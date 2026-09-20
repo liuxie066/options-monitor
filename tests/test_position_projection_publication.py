@@ -98,6 +98,39 @@ def _generations(repo: SQLiteOptionPositionsRepository) -> tuple[int, dict[str, 
     return int(source["source_generation"]), {str(row["account"]): int(row["lots_generation"]) for row in heads}
 
 
+def _exec(repo: SQLiteOptionPositionsRepository, sql: str, params: tuple = ()) -> None:
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(sql, params)
+        conn.commit()
+
+
+class _LegacyRepo:
+    """Repository stub that lacks the projection publication interface."""
+
+    def __init__(self) -> None:
+        self.replacements = 0
+        self.event_writes = 0
+
+    def list_position_lots(self) -> list[dict[str, object]]:
+        return []
+
+    def list_trade_events(self) -> list[dict[str, object]]:
+        return []
+
+    def upsert_trade_event(self, _event: object, *, conn: object = None) -> bool:
+        self.event_writes += 1
+        return True
+
+    def replace_position_lots(
+        self,
+        _records: object,
+        *,
+        conn: object = None,
+    ) -> int:
+        self.replacements += 1
+        return 0
+
+
 def test_position_lot_fingerprint_is_canonical_streaming_and_strict() -> None:
     records = [
         {"record_id": "b", "fields": {"nested": {"z": 1, "a": None}, "items": [2, 1]}},
@@ -169,12 +202,7 @@ def test_event_trigger_matrix_idempotency_conflict_and_replace(tmp_path: Path) -
         repo.upsert_trade_event(TradeEvent(**{**event.__dict__, "price": 2.0}))
     assert _generations(repo)[0] == 1
 
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute(
-            "UPDATE trade_events SET updated_at_ms = updated_at_ms + 1 WHERE event_id = ?",
-            (event.event_id,),
-        )
-        conn.commit()
+    _exec(repo, "UPDATE trade_events SET updated_at_ms = updated_at_ms + 1 WHERE event_id = ?", (event.event_id,))
     assert _generations(repo)[0] == 1
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -319,9 +347,7 @@ def test_lot_trigger_metadata_update_and_cross_account_replace(tmp_path: Path) -
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.apply_position_lot_diff([_lot("lot-a")])
     before = _generations(repo)[1]
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("UPDATE position_lots SET updated_at_ms = updated_at_ms + 1 WHERE record_id = 'lot-a'")
-        conn.commit()
+    _exec(repo, "UPDATE position_lots SET updated_at_ms = updated_at_ms + 1 WHERE record_id = 'lot-a'")
     assert _generations(repo)[1] == before
 
     replacement = _lot("lot-a", account="sy")
@@ -414,17 +440,13 @@ def test_direct_mutation_and_schema_change_fail_closed(tmp_path: Path) -> None:
     publish_full_position_projection(repo, [_lot("lot-lx")])
     assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
 
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
-        conn.commit()
+    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
     changed = read_current_position_projection(repo, account="lx")
     assert changed["status"] == "data_unavailable"
     assert changed["reason"] == "lots_generation_mismatch"
 
     publish_full_position_projection(repo, [_lot("lot-lx")])
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("ALTER TABLE position_lots ADD COLUMN future_semantic TEXT")
-        conn.commit()
+    _exec(repo, "ALTER TABLE position_lots ADD COLUMN future_semantic TEXT")
     schema_changed = read_current_position_projection(repo, account="lx")
     assert schema_changed["status"] == "data_unavailable"
     assert schema_changed["reason"] == "sqlite_schema_cookie_mismatch"
@@ -437,9 +459,7 @@ def test_untrusted_read_rejects_before_scanning_account_lots(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.upsert_trade_event(_event("event-lx"))
     publish_full_position_projection(repo, [_lot("lot-lx")])
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
-        conn.commit()
+    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
 
     def _unexpected_snapshot(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("stale metadata must reject before reading lot rows")
@@ -454,9 +474,7 @@ def test_full_publication_repairs_non_null_scalar_drift(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.upsert_trade_event(_event("event-lx"))
     publish_full_position_projection(repo, [_lot("lot-lx")])
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("UPDATE position_lots SET strike = 999 WHERE record_id = 'lot-lx'")
-        conn.commit()
+    _exec(repo, "UPDATE position_lots SET strike = 999 WHERE record_id = 'lot-lx'")
 
     repaired = publish_full_position_projection(repo, [_lot("lot-lx")])
     assert repaired.changed == 1
@@ -590,29 +608,7 @@ def test_loaded_projector_identity_is_frozen_before_transactions(
 
 
 def test_publication_rejects_legacy_repo_before_lot_write() -> None:
-    class LegacyRepo:
-        def __init__(self) -> None:
-            self.replacements = 0
-
-        def list_position_lots(self) -> list[dict[str, object]]:
-            return []
-
-        def list_trade_events(self) -> list[dict[str, object]]:
-            return []
-
-        def upsert_trade_event(self, _event: object, *, conn: object = None) -> bool:
-            return True
-
-        def replace_position_lots(
-            self,
-            _records: object,
-            *,
-            conn: object = None,
-        ) -> int:
-            self.replacements += 1
-            return 0
-
-    repo = LegacyRepo()
+    repo = _LegacyRepo()
 
     with pytest.raises(TypeError, match="projection publication interface"):
         publish_full_position_projection(repo, [])
@@ -620,29 +616,7 @@ def test_publication_rejects_legacy_repo_before_lot_write() -> None:
 
 
 def test_projecting_transaction_rejects_legacy_repo_before_event_write() -> None:
-    class LegacyRepo:
-        def __init__(self) -> None:
-            self.event_writes = 0
-
-        def list_position_lots(self) -> list[dict[str, object]]:
-            return []
-
-        def list_trade_events(self) -> list[dict[str, object]]:
-            return []
-
-        def upsert_trade_event(self, _event: object, *, conn: object = None) -> bool:
-            self.event_writes += 1
-            return True
-
-        def replace_position_lots(
-            self,
-            _records: object,
-            *,
-            conn: object = None,
-        ) -> int:
-            return 0
-
-    repo = LegacyRepo()
+    repo = _LegacyRepo()
 
     with pytest.raises(TypeError, match="projection publication interface"):
         with_sqlite_repo_transaction(

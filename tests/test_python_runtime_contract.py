@@ -53,6 +53,33 @@ def _runtime_env(fake_bin: Path) -> dict[str, str]:
     return env
 
 
+def _run(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv, text=True, capture_output=True, env=env, cwd=cwd, check=False
+    )
+
+
+def _selector(
+    selector: str, target: Path, env: dict[str, str], *, label: str, shell: str = "bash"
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            shell,
+            "-c",
+            f'source "$1" && {selector} "$2"',
+            label,
+            str(ROOT / "scripts" / "python_runtime.sh"),
+            str(target),
+        ],
+        env=env,
+    )
+
+
 def test_om_python_override_explicitly_bypasses_incompatible_repo_venv(tmp_path: Path) -> None:
     repo = _copy_launcher_repo(tmp_path)
     _write_fake_python(repo / ".venv" / "bin" / "python", version="3.11.9")
@@ -61,13 +88,7 @@ def test_om_python_override_explicitly_bypasses_incompatible_repo_venv(tmp_path:
     env = _runtime_env(tmp_path / "empty-bin")
     env["OM_PYTHON"] = str(override)
 
-    result = subprocess.run(
-        ["bash", str(repo / "om"), "config", "validate"],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _run(["bash", str(repo / "om"), "config", "validate"], env=env)
 
     assert result.returncode == 0, result.stderr
     assert "-m src.interfaces.cli.main config validate" in log.read_text(encoding="utf-8")
@@ -81,13 +102,7 @@ def test_incompatible_repo_venv_blocks_python_and_path_fallback(tmp_path: Path) 
     env = _runtime_env(fallback.parent)
     env["PYTHON"] = str(fallback)
 
-    result = subprocess.run(
-        ["bash", str(repo / "om"), "--help"],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _run(["bash", str(repo / "om"), "--help"], env=env)
 
     assert result.returncode != 0
     assert "Python >= 3.12 is required" in result.stderr
@@ -104,20 +119,7 @@ def test_repo_selector_preserves_venv_python_symlink_entrypoint(tmp_path: Path) 
     repo_python.symlink_to(external)
     env = _runtime_env(tmp_path / "empty-bin")
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1" && om_select_repo_python "$2"',
-            "repo-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(repo),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _selector("om_select_repo_python", repo, env, label="repo-test")
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(repo_python)
@@ -129,13 +131,7 @@ def test_missing_repo_venv_prefers_python312_and_forwards_agent_argv(tmp_path: P
     python312 = _write_fake_python(tmp_path / "fake-bin" / "python3.12", version="3.12.2", log=log)
     env = _runtime_env(python312.parent)
 
-    result = subprocess.run(
-        ["bash", str(repo / "om-agent"), "spec"],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _run(["bash", str(repo / "om-agent"), "spec"], env=env)
 
     assert result.returncode == 0, result.stderr
     assert "-m src.interfaces.agent.cli spec" in log.read_text(encoding="utf-8")
@@ -149,19 +145,8 @@ def test_old_python3_is_only_a_diagnostic_final_candidate(tmp_path: Path) -> Non
     env = _runtime_env(old.parent)
     env["PATH"] = str(old.parent)
 
-    result = subprocess.run(
-        [
-            "/bin/bash",
-            "-c",
-            'source "$1" && om_select_repo_python "$2"',
-            "runtime-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(repo),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
+    result = _selector(
+        "om_select_repo_python", repo, env, label="runtime-test", shell="/bin/bash"
     )
 
     assert result.returncode != 0
@@ -176,20 +161,7 @@ def test_bootstrap_selector_rejects_interpreter_inside_target_venv(tmp_path: Pat
     env = _runtime_env(tmp_path / "empty-bin")
     env["PYTHON"] = str(target_python)
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1" && om_select_bootstrap_python "$2"',
-            "bootstrap-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(target),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _selector("om_select_bootstrap_python", target, env, label="bootstrap-test")
 
     assert result.returncode != 0
     assert "bootstrap interpreter must be outside" in result.stderr
@@ -206,20 +178,7 @@ def test_bootstrap_selector_rejects_interpreter_through_symlinked_target_venv(tm
     env = _runtime_env(tmp_path / "empty-bin")
     env["PYTHON"] = str(target / "bin" / "python")
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1" && om_select_bootstrap_python "$2"',
-            "bootstrap-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(target),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _selector("om_select_bootstrap_python", target, env, label="bootstrap-test")
 
     assert result.returncode != 0
     assert "bootstrap interpreter must be outside" in result.stderr
@@ -235,20 +194,7 @@ def test_bootstrap_selector_rejects_external_alias_to_target_interpreter(tmp_pat
     env = _runtime_env(tmp_path / "empty-bin")
     env["PYTHON"] = str(alias)
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1" && om_select_bootstrap_python "$2"',
-            "bootstrap-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(target),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _selector("om_select_bootstrap_python", target, env, label="bootstrap-test")
 
     assert result.returncode != 0
     assert "bootstrap interpreter must be outside" in result.stderr
@@ -261,20 +207,7 @@ def test_bootstrap_selector_ignores_existing_target_venv(tmp_path: Path) -> None
     external = _write_fake_python(tmp_path / "fake-bin" / "python3.12", version="3.12.3")
     env = _runtime_env(external.parent)
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1" && om_select_bootstrap_python "$2"',
-            "bootstrap-test",
-            str(ROOT / "scripts" / "python_runtime.sh"),
-            str(target),
-        ],
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
-    )
+    result = _selector("om_select_bootstrap_python", target, env, label="bootstrap-test")
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(external)
@@ -284,16 +217,9 @@ def test_src_and_domain_guards_are_python39_parseable_and_fail_fast() -> None:
     for package in ("src", "domain"):
         init_path = ROOT / package / "__init__.py"
         ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path), feature_version=(3, 9))
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                f"import sys; sys.version_info = (3, 9, 18); import {package}",
-            ],
+        result = _run(
+            [sys.executable, "-c", f"import sys; sys.version_info = (3, 9, 18); import {package}"],
             cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
         )
         assert result.returncode != 0
         assert "options-monitor requires Python >= 3.12" in result.stderr

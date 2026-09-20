@@ -11,6 +11,7 @@ import pytest
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.cash_conversion_migration import (
+    CashConversionBackfillResult,
     backfill_cash_conversions,
     correct_superseded_cash_conversions,
 )
@@ -22,6 +23,62 @@ TZ = ZoneInfo("Asia/Shanghai")
 EVENT_MS = int(datetime(2026, 7, 3, 10, 0, tzinfo=TZ).timestamp() * 1000)
 RATE_MS = int(datetime(2026, 7, 3, 9, 15, tzinfo=TZ).timestamp() * 1000)
 MIGRATION_MS = int(datetime(2026, 7, 24, 15, 0, tzinfo=TZ).timestamp() * 1000)
+
+
+
+def _positions_db(tmp_path: Path) -> tuple[Path, SQLiteOptionPositionsRepository]:
+    db_path = tmp_path / "option_positions.sqlite3"
+    return db_path, SQLiteOptionPositionsRepository(db_path)
+
+
+def _sale_event(stock_event_id: str, trade_time_ms: int) -> dict[str, object]:
+    return {
+        "stock_event_id": stock_event_id,
+        "event_type": "sale",
+        "trade_time_ms": trade_time_ms,
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "currency": "USD",
+        "shares": 100,
+        "price": 105,
+        "fees": 1,
+        "fee_provenance": {"basis": "actual", "source": "test"},
+    }
+
+
+def _backfill(
+    repo: SQLiteOptionPositionsRepository,
+    evidence_repo: PerformanceEvidenceSQLiteRepository,
+    *,
+    account: str = "lx",
+    apply: bool = False,
+    migrated_at_ms: int = MIGRATION_MS,
+) -> CashConversionBackfillResult:
+    return backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account=account,
+        apply=apply,
+        migrated_at_ms=migrated_at_ms,
+    )
+
+
+def _correct(
+    repo: SQLiteOptionPositionsRepository,
+    evidence_repo: PerformanceEvidenceSQLiteRepository,
+    *,
+    account: str = "lx",
+    apply: bool = False,
+    migrated_at_ms: int = MIGRATION_MS,
+) -> CashConversionBackfillResult:
+    return correct_superseded_cash_conversions(
+        repo,
+        evidence_repo,
+        account=account,
+        apply=apply,
+        migrated_at_ms=migrated_at_ms,
+    )
 
 
 def _event(
@@ -162,29 +219,16 @@ def test_backfill_applies_to_a_pre_section7_stored_event(tmp_path: Path) -> None
     nothing and the trade-event immutability trigger rejects the write as a
     contract-key transition.
     """
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     _seed_stored_trade_event(repo, _LEGACY_EVENT_JSON)
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     _import_rate(evidence_repo)
 
-    preview = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    preview = _backfill(repo, evidence_repo)
     assert preview.preview_conversion_count == 2
     assert preview.changed_event_count == 1
 
-    applied = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    applied = _backfill(repo, evidence_repo, apply=True)
     assert applied.migrated_conversion_count == 2
     assert applied.changed_event_count == 1
 
@@ -215,8 +259,7 @@ def test_stored_trade_event_rejects_a_reencoded_contract_key(tmp_path: Path) -> 
     it back" is not a strategy the storage layer will accept at all, whatever
     the plan's compare-and-swap happens to be comparing.
     """
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     _seed_stored_trade_event(repo, _LEGACY_EVENT_JSON)
 
     reencoded = json.loads(_LEGACY_EVENT_JSON)
@@ -253,19 +296,12 @@ def _has_table(path: Path, name: str) -> bool:
 def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     repo.upsert_trade_event(_event("open-1"))
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     fx_fact_id = _import_rate(evidence_repo)
 
-    preview = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    preview = _backfill(repo, evidence_repo)
 
     assert preview.applied is False
     assert preview.preview_conversion_count == 2
@@ -273,20 +309,8 @@ def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
     assert not _has_table(db_path, "cash_conversion_backfill_audit")
     assert "cash_conversions" not in repo.list_trade_events()[0]["raw_payload"]
 
-    applied = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
-    repeated = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    applied = _backfill(repo, evidence_repo, apply=True)
+    repeated = _backfill(repo, evidence_repo, apply=True, migrated_at_ms=MIGRATION_MS + 1)
 
     assert applied.migrated_conversion_count == 2
     assert applied.changed_event_count == 1
@@ -307,18 +331,11 @@ def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
 def test_backfill_after_opend_time_correction_preserves_prior_audit(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     repo.upsert_trade_event(_event("open-1"))
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     _import_rate(evidence_repo)
-    backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    _backfill(repo, evidence_repo, apply=True)
 
     with repo._connect() as conn:  # noqa: SLF001 - exact audit recovery fixture
         row = conn.execute(
@@ -343,13 +360,7 @@ def test_backfill_after_opend_time_correction_preserves_prior_audit(
             (json.dumps(payload, ensure_ascii=False, sort_keys=True),),
         )
 
-    reapplied = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    reapplied = _backfill(repo, evidence_repo, apply=True, migrated_at_ms=MIGRATION_MS + 1)
 
     assert reapplied.changed_event_count == 1
     assert reapplied.migrated_conversion_count == 2
@@ -365,8 +376,7 @@ def test_backfill_after_opend_time_correction_preserves_prior_audit(
 def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     observed = build_cash_conversion(
         cash_fact_id="option_trade_cash_gross:observed",
         amount=200,
@@ -388,20 +398,8 @@ def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     _import_rate(evidence_repo, effective_at_ms=EVENT_MS - 2 * 24 * 60 * 60 * 1000)
 
-    lx = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS,
-    )
-    sy = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="sy",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    lx = _backfill(repo, evidence_repo)
+    sy = _backfill(repo, evidence_repo, account="sy")
 
     assert lx.existing_observed_count == 1
     assert lx.preview_conversion_count == 0
@@ -411,8 +409,7 @@ def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(
 
 
 def test_backfill_carries_explicit_official_rate_across_non_business_day(tmp_path: Path) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     holiday_event_ms = int(datetime(2026, 7, 5, 10, 0, tzinfo=TZ).timestamp() * 1000)
     weekday_event_ms = int(datetime(2026, 7, 6, 10, 0, tzinfo=TZ).timestamp() * 1000)
     repo.upsert_trade_event(
@@ -431,13 +428,7 @@ def test_backfill_carries_explicit_official_rate_across_non_business_day(tmp_pat
         },
     )
 
-    result = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="sy",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    result = _backfill(repo, evidence_repo, account="sy", apply=True)
 
     assert result.migrated_conversion_count == 2
     assert any(
@@ -453,21 +444,14 @@ def test_backfill_carries_explicit_official_rate_across_non_business_day(tmp_pat
         RATE_MS / 1000,
         tz=timezone.utc,
     ).isoformat()
-    replay = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="sy",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    replay = _backfill(repo, evidence_repo, account="sy", migrated_at_ms=MIGRATION_MS + 1)
     assert replay.changed_event_count == 0
     assert replay.preview_conversion_count == 0
     assert replay.existing_observed_count == 2
 
 
 def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     conversion = build_cash_conversion(
         cash_fact_id="option_trade_cash_gross:corrupt",
         amount=200,
@@ -496,13 +480,7 @@ def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     _import_rate(evidence_repo)
 
-    result = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    result = _backfill(repo, evidence_repo, apply=True)
 
     assert result.existing_observed_count == 0
     assert result.migrated_conversion_count == 2
@@ -511,24 +489,9 @@ def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
 
 
 def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     holiday_event_ms = int(datetime(2026, 7, 5, 10, 0, tzinfo=TZ).timestamp() * 1000)
-    repo.upsert_assigned_stock_event(
-        {
-            "stock_event_id": "sale-1",
-            "event_type": "sale",
-            "trade_time_ms": holiday_event_ms,
-            "account": "lx",
-            "broker": "富途",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "shares": 100,
-            "price": 105,
-            "fees": 1,
-            "fee_provenance": {"basis": "actual", "source": "test"},
-        }
-    )
+    repo.upsert_assigned_stock_event(_sale_event("sale-1", holiday_event_ms))
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     _import_rate(
         evidence_repo,
@@ -539,13 +502,7 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
         },
     )
 
-    result = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    result = _backfill(repo, evidence_repo, apply=True)
 
     assert result.migrated_conversion_count == 2
     conversions = repo.list_assigned_stock_events()[0]["cash_conversions"]
@@ -555,13 +512,7 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
         conversions["assigned_stock_sale_cash_gross"]["method"]
         == "historical_business_day_fx_carry_forward"
     )
-    replay = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    replay = _backfill(repo, evidence_repo, migrated_at_ms=MIGRATION_MS + 1)
     assert replay.changed_event_count == 0
     assert replay.preview_conversion_count == 0
     assert replay.existing_observed_count == 2
@@ -570,54 +521,21 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
 def test_correction_requires_explicit_superseding_evidence_and_is_auditable(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "option_positions.sqlite3"
-    repo = SQLiteOptionPositionsRepository(db_path)
+    db_path, repo = _positions_db(tmp_path)
     repo.upsert_trade_event(_event("correct-trade"))
-    repo.upsert_assigned_stock_event(
-        {
-            "stock_event_id": "correct-sale",
-            "event_type": "sale",
-            "trade_time_ms": EVENT_MS,
-            "account": "lx",
-            "broker": "富途",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "shares": 100,
-            "price": 105,
-            "fees": 1,
-            "fee_provenance": {"basis": "actual", "source": "test"},
-        }
-    )
+    repo.upsert_assigned_stock_event(_sale_event("correct-sale", EVENT_MS))
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
     old_fact_id = _import_rate(evidence_repo)
-    backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS,
-    )
+    _backfill(repo, evidence_repo, apply=True)
     _import_rate(
         evidence_repo,
         rate="7.3",
         source="official_close",
         source_id="unrelated:2026-07-03",
     )
-    preserved = backfill_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    preserved = _backfill(repo, evidence_repo, apply=True, migrated_at_ms=MIGRATION_MS + 1)
 
-    unrelated = correct_superseded_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS + 1,
-    )
+    unrelated = _correct(repo, evidence_repo, migrated_at_ms=MIGRATION_MS + 1)
 
     assert preserved.migrated_conversion_count == 0
     assert unrelated.preview_conversion_count == 0
@@ -628,30 +546,12 @@ def test_correction_requires_explicit_superseding_evidence_and_is_auditable(
         source_id="pbc-correction:2026-07-03",
         supersedes_fact_id=old_fact_id,
     )
-    preview = correct_superseded_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS + 2,
-    )
+    preview = _correct(repo, evidence_repo, migrated_at_ms=MIGRATION_MS + 2)
     assert preview.preview_conversion_count == 4
     assert not _has_table(db_path, "cash_conversion_correction_audit")
 
-    applied = correct_superseded_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=True,
-        migrated_at_ms=MIGRATION_MS + 2,
-    )
-    repeated = correct_superseded_cash_conversions(
-        repo,
-        evidence_repo,
-        account="lx",
-        apply=False,
-        migrated_at_ms=MIGRATION_MS + 3,
-    )
+    applied = _correct(repo, evidence_repo, apply=True, migrated_at_ms=MIGRATION_MS + 2)
+    repeated = _correct(repo, evidence_repo, migrated_at_ms=MIGRATION_MS + 3)
 
     assert applied.migrated_conversion_count == 4
     assert repeated.preview_conversion_count == 0

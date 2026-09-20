@@ -19,11 +19,31 @@ def _payload(symbol: str, *, status: str, ok: bool, message: str = "ok", source:
     )
 
 
+def _futu_cfg(symbol: str) -> dict[str, Any]:
+    return {"symbol": symbol, "fetch": {"source": "futu", "limit_expirations": 8}}
+
+
+def _run_coordinator(
+    symbol_cfgs: list[dict[str, Any]],
+    dispatch_fn: Any,
+    *,
+    fail_budget_consecutive: int = 3,
+    fail_budget_total: int = 5,
+    **overrides: Any,
+):
+    return PrefetchCoordinator(
+        symbol_cfgs=symbol_cfgs,
+        max_workers=1,
+        execution_mode="inprocess",
+        fail_budget_consecutive=fail_budget_consecutive,
+        fail_budget_total=fail_budget_total,
+        dispatch_fn=dispatch_fn,
+        **overrides,
+    ).run()
+
+
 def test_prefetch_coordinator_short_circuits_rate_limited_symbol_class() -> None:
-    cfgs = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "limit_expirations": 8}},
-    ]
+    cfgs = [_futu_cfg("AAPL"), _futu_cfg("MSFT")]
     dispatched: list[str] = []
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -31,14 +51,7 @@ def test_prefetch_coordinator_short_circuits_rate_limited_symbol_class() -> None
         dispatched.append(symbol)
         return _payload(symbol, status="error", ok=False, message="rate limit")
 
-    result = PrefetchCoordinator(
-        symbol_cfgs=cfgs,
-        max_workers=1,
-        execution_mode="inprocess",
-        fail_budget_consecutive=3,
-        fail_budget_total=5,
-        dispatch_fn=_dispatch,
-    ).run()
+    result = _run_coordinator(cfgs, _dispatch)
 
     assert dispatched == ["AAPL"]
     assert result.errors == 1
@@ -52,9 +65,7 @@ def test_prefetch_coordinator_short_circuits_rate_limited_symbol_class() -> None
 
 
 def test_prefetch_coordinator_records_nested_us_expiration_rate_limit() -> None:
-    cfgs = [
-        {"symbol": "NVDA", "fetch": {"source": "futu", "limit_expirations": 8}},
-    ]
+    cfgs = [_futu_cfg("NVDA")]
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
         symbol = str(symbol_cfg["symbol"])
@@ -74,16 +85,9 @@ def test_prefetch_coordinator_records_nested_us_expiration_rate_limit() -> None:
         }
         return payload
 
-    result = PrefetchCoordinator(
-        symbol_cfgs=cfgs,
-        max_workers=1,
-        execution_mode="inprocess",
-        fail_budget_consecutive=3,
-        fail_budget_total=5,
-        dispatch_fn=_dispatch,
-        short_circuit_rate_limits=False,
-        stop_on_failure_budget=False,
-    ).run()
+    result = _run_coordinator(
+        cfgs, _dispatch, short_circuit_rate_limits=False, stop_on_failure_budget=False
+    )
 
     assert result.fetched_ok == 1
     assert result.errors == 0
@@ -101,11 +105,7 @@ def test_prefetch_coordinator_records_nested_us_expiration_rate_limit() -> None:
 
 
 def test_prefetch_coordinator_stops_queued_work_on_failure_budget() -> None:
-    cfgs = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "limit_expirations": 8}},
-        {"symbol": "0700.HK", "fetch": {"source": "futu", "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "limit_expirations": 8}},
-    ]
+    cfgs = [_futu_cfg("AAPL"), _futu_cfg("0700.HK"), _futu_cfg("MSFT")]
     dispatched: list[str] = []
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -113,14 +113,7 @@ def test_prefetch_coordinator_stops_queued_work_on_failure_budget() -> None:
         dispatched.append(symbol)
         return _payload(symbol, status="error", ok=False, message="transient failure")
 
-    result = PrefetchCoordinator(
-        symbol_cfgs=cfgs,
-        max_workers=1,
-        execution_mode="inprocess",
-        fail_budget_consecutive=1,
-        fail_budget_total=5,
-        dispatch_fn=_dispatch,
-    ).run()
+    result = _run_coordinator(cfgs, _dispatch, fail_budget_consecutive=1)
 
     assert dispatched == ["AAPL"]
     assert result.budget_triggered is True
@@ -132,10 +125,7 @@ def test_prefetch_coordinator_stops_queued_work_on_failure_budget() -> None:
 
 
 def test_prefetch_coordinator_can_run_without_early_stops() -> None:
-    cfgs = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "limit_expirations": 8}},
-    ]
+    cfgs = [_futu_cfg("AAPL"), _futu_cfg("MSFT")]
     dispatched: list[str] = []
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -143,16 +133,14 @@ def test_prefetch_coordinator_can_run_without_early_stops() -> None:
         dispatched.append(symbol)
         return _payload(symbol, status="error", ok=False, message="rate limit")
 
-    result = PrefetchCoordinator(
-        symbol_cfgs=cfgs,
-        max_workers=1,
-        execution_mode="inprocess",
+    result = _run_coordinator(
+        cfgs,
+        _dispatch,
         fail_budget_consecutive=1,
         fail_budget_total=1,
-        dispatch_fn=_dispatch,
         short_circuit_rate_limits=False,
         stop_on_failure_budget=False,
-    ).run()
+    )
 
     assert dispatched == ["AAPL", "MSFT"]
     assert result.errors == 2
@@ -161,10 +149,7 @@ def test_prefetch_coordinator_can_run_without_early_stops() -> None:
 
 
 def test_prefetch_coordinator_normalizes_dispatch_exceptions_and_continues() -> None:
-    cfgs = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "limit_expirations": 8}},
-    ]
+    cfgs = [_futu_cfg("AAPL"), _futu_cfg("MSFT")]
     dispatched: list[str] = []
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -174,14 +159,7 @@ def test_prefetch_coordinator_normalizes_dispatch_exceptions_and_continues() -> 
             raise RuntimeError("adapter failed")
         return _payload(symbol, status="fetched", ok=True, message="fetched")
 
-    result = PrefetchCoordinator(
-        symbol_cfgs=cfgs,
-        max_workers=1,
-        execution_mode="inprocess",
-        fail_budget_consecutive=3,
-        fail_budget_total=5,
-        dispatch_fn=_dispatch,
-    ).run()
+    result = _run_coordinator(cfgs, _dispatch)
 
     assert dispatched == ["AAPL", "MSFT"]
     assert result.errors == 1

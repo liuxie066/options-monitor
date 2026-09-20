@@ -20,40 +20,24 @@ def _v2_config() -> dict:
         "wheel": {
             "enabled": True,
             "accounts": ["lx"],
-            "call": {
-                "min_dte": 31,
-                "max_dte": 46,
-                "min_abs_delta": 0.27,
-            },
-            "put": {
-                "min_dte": 14,
-                "max_dte": 35,
-            },
+            "call": {"min_dte": 31, "max_dte": 46, "min_abs_delta": 0.27},
+            "put": {"min_dte": 14, "max_dte": 35},
             "activation_by_account": {
-                "lx": {
-                    "generation": 2,
-                    "activated_at_ms": 1_700_000_000_000,
-                    "deactivated_at_ms": None,
-                }
+                "lx": {"generation": 2, "activated_at_ms": 1_700_000_000_000, "deactivated_at_ms": None}
             },
         },
     }
 
 
+def _legacy_config() -> dict:
+    return {
+        "_resolved": {"market": "us"},
+        "wheel": {"enabled": True, "accounts": ["LX"], "min_dte": 35, "max_dte": 50, "min_delta": 0.90},
+    }
+
+
 def test_resolve_wheel_config_maps_legacy_only_to_call_and_fails_closed_without_descriptor() -> None:
-    resolved = resolve_wheel_config(
-        {
-            "_resolved": {"market": "us"},
-            "wheel": {
-                "enabled": True,
-                "accounts": ["LX"],
-                "min_dte": 35,
-                "max_dte": 50,
-                "min_delta": 0.90,
-            },
-        },
-        "lx",
-    )
+    resolved = resolve_wheel_config(_legacy_config(), "lx")
 
     assert resolved["call"]["min_dte"] == 35
     assert resolved["call"]["max_dte"] == 50
@@ -154,11 +138,7 @@ def test_wheel_validation_is_pure_and_rejects_invalid_descriptor(
         "connect",
         lambda *args, **kwargs: pytest.fail("static Wheel validation touched SQLite"),
     )
-    config = {
-        "accounts": ["lx"],
-        "symbols": [{"symbol": "NVDA"}],
-        "wheel": _v2_config()["wheel"],
-    }
+    config = {"accounts": ["lx"], "symbols": [{"symbol": "NVDA"}], "wheel": _v2_config()["wheel"]}
     validate_config(config)
 
     config["wheel"]["activation_by_account"]["lx"]["deactivated_at_ms"] = 1
@@ -178,16 +158,13 @@ def test_readiness_uses_only_durable_effective_policy_and_preserves_boundaries()
         assert result["ready"] is False
         assert result["reason_code"] == "descriptor_mismatch"
     closed_at = descriptor["activated_at_ms"] + 1
-    result = evaluate_wheel_activation_readiness(
-        {**descriptor, "deactivated_at_ms": closed_at},
-        {**window, "deactivated_at_ms": closed_at},
-    )
+    result = evaluate_wheel_activation_readiness({**descriptor, "deactivated_at_ms": closed_at},
+                                                 {**window, "deactivated_at_ms": closed_at})
     assert result["reason_code"] == "closed_window"
     assert result["policy_drift"] is False
     # Config metadata cannot substitute for the config's actual policy hash.
     assert evaluate_wheel_activation_readiness(
-        {**descriptor, "policy_hash": "b" * 64, "effective_policy_hash": descriptor["policy_hash"]},
-        window,
+        {**descriptor, "policy_hash": "b" * 64, "effective_policy_hash": descriptor["policy_hash"]}, window
     )["ready"] is False
 
 

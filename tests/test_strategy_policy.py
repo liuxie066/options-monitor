@@ -22,13 +22,16 @@ from src.application.strategy_policy import (
 )
 
 
+def _position(**overrides) -> dict:
+    return {"symbol": "NVDA", "option_type": "put", "side": "short", **overrides}
+
+
+def _leg(**overrides) -> dict:
+    return {"option_type": "put", "position_side": "short", **overrides}
+
+
 def test_strategy_resolution_prefers_position_snapshot() -> None:
-    position = {
-        "symbol": "NVDA",
-        "option_type": "put",
-        "side": "short",
-        "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
-    }
+    position = _position(strategy_snapshot={"strategy_family": "sell_put", "strategy_profile": "return_first"})
     config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}]}
 
     resolution = resolve_position_strategy(position=position, config=config)
@@ -40,15 +43,12 @@ def test_strategy_resolution_prefers_position_snapshot() -> None:
 
 
 def test_strategy_resolution_uses_combo_yield_mode_for_short_put() -> None:
-    position = {
-        "symbol": "NVDA",
-        "option_type": "put",
-        "side": "short",
-        "strategy": "yield_enhancement",
-        "leg_role": "sell_put",
-        "strategy_group_id": "ye_nvda_1",
-        "yield_enhancement_mode": "vol_convexity_enhancement",
-    }
+    position = _position(
+        strategy="yield_enhancement",
+        leg_role="sell_put",
+        strategy_group_id="ye_nvda_1",
+        yield_enhancement_mode="vol_convexity_enhancement",
+    )
     config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "return_first"}}]}
 
     resolution = resolve_position_strategy(position=position, config=config)
@@ -60,14 +60,7 @@ def test_strategy_resolution_uses_combo_yield_mode_for_short_put() -> None:
 
 
 def test_strategy_resolution_defaults_legacy_combo_yield_to_return_first() -> None:
-    position = {
-        "symbol": "NVDA",
-        "option_type": "put",
-        "side": "short",
-        "strategy": "yield_enhancement",
-        "leg_role": "sell_put",
-        "strategy_group_id": "ye_nvda_1",
-    }
+    position = _position(strategy="yield_enhancement", leg_role="sell_put", strategy_group_id="ye_nvda_1")
     config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}]}
 
     resolution = resolve_position_strategy(position=position, config=config)
@@ -212,14 +205,11 @@ def test_global_path_risk_context_checks_templates_then_symbols(
 
 
 def test_position_strategy_semantics_reads_retired_combo_yield_mode() -> None:
-    position = {
-        "symbol": "NVDA",
-        "option_type": "put",
-        "side": "short",
-        "strategy": "yield_enhancement",
-        "leg_role": "sell_put",
-        "yield_enhancement_mode": "vol_convexity_enhancement",
-    }
+    position = _position(
+        strategy="yield_enhancement",
+        leg_role="sell_put",
+        yield_enhancement_mode="vol_convexity_enhancement",
+    )
     config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "return_first"}}]}
 
     resolution, semantics = resolve_position_strategy_semantics(position=position, config=config)
@@ -274,53 +264,28 @@ def test_unknown_strategy_family_does_not_enable_underwriting_scan() -> None:
 
 
 def test_combo_yield_position_role_does_not_treat_any_grouped_put_as_combo_yield() -> None:
-    role = resolve_combo_yield_position_role(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "position_side": "short",
-            "strategy_group_id": "other_combo",
-        }
-    )
+    role = resolve_combo_yield_position_role(_leg(symbol="NVDA", strategy_group_id="other_combo"))
 
     assert role.is_combo_yield_short_put is False
 
 
 def test_combo_yield_position_role_identifies_grouped_sell_put_leg() -> None:
     role = resolve_combo_yield_position_role(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "position_side": "short",
-            "leg_role": "sell_put",
-            "strategy_group_id": "ye_nvda_1",
-        }
+        _leg(symbol="NVDA", leg_role="sell_put", strategy_group_id="ye_nvda_1")
     )
 
     assert role.is_combo_yield_short_put is True
 
 
 def test_combo_yield_position_role_recognizes_canonical_funding_put() -> None:
-    role = resolve_combo_yield_position_role(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "position_side": "short",
-            "leg_role": "funding_put",
-        }
-    )
+    role = resolve_combo_yield_position_role(_leg(symbol="NVDA", leg_role="funding_put"))
 
     assert role.is_combo_yield_short_put is True
 
 
 def test_combo_yield_position_role_recognizes_canonical_participation_call() -> None:
     role = resolve_combo_yield_position_role(
-        {
-            "symbol": "NVDA",
-            "option_type": "call",
-            "position_side": "long",
-            "leg_role": "participation_call",
-        }
+        _leg(symbol="NVDA", option_type="call", position_side="long", leg_role="participation_call")
     )
 
     assert role.is_combo_yield_long_call is True
@@ -332,21 +297,12 @@ def test_combo_yield_position_role_keeps_legacy_aliases_readable() -> None:
 
     for leg_role in put_aliases:
         role = resolve_combo_yield_position_role(
-            {
-                "option_type": "put",
-                "position_side": "short",
-                "leg_role": leg_role,
-                "strategy_group_id": "combo_yield:legacy",
-            }
+            _leg(leg_role=leg_role, strategy_group_id="combo_yield:legacy")
         )
         assert role.is_combo_yield_short_put is True
 
     for leg_role in call_aliases:
         role = resolve_combo_yield_position_role(
-            {
-                "option_type": "call",
-                "position_side": "long",
-                "leg_role": leg_role,
-            }
+            _leg(option_type="call", position_side="long", leg_role=leg_role)
         )
         assert role.is_combo_yield_long_call is True

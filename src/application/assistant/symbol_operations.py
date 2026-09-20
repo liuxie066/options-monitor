@@ -7,7 +7,7 @@ from typing import Any
 
 from src.application.account_config import normalize_accounts
 from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
-from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
+from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.config_sections import (
     resolve_watchlist_config,
     set_watchlist_config,
@@ -19,9 +19,9 @@ from src.application.config_yaml_symbols import mutate_yaml_symbol_config
 from src.application.runtime_config_freshness import GENERATED_KEY, infer_runtime_config_market
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
-    build_cancelled_operation_response,
-    build_previewed_operation_response,
-    confirm_previewed_operation_or_raise,
+    cancel_pending_operation_or_raise,
+    confirm_and_apply_operation,
+    preview_and_save_operation,
     resolve_pending_operation_or_raise,
 )
 from src.application.assistant.operation_policy import enforce_symbol_write_allowed
@@ -41,6 +41,9 @@ LIST_INTENTS = frozenset({"symbol_list"})
 PREVIEW_INTENTS = frozenset({"symbol_add", "symbol_edit", "symbol_remove"})
 CONFIRM_INTENTS = frozenset({"symbol_confirm", "symbol_cancel"})
 SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
+_OPERATION_SUBJECT = "监控标的变更"
+_EXPIRED_MESSAGE = "这条监控标的变更确认已过期，未写入配置。"
+_EXPIRED_HINT = "请重新发送监控标的命令生成新的预览。"
 
 
 def handle_symbol_operation(
@@ -85,92 +88,45 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
-    preview = _preview_operation(payload)
-    return build_previewed_operation_response(
-        tool_name="inbound.symbols",
-        operation_id=command_id,
+    return preview_and_save_operation(
+        payload,
         request=request,
+        command_id=command_id,
         store=store,
-        payload=payload,
-        preview=preview,
         ttl_seconds=ttl_seconds,
-        response_text=lambda operation: render_symbol_response(
-            status="previewed",
-            operation_id=command_id,
-            payload=payload,
-            preview=preview,
-            expires_at=str(operation.get("expires_at") or ""),
-        ),
+        tool_name="inbound.symbols",
+        preview_operation=_preview_operation,
+        render=render_symbol_response,
     )
 
 
 def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_symbol_operation(
+    return confirm_and_apply_operation(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=False,
-        action="确认",
-    )
-    confirmed = confirm_previewed_operation_or_raise(
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        subject="监控标的变更",
-        expired_message="这条监控标的变更确认已过期，未写入配置。",
-        expired_hint="请重新发送监控标的命令生成新的预览。",
-        hash_mismatch_message="pending symbol operation payload hash mismatch; refusing to write config",
-    )
-    operation_id = confirmed.operation_id
-    operation_resolution = confirmed.operation_resolution
-    payload = confirmed.payload
-    try:
-        preview = _preview_operation(payload)
-        result = _apply_operation(payload)
-    except AgentToolError as exc:
-        store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
-        raise
-    except Exception as exc:
-        failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
-        store.mark_failed(operation_id, result=failed)
-        raise AgentToolError(code="INTERNAL_ERROR", message="symbol operation failed before config write could be confirmed", details=failed) from exc
-    store.mark_applied(operation_id, result=result)
-    text = render_symbol_response(status="applied", operation_id=operation_id, payload=payload, preview=preview, result=result)
-    return build_response(
+        resolve=_resolve_symbol_operation,
         tool_name="inbound.symbols",
-        ok=True,
-        data={
-            "operation_id": operation_id,
-            **operation_resolution,
-            "operation_type": payload["operation_type"],
-            "status": "applied",
-            "payload_hash": confirmed.payload_hash,
-            "payload": payload,
-            "preview": preview,
-            "result": result,
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        subject=_OPERATION_SUBJECT,
+        expired_message=_EXPIRED_MESSAGE,
+        expired_hint=_EXPIRED_HINT,
+        hash_mismatch_message="pending symbol operation payload hash mismatch; refusing to write config",
+        apply_failure_message="symbol operation failed before config write could be confirmed",
+        preview_operation=_preview_operation,
+        apply_operation=_apply_operation,
+        render=render_symbol_response,
     )
 
 
 def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_symbol_operation(
+    return cancel_pending_operation_or_raise(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=True,
-        action="取消",
-    )
-    text = f"监控标的变更已取消，未写入配置。\ncommand_id: {operation_id}"
-    return build_cancelled_operation_response(
+        resolve=_resolve_symbol_operation,
         tool_name="inbound.symbols",
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        response_text=text,
+        subject=_OPERATION_SUBJECT,
+        cancel_suffix="未写入配置",
     )
 
 
@@ -189,9 +145,9 @@ def _resolve_symbol_operation(
         operation_types=SYMBOL_OPERATION_TYPES,
         allow_expired=allow_expired,
         action=action,
-        subject="监控标的变更",
-        expired_message="这条监控标的变更确认已过期，未写入配置。",
-        expired_hint="请重新发送监控标的命令生成新的预览。",
+        subject=_OPERATION_SUBJECT,
+        expired_message=_EXPIRED_MESSAGE,
+        expired_hint=_EXPIRED_HINT,
         none_hint="请先发送监控标的变更命令生成预览。",
         wrong_family_message="这不是监控标的变更，不能用确认监控/取消监控处理。",
         not_found_message="找不到待确认的监控标的变更。",

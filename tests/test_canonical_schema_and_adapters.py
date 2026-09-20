@@ -24,6 +24,19 @@ adapt_opend_tool_payload = _ADAPTERS_MOD.adapt_opend_tool_payload
 adapt_option_positions_context = _ADAPTERS_MOD.adapt_option_positions_context
 
 
+def _opend_tool_payload(**overrides: object) -> dict:
+    return {
+        "schema_kind": "tool_execution",
+        "schema_version": "1.0",
+        "symbol": "AAPL",
+        "tool_name": "required_data_prefetch",
+        "status": "fetched",
+        "ok": True,
+        "source": "opend",
+        **overrides,
+    }
+
+
 def test_normalize_processor_row_requires_symbol_and_strategy() -> None:
     out = normalize_processor_row({"symbol": "aapl", "strategy": "sell_put", "candidate_count": "2"})
     assert out["schema_kind"] == "processor_output"
@@ -140,17 +153,7 @@ def test_normalize_processor_rows_requires_list_contract() -> None:
 
 def test_three_source_adapters_produce_unified_dto() -> None:
     opend = adapt_opend_tool_payload(
-        {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "symbol": "AAPL",
-            "tool_name": "required_data_prefetch",
-            "status": "fetched",
-            "ok": True,
-            "source": "opend",
-            "idempotency_key": "k1",
-            "returncode": 0,
-        }
+        _opend_tool_payload(idempotency_key="k1", returncode=0)
     )
     holdings = adapt_holdings_context(
         {
@@ -184,17 +187,7 @@ def test_three_source_adapters_produce_unified_dto() -> None:
 
 def test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code() -> None:
     timeout_case = adapt_opend_tool_payload(
-        {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "symbol": "AAPL",
-            "tool_name": "required_data_prefetch",
-            "status": "error",
-            "ok": False,
-            "source": "opend",
-            "error_code": "OPEND_API_ERROR",
-            "message": "request timed out",
-        }
+        _opend_tool_payload(status="error", ok=False, error_code="OPEND_API_ERROR", message="request timed out")
     )
     assert timeout_case["status"] == "error"
     assert timeout_case["fallback_used"] is False
@@ -204,16 +197,7 @@ def test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code() -> None
     # A non-Futu upstream source is labeled as fallback in the unified snapshot.
     # This is an audit/status shape only, not a runtime Yahoo fallback path.
     fallback_ok = adapt_opend_tool_payload(
-        {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "symbol": "AAPL",
-            "tool_name": "required_data_prefetch",
-            "status": "fetched",
-            "ok": True,
-            "source": "yahoo",
-            "returncode": 0,
-        }
+        _opend_tool_payload(source="yahoo", returncode=0)
     )
     assert fallback_ok["status"] == "fallback"
     assert fallback_ok["fallback_used"] is True
@@ -223,15 +207,7 @@ def test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code() -> None
 def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
     with pytest.raises(ValueError) as _caught:
         adapt_opend_tool_payload(
-            {
-                "schema_kind": "bad_kind",
-                "schema_version": "1.0",
-                "symbol": "AAPL",
-                "tool_name": "required_data_prefetch",
-                "status": "fetched",
-                "ok": True,
-                "source": "opend",
-            }
+            _opend_tool_payload(schema_kind="bad_kind")
         )
     e = _caught.value
     assert "schema_kind must be tool_execution" in str(e)

@@ -8,6 +8,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import FINAL_STATUSES, PENDING_STATUSES
 from domain.domain.symbol_identity import symbol_market
 from src.application.quality.model import check_result, dataset_status, freshness, utc_iso
+from src.application.payload_helpers import parse_utc as _parse_utc
 
 
 EXTERNAL_REVIEW_STATUSES = {"external_adjustment_pending_review", "external_adjustment", "manual_review"}
@@ -21,19 +22,6 @@ def _parse_date(value: Any) -> date | None:
         return date.fromisoformat(raw[:10]) if raw else None
     except ValueError:
         return None
-
-
-def _parse_utc(value: Any) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def next_trading_day(expiration: date, trading_days: list[date]) -> date | None:

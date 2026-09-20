@@ -21,6 +21,27 @@ from src.application.sell_put_steps import _evidence_scan_status as put_status
 from src.application.scan_sell_put import run_sell_put_scan
 
 
+_SCAN_NOW_UTC = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
+
+
+def _nvda_put_row(**overrides) -> dict:
+    row = {
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-09-18",
+        "contract_symbol": "US.NVDA260918P00100000",
+        "currency": "USD",
+        "dte": 43,
+        "strike": 100.0,
+        "spot": 110.0,
+        "bid": 1.0,
+        "ask": 1.01,
+        "multiplier": 100,
+    }
+    row.update(overrides)
+    return row
+
+
 def _decision(*, accepted: bool = False, reasons: tuple[str, ...] = ()) -> dict:
     return {
         "opening_decision": {
@@ -169,22 +190,7 @@ def test_supplied_required_data_frame_avoids_legacy_csv_read(
 def test_sell_put_scan_classifies_missing_canonical_status_as_unavailable(
     tmp_path,
 ) -> None:
-    row = phase2_opening_row(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-09-18",
-            "contract_symbol": "US.NVDA260918P00100000",
-            "currency": "USD",
-            "dte": 43,
-            "strike": 100.0,
-            "spot": 110.0,
-            "bid": 1.0,
-            "ask": 1.01,
-            "multiplier": 100,
-            "implied_volatility": 0.30,
-        }
-    )
+    row = phase2_opening_row(_nvda_put_row(implied_volatility=0.30))
     row.pop("opening_contract_status")
     decisions: list[dict] = []
 
@@ -192,14 +198,7 @@ def test_sell_put_scan_classifies_missing_canonical_status_as_unavailable(
         symbols=["NVDA"],
         input_root=tmp_path,
         min_annualized_net_return=0.10,
-        quote_freshness_now_utc=datetime(
-            2026,
-            4,
-            1,
-            15,
-            0,
-            tzinfo=timezone.utc,
-        ),
+        quote_freshness_now_utc=_SCAN_NOW_UTC,
         calculation_decision_sink_fn=decisions.extend,
         required_data_frames={"NVDA": pd.DataFrame([row])},
     )
@@ -223,37 +222,14 @@ def test_sell_put_scan_classifies_explicit_contract_conflicts_as_ineligible(
     overrides: dict,
     specific_reason: str,
 ) -> None:
-    row = phase2_opening_row(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-09-18",
-            "contract_symbol": "US.NVDA260918P00100000",
-            "currency": "USD",
-            "dte": 43,
-            "strike": 100.0,
-            "spot": 110.0,
-            "bid": 1.0,
-            "ask": 1.01,
-            "multiplier": 100,
-            "implied_volatility": 0.30,
-            **overrides,
-        }
-    )
+    row = phase2_opening_row(_nvda_put_row(implied_volatility=0.30, **overrides))
     decisions: list[dict] = []
 
     result = run_sell_put_scan(
         symbols=["NVDA"],
         input_root=tmp_path,
         min_annualized_net_return=0.10,
-        quote_freshness_now_utc=datetime(
-            2026,
-            4,
-            1,
-            15,
-            0,
-            tzinfo=timezone.utc,
-        ),
+        quote_freshness_now_utc=_SCAN_NOW_UTC,
         calculation_decision_sink_fn=decisions.extend,
         required_data_frames={"NVDA": pd.DataFrame([row])},
     )
@@ -277,21 +253,7 @@ def test_candidate_scan_classifies_only_explicit_contract_evidence_conflicts(
     tmp_path,
     specific_reason: str,
 ) -> None:
-    row = phase2_opening_row(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-09-18",
-            "contract_symbol": "US.NVDA260918P00100000",
-            "currency": "USD",
-            "dte": 43,
-            "strike": 100.0,
-            "spot": 110.0,
-            "bid": 1.0,
-            "ask": 1.01,
-            "multiplier": 100,
-        }
-    )
+    row = phase2_opening_row(_nvda_put_row())
     decisions: list[dict] = []
 
     result = run_candidate_scan(

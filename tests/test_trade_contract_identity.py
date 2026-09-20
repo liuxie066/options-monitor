@@ -23,6 +23,35 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_execution import execution_identity_from_input
+from src.application.ledger import api, writer_trade_events
+from src.application.ledger.api import (
+    applied_execution_association_conflicts,
+    record_broker_trade_close,
+    record_normalized_trade_event,
+    record_trade_event_void,
+    refresh_position_lot_projection,
+    resolve_broker_trade_close_targets,
+)
+from src.application.ledger.repository import SQLiteOptionPositionsRepository
+from src.application.quality.ledger_checks import build_ledger_datasets
+from src.application.trades.auto_intake import _process_payload
+from src.application.trades.backfill import _ledger_recorded_deal_keys
+from src.application.trades.deal_identity import structured_deal_keys_from_ledger_event
+from src.application.trades.inbox import read_trade_payload
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
+from src.application.trades.normalizer import (
+    canonical_trade_execution_content,
+    normalize_trade_deal,
+)
+from src.application.trades.order_fee_sync import recover_order_fee_targets
+from src.application.trades.resolver import resolve_trade_deal
+from src.application.trades.state_reconcile import _ledger_events_by_deal
+from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+from unittest.mock import MagicMock
+
+
 
 def test_trade_side_and_position_effect_aliases_are_centralized() -> None:
     assert normalize_trade_side("SELL_SHORT") == "sell"
@@ -91,10 +120,6 @@ def test_ledger_completion_never_uses_an_unscoped_deal_id() -> None:
 
 
 def test_standard_execution_keeps_futu_event_lot_and_frozen_economics(tmp_path) -> None:
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-
     payload = {
         "acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
         "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
@@ -132,9 +157,6 @@ def test_standard_execution_keeps_futu_event_lot_and_frozen_economics(tmp_path) 
     ({"multiplier": "10"}, "ledger_contract_multiplier"),
 ])
 def test_real_intake_admission_preserves_projection_scope(tmp_path, change, error):
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.auto_intake import _process_payload
-
     payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
                "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
                "deal_id": "first", "order_id": "first-order", "code": "US.NVDA260918P00100000",
@@ -175,12 +197,6 @@ def _execution_input(deal_id="fill-1", *, namespace="futu.deal", effect="open", 
 @pytest.mark.parametrize("source_shape", ["standard", "metadata_only"])
 @pytest.mark.parametrize("multiplier", [None, "0", "1.5", "NaN"])
 def test_public_ledger_revalidates_standard_multiplier_before_any_write(tmp_path, monkeypatch, source_shape, multiplier):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.ledger import writer_trade_events
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
-
     payload = _execution_input()
     payload["instrument_ref"]["multiplier"] = multiplier
     deal = normalize_trade_deal(payload)
@@ -203,10 +219,6 @@ def test_public_ledger_revalidates_standard_multiplier_before_any_write(tmp_path
 
 
 def test_public_ledger_revalidates_explicit_standard_raw_without_execution_metadata(tmp_path):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-
     payload = _execution_input()
     payload.pop("external_id_namespace")
     deal = replace(normalize_trade_deal(payload), execution_input={})
@@ -218,10 +230,6 @@ def test_public_ledger_revalidates_explicit_standard_raw_without_execution_metad
 
 @pytest.mark.parametrize("retain_partial_metadata", [False, True])
 def test_public_ledger_preserves_legacy_input_without_standard_identity(tmp_path, retain_partial_metadata):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-
     payload = {"acc_id": "123", "deal_id": "old-fill", "order_id": "old-order",
                "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.5", "multiplier": "100",
                "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00"}
@@ -241,11 +249,6 @@ def test_public_ledger_preserves_legacy_input_without_standard_identity(tmp_path
 
 @pytest.mark.parametrize("known_effect,conflicts", [("open", False), ("close", True)])
 def test_source_effect_enrichment_checks_applied_allocation_at_ledger_facades(tmp_path, known_effect, conflicts):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     payload = {**_execution_input(effect=None, option_type="call"), "side": "buy"}
     first = resolve_trade_deal(normalize_trade_deal(payload), repo=repo, state={}, apply_changes=True)
@@ -266,9 +269,6 @@ def test_source_effect_enrichment_checks_applied_allocation_at_ledger_facades(tm
 
 
 def test_intake_isolates_execution_namespaces_and_preserves_legacy_futu_event_ids(tmp_path):
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.auto_intake import _process_payload
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     def process(payload):
         return _process_payload(payload, repo=repo, state_path=tmp_path / "state.json",
@@ -290,11 +290,6 @@ def test_intake_isolates_execution_namespaces_and_preserves_legacy_futu_event_id
 
 @pytest.mark.parametrize("namespace", ["futu.deal", "verified.partition.deal"])
 def test_standard_split_close_replay_preserves_event_set_and_rejects_partial_void(tmp_path, namespace):
-    from src.application.ledger.api import record_normalized_trade_event, record_trade_event_void
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     for deal_id in ("opening-1", "opening-2"):
         opened = resolve_trade_deal(normalize_trade_deal(_execution_input(deal_id, namespace=namespace)),
@@ -323,11 +318,6 @@ def test_standard_split_close_replay_preserves_event_set_and_rejects_partial_voi
 
 @pytest.mark.parametrize("source_effect", ["close", None])
 def test_close_outbox_keeps_namespace_and_original_account_scope_on_replay(tmp_path, source_effect):
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.auto_intake import _process_payload
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     closes = []
     for namespace in ("futu.deal", "verified.partition.deal"):
@@ -371,19 +361,11 @@ def test_close_outbox_keeps_namespace_and_original_account_scope_on_replay(tmp_p
 
 
 def test_applied_association_check_tolerates_readless_protocol_repositories():
-    from unittest.mock import MagicMock
-    from src.application.ledger.api import applied_execution_association_conflicts
-
     for repo in (None, SimpleNamespace(), MagicMock(), SimpleNamespace(list_trade_events=lambda: None)):
         assert applied_execution_association_conflicts(repo, "execution:v1:test", {"associations": {}}) == []
 
 
 def test_source_order_enrichment_checks_existing_durable_order_binding(tmp_path):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     payload = {**_execution_input(), "external_order_id": None, "external_order_namespace": None}
     initial = replace(normalize_trade_deal(payload), order_id="allocated-order")
@@ -398,13 +380,6 @@ def test_source_order_enrichment_checks_existing_durable_order_binding(tmp_path)
 
 @pytest.mark.parametrize("split,facade", [(False, "resolver"), (True, "resolver"), (True, "writer")])
 def test_late_source_order_enriches_whole_execution_without_economic_changes(tmp_path, split, facade):
-    from copy import deepcopy
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-    from src.application.trades.order_fee_sync import recover_order_fee_targets
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     if split:
         for identifier in ("open-a", "open-b"):
@@ -452,10 +427,6 @@ def test_late_source_order_enriches_whole_execution_without_economic_changes(tmp
 
 
 def test_split_order_enrichment_cas_failure_rolls_back_whole_execution(tmp_path, monkeypatch):
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     for identifier in ("open-a", "open-b"):
         assert resolve_trade_deal(normalize_trade_deal(_execution_input(identifier)), repo=repo,
@@ -480,10 +451,6 @@ def test_split_order_enrichment_cas_failure_rolls_back_whole_execution(tmp_path,
 
 
 def _direct_split_close_fixture(tmp_path, *, namespace="futu.deal", standard=True):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-
     def normalize(payload):
         deal = normalize_trade_deal(payload)
         return deal if standard else replace(deal, execution_input={}, raw_payload={})
@@ -501,12 +468,6 @@ def _direct_split_close_fixture(tmp_path, *, namespace="futu.deal", standard=Tru
 
 
 def test_public_atomic_close_rejects_invalid_execution_without_changing_lots_or_fx(tmp_path, monkeypatch):
-    from src.application.ledger.api import (
-        record_broker_trade_close, record_normalized_trade_event, resolve_broker_trade_close_targets,
-    )
-    from src.application.ledger import writer_trade_events
-    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
-
     repo, close = _direct_split_close_fixture(tmp_path)
     execution = {**close.execution_input, "instrument_ref": {**close.execution_input["instrument_ref"], "multiplier": None}, "errors": []}
     close = replace(close, execution_input=execution, multiplier=None)
@@ -533,9 +494,6 @@ def test_public_atomic_close_rejects_invalid_execution_without_changing_lots_or_
 
 @pytest.mark.parametrize("namespace", ["futu.deal", "verified.partition.deal"])
 def test_direct_ledger_close_splits_once_and_rejects_partially_voided_replay(tmp_path, namespace):
-    from src.application.ledger.api import record_normalized_trade_event, record_trade_event_void
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo, close = _direct_split_close_fixture(tmp_path, namespace=namespace)
     target_ids = {row["record_id"] for row in repo.list_position_lots()}
     assert record_normalized_trade_event(repo, close).created
@@ -574,8 +532,6 @@ def test_direct_ledger_close_splits_once_and_rejects_partially_voided_replay(tmp
 
 @pytest.mark.parametrize("namespace", ["futu.deal", "verified.partition.deal"])
 def test_direct_ledger_split_failure_rolls_back_all_events_and_can_retry(tmp_path, monkeypatch, namespace):
-    from src.application.ledger.api import record_normalized_trade_event
-
     repo, close = _direct_split_close_fixture(tmp_path, namespace=namespace)
     events, lots = repo.list_trade_events(), repo.list_position_lots()
     notifications = repo.list_trade_lifecycle_notifications()
@@ -603,8 +559,6 @@ def test_direct_ledger_split_failure_rolls_back_all_events_and_can_retry(tmp_pat
 
 
 def test_legacy_direct_ledger_close_keeps_existing_split_metadata_shape(tmp_path):
-    from src.application.ledger.api import record_normalized_trade_event
-
     repo, close = _direct_split_close_fixture(tmp_path, standard=False)
     assert record_normalized_trade_event(repo, close).created
     closes = [event for event in repo.list_trade_events() if event["event_type"] == "close"]
@@ -623,10 +577,6 @@ def test_legacy_direct_ledger_close_keeps_existing_split_metadata_shape(tmp_path
 
 
 def _proven_legacy_execution_fixture(tmp_path, *, split=False, order_known=True, source_changes=None):
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     payload = {
         "acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
         "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
@@ -659,11 +609,6 @@ def _proven_legacy_execution_fixture(tmp_path, *, split=False, order_known=True,
 
 @pytest.mark.parametrize("split", [False, True])
 def test_proven_legacy_order_replay_preserves_original_group_at_public_intake(tmp_path, monkeypatch, split):
-    from src.application.ledger import api
-    from src.application.trades.auto_intake import _process_payload
-    from src.application.trades.inbox import read_trade_payload
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo, payload, deal = _proven_legacy_execution_fixture(tmp_path, split=split)
     before, lots = repo.list_trade_events(), repo.list_position_lots()
     notifications = repo.list_trade_lifecycle_notifications()
@@ -700,9 +645,6 @@ def test_proven_legacy_order_replay_preserves_original_group_at_public_intake(tm
 
 @pytest.mark.parametrize("split", [False, True])
 def test_legacy_missing_order_requires_review_in_preview_apply_and_core(tmp_path, split):
-    from src.application.trades.auto_intake import _process_payload
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo, payload, deal = _proven_legacy_execution_fixture(tmp_path, split=split, order_known=False)
     before, lots = repo.list_trade_events(), repo.list_position_lots()
     notifications = repo.list_trade_lifecycle_notifications()
@@ -730,8 +672,6 @@ def test_legacy_missing_order_requires_review_in_preview_apply_and_core(tmp_path
     ({"order_id": "other-order"}, "trade_execution_applied_association_conflict"),
 ])
 def test_legacy_order_readback_keeps_scope_economics_and_association_guards(tmp_path, source_changes, reason):
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, source_changes=source_changes)
     before, lots = repo.list_trade_events(), repo.list_position_lots()
     for apply in (False, True):
@@ -743,9 +683,6 @@ def test_legacy_order_readback_keeps_scope_economics_and_association_guards(tmp_
 
 
 def test_legacy_order_readback_rejects_partial_split_void(tmp_path):
-    from src.application.ledger.api import record_trade_event_void
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, split=True)
     close = completed_ledger_execution_events(repo.list_trade_events(), deal)[0]
     record_trade_event_void(repo, event_id=close["event_id"], reason="invalid split allocation")
@@ -758,11 +695,6 @@ def test_legacy_order_readback_rejects_partial_split_void(tmp_path):
 
 
 def test_canonical_order_enrichment_empty_readback_requires_review(tmp_path, monkeypatch):
-    from src.application.ledger import api
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     deal = normalize_trade_deal(_execution_input())
     assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True).status == "applied"
@@ -810,8 +742,6 @@ def test_complete_split_requires_every_unique_active_allocation(legacy, quantiti
     duplicate = deepcopy(rows)
     duplicate[1]["target_lot_id"] = duplicate[0]["target_lot_id"]
     assert completed_ledger_deal_keys(duplicate) == set()
-    from domain.domain.ledger import ContractKey, TradeEvent
-
     void = TradeEvent(
         event_id="void", event_type="void", event_time_ms=1_700_000_000_001,
         contract_key=ContractKey.from_values(
@@ -894,8 +824,6 @@ def test_split_completion_requires_broker_quantity_even_when_metadata_agrees(leg
     ("allocated_contracts", "NaN"), ("allocated_contracts", "Infinity"),
 ])
 def test_direct_public_writer_rejects_malformed_persisted_split_metadata(tmp_path, field, invalid):
-    from src.application.ledger.api import record_normalized_trade_event, refresh_position_lot_projection
-
     source, close = _direct_split_close_fixture(tmp_path / "source")
     assert record_normalized_trade_event(source, close).created
     rows = completed_ledger_execution_events(source.list_trade_events(), close)
@@ -921,9 +849,6 @@ def test_direct_public_writer_rejects_malformed_persisted_split_metadata(tmp_pat
 @pytest.mark.parametrize("field", ["source_deal_id", "deal_id", "futu_deal_id"])
 @pytest.mark.parametrize("strip_errors", [False, True])
 def test_public_writer_rejects_same_namespace_source_identity_conflict_without_writes(tmp_path, namespace, field, strip_errors):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.trades.normalizer import normalize_trade_deal
-
     repo, close = _direct_split_close_fixture(tmp_path, namespace=namespace)
     conflicting = normalize_trade_deal({**close.raw_payload, field: "different-execution"})
     assert "invalid:source_execution_identity" in conflicting.execution_input["errors"]
@@ -938,11 +863,6 @@ def test_public_writer_rejects_same_namespace_source_identity_conflict_without_w
 
 @pytest.mark.parametrize("namespace_field", [None, "external_id_namespace", "execution_id_namespace"])
 def test_source_identity_comparison_does_not_merge_distinct_namespaces(tmp_path, namespace_field):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-    from src.application.quality.ledger_checks import build_ledger_datasets
-
     repo, close = _direct_split_close_fixture(tmp_path, namespace="verified.partition.deal")
     payload = {
         "execution_input": close.execution_input, "source_deal_id": "legacy-futu-id",
@@ -967,13 +887,6 @@ def test_source_identity_comparison_does_not_merge_distinct_namespaces(tmp_path,
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("with_order", [False, True])
 def test_conflicting_source_identity_is_rejected_before_first_intake_or_replay(tmp_path, existing, with_order):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.auto_intake import _process_payload
-    from src.application.trades.inbox import read_trade_payload
-    from src.application.trades.inbox_authority import resolve_execution_inbox_path
-    from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     payload = {**_execution_input(), "external_order_id": None, "external_order_namespace": None}
     if existing:
@@ -1000,8 +913,6 @@ def test_conflicting_source_identity_is_rejected_before_first_intake_or_replay(t
 
 @pytest.mark.parametrize("shape", ["standard", "nested", "futu"])
 def test_normalizer_retains_source_identity_error_in_all_execution_shapes(shape):
-    from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
-
     standard = _execution_input()
     payload = standard if shape == "standard" else {"execution_input": standard}
     if shape == "futu":
@@ -1016,9 +927,6 @@ def test_normalizer_retains_source_identity_error_in_all_execution_shapes(shape)
 
 
 def test_completion_readback_rejects_conflicting_source_even_if_dto_errors_are_stripped(tmp_path):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.trades.normalizer import normalize_trade_deal
-
     repo, close = _direct_split_close_fixture(tmp_path)
     assert record_normalized_trade_event(repo, close).created
     bad = normalize_trade_deal({**close.raw_payload, "source_deal_id": "other-fill"})
@@ -1030,9 +938,6 @@ def test_completion_readback_rejects_conflicting_source_even_if_dto_errors_are_s
 @pytest.mark.parametrize("change", ["missing_target", "duplicate_target", "source_quantity", "source_price"])
 @pytest.mark.parametrize("late_order", [False, True])
 def test_public_writer_proves_full_split_before_replay_or_order_enrichment(tmp_path, change, late_order):
-    from src.application.ledger.api import record_normalized_trade_event, refresh_position_lot_projection
-    from src.application.trades.normalizer import normalize_trade_deal
-
     source, original = _direct_split_close_fixture(tmp_path / "source")
     payload = {**original.raw_payload, "external_order_id": None, "external_order_namespace": None}
     close = normalize_trade_deal(payload)
@@ -1067,12 +972,6 @@ def test_public_writer_proves_full_split_before_replay_or_order_enrichment(tmp_p
 @pytest.mark.parametrize("canonical_second", [False, True])
 @pytest.mark.parametrize("second_physical", ["123", "456"])
 def test_physical_execution_conflict_blocks_alias_consumers_and_public_replay(tmp_path, canonical_second, second_physical):
-    from domain.domain.trade_execution import execution_identity_from_input
-    from src.application.ledger.api import refresh_position_lot_projection
-    from src.application.trades.backfill import _ledger_recorded_deal_keys
-    from src.application.trades.resolver import resolve_trade_deal
-    from src.application.trades.state_reconcile import _ledger_events_by_deal
-
     repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, split=True)
     source_key = broker_external_event_key(deal)
     for row in repo.list_trade_events():
@@ -1124,8 +1023,6 @@ def test_physical_execution_conflict_blocks_alias_consumers_and_public_replay(tm
 
 @pytest.mark.parametrize("change", ["physical_missing", "namespace", "environment", "broker"])
 def test_legacy_physical_grouping_requires_existing_futu_alias_scope(change):
-    from src.application.trades.deal_identity import structured_deal_keys_from_ledger_event
-
     row = _complete_split_rows()[0]
     raw = row["raw_payload"]
     if change == "physical_missing":
@@ -1141,10 +1038,6 @@ def test_legacy_physical_grouping_requires_existing_futu_alias_scope(change):
 
 @pytest.mark.parametrize("canonical", [False, True])
 def test_public_replay_requires_canonical_proof_to_reuse_other_account_events(tmp_path, canonical):
-    from src.application.ledger.api import record_normalized_trade_event
-    from src.application.trades.normalizer import normalize_trade_deal
-    from src.application.trades.resolver import resolve_trade_deal
-
     if canonical:
         repo, deal = _direct_split_close_fixture(tmp_path)
         assert record_normalized_trade_event(repo, deal).created

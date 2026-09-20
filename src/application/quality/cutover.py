@@ -14,6 +14,7 @@ from src.infrastructure.private_storage import (
     ensure_private_directory,
     private_path,
 )
+from src.application.payload_helpers import canonical_json_bytes as _canonical_bytes
 
 
 CUTOVER_EVIDENCE_SCHEMA = "om.quality_hot_path_cutover_evidence.v1"
@@ -30,16 +31,6 @@ QUALITY_CURRENT_CONSUMERS = (
 )
 _MARKETS = ("hk", "us")
 _MAX_EVIDENCE_BYTES = 1_048_576
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _sha256(value: bytes) -> str:

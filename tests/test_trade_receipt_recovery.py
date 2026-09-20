@@ -57,6 +57,11 @@ def _successful_sender(calls):
     return send
 
 
+def _ledger_case(tmp_path):
+    """The positions ledger plus the send-call log the receipt cases start from."""
+    return SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"), []
+
+
 def _inbox_id(payload):
     key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
     return hashlib.sha256(key.encode()).hexdigest()
@@ -340,8 +345,7 @@ def test_missing_ledger_read_evidence_is_retained_without_receipt_permission(tmp
 
 
 def test_new_order_after_commit_crash_preserves_original_first_receipt_permission(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     process = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls))
     unknown_order = {**_payload(), "external_order_id": None, "external_order_namespace": None}
 
@@ -368,8 +372,7 @@ def test_new_order_after_commit_crash_preserves_original_first_receipt_permissio
 
 
 def test_transient_lock_failure_then_due_retry_sends_distinct_success_once(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     process = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls))
     resolver = auto_intake.resolve_trade_deal
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("locking protocol")))
@@ -399,8 +402,7 @@ def test_transient_lock_failure_then_due_retry_sends_distinct_success_once(tmp_p
 @pytest.mark.parametrize("error,cause", [(sqlite3.OperationalError("no such table: trade_events"), "数据库结构或存储异常"),
                                        (PermissionError("denied"), "数据库写入权限不足")])
 def test_permanent_failure_explains_no_automatic_retry(tmp_path, monkeypatch, error, cause):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", lambda *_a, **_k: (_ for _ in ()).throw(error))
     failed = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls))(_payload())
     assert failed["receipt_kind"] == "manual_required"
@@ -411,8 +413,7 @@ def test_permanent_failure_explains_no_automatic_retry(tmp_path, monkeypatch, er
 
 @pytest.mark.parametrize("initial", ["no_route", "rejected"])
 def test_notification_recovery_without_new_fill_never_runs_economic_writer(tmp_path, monkeypatch, initial):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     def rejected(**kwargs):
         calls.append(kwargs)
         return {"ok": False, "command_ok": False, "delivery_confirmed": False, "returncode": 1,
@@ -430,8 +431,7 @@ def test_notification_recovery_without_new_fill_never_runs_economic_writer(tmp_p
 
 
 def test_unknown_ledger_readback_only_checks_until_absence_is_proven(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("locking protocol")))
     reader = auto_intake.open_trade_reconciliation_evidence_repo
     monkeypatch.setattr(auto_intake, "open_trade_reconciliation_evidence_repo", lambda *_a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
@@ -451,8 +451,7 @@ def test_unknown_ledger_readback_only_checks_until_absence_is_proven(tmp_path, m
 
 
 def test_exception_after_commit_uses_read_only_proof_and_sends_success_first(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     resolver = auto_intake.resolve_trade_deal
     def commit_then_fail(*args, **kwargs):
         resolver(*args, **kwargs)
@@ -465,8 +464,7 @@ def test_exception_after_commit_uses_read_only_proof_and_sends_success_first(tmp
 
 
 def test_normalize_failure_no_route_recovers_failure_notice_without_renormalizing(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     monkeypatch.setattr(auto_intake, "normalize_trade_deal", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("invalid contract")))
     failed = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls), routed=False)(_payload())
     assert failed["receipt_kind"] == "manual_required" and failed["account"] == "lx"
@@ -478,8 +476,7 @@ def test_normalize_failure_no_route_recovers_failure_notice_without_renormalizin
 
 def test_legacy_source_recovery_uses_current_mapping_and_rejects_remapped_account(tmp_path, monkeypatch):
     import threading
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     payload = _payload("779")
     _processor(tmp_path, repo, monkeypatch, _successful_sender(calls), routed=False)(payload)
     cfg = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}}
@@ -496,8 +493,7 @@ def test_legacy_source_recovery_uses_current_mapping_and_rejects_remapped_accoun
 
 
 def test_non_option_write_uncertainty_cannot_be_proved_absent_by_option_ledger(tmp_path, monkeypatch):
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    calls = []
+    repo, calls = _ledger_case(tmp_path)
     raw = {**_payload(), "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"}}
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("locking protocol")))
     result = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls))(raw)

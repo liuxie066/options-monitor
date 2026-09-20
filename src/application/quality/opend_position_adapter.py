@@ -318,21 +318,6 @@ def _position_quantity(row: Mapping[str, Any]) -> float | None:
         return None
 
 
-def _row_multiplier(row: Mapping[str, Any]) -> float | None:
-    for key in (
-        "options_per_contract",
-        "option_contract_multiplier",
-        "option_contract_size",
-        "contract_multiplier",
-        "lot_size",
-        "multiplier",
-    ):
-        value = _positive_number(row.get(key))
-        if value is not None:
-            return value
-    return None
-
-
 def _enrich_option_contract_terms(
     gateway: Any,
     rows: list[dict[str, Any]],

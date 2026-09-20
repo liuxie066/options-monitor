@@ -43,6 +43,16 @@ def test_opend_option_type_normalization_rejects_non_exact_values(
     assert normalize_opend_option_type(value) not in {"put", "call"}
 
 
+def _chain_row(code: str, strike_price: float = 100.0, lot_size: int = 100) -> dict:
+    return {
+        "code": code,
+        "strike_time": "2026-06-19",
+        "strike_price": strike_price,
+        "option_type": "PUT",
+        "lot_size": lot_size,
+    }
+
+
 def _chain_bundle(*, rows: list[dict[str, object]], source_outcome: str) -> SymbolOptionChainResult:
     frame = pd.DataFrame(rows)
     return SymbolOptionChainResult(
@@ -72,6 +82,19 @@ def _install_symbol_dependencies(monkeypatch, *, chain_bundle: SymbolOptionChain
     monkeypatch.setattr(mod, "fetch_symbol_option_chain", lambda **_kwargs: chain_bundle)
 
 
+def _fetch_symbol_request(tmp_path: Path, **overrides):
+    import src.application.opend_symbol_fetching as mod
+
+    kwargs = {
+        "symbol": "NVDA",
+        "base_dir": tmp_path,
+        "gateway": object(),
+        "spot_override": 100.0,
+    }
+    kwargs.update(overrides)
+    return mod.fetch_symbol_request(mod.FetchSymbolRequest(**kwargs))
+
+
 @pytest.mark.parametrize(
     ("rv_status", "rv_estimate"),
     [
@@ -93,15 +116,7 @@ def test_required_realized_volatility_failure_is_typed_overall_error(
 
     code = "US.NVDA.2026-06-19.P100"
     chain_bundle = _chain_bundle(
-        rows=[
-            {
-                "code": code,
-                "strike_time": "2026-06-19",
-                "strike_price": 100.0,
-                "option_type": "PUT",
-                "lot_size": 100,
-            }
-        ],
+        rows=[_chain_row(code)],
         source_outcome="success_rows",
     )
     _install_symbol_dependencies(monkeypatch, chain_bundle=chain_bundle)
@@ -139,15 +154,10 @@ def test_required_realized_volatility_failure_is_typed_overall_error(
         lambda: completion_events.append("completed") or "2026-08-04T01:00:02+00:00",
     )
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=100.0,
-            option_types="put",
-            include_realized_volatility=True,
-        )
+    payload = _fetch_symbol_request(
+        tmp_path,
+        option_types="put",
+        include_realized_volatility=True,
     )
 
     assert payload["meta"]["status"] == "error"
@@ -251,15 +261,7 @@ def test_success_empty_marks_rv_not_applicable_without_provider_call(
     monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", forbidden)
     monkeypatch.setattr(mod, "fetch_option_snapshots", forbidden)
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=100.0,
-            include_realized_volatility=True,
-        )
-    )
+    payload = _fetch_symbol_request(tmp_path, include_realized_volatility=True)
 
     assert payload["meta"]["status"] == "ok"
     assert payload["meta"]["source_outcome"] == "success_empty"
@@ -277,15 +279,7 @@ def test_fully_fetched_chain_filtered_to_empty_is_normalized_to_success_empty(
     _install_symbol_dependencies(
         monkeypatch,
         chain_bundle=_chain_bundle(
-            rows=[
-                {
-                    "code": "US.NVDA.2026-06-19.P90",
-                    "strike_time": "2026-06-19",
-                    "strike_price": 90.0,
-                    "option_type": "PUT",
-                    "lot_size": 100,
-                }
-            ],
+            rows=[_chain_row("US.NVDA.2026-06-19.P90", 90.0)],
             source_outcome="success_rows",
         ),
     )
@@ -303,17 +297,12 @@ def test_fully_fetched_chain_filtered_to_empty_is_normalized_to_success_empty(
         ),
     )
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=100.0,
-            option_types="put",
-            explicit_expirations=["2026-06-19"],
-            min_strike=100.0,
-            max_strike=100.0,
-        )
+    payload = _fetch_symbol_request(
+        tmp_path,
+        option_types="put",
+        explicit_expirations=["2026-06-19"],
+        min_strike=100.0,
+        max_strike=100.0,
     )
 
     assert payload["rows"] == []
@@ -349,15 +338,7 @@ def test_observed_missing_spot_is_not_fetched_again(
     monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", forbidden)
     monkeypatch.setattr(mod, "fetch_option_snapshots", forbidden)
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=None,
-            fetch_spot_if_missing=False,
-        )
-    )
+    payload = _fetch_symbol_request(tmp_path, spot_override=None, fetch_spot_if_missing=False)
 
     assert payload["spot"] is None
     assert payload["meta"]["spot_snapshot_opend_calls"] == 0
@@ -392,15 +373,7 @@ def test_malformed_chain_filter_input_is_a_provider_error(
         ),
     )
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=100.0,
-            option_types="put",
-        )
-    )
+    payload = _fetch_symbol_request(tmp_path, option_types="put")
 
     assert payload["meta"]["status"] == "error"
     assert "lacks required filter columns" in str(payload["meta"]["error"])
@@ -443,15 +416,7 @@ def test_duplicate_snapshot_code_is_a_typed_overall_error(
     _install_symbol_dependencies(
         monkeypatch,
         chain_bundle=_chain_bundle(
-            rows=[
-                {
-                    "code": code,
-                    "strike_time": "2026-06-19",
-                    "strike_price": 100.0,
-                    "option_type": "PUT",
-                    "lot_size": 100,
-                }
-            ],
+            rows=[_chain_row(code)],
             source_outcome="success_rows",
         ),
     )
@@ -485,15 +450,7 @@ def test_duplicate_snapshot_code_is_a_typed_overall_error(
         ),
     )
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=100.0,
-            include_realized_volatility=True,
-        )
-    )
+    payload = _fetch_symbol_request(tmp_path, include_realized_volatility=True)
 
     assert payload["meta"]["status"] == "error"
     assert payload["meta"]["error_code"] == "SNAPSHOT_COVERAGE_INCOMPLETE"
@@ -585,15 +542,11 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
         reason_code=None,
     )
 
-    payload = mod.fetch_symbol_request(
-        mod.FetchSymbolRequest(
-            symbol="NVDA",
-            base_dir=tmp_path,
-            gateway=object(),
-            spot_override=180.0,
-            underlier_observation=underlier.to_dict(),
-            option_types="put",
-        )
+    payload = _fetch_symbol_request(
+        tmp_path,
+        spot_override=180.0,
+        underlier_observation=underlier.to_dict(),
+        option_types="put",
     )
     rows = {row["contract_symbol"]: row for row in payload["rows"]}
 

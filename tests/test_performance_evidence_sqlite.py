@@ -9,7 +9,6 @@ import pytest
 
 from domain.domain.performance.models import (
     EvidenceEnvelope,
-    ValuationMarkFact,
     parse_evidence_envelope,
     select_fx_rate,
     select_valuation_mark,
@@ -255,15 +254,8 @@ def test_correction_cycle_and_equal_time_source_priority_are_deterministic() -> 
     base = parse_evidence_envelope(
         _envelope(marks=[_mark(source="broker_snapshot", source_id="broker", fact_id="broker")])
     ).valuation_marks[0]
-    official = ValuationMarkFact(
-        fact_id="official",
-        instrument=base.instrument,
-        price="2.4",
-        mark_kind="official_close",
-        effective_at_ms=base.effective_at_ms,
-        observed_at_ms=base.observed_at_ms,
-        source="official_close",
-        source_id="official",
+    official = replace(
+        base, fact_id="official", price="2.4", mark_kind="official_close", source="official_close", source_id="official"
     )
     selected = select_valuation_mark(
         [base, official],
@@ -273,41 +265,21 @@ def test_correction_cycle_and_equal_time_source_priority_are_deterministic() -> 
 
     assert selected.fact is not None and selected.fact.fact_id == "official"
 
-    cycle_a = ValuationMarkFact(
-        fact_id="cycle-a",
-        instrument=base.instrument,
-        price="2.1",
-        mark_kind="manual",
-        effective_at_ms=base.effective_at_ms,
-        observed_at_ms=base.observed_at_ms,
-        source="manual_correction",
-        source_id="cycle-a",
+    cycle_a = replace(
+        base, fact_id="cycle-a", price="2.1", mark_kind="manual", source="manual_correction", source_id="cycle-a",
         supersedes_fact_id="cycle-b",
     )
-    cycle_b = ValuationMarkFact(
-        fact_id="cycle-b",
-        instrument=base.instrument,
-        price="2.2",
-        mark_kind="manual",
-        effective_at_ms=base.effective_at_ms,
-        observed_at_ms=base.observed_at_ms,
-        source="manual_correction",
-        source_id="cycle-b",
+    cycle_b = replace(
+        base, fact_id="cycle-b", price="2.2", mark_kind="manual", source="manual_correction", source_id="cycle-b",
         supersedes_fact_id="cycle-a",
     )
     with pytest.raises(ValueError, match="cycle"):
         validate_evidence_facts([], [], existing_marks=[cycle_a, cycle_b])
 
-    future_correction = ValuationMarkFact(
-        fact_id="future-correction",
-        instrument=base.instrument,
-        price="1.9",
-        mark_kind="manual",
-        effective_at_ms=base.effective_at_ms + 86_400_000,
-        observed_at_ms=base.observed_at_ms + 86_400_000,
-        source="manual_correction",
-        source_id="future-correction",
-        supersedes_fact_id="broker",
+    future_correction = replace(
+        base, fact_id="future-correction", price="1.9", mark_kind="manual",
+        effective_at_ms=base.effective_at_ms + 86_400_000, observed_at_ms=base.observed_at_ms + 86_400_000,
+        source="manual_correction", source_id="future-correction", supersedes_fact_id="broker",
     )
     before_effective = select_valuation_mark(
         [base, future_correction],

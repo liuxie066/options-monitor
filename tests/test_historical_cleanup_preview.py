@@ -29,15 +29,15 @@ def _runtime(tmp_path: Path) -> tuple[Path, Path]:
     return root, ledger
 
 
-def _inventory(path: Path, *, needs_review: bool = False) -> Path:
+def _inventory(path: Path, *, needs_review: bool = False, case_id: str = "case-1") -> Path:
     rows = [
         {
-            "target_key": "lifecycle:case-1",
+            "target_key": f"lifecycle:{case_id}",
             "kind": "lifecycle_case",
             "selected": False,
             "mapping_status": "needs_review" if needs_review else "exact",
             "review_reason_codes": ["target_manifest_missing"] if needs_review else [],
-            "case_id": "case-1",
+            "case_id": case_id,
             "account": "lx",
         }
     ]
@@ -143,10 +143,19 @@ def _patch_inputs(monkeypatch) -> None:
     )
 
 
-def _preview(monkeypatch, tmp_path: Path, *, proof: Path | None = None, needs_review: bool = False) -> dict[str, Any]:
+def _preview(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    proof: Path | None = None,
+    needs_review: bool = False,
+    inventory: Path | None = None,
+    now: datetime = NOW,
+) -> dict[str, Any]:
     _patch_inputs(monkeypatch)
     root, ledger = _runtime(tmp_path)
-    inventory = _inventory(tmp_path / "lifecycle.json", needs_review=needs_review)
+    if inventory is None:
+        inventory = _inventory(tmp_path / "lifecycle.json", needs_review=needs_review)
     (tmp_path / "quality.json").write_text("{}", encoding="utf-8")
     return module.build_historical_cleanup_preview(
         repo_root=Path.cwd(),
@@ -156,7 +165,7 @@ def _preview(monkeypatch, tmp_path: Path, *, proof: Path | None = None, needs_re
         quality_cutover_evidence=tmp_path / "quality.json",
         backup_proof=proof,
         history_reports=[tmp_path / "old-baseline.json"],
-        now_fn=lambda: NOW,
+        now_fn=lambda: now,
     )
 
 
@@ -223,16 +232,8 @@ def test_cleanup_preview_verifies_backup_and_has_stable_plan_hash(monkeypatch, t
     backup_before = backup.read_bytes()
 
     ready = _preview(monkeypatch, tmp_path / "first", proof=proof)
-    later = module.build_historical_cleanup_preview(
-        repo_root=Path.cwd(),
-        runtime_root=first_root,
-        ledger_sqlite=ledger,
-        lifecycle_inventory=tmp_path / "first/lifecycle.json",
-        quality_cutover_evidence=tmp_path / "first/quality.json",
-        backup_proof=proof,
-        history_reports=[tmp_path / "first/old-baseline.json"],
-        now_fn=lambda: datetime(2030, 2, 1, 1, tzinfo=timezone.utc),
-    )
+    later = _preview(monkeypatch, tmp_path / "first", proof=proof,
+                     now=datetime(2030, 2, 1, 1, tzinfo=timezone.utc))
 
     assert ready["status"] == "ready_for_authorization"
     assert ready["preview_ready"] is True
@@ -289,27 +290,10 @@ def test_cleanup_preview_blocks_lifecycle_rows_needing_review(monkeypatch, tmp_p
 
 
 def test_cleanup_preview_blocks_lifecycle_inventory_from_another_ledger(monkeypatch, tmp_path: Path) -> None:
-    _patch_inputs(monkeypatch)
-    root, ledger = _runtime(tmp_path)
-    inventory = _inventory(tmp_path / "lifecycle.json")
-    (tmp_path / "quality.json").write_text("{}", encoding="utf-8")
-    payload = json.loads(inventory.read_text(encoding="utf-8"))
-    payload["rows"][0]["case_id"] = "case-other"
-    payload["rows"][0]["target_key"] = "lifecycle:case-other"
-    body = {"schema_version": MIGRATION_SCHEMA, "rows": payload["rows"]}
-    inventory.write_text(
-        json.dumps({**body, "manifest_hash": canonical_payload_hash(body)}),
-        encoding="utf-8",
-    )
-
-    result = module.build_historical_cleanup_preview(
-        repo_root=Path.cwd(),
-        runtime_root=root,
-        ledger_sqlite=ledger,
-        lifecycle_inventory=inventory,
-        quality_cutover_evidence=tmp_path / "quality.json",
-        history_reports=[tmp_path / "old-baseline.json"],
-        now_fn=lambda: NOW,
+    result = _preview(
+        monkeypatch,
+        tmp_path,
+        inventory=_inventory(tmp_path / "lifecycle.json", case_id="case-other"),
     )
 
     assert result["gates"]["lifecycle_reconciliation"]["case_coverage_matches"] is False

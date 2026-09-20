@@ -6,7 +6,16 @@ from typing import Any
 
 import pytest
 
+import src.application.tool_execution as tool_execution
+from src.application.agent_tool_registry import get_tool_definition
+from src.application.tool_execution import build_tool_manifest as build_spec
+from src.application.tool_execution import execute_tool as run_tool
+
 BASE = Path(__file__).resolve().parents[1]
+
+
+def _tool(spec: dict, name: str) -> dict:
+    return next(item for item in spec["tools"] if item["name"] == name)
 
 
 def test_diagnostics_module_keeps_current_exports() -> None:
@@ -37,7 +46,6 @@ def test_scheduled_tasks_tool_has_narrow_read_only_input() -> None:
 
 
 def test_agent_spec_uses_symbols_public_name() -> None:
-    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
     tool_names = [str(x.get("name")) for x in spec.get("tools", [])]
@@ -76,22 +84,22 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "research" not in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
-    get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
+    get_close_advice = _tool(spec, "get_close_advice")
     assert "requires" in get_close_advice
     assert "capabilities" in get_close_advice
-    runtime_status = next(item for item in spec["tools"] if item["name"] == "runtime_status")
+    runtime_status = _tool(spec, "runtime_status")
     assert runtime_status["risk_level"] == "read_only"
     assert runtime_status["requires_confirm"] is False
     assert "run_id" in runtime_status["input_schema"]
     assert "run_dir" in runtime_status["input_schema"]
-    runtime_runs = next(item for item in spec["tools"] if item["name"] == "runtime_runs")
+    runtime_runs = _tool(spec, "runtime_runs")
     assert runtime_runs["risk_level"] == "read_only"
     assert runtime_runs["requires_confirm"] is False
     assert runtime_runs["safe_default_input"] == {"limit": 10}
     assert "run_id" in runtime_runs["input_schema"]
     assert "run_dir" in runtime_runs["input_schema"]
     assert "limit" in runtime_runs["input_schema"]
-    runtime_logs = next(item for item in spec["tools"] if item["name"] == "runtime_logs")
+    runtime_logs = _tool(spec, "runtime_logs")
     assert runtime_logs["risk_level"] == "read_only"
     assert runtime_logs["requires_confirm"] is False
     assert runtime_logs["safe_default_input"] == {}  # Legacy handler retains kind=all/lines=50 defaults.
@@ -99,23 +107,21 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "lines" in runtime_logs["input_schema"]
     assert "log_file" in runtime_logs["input_schema"]
     assert "file" not in runtime_logs["input_schema"]
-    notification_perception = next(item for item in spec["tools"] if item["name"] == "notification_perception_read")
+    notification_perception = _tool(spec, "notification_perception_read")
     assert notification_perception["risk_level"] == "read_only"
     assert notification_perception["requires_confirm"] is False
     assert notification_perception["safe_default_input"] == {"limit": 10}
     assert "run_id" in notification_perception["input_schema"]
     assert "conversation_id" in notification_perception["input_schema"]
     assert "audit_path" not in notification_perception["input_schema"]
-    portfolio_query = next(item for item in spec["tools"] if item["name"] == "portfolio_query")
+    portfolio_query = _tool(spec, "portfolio_query")
     assert portfolio_query["risk_level"] == "read_only"
     assert portfolio_query["requires_confirm"] is False
     assert portfolio_query["side_effects"] == []
     assert portfolio_query["safe_default_input"] == {"view": "health"}
     assert "view" in portfolio_query["input_schema"]
     assert "url" not in portfolio_query["input_schema"]
-    assignment_scenario = next(
-        item for item in spec["tools"] if item["name"] == "portfolio_assignment_scenario"
-    )
+    assignment_scenario = _tool(spec, "portfolio_assignment_scenario")
     assert assignment_scenario["risk_level"] == "read_only"
     assert assignment_scenario["requires_confirm"] is False
     assert assignment_scenario["side_effects"] == []
@@ -125,14 +131,14 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert assignment_scenario["output_contract"]["schema_version"] == (
         "portfolio.assignment_scenario.v1"
     )
-    operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
+    operation_timeline = _tool(spec, "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
     assert operation_timeline["safe_default_input"] == {}
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
-    performance_report = next(item for item in spec["tools"] if item["name"] == "option_performance_report")
+    performance_report = _tool(spec, "option_performance_report")
     assert performance_report["risk_level"] == "read_only"
     assert performance_report["requires_confirm"] is False
     assert performance_report["safe_default_input"] == {
@@ -146,7 +152,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
         "buy_option_win_rate",
         "option_return",
     }.issubset(performance_report["output_contract"]["fact_fields"])
-    option_positions_read = next(item for item in spec["tools"] if item["name"] == "option_positions_read")
+    option_positions_read = _tool(spec, "option_positions_read")
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"
     action_schema = option_positions_read["input_schema"]["action"]
@@ -159,7 +165,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "opend_host" in option_positions_read["input_schema"]
     assert "opend_port" in option_positions_read["input_schema"]
     from src.application.agent_tool_contracts import AgentToolError
-    from src.application.agent_tool_registry import get_tool_definition
 
     definition = get_tool_definition("option_positions_read")
     assert definition is not None
@@ -168,28 +173,28 @@ def test_agent_spec_uses_symbols_public_name() -> None:
         definition.validate_input({"action": "events", "limit": 21})
     with pytest.raises(AgentToolError, match="require action=events"):
         definition.validate_input({"action": "list", "cursor": "opaque"})
-    config_validate = next(item for item in spec["tools"] if item["name"] == "config_validate")
+    config_validate = _tool(spec, "config_validate")
     assert config_validate["risk_level"] == "read_only"
-    scheduler_status = next(item for item in spec["tools"] if item["name"] == "scheduler_status")
+    scheduler_status = _tool(spec, "scheduler_status")
     assert scheduler_status["side_effects"] == []
-    symbol_resolve = next(item for item in spec["tools"] if item["name"] == "symbol_resolve")
+    symbol_resolve = _tool(spec, "symbol_resolve")
     assert symbol_resolve["risk_level"] == "read_only"
     assert symbol_resolve["requires_confirm"] is False
     assert "symbol" in symbol_resolve["input_schema"]
-    symbol_config_read = next(item for item in spec["tools"] if item["name"] == "symbol_config_read")
+    symbol_config_read = _tool(spec, "symbol_config_read")
     assert symbol_config_read["risk_level"] == "read_only"
     assert symbol_config_read["requires_confirm"] is False
     assert "symbol" in symbol_config_read["input_schema"]
     assert "field" in symbol_config_read["input_schema"]
-    version_check = next(item for item in spec["tools"] if item["name"] == "version_check")
+    version_check = _tool(spec, "version_check")
     assert version_check["safe_default_input"]["remote_name"] == "origin"
-    version_update = next(item for item in spec["tools"] if item["name"] == "version_update")
+    version_update = _tool(spec, "version_update")
     assert version_update["risk_level"] == "local_write"
     assert version_update["requires_confirm"] is True
     assert version_update["safe_default_input"] == {"bump": "patch", "apply": False}
     assert "target_version" in version_update["input_schema"]
     assert "version" not in version_update["input_schema"]
-    manage_symbols = next(item for item in spec["tools"] if item["name"] == "manage_symbols")
+    manage_symbols = _tool(spec, "manage_symbols")
     assert manage_symbols["risk_level"] == "local_write"
     assert manage_symbols["requires_confirm"] is True
     assert manage_symbols["safe_default_input"]["action"] == "list"
@@ -222,11 +227,11 @@ def test_agent_spec_uses_symbols_public_name() -> None:
         "yes",
     ):
         assert field in manage_symbols_properties
-    candidate_rank_explain = next(item for item in spec["tools"] if item["name"] == "candidate_rank_explain")
+    candidate_rank_explain = _tool(spec, "candidate_rank_explain")
     assert candidate_rank_explain["risk_level"] == "read_only"
     assert candidate_rank_explain["requires_confirm"] is False
     assert candidate_rank_explain["safe_default_input"]["mode"] == "all"
-    candidate_filter_explain = next(item for item in spec["tools"] if item["name"] == "candidate_filter_explain")
+    candidate_filter_explain = _tool(spec, "candidate_filter_explain")
     assert candidate_filter_explain["risk_level"] == "read_only"
     assert candidate_filter_explain["requires_confirm"] is False
     assert "symbol" in candidate_filter_explain["input_schema"]
@@ -250,7 +255,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
 
 
 def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
-    from src.application.tool_execution import build_tool_manifest as build_spec
     from src.application.agent_tools.base import AgentTool
     from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, get_tool_definition, tool_names
 
@@ -301,8 +305,6 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
 
 
 def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> None:
-    from src.application.agent_tool_registry import get_tool_definition
-    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
     tools = {str(item.get("name")): item for item in spec.get("tools", [])}
@@ -430,7 +432,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
 
 
 def test_agent_tool_manifest_exposes_runtime_annotations_without_answer_pipeline_metadata() -> None:
-    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
     tools = {str(item.get("name")): item for item in spec.get("tools", [])}
@@ -502,7 +503,6 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
 
 
 def test_write_request_policy_is_tool_permission_driven() -> None:
-    from src.application.agent_tool_registry import get_tool_definition
     from src.application.agent_tools.permissions import tool_write_requested
 
     version_update = get_tool_definition("version_update")
@@ -526,7 +526,6 @@ def test_write_request_policy_is_tool_permission_driven() -> None:
 
 
 def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     runs_root = tmp_path / "output_runs"
     runs_root.mkdir()
@@ -545,7 +544,6 @@ def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) 
 
 def test_write_gate_uses_tool_write_policy(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.runtime as runtime_tools
-    import src.application.tool_execution as tool_execution
 
     calls: list[dict[str, Any]] = []
 
@@ -581,7 +579,6 @@ def test_write_gate_uses_tool_write_policy(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
-    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
 
@@ -599,7 +596,6 @@ def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     out = run_tool("does_not_exist", {})
 
@@ -611,7 +607,6 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
 def test_agent_tool_system_exit_becomes_config_error(monkeypatch) -> None:
     from dataclasses import replace
 
-    import src.application.tool_execution as tool_execution
 
     definition = tool_execution.get_tool_definition("runtime_status")
     assert definition is not None
@@ -633,7 +628,6 @@ def test_agent_tool_system_exit_becomes_config_error(monkeypatch) -> None:
 
 
 def test_agent_tool_execution_rejects_nested_symbol_set_before_handler() -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     out = run_tool(
         "manage_symbols",
@@ -652,7 +646,6 @@ def test_agent_tool_execution_rejects_nested_symbol_set_before_handler() -> None
 
 
 def test_agent_tool_execution_rejects_non_dot_symbol_set_key_before_handler() -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     out = run_tool(
         "manage_symbols",
@@ -672,7 +665,6 @@ def test_agent_tool_execution_rejects_non_dot_symbol_set_key_before_handler() ->
 
 
 def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
@@ -684,7 +676,6 @@ def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
 
 @pytest.mark.parametrize("tool_name", ("analysis_catalog", "analysis_query"))
 def test_removed_analysis_tools_return_unknown_tool(monkeypatch, tool_name: str) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
@@ -695,7 +686,6 @@ def test_removed_analysis_tools_return_unknown_tool(monkeypatch, tool_name: str)
 
 
 def test_research_is_not_an_agent_tool(monkeypatch) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
@@ -771,7 +761,6 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
 
 
 def test_version_update_auto_contract_is_discoverable() -> None:
-    from src.application.agent_tool_registry import get_tool_definition
 
     tool = get_tool_definition("version_update")
     assert tool is not None

@@ -43,6 +43,8 @@ from src.application.ledger.repository import (
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.ledger.order_fee_semantics import option_contract_identity as _option_contract_identity
 
 
 _MONEY = Decimal("0.000001")
@@ -131,7 +133,6 @@ class _Unit:
     identity: str
     changes: tuple[_Change, ...]
     settlement_observation: ActualOrderFee | None = None
-
 
 
 def stock_settlement_fee_context(event: TradeEvent) -> dict[str, Any] | None:
@@ -1584,21 +1585,6 @@ def _allocate(total: Decimal, weights: Sequence[int]) -> tuple[Decimal, ...]:
     return tuple(out)
 
 
-def _option_contract_identity(event: TradeEvent) -> tuple[Any, ...]:
-    key = event.contract_key
-    return (
-        key.broker,
-        key.account,
-        key.underlying_symbol,
-        key.option_type,
-        event.position_side,
-        key.strike,
-        key.expiration_ymd,
-        event.currency,
-        event.multiplier,
-    )
-
-
 def _order_identity(
     broker: Any, account: Any, futu_account_id: Any, order_id: Any
 ) -> tuple[str, str, str, str] | None:
@@ -1678,11 +1664,6 @@ def _required_text(value: Any, *, field: str) -> str:
     if not text:
         raise ValueError(f"{field} is required")
     return text
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _optional_sha256(value: Any) -> str | None:

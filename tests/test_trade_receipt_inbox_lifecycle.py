@@ -40,11 +40,20 @@ def _advance(monkeypatch, clock, seconds=60):
     monkeypatch.setattr(inbox.time, "time", lambda: clock[0])
 
 
-def test_claim_budget_due_and_settle_use_one_authoritative_counter(tmp_path, monkeypatch):
+def _fixture(tmp_path):
+    path = tmp_path / "inbox.db"
+    return path, _new(path)
+
+
+def _timed(tmp_path, monkeypatch):
     clock = [1000.0]
     _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
+    return clock, path, key
+
+
+def test_claim_budget_due_and_settle_use_one_authoritative_counter(tmp_path, monkeypatch):
+    clock, path, key = _timed(tmp_path, monkeypatch)
     for count in range(1, 21):
         enriched = _save(path, key, _FAILED)
         assert enriched["retry_policy"] == {"attempt_count": count, "max_attempts": 20,
@@ -61,10 +70,7 @@ def test_claim_budget_due_and_settle_use_one_authoritative_counter(tmp_path, mon
 
 
 def test_last_claim_crash_has_readback_path_but_no_economic_claim(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     with inbox._connect(path) as conn:
         conn.execute("UPDATE trade_inbox SET attempt_count = 19, updated_at_ms = 0 WHERE inbox_id = ?", (key,))
     claim = inbox.claim_trade_payload(path, inbox_id=key)
@@ -95,10 +101,7 @@ def test_last_claim_crash_has_readback_path_but_no_economic_claim(tmp_path, monk
 
 @pytest.mark.parametrize("finished", [None, {"delivery_confirmed": True}, {"explicit_pre_acceptance_failure": True}])
 def test_superseded_failure_cannot_send_after_recorded_but_late_callback_retained(tmp_path, monkeypatch, finished):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     failed = _save(path, key, _FAILED)
     prior = _attempt(path, key, result_key="pending_retry")
     if finished:
@@ -120,8 +123,7 @@ def test_superseded_failure_cannot_send_after_recorded_but_late_callback_retaine
 
 
 def test_unsent_failure_superseded_and_original_success_survives_callback_exception(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     failed = _save(path, key, _FAILED)
     inbox.prepare_trade_receipt_result(path, inbox_id=key, result=_RECORDED, expected_result=failed)
     with pytest.raises(inbox.TradePayloadClaimLost):
@@ -138,10 +140,7 @@ def test_unsent_failure_superseded_and_original_success_survives_callback_except
 
 
 def test_notification_rejection_budget_is_independent_and_route_message_freeze(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     _save(path, key, _RECORDED)
     for count in range(1, 21):
         attempt = _attempt(path, key, message="original" if count == 1 else "changed")
@@ -160,10 +159,7 @@ def test_notification_rejection_budget_is_independent_and_route_message_freeze(t
 
 
 def test_no_route_does_not_consume_and_changed_route_stops(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     _save(path, key, _RECORDED)
     assert _attempt(path, key, route={})["claimed"] is False
     assert inbox.read_trade_payload(path, inbox_id=key)["receipt"]["attempt_count"] == 0
@@ -179,8 +175,7 @@ def test_no_route_does_not_consume_and_changed_route_stops(tmp_path, monkeypatch
 
 
 def test_parallel_attempt_and_result_cas(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     failed = _save(path, key, _FAILED)
     with ThreadPoolExecutor(max_workers=2) as pool:
         attempts = list(pool.map(lambda _: _attempt(path, key), range(2)))
@@ -192,8 +187,7 @@ def test_parallel_attempt_and_result_cas(tmp_path):
 
 @pytest.mark.parametrize("legacy_status", ["sent", "unknown", "failed"])
 def test_legacy_failed_business_allows_independent_success_only_with_proof(tmp_path, legacy_status):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     legacy = {"status": legacy_status, "receipt_id": f"trade-receipt:{key}", "attempt_id": "legacy"}
     with inbox._connect(path) as conn:
         conn.execute("UPDATE trade_inbox SET receipt_json = ?, result_json = ? WHERE inbox_id = ?",
@@ -207,8 +201,7 @@ def test_legacy_failed_business_allows_independent_success_only_with_proof(tmp_p
 
 @pytest.mark.parametrize("legacy", [None, {"status": "sent"}, {"status": "unknown"}])
 def test_legacy_historical_success_not_recovered_on_upgrade(tmp_path, legacy):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     with inbox._connect(path) as conn:
         conn.execute("UPDATE trade_inbox SET receipt_json = ?, result_json = ?, status = 'handled', receipt_recovery_allowed = 0 WHERE inbox_id = ?",
                      (json.dumps(legacy) if legacy else None, json.dumps(_RECORDED), key))
@@ -219,8 +212,7 @@ def test_legacy_historical_success_not_recovered_on_upgrade(tmp_path, legacy):
 
 
 def test_old_open_connection_and_downgrade_cannot_write_after_atomic_guard_migration(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     old = sqlite3.connect(path)
     old.create_function("trade_inbox_writer_version", 0, lambda: 1)
     try:
@@ -247,8 +239,7 @@ def test_old_open_connection_and_downgrade_cannot_write_after_atomic_guard_migra
 
 
 def test_unknown_schema_and_source_account_scope_fail_closed(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     _save(path, key, _RECORDED)
     assert inbox.list_trade_receipt_recovery_rows(path, account_ids=["456"]) == []
     assert inbox.list_trade_receipt_recovery_rows(path, account_ids=["123"])[0]["inbox_id"] == key
@@ -260,8 +251,7 @@ def test_unknown_schema_and_source_account_scope_fail_closed(tmp_path):
 
 
 def test_lifecycle_handoff_suppresses_ordinary_and_old_pending_failure(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     failed = _save(path, key, _FAILED)
     result = {**_RECORDED, "diagnostics": {"notification_authority": "lifecycle_outbox"}}
     inbox.prepare_trade_receipt_result(path, inbox_id=key, result=result, expected_result=failed)
@@ -274,8 +264,7 @@ def test_lifecycle_handoff_suppresses_ordinary_and_old_pending_failure(tmp_path)
 
 
 def test_recorded_verification_requires_explicit_unknown_economics_and_keeps_send_evidence(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     recorded = _save(path, key, _RECORDED)
     attempt = _attempt(path, key)
     with pytest.raises(inbox.TradePayloadClaimLost):
@@ -290,8 +279,7 @@ def test_recorded_verification_requires_explicit_unknown_economics_and_keeps_sen
 
 
 def test_resume_resets_economic_budget_without_reopening_unknown_delivery(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     with inbox._connect(path) as conn:
         conn.execute("UPDATE trade_inbox SET attempt_count = 19, updated_at_ms = 0 WHERE inbox_id = ?", (key,))
     exhausted = _save(path, key, _FAILED)
@@ -307,8 +295,7 @@ def test_resume_resets_economic_budget_without_reopening_unknown_delivery(tmp_pa
 
 @pytest.mark.parametrize("status", ["confirmed", "unknown"])
 def test_prior_compensation_evidence_suppresses_new_recorded_automatic_send(tmp_path, status):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     _save(path, key, {**_RECORDED, "_receipt_legacy_evidence": {
         "blocked": True, "status": status, "records": ["compensation-1"], "result_key": "recorded"}})
     current = _attempt(path, key)
@@ -319,10 +306,7 @@ def test_prior_compensation_evidence_suppresses_new_recorded_automatic_send(tmp_
 
 
 def test_enrichment_timestamp_does_not_postpone_already_due_crash_recovery(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     claim = inbox.claim_trade_payload(path, inbox_id=key)
     _advance(monkeypatch, clock, 121)
     # Enqueue's metadata update must not change the deadline established by the economic claim.
@@ -335,10 +319,7 @@ def test_enrichment_timestamp_does_not_postpone_already_due_crash_recovery(tmp_p
 
 
 def test_late_callback_for_archived_attempt_does_not_change_current_attempt(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     _save(path, key, _RECORDED)
     first = _attempt(path, key)
     inbox.finish_trade_receipt_attempt(path, inbox_id=key, attempt_id=first["attempt_id"],
@@ -354,8 +335,7 @@ def test_late_callback_for_archived_attempt_does_not_change_current_attempt(tmp_
 
 
 def test_explicit_empty_result_observation_is_compared_not_treated_as_omitted(tmp_path):
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    path, key = _fixture(tmp_path)
     observed = inbox.read_trade_payload(path, inbox_id=key)
     assert observed["result"] is None
     _save(path, key, _RECORDED)
@@ -367,10 +347,7 @@ def test_explicit_empty_result_observation_is_compared_not_treated_as_omitted(tm
 
 
 def test_readback_of_due_retry_cannot_postpone_economic_claim(tmp_path, monkeypatch):
-    clock = [1000.0]
-    _advance(monkeypatch, clock, 0)
-    path = tmp_path / "inbox.db"
-    key = _new(path)
+    clock, path, key = _timed(tmp_path, monkeypatch)
     failed = _save(path, key, _FAILED)
     deadline = inbox.read_trade_payload(path, inbox_id=key)["next_attempt_at_ms"]
     _advance(monkeypatch, clock, 61)

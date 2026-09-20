@@ -11,54 +11,26 @@ from src.application.assistant.position_query import parse_position_query_text, 
 from src.application.ledger.read_model import list_position_rows
 
 
+def _lot(record_id: str, **fields) -> dict:
+    """Position-lot fixture with the field order the ledger read model emits."""
+    return {
+        "record_id": record_id,
+        "fields": {"broker": "富途", **fields},
+    }
+
+
 class _Repo:
     def list_position_lots(self) -> list[dict]:
         return [
-            {
-                "record_id": "lot-0700-call-may",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "call",
-                    "side": "short",
-                    "status": "open",
-                    "strike": 510,
-                    "expiration_ymd": "2026-05-28",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                },
-            },
-            {
-                "record_id": "lot-0700-put-jun",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "status": "open",
-                    "strike": 450,
-                    "expiration_ymd": "2026-06-29",
-                    "contracts": 3,
-                    "contracts_open": 3,
-                },
-            },
-            {
-                "record_id": "lot-tigr-put-may-closed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "TIGR",
-                    "option_type": "put",
-                    "side": "short",
-                    "status": "close",
-                    "strike": 6,
-                    "expiration_ymd": "2026-05-22",
-                    "contracts": 10,
-                    "contracts_open": 0,
-                },
-            },
+            _lot("lot-0700-call-may", account="sy", symbol="0700.HK", option_type="call",
+                 side="short", status="open", strike=510, expiration_ymd="2026-05-28",
+                 contracts=2, contracts_open=2),
+            _lot("lot-0700-put-jun", account="sy", symbol="0700.HK", option_type="put",
+                 side="short", status="open", strike=450, expiration_ymd="2026-06-29",
+                 contracts=3, contracts_open=3),
+            _lot("lot-tigr-put-may-closed", account="lx", symbol="TIGR", option_type="put",
+                 side="short", status="close", strike=6, expiration_ymd="2026-05-22",
+                 contracts=10, contracts_open=0),
         ]
 
 
@@ -233,50 +205,15 @@ def test_position_query_read_model_sorts_by_expiration_before_limit() -> None:
     class _UnsortedRepo:
         def list_position_lots(self) -> list[dict]:
             return [
-                {
-                    "record_id": "lot-jul",
-                    "fields": {
-                        "broker": "富途",
-                        "account": "sy",
-                        "symbol": "PDD",
-                        "option_type": "put",
-                        "side": "short",
-                        "status": "open",
-                        "strike": 80,
-                        "expiration_ymd": "2026-07-17",
-                        "contracts": 1,
-                        "contracts_open": 1,
-                    },
-                },
-                {
-                    "record_id": "lot-jun",
-                    "fields": {
-                        "broker": "富途",
-                        "account": "lx",
-                        "symbol": "FUTU",
-                        "option_type": "put",
-                        "side": "short",
-                        "status": "open",
-                        "strike": 110,
-                        "expiration_ymd": "2026-06-12",
-                        "contracts": 1,
-                        "contracts_open": 1,
-                    },
-                },
-                {
-                    "record_id": "lot-no-exp",
-                    "fields": {
-                        "broker": "富途",
-                        "account": "lx",
-                        "symbol": "MSFT",
-                        "option_type": "call",
-                        "side": "long",
-                        "status": "open",
-                        "strike": 500,
-                        "contracts": 1,
-                        "contracts_open": 1,
-                    },
-                },
+                _lot("lot-jul", account="sy", symbol="PDD", option_type="put",
+                     side="short", status="open", strike=80, expiration_ymd="2026-07-17",
+                     contracts=1, contracts_open=1),
+                _lot("lot-jun", account="lx", symbol="FUTU", option_type="put",
+                     side="short", status="open", strike=110, expiration_ymd="2026-06-12",
+                     contracts=1, contracts_open=1),
+                _lot("lot-no-exp", account="lx", symbol="MSFT", option_type="call",
+                     side="long", status="open", strike=500,
+                     contracts=1, contracts_open=1),
             ]
 
     rows = list_position_rows(

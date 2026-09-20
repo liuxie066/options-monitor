@@ -119,6 +119,27 @@ def _route(**_kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _call(
+    tmp_path: Path,
+    sources: list[dict[str, Any]],
+    repo: _Repo,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Call compensation on the fixture rows, overriding only what a case changes."""
+    kwargs: dict[str, Any] = {
+        "base": tmp_path,
+        "config": {},
+        "sources": sources,
+        "repo": repo,
+        "account": ACCOUNT,
+        "deal_ids": list(DEAL_IDS),
+        "apply_changes": False,
+        "route_resolver": _route,
+    }
+    kwargs.update(overrides)
+    return compensate_trade_intake_receipts(**kwargs)
+
+
 def _run(
     tmp_path: Path,
     *,
@@ -126,32 +147,22 @@ def _run(
     send_fn: Any = None,
 ) -> dict[str, Any]:
     sources, repo = _fixture(tmp_path)
-    kwargs = {
-        "base": tmp_path,
-        "config": {},
-        "sources": sources,
-        "repo": repo,
-        "account": ACCOUNT,
-        "deal_ids": list(DEAL_IDS),
-        "reason": LEGACY_FALSE_OUTBOX_REASON,
+    overrides = {
         "send_fn": send_fn,
+        "reason": LEGACY_FALSE_OUTBOX_REASON,
         "normalize_fn": (lambda send_result: send_result),
-        "route_resolver": _route,
         "now_fn": (lambda: "2026-08-04T10:00:00+00:00"),
     }
-    if apply_changes:
-        preview = compensate_trade_intake_receipts(
-            **kwargs,
-            apply_changes=False,
-        )
-        return compensate_trade_intake_receipts(
-            **kwargs,
-            apply_changes=True,
-            expected_payload_hash=preview["payload_hash"],
-        )
-    return compensate_trade_intake_receipts(
-        **kwargs,
-        apply_changes=False,
+    if not apply_changes:
+        return _call(tmp_path, sources, repo, **overrides)
+    preview = _call(tmp_path, sources, repo, **overrides)
+    return _call(
+        tmp_path,
+        sources,
+        repo,
+        **overrides,
+        apply_changes=True,
+        expected_payload_hash=preview["payload_hash"],
     )
 
 
@@ -193,17 +204,7 @@ def test_receipt_compensation_formats_float_transport_noise_as_broker_price(
     repo.events = [repo.events[0]]
     repo.events[0]["price"] = 1.5699999999999998
 
-    out = compensate_trade_intake_receipts(
-        base=tmp_path,
-        config={},
-        sources=sources,
-        repo=repo,
-        account=ACCOUNT,
-        deal_ids=[DEAL_IDS[0]],
-        apply_changes=False,
-        reason=LEGACY_FALSE_OUTBOX_REASON,
-        route_resolver=_route,
-    )
+    out = _call(tmp_path, sources, repo, deal_ids=[DEAL_IDS[0]], reason=LEGACY_FALSE_OUTBOX_REASON)
 
     assert "成交｜1.57 HKD" in out["message"]
     assert "权利金毛流入 HKD 157.00" in out["message"]
@@ -307,16 +308,7 @@ def test_receipt_compensation_rejects_real_outbox_evidence(
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     with pytest.raises(ValueError, match="durable outbox evidence"):
-        compensate_trade_intake_receipts(
-            base=tmp_path,
-            config={},
-            sources=sources,
-            repo=repo,
-            account=ACCOUNT,
-            deal_ids=list(DEAL_IDS),
-            apply_changes=False,
-            route_resolver=_route,
-        )
+        _call(tmp_path, sources, repo)
 
 
 def test_receipt_compensation_accepts_explicit_unsent_no_route_marker(
@@ -336,17 +328,7 @@ def test_receipt_compensation_accepts_explicit_unsent_no_route_marker(
         }
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
-    out = compensate_trade_intake_receipts(
-        base=tmp_path,
-        config={},
-        sources=sources,
-        repo=repo,
-        account=ACCOUNT,
-        deal_ids=list(DEAL_IDS),
-        apply_changes=False,
-        reason=SKIPPED_NO_ROUTE_REASON,
-        route_resolver=_route,
-    )
+    out = _call(tmp_path, sources, repo, reason=SKIPPED_NO_ROUTE_REASON)
 
     assert out["status"] == "ready"
     assert out["reason"] == SKIPPED_NO_ROUTE_REASON
@@ -358,17 +340,7 @@ def test_receipt_compensation_rejects_no_route_reason_without_exact_marker(
     sources, repo = _fixture(tmp_path)
 
     with pytest.raises(ValueError, match="unsent no-route marker"):
-        compensate_trade_intake_receipts(
-            base=tmp_path,
-            config={},
-            sources=sources,
-            repo=repo,
-            account=ACCOUNT,
-            deal_ids=list(DEAL_IDS),
-            apply_changes=False,
-            reason=SKIPPED_NO_ROUTE_REASON,
-            route_resolver=_route,
-        )
+        _call(tmp_path, sources, repo, reason=SKIPPED_NO_ROUTE_REASON)
 
 
 def test_receipt_compensation_requires_canonical_account_scoped_ids(
@@ -377,16 +349,7 @@ def test_receipt_compensation_requires_canonical_account_scoped_ids(
     sources, repo = _fixture(tmp_path)
 
     with pytest.raises(ValueError, match="canonical IDs"):
-        compensate_trade_intake_receipts(
-            base=tmp_path,
-            config={},
-            sources=sources,
-            repo=repo,
-            account=ACCOUNT,
-            deal_ids=["2000000000000000001"],
-            apply_changes=False,
-            route_resolver=_route,
-        )
+        _call(tmp_path, sources, repo, deal_ids=["2000000000000000001"])
 
 
 def test_receipt_compensation_apply_requires_matching_dry_run_hash(
@@ -395,29 +358,10 @@ def test_receipt_compensation_apply_requires_matching_dry_run_hash(
     sources, repo = _fixture(tmp_path)
 
     with pytest.raises(ValueError, match="payload_hash from dry-run"):
-        compensate_trade_intake_receipts(
-            base=tmp_path,
-            config={},
-            sources=sources,
-            repo=repo,
-            account=ACCOUNT,
-            deal_ids=list(DEAL_IDS),
-            apply_changes=True,
-            route_resolver=_route,
-        )
+        _call(tmp_path, sources, repo, apply_changes=True)
 
     with pytest.raises(ValueError, match="payload changed after dry-run"):
-        compensate_trade_intake_receipts(
-            base=tmp_path,
-            config={},
-            sources=sources,
-            repo=repo,
-            account=ACCOUNT,
-            deal_ids=list(DEAL_IDS),
-            apply_changes=True,
-            expected_payload_hash="0" * 64,
-            route_resolver=_route,
-        )
+        _call(tmp_path, sources, repo, apply_changes=True, expected_payload_hash="0" * 64)
 
 
 def _core_compensation_input(tmp_path, monkeypatch, *, namespace="futu.deal", outcome="no_route"):

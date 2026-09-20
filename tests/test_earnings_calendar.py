@@ -36,6 +36,21 @@ def _us_timestamp(day: int, hour: int) -> float:
     ).timestamp()
 
 
+def _event(
+    security: str,
+    earnings_date: str,
+    *,
+    timestamp: float | None = None,
+    pub_type: str | None = None,
+) -> dict:
+    event = {"security": security, "earnings_date": earnings_date}
+    if timestamp is not None:
+        event["earnings_timestamp"] = timestamp
+    if pub_type is not None:
+        event["pub_type"] = pub_type
+    return event
+
+
 class _Gateway:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -86,15 +101,30 @@ def test_candidate_annotation_preserves_optional_earnings_none(
     assert canonical_sha256(rows[0])
 
 
-def _fetch(gateway: _Gateway, *, expiry: str = "2026-08-21"):
+_SCAN_AT_UTC = datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc)
+
+
+def _fetch_calendar(
+    gateway: _Gateway,
+    *,
+    expirations_by_underlier: dict[str, list[str]],
+    market: str = "US",
+    scan_date: date = date(2026, 8, 6),
+    scan_at_utc: datetime = _SCAN_AT_UTC,
+    now_fn=lambda: datetime(2026, 8, 6, 16, 1, tzinfo=timezone.utc),
+) -> dict:
     return fetch_market_earnings_calendar(
         gateway=gateway,
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
-        expirations_by_underlier={"US.NVDA": [expiry]},
-        now_fn=lambda: datetime(2026, 8, 6, 16, 1, tzinfo=timezone.utc),
+        market=market,
+        scan_date=scan_date,
+        scan_at_utc=scan_at_utc,
+        expirations_by_underlier=expirations_by_underlier,
+        now_fn=now_fn,
     )
+
+
+def _fetch(gateway: _Gateway, *, expiry: str = "2026-08-21"):
+    return _fetch_calendar(gateway, expirations_by_underlier={"US.NVDA": [expiry]})
 
 
 def _rehash(snapshot: dict) -> None:
@@ -139,15 +169,9 @@ def test_complete_empty_results_make_absence_authoritative() -> None:
 
 def test_interval_failure_only_blocks_expiries_that_need_it() -> None:
     gateway = _Gateway([[], RuntimeError("interval unavailable"), []])
-    snapshot = fetch_market_earnings_calendar(
-        gateway=gateway,
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
-        expirations_by_underlier={
-            "US.NVDA": ["2026-08-12", "2026-08-21"],
-        },
-        now_fn=lambda: datetime(2026, 8, 6, 16, 1, tzinfo=timezone.utc),
+    snapshot = _fetch_calendar(
+        gateway,
+        expirations_by_underlier={"US.NVDA": ["2026-08-12", "2026-08-21"]},
     )
 
     short = snapshot["evidence_by_underlier"]["US.NVDA"]["2026-08-12"]
@@ -159,11 +183,7 @@ def test_interval_failure_only_blocks_expiries_that_need_it() -> None:
 
 
 def test_distant_event_does_not_hide_unresolved_hard_window_coverage() -> None:
-    event = {
-        "security": "US.NVDA",
-        "earnings_date": "2026-08-09",
-        "earnings_timestamp": _us_timestamp(9, 16),
-    }
+    event = _event("US.NVDA", "2026-08-09", timestamp=_us_timestamp(9, 16))
     snapshot = _fetch(_Gateway([[event], RuntimeError("later failure"), []]))
     evidence = snapshot["evidence_by_underlier"]["US.NVDA"]["2026-08-21"]
 
@@ -175,11 +195,7 @@ def test_distant_event_does_not_hide_unresolved_hard_window_coverage() -> None:
 
 
 def test_known_blocking_event_resolves_outcome_despite_other_hard_window_gap() -> None:
-    event = {
-        "security": "US.NVDA",
-        "earnings_date": "2026-08-21",
-        "earnings_timestamp": _us_timestamp(21, 16),
-    }
+    event = _event("US.NVDA", "2026-08-21", timestamp=_us_timestamp(21, 16))
     snapshot = _fetch(
         _Gateway([[], RuntimeError("hard-window gap"), [event]])
     )
@@ -192,12 +208,7 @@ def test_known_blocking_event_resolves_outcome_despite_other_hard_window_gap() -
 
 
 def test_expiry_date_earnings_is_inside_holding_period() -> None:
-    event = {
-        "security": "US.NVDA",
-        "earnings_date": "2026-08-21",
-        "earnings_timestamp": _us_timestamp(21, 16),
-        "pub_type": "AFTER",
-    }
+    event = _event("US.NVDA", "2026-08-21", timestamp=_us_timestamp(21, 16), pub_type="AFTER")
     snapshot = _fetch(_Gateway([[], [], [event]]))
     evidence = snapshot["evidence_by_underlier"]["US.NVDA"]["2026-08-21"]
 
@@ -208,28 +219,11 @@ def test_expiry_date_earnings_is_inside_holding_period() -> None:
 
 
 def test_scan_day_is_pending_for_the_full_market_day_regardless_of_timestamp() -> None:
-    released = {
-        "security": "US.NVDA",
-        "earnings_date": "2026-08-06",
-        "earnings_timestamp": _us_timestamp(6, 8),
-        "pub_type": "BEFORE",
-    }
-    upcoming = {
-        "security": "US.AAPL",
-        "earnings_date": "2026-08-06",
-        "earnings_timestamp": _us_timestamp(6, 16),
-        "pub_type": "AFTER",
-    }
-    snapshot = fetch_market_earnings_calendar(
-        gateway=_Gateway([[released, upcoming]]),
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
-        expirations_by_underlier={
-            "US.NVDA": ["2026-08-12"],
-            "US.AAPL": ["2026-08-12"],
-        },
-        now_fn=lambda: datetime(2026, 8, 6, 16, 1, tzinfo=timezone.utc),
+    released = _event("US.NVDA", "2026-08-06", timestamp=_us_timestamp(6, 8), pub_type="BEFORE")
+    upcoming = _event("US.AAPL", "2026-08-06", timestamp=_us_timestamp(6, 16), pub_type="AFTER")
+    snapshot = _fetch_calendar(
+        _Gateway([[released, upcoming]]),
+        expirations_by_underlier={"US.NVDA": ["2026-08-12"], "US.AAPL": ["2026-08-12"]},
     )
 
     nvda = snapshot["evidence_by_underlier"]["US.NVDA"]["2026-08-12"]
@@ -241,18 +235,9 @@ def test_scan_day_is_pending_for_the_full_market_day_regardless_of_timestamp() -
 
 
 def test_scan_day_date_only_is_pending_and_does_not_require_timestamp() -> None:
-    snapshot = fetch_market_earnings_calendar(
-        gateway=_Gateway(
-            [[{"security": "US.NVDA", "earnings_date": "2026-08-06"}]]
-        ),
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
-        expirations_by_underlier={
-            "US.NVDA": ["2026-08-12"],
-            "US.AAPL": ["2026-08-12"],
-        },
-        now_fn=lambda: datetime(2026, 8, 6, 16, 1, tzinfo=timezone.utc),
+    snapshot = _fetch_calendar(
+        _Gateway([[_event("US.NVDA", "2026-08-06")]]),
+        expirations_by_underlier={"US.NVDA": ["2026-08-12"], "US.AAPL": ["2026-08-12"]},
     )
 
     nvda = snapshot["evidence_by_underlier"]["US.NVDA"]["2026-08-12"]
@@ -264,18 +249,15 @@ def test_scan_day_date_only_is_pending_and_does_not_require_timestamp() -> None:
 
 def test_hk_underliers_share_inclusive_day_six_and_nonblocking_day_seven_policy() -> None:
     events = [
-        {"security": "HK.00700", "earnings_date": "2026-08-08"},
-        {"security": "HK.09992", "earnings_date": "2026-08-07"},
+        _event("HK.00700", "2026-08-08"),
+        _event("HK.09992", "2026-08-07"),
     ]
-    snapshot = fetch_market_earnings_calendar(
-        gateway=_Gateway([events, []]),
+    snapshot = _fetch_calendar(
+        _Gateway([events, []]),
         market="HK",
-        scan_date=date(2026, 8, 6),
         scan_at_utc=datetime(2026, 8, 6, 6, 0, tzinfo=timezone.utc),
-        expirations_by_underlier={
-            "HK.00700": ["2026-08-14"],
-            "HK.09992": ["2026-08-14"],
-        },
+        expirations_by_underlier={"HK.00700": ["2026-08-14"], "HK.09992": ["2026-08-14"]},
+        now_fn=None,
     )
 
     tencent = snapshot["evidence_by_underlier"]["HK.00700"]["2026-08-14"]
@@ -332,12 +314,10 @@ def test_provider_dataframe_is_normalized_and_out_of_interval_fails_closed() -> 
             }
         ]
     )
-    snapshot = fetch_market_earnings_calendar(
-        gateway=_Gateway([valid]),
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+    snapshot = _fetch_calendar(
+        _Gateway([valid]),
         expirations_by_underlier={"US.NVDA": ["2026-08-12"]},
+        now_fn=None,
     )
     assert snapshot["events"][0].keys() == {
         "security",
@@ -346,14 +326,10 @@ def test_provider_dataframe_is_normalized_and_out_of_interval_fails_closed() -> 
         "pub_type",
     }
 
-    unavailable = fetch_market_earnings_calendar(
-        gateway=_Gateway(
-            [[{"security": "US.NVDA", "earnings_date": "2026-08-13"}]]
-        ),
-        market="US",
-        scan_date=date(2026, 8, 6),
-        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+    unavailable = _fetch_calendar(
+        _Gateway([[_event("US.NVDA", "2026-08-13")]]),
         expirations_by_underlier={"US.NVDA": ["2026-08-12"]},
+        now_fn=None,
     )
     assert unavailable["status"] == "data_unavailable"
 

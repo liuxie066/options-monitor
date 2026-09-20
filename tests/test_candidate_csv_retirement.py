@@ -13,18 +13,15 @@ LEGACY_METADATA_CLASSIFIERS = {
     ROOT / "src" / "application" / "research" / "archive.py",
 }
 RETIRED_CANDIDATE_CSV_FRAGMENTS = (
-    "_candidates.csv",
-    "_candidates_labeled.csv",
-    "_candidates_reject_log.csv",
-    "_reject_log.csv",
-    "_pair_diagnostics.csv",
-    "_rank_shadow.csv",
-    "_put_universe.csv",
-    "_put_universe_labeled.csv",
-    "_put_universe_cash_filtered.csv",
-    "_put_universe_underwritten.csv",
-    "sell_put_linked_calls.csv",
+    "_candidates.csv", "_candidates_labeled.csv", "_candidates_reject_log.csv", "_reject_log.csv",
+    "_pair_diagnostics.csv", "_rank_shadow.csv", "_put_universe.csv", "_put_universe_labeled.csv",
+    "_put_universe_cash_filtered.csv", "_put_universe_underwritten.csv", "sell_put_linked_calls.csv",
 )
+
+
+def _output_adapter_params(*extra: str) -> set[str]:
+    """Retired CSV output-adapter parameters that must stay out of a producer signature."""
+    return {"output", "output_path", *extra}
 
 
 def _production_python_files() -> list[Path]:
@@ -68,21 +65,9 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
     from src.application.sell_put_steps import run_sell_put_scan_and_summarize
 
     forbidden_by_callable = {
-        run_sell_put_scan: {
-            "output",
-            "output_path",
-            "reject_log",
-            "reject_log_output",
-            "reject_log_path",
-        },
-        run_sell_call_scan: {
-            "output",
-            "output_path",
-            "reject_log",
-            "reject_log_output",
-            "reject_log_path",
-            "shares_available_for_cover",
-        },
+        run_sell_put_scan: _output_adapter_params("reject_log", "reject_log_output", "reject_log_path"),
+        run_sell_call_scan: _output_adapter_params("reject_log", "reject_log_output", "reject_log_path",
+                                                   "shares_available_for_cover"),
         run_sell_put_scan_and_summarize: {
             "base",
             "report_dir",
@@ -114,20 +99,8 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
         ),
         (
             "src.application.scan_sell_call",
-            [
-                "--symbols",
-                "NVDA",
-                "--avg-cost",
-                "100",
-                "--shares",
-                "100",
-                "--shares-can-sell",
-                "100",
-                "--shares-locked",
-                "0",
-                "--min-annualized-net-return",
-                "0.1",
-            ],
+            ["--symbols", "NVDA", "--avg-cost", "100", "--shares", "100", "--shares-can-sell", "100",
+             "--shares-locked", "0", "--min-annualized-net-return", "0.1"],
         ),
     ),
 )

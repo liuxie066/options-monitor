@@ -10,6 +10,10 @@ from src.interfaces.cli.main import parse_args
 from src.interfaces.cli import option_performance
 
 
+def _args(*argv: str):
+    return parse_args(list(argv))
+
+
 def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 
@@ -18,18 +22,9 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
         return {"period": {}, "scope": {}, "quality": {}}, [], {}
 
     monkeypatch.setattr(option_performance, "option_performance_report_tool", _report)
-    args = parse_args(
-        [
-            "option-performance",
-            "report",
-            "--period",
-            "ytd",
-            "--as-of-date",
-            "2026-09-02",
-            "--account",
-            "LX",
-            "--include-rows",
-        ]
+    args = _args(
+        "option-performance", "report", "--period", "ytd", "--as-of-date",
+        "2026-09-02", "--account", "LX", "--include-rows",
     )
 
     result = option_performance.handle_option_performance_command(args)
@@ -57,7 +52,7 @@ def test_report_cli_normalizes_config_failure_to_read_error(
         "load_runtime_config",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("private path")),
     )
-    args = parse_args(["option-performance", "report", "--period", "mtd"])
+    args = _args("option-performance", "report", "--period", "mtd")
 
     with pytest.raises(AgentToolError) as caught:
         option_performance.handle_option_performance_command(args)
@@ -78,7 +73,7 @@ def test_report_cli_normalizes_config_failure_to_read_error(
 )
 def test_report_cli_rejects_removed_period_and_quote_flags(flags: list[str]) -> None:
     with pytest.raises(SystemExit):
-        parse_args(["option-performance", "report", *flags])
+        _args("option-performance", "report", *flags)
 
 
 @pytest.mark.parametrize(
@@ -101,7 +96,7 @@ def test_report_cli_propagates_natural_periods(
     )
 
     option_performance.handle_option_performance_command(
-        parse_args(["option-performance", "report", *flags])
+        _args("option-performance", "report", *flags)
     )
 
     assert {key: captured[key] for key in expected} == expected
@@ -109,32 +104,12 @@ def test_report_cli_propagates_natural_periods(
 
 def test_evidence_flags_are_mutually_exclusive() -> None:
     with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "option-performance",
-                "evidence",
-                "import",
-                "--file",
-                "facts.json",
-                "--dry-run",
-                "--apply",
-            ]
-        )
+        _args("option-performance", "evidence", "import", "--file", "facts.json", "--dry-run", "--apply")
 
 
 def test_evidence_import_does_not_advertise_unapplied_scope_filters() -> None:
     with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "option-performance",
-                "evidence",
-                "import",
-                "--file",
-                "facts.json",
-                "--account",
-                "lx",
-            ]
-        )
+        _args("option-performance", "evidence", "import", "--file", "facts.json", "--account", "lx")
 
 
 class _ImportResult:
@@ -154,7 +129,8 @@ class _EvidenceRepo:
         return _ImportResult(apply)
 
 
-def _patch_import_dependencies(monkeypatch: pytest.MonkeyPatch, repo: _EvidenceRepo, tmp_path: Path) -> None:
+def _patch_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Shared config/ledger-path stubs for the evidence-import and cash-conversion commands."""
     monkeypatch.setattr(
         option_performance,
         "load_runtime_config",
@@ -170,6 +146,10 @@ def _patch_import_dependencies(monkeypatch: pytest.MonkeyPatch, repo: _EvidenceR
         "open_position_ledger_from_data_config",
         lambda **_kwargs: (tmp_path / "portfolio.runtime.json", object()),
     )
+
+
+def _patch_import_dependencies(monkeypatch: pytest.MonkeyPatch, repo: _EvidenceRepo, tmp_path: Path) -> None:
+    _patch_config_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(option_performance, "open_performance_evidence_repository", lambda _ledger: repo)
     monkeypatch.setattr(option_performance, "repo_base", lambda: tmp_path)
     monkeypatch.setattr(option_performance, "mask_path", lambda value: str(value))
@@ -184,11 +164,9 @@ def test_evidence_import_defaults_to_dry_run_and_apply_is_explicit(
     repo = _EvidenceRepo()
     _patch_import_dependencies(monkeypatch, repo, tmp_path)
 
-    dry_args = parse_args(["option-performance", "evidence", "import", "--file", str(facts)])
+    dry_args = _args("option-performance", "evidence", "import", "--file", str(facts))
     dry = option_performance.handle_option_performance_command(dry_args)
-    apply_args = parse_args(
-        ["option-performance", "evidence", "import", "--file", str(facts), "--apply"]
-    )
+    apply_args = _args("option-performance", "evidence", "import", "--file", str(facts), "--apply")
     applied = option_performance.handle_option_performance_command(apply_args)
 
     assert dry["dry_run"] is True
@@ -205,9 +183,7 @@ def test_evidence_capture_defaults_to_dry_run(monkeypatch: pytest.MonkeyPatch) -
         return {"schema_version": "option_performance_evidence_capture.output.v1", "dry_run": not apply}, [], {}
 
     monkeypatch.setattr(option_performance, "capture_option_performance_evidence", _capture)
-    args = parse_args(
-        ["option-performance", "evidence", "capture", "--config-key", "us", "--account", "lx"]
-    )
+    args = _args("option-performance", "evidence", "capture", "--config-key", "us", "--account", "lx")
 
     data = option_performance.handle_option_performance_command(args)
 
@@ -229,18 +205,9 @@ def test_cash_conversion_backfill_defaults_to_dry_run_and_preserves_scope(
         }
 
     monkeypatch.setattr(option_performance, "_backfill_cash_conversion", _backfill)
-    args = parse_args(
-        [
-            "option-performance",
-            "cash-conversion",
-            "backfill",
-            "--account",
-            "lx",
-            "--start-date",
-            "2026-04-01",
-            "--end-date",
-            "2026-07-24",
-        ]
+    args = _args(
+        "option-performance", "cash-conversion", "backfill", "--account", "lx",
+        "--start-date", "2026-04-01", "--end-date", "2026-07-24",
     )
 
     result = option_performance.handle_option_performance_command(args)
@@ -254,15 +221,7 @@ def test_cash_conversion_backfill_defaults_to_dry_run_and_preserves_scope(
 
 def test_cash_conversion_backfill_apply_and_dry_run_are_mutually_exclusive() -> None:
     with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "option-performance",
-                "cash-conversion",
-                "backfill",
-                "--dry-run",
-                "--apply",
-            ]
-        )
+        _args("option-performance", "cash-conversion", "backfill", "--dry-run", "--apply")
 
 
 def test_cash_conversion_correction_defaults_to_dry_run_and_preserves_scope(
@@ -278,18 +237,9 @@ def test_cash_conversion_correction_defaults_to_dry_run_and_preserves_scope(
         }
 
     monkeypatch.setattr(option_performance, "_correct_cash_conversion", _correct)
-    args = parse_args(
-        [
-            "option-performance",
-            "cash-conversion",
-            "correct",
-            "--account",
-            "lx",
-            "--start-date",
-            "2026-01-01",
-            "--end-date",
-            "2026-08-26",
-        ]
+    args = _args(
+        "option-performance", "cash-conversion", "correct", "--account", "lx",
+        "--start-date", "2026-01-01", "--end-date", "2026-08-26",
     )
 
     result = option_performance.handle_option_performance_command(args)
@@ -311,9 +261,7 @@ def test_cash_conversion_correction_requires_explicit_apply_and_confirmation(
     flags: list[str],
     message: str,
 ) -> None:
-    args = parse_args(
-        ["option-performance", "cash-conversion", "correct", *flags]
-    )
+    args = _args("option-performance", "cash-conversion", "correct", *flags)
     with pytest.raises(SystemExit, match=message):
         option_performance.handle_option_performance_command(args)
 
@@ -335,25 +283,11 @@ def test_cash_conversion_correction_confirmed_apply_uses_guard_and_returns_audit
                 "changes": [],
             }
 
-    monkeypatch.setattr(
-        option_performance,
-        "load_runtime_config",
-        lambda **_kwargs: (tmp_path / "config.us.json", {"portfolio": {}}),
-    )
-    monkeypatch.setattr(
-        option_performance,
-        "resolve_public_data_config_path",
-        lambda _payload, _portfolio: tmp_path / "portfolio.runtime.json",
-    )
+    _patch_config_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(
         option_performance,
         "guard_ledger_write",
         lambda **kwargs: calls.setdefault("guard", kwargs) or {"ok": True},
-    )
-    monkeypatch.setattr(
-        option_performance,
-        "open_position_ledger_from_data_config",
-        lambda **_kwargs: (tmp_path / "portfolio.runtime.json", object()),
     )
     monkeypatch.setattr(
         option_performance,
@@ -366,16 +300,8 @@ def test_cash_conversion_correction_confirmed_apply_uses_guard_and_returns_audit
         return _Result()
 
     monkeypatch.setattr(option_performance, "correct_superseded_cash_conversions", _correct)
-    args = parse_args(
-        [
-            "option-performance",
-            "cash-conversion",
-            "correct",
-            "--account",
-            "lx",
-            "--apply",
-            "--confirm",
-        ]
+    args = _args(
+        "option-performance", "cash-conversion", "correct", "--account", "lx", "--apply", "--confirm"
     )
 
     result = option_performance.handle_option_performance_command(args)

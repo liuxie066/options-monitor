@@ -31,6 +31,11 @@ def _brief(*, run_id: str) -> dict:
     }
 
 
+def _args(**overrides: object) -> Namespace:
+    base = {"daily_brief_command": "latest", "account": "lx", "market": "US", "json": False}
+    return Namespace(**{**base, **overrides})
+
+
 def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     from src.interfaces.cli.main import parse_args
 
@@ -43,21 +48,8 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     assert aggregate.market is None
     assert latest.json is False
 
-    revision = parse_args(
-        [
-            "daily-brief",
-            "day",
-            "--account",
-            "lx",
-            "--market",
-            "US",
-            "--date",
-            "2026-07-19",
-            "--revision",
-            "2",
-            "--json",
-        ]
-    )
+    revision = parse_args(["daily-brief", "day", "--account", "lx", "--market", "US", "--date", "2026-07-19",
+                           "--revision", "2", "--json"])
     assert revision.daily_brief_command == "day"
     assert revision.market_trading_date == "2026-07-19"
     assert revision.revision == 2
@@ -76,12 +68,7 @@ def test_daily_brief_cli_outputs_markdown_and_json(monkeypatch, capsys, tmp_path
     }
     monkeypatch.setattr(daily_brief_ops, "read_daily_brief_view", lambda **_kwargs: data)
 
-    markdown_args = Namespace(
-        daily_brief_command="latest",
-        account="lx",
-        market="US",
-        json=False,
-    )
+    markdown_args = _args()
     assert daily_brief_ops.handle_daily_brief_command(markdown_args, repo_base_fn=lambda: tmp_path) == 0
     assert capsys.readouterr().out == "# 每日决策简报\n- ok\n"
 
@@ -94,14 +81,7 @@ def test_daily_brief_cli_rejects_negative_revision(tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import AgentToolError
     from src.interfaces.cli import daily_brief_ops
 
-    args = Namespace(
-        daily_brief_command="day",
-        account="lx",
-        market="US",
-        market_trading_date="2026-07-19",
-        revision=-1,
-        json=True,
-    )
+    args = _args(daily_brief_command="day", market_trading_date="2026-07-19", revision=-1, json=True)
     with pytest.raises(AgentToolError) as _caught:
         daily_brief_ops.handle_daily_brief_command(args, repo_base_fn=lambda: tmp_path)
     exc = _caught.value
@@ -149,14 +129,8 @@ def test_daily_brief_cli_reads_env_runtime_root_then_repo_fallback(monkeypatch, 
         brief=_brief(run_id="runtime-r1"),
     )
 
-    args = Namespace(
-        daily_brief_command="day",
-        account="lx",
-        market="US",
-        market_trading_date="2026-07-19",
-        revision=runtime_r1["brief"]["revision"],
-        json=True,
-    )
+    args = _args(daily_brief_command="day", market_trading_date="2026-07-19", json=True,
+                 revision=runtime_r1["brief"]["revision"])
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
 

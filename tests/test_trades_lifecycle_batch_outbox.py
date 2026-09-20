@@ -49,11 +49,7 @@ def _repo(tmp_path: Path) -> SQLiteOptionPositionsRepository:
 
 
 def _route(*, target: str = "ou_test_target") -> dict[str, str]:
-    return build_notification_batch_route(
-        provider="feishu_app",
-        channel="bot",
-        target=target,
-    )
+    return build_notification_batch_route(provider="feishu_app", channel="bot", target=target)
 
 
 def _enqueue(
@@ -86,6 +82,28 @@ def _quiet_now(rows: list[dict]) -> int:
     return max(int(row["created_at_ms"]) for row in rows) + QUIET_WINDOW_MS
 
 
+def _confirmed_send(message_id: str = "provider-message-1") -> dict:
+    return {
+        "status": "confirmed",
+        "delivery_confirmed": True,
+        "message_id": message_id,
+    }
+
+
+def _dispatch(
+    repo: SQLiteOptionPositionsRepository,
+    **overrides: object,
+) -> dict:
+    return dispatch_notification_batch_once(repo, route=_route(), **overrides)
+
+
+def _plan_batch(
+    repo: SQLiteOptionPositionsRepository,
+    **overrides: object,
+) -> dict:
+    return plan_notification_batch(repo, route=_route(), **overrides)
+
+
 def test_legacy_per_row_delivery_dispatcher_is_removed() -> None:
     from src.application.trades import lifecycle_outbox
 
@@ -97,30 +115,16 @@ def test_twenty_four_intents_use_one_batch_and_one_receipt(
 ) -> None:
     repo = _repo(tmp_path)
     rows = [
-        _enqueue(
-            repo,
-            suffix=f"{index:02d}",
-            account="lx" if index < 15 else "sy",
-        )
+        _enqueue(repo, suffix=f"{index:02d}", account="lx" if index < 15 else "sy")
         for index in range(24)
     ]
     calls: list[dict] = []
 
     def _send(payload: dict) -> dict:
         calls.append(payload)
-        return {
-            "status": "confirmed",
-            "delivery_confirmed": True,
-            "message_id": "provider-message-1",
-        }
+        return _confirmed_send()
 
-    result = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_send,
-        now_ms=_quiet_now(rows),
-        allowed_accounts={"lx", "sy"},
-    )
+    result = _dispatch(repo, send_fn=_send, now_ms=_quiet_now(rows), allowed_accounts={"lx", "sy"})
 
     assert result["status"] == "confirmed"
     assert len(calls) == 1
@@ -131,9 +135,7 @@ def test_twenty_four_intents_use_one_batch_and_one_receipt(
     assert batch["provider_message_id"] == "provider-message-1"
     assert batch["batch_id"] == calls[0]["batch_id"]
     assert "ou_test_target" not in str(batch["payload"])
-    settled = repo.list_trade_lifecycle_notification_batch_members(
-        batch["batch_id"]
-    )
+    settled = repo.list_trade_lifecycle_notification_batch_members(batch["batch_id"])
     assert len(settled) == 24
     assert {row["status"] for row in settled} == {"confirmed"}
     assert {
@@ -146,11 +148,7 @@ def test_process_dispatcher_batches_lx_and_sy_into_one_provider_call(
 ) -> None:
     repo = _repo(tmp_path)
     rows = [
-        _enqueue(
-            repo,
-            suffix=f"dispatcher-{index:02d}",
-            account="lx" if index < 15 else "sy",
-        )
+        _enqueue(repo, suffix=f"dispatcher-{index:02d}", account="lx" if index < 15 else "sy")
         for index in range(24)
     ]
     calls: list[dict] = []
@@ -159,11 +157,7 @@ def test_process_dispatcher_batches_lx_and_sy_into_one_provider_call(
         route=_route(),
         allowed_accounts={"lx", "sy"},
         send_fn=lambda payload: calls.append(payload)
-        or {
-            "status": "confirmed",
-            "delivery_confirmed": True,
-            "message_id": "provider-dispatcher-1",
-        },
+        or _confirmed_send("provider-dispatcher-1"),
         now_ms_fn=lambda: _quiet_now(rows),
     )
 
@@ -175,9 +169,7 @@ def test_process_dispatcher_batches_lx_and_sy_into_one_provider_call(
     assert result["batch"]["member_count"] == 24
     assert {
         row["status"]
-        for row in repo.list_trade_lifecycle_notification_batch_members(
-            result["batch"]["batch_id"]
-        )
+        for row in repo.list_trade_lifecycle_notification_batch_members(result["batch"]["batch_id"])
     } == {"confirmed"}
     snapshot = dispatcher.snapshot()
     assert snapshot["provider_attempt_count"] == 1
@@ -197,30 +189,20 @@ def test_process_dispatcher_preserves_route_budget_for_next_intent(
         route=_route(),
         allowed_accounts={"lx"},
         send_fn=lambda payload: calls.append(str(payload["batch_id"]))
-        or {
-            "status": "confirmed",
-            "delivery_confirmed": True,
-            "message_id": f"message-{len(calls)}",
-        },
+        or _confirmed_send(f"message-{len(calls)}"),
         now_ms_fn=lambda: current[0],
     )
 
     assert dispatcher.run_once()["status"] == "confirmed"
     second_row = _enqueue(repo, suffix="dispatcher-second")
-    current[0] = max(
-        int(second_row["created_at_ms"]) + QUIET_WINDOW_MS,
-        first_at + QUIET_WINDOW_MS,
-    )
+    current[0] = max(int(second_row["created_at_ms"]) + QUIET_WINDOW_MS, first_at + QUIET_WINDOW_MS)
     if current[0] >= first_at + TARGET_SEND_INTERVAL_MS:
         current[0] = first_at + TARGET_SEND_INTERVAL_MS - 1
     held = dispatcher.run_once()
     assert held["status"] == "idle"
     assert len(calls) == 1
 
-    current[0] = max(
-        first_at + TARGET_SEND_INTERVAL_MS,
-        int(second_row["created_at_ms"]) + QUIET_WINDOW_MS,
-    )
+    current[0] = max(first_at + TARGET_SEND_INTERVAL_MS, int(second_row["created_at_ms"]) + QUIET_WINDOW_MS)
     assert dispatcher.run_once()["status"] == "confirmed"
     assert len(calls) == 2
 
@@ -299,11 +281,7 @@ def test_repeated_dispatcher_error_is_visible_without_log_storm(
         raise RuntimeError("sqlite unavailable")
 
     logs: list[str] = []
-    monkeypatch.setattr(
-        lifecycle_batch_dispatcher,
-        "dispatch_notification_batch_once",
-        _raise,
-    )
+    monkeypatch.setattr(lifecycle_batch_dispatcher, "dispatch_notification_batch_once", _raise)
     dispatcher = LifecycleReceiptBatchDispatcher(
         repo=_repo(tmp_path),
         route=_route(),
@@ -334,11 +312,7 @@ def test_blocking_provider_does_not_hold_ledger_or_process_lock(
     def _blocking_send(_payload: dict) -> dict:
         provider_started.set()
         assert provider_release.wait(2)
-        return {
-            "status": "confirmed",
-            "delivery_confirmed": True,
-            "message_id": "provider-blocking-1",
-        }
+        return _confirmed_send("provider-blocking-1")
 
     dispatcher = LifecycleReceiptBatchDispatcher(
         repo=repo,
@@ -354,16 +328,10 @@ def test_blocking_provider_does_not_hold_ledger_or_process_lock(
 
         def _independent_ledger_write() -> dict:
             with process_lock:
-                return _enqueue(
-                    repo,
-                    suffix="while-provider-blocked",
-                    account="lx",
-                )
+                return _enqueue(repo, suffix="while-provider-blocked", account="lx")
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            written = executor.submit(_independent_ledger_write).result(
-                timeout=0.5
-            )
+            written = executor.submit(_independent_ledger_write).result(timeout=0.5)
         assert written["status"] == "pending"
     finally:
         provider_release.set()
@@ -431,11 +399,7 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
 
         return with_sqlite_repo_transaction(repo, _run)
 
-    monkeypatch.setattr(
-        lifecycle_batch_dispatcher,
-        "dispatch_notification_batch_once",
-        _hold_dispatcher_write,
-    )
+    monkeypatch.setattr(lifecycle_batch_dispatcher, "dispatch_notification_batch_once", _hold_dispatcher_write)
     dispatcher = LifecycleReceiptBatchDispatcher(
         repo=dispatcher_repo,
         route=_route(),
@@ -452,21 +416,11 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
             auto_close_writer_entered.set()
             yield conn
 
-    monkeypatch.setattr(
-        auto_close_repo,
-        "_writer_connection",
-        _observed_auto_close_writer_connection,
-    )
+    monkeypatch.setattr(auto_close_repo, "_writer_connection", _observed_auto_close_writer_connection)
 
     def _run_auto_close():
         auto_close_started.set()
-        return auto_close_expired_positions(
-            auto_close_repo,
-            positions,
-            as_of_ms=as_of_ms,
-            grace_days=1,
-            max_close=5,
-        )
+        return auto_close_expired_positions(auto_close_repo, positions, as_of_ms=as_of_ms, grace_days=1, max_close=5)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         dispatcher_future = executor.submit(dispatcher.run_once)
@@ -517,18 +471,8 @@ def test_quiet_window_and_oldest_max_wait_are_both_enforced(
             ),
         )
 
-    waiting = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=base + MAX_BATCH_WAIT_MS - 1,
-        apply_changes=False,
-    )
-    forced = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=base + MAX_BATCH_WAIT_MS,
-        apply_changes=False,
-    )
+    waiting = _plan_batch(repo, now_ms=base + MAX_BATCH_WAIT_MS - 1, apply_changes=False)
+    forced = _plan_batch(repo, now_ms=base + MAX_BATCH_WAIT_MS, apply_changes=False)
 
     assert waiting["status"] == "waiting"
     assert forced["status"] == "ready"
@@ -541,22 +485,13 @@ def test_batch_binding_is_atomic_and_old_claim_predicate_fails_closed(
 ) -> None:
     repo = _repo(tmp_path)
     rows = [_enqueue(repo, suffix=str(index)) for index in range(3)]
-    planned = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=_quiet_now(rows),
-    )
+    planned = _plan_batch(repo, now_ms=_quiet_now(rows))
 
     assert planned["status"] == "created"
-    members = repo.list_trade_lifecycle_notification_batch_members(
-        planned["batch"]["batch_id"]
-    )
+    members = repo.list_trade_lifecycle_notification_batch_members(planned["batch"]["batch_id"])
     assert len(members) == 3
     assert {row["status"] for row in members} == {"batched"}
-    assert claim_next_notification(
-        repo,
-        now_ms=_quiet_now(rows),
-    ) is None
+    assert claim_next_notification(repo, now_ms=_quiet_now(rows)) is None
 
 
 def test_concurrent_planners_create_exactly_one_batch(
@@ -567,11 +502,7 @@ def test_concurrent_planners_create_exactly_one_batch(
     current = _quiet_now(rows)
 
     def _plan() -> dict:
-        return plan_notification_batch(
-            repo,
-            route=_route(),
-            now_ms=current,
-        )
+        return _plan_batch(repo, now_ms=current)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _value: _plan(), range(2)))
@@ -601,26 +532,14 @@ def test_explicit_failure_retries_same_batch_and_stops_at_three(
             "error": "provider rejected before acceptance",
         }
 
-    first = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_reject,
-        now_ms=first_at,
-    )
+    first = _dispatch(repo, send_fn=_reject, now_ms=first_at)
     first_batch = first["batch"]
     assert first_batch["attempt_count"] == 1
     assert first_batch["status"] == "explicit_failed"
-    assert repo.get_trade_lifecycle_notification(
-        row["outbox_id"]
-    )["status"] == "batched"
+    assert repo.get_trade_lifecycle_notification(row["outbox_id"])["status"] == "batched"
 
     second_at = int(first_batch["next_attempt_at_ms"])
-    second = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_reject,
-        now_ms=second_at,
-    )
+    second = _dispatch(repo, send_fn=_reject, now_ms=second_at)
     assert second["batch"]["attempt_count"] == 2
     assert (
         int(second["batch"]["next_attempt_at_ms"])
@@ -628,26 +547,14 @@ def test_explicit_failure_retries_same_batch_and_stops_at_three(
     )
 
     third_at = int(second["batch"]["next_attempt_at_ms"])
-    third = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_reject,
-        now_ms=third_at,
-    )
+    third = _dispatch(repo, send_fn=_reject, now_ms=third_at)
     assert third["batch"]["attempt_count"] == 3
     assert third["batch"]["next_attempt_at_ms"] is None
-    terminal_member = repo.get_trade_lifecycle_notification(
-        row["outbox_id"]
-    )
+    terminal_member = repo.get_trade_lifecycle_notification(row["outbox_id"])
     assert terminal_member["status"] == "explicit_failed"
     assert terminal_member["attempt_count"] == 3
 
-    fourth = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_reject,
-        now_ms=third_at + TARGET_SEND_INTERVAL_MS,
-    )
+    fourth = _dispatch(repo, send_fn=_reject, now_ms=third_at + TARGET_SEND_INTERVAL_MS)
     assert fourth["status"] == "idle"
     assert len(seen_batch_ids) == 3
     assert len(set(seen_batch_ids)) == 1
@@ -663,45 +570,17 @@ def test_route_budget_holds_new_intent_for_sixty_seconds(
 
     def _confirm(payload: dict) -> dict:
         calls.append(str(payload["batch_id"]))
-        return {
-            "status": "confirmed",
-            "delivery_confirmed": True,
-            "message_id": f"message-{len(calls)}",
-        }
+        return _confirmed_send(f"message-{len(calls)}")
 
-    first = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_confirm,
-        now_ms=first_at,
-    )
+    first = _dispatch(repo, send_fn=_confirm, now_ms=first_at)
     assert first["status"] == "confirmed"
     second_row = _enqueue(repo, suffix="second")
-    quiet_ready = max(
-        first_at + QUIET_WINDOW_MS,
-        int(second_row["created_at_ms"]) + QUIET_WINDOW_MS,
-    )
-    held_at = min(
-        quiet_ready,
-        first_at + TARGET_SEND_INTERVAL_MS - 1,
-    )
-    held = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_confirm,
-        now_ms=held_at,
-    )
+    quiet_ready = max(first_at + QUIET_WINDOW_MS, int(second_row["created_at_ms"]) + QUIET_WINDOW_MS)
+    held_at = min(quiet_ready, first_at + TARGET_SEND_INTERVAL_MS - 1)
+    held = _dispatch(repo, send_fn=_confirm, now_ms=held_at)
     assert held["status"] == "idle"
-    released_at = max(
-        first_at + TARGET_SEND_INTERVAL_MS,
-        int(second_row["created_at_ms"]) + QUIET_WINDOW_MS,
-    )
-    released = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=_confirm,
-        now_ms=released_at,
-    )
+    released_at = max(first_at + TARGET_SEND_INTERVAL_MS, int(second_row["created_at_ms"]) + QUIET_WINDOW_MS)
+    released = _dispatch(repo, send_fn=_confirm, now_ms=released_at)
     assert released["status"] == "confirmed"
     assert len(calls) == 2
 
@@ -712,59 +591,28 @@ def test_stale_claim_recovers_but_stale_send_freezes_whole_batch(
     repo = _repo(tmp_path)
     rows = [_enqueue(repo, suffix=str(index)) for index in range(2)]
     planned_at = _quiet_now(rows)
-    planned = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=planned_at,
-    )
+    planned = _plan_batch(repo, now_ms=planned_at)
     batch_id = planned["batch"]["batch_id"]
-    first_claim = claim_next_notification_batch(
-        repo,
-        now_ms=planned_at,
-        claim_id="claim-1",
-    )
+    first_claim = claim_next_notification_batch(repo, now_ms=planned_at, claim_id="claim-1")
     assert first_claim is not None
     recovered_at = planned_at + CLAIM_LEASE_MS + 1
-    recovered = recover_stale_notification_batches(
-        repo,
-        now_ms=recovered_at,
-    )
+    recovered = recover_stale_notification_batches(repo, now_ms=recovered_at)
     assert recovered["reclaimed_claimed_count"] == 1
-    assert repo.get_trade_lifecycle_notification_batch(
-        batch_id
-    )["status"] == "pending"
+    assert repo.get_trade_lifecycle_notification_batch(batch_id)["status"] == "pending"
     assert {
         row["status"]
-        for row in repo.list_trade_lifecycle_notification_batch_members(
-            batch_id
-        )
+        for row in repo.list_trade_lifecycle_notification_batch_members(batch_id)
     } == {"batched"}
 
-    second_claim = claim_next_notification_batch(
-        repo,
-        now_ms=recovered_at,
-        claim_id="claim-2",
-    )
+    second_claim = claim_next_notification_batch(repo, now_ms=recovered_at, claim_id="claim-2")
     assert second_claim is not None
-    mark_notification_batch_send_started(
-        repo,
-        batch_id=batch_id,
-        claim_id="claim-2",
-        now_ms=recovered_at,
-    )
-    frozen = recover_stale_notification_batches(
-        repo,
-        now_ms=recovered_at + CLAIM_LEASE_MS + 1,
-    )
+    mark_notification_batch_send_started(repo, batch_id=batch_id, claim_id="claim-2", now_ms=recovered_at)
+    frozen = recover_stale_notification_batches(repo, now_ms=recovered_at + CLAIM_LEASE_MS + 1)
     assert frozen["frozen_unknown_count"] == 1
-    assert repo.get_trade_lifecycle_notification_batch(
-        batch_id
-    )["status"] == "unknown"
+    assert repo.get_trade_lifecycle_notification_batch(batch_id)["status"] == "unknown"
     assert {
         row["status"]
-        for row in repo.list_trade_lifecycle_notification_batch_members(
-            batch_id
-        )
+        for row in repo.list_trade_lifecycle_notification_batch_members(batch_id)
     } == {"unknown"}
 
 
@@ -774,42 +622,20 @@ def test_stale_claims_do_not_consume_provider_attempt_budget(
     repo = _repo(tmp_path)
     row = _enqueue(repo, suffix="claim-recovery")
     current = _quiet_now([row])
-    batch_id = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=current,
-    )["batch"]["batch_id"]
+    batch_id = _plan_batch(repo, now_ms=current)["batch"]["batch_id"]
 
     for index in range(3):
-        claimed = claim_next_notification_batch(
-            repo,
-            now_ms=current,
-            claim_id=f"claim-{index}",
-        )
+        claimed = claim_next_notification_batch(repo, now_ms=current, claim_id=f"claim-{index}")
         assert claimed is not None
         assert claimed["attempt_count"] == 0
         current += CLAIM_LEASE_MS + 1
-        recovered = recover_stale_notification_batches(
-            repo,
-            now_ms=current,
-        )
+        recovered = recover_stale_notification_batches(repo, now_ms=current)
         assert recovered["reclaimed_claimed_count"] == 1
-        assert repo.get_trade_lifecycle_notification_batch(
-            batch_id
-        )["attempt_count"] == 0
+        assert repo.get_trade_lifecycle_notification_batch(batch_id)["attempt_count"] == 0
 
-    final_claim = claim_next_notification_batch(
-        repo,
-        now_ms=current,
-        claim_id="claim-final",
-    )
+    final_claim = claim_next_notification_batch(repo, now_ms=current, claim_id="claim-final")
     assert final_claim is not None
-    started = mark_notification_batch_send_started(
-        repo,
-        batch_id=batch_id,
-        claim_id="claim-final",
-        now_ms=current,
-    )
+    started = mark_notification_batch_send_started(repo, batch_id=batch_id, claim_id="claim-final", now_ms=current)
     assert started["attempt_count"] == 1
 
 
@@ -818,12 +644,7 @@ def test_unknown_batch_resend_creates_one_compensating_intent_per_member(
 ) -> None:
     repo = _repo(tmp_path)
     rows = [_enqueue(repo, suffix=str(index)) for index in range(2)]
-    result = dispatch_notification_batch_once(
-        repo,
-        route=_route(),
-        send_fn=lambda _payload: {"status": "unknown"},
-        now_ms=_quiet_now(rows),
-    )
+    result = _dispatch(repo, send_fn=lambda _payload: {"status": "unknown"}, now_ms=_quiet_now(rows))
     batch_id = result["batch"]["batch_id"]
 
     resend = reconcile_notification_batch(
@@ -837,9 +658,7 @@ def test_unknown_batch_resend_creates_one_compensating_intent_per_member(
     )
 
     assert resend["compensating_intent_count"] == 2
-    assert repo.get_trade_lifecycle_notification_batch(
-        batch_id
-    )["status"] == "unknown"
+    assert repo.get_trade_lifecycle_notification_batch(batch_id)["status"] == "unknown"
     compensating = resend["compensating_intents"]
     assert {row["status"] for row in compensating} == {"pending"}
     assert {
@@ -873,9 +692,8 @@ def test_suppressed_and_confirmed_legacy_rows_are_not_reactivated(
         fields={"confirmed_at_ms": int(confirmed["created_at_ms"])},
     )
 
-    preview = plan_notification_batch(
+    preview = _plan_batch(
         repo,
-        route=_route(),
         now_ms=max(
             int(confirmed["created_at_ms"]),
             int(
@@ -890,9 +708,7 @@ def test_suppressed_and_confirmed_legacy_rows_are_not_reactivated(
 
     assert preview["status"] == "idle"
     for outbox_id in (suppressed["outbox_id"], confirmed["outbox_id"]):
-        assert repo.get_trade_lifecycle_notification(
-            outbox_id
-        )["delivery_batch_id"] is None
+        assert repo.get_trade_lifecycle_notification(outbox_id)["delivery_batch_id"] is None
 
 
 def test_terminal_completion_rolls_back_when_member_cardinality_changes(
@@ -901,23 +717,10 @@ def test_terminal_completion_rolls_back_when_member_cardinality_changes(
     repo = _repo(tmp_path)
     row = _enqueue(repo, suffix="cardinality")
     current = _quiet_now([row])
-    batch = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=current,
-    )["batch"]
-    claimed = claim_next_notification_batch(
-        repo,
-        now_ms=current,
-        claim_id="claim-cardinality",
-    )
+    batch = _plan_batch(repo, now_ms=current)["batch"]
+    claimed = claim_next_notification_batch(repo, now_ms=current, claim_id="claim-cardinality")
     assert claimed is not None
-    mark_notification_batch_send_started(
-        repo,
-        batch_id=batch["batch_id"],
-        claim_id="claim-cardinality",
-        now_ms=current,
-    )
+    mark_notification_batch_send_started(repo, batch_id=batch["batch_id"], claim_id="claim-cardinality", now_ms=current)
     with repo._connect() as conn:
         conn.execute(
             """
@@ -938,15 +741,10 @@ def test_terminal_completion_rolls_back_when_member_cardinality_changes(
         )
     exc = _caught.value
     assert "member mismatch" in str(exc)
-    assert repo.get_trade_lifecycle_notification_batch(
-        batch["batch_id"]
-    )["status"] == "send_started"
+    assert repo.get_trade_lifecycle_notification_batch(batch["batch_id"])["status"] == "send_started"
 
 
-@pytest.mark.parametrize(
-    "tamper",
-    ("member_id", "payload_hash", "payload"),
-)
+@pytest.mark.parametrize("tamper", ("member_id", "payload_hash", "payload"))
 def test_repository_rejects_frozen_member_mismatch(
     tmp_path: Path,
     tamper: str,
@@ -956,12 +754,7 @@ def test_repository_rejects_frozen_member_mismatch(
         _enqueue(repo, suffix="tamper-a"),
         _enqueue(repo, suffix="tamper-b"),
     ]
-    preview = plan_notification_batch(
-        repo,
-        route=_route(),
-        now_ms=_quiet_now(rows),
-        apply_changes=False,
-    )
+    preview = _plan_batch(repo, now_ms=_quiet_now(rows), apply_changes=False)
     batch = copy.deepcopy(preview["batch"])
     member_ids = [row["outbox_id"] for row in rows]
     if tamper == "member_id":
@@ -973,10 +766,7 @@ def test_repository_rejects_frozen_member_mismatch(
     batch["payload_hash"] = canonical_payload_hash(batch["payload"])
 
     with pytest.raises(ValueError):
-        repo.insert_trade_lifecycle_notification_batch_once(
-            batch,
-            member_outbox_ids=member_ids,
-        )
+        repo.insert_trade_lifecycle_notification_batch_once(batch, member_outbox_ids=member_ids)
 
     assert repo.list_trade_lifecycle_notification_batches() == []
     for row in rows:

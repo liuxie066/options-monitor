@@ -55,18 +55,40 @@ def _event(
     )
 
 
-def test_short_partial_close_allocates_open_fee_and_last_close_absorbs_remainder() -> None:
-    result = project_trade_events(
-        [
-            _event("open", "open", contracts=3, price=2, fees=1, basis="actual"),
-            _event(
-                "close-1", "close", contracts=1, price=1, time_ms=2, fees=0.2, basis="actual", target_lot_id="lot-1"
-            ),
-            _event(
-                "close-2", "close", contracts=2, price=0.5, time_ms=3, fees=0.3, basis="actual", target_lot_id="lot-1"
-            ),
-        ]
+def _void(event_id: str, *, key: ContractKey, target_event_id: str) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type="void",
+        event_time_ms=3,
+        contract_key=key,
+        contracts=0,
+        price=0,
+        currency="USD",
+        source="test",
+        target_event_id=target_event_id,
     )
+
+
+def _snapshot(
+    *,
+    strategy: str = "sell_put",
+    leg_role: str = "put",
+    strategy_group_id: str = "g1",
+) -> dict:
+    return {
+        "strategy": strategy,
+        "leg_role": leg_role,
+        "strategy_group_id": strategy_group_id,
+    }
+
+
+def test_short_partial_close_allocates_open_fee_and_last_close_absorbs_remainder() -> None:
+    events = [
+        _event("open", "open", contracts=3, price=2, fees=1, basis="actual"),
+        _event("close-1", "close", contracts=1, price=1, time_ms=2, fees=0.2, basis="actual", target_lot_id="lot-1"),
+        _event("close-2", "close", contracts=2, price=0.5, time_ms=3, fees=0.3, basis="actual", target_lot_id="lot-1"),
+    ]
+    result = project_trade_events(events)
 
     assert result.diagnostics == []
     assert len(result.allocations) == 2
@@ -83,12 +105,11 @@ def test_short_partial_close_allocates_open_fee_and_last_close_absorbs_remainder
 
 
 def test_long_close_uses_opposite_cash_signs() -> None:
-    result = project_trade_events(
-        [
-            _event("open", "open", side="long", price=1, fees=0, basis="actual"),
-            _event("close", "close", side="long", price=2.5, time_ms=2, fees=0, basis="actual", target_lot_id="lot-1"),
-        ]
-    )
+    events = [
+        _event("open", "open", side="long", price=1, fees=0, basis="actual"),
+        _event("close", "close", side="long", price=2.5, time_ms=2, fees=0, basis="actual", target_lot_id="lot-1"),
+    ]
+    result = project_trade_events(events)
 
     allocation = result.allocations[0]
     assert allocation.open_amount_gross == Decimal("-100.000000")
@@ -129,15 +150,11 @@ def test_invalid_explicit_fee_provenance_fails_closed_instead_of_legacy_inferenc
 
 def test_fee_provenance_conflict_with_compatibility_amount_fails_closed() -> None:
     actual = _event(
-        "actual-conflict",
-        "close",
-        fees=9,
+        "actual-conflict", "close", fees=9,
         raw={"fee_provenance": {"basis": "actual", "amount": 1, "source": "test"}},
     )
     estimated = _event(
-        "estimated-conflict",
-        "close",
-        fees=9,
+        "estimated-conflict", "close", fees=9,
         raw={"fee_provenance": {"basis": "estimated", "amount": 1, "source": "test"}},
     )
 
@@ -148,12 +165,11 @@ def test_fee_provenance_conflict_with_compatibility_amount_fails_closed() -> Non
 
 
 def test_missing_fee_preserves_gross_and_nulls_net() -> None:
-    result = project_trade_events(
-        [
-            _event("open", "open", price=2),
-            _event("close", "close", price=1, time_ms=2, target_lot_id="lot-1"),
-        ]
-    )
+    events = [
+        _event("open", "open", price=2),
+        _event("close", "close", price=1, time_ms=2, target_lot_id="lot-1"),
+    ]
+    result = project_trade_events(events)
 
     allocation = result.allocations[0]
     assert allocation.realized_pnl_gross == Decimal("100.000000")
@@ -162,20 +178,11 @@ def test_missing_fee_preserves_gross_and_nulls_net() -> None:
 
 
 def test_estimated_fee_is_preserved_but_never_used_for_production_realized_net() -> None:
-    result = project_trade_events(
-        [
-            _event("open", "open", price=2, basis="actual"),
-            _event(
-                "close",
-                "close",
-                price=1,
-                time_ms=2,
-                fees=0.4,
-                basis="estimated",
-                target_lot_id="lot-1",
-            ),
-        ]
-    )
+    events = [
+        _event("open", "open", price=2, basis="actual"),
+        _event("close", "close", price=1, time_ms=2, fees=0.4, basis="estimated", target_lot_id="lot-1"),
+    ]
+    result = project_trade_events(events)
 
     allocation = result.allocations[0]
     assert allocation.close_fee.amount == Decimal("0.400000")
@@ -186,22 +193,12 @@ def test_estimated_fee_is_preserved_but_never_used_for_production_realized_net()
 
 def test_assignment_zero_close_price_and_strategy_metadata_are_stable() -> None:
     open_event = _event(
-        "open",
-        "open",
-        price=2,
-        fees=0,
-        basis="actual",
-        raw={"strategy_snapshot": {"strategy": "sell_put", "leg_role": "put", "strategy_group_id": "g1"}},
+        "open", "open", price=2, fees=0, basis="actual",
+        raw={"strategy_snapshot": _snapshot()},
     )
     assignment = _event(
-        "assign",
-        "assignment",
-        price=0,
-        time_ms=2,
-        fees=0,
-        basis="actual",
-        target_lot_id="lot-1",
-        raw={"settlement_ref": "settle-1"},
+        "assign", "assignment", price=0, time_ms=2, fees=0, basis="actual",
+        target_lot_id="lot-1", raw={"settlement_ref": "settle-1"},
     )
 
     first = project_trade_events([open_event, assignment])
@@ -218,39 +215,22 @@ def test_assignment_zero_close_price_and_strategy_metadata_are_stable() -> None:
 
 
 def test_conflicting_close_strategy_metadata_cannot_override_open_metadata() -> None:
-    result = project_trade_events(
-        [
-            _event(
-                "open",
-                "open",
-                price=2,
-                basis="actual",
-                raw={
-                    "strategy_snapshot": {
-                        "strategy": "sell_put",
-                        "leg_role": "put",
-                        "strategy_group_id": "g1",
-                    }
-                },
-            ),
-            _event(
-                "close",
-                "close",
-                price=1,
-                time_ms=2,
-                basis="actual",
-                target_lot_id="lot-1",
-                raw={
-                    "strategy": "wheel",
-                    "strategy_snapshot": {
-                        "strategy": "combo_yield",
-                        "leg_role": "funding_put",
-                        "strategy_group_id": "other",
-                    },
-                },
-            ),
-        ]
-    )
+    events = [
+        _event(
+            "open", "open", price=2, basis="actual",
+            raw={"strategy_snapshot": _snapshot()},
+        ),
+        _event(
+            "close", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1",
+            raw={
+                "strategy": "wheel",
+                "strategy_snapshot": _snapshot(
+                    strategy="combo_yield", leg_role="funding_put", strategy_group_id="other"
+                ),
+            },
+        ),
+    ]
+    result = project_trade_events(events)
 
     allocation = result.allocations[0]
     assert (allocation.strategy, allocation.leg_role, allocation.strategy_group_id) == (
@@ -263,17 +243,7 @@ def test_conflicting_close_strategy_metadata_cannot_override_open_metadata() -> 
 def test_voided_close_produces_no_allocation() -> None:
     key = _key()
     close = _event("close", "close", price=1, time_ms=2, target_lot_id="lot-1")
-    void = TradeEvent(
-        event_id="void-close",
-        event_type="void",
-        event_time_ms=3,
-        contract_key=key,
-        contracts=0,
-        price=0,
-        currency="USD",
-        source="test",
-        target_event_id="close",
-    )
+    void = _void("void-close", key=key, target_event_id="close")
     result = project_trade_events([_event("open", "open", price=2), close, void])
 
     assert result.allocations == []
@@ -283,25 +253,9 @@ def test_voided_close_produces_no_allocation() -> None:
 def test_void_and_replacement_close_repair_produce_only_replacement_allocation() -> None:
     key = _key()
     original = _event("close-original", "close", price=1, time_ms=2, target_lot_id="lot-1")
-    void = TradeEvent(
-        event_id="void-original",
-        event_type="void",
-        event_time_ms=3,
-        contract_key=key,
-        contracts=0,
-        price=0,
-        currency="USD",
-        source="test",
-        target_event_id=original.event_id,
-    )
+    void = _void("void-original", key=key, target_event_id=original.event_id)
     replacement = _event(
-        "close-replacement",
-        "close",
-        price=0.75,
-        time_ms=4,
-        fees=0,
-        basis="actual",
-        target_lot_id="lot-1",
+        "close-replacement", "close", price=0.75, time_ms=4, fees=0, basis="actual", target_lot_id="lot-1"
     )
     result = project_trade_events([_event("open", "open", price=2, basis="actual"), original, void, replacement])
 
@@ -314,22 +268,8 @@ def test_void_and_replacement_close_repair_produce_only_replacement_allocation()
 def test_allocation_order_and_ids_are_deterministic_for_unsorted_input() -> None:
     events = [
         _event("open", "open", contracts=2, price=2, basis="actual"),
-        _event(
-            "close-later",
-            "close",
-            price=0.5,
-            time_ms=3,
-            basis="actual",
-            target_lot_id="lot-1",
-        ),
-        _event(
-            "close-earlier",
-            "close",
-            price=1,
-            time_ms=2,
-            basis="actual",
-            target_lot_id="lot-1",
-        ),
+        _event("close-later", "close", price=0.5, time_ms=3, basis="actual", target_lot_id="lot-1"),
+        _event("close-earlier", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1"),
     ]
 
     ordered = project_trade_events(events)
@@ -344,27 +284,14 @@ def test_allocation_order_and_ids_are_deterministic_for_unsorted_input() -> None
 
 
 def test_invalid_close_is_rejected_without_advancing_lot_or_open_fee_state() -> None:
-    result = project_trade_events(
-        [
-            _event("open", "open", contracts=2, price=2, fees=1, basis="actual"),
-            _event(
-                "close-invalid-price",
-                "close",
-                price=float("nan"),
-                time_ms=2,
-                basis="actual",
-                target_lot_id="lot-1",
-            ),
-            _event(
-                "close-valid",
-                "close",
-                price=1,
-                time_ms=3,
-                basis="actual",
-                target_lot_id="lot-1",
-            ),
-        ]
-    )
+    events = [
+        _event("open", "open", contracts=2, price=2, fees=1, basis="actual"),
+        _event(
+            "close-invalid-price", "close", price=float("nan"), time_ms=2, basis="actual", target_lot_id="lot-1"
+        ),
+        _event("close-valid", "close", price=1, time_ms=3, basis="actual", target_lot_id="lot-1"),
+    ]
+    result = project_trade_events(events)
 
     assert result.lots[0].contracts_open == 1
     assert [item.close_event_id for item in result.allocations] == ["close-valid"]
@@ -377,13 +304,7 @@ def test_currency_or_multiplier_mismatch_closes_lot_but_emits_no_economic_alloca
         [
             _event("open", "open", price=2, basis="actual"),
             _event(
-                "close",
-                "close",
-                price=1,
-                time_ms=2,
-                basis="actual",
-                currency="HKD",
-                target_lot_id="lot-1",
+                "close", "close", price=1, time_ms=2, basis="actual", currency="HKD", target_lot_id="lot-1"
             ),
         ]
     )
@@ -391,13 +312,7 @@ def test_currency_or_multiplier_mismatch_closes_lot_but_emits_no_economic_alloca
         [
             _event("open", "open", price=2, basis="actual"),
             _event(
-                "close",
-                "close",
-                price=1,
-                time_ms=2,
-                basis="actual",
-                multiplier=10,
-                target_lot_id="lot-1",
+                "close", "close", price=1, time_ms=2, basis="actual", multiplier=10, target_lot_id="lot-1"
             ),
         ]
     )

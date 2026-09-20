@@ -42,27 +42,27 @@ def test_state_repo_has_current_read_model_writers() -> None:
     assert "tick_metrics.current.json" in src
 
 
-def test_tick_idempotency_claim_blocks_active_and_reclaims_stale(tmp_path: Path) -> None:
+def _claim(tmp_path: Path, run_id: str, *, stale_after_sec=60, **payload_extra):
     from domain.storage.repositories import state_repo
 
-    first = state_repo.claim_idempotency_record(
+    return state_repo.claim_idempotency_record(
         tmp_path,
         scope="tick_execution",
         key="tick-key",
-        payload={"run_id": "run-1"},
-        stale_after_sec=60,
+        payload={"run_id": run_id, **payload_extra},
+        stale_after_sec=stale_after_sec,
     )
+
+
+def test_tick_idempotency_claim_blocks_active_and_reclaims_stale(tmp_path: Path) -> None:
+    from domain.storage.repositories import state_repo
+
+    first = _claim(tmp_path, "run-1")
     assert first["claimed"] is True
     assert first["record"]["ok"] is False
     assert first["record"]["status"] == "in_progress"
 
-    active_duplicate = state_repo.claim_idempotency_record(
-        tmp_path,
-        scope="tick_execution",
-        key="tick-key",
-        payload={"run_id": "run-2"},
-        stale_after_sec=60,
-    )
+    active_duplicate = _claim(tmp_path, "run-2")
     assert active_duplicate["claimed"] is False
     assert active_duplicate["stale"] is False
     assert active_duplicate["record"]["run_id"] == "run-1"
@@ -72,13 +72,7 @@ def test_tick_idempotency_claim_blocks_active_and_reclaims_stale(tmp_path: Path)
     stale_record["updated_at_utc"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     path.write_text(json.dumps(stale_record), encoding="utf-8")
 
-    reclaimed = state_repo.claim_idempotency_record(
-        tmp_path,
-        scope="tick_execution",
-        key="tick-key",
-        payload={"run_id": "run-3"},
-        stale_after_sec=60,
-    )
+    reclaimed = _claim(tmp_path, "run-3")
     assert reclaimed["claimed"] is True
     assert reclaimed["stale"] is True
     assert reclaimed["record"]["run_id"] == "run-3"
@@ -89,36 +83,16 @@ def test_tick_idempotency_claim_blocks_active_and_reclaims_stale(tmp_path: Path)
         key="tick-key",
         payload={"ok": True, "status": "completed", "run_id": "run-3"},
     )
-    completed_duplicate = state_repo.claim_idempotency_record(
-        tmp_path,
-        scope="tick_execution",
-        key="tick-key",
-        payload={"run_id": "run-4"},
-        stale_after_sec=1,
-    )
+    completed_duplicate = _claim(tmp_path, "run-4", stale_after_sec=1)
     assert completed_duplicate["claimed"] is False
     assert completed_duplicate["record"]["status"] == "completed"
 
 
 def test_tick_idempotency_claim_reclaims_dead_owner_pid(tmp_path: Path) -> None:
-    from domain.storage.repositories import state_repo
-
-    first = state_repo.claim_idempotency_record(
-        tmp_path,
-        scope="tick_execution",
-        key="tick-key",
-        payload={"run_id": "run-1", "pid": 99999999},
-        stale_after_sec=3600,
-    )
+    first = _claim(tmp_path, "run-1", stale_after_sec=3600, pid=99999999)
     assert first["claimed"] is True
 
-    reclaimed = state_repo.claim_idempotency_record(
-        tmp_path,
-        scope="tick_execution",
-        key="tick-key",
-        payload={"run_id": "run-2"},
-        stale_after_sec=3600,
-    )
+    reclaimed = _claim(tmp_path, "run-2", stale_after_sec=3600)
 
     assert reclaimed["claimed"] is True
     assert reclaimed["stale"] is True

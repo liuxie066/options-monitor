@@ -37,6 +37,14 @@ def run(replies, captured, **kw):
                      request=script(replies, captured), **kw)
 
 
+def _channel_contract(question, *, request_id, sender='alice', conversation='one'):
+    return prepare_contract(BotRequest(
+        request_id=request_id, source_entry='test', user_message=question,
+        execution_environment='channel', explicit_scope=BotScope(config_key='us'),
+        trusted_tool_scope={'authenticated_channel': 'test', 'authenticated_sender_id': sender,
+                            'authenticated_conversation_id': conversation}))
+
+
 def test_tools_then_final_without_submission():
     captured = []
     text = run([call(), answer('过滤条件来自已读结果。')], captured, call_tool=lambda *a: {'ok': True, 'data': {'reason': 'delta_too_high', 'account': 'lx'}})
@@ -168,9 +176,7 @@ def test_memory_remember_then_cross_conversation_recall_and_sender_isolation(tmp
     monkeypatch.setattr('src.application.agent_tool_config.load_runtime_config',lambda **kw:(tmp_path,{'accounts':['lx']}))
     store=BotHostStore(tmp_path/'host.db')
     def channel(question, sender='alice', conversation='one'):
-        return prepare_contract(BotRequest(request_id='memory-test', source_entry='test', user_message=question,
-            execution_environment='channel', explicit_scope=BotScope(config_key='us'),
-            trusted_tool_scope={'authenticated_channel':'test','authenticated_sender_id':sender,'authenticated_conversation_id':conversation}))
+        return _channel_contract(question, request_id='memory-test', sender=sender, conversation=conversation)
     c=channel('记住：我喜欢简短回答')
     captured=[]
     result=run_contract(c,model_settings=MODEL,host_store=store,session_key=session_key_for_contract(c),model_request=script([
@@ -253,9 +259,7 @@ def test_failed_provider_after_read_gets_one_final_attempt():
 
 def test_wrong_sender_session_never_invokes_model(tmp_path):
     from src.application.bot.session import session_key_for_contract
-    c=prepare_contract(BotRequest(request_id='identity',source_entry='test',user_message='question',
-        execution_environment='channel',explicit_scope=BotScope(config_key='us'),
-        trusted_tool_scope={'authenticated_channel':'test','authenticated_sender_id':'alice','authenticated_conversation_id':'chat'}))
+    c=_channel_contract('question', request_id='identity', conversation='chat')
     other=replace(c,input={**c.input,'authenticated_sender_id':'bob'})
     result=run_contract(c,model_settings=MODEL,host_store=BotHostStore(tmp_path/'host.db'),
         session_key=session_key_for_contract(other),model_request=lambda **kw:pytest.fail('wrong identity reached model'))
@@ -267,9 +271,7 @@ def test_replaced_run_lease_cannot_write_memory(tmp_path, monkeypatch):
     from src.application.bot.session import session_key_for_contract
     monkeypatch.setattr('src.application.agent_tool_config.load_runtime_config',lambda **kw:(tmp_path,{'accounts':['lx']}))
     store=BotHostStore(tmp_path/'host.db')
-    c=prepare_contract(BotRequest(request_id='memory-lease', source_entry='test', user_message='记住：简短回答',
-        execution_environment='channel', explicit_scope=BotScope(config_key='us'),
-        trusted_tool_scope={'authenticated_channel':'test','authenticated_sender_id':'alice','authenticated_conversation_id':'one'}))
+    c=_channel_contract('记住：简短回答', request_id='memory-lease')
     replies=iter([call('bot_memory',{'action':'remember','idempotency_key':'lease','expected_revision':0,'expected_epoch':0,
         'content':'简短回答','kind':'preference','source_quote':'记住：简短回答'}),answer('已记住')])
     def request(**kw):
@@ -287,9 +289,7 @@ def test_native_observation_can_back_explicit_experience(tmp_path, monkeypatch):
     monkeypatch.setattr('src.application.agent_tool_config.load_runtime_config',lambda **kw:(tmp_path,{'accounts':['lx']}))
     monkeypatch.setattr('src.application.bot.tools.call_read_tool',lambda *a,**kw:{'ok':True,'data':{
         'scope':{'account':'lx'},'coverage':{'status':'complete'},'diagnostics':[{'reason':'account_config_hash_mismatch'}]}})
-    c=prepare_contract(BotRequest(request_id='experience',source_entry='test',user_message='请读取报错，并记住这次 lx 的错误原因',
-        execution_environment='channel',explicit_scope=BotScope(config_key='us'),
-        trusted_tool_scope={'authenticated_channel':'test','authenticated_sender_id':'alice','authenticated_conversation_id':'one'}))
+    c=_channel_contract('请读取报错，并记住这次 lx 的错误原因', request_id='experience')
     store=BotHostStore(tmp_path/'host.db')
     count=0
     def request(**kw):

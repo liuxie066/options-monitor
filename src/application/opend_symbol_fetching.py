@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.infrastructure.io_utils import utc_now as _utc_now_iso
 
 """Fetch required option data using Futu OpenD.
 
@@ -81,10 +82,6 @@ def calc_mid(bid, ask, last_price=None):
 REQUIRED_REALIZED_VOLATILITY_INCOMPLETE = "REQUIRED_REALIZED_VOLATILITY_INCOMPLETE"
 SNAPSHOT_COVERAGE_INCOMPLETE = "SNAPSHOT_COVERAGE_INCOMPLETE"
 OPTION_CHAIN_SCOPE_COVERAGE_SCHEMA = "option_chain_scope_coverage.v1"
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:
@@ -300,25 +297,6 @@ def _resolve_request_trading_date(
     if parsed.isoformat() != value:
         raise ValueError("required-data trading date is invalid")
     return parsed
-
-
-def _pick_col(row: Any, *cands: str):
-    # row can be a pandas Series or a plain dict (we prefer dicts for memory efficiency)
-    try:
-        if row is None:
-            return None
-        if isinstance(row, dict):
-            for c in cands:
-                if c in row and row[c] is not None and (not (isinstance(row[c], float) and math.isnan(row[c]))):
-                    return row[c]
-            return None
-        # pandas Series-like
-        for c in cands:
-            if c in row and pd.notna(row[c]):
-                return row[c]
-        return None
-    except Exception:
-        return None
 
 
 def _tuple_col(row: tuple[Any, ...], columns: dict[str, int], name: str) -> Any:

@@ -7,17 +7,73 @@ import json
 from pathlib import Path
 
 
-def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:
+def _normalize(**overrides):
+    """Normalize one Feishu app-send result built from the shared success shape."""
     from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
-    out = normalize_feishu_app_send_output(
-        send_result={
-            "http_status": 200,
-            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
-            "response_json": {"code": 0, "msg": "success", "data": {"message_id": "om_123"}},
-            "response_tail": '{"code":0}',
-        }
+    send_result = {
+        "http_status": 200,
+        "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
+        "response_json": {"code": 0, "msg": "success", "data": {"message_id": "om_123"}},
+        "response_tail": '{"code":0}',
+    }
+    send_result.update(overrides)
+    return normalize_feishu_app_send_output(send_result=send_result)
+
+
+def _bind_feishu_bot(monkeypatch, open_id: str = "ou_1") -> None:
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", open_id)
+
+
+def _wechat_state(tmp_path: Path, **binding_overrides) -> Path:
+    """Write the wechat state/bindings pair these cases read."""
+    state_dir = tmp_path / "wechat"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
     )
+    binding = {"to_user_id": "wx_user_1", "context_token": "ctx_1"}
+    binding.update(binding_overrides)
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": binding}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return state_dir
+
+
+def _fallback_envelope():
+    """The rendered rich card plus the plain-text fallback these cases share."""
+    from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
+
+    fallback_text = "# 决策简报\n\n候选｜NVDA"
+    return fallback_text, render_feishu_notification_card(
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
+        fallback_text=fallback_text,
+    )
+
+
+def _send_card(tmp_path: Path, envelope: dict, fallback_text: str, idempotency_key: str) -> dict:
+    """Send one rich card through the app sender and normalize the receipt."""
+    from src.application import notification_delivery_adapter as service
+
+    return service.normalize_feishu_app_send_output(
+        send_result=service.send_feishu_app_message(
+            base=tmp_path,
+            channel="feishu_app",
+            target="",
+            message=fallback_text,
+            notifications={},
+            idempotency_key=idempotency_key,
+            transport_envelope=envelope,
+        )
+    )
+
+
+def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:
+    out = _normalize()
 
     assert out["ok"] is True
     assert out["command_ok"] is True
@@ -27,20 +83,12 @@ def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> Non
 
 
 def test_normalize_feishu_app_send_output_exposes_idempotency_and_retry_diagnostics() -> None:
-    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
-
-    out = normalize_feishu_app_send_output(
-        send_result={
-            "http_status": 200,
-            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
-            "response_json": {"code": 0, "msg": "success", "data": {"message_id": "om_123"}},
-            "response_tail": '{"code":0}',
-            "idempotency_key": "idem-1",
-            "http_attempts": [
-                {"level": "warn", "category": "transient", "http_status": 500, "feishu_code": 2200, "attempt": 1},
-                {"level": "info", "category": "success", "http_status": 200, "feishu_code": 0, "attempt": 2, "message_id": "om_123"},
-            ],
-        }
+    out = _normalize(
+        idempotency_key="idem-1",
+        http_attempts=[
+            {"level": "warn", "category": "transient", "http_status": 500, "feishu_code": 2200, "attempt": 1},
+            {"level": "info", "category": "success", "http_status": 200, "feishu_code": 0, "attempt": 2, "message_id": "om_123"},
+        ],
     )
 
     assert out["ok"] is True
@@ -52,16 +100,7 @@ def test_normalize_feishu_app_send_output_exposes_idempotency_and_retry_diagnost
 
 
 def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_missing() -> None:
-    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
-
-    out = normalize_feishu_app_send_output(
-        send_result={
-            "http_status": 200,
-            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
-            "response_json": {"code": 0, "msg": "success", "data": {}},
-            "response_tail": '{"code":0}',
-        }
-    )
+    out = _normalize(response_json={"code": 0, "msg": "success", "data": {}})
 
     assert out["ok"] is False
     assert out["command_ok"] is True
@@ -72,15 +111,10 @@ def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_miss
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
-    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
-
-    out = normalize_feishu_app_send_output(
-        send_result={
-            "http_status": 500,
-            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
-            "response_json": {"code": 999, "msg": "oops"},
-            "response_tail": "oops-tail",
-        }
+    out = _normalize(
+        http_status=500,
+        response_json={"code": 999, "msg": "oops"},
+        response_tail="oops-tail",
     )
 
     assert out["ok"] is False
@@ -96,15 +130,9 @@ def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
-    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
-
-    out = normalize_feishu_app_send_output(
-        send_result={
-            "http_status": 200,
-            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
-            "response_json": {"code": 230001, "msg": "denied", "data": {}},
-            "response_tail": "denied-tail",
-        }
+    out = _normalize(
+        response_json={"code": 230001, "msg": "denied", "data": {}},
+        response_tail="denied-tail",
     )
 
     assert out["ok"] is False
@@ -123,9 +151,7 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
 def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
     from src.application import notification_delivery_adapter as service
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    _bind_feishu_bot(monkeypatch)
     captured: dict[str, str] = {}
 
     def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
@@ -154,9 +180,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
 def test_send_feishu_app_message_ignores_config_target_for_bot_channel(monkeypatch, tmp_path: Path) -> None:
     from src.application import notification_delivery_adapter as service
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    _bind_feishu_bot(monkeypatch, "ou_bot")
     captured: dict[str, str] = {}
 
     def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
@@ -246,27 +270,7 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
             captured.update(kwargs)
             return {"ret": 0, "data": {"message_id": "msg_1"}}
 
-    state_dir = tmp_path / "wechat"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "wx_user_1",
-                        "context_token": "ctx_1",
-                        "group_id": "group_1",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state(tmp_path, group_id="group_1")
 
     out = send_wechat_clawbot_message(
         base=tmp_path,
@@ -310,16 +314,7 @@ def test_send_wechat_clawbot_message_retries_nested_ret_minus_2_without_context_
                 return {"data": {"ret": -2}}
             return {"ret": 0, "data": {"message_id": "msg_2"}}
 
-    state_dir = tmp_path / "wechat"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state(tmp_path)
 
     send_result = send_wechat_clawbot_message(
         base=tmp_path,
@@ -515,16 +510,7 @@ def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Pa
         def send_text_message(self, **_kwargs):  # type: ignore[no-untyped-def]
             return {"ret": 0}
 
-    state_dir = tmp_path / "wechat"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state(tmp_path)
 
     out = send_wechat_clawbot_message(
         base=tmp_path,
@@ -554,16 +540,7 @@ def test_send_wechat_clawbot_message_accepts_empty_success_response(tmp_path: Pa
         def send_text_message(self, **_kwargs):  # type: ignore[no-untyped-def]
             return {}
 
-    state_dir = tmp_path / "wechat"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state(tmp_path)
 
     send_result = send_wechat_clawbot_message(
         base=tmp_path,
@@ -610,9 +587,7 @@ def test_feishu_size_preflight_error_preserves_local_diagnostics(monkeypatch, tm
     from src.application import notification_delivery_adapter as service
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    _bind_feishu_bot(monkeypatch)
     diagnostics = {
         "local_error_code": "FEISHU_POST_TOO_LARGE",
         "http_status": None,
@@ -665,18 +640,9 @@ def test_send_feishu_card_uses_interactive_transport_and_preserves_logical_key(
     tmp_path: Path,
 ) -> None:
     from src.application import notification_delivery_adapter as service
-    from src.application.channels.feishu_notification_renderer import (
-        render_feishu_notification_card,
-    )
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
-    fallback_text = "# 决策简报\n\n候选｜NVDA"
-    envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
-        fallback_text=fallback_text,
-    )
+    _bind_feishu_bot(monkeypatch)
+    fallback_text, envelope = _fallback_envelope()
     captured: dict[str, object] = {}
 
     def _send_message(**kwargs):  # type: ignore[no-untyped-def]
@@ -717,19 +683,10 @@ def test_send_feishu_card_falls_back_once_on_safe_permanent_rejection(
     tmp_path: Path,
 ) -> None:
     from src.application import notification_delivery_adapter as service
-    from src.application.channels.feishu_notification_renderer import (
-        render_feishu_notification_card,
-    )
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
-    fallback_text = "# 决策简报\n\n候选｜NVDA"
-    envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
-        fallback_text=fallback_text,
-    )
+    _bind_feishu_bot(monkeypatch)
+    fallback_text, envelope = _fallback_envelope()
     fallback_calls: list[dict[str, object]] = []
 
     def _reject_card(**_kwargs):  # type: ignore[no-untyped-def]
@@ -746,17 +703,7 @@ def test_send_feishu_card_falls_back_once_on_safe_permanent_rejection(
     monkeypatch.setattr(service, "send_message", _reject_card)
     monkeypatch.setattr(service, "send_post_message", _send_post_message)
 
-    normalized = service.normalize_feishu_app_send_output(
-        send_result=service.send_feishu_app_message(
-            base=tmp_path,
-            channel="feishu_app",
-            target="",
-            message=fallback_text,
-            notifications={},
-            idempotency_key="idem-card-2",
-            transport_envelope=envelope,
-        )
-    )
+    normalized = _send_card(tmp_path, envelope, fallback_text, "idem-card-2")
 
     assert len(fallback_calls) == 1
     assert fallback_calls[0]["markdown"] == fallback_text
@@ -773,19 +720,10 @@ def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
     tmp_path: Path,
 ) -> None:
     from src.application import notification_delivery_adapter as service
-    from src.application.channels.feishu_notification_renderer import (
-        render_feishu_notification_card,
-    )
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
-    fallback_text = "# 决策简报\n\n候选｜NVDA"
-    envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
-        fallback_text=fallback_text,
-    )
+    _bind_feishu_bot(monkeypatch)
+    fallback_text, envelope = _fallback_envelope()
 
     def _ambiguous_card_failure(**_kwargs):  # type: ignore[no-untyped-def]
         raise FeishuPermanentError(
@@ -806,17 +744,7 @@ def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ambiguous send must not fallback")),
     )
 
-    normalized = service.normalize_feishu_app_send_output(
-        send_result=service.send_feishu_app_message(
-            base=tmp_path,
-            channel="feishu_app",
-            target="",
-            message=fallback_text,
-            notifications={},
-            idempotency_key="idem-card-3",
-            transport_envelope=envelope,
-        )
-    )
+    normalized = _send_card(tmp_path, envelope, fallback_text, "idem-card-3")
 
     assert normalized["delivery_confirmed"] is False
     assert normalized["transport_ok"] is True
@@ -831,19 +759,10 @@ def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
     tmp_path: Path,
 ) -> None:
     from src.application import notification_delivery_adapter as service
-    from src.application.channels.feishu_notification_renderer import (
-        render_feishu_notification_card,
-    )
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
-    fallback_text = "# 决策简报\n\n候选｜NVDA"
-    envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
-        fallback_text=fallback_text,
-    )
+    _bind_feishu_bot(monkeypatch)
+    fallback_text, envelope = _fallback_envelope()
 
     def _transient_then_reject(**kwargs):  # type: ignore[no-untyped-def]
         kwargs["log_fn"](
@@ -868,17 +787,7 @@ def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
         ),
     )
 
-    normalized = service.normalize_feishu_app_send_output(
-        send_result=service.send_feishu_app_message(
-            base=tmp_path,
-            channel="feishu_app",
-            target="",
-            message=fallback_text,
-            notifications={},
-            idempotency_key="idem-card-transient",
-            transport_envelope=envelope,
-        )
-    )
+    normalized = _send_card(tmp_path, envelope, fallback_text, "idem-card-transient")
 
     assert normalized["delivery_confirmed"] is False
     assert normalized["ambiguous_send"] is True
@@ -895,9 +804,7 @@ def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp
     canonical_markdown = '# 决策简报\n\n> 中文 "quote" 🙂\n\n- **NVDA**\n  - 合约: 1'
     captured: dict[str, str] = {}
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    _bind_feishu_bot(monkeypatch)
 
     def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
         captured["feishu"] = kwargs["markdown"]

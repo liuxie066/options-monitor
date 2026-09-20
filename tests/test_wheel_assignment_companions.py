@@ -34,6 +34,55 @@ def _open_activation(repo: SQLiteOptionPositionsRepository) -> None:
         )
 
 
+def _call_key() -> ContractKey:
+    return ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="call",
+        strike=110,
+        expiration_ymd="2026-09-18",
+    )
+
+
+def _persist_put_open(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    multiplier: int | float,
+    raw_payload: dict,
+    contracts: int = 1,
+) -> None:
+    persist_trade_event_objects_atomically(
+        repo,
+        [_put_event(
+            event_id="put-open",
+            event_type="open",
+            multiplier=multiplier,
+            contracts=contracts,
+            raw_payload=raw_payload,
+        )],
+    )
+
+
+def _persist_put_assignment(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    multiplier: int | float,
+    raw_payload: dict,
+    contracts: int = 1,
+) -> dict:
+    return persist_trade_event_objects_atomically(
+        repo,
+        [_put_event(
+            event_id="put-assignment",
+            event_type="assignment",
+            multiplier=multiplier,
+            contracts=contracts,
+            raw_payload=raw_payload,
+        )],
+    )[0].to_dict()
+
+
 def _put_event(
     *,
     event_id: str,
@@ -141,26 +190,10 @@ def _resolver_multiplier_payload(
 
 def test_actual_nonstandard_multiplier_creates_exact_wheel_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload=_trusted_multiplier_payload("put-open"),
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload=_trusted_multiplier_payload("put-open"))
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10,
-            raw_payload=_assignment_payload(10),
-        )],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
 
     branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
     assert result["wheel_event_id"]
@@ -190,14 +223,7 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
         )],
     )
     lot_id = "assigned-stock-stock-source-assignment"
-    call_key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="call",
-        strike=110,
-        expiration_ymd="2026-09-18",
-        )
+    call_key = _call_key()
     persist_trade_event_objects_atomically(
         repo,
         [TradeEvent(
@@ -322,15 +348,7 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
 
 def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload=_trusted_multiplier_payload("put-open"),
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload=_trusted_multiplier_payload("put-open"))
     _open_activation(repo)
     persist_trade_event_objects_atomically(
         repo,
@@ -341,14 +359,7 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
             raw_payload=_assignment_payload(10),
         )],
     )
-    call_key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="call",
-        strike=110,
-        expiration_ymd="2026-09-18",
-        )
+    call_key = _call_key()
     persist_trade_event_objects_atomically(
         repo,
         [TradeEvent(
@@ -410,26 +421,10 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
 
 def test_unproven_multiplier_creates_visible_blocked_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload={},
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload={})
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10,
-            raw_payload=_assignment_payload(10),
-        )],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
 
     assert result["created"] is True
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
@@ -452,26 +447,10 @@ def test_unbound_resolver_multiplier_creates_visible_blocked_child(
     payload,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload=payload,
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload=payload)
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10,
-            raw_payload=_assignment_payload(10),
-        )],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
 
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
     assert len(repo.list_wheel_events(account="lx")) == 1
@@ -482,26 +461,10 @@ def test_unbound_resolver_multiplier_creates_visible_blocked_child(
 
 def test_bound_resolver_multiplier_creates_wheel_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload=_resolver_multiplier_payload("put-open"),
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload=_resolver_multiplier_payload("put-open"))
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10,
-            raw_payload=_assignment_payload(10),
-        )],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
 
     assert result["wheel_event_id"]
     assert "wheel_manual_review_reason" not in result
@@ -509,33 +472,11 @@ def test_bound_resolver_multiplier_creates_wheel_child(tmp_path) -> None:
 
 def test_arbitrary_multiplier_source_is_not_trusted(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [
-            _put_event(
-                event_id="put-open",
-                event_type="open",
-                multiplier=10,
-                raw_payload=_trusted_multiplier_payload(
-                    "put-open",
-                    multiplier_source="broker",
-                ),
-            )
-        ],
-    )
+    _persist_put_open(repo, multiplier=10,
+                      raw_payload=_trusted_multiplier_payload( "put-open", multiplier_source="broker", ))
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [
-            _put_event(
-                event_id="put-assignment",
-                event_type="assignment",
-                multiplier=10,
-                raw_payload=_assignment_payload(10),
-            )
-        ],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
 
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
     assert len(repo.list_wheel_events(account="lx")) == 1
@@ -561,18 +502,7 @@ def test_fractional_multiplier_is_rejected_before_assignment(tmp_path) -> None:
 
 def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [
-            _put_event(
-                event_id="put-open",
-                event_type="open",
-                multiplier=100,
-                contracts=2,
-                raw_payload=_trusted_multiplier_payload("put-open"),
-            )
-        ],
-    )
+    _persist_put_open(repo, multiplier=100, raw_payload=_trusted_multiplier_payload("put-open"), contracts=2)
     _open_activation(repo)
     persist_trade_event_objects_atomically(
         repo,
@@ -587,14 +517,7 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
         ],
     )
     lot_id = "assigned-stock-put-assignment"
-    call_key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="call",
-        strike=110,
-        expiration_ymd="2026-09-18",
-        )
+    call_key = _call_key()
     persist_trade_event_objects_atomically(
         repo,
         [
@@ -674,26 +597,10 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
 
 def test_unproven_assignment_fee_creates_visible_blocked_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload=_trusted_multiplier_payload("put-open"),
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload=_trusted_multiplier_payload("put-open"))
     _open_activation(repo)
 
-    result = persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10,
-            raw_payload=_assignment_payload(10, actual_fee=False),
-        )],
-    )[0].to_dict()
+    result = _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10, actual_fee=False))
 
     assert result["created"] is True
     assert result["wheel_manual_review_reason"] == "assignment_cash_facts_unavailable"
@@ -705,15 +612,7 @@ def test_unproven_assignment_fee_creates_visible_blocked_child(tmp_path) -> None
 
 def test_broker_assignment_refreshes_wheel_evidence_after_fee_sync(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [_put_event(
-            event_id="put-open",
-            event_type="open",
-            multiplier=10,
-            raw_payload={},
-        )],
-    )
+    _persist_put_open(repo, multiplier=10, raw_payload={})
     _open_activation(repo)
     persist_trade_event_objects_atomically(
         repo,

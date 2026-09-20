@@ -76,6 +76,18 @@ def _opend_fetch_config() -> dict[str, Any]:
     }
 
 
+def _symbol_cfg(symbol: str = "AAPL") -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+    }
+
+
+def _inprocess_kwargs(tmp_path: Any, **overrides: Any) -> dict[str, Any]:
+    return {"base": tmp_path, "shared_required": tmp_path / "required_data",
+            "opend_fetch_cfg": _opend_fetch_config(), "batch_cfg": _batch_config(), **overrides}
+
+
 def _batch_config() -> SimpleNamespace:
     return SimpleNamespace(
         market_snapshot=200,
@@ -153,18 +165,8 @@ def test_inprocess_structured_connection_failures_close_and_rebuild_gateway(
     monkeypatch.setattr(prefetch, "fetch_symbol", _fetch_symbol)
     _patch_source_snapshot_writes(monkeypatch)
 
-    symbol_cfg = {
-        "symbol": "AAPL",
-        "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-    }
     for _ in range(2):
-        result = prefetch._fetch_one_inprocess(
-            symbol_cfg,
-            base=tmp_path,
-            shared_required=tmp_path / "required_data",
-            opend_fetch_cfg=_opend_fetch_config(),
-            batch_cfg=_batch_config(),
-        )
+        result = prefetch._fetch_one_inprocess(_symbol_cfg(), **_inprocess_kwargs(tmp_path))
         assert result["ok"] is False
 
     assert len(built) == 1
@@ -222,16 +224,7 @@ def test_artifact_failure_follows_typed_provider_success_without_health_failure(
     _patch_source_snapshot_writes(monkeypatch)
 
     result = prefetch._fetch_one_inprocess(
-        {
-            "symbol": "AAPL",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-        },
-        base=tmp_path,
-        shared_required=tmp_path / "required_data",
-        opend_fetch_cfg=_opend_fetch_config(),
-        batch_cfg=_batch_config(),
-        expected_fetch_contract={},
-    )
+        _symbol_cfg(), **_inprocess_kwargs(tmp_path, expected_fetch_contract={}))
 
     assert result["ok"] is False
     assert events == [

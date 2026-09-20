@@ -49,16 +49,21 @@ def _call(payload, monkeypatch, response):
         return _Response(response)
 
     monkeypatch.setattr(portfolio.urllib.request, "urlopen", fake_urlopen)
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
+    definition = _tool("portfolio_query")
     data, warnings, meta = definition.call(payload)
     return data, warnings, meta, seen
 
 
-def test_portfolio_tools_share_one_pure_read_toolset() -> None:
-    definition = get_tool_definition("portfolio_query")
-
+def _tool(name: str):
+    """Look up a registered tool definition, failing the test when it is absent."""
+    definition = get_tool_definition(name)
     assert definition is not None
+    return definition
+
+
+def test_portfolio_tools_share_one_pure_read_toolset() -> None:
+    definition = _tool("portfolio_query")
+
     assert definition.is_pure_read() is True
     assert definition.side_effects == ()
     assert definition.requires_confirm is False
@@ -88,8 +93,7 @@ def test_portfolio_query_disabled_never_opens_transport(monkeypatch) -> None:
         lambda *_args, **_kwargs: calls.append(True),
     )
 
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
+    definition = _tool("portfolio_query")
     with pytest.raises(AgentToolError) as raised:
         definition.call({"view": "health"})
 
@@ -110,9 +114,8 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
         "query_portfolio_assignment_scenario",
         lambda accounts: {**expected, "scope": {**expected["scope"], "accounts": list(accounts)}},
     )
-    definition = get_tool_definition("portfolio_assignment_scenario")
+    definition = _tool("portfolio_assignment_scenario")
 
-    assert definition is not None
     assert definition.is_pure_read() is True
     assert definition.safe_default_input == {}
     assert definition.input_json_schema()["required"] == ["accounts"]
@@ -198,50 +201,42 @@ def test_portfolio_query_maps_supported_views_to_get_endpoints(monkeypatch, payl
     assert seen["request"].get_method() == "GET"
 
 
-def test_portfolio_query_rejects_non_loopback_service_url(monkeypatch) -> None:
-    monkeypatch.setenv("PORTFOLIO_SERVICE_URL", "http://portfolio.internal:8765")
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
+@pytest.mark.parametrize(
+    ("payload", "service_url", "match", "code"),
+    [
+        ({"view": "health"}, "http://portfolio.internal:8765", "loopback", "CONFIG_ERROR"),
+        ({"view": "health", "service_url": "http://127.0.0.1:9999"}, None, "endpoint fields", "INPUT_ERROR"),
+        ({"view": "holdings"}, None, "account is required", "INPUT_ERROR"),
+    ],
+    ids=["non-loopback-service-url", "model-provided-endpoint-field", "account-required-for-scoped-view"],
+)
+def test_portfolio_query_rejects_invalid_request_before_transport(monkeypatch, payload, service_url, match, code) -> None:
+    if service_url is not None:
+        monkeypatch.setenv("PORTFOLIO_SERVICE_URL", service_url)
+    definition = _tool("portfolio_query")
 
-    with pytest.raises(AgentToolError, match="loopback") as exc_info:
+    with pytest.raises(AgentToolError, match=match) as exc_info:
+        definition.call(payload)
+
+    assert exc_info.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("response", "match", "code"),
+    [
+        ({"success": False, "error": "missing holdings table"}, "missing holdings table", "PORTFOLIO_MANAGEMENT_UNAVAILABLE"),
+        (b"not-json", "invalid JSON", "PORTFOLIO_MANAGEMENT_INCOMPATIBLE"),
+    ],
+    ids=["service-reported-failure", "invalid-json-body"],
+)
+def test_portfolio_query_converts_bad_response_to_agent_tool_error(monkeypatch, response, match, code) -> None:
+    definition = _tool("portfolio_query")
+    monkeypatch.setattr(portfolio.urllib.request, "urlopen", lambda request, timeout: _Response(response))
+
+    with pytest.raises(AgentToolError, match=match) as exc_info:
         definition.call({"view": "health"})
 
-    assert exc_info.value.code == "CONFIG_ERROR"
-
-
-def test_portfolio_query_rejects_model_provided_endpoint_fields() -> None:
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
-
-    with pytest.raises(AgentToolError, match="endpoint fields") as exc_info:
-        definition.call({"view": "health", "service_url": "http://127.0.0.1:9999"})
-
-    assert exc_info.value.code == "INPUT_ERROR"
-
-
-def test_portfolio_query_requires_account_for_account_scoped_views() -> None:
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
-
-    with pytest.raises(AgentToolError, match="account is required") as exc_info:
-        definition.call({"view": "holdings"})
-
-    assert exc_info.value.code == "INPUT_ERROR"
-
-
-def test_portfolio_query_converts_service_failure_to_agent_tool_error(monkeypatch) -> None:
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
-    monkeypatch.setattr(
-        portfolio.urllib.request,
-        "urlopen",
-        lambda request, timeout: _Response({"success": False, "error": "missing holdings table"}),
-    )
-
-    with pytest.raises(AgentToolError, match="missing holdings table") as exc_info:
-        definition.call({"view": "health"})
-
-    assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_UNAVAILABLE"
+    assert exc_info.value.code == code
 
 
 @pytest.mark.parametrize(
@@ -253,8 +248,7 @@ def test_portfolio_query_converts_service_failure_to_agent_tool_error(monkeypatc
     ],
 )
 def test_portfolio_query_converts_transport_failures_to_agent_tool_error(monkeypatch, failure) -> None:
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
+    definition = _tool("portfolio_query")
 
     def fail(request, timeout):
         raise failure
@@ -265,18 +259,6 @@ def test_portfolio_query_converts_transport_failures_to_agent_tool_error(monkeyp
         definition.call({"view": "health"})
 
     assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_UNAVAILABLE"
-
-
-def test_portfolio_query_rejects_invalid_json(monkeypatch) -> None:
-    definition = get_tool_definition("portfolio_query")
-    assert definition is not None
-    monkeypatch.setattr(portfolio.urllib.request, "urlopen", lambda request, timeout: _Response(b"not-json"))
-
-    with pytest.raises(AgentToolError, match="invalid JSON") as exc_info:
-        definition.call({"view": "health"})
-
-    assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_INCOMPATIBLE"
-
 
 
 def _bridge_facts(account: str, *, end_date: str = "2026-07-16") -> dict:
@@ -311,8 +293,7 @@ def test_portfolio_cash_bridge_reports_cash_facts_not_onboarded_without_http(mon
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("HTTP must not be called")),
     )
 
-    definition = get_tool_definition("portfolio_cash_bridge")
-    assert definition is not None
+    definition = _tool("portfolio_cash_bridge")
     data, warnings, meta = definition.call(
         {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx"]}
     )
@@ -325,9 +306,8 @@ def test_portfolio_cash_bridge_reports_cash_facts_not_onboarded_without_http(mon
 
 @pytest.mark.parametrize("tool_name", ["portfolio_pnl_bridge", "portfolio_cash_bridge"])
 def test_primary_portfolio_bridges_are_pure_read_and_require_explicit_scope(tool_name) -> None:
-    definition = get_tool_definition(tool_name)
+    definition = _tool(tool_name)
 
-    assert definition is not None
     assert definition.is_pure_read() is True
     assert definition.side_effects == ()
     assert definition.requires_confirm is False
@@ -338,10 +318,8 @@ def test_primary_portfolio_bridges_are_pure_read_and_require_explicit_scope(tool
 
 
 def test_primary_bridges_use_only_their_authoritative_sources(monkeypatch) -> None:
-    pnl = get_tool_definition("portfolio_pnl_bridge")
-    cash = get_tool_definition("portfolio_cash_bridge")
-    assert pnl is not None
-    assert cash is not None
+    pnl = _tool("portfolio_pnl_bridge")
+    cash = _tool("portfolio_cash_bridge")
     calls = []
 
     def fake_capital(*, account, period, as_of_month):
@@ -372,8 +350,7 @@ def test_primary_bridges_use_only_their_authoritative_sources(monkeypatch) -> No
 
 
 def test_cash_bridge_is_unavailable_without_opening_transport(monkeypatch) -> None:
-    definition = get_tool_definition("portfolio_cash_bridge")
-    assert definition is not None
+    definition = _tool("portfolio_cash_bridge")
 
     monkeypatch.setattr(
         portfolio.urllib.request,

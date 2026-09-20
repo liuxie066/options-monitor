@@ -48,6 +48,48 @@ _INPUT_HASHES = {
     "current_scale": "9a735acf87602227578eee35c7f3a336db59f107ab11ec4e072cc1773dcb2270",
     "current_state_10x": "4c81c6e53d4a0bfac8d4074f8691c3d516ac1df37a0646b8f0ab8b0de0e2063d",
 }
+_LEGACY_SECTION_NAMES = (
+    "ledger_projection",
+    "broker_cash",
+    "broker_positions",
+    "cash_occupation",
+)
+
+
+def _current_scale_kwargs() -> dict:
+    return generate_fixture("current_scale")["builder_kwargs"]
+
+
+def _legacy_section_facts(sections: dict) -> dict:
+    return {name: deepcopy(sections[name]["facts"]) for name in _LEGACY_SECTION_NAMES}
+
+
+def _unavailable_completeness() -> dict:
+    return {
+        "status": "unavailable",
+        "reason_codes": ["legacy_comparison:unavailable"],
+    }
+
+
+def _profile(**overrides) -> dict:  # type: ignore[no-untyped-def]
+    return run_profile("current_scale", warmups=0, repetitions=1, **overrides)
+
+
+def _verified(snapshot: dict, *, expected_run_id: str, expected_account: str, reference_payloads: dict) -> dict:
+    return verify_runtime_portfolio_snapshot(
+        snapshot,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        reference_payloads=reference_payloads,
+    )
+
+
+def _published(base, snapshot: dict, reference_payloads: dict):  # type: ignore[no-untyped-def]
+    return publish_runtime_portfolio_snapshot(
+        base=base,
+        snapshot=snapshot,
+        reference_payloads=reference_payloads,
+    )
 
 
 def _owner_assembly_kwargs() -> dict:
@@ -202,10 +244,8 @@ def test_deterministic_profiles_pin_input_hash_shape_and_size() -> None:
     for profile, snapshot in snapshots.items():
         fixture = fixtures[profile]
         assert snapshot == build_runtime_portfolio_snapshot(**fixture["builder_kwargs"])
-        assert snapshot == verify_runtime_portfolio_snapshot(
-            snapshot,
-            expected_run_id="fixture-runtime-0001",
-            expected_account="acct_fixture",
+        assert snapshot == _verified(
+            snapshot, expected_run_id="fixture-runtime-0001", expected_account="acct_fixture",
             reference_payloads=fixture["builder_kwargs"]["reference_payloads"],
         )
 
@@ -217,10 +257,8 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
 
     assert snapshot["status"] == "trusted"
     assert snapshot["legacy_comparison"]["status"] == "matched"
-    assert snapshot == verify_runtime_portfolio_snapshot(
-        snapshot,
-        expected_run_id=assembly["run_id"],
-        expected_account=assembly["account"],
+    assert snapshot == _verified(
+        snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
     )
 
@@ -242,28 +280,17 @@ def test_runtime_snapshot_preserves_prepared_owner_binding() -> None:
     assert binding["relpath"] == (
         "state/prepared_option_positions_context.json"
     )
-    assert snapshot == verify_runtime_portfolio_snapshot(
-        snapshot,
-        expected_run_id=assembly["run_id"],
-        expected_account=assembly["account"],
+    assert snapshot == _verified(
+        snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
     )
 
 
 def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
-    fixture = generate_fixture("current_scale")
-    kwargs = fixture["builder_kwargs"]
+    kwargs = _current_scale_kwargs()
     snapshot = build_runtime_portfolio_snapshot(**kwargs)
-    path = publish_runtime_portfolio_snapshot(
-        base=tmp_path,
-        snapshot=snapshot,
-        reference_payloads=kwargs["reference_payloads"],
-    )
-    adopted = publish_runtime_portfolio_snapshot(
-        base=tmp_path,
-        snapshot=snapshot,
-        reference_payloads=kwargs["reference_payloads"],
-    )
+    path = _published(tmp_path, snapshot, kwargs["reference_payloads"])
+    adopted = _published(tmp_path, snapshot, kwargs["reference_payloads"])
 
     assert path == adopted
     assert path.read_bytes() == canonical_json_bytes(snapshot)
@@ -279,15 +306,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
     assert canonical_json_bytes({"值": 1, "a": 1.25}) == canonical_json_bytes({"a": 1.25, "值": 1})
 
     changed_sections = deepcopy(kwargs["sections"])
-    legacy = {
-        name: deepcopy(changed_sections[name]["facts"])
-        for name in (
-            "ledger_projection",
-            "broker_cash",
-            "broker_positions",
-            "cash_occupation",
-        )
-    }
+    legacy = _legacy_section_facts(changed_sections)
     comparison = compare_runtime_portfolio_snapshot(
         sections=changed_sections,
         chosen_results=kwargs["chosen_results"],
@@ -295,10 +314,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
         legacy_chosen_results=kwargs["chosen_results"],
         ledger_shadow_status="unavailable",
     )
-    unavailable = {
-        "status": "unavailable",
-        "reason_codes": ["legacy_comparison:unavailable"],
-    }
+    unavailable = _unavailable_completeness()
     changed_sections["ledger_projection"]["completeness"] = unavailable
     owners = deepcopy(changed_sections["source_status"]["facts"])
     owners["ledger_projection"]["completeness"] = unavailable
@@ -312,11 +328,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
     )
     assert conflicting["status"] == "data_unavailable"
     with pytest.raises(AccountRunConfigError) as conflict:
-        publish_runtime_portfolio_snapshot(
-            base=tmp_path,
-            snapshot=conflicting,
-            reference_payloads=kwargs["reference_payloads"],
-        )
+        _published(tmp_path, conflicting, kwargs["reference_payloads"])
     assert conflict.value.code == "ACCOUNT_RUN_STATE_CONFLICT"
 
 
@@ -333,8 +345,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
     ],
 )
 def test_verifier_rejects_tampered_trust_boundaries(case: str) -> None:
-    fixture = generate_fixture("current_scale")
-    kwargs = fixture["builder_kwargs"]
+    kwargs = _current_scale_kwargs()
     snapshot = build_runtime_portfolio_snapshot(**kwargs)
     candidate = deepcopy(snapshot)
     references = dict(kwargs["reference_payloads"])
@@ -357,26 +368,15 @@ def test_verifier_rejects_tampered_trust_boundaries(case: str) -> None:
         candidate["unexpected"] = True
 
     with pytest.raises(RuntimePortfolioSnapshotError):
-        verify_runtime_portfolio_snapshot(
-            candidate,
-            expected_run_id=expected_run,
-            expected_account=expected_account,
+        _verified(
+            candidate, expected_run_id=expected_run, expected_account=expected_account,
             reference_payloads=references,
         )
 
 
 def test_shadow_mismatch_is_bounded_metadata_and_fails_closed() -> None:
-    fixture = generate_fixture("current_scale")
-    kwargs = fixture["builder_kwargs"]
-    legacy = {
-        name: deepcopy(kwargs["sections"][name]["facts"])
-        for name in (
-            "ledger_projection",
-            "broker_cash",
-            "broker_positions",
-            "cash_occupation",
-        )
-    }
+    kwargs = _current_scale_kwargs()
+    legacy = _legacy_section_facts(kwargs["sections"])
     legacy["broker_cash"]["filters"] = {"market": "hk"}
     comparison = compare_runtime_portfolio_snapshot(
         sections=kwargs["sections"],
@@ -397,10 +397,7 @@ def test_shadow_mismatch_is_bounded_metadata_and_fails_closed() -> None:
         "compact_sha256",
     }
     sections = deepcopy(kwargs["sections"])
-    unavailable = {
-        "status": "unavailable",
-        "reason_codes": ["legacy_comparison:unavailable"],
-    }
+    unavailable = _unavailable_completeness()
     sections["ledger_projection"]["completeness"] = unavailable
     owners = deepcopy(sections["source_status"]["facts"])
     owners["ledger_projection"]["completeness"] = unavailable
@@ -415,8 +412,7 @@ def test_shadow_mismatch_is_bounded_metadata_and_fails_closed() -> None:
 
 
 def test_loader_rejects_invalid_present_artifact_without_fallback(tmp_path) -> None:
-    fixture = generate_fixture("current_scale")
-    references = fixture["builder_kwargs"]["reference_payloads"]
+    references = _current_scale_kwargs()["reference_payloads"]
     write_account_run_state_bytes_once_safely(
         base=tmp_path,
         run_id="fixture-runtime-0001",
@@ -440,8 +436,7 @@ def test_canonical_encoder_rejects_non_finite_numbers() -> None:
 
 
 def test_policy_bearing_source_freshness_cannot_drift_from_owner() -> None:
-    fixture = generate_fixture("current_scale")
-    kwargs = fixture["builder_kwargs"]
+    kwargs = _current_scale_kwargs()
     sections = deepcopy(kwargs["sections"])
     owners = deepcopy(sections["source_status"]["facts"])
     owners["required_data"]["freshness"] = {
@@ -456,7 +451,7 @@ def test_policy_bearing_source_freshness_cannot_drift_from_owner() -> None:
 
 
 def test_current_decision_cannot_self_promote_completeness() -> None:
-    kwargs = generate_fixture("current_scale")["builder_kwargs"]
+    kwargs = _current_scale_kwargs()
     sections = deepcopy(kwargs["sections"])
     ledger = sections["ledger_projection"]
     facts = deepcopy(ledger["facts"])
@@ -476,7 +471,7 @@ def test_current_decision_cannot_self_promote_completeness() -> None:
 
 @pytest.mark.parametrize("case", ["foreign_account", "duplicate_json", "chosen_split"])
 def test_replay_bundle_drift_fails_closed(case: str) -> None:
-    kwargs = generate_fixture("current_scale")["builder_kwargs"]
+    kwargs = _current_scale_kwargs()
     bindings = deepcopy(kwargs["replay_bindings"])
     chosen = deepcopy(kwargs["chosen_results"])
     payloads = dict(kwargs["reference_payloads"])
@@ -504,7 +499,7 @@ def test_replay_bundle_drift_fails_closed(case: str) -> None:
 
 
 def test_benchmark_gate_measures_valid_path_and_faults() -> None:
-    receipt = run_profile("current_scale", warmups=0, repetitions=1)
+    receipt = _profile()
     assert benchmark_exit_code(receipt) == 0
     assert receipt["violations"] == []
     assert receipt["forbidden_history_structural_reference_count"] == 0
@@ -518,18 +513,8 @@ def test_benchmark_gate_measures_valid_path_and_faults() -> None:
         relpath = chosen["owner_snapshots"][0]["relpath"]
         builder_kwargs["reference_payloads"][relpath] = b"{}"
 
-    owner_fault = run_profile(
-        "current_scale",
-        warmups=0,
-        repetitions=1,
-        fixture_mutator=owner_drift,
-    )
-    history_fault = run_profile(
-        "current_scale",
-        warmups=0,
-        repetitions=1,
-        executable_probe=lambda: ledger_api.preview_current_decision_projection_oracle(),
-    )
+    owner_fault = _profile(fixture_mutator=owner_drift)
+    history_fault = _profile(executable_probe=lambda: ledger_api.preview_current_decision_projection_oracle())
     assert benchmark_exit_code(owner_fault) == 1
     assert "fixture_owner_validators_passed" in owner_fault["violations"]
     assert benchmark_exit_code(history_fault) == 1

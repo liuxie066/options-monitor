@@ -34,25 +34,31 @@ def _make_http_error(status: int, body: str | bytes | None):
     return FakeHTTPError()
 
 
+def _token_body(token: str) -> bytes:
+    return json.dumps({"code": 0, "tenant_access_token": token, "expire": 7200}).encode("utf-8")
+
+
+class _FakeResp:
+    """Minimal stand-in for the response object feishu_bitable reads."""
+
+    def __init__(self, body: bytes = _token_body("token-app_a")):
+        self._body = body
+        self.status = 200
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 def test_http_json_retries_on_429_then_succeeds() -> None:
     from src.infrastructure import feishu_bitable as fb
 
     ok_body = json.dumps({"code": 0, "msg": "ok", "data": {"x": 1}}).encode("utf-8")
-
-    class FakeResp:
-        def __init__(self, body: bytes):
-            self._body = body
-            self.status = 200
-
-        def read(self):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
     err_body = json.dumps({"code": 99991400, "msg": "rate limit"})
     fake_429 = _make_http_error(429, err_body)
 
@@ -62,7 +68,7 @@ def test_http_json_retries_on_429_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise fake_429
-        return FakeResp(ok_body)
+        return _FakeResp(ok_body)
 
     with patch("urllib.request.urlopen", side_effect=side_effect), patch("time.sleep") as sleep_mock:
         res = fb.http_json("GET", "https://example.com", retry_max_attempts=3)
@@ -93,28 +99,14 @@ def test_get_tenant_access_token_cache_and_force_refresh() -> None:
     # reset cache
     fb._token_cache.clear()
 
-    body1 = json.dumps({"code": 0, "tenant_access_token": "t1", "expire": 7200}).encode("utf-8")
-    body2 = json.dumps({"code": 0, "tenant_access_token": "t2", "expire": 7200}).encode("utf-8")
-
-    class FakeResp:
-        def __init__(self, body: bytes):
-            self._body = body
-            self.status = 200
-
-        def read(self):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
+    body1 = _token_body("t1")
+    body2 = _token_body("t2")
 
     calls = {"n": 0}
 
     def side_effect(*args, **kwargs):
         calls["n"] += 1
-        return FakeResp(body1 if calls["n"] == 1 else body2)
+        return _FakeResp(body1 if calls["n"] == 1 else body2)
 
     with patch("urllib.request.urlopen", side_effect=side_effect):
         t = fb.get_tenant_access_token("a", "s")
@@ -134,24 +126,10 @@ def test_get_tenant_access_token_isolated_by_app_credentials() -> None:
 
     fb._token_cache.clear()
 
-    class FakeResp:
-        def __init__(self, token: str):
-            self._body = json.dumps({"code": 0, "tenant_access_token": token, "expire": 7200}).encode("utf-8")
-            self.status = 200
-
-        def read(self):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
     def side_effect(req, **_kwargs):
         body = json.loads(req.data.decode("utf-8"))
         app_id = body["app_id"]
-        return FakeResp(f"token-{app_id}")
+        return _FakeResp(_token_body(f"token-{app_id}"))
 
     with patch("urllib.request.urlopen", side_effect=side_effect) as urlopen_mock:
         assert fb.get_tenant_access_token("app_a", "secret_a") == "token-app_a"
@@ -166,26 +144,12 @@ def test_get_tenant_access_token_reuses_cache_under_concurrency() -> None:
 
     fb._token_cache.clear()
 
-    class FakeResp:
-        def __init__(self):
-            self._body = json.dumps({"code": 0, "tenant_access_token": "token-app_a", "expire": 7200}).encode("utf-8")
-            self.status = 200
-
-        def read(self):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
     results: list[str] = []
 
     def _worker() -> None:
         results.append(fb.get_tenant_access_token("app_a", "secret_a"))
 
-    with patch("urllib.request.urlopen", return_value=FakeResp()) as urlopen_mock:
+    with patch("urllib.request.urlopen", return_value=_FakeResp()) as urlopen_mock:
         threads = [threading.Thread(target=_worker) for _ in range(4)]
         for thread in threads:
             thread.start()
@@ -245,21 +209,6 @@ def test_http_json_logs_warn_retries_when_rate_limited() -> None:
     from src.infrastructure import feishu_bitable as fb
 
     ok_body = json.dumps({"code": 0, "msg": "ok", "data": {"x": 1}}).encode("utf-8")
-
-    class FakeResp:
-        def __init__(self, body: bytes):
-            self._body = body
-            self.status = 200
-
-        def read(self):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
     err_body = json.dumps({"code": 99991400, "msg": "rate limit"})
     fake_429 = _make_http_error(429, err_body)
 
@@ -273,7 +222,7 @@ def test_http_json_logs_warn_retries_when_rate_limited() -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise fake_429
-        return FakeResp(ok_body)
+        return _FakeResp(ok_body)
 
     with patch("urllib.request.urlopen", side_effect=side_effect), patch("time.sleep"):
         res = fb.http_json("GET", "https://example.com/path?a=b", retry_max_attempts=3, log_fn=logger)

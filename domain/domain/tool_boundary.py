@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from typing import Any
+from domain.domain.canonical_schema import utc_now_iso as _utc_now_iso
 
 
 SCHEMA_VERSION_V1 = "1.0"
@@ -14,10 +15,6 @@ SCHEMA_KIND_SUBPROCESS_ADAPTER = "subprocess_adapter"
 
 ALLOWED_TOOL_STATUS = {"cached", "fetched", "error", "skipped"}
 ALLOWED_SUBPROCESS_STATUS = {"ok", "error"}
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def validate_schema_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:

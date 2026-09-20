@@ -25,7 +25,12 @@ from src.application.channels.wechat_clawbot.notification import (
 )
 from src.application.secret_resolver import resolve_feishu_bot_config
 from src.infrastructure.feishu_bitable import FeishuError, FeishuPermanentError
-from src.infrastructure.feishu_bot import FEISHU_SEND_TOO_LARGE, send_message, send_post_message
+from src.infrastructure.feishu_bot import (
+    FEISHU_SEND_TOO_LARGE,
+    permanent_failure_allows_fallback,
+    send_message,
+    send_post_message,
+)
 
 
 @dataclass(frozen=True)
@@ -203,13 +208,7 @@ def send_feishu_app_message(
 
 
 def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
-    response = exc.response if isinstance(exc.response, dict) else {}
-    if str(response.get("local_error_code") or "") == FEISHU_SEND_TOO_LARGE:
-        return True
-    http_status = response.get("http_status")
-    return exc.code is not None or (
-        isinstance(http_status, int) and 400 <= http_status <= 499
-    )
+    return permanent_failure_allows_fallback(exc, too_large_code=FEISHU_SEND_TOO_LARGE)
 
 
 def _first_int(*values: Any) -> int | None:

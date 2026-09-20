@@ -9,8 +9,28 @@ def _plan(account_messages: dict[str, str]) -> SimpleNamespace:
     return SimpleNamespace(channel="wechat_clawbot", target="wechat:ops", account_messages=account_messages)
 
 
-def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fake_runlog_factory) -> None:
+def _execute(*, send_fn, normalize_fn, **overrides):
+    """``execute_per_account_delivery`` with the keyword defaults shared by every case.
+
+    ``on_failure`` is deliberately absent: the account-overrides case relies on
+    the production default, so each case that wants a callback passes its own.
+    """
     mod = importlib.import_module("src.application.scheduled_notification")
+    defaults = {
+        "delivery_batch": _plan({"lx": "msg-lx", "sy": "msg-sy"}),
+        "audit_fn": lambda *_args, **_kwargs: None,
+        "safe_data_fn": lambda payload: payload,
+        "failure_fields_builder": lambda **_kwargs: {},
+        "base": "/tmp/base",
+    }
+    return mod.execute_per_account_delivery(
+        send_fn=send_fn,
+        normalize_fn=normalize_fn,
+        **{**defaults, **overrides},
+    )
+
+
+def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fake_runlog_factory) -> None:
     normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
     events: list[dict] = []
     audit_events: list[dict] = []
@@ -23,17 +43,13 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
             return SimpleNamespace(returncode=0, stdout='{"result":{"messageId":"lx-1"}}', stderr="")
         return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
 
-    out = mod.execute_per_account_delivery(
-        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
+    out = _execute(
+        send_fn=_send_fn,
+        normalize_fn=normalize,
         run_id="run-1",
         runlog=fake_runlog_factory(events),
         audit_fn=lambda kind, action, **kwargs: audit_events.append({"kind": kind, "action": action, **kwargs}),
-        safe_data_fn=lambda payload: payload,
-        send_fn=_send_fn,
-        normalize_fn=normalize,
-        failure_fields_builder=lambda **_kwargs: {},
         on_failure=lambda error_code: failure_codes.append(error_code),
-        base="/tmp/base",
         failure_stage="send_wechat_clawbot_message",
     )
 
@@ -58,7 +74,6 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
 
 
 def test_execute_per_account_delivery_retries_clawbot_unconfirmed_without_upstream_id(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     normalize = importlib.import_module(
         "src.application.channels.wechat_clawbot.notification"
     ).normalize_wechat_clawbot_send_output
@@ -85,17 +100,13 @@ def test_execute_per_account_delivery_retries_clawbot_unconfirmed_without_upstre
             "idempotency_key": idempotency_key,
         }
 
-    out = mod.execute_per_account_delivery(
+    out = _execute(
+        send_fn=_send_fn,
+        normalize_fn=normalize,
         delivery_batch=_plan({"sy": "msg-sy"}),
         run_id="run-clawbot-unconfirmed",
         runlog=fake_runlog_factory([]),
-        audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
-        send_fn=_send_fn,
-        normalize_fn=normalize,
-        failure_fields_builder=lambda **_kwargs: {},
         on_failure=lambda _error_code: None,
-        base="/tmp/base",
         failure_stage="send_wechat_clawbot_message",
         sleep_fn=lambda seconds: sleep_calls.append(seconds),
     )
@@ -111,7 +122,6 @@ def test_execute_per_account_delivery_retries_clawbot_unconfirmed_without_upstre
 
 
 def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
     failure_codes: list[str] = []
     send_calls: list[dict] = []
@@ -120,17 +130,12 @@ def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory)
         send_calls.append(dict(kwargs))
         return SimpleNamespace(returncode=2, stdout="", stderr="boom")
 
-    out = mod.execute_per_account_delivery(
-        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
-        run_id="run-2",
-        runlog=fake_runlog_factory([]),
-        audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
+    out = _execute(
         send_fn=_send_failure,
         normalize_fn=normalize,
-        failure_fields_builder=lambda **_kwargs: {},
+        run_id="run-2",
+        runlog=fake_runlog_factory([]),
         on_failure=lambda error_code: failure_codes.append(error_code),
-        base="/tmp/base",
         sleep_fn=lambda _seconds: None,
     )
 
@@ -147,24 +152,18 @@ def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory)
 
 
 def test_execute_per_account_delivery_preserves_success_order(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
 
     def _send_fn(*, message: str, **_kwargs):
         suffix = message.split("-")[-1]
         return SimpleNamespace(returncode=0, stdout=f'{{"messageId":"{suffix}"}}', stderr="")
 
-    out = mod.execute_per_account_delivery(
-        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
-        run_id="run-3",
-        runlog=fake_runlog_factory([]),
-        audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
+    out = _execute(
         send_fn=_send_fn,
         normalize_fn=normalize,
-        failure_fields_builder=lambda **_kwargs: {},
+        run_id="run-3",
+        runlog=fake_runlog_factory([]),
         on_failure=lambda _error_code: None,
-        base="/tmp/base",
     )
 
     assert out.sent_accounts == ["lx", "sy"]
@@ -172,7 +171,6 @@ def test_execute_per_account_delivery_preserves_success_order(fake_runlog_factor
 
 
 def test_execute_per_account_delivery_sends_one_message_per_account_to_same_target(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     seen_targets: list[str] = []
     seen_messages: list[str] = []
 
@@ -182,12 +180,7 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
         suffix = message.split("-")[-1]
         return SimpleNamespace(returncode=0, stdout="", stderr="", raw={"http_status": 200, "response_json": {"code": 0, "data": {"message_id": suffix}}})
 
-    out = mod.execute_per_account_delivery(
-        delivery_batch=SimpleNamespace(channel="wechat_clawbot", target="wechat:ops", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
-        run_id="run-4",
-        runlog=fake_runlog_factory([]),
-        audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
+    out = _execute(
         send_fn=_send_fn,
         normalize_fn=lambda *, send_result: {
             "ok": bool(((send_result.get("response_json") or {}).get("data") or {}).get("message_id")),
@@ -196,9 +189,9 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
             "returncode": 0,
             "message_id": ((send_result.get("response_json") or {}).get("data") or {}).get("message_id"),
         },
-        failure_fields_builder=lambda **_kwargs: {},
+        run_id="run-4",
+        runlog=fake_runlog_factory([]),
         on_failure=lambda _error_code: None,
-        base="/tmp/base",
     )
 
     assert out.sent_accounts == ["lx", "sy"]
@@ -207,7 +200,6 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
 
 
 def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
     events: list[dict] = []
     audit_events: list[dict] = []
@@ -218,17 +210,13 @@ def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_fa
             raise subprocess.TimeoutExpired(cmd=["wechat_clawbot", "message", "send"], timeout=60)
         return SimpleNamespace(returncode=0, stdout='{"message_id":"sy-1"}', stderr="")
 
-    out = mod.execute_per_account_delivery(
-        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
+    out = _execute(
+        send_fn=_send_fn,
+        normalize_fn=normalize,
         run_id="run-timeout",
         runlog=fake_runlog_factory(events),
         audit_fn=lambda kind, action, **kwargs: audit_events.append({"kind": kind, "action": action, **kwargs}),
-        safe_data_fn=lambda payload: payload,
-        send_fn=_send_fn,
-        normalize_fn=normalize,
-        failure_fields_builder=lambda **_kwargs: {},
         on_failure=lambda error_code: failure_codes.append(error_code),
-        base="/tmp/base",
     )
 
     assert out.attempted_accounts == ["lx", "sy"]
@@ -247,7 +235,6 @@ def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_fa
 
 
 def test_execute_per_account_delivery_uses_account_specific_logical_overrides(fake_runlog_factory) -> None:
-    mod = importlib.import_module("src.application.scheduled_notification")
     adapter = importlib.import_module("src.application.notification_delivery_adapter")
     seen: dict[str, str] = {}
 
@@ -259,12 +246,7 @@ def test_execute_per_account_delivery_uses_account_specific_logical_overrides(fa
         "lx": "daily-brief:US:2026-07-19:lx:full:" + "a" * 64,
         "sy": "daily-brief:US:2026-07-19:sy:full:" + "b" * 64,
     }
-    out = mod.execute_per_account_delivery(
-        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
-        run_id="run-overrides",
-        runlog=fake_runlog_factory([]),
-        audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
+    out = _execute(
         send_fn=_send_fn,
         normalize_fn=lambda *, send_result: {
             "ok": True,
@@ -273,8 +255,8 @@ def test_execute_per_account_delivery_uses_account_specific_logical_overrides(fa
             "returncode": 0,
             "message_id": send_result.stdout,
         },
-        failure_fields_builder=lambda **_kwargs: {},
-        base="/tmp/base",
+        run_id="run-overrides",
+        runlog=fake_runlog_factory([]),
         idempotency_keys_by_account=keys,
     )
 

@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 
+def _notify(account, notify_decision_by_account, scheduler_decision):
+    from domain.domain.multi_tick import decide_should_notify
+
+    return decide_should_notify(
+        account=account,
+        notify_decision_by_account=notify_decision_by_account,
+        scheduler_decision=scheduler_decision,
+    )
+
 
 def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> None:
     from domain.domain.multi_tick import apply_scan_run_decision
@@ -17,61 +26,21 @@ def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> No
 
 
 def test_decide_should_notify_prefers_account_and_fallbacks_to_scheduler_fields() -> None:
-    from domain.domain.multi_tick import decide_should_notify
+    assert _notify('lx', {'lx': True}, {'should_notify': False, 'is_notify_window_open': False}) is True
 
-    assert (
-        decide_should_notify(
-            account='lx',
-            notify_decision_by_account={'lx': True},
-            scheduler_decision={'should_notify': False, 'is_notify_window_open': False},
-        )
-        is True
-    )
+    assert _notify('sy', {}, {'should_notify': True, 'is_notify_window_open': False}) is False
 
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={},
-            scheduler_decision={'should_notify': True, 'is_notify_window_open': False},
-        )
-        is False
-    )
+    assert _notify('sy', {}, {'should_notify': True}) is True
 
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={},
-            scheduler_decision={'should_notify': True},
-        )
-        is True
-    )
-
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={'sy': False},
-            scheduler_decision={'is_notify_window_open': True},
-        )
-        is False
-    )
+    assert _notify('sy', {'sy': False}, {'is_notify_window_open': True}) is False
 
 
 def test_decide_should_notify_accepts_scheduler_view() -> None:
     from domain.domain.engine import SchedulerDecisionView
-    from domain.domain.multi_tick import decide_should_notify
 
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={},
-            scheduler_decision=SchedulerDecisionView(
-                should_run_scan=True,
-                is_notify_window_open=True,
-                reason='ok',
-            ),
-        )
-        is True
-    )
+    assert _notify(
+        'sy', {}, SchedulerDecisionView(should_run_scan=True, is_notify_window_open=True, reason='ok'),
+    ) is True
 
 
 def test_decide_should_notify_normalizes_scheduler_payload_via_dto_builder() -> None:
@@ -84,69 +53,33 @@ def test_decide_should_notify_normalizes_scheduler_payload_via_dto_builder() -> 
             'is_notify_window_open': True,
             'reason': 'normalized',
         }
-        assert (
-            mod.decide_should_notify(
-                account='sy',
-                notify_decision_by_account={},
-                scheduler_decision={'should_notify': False, 'is_notify_window_open': False},
-            )
-            is True
-        )
+        assert _notify(
+            'sy', {}, {'should_notify': False, 'is_notify_window_open': False},
+        ) is True
     finally:
         mod.build_scheduler_decision_dto = old_build_scheduler_decision_dto  # type: ignore[assignment]
 
 
 def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
-    from domain.domain.multi_tick import decide_should_notify
-
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={'sy': {'should_notify': True}},
-            scheduler_decision={'is_notify_window_open': False},
-        )
-        is True
-    )
+    assert _notify('sy', {'sy': {'should_notify': True}}, {'is_notify_window_open': False}) is True
 
 
 def test_decide_should_notify_treats_none_account_payload_as_scheduler_fallback() -> None:
-    from domain.domain.multi_tick import decide_should_notify
-
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={'sy': None},
-            scheduler_decision={'should_notify': True},
-        )
-        is True
-    )
+    assert _notify('sy', {'sy': None}, {'should_notify': True}) is True
 
 
 def test_decide_should_notify_prefers_canonical_account_field_over_legacy() -> None:
-    from domain.domain.multi_tick import decide_should_notify
-
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={'sy': {'is_notify_window_open': False, 'should_notify': True}},
-            scheduler_decision={'is_notify_window_open': True},
-        )
-        is False
-    )
+    assert _notify(
+        'sy', {'sy': {'is_notify_window_open': False, 'should_notify': True}}, {'is_notify_window_open': True},
+    ) is False
 
 
 def test_decide_should_notify_accepts_account_scheduler_view() -> None:
     from domain.domain.engine import AccountSchedulerDecisionView
-    from domain.domain.multi_tick import decide_should_notify
 
-    assert (
-        decide_should_notify(
-            account='sy',
-            notify_decision_by_account={'sy': AccountSchedulerDecisionView(is_notify_window_open=True)},
-            scheduler_decision={'is_notify_window_open': False},
-        )
-        is True
-    )
+    assert _notify(
+        'sy', {'sy': AccountSchedulerDecisionView(is_notify_window_open=True)}, {'is_notify_window_open': False},
+    ) is True
 
 
 def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
@@ -161,14 +94,7 @@ def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
                 cls(is_notify_window_open=bool(scheduler_decision.is_notify_window_open)),
             )[1]
         )
-        assert (
-            mod.decide_should_notify(
-                account='sy',
-                notify_decision_by_account={'sy': {'should_notify': True}},
-                scheduler_decision={'is_notify_window_open': True},
-            )
-            is True
-        )
+        assert _notify('sy', {'sy': {'should_notify': True}}, {'is_notify_window_open': True}) is True
         assert calls['n'] == 1
     finally:
         mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
@@ -192,14 +118,7 @@ def test_decide_should_notify_routes_account_payload_via_account_scheduler_dto_b
                 cls(is_notify_window_open=bool(payload.get('is_notify_window_open'))),
             )[1]
         )
-        assert (
-            mod.decide_should_notify(
-                account='sy',
-                notify_decision_by_account={'sy': True},
-                scheduler_decision={'is_notify_window_open': False},
-            )
-            is True
-        )
+        assert _notify('sy', {'sy': True}, {'is_notify_window_open': False}) is True
         assert seen['raw'] is True
         assert bool(getattr(seen['scheduler_decision'], 'is_notify_window_open', False)) is False
     finally:
@@ -217,21 +136,12 @@ def test_decide_should_notify_uses_canonical_account_dto_without_rebuilding() ->
             calls.__setitem__('n', calls['n'] + 1),
             {'is_notify_window_open': False},
         )[1]
-        assert (
-            mod.decide_should_notify(
-                account='sy',
-                notify_decision_by_account={
-                    'sy': {
-                        'schema_kind': 'scheduler_decision_account',
-                        'schema_version': '1.0',
-                        'is_notify_window_open': True,
-                        'should_notify': False,
-                    }
-                },
-                scheduler_decision={'is_notify_window_open': False},
-            )
-            is True
-        )
+        assert _notify(
+            'sy',
+            {'sy': {'schema_kind': 'scheduler_decision_account', 'schema_version': '1.0',
+                    'is_notify_window_open': True, 'should_notify': False}},
+            {'is_notify_window_open': False},
+        ) is True
         assert calls['n'] == 0
     finally:
         mod.build_account_scheduler_decision_dto = old_build_account_scheduler_decision_dto  # type: ignore[assignment]
@@ -247,20 +157,12 @@ def test_decide_should_notify_uses_canonical_scheduler_dto_without_rebuilding() 
             calls.__setitem__('n', calls['n'] + 1),
             {'is_notify_window_open': False},
         )[1]
-        assert (
-            mod.decide_should_notify(
-                account='sy',
-                notify_decision_by_account={},
-                scheduler_decision={
-                    'schema_kind': 'scheduler_decision',
-                    'schema_version': '1.0',
-                    'should_run_scan': True,
-                    'is_notify_window_open': True,
-                    'reason': 'ok',
-                },
-            )
-            is True
-        )
+        assert _notify(
+            'sy',
+            {},
+            {'schema_kind': 'scheduler_decision', 'schema_version': '1.0',
+             'should_run_scan': True, 'is_notify_window_open': True, 'reason': 'ok'},
+        ) is True
         assert calls['n'] == 0
     finally:
         mod.build_scheduler_decision_dto = old_build_scheduler_decision_dto  # type: ignore[assignment]

@@ -39,28 +39,57 @@ def _stock_contract_key() -> ContractKey:
         )
 
 
+def _legacy_event(**overrides: object) -> LegacyTradeEvent:
+    base = {
+        "event_id": "deal-open-1",
+        "source_type": "broker_trade_event",
+        "source_name": "opend_push",
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 1,
+        "price": 1.0,
+        "strike": 150.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-06-19",
+        "currency": "USD",
+        "trade_time_ms": 1000,
+        "order_id": "order-1",
+        "multiplier_source": "payload",
+        "raw_payload": {"deal_id": "deal-open-1"},
+    }
+    base.update(overrides)
+    return LegacyTradeEvent(**base)
+
+
+def _canonical_event_kwargs(**overrides: object) -> dict:
+    base = {
+        "event_id": "open-aapl",
+        "event_type": "open",
+        "event_time_ms": 1000,
+        "contract_key": _contract_key(),
+        "contracts": 1,
+        "price": 1.0,
+        "currency": "USD",
+        "source": "manual",
+        "multiplier": 100,
+        "lot_id": "lot_open-aapl",
+        # §9.2 step 3: the short put side travels as the trade side.
+        "raw_payload": {"side": "sell"},
+    }
+    base.update(overrides)
+    return base
+
+
+def _canonical_event(**overrides: object) -> TradeEvent:
+    return TradeEvent(**_canonical_event_kwargs(**overrides))
+
+
 def test_event_codec_rejects_legacy_trade_event_payloads() -> None:
-    legacy = LegacyTradeEvent(
-        event_id="deal-open-1",
-        source_type="broker_trade_event",
-        source_name="opend_push",
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=1,
-        price=1.0,
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        currency="USD",
-        trade_time_ms=1000,
-        order_id="order-1",
-        multiplier_source="payload",
-        raw_payload={"deal_id": "deal-open-1"},
-    )
+    legacy = _legacy_event()
 
     with pytest.raises(ValueError) as _caught:
         encode_trade_event_for_storage(legacy.to_legacy_dict())
@@ -70,20 +99,7 @@ def test_event_codec_rejects_legacy_trade_event_payloads() -> None:
 
 def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    event = TradeEvent(
-        event_id="open-aapl",
-        event_type="open",
-        event_time_ms=1000,
-        contract_key=_contract_key(),
-        contracts=1,
-        price=1.0,
-        currency="USD",
-        source="manual",
-        multiplier=100,
-        lot_id="lot_open-aapl",
-        # §9.2 step 3: the short put side travels as the trade side.
-        raw_payload={"side": "sell"},
-    )
+    event = _canonical_event()
 
     assert repo.upsert_trade_event(event) is True
     assert repo.upsert_trade_event(event) is False
@@ -104,39 +120,14 @@ def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_
 
 
 def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
-    canonical_open = TradeEvent(
-        event_id="open-aapl",
-        event_type="open",
-        event_time_ms=1000,
-        contract_key=_contract_key(),
-        contracts=2,
-        price=1.0,
-        currency="USD",
-        source="manual",
-        multiplier=100,
-        lot_id="lot_open-aapl",
-        # §9.2 step 3: the short put side travels as the trade side.
-        raw_payload={"side": "sell"},
-    ).to_dict()
-    legacy_close = LegacyTradeEvent(
+    canonical_open = _canonical_event(contracts=2).to_dict()
+    legacy_close = _legacy_event(
         event_id="close-aapl",
-        source_type="broker_trade_event",
-        source_name="opend_push",
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
         side="buy",
         position_effect="close",
-        contracts=1,
         price=0.5,
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        currency="USD",
         trade_time_ms=2000,
         order_id="order-2",
-        multiplier_source="payload",
         raw_payload={"record_id": "lot_open-aapl"},
     )
 
@@ -152,18 +143,12 @@ def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
 
 
 def test_encode_rejects_event_values_that_cannot_form_a_publishable_lot() -> None:
-    base = {
-        "event_id": "invalid-open",
-        "event_type": "open",
-        "event_time_ms": 1000,
-        "contract_key": _contract_key(),
-        "contracts": 1,
-        "price": 1.0,
-        "currency": "USD",
-        "source": "test",
-        "multiplier": 100,
-        "lot_id": "lot-invalid-open",
-    }
+    base = _canonical_event_kwargs(
+        event_id="invalid-open",
+        source="test",
+        lot_id="lot-invalid-open",
+        raw_payload={},
+    )
     invalid_variants = [
         {"event_time_ms": 0},
         {"price": float("nan")},
@@ -182,28 +167,16 @@ def test_encode_rejects_event_values_that_cannot_form_a_publishable_lot() -> Non
 
 
 def test_codec_persists_asset_type_and_quantity_unit() -> None:
-    option_event = TradeEvent(
+    option_event = _canonical_event(
         event_id="open-aapl-opt",
-        event_type="open",
-        event_time_ms=1000,
-        contract_key=_contract_key(),
-        contracts=1,
-        price=1.0,
-        currency="USD",
-        source="manual",
-        multiplier=100,
         lot_id="lot_open-aapl-opt",
         asset_type="option",
     )
-    stock_event = TradeEvent(
+    stock_event = _canonical_event(
         event_id="open-aapl-stk",
-        event_type="open",
-        event_time_ms=1000,
         contract_key=_stock_contract_key(),
         contracts=50,
         price=45.5,
-        currency="USD",
-        source="manual",
         lot_id="lot_open-aapl-stk",
         asset_type="stock",
     )
@@ -246,15 +219,11 @@ def test_legacy_canonical_payload_without_asset_type_defaults_to_option() -> Non
 
 def test_sqlite_repo_stores_stock_event_asset_type_and_quantity_unit(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    stock_event = TradeEvent(
+    stock_event = _canonical_event(
         event_id="open-aapl-stk",
-        event_type="open",
-        event_time_ms=1000,
         contract_key=_stock_contract_key(),
         contracts=50,
         price=45.5,
-        currency="USD",
-        source="manual",
         lot_id="lot_open-aapl-stk",
         asset_type="stock",
     )

@@ -20,22 +20,16 @@ from tests.service_deploy_test_support import (
     _create_fake_venv_python_at,
     _fake_git_cache_materialize,
     _fake_pi_runtime_prepare,
+    _render_bundle,
 )
 
-def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
 
+def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
@@ -71,8 +65,6 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
 def test_render_systemd_bundle_omits_retired_ai_evidence_collector(
     tmp_path: Path,
 ) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
@@ -91,31 +83,16 @@ def test_render_systemd_bundle_omits_retired_ai_evidence_collector(
         "    symbols: [NVDA]\n",
         encoding="utf-8",
     )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_yaml=config_yaml,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], config_yaml=config_yaml)
     paths = {item["relative_path"] for item in bundle["files"]}
     assert "systemd/options-monitor-ai-evidence-collector.service" not in paths
     assert "systemd/options-monitor-ai-evidence-collector.timer" not in paths
     assert "ai_evidence_collector" not in str(bundle)
 
 def test_render_systemd_bundle_service_hardening() -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = Path("/tmp/om-svc-repo")
     runtime = Path("/tmp/om-svc-runtime")
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us", "hk"],
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us", "hk"])
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
     tick_hk = files["systemd/options-monitor-tick-hk.service"]["content"]
@@ -157,23 +134,12 @@ def test_render_systemd_bundle_service_hardening() -> None:
 @pytest.mark.parametrize("delivery", [None, "load-credential-encrypted", "runtime-files"])
 def test_secure_bundle_strips_secret_env_from_all_services(tmp_path: Path, delivery: str | None) -> None:
     from src.application.secret_store import legacy_secret_env_names
-    from src.application.service_deploy import render_service_bundle
-
     env_file = tmp_path / "ordinary.env"
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=tmp_path,
-        runtime_root=tmp_path / "runtime",
-        accounts=["lx"],
-        markets=["us", "hk"],
-        env_file=env_file,
-        include_feishu_ws=True,
-        feishu_ws_config_key="us",
-        include_quality_monitoring=True,
-        include_auto_upgrade=True,
+    bundle = _render_bundle(
+        tmp_path, tmp_path / "runtime", accounts=["lx"], markets=["us", "hk"], env_file=env_file,
+        include_feishu_ws=True, feishu_ws_config_key="us", include_quality_monitoring=True, include_auto_upgrade=True,
         include_secret_credentials=delivery is not None,
-        secret_credential_delivery=delivery or "load-credential-encrypted",
-        deploy_user="liuxie",
+        secret_credential_delivery=delivery or "load-credential-encrypted", deploy_user="liuxie",
     )
     services = [item for item in bundle["files"] if item["kind"] == "systemd_service"]
     assert services
@@ -192,23 +158,14 @@ def test_secure_bundle_strips_secret_env_from_all_services(tmp_path: Path, deliv
 
 
 def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
     from src.application.secret_store import legacy_secret_env_names
 
     repo = tmp_path / "repo"
     repo.mkdir()
     store = tmp_path / "credstore.encrypted"
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=tmp_path / "runtime",
-        accounts=["lx"],
-        markets=["us"],
-        include_opend=True,
-        include_feishu_ws=True,
-        include_quality_monitoring=True,
-        include_secret_credentials=True,
-        secret_credential_store_root=store,
+    bundle = _render_bundle(
+        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, include_feishu_ws=True,
+        include_quality_monitoring=True, include_secret_credentials=True, secret_credential_store_root=store,
         deploy_user="liuxie",
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -261,19 +218,10 @@ def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: 
     repo = tmp_path / "repo"
     repo.mkdir()
     store = tmp_path / "credstore.encrypted"
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=tmp_path / "runtime",
-        accounts=["lx"],
-        markets=["us"],
-        include_opend=True,
-        include_feishu_ws=True,
-        include_quality_monitoring=True,
-        include_secret_credentials=True,
-        secret_credential_delivery="runtime-files",
-        secret_credential_store_root=store,
-        deploy_user="liuxie",
+    bundle = _render_bundle(
+        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, include_feishu_ws=True,
+        include_quality_monitoring=True, include_secret_credentials=True, secret_credential_delivery="runtime-files",
+        secret_credential_store_root=store, deploy_user="liuxie",
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
@@ -319,15 +267,9 @@ def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: 
     assert secret_profile["legacy_env_materializer_enabled"] is False
 
 def test_render_rejects_unknown_secret_credential_delivery(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     with pytest.raises(ValueError, match="secret credential delivery"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=tmp_path,
-            markets=["us"],
-            include_secret_credentials=True,
-            secret_credential_delivery="automatic-fallback",
+        _render_bundle(
+            tmp_path, markets=["us"], include_secret_credentials=True, secret_credential_delivery="automatic-fallback",
         )
 
 @pytest.mark.parametrize(
@@ -353,53 +295,26 @@ def test_render_runtime_credentials_rejects_systemd_exec_injection_inputs(
     store_root: str,
     error: str,
 ) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     with pytest.raises(ValueError, match=error):
-        render_service_bundle(
-            target="systemd",
-            repo_root=tmp_path,
-            markets=["us"],
-            include_secret_credentials=True,
-            secret_credential_delivery="runtime-files",
-            secret_credential_store_root=store_root,
-            deploy_user=deploy_user,
+        _render_bundle(
+            tmp_path, markets=["us"], include_secret_credentials=True, secret_credential_delivery="runtime-files",
+            secret_credential_store_root=store_root, deploy_user=deploy_user,
         )
 
 def test_render_native_credentials_rejects_systemd_store_expansion(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     with pytest.raises(ValueError, match="systemd expansion"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=tmp_path,
-            markets=["us"],
-            include_secret_credentials=True,
-            secret_credential_delivery="load-credential-encrypted",
-            secret_credential_store_root="/etc/credstore.%n",
+        _render_bundle(
+            tmp_path, markets=["us"], include_secret_credentials=True,
+            secret_credential_delivery="load-credential-encrypted", secret_credential_store_root="/etc/credstore.%n",
         )
 
 def test_render_rejects_mixed_legacy_and_per_unit_secret_modes(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     with pytest.raises(ValueError, match="mutually exclusive"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=tmp_path,
-            markets=["us"],
-            include_secret_credentials=True,
-            include_feishu_agent_credential=True,
-        )
+        _render_bundle(tmp_path, markets=["us"], include_secret_credentials=True, include_feishu_agent_credential=True)
 
 def test_render_launchd_bundle_rejects_feishu_agent_credential(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     with pytest.raises(ValueError, match="supported only for systemd"):
-        render_service_bundle(
-            target="launchd",
-            repo_root=tmp_path,
-            include_feishu_agent_credential=True,
-        )
+        _render_bundle(tmp_path, target="launchd", include_feishu_agent_credential=True)
 
 def test_systemd_unit_rejects_non_positive_start_timeout(tmp_path: Path) -> None:
     from src.application.service_deploy import _systemd_unit
@@ -414,18 +329,10 @@ def test_systemd_unit_rejects_non_positive_start_timeout(tmp_path: Path) -> None
         )
 
 def test_render_launchd_runtime_status_uses_bounded_journal_summary(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    bundle = _render_bundle(repo, runtime, target="launchd", accounts=["lx"], markets=["us"])
     files = {item["relative_path"]: item for item in bundle["files"]}
     content = files["launchd/com.options-monitor.runtime-status.plist"]["content"]
     assert str(repo / "om") in content
@@ -434,23 +341,13 @@ def test_render_launchd_runtime_status_uses_bounded_journal_summary(tmp_path: Pa
     assert str(repo / "om-agent") not in content
 
 def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     opend = tmp_path / "futu-opend" / "current"
     repo.mkdir()
     opend.mkdir(parents=True)
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_opend=True,
-        opend_root=opend,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], include_opend=True, opend_root=opend)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     opend_service = files["systemd/options-monitor-opend.service"]["content"]
@@ -475,8 +372,6 @@ def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None
     assert "systemctl enable --now options-monitor-opend.service" in bundle["commands"]["enable"]
 
 def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     opend_lx = tmp_path / "futu-opend-lx" / "current"
@@ -514,14 +409,8 @@ def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path:
         encoding="utf-8",
     )
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx", "sy"], markets=["us"], config_paths={"us": config_path}, include_opend=True,
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -562,8 +451,6 @@ def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path:
     assert "systemctl enable --now options-monitor-opend-sy.service" in bundle["commands"]["enable"]
 
 def test_render_systemd_bundle_uses_account_opend_services_from_yaml_config(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     opend_lx = tmp_path / "futu-opend-lx" / "current"
@@ -602,15 +489,7 @@ markets:
         encoding="utf-8",
     )
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_yaml=config_yaml,
-        include_opend=True,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx", "sy"], markets=["us"], config_yaml=config_yaml, include_opend=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     assert "systemd/options-monitor-opend-lx.service" in files
@@ -635,8 +514,6 @@ markets:
     ]
 
 def test_render_systemd_bundle_rejects_invalid_opend_config_json(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     config_path = tmp_path / "config.us.json"
@@ -645,30 +522,16 @@ def test_render_systemd_bundle_rejects_invalid_opend_config_json(tmp_path: Path)
     config_path.write_text("{invalid json", encoding="utf-8")
 
     with pytest.raises(ValueError, match="failed to parse service config JSON"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            runtime_root=runtime,
-            accounts=["lx", "sy"],
-            markets=["us"],
-            config_paths={"us": config_path},
-            include_opend=True,
+        _render_bundle(
+            repo, runtime, accounts=["lx", "sy"], markets=["us"], config_paths={"us": config_path}, include_opend=True,
         )
 
 def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["hk"],
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["hk"])
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-hk.service"]["content"]
@@ -680,23 +543,15 @@ def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_p
     assert "OnBootSec=2min" not in tick_timer
 
 def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    default_bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, markets=["us"])
+    default_bundle = _render_bundle(repo, runtime, markets=["us"])
     default_files = {item["relative_path"]: item for item in default_bundle["files"]}
     assert "systemd/options-monitor-upgrade.service" not in default_files
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        include_auto_upgrade=True,
-    )
+    bundle = _render_bundle(repo, runtime, markets=["us"], include_auto_upgrade=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     service = files["systemd/options-monitor-upgrade.service"]["content"]
@@ -711,29 +566,15 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
 
 def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    default_bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us", "hk"],
-    )
+    default_bundle = _render_bundle(repo, runtime, markets=["us", "hk"])
     default_files = {item["relative_path"]: item for item in default_bundle["files"]}
     assert "systemd/options-monitor-quality-http.service" not in default_files
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us", "hk"],
-        include_opend=True,
-        include_quality_monitoring=True,
-    )
+    bundle = _render_bundle(repo, runtime, markets=["us", "hk"], include_opend=True, include_quality_monitoring=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     assert not any("quality-http" in name for name in files)
@@ -769,34 +610,19 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     }
 
 def test_render_launchd_bundle_rejects_quality_monitoring(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "current"
     repo.mkdir()
 
     with pytest.raises(ValueError, match="supported only for systemd"):
-        render_service_bundle(
-            target="launchd",
-            repo_root=repo,
-            include_quality_monitoring=True,
-        )
+        _render_bundle(repo, target="launchd", include_quality_monitoring=True)
 
 def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     config_yaml = runtime / "config.yaml"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us", "hk"],
-        config_yaml=config_yaml,
-        include_auto_upgrade=True,
-    )
+    bundle = _render_bundle(repo, runtime, markets=["us", "hk"], config_yaml=config_yaml, include_auto_upgrade=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
@@ -810,8 +636,6 @@ def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> 
     assert profile["config_paths"]["hk"] == str(runtime / "config.hk.json")
 
 def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
@@ -819,14 +643,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     config_yaml = runtime / "config.yaml"
     config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        config_yaml=config_yaml,
-        include_feishu_ws=True,
-    )
+    bundle = _render_bundle(repo, runtime, markets=["us"], config_yaml=config_yaml, include_feishu_ws=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     service = files["systemd/options-monitor-feishu-ws.service"]["content"]
@@ -852,8 +669,6 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
 
 def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
@@ -861,14 +676,8 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     config_yaml = runtime / "config.yaml"
     config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        config_yaml=config_yaml,
-        include_wechat_clawbot=True,
-        wechat_clawbot_label="ops",
+    bundle = _render_bundle(
+        repo, runtime, markets=["us"], config_yaml=config_yaml, include_wechat_clawbot=True, wechat_clawbot_label="ops",
         wechat_clawbot_allowed_senders="wechat:user_1",
     )
 
@@ -903,23 +712,13 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     assert "systemctl enable --now options-monitor-wechat-clawbot.service" in bundle["commands"]["enable"]
 
 def test_render_wechat_clawbot_requires_explicit_allowed_senders(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     repo.mkdir()
 
     with pytest.raises(ValueError, match="wechat_clawbot_allowed_senders"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            runtime_root=tmp_path / "runtime",
-            markets=["us"],
-            include_wechat_clawbot=True,
-        )
+        _render_bundle(repo, tmp_path / "runtime", markets=["us"], include_wechat_clawbot=True)
 
 def test_render_wechat_clawbot_can_use_yaml_inbound_allowlist(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
@@ -937,14 +736,7 @@ inbound:
         encoding="utf-8",
     )
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        config_yaml=config_yaml,
-        include_wechat_clawbot=True,
-    )
+    bundle = _render_bundle(repo, runtime, markets=["us"], config_yaml=config_yaml, include_wechat_clawbot=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     service = files["systemd/options-monitor-wechat-clawbot.service"]["content"]
@@ -960,8 +752,6 @@ inbound:
     assert profile["wechat_clawbot"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
 
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     releases = tmp_path / "releases"
     release_dir = releases / "1.2.71"
     release_dir.mkdir(parents=True)
@@ -969,13 +759,7 @@ def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path)
     current.symlink_to(release_dir, target_is_directory=True)
     runtime = tmp_path / "runtime"
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=current,
-        runtime_root=runtime,
-        markets=["hk"],
-        include_auto_upgrade=True,
-    )
+    bundle = _render_bundle(current, runtime, markets=["hk"], include_auto_upgrade=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     upgrade = files["systemd/options-monitor-upgrade.service"]["content"]
@@ -991,19 +775,11 @@ def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path)
     assert profile["config_paths"]["hk"] == str(runtime / "config.hk.json")
 
 def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=tmp_path / "runtime",
-        accounts=["lx"],
-        markets=["us"],
-        deploy_user="ops",
-        deploy_home="/srv/options-home",
+    bundle = _render_bundle(
+        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], deploy_user="ops", deploy_home="/srv/options-home",
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -1020,20 +796,10 @@ def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -
     assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in profile["restart"]["sudoers"]
 
 def test_render_systemd_feishu_ws_sudoers_cover_all_long_running_services(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=tmp_path / "runtime",
-        accounts=["lx"],
-        markets=["us"],
-        deploy_user="ops",
-        include_feishu_ws=True,
-    )
+    bundle = _render_bundle(repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], deploy_user="ops", include_feishu_ws=True)
 
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
 
@@ -1046,19 +812,11 @@ def test_render_systemd_feishu_ws_sudoers_cover_all_long_running_services(tmp_pa
     assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-feishu-ws.service" in profile["restart"]["sudoers"]
 
 def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo with space"
     runtime = tmp_path / "runtime with space"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
@@ -1069,21 +827,12 @@ def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
     assert f'--lock-path "{runtime / "locks" / "tick-us.lock"}"' in tick
 
 def test_render_systemd_bundle_can_reference_environment_file(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     env_file = tmp_path / "etc" / "options-monitor" / "options-monitor.env"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        env_file=env_file,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], env_file=env_file)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
@@ -1096,21 +845,12 @@ def test_render_systemd_bundle_can_reference_environment_file(tmp_path: Path) ->
     assert profile["env_file"] == str(env_file)
 
 def test_render_launchd_bundle_can_reference_environment_file(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     env_file = tmp_path / "Library" / "Application Support" / "options-monitor" / "options-monitor.env"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        env_file=env_file,
-    )
+    bundle = _render_bundle(repo, runtime, target="launchd", accounts=["lx"], markets=["us"], env_file=env_file)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["launchd/com.options-monitor.tick-us.plist"]["content"]
@@ -1124,21 +864,13 @@ def test_render_launchd_bundle_can_reference_environment_file(tmp_path: Path) ->
     assert profile["env_file"] == str(env_file)
 
 def test_render_launchd_channel_services_use_one_data_scope(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        include_feishu_ws=True,
-        include_wechat_clawbot=True,
-        wechat_clawbot_label="ops",
-        wechat_clawbot_allowed_senders="wechat:user_1",
+    bundle = _render_bundle(
+        repo, runtime, target="launchd", markets=["us"], include_feishu_ws=True, include_wechat_clawbot=True,
+        wechat_clawbot_label="ops", wechat_clawbot_allowed_senders="wechat:user_1",
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -1152,19 +884,11 @@ def test_render_launchd_channel_services_use_one_data_scope(tmp_path: Path) -> N
         assert "<string>--config-key</string>" not in service
 
 def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us", "hk"],
-    )
+    bundle = _render_bundle(repo, runtime, target="launchd", accounts=["lx", "sy"], markets=["us", "hk"])
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["launchd/com.options-monitor.tick-hk.plist"]["content"]
@@ -1203,19 +927,11 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     )
 
 def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        markets=["us"],
-        include_auto_upgrade=True,
-    )
+    bundle = _render_bundle(repo, runtime, target="launchd", markets=["us"], include_auto_upgrade=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     upgrade = files["launchd/com.options-monitor.upgrade.plist"]["content"]
@@ -1732,7 +1448,29 @@ def test_service_upgrade_restart_includes_opend_when_profile_declares_it(tmp_pat
         ["systemctl", "restart", "options-monitor-feishu-ws.service"],
     ]
 
-def test_service_upgrade_restart_uses_sudo_fallback_for_legacy_non_root_systemd_profile(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("profile_extras", "expected_command", "expected_source"),
+    (
+        (
+            {},
+            ["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"],
+            "non_root_sudo_fallback",
+        ),
+        (
+            {"restart": {"requires_sudo": False}},
+            ["systemctl", "restart", "options-monitor-trade-intake.service"],
+            "profile.requires_sudo_false",
+        ),
+    ),
+    ids=("legacy-profile-falls-back-to-sudo", "explicit-non-sudo-profile"),
+)
+def test_service_upgrade_restart_resolves_sudo_from_profile(
+    monkeypatch,
+    tmp_path: Path,
+    profile_extras: dict,
+    expected_command: list[str],
+    expected_source: str,
+) -> None:
     from src.application.service_upgrade import _restart_services_from_profile
 
     monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
@@ -1742,6 +1480,7 @@ def test_service_upgrade_restart_uses_sudo_fallback_for_legacy_non_root_systemd_
         json.dumps(
             {
                 "service_provider": "systemd",
+                **profile_extras,
                 "services": [{"name": "options-monitor-trade-intake.service"}],
             }
         ),
@@ -1757,37 +1496,8 @@ def test_service_upgrade_restart_uses_sudo_fallback_for_legacy_non_root_systemd_
     restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
 
     assert restarted == ["options-monitor-trade-intake.service"]
-    assert calls == [["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"]]
-    assert operations[0]["command_source"] == "non_root_sudo_fallback"
-
-def test_service_upgrade_restart_honors_explicit_non_sudo_profile(monkeypatch, tmp_path: Path) -> None:
-    from src.application.service_upgrade import _restart_services_from_profile
-
-    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "service.profile.json").write_text(
-        json.dumps(
-            {
-                "service_provider": "systemd",
-                "restart": {"requires_sudo": False},
-                "services": [{"name": "options-monitor-trade-intake.service"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    calls: list[list[str]] = []
-    operations: list[dict] = []
-
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-
-    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
-
-    assert restarted == ["options-monitor-trade-intake.service"]
-    assert calls == [["systemctl", "restart", "options-monitor-trade-intake.service"]]
-    assert operations[0]["command_source"] == "profile.requires_sudo_false"
+    assert calls == [expected_command]
+    assert operations[0]["command_source"] == expected_source
 
 def test_service_upgrade_materialize_uses_existing_git_cache_fetch(tmp_path: Path) -> None:
     from src.application.service_upgrade import _materialize_release_from_git_cache

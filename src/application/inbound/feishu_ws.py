@@ -48,10 +48,19 @@ from src.infrastructure.feishu_bitable import (
     FeishuRateLimitError,
     FeishuTransientError,
 )
-from src.infrastructure.feishu_bot import FEISHU_REPLY_TOO_LARGE, add_message_reaction, reply_message
+from src.infrastructure.feishu_bot import (
+    FEISHU_REPLY_TOO_LARGE,
+    add_message_reaction,
+    permanent_failure_allows_fallback,
+    reply_message,
+)
 from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available, start_feishu_ws_client
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
+from src.application.channels.reply_decision import public_inbound_summary as _public_inbound_summary
+from src.application.payload_helpers import config_bool as _config_bool
+from src.application.payload_helpers import config_positive_int as _config_positive_int
+from src.application.file_locks import single_instance_lock
 
 
 DEFAULT_FEISHU_REPLY_MAX_CHARS = 3500
@@ -1012,13 +1021,7 @@ def _reply_exception_is_retryable(exc: Exception) -> bool:
 
 
 def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
-    response = exc.response if isinstance(exc.response, dict) else {}
-    if str(response.get("local_error_code") or "") == FEISHU_REPLY_TOO_LARGE:
-        return True
-    http_status = response.get("http_status")
-    return exc.code is not None or (
-        isinstance(http_status, int) and 400 <= http_status <= 499
-    )
+    return permanent_failure_allows_fallback(exc, too_large_code=FEISHU_REPLY_TOO_LARGE)
 
 
 def _inbound_render_route(inbound_result: dict[str, Any]) -> str | None:
@@ -1181,30 +1184,6 @@ def _event_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
-    data = _dict(inbound.get("data"))
-    error = _dict(inbound.get("error"))
-    result = _dict(data.get("inbound_result")) or _dict(data.get("result"))
-    result_data = _dict(result.get("data"))
-    control = _dict(result_data.get("control"))
-    decision = _dict(result_data.get("decision"))
-    assistant = _dict(_dict(result.get("meta")).get("assistant"))
-    return {
-        key: value
-        for key, value in {
-            "ok": bool(inbound.get("ok", False)),
-            "kind": data.get("kind"),
-            "status": data.get("status") or result.get("status"),
-            "intent_name": result.get("intent_name") or control.get("intent_name"),
-            "tool_name": result.get("tool_name") or control.get("tool_name"),
-            "route": result.get("render_route") or assistant.get("route"),
-            "decision_reason": decision.get("reason"),
-            "error_code": error.get("code"),
-        }.items()
-        if value is not None
-    }
-
-
 def _status_only(payload: Any) -> dict[str, Any]:
     source = _dict(payload)
     allowed = {
@@ -1256,21 +1235,6 @@ def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any
     return cfg
 
 
-def _config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bool:
-    if explicit is not None:
-        return bool(explicit)
-    if isinstance(configured, bool):
-        return configured
-    if configured is None:
-        return bool(default)
-    value = str(configured or "").strip().lower()
-    if value in {"1", "true", "yes", "y", "on"}:
-        return True
-    if value in {"0", "false", "no", "n", "off"}:
-        return False
-    return bool(default)
-
-
 def _normalize_ack_reaction(value: Any) -> str:
     emoji_type = str(value or "").strip()
     if not emoji_type:
@@ -1280,42 +1244,10 @@ def _normalize_ack_reaction(value: Any) -> str:
     return emoji_type.upper()
 
 
-def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:
-    raw = explicit if explicit is not None else configured
-    if raw is None or str(raw).strip() == "":
-        raw = default
-    try:
-        value = int(raw)
-    except Exception:
-        value = default
-    return max(1, value)
-
-
 @contextmanager
 def _single_instance_lock(lock_path: str | os.PathLike[str] | None) -> Any:
-    raw = str(lock_path or "").strip()
-    if not raw:
+    with single_instance_lock(
+        lock_path,
+        busy_message="another Feishu WebSocket inbound client is already running",
+    ):
         yield
-        return
-    path = Path(raw).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    try:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise AgentToolError(
-                code="RESOURCE_BUSY",
-                message="another Feishu WebSocket inbound client is already running",
-                details={"lock_path": str(path)},
-            ) from exc
-        yield
-    finally:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .combo_yield import ComboYieldLeg
+from domain.domain.engine.combo_yield import _safe_float
 
 
 CC_LP_DEFAULT_MIN_PUT_DELTA = 0.10
@@ -167,23 +168,6 @@ def cc_lp_rank_key(
 
 def rank_cc_lp_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted((dict(row) for row in rows), key=cc_lp_rank_key)
-
-
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except Exception:
-        return None
-    try:
-        if out != out:
-            return None
-    except Exception:
-        return None
-    return out
 
 
 def _pct_distance(numerator: float, denominator: float) -> float:

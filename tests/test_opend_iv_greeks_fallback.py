@@ -40,6 +40,11 @@ def _payload(value: dict[str, object]) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def _fetch_payload(fetch_symbol: Callable[..., dict[str, object]], tmp_path: Path, *, max_codes: int) -> dict[str, Any]:
+    return _payload(fetch_symbol("NVDA", base_dir=tmp_path, chain_cache=False, snapshot_batch_size=200,
+                                 snapshot_fallback_max_codes=max_codes, snapshot_fallback_batch_size=1))
+
+
 def _chain_rows(count: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for idx in range(count):
@@ -105,14 +110,7 @@ def test_fallback_fills_missing_iv_when_batch_fails(monkeypatch, tmp_path: Path)
 
     fetch_symbol = _setup_common(monkeypatch, tmp_path, gateway=_build_gateway(chain_rows=chain_rows, snapshot_handler=_snapshot_handler))
 
-    payload = _payload(fetch_symbol(
-        "NVDA",
-        base_dir=tmp_path,
-        chain_cache=False,
-        snapshot_batch_size=200,
-        snapshot_fallback_max_codes=100,
-        snapshot_fallback_batch_size=1,
-    ))
+    payload = _fetch_payload(fetch_symbol, tmp_path, max_codes=100)
 
     assert len(payload["rows"]) == 2
     assert all(row["implied_volatility"] == 0.25 for row in payload["rows"])
@@ -138,14 +136,7 @@ def test_fallback_respects_max_codes_budget(monkeypatch, tmp_path: Path) -> None
 
     fetch_symbol = _setup_common(monkeypatch, tmp_path, gateway=_build_gateway(chain_rows=chain_rows, snapshot_handler=_snapshot_handler))
 
-    payload = _payload(fetch_symbol(
-        "NVDA",
-        base_dir=tmp_path,
-        chain_cache=False,
-        snapshot_batch_size=200,
-        snapshot_fallback_max_codes=50,
-        snapshot_fallback_batch_size=1,
-    ))
+    payload = _fetch_payload(fetch_symbol, tmp_path, max_codes=50)
 
     filled = [row for row in payload["rows"] if row["implied_volatility"] is not None]
     assert len(filled) == 50
@@ -166,14 +157,7 @@ def test_fallback_failure_recorded_not_raised(monkeypatch, tmp_path: Path) -> No
 
     fetch_symbol = _setup_common(monkeypatch, tmp_path, gateway=_build_gateway(chain_rows=chain_rows, snapshot_handler=_snapshot_handler))
 
-    payload = _payload(fetch_symbol(
-        "NVDA",
-        base_dir=tmp_path,
-        chain_cache=False,
-        snapshot_batch_size=200,
-        snapshot_fallback_max_codes=100,
-        snapshot_fallback_batch_size=1,
-    ))
+    payload = _fetch_payload(fetch_symbol, tmp_path, max_codes=100)
 
     assert payload["meta"]["status"] == "error"
     assert any(item["error_code"] == "FALLBACK_FAILED" for item in payload["meta"]["snapshot_errors"])
@@ -191,14 +175,7 @@ def test_fallback_disabled_when_max_codes_zero(monkeypatch, tmp_path: Path) -> N
 
     fetch_symbol = _setup_common(monkeypatch, tmp_path, gateway=_build_gateway(chain_rows=chain_rows, snapshot_handler=_snapshot_handler))
 
-    payload = _payload(fetch_symbol(
-        "NVDA",
-        base_dir=tmp_path,
-        chain_cache=False,
-        snapshot_batch_size=200,
-        snapshot_fallback_max_codes=0,
-        snapshot_fallback_batch_size=1,
-    ))
+    payload = _fetch_payload(fetch_symbol, tmp_path, max_codes=0)
 
     assert len(calls) == 1
     assert payload["meta"]["snapshot_fallback_filled"] == 0
@@ -228,14 +205,7 @@ def test_fallback_uses_same_rate_limiter(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(mod, "rate_limited_opend_call", _fake_rate_limited_opend_call)
 
-    payload = _payload(fetch_symbol(
-        "NVDA",
-        base_dir=tmp_path,
-        chain_cache=False,
-        snapshot_batch_size=200,
-        snapshot_fallback_max_codes=3,
-        snapshot_fallback_batch_size=1,
-    ))
+    payload = _fetch_payload(fetch_symbol, tmp_path, max_codes=3)
 
     assert payload["meta"]["snapshot_fallback_filled"] == 3
     assert limiter_calls[0] == "option_expiration"

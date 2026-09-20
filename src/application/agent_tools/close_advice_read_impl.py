@@ -24,6 +24,7 @@ from src.application.quality.gate import QualityGateBlocked, assert_quality_allo
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
+from src.application.payload_helpers import as_float_or_none as _float_or_none
 
 
 CLOSE_ADVICE_CSV = "close_advice.csv"
@@ -1011,15 +1012,6 @@ def _normalize_public_value(key: str, value: Any) -> Any:
 def _float_equal(left: Any, right: float) -> bool:
     value = _float_or_none(left)
     return value is not None and abs(value - float(right)) < 1e-6
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _lower(value: Any) -> str:

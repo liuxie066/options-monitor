@@ -89,6 +89,46 @@ def _position_record(
     }
 
 
+def _long_call_deal(**overrides: object) -> NormalizedTradeDeal:
+    """The unpaired PDD long call this module repeats.
+
+    Call sites name only the fields that differ from that deal.
+    """
+    base: dict[str, object] = {
+        "deal_id": "deal-pdd-long-call",
+        "symbol": "PDD",
+        "option_type": "call",
+        "side": "buy",
+        "position_effect": None,
+        "contracts": 1,
+        "price": 0.73,
+        "strike": 100.0,
+        "expiration_ymd": "2026-07-17",
+        "currency": "USD",
+        "raw_payload": {"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
+    }
+    base.update(overrides)
+    return _deal(**base)
+
+
+def _short_put_deal(**overrides: object) -> NormalizedTradeDeal:
+    """The PDD short put this module opens, in the shapes it repeats."""
+    base: dict[str, object] = {
+        "deal_id": "deal-pdd-short-put",
+        "symbol": "PDD",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 1,
+        "price": 1.5,
+        "strike": 80.0,
+        "expiration_ymd": "2026-07-17",
+        "currency": "USD",
+    }
+    base.update(overrides)
+    return _deal(**base)
+
+
 def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     result = resolve_trade_deal(_deal(), repo=FakeRepo(), state={}, apply_changes=False)
 
@@ -110,19 +150,7 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
 
 def test_resolve_unknown_buy_call_with_companion_put_as_independent_open() -> None:
     repo = FakeRepo([_position_record("lot_pdd_short_put")])
-    deal = _deal(
-        deal_id="deal-pdd-long-call",
-        symbol="PDD",
-        option_type="call",
-        side="buy",
-        position_effect=None,
-        contracts=1,
-        price=0.73,
-        strike=100.0,
-        expiration_ymd="2026-07-17",
-        currency="USD",
-        raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
-    )
+    deal = _long_call_deal()
 
     result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False)
 
@@ -148,14 +176,9 @@ def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
             )
         ]
     )
-    deal = _deal(
+    deal = _long_call_deal(
         deal_id="deal-tch-long-call",
         symbol="TCH",
-        option_type="call",
-        side="buy",
-        position_effect=None,
-        contracts=1,
-        price=0.73,
         strike=520.0,
         expiration_ymd="2026-06-05",
         currency="HKD",
@@ -172,19 +195,7 @@ def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
 
 
 def test_resolve_unknown_buy_call_without_companion_opens_independent_long_call() -> None:
-    deal = _deal(
-        deal_id="deal-pdd-long-call",
-        symbol="PDD",
-        option_type="call",
-        side="buy",
-        position_effect=None,
-        contracts=1,
-        price=0.73,
-        strike=100.0,
-        expiration_ymd="2026-07-17",
-        currency="USD",
-        raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
-    )
+    deal = _long_call_deal()
 
     result = resolve_trade_deal(deal, repo=FakeRepo(), state={}, apply_changes=False)
 
@@ -243,18 +254,7 @@ def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Pa
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     put_result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-pdd-short-put",
-            symbol="PDD",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.5,
-            strike=80.0,
-            expiration_ymd="2026-07-17",
-            currency="USD",
-        ),
+        _short_put_deal(),
         repo=repo,
         state={},
         apply_changes=True,
@@ -262,19 +262,7 @@ def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Pa
     assert put_result.status == "applied"
 
     call_result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-pdd-long-call",
-            symbol="PDD",
-            option_type="call",
-            side="buy",
-            position_effect=None,
-            contracts=1,
-            price=0.73,
-            strike=100.0,
-            expiration_ymd="2026-07-17",
-            currency="USD",
-            raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
-        ),
+        _long_call_deal(),
         repo=repo,
         state={},
         apply_changes=True,
@@ -293,19 +281,7 @@ def test_resolve_sell_put_open_after_long_call_keeps_both_lots_independent(tmp_p
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     call_result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-pdd-long-call",
-            symbol="PDD",
-            option_type="call",
-            side="buy",
-            position_effect=None,
-            contracts=1,
-            price=0.73,
-            strike=100.0,
-            expiration_ymd="2026-07-17",
-            currency="USD",
-            raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
-        ),
+        _long_call_deal(),
         repo=repo,
         state={},
         apply_changes=True,
@@ -313,18 +289,7 @@ def test_resolve_sell_put_open_after_long_call_keeps_both_lots_independent(tmp_p
     assert call_result.status == "applied"
 
     put_result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-pdd-short-put",
-            symbol="PDD",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.5,
-            strike=80.0,
-            expiration_ymd="2026-07-17",
-            currency="USD",
-        ),
+        _short_put_deal(),
         repo=repo,
         state={},
         apply_changes=True,
@@ -477,17 +442,9 @@ def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> Non
 
 
 def test_combo_yield_without_pair_intent_records_independent_long_call() -> None:
-    deal = _deal(
+    deal = _long_call_deal(
         deal_id="deal-combo-call-unpaired",
-        symbol="PDD",
-        option_type="call",
-        side="buy",
-        position_effect=None,
-        contracts=1,
-        price=0.73,
-        strike=100.0,
         expiration_ymd="2026-10-16",
-        currency="USD",
         raw_payload={
             "deal_id": "deal-combo-call-unpaired",
             "code": "US.PDD261016C100000",
@@ -525,17 +482,9 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
     }
 
     put_result = resolve_trade_deal(
-        _deal(
+        _short_put_deal(
             deal_id="deal-pdd-combo-put",
-            symbol="PDD",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.5,
-            strike=80.0,
             expiration_ymd="2026-08-21",
-            currency="USD",
             raw_payload={**pair_payload, "deal_id": "deal-pdd-combo-put"},
         ),
         repo=repo,
@@ -543,17 +492,9 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
         apply_changes=True,
     )
     call_result = resolve_trade_deal(
-        _deal(
+        _long_call_deal(
             deal_id="deal-pdd-combo-call",
-            symbol="PDD",
-            option_type="call",
-            side="buy",
-            position_effect=None,
-            contracts=1,
-            price=0.73,
-            strike=100.0,
             expiration_ymd="2026-10-16",
-            currency="USD",
             raw_payload={
                 **pair_payload,
                 "deal_id": "deal-pdd-combo-call",

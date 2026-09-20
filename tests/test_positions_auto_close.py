@@ -17,24 +17,63 @@ class _FakeRunlog:
         self.events.append(payload)
 
 
+def _write_config(root: Path) -> Path:
+    """Create `root` and drop the `{}` config file the auto-close entrypoint reads."""
+    root.mkdir(parents=True, exist_ok=True)
+    cfg_path = root / "config.hk.json"
+    cfg_path.write_text("{}", encoding="utf-8")
+    return cfg_path
+
+
+def _config(accounts: list[str], *, data_config: str = "portfolio.runtime.json") -> dict[str, Any]:
+    """The `load_config` stub payload shared by the auto-close entrypoint tests."""
+    return {
+        "accounts": accounts,
+        "portfolio": {"data_config": data_config, "broker": "富途"},
+        "option_positions": {"auto_close": {"enabled": True}},
+    }
+
+
+def _maintenance_stub(calls: list[dict[str, Any]], payload: dict[str, Any]):
+    """Record the maintenance kwargs and echo the account back into `payload`."""
+
+    def _run_maintenance(**kwargs):
+        calls.append(dict(kwargs))
+        return {"account": kwargs["account"], **payload}
+
+    return _run_maintenance
+
+
+def _forbidden_receipt(message: str):
+    def _send(**_kwargs):
+        raise AssertionError(message)
+
+    return _send
+
+
+def _maintenance_noop_payload() -> dict[str, Any]:
+    """A zero-work, applied maintenance result, as returned by the real entrypoint."""
+    return {
+        "mode": "applied",
+        "broker": "富途",
+        "positions_checked": 0,
+        "candidates_should_close": 0,
+        "applied_closed": 0,
+        "skipped_already_closed": 0,
+        "errors": [],
+        "applied": [],
+        "summary_text": "",
+    }
+
+
 def test_run_auto_close_expired_processes_config_accounts_and_writes_run_state(monkeypatch, tmp_path: Path) -> None:
     from src.application.positions import auto_close as mod
 
     base = tmp_path / "repo"
-    base.mkdir()
-    cfg_path = base / "config.hk.json"
-    cfg_path.write_text("{}", encoding="utf-8")
+    cfg_path = _write_config(base)
     calls: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(
-        mod,
-        "load_config",
-        lambda **_kwargs: {
-            "accounts": ["lx", "sy"],
-            "portfolio": {"data_config": "portfolio.runtime.json", "broker": "富途"},
-            "option_positions": {"auto_close": {"enabled": True}},
-        },
-    )
+    monkeypatch.setattr(mod, "load_config", lambda **_kwargs: _config(["lx", "sy"]))
 
     def _run_maintenance(**kwargs):
         calls.append(dict(kwargs))
@@ -93,25 +132,23 @@ def test_run_auto_close_expired_no_send_dry_run_attaches_skipped_receipt(monkeyp
     base.mkdir()
     calls: list[dict[str, Any]] = []
 
-    def _run_maintenance(**kwargs):
-        calls.append(dict(kwargs))
-        return {
-            "mode": "dry_run",
-            "account": kwargs["account"],
-            "positions_checked": 1,
-            "candidates_should_close": 1,
-            "applied_closed": 0,
-            "skipped_already_closed": 0,
-            "errors": [],
-            "applied": [],
-            "summary_text": "Auto-close expired positions (grace_days=1)\ncandidates_should_close: 1\nERRORS: 0",
-        }
-
-    monkeypatch.setattr(mod, "run_expired_position_maintenance_for_account", _run_maintenance)
+    dry_run_payload = {
+        "mode": "dry_run",
+        "positions_checked": 1,
+        "candidates_should_close": 1,
+        "applied_closed": 0,
+        "skipped_already_closed": 0,
+        "errors": [],
+        "applied": [],
+        "summary_text": "Auto-close expired positions (grace_days=1)\ncandidates_should_close: 1\nERRORS: 0",
+    }
+    monkeypatch.setattr(
+        mod, "run_expired_position_maintenance_for_account", _maintenance_stub(calls, dry_run_payload)
+    )
     monkeypatch.setattr(
         mod,
         "safe_send_auto_close_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-send must not send receipt")),
+        _forbidden_receipt("no-send must not send receipt"),
     )
 
     result = mod.run_auto_close_expired(
@@ -151,15 +188,7 @@ def test_run_auto_close_expired_reports_projection_refresh_failure(monkeypatch, 
         def count_trade_events(self) -> int:
             return 1
 
-    monkeypatch.setattr(
-        mod,
-        "load_config",
-        lambda **_kwargs: {
-            "accounts": ["lx"],
-            "portfolio": {"data_config": str(data_config), "broker": "富途"},
-            "option_positions": {"auto_close": {"enabled": True}},
-        },
-    )
+    monkeypatch.setattr(mod, "load_config", lambda **_kwargs: _config(["lx"], data_config=str(data_config)))
     monkeypatch.setattr(maintenance, "open_position_ledger", lambda *_args, **_kwargs: FakeRepo())
     monkeypatch.setattr(
         maintenance,
@@ -196,55 +225,21 @@ def test_auto_close_expired_main_writes_runtime_outputs_outside_release(monkeypa
 
     release = tmp_path / "releases" / "1.2.157"
     runtime = tmp_path / "runtime"
-    cfg_path = runtime / "config.hk.json"
-    runtime.mkdir(parents=True)
-    cfg_path.write_text("{}", encoding="utf-8")
+    cfg_path = _write_config(runtime)
     calls: list[dict[str, Any]] = []
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
     monkeypatch.setattr(mod, "__file__", str(release / "src" / "application" / "positions" / "auto_close.py"))
+    monkeypatch.setattr(mod, "load_config", lambda **_kwargs: _config(["lx"]))
     monkeypatch.setattr(
-        mod,
-        "load_config",
-        lambda **_kwargs: {
-            "accounts": ["lx"],
-            "portfolio": {"data_config": "portfolio.runtime.json", "broker": "富途"},
-            "option_positions": {"auto_close": {"enabled": True}},
-        },
+        mod, "run_expired_position_maintenance_for_account",
+        _maintenance_stub(calls, _maintenance_noop_payload()),
+    )
+    monkeypatch.setattr(
+        mod, "safe_send_auto_close_receipt", _forbidden_receipt("--no-send must not send receipt")
     )
 
-    def _run_maintenance(**kwargs):
-        calls.append(dict(kwargs))
-        return {
-            "mode": "applied",
-            "account": kwargs["account"],
-            "broker": "富途",
-            "positions_checked": 0,
-            "candidates_should_close": 0,
-            "applied_closed": 0,
-            "skipped_already_closed": 0,
-            "errors": [],
-            "applied": [],
-            "summary_text": "",
-        }
-
-    monkeypatch.setattr(mod, "run_expired_position_maintenance_for_account", _run_maintenance)
-    monkeypatch.setattr(
-        mod,
-        "safe_send_auto_close_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("--no-send must not send receipt")),
-    )
-
-    rc = mod.main([
-        "--config",
-        str(cfg_path),
-        "--accounts",
-        "lx",
-        "--apply",
-        "--yes",
-        "--no-send",
-        "--quiet",
-    ])
+    rc = mod.main(["--config", str(cfg_path), "--accounts", "lx", "--apply", "--yes", "--no-send", "--quiet"])
 
     assert rc == 0
     assert calls and calls[0]["base"] == runtime.resolve()
@@ -261,45 +256,20 @@ def test_auto_close_expired_main_accepts_explicit_runtime_root(monkeypatch, tmp_
 
     release = tmp_path / "releases" / "1.2.158"
     runtime = tmp_path / "runtime"
-    cfg_path = runtime / "config.hk.json"
-    runtime.mkdir(parents=True)
-    cfg_path.write_text("{}", encoding="utf-8")
+    cfg_path = _write_config(runtime)
     calls: list[dict[str, Any]] = []
     lock_modes: list[int] = []
 
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr(mod.fcntl, "flock", lambda _fd, mode: lock_modes.append(mode))
     monkeypatch.setattr(mod, "__file__", str(release / "src" / "application" / "positions" / "auto_close.py"))
+    monkeypatch.setattr(mod, "load_config", lambda **_kwargs: _config(["lx"]))
     monkeypatch.setattr(
-        mod,
-        "load_config",
-        lambda **_kwargs: {
-            "accounts": ["lx"],
-            "portfolio": {"data_config": "portfolio.runtime.json", "broker": "富途"},
-            "option_positions": {"auto_close": {"enabled": True}},
-        },
+        mod, "run_expired_position_maintenance_for_account",
+        _maintenance_stub(calls, _maintenance_noop_payload()),
     )
-
-    def _run_maintenance(**kwargs):
-        calls.append(dict(kwargs))
-        return {
-            "mode": "applied",
-            "account": kwargs["account"],
-            "broker": "富途",
-            "positions_checked": 0,
-            "candidates_should_close": 0,
-            "applied_closed": 0,
-            "skipped_already_closed": 0,
-            "errors": [],
-            "applied": [],
-            "summary_text": "",
-        }
-
-    monkeypatch.setattr(mod, "run_expired_position_maintenance_for_account", _run_maintenance)
     monkeypatch.setattr(
-        mod,
-        "safe_send_auto_close_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("--no-send must not send receipt")),
+        mod, "safe_send_auto_close_receipt", _forbidden_receipt("--no-send must not send receipt")
     )
 
     rc = mod.main([
@@ -331,31 +301,12 @@ def test_auto_close_expired_main_returns_failed_for_missing_data_config(monkeypa
     from src.application.positions import auto_close as mod
 
     runtime = tmp_path / "runtime"
-    cfg_path = runtime / "config.hk.json"
-    runtime.mkdir(parents=True)
-    cfg_path.write_text("{}", encoding="utf-8")
+    cfg_path = _write_config(runtime)
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
-    monkeypatch.setattr(
-        mod,
-        "load_config",
-        lambda **_kwargs: {
-            "accounts": ["lx"],
-            "portfolio": {"data_config": "missing.runtime.json", "broker": "富途"},
-            "option_positions": {"auto_close": {"enabled": True}},
-        },
-    )
+    monkeypatch.setattr(mod, "load_config", lambda **_kwargs: _config(["lx"], data_config="missing.runtime.json"))
 
-    rc = mod.main([
-        "--config",
-        str(cfg_path),
-        "--accounts",
-        "lx",
-        "--apply",
-        "--yes",
-        "--no-send",
-        "--quiet",
-    ])
+    rc = mod.main(["--config", str(cfg_path), "--accounts", "lx", "--apply", "--yes", "--no-send", "--quiet"])
 
     payload = json.loads((runtime / "output_shared" / "state" / "auto_close_expired.json").read_text(encoding="utf-8"))
     assert rc == 1
@@ -366,11 +317,19 @@ def test_auto_close_expired_main_returns_failed_for_missing_data_config(monkeypa
     assert account_result["errors"]
 
 
-def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None:
+def _cli_auto_close_calls(monkeypatch) -> list[list[str]]:
+    """Record the argv the `option_positions` CLI forwards to the auto-close entrypoint."""
     from src.interfaces.cli import option_positions as cli
 
     calls: list[list[str]] = []
     monkeypatch.setattr(cli, "run_option_positions_auto_close", lambda argv: calls.append(list(argv)) or 0)
+    return calls
+
+
+def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None:
+    from src.interfaces.cli import option_positions as cli
+
+    calls = _cli_auto_close_calls(monkeypatch)
 
     rc = cli.main([
         "auto-close-expired",
@@ -404,8 +363,7 @@ def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None
 def test_option_positions_cli_passes_auto_close_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.interfaces.cli import option_positions as cli
 
-    calls: list[list[str]] = []
-    monkeypatch.setattr(cli, "run_option_positions_auto_close", lambda argv: calls.append(list(argv)) or 0)
+    calls = _cli_auto_close_calls(monkeypatch)
 
     runtime = tmp_path / "runtime"
     rc = cli.main([
@@ -440,8 +398,7 @@ def test_option_positions_cli_passes_auto_close_runtime_root(monkeypatch, tmp_pa
 def test_option_positions_cli_passes_auto_close_subcommand_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.interfaces.cli import option_positions as cli
 
-    calls: list[list[str]] = []
-    monkeypatch.setattr(cli, "run_option_positions_auto_close", lambda argv: calls.append(list(argv)) or 0)
+    calls = _cli_auto_close_calls(monkeypatch)
 
     runtime = tmp_path / "runtime"
     rc = cli.main([

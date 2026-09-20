@@ -77,6 +77,30 @@ def _reply_text(reply: dict) -> str:
     return reply["content"]["body"]["elements"][0]["content"]
 
 
+def _feishu_settings(
+    tmp_path: Path, url: str, *, config_key: str | None, config_path: str | None = None
+) -> FeishuWsSettings:
+    return FeishuWsSettings(
+        config_key=config_key,
+        config_path=config_path,
+        assistant_config_path=str(_assistant_config(tmp_path, url)),
+        allowed_senders="feishu:ou_1",
+        app_id="test",
+        app_secret="test",
+        audit_db=str(tmp_path / "audit.sqlite3"),
+    )
+
+
+def _run_ws_event(text: str, settings: FeishuWsSettings, replies: list[dict]) -> dict:
+    return handle_feishu_ws_event(
+        _message_payload(text=text),
+        settings=settings,
+        reply_fn=_reply_collector(replies),
+        reaction_fn=lambda **kwargs: {"code": 0},
+        execute_tool_fn=lambda *args, **kwargs: pytest.fail("unexpected Control execution"),
+    )
+
+
 def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, tmp_path):
     config = _build_runtime_config(tmp_path, market="us")
     state = tmp_path / "output_shared" / "state" / "scheduler_state_us.json"
@@ -109,22 +133,8 @@ def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, t
         {"body": submit},
     ]
     with _loopback_server(responses) as (url, requests):
-        settings = FeishuWsSettings(
-            config_key="us",
-            config_path=None,
-            assistant_config_path=str(_assistant_config(tmp_path, url)),
-            allowed_senders="feishu:ou_1",
-            app_id="test",
-            app_secret="test",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        )
-        out = handle_feishu_ws_event(
-            _message_payload(text="读取 lx 当前业务调度状态"),
-            settings=settings,
-            reply_fn=_reply_collector(replies),
-            reaction_fn=lambda **kwargs: {"code": 0},
-            execute_tool_fn=lambda *args, **kwargs: pytest.fail("unexpected Control execution"),
-        )
+        settings = _feishu_settings(tmp_path, url, config_key="us")
+        out = _run_ws_event("读取 lx 当前业务调度状态", settings, replies)
 
     assert out["ok"], out
     assert len(requests) == 2
@@ -150,22 +160,8 @@ def test_feishu_initial_config_failure_precedes_model_and_tool(monkeypatch, tmp_
     replies: list[dict] = []
 
     with _loopback_server([]) as (url, requests):
-        settings = FeishuWsSettings(
-            config_key=None,
-            config_path=str(config),
-            assistant_config_path=str(_assistant_config(tmp_path, url)),
-            allowed_senders="feishu:ou_1",
-            app_id="test",
-            app_secret="test",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        )
-        out = handle_feishu_ws_event(
-            _message_payload(text="读取当前调度状态"),
-            settings=settings,
-            reply_fn=_reply_collector(replies),
-            reaction_fn=lambda **kwargs: {"code": 0},
-            execute_tool_fn=lambda *args, **kwargs: pytest.fail("unexpected Control execution"),
-        )
+        settings = _feishu_settings(tmp_path, url, config_key=None, config_path=str(config))
+        out = _run_ws_event("读取当前调度状态", settings, replies)
 
     assert out["ok"], out
     assert requests == []
@@ -249,22 +245,8 @@ def test_feishu_hk_can_use_two_active_read_tools(monkeypatch, tmp_path):
         {"body": submit},
     ]
     with _loopback_server(responses) as (url, requests):
-        settings = FeishuWsSettings(
-            config_key="hk",
-            config_path=None,
-            assistant_config_path=str(_assistant_config(tmp_path, url)),
-            allowed_senders="feishu:ou_1",
-            app_id="test",
-            app_secret="test",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        )
-        out = handle_feishu_ws_event(
-            _message_payload(text="查看 HK lx 调度历史、业务窗口和系统定时任务状态"),
-            settings=settings,
-            reply_fn=_reply_collector(replies),
-            reaction_fn=lambda **kwargs: {"code": 0},
-            execute_tool_fn=lambda *args, **kwargs: pytest.fail("unexpected Control execution"),
-        )
+        settings = _feishu_settings(tmp_path, url, config_key="hk")
+        out = _run_ws_event("查看 HK lx 调度历史、业务窗口和系统定时任务状态", settings, replies)
 
     assert out["ok"], out
     assert len(requests) == 3

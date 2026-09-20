@@ -13,6 +13,7 @@ from domain.domain.option_close_reason import (
     resolve_close_reason,
 )
 from domain.domain.option_lifecycle import (
+    LifecycleReadModel,
     expiration_observation_start_ms,
     derive_lifecycle_read_model,
 )
@@ -257,14 +258,21 @@ def _allocation(*, terminal_type: str = "assignment") -> dict:
     }
 
 
+def _read_model(**overrides) -> LifecycleReadModel:
+    values = {
+        "expiration_ymd": "2026-08-21",
+        "market": "US",
+        "target_contracts_by_lot": {"lot-1": 2},
+        "now_ms": expiration_observation_start_ms("2026-08-21", "US"),
+    }
+    return derive_lifecycle_read_model(**{**values, **overrides})
+
+
 def test_pending_reservation_is_nonactionable_without_changing_remaining() -> None:
     observation_start = expiration_observation_start_ms("2026-08-21", "US")
     assert observation_start is not None
 
-    model = derive_lifecycle_read_model(
-        expiration_ymd="2026-08-21",
-        market="US",
-        target_contracts_by_lot={"lot-1": 2},
+    model = _read_model(
         accepted_option_close_contracts_by_lot={"lot-1": 2},
         now_ms=observation_start - 1,
     )
@@ -279,21 +287,11 @@ def test_pending_reservation_is_nonactionable_without_changing_remaining() -> No
 def test_voided_terminal_allocation_becomes_pending_reservation() -> None:
     allocation = _allocation()
     terminal_event_id = allocation["canonical_terminal_event_id"]
-    resolved = derive_lifecycle_read_model(
-        expiration_ymd="2026-08-21",
-        market="US",
-        target_contracts_by_lot={"lot-1": 2},
-        allocations=[allocation],
-        now_ms=expiration_observation_start_ms("2026-08-21", "US"),
-    )
-    corrected = derive_lifecycle_read_model(
-        expiration_ymd="2026-08-21",
-        market="US",
-        target_contracts_by_lot={"lot-1": 2},
+    resolved = _read_model(allocations=[allocation])
+    corrected = _read_model(
         allocations=[allocation],
         void_event_ids=(terminal_event_id,),
         accepted_option_close_contracts_by_lot={"lot-1": 2},
-        now_ms=expiration_observation_start_ms("2026-08-21", "US"),
     )
 
     assert resolved.reason_state == "resolved"
@@ -306,13 +304,7 @@ def test_voided_terminal_allocation_becomes_pending_reservation() -> None:
 
 
 def test_close_terminal_allocation_maps_to_trade_close() -> None:
-    model = derive_lifecycle_read_model(
-        expiration_ymd="2026-08-21",
-        market="US",
-        target_contracts_by_lot={"lot-1": 2},
-        allocations=[_allocation(terminal_type="close")],
-        now_ms=expiration_observation_start_ms("2026-08-21", "US"),
-    )
+    model = _read_model(allocations=[_allocation(terminal_type="close")])
 
     assert model.lifecycle_state == "closed"
     assert model.reason_state == "resolved"

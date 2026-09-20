@@ -54,18 +54,29 @@ def _publish_combo_status(report_dir: Path) -> None:
     )
 
 
-def test_v2_index_is_csv_independent_after_status_publication(tmp_path: Path) -> None:
-    report_dir = tmp_path / "reports"
+def _combo_report_dir(tmp_path: Path, name: str = "reports") -> Path:
+    """A report dir holding the published ``run-1`` combo status."""
+    report_dir = tmp_path / name
     report_dir.mkdir()
     _publish_combo_status(report_dir)
+    return report_dir
 
-    index = publish_strategy_scan_status_index_v2(
-        report_dir=report_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256="a" * 64,
-        expected=_v2_expected(),
-    )
+
+def _publish_v2_index(**overrides):
+    """``publish_strategy_scan_status_index_v2`` with the shared scope defaults."""
+    defaults = {
+        "run_id": "run-1",
+        "account": "lx",
+        "account_config_sha256": "a" * 64,
+        "expected": _v2_expected(),
+    }
+    return publish_strategy_scan_status_index_v2(**{**defaults, **overrides})
+
+
+def test_v2_index_is_csv_independent_after_status_publication(tmp_path: Path) -> None:
+    report_dir = _combo_report_dir(tmp_path)
+
+    index = _publish_v2_index(report_dir=report_dir)
     loaded = load_strategy_scan_status_index_v2(
         report_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
         expected_run_id="run-1",
@@ -87,18 +98,10 @@ def test_v2_index_rejects_owner_mode_mismatch(
     owner: str,
     mode: str,
 ) -> None:
-    report_dir = tmp_path / f"reports-{owner}-{mode}"
-    report_dir.mkdir()
-    _publish_combo_status(report_dir)
+    report_dir = _combo_report_dir(tmp_path, f"reports-{owner}-{mode}")
 
     with pytest.raises(StrategyScanStatusError, match="owner/mode|unknown"):
-        publish_strategy_scan_status_index_v2(
-            report_dir=report_dir,
-            run_id="run-1",
-            account="lx",
-            account_config_sha256="a" * 64,
-            expected=_v2_expected(owner=owner, mode=mode),
-        )
+        _publish_v2_index(report_dir=report_dir, expected=_v2_expected(owner=owner, mode=mode))
 
 
 def test_wheel_direction_statuses_publish_a_v4_index(tmp_path: Path) -> None:
@@ -169,11 +172,9 @@ def test_v4_index_rejects_mixed_wheel_identity(tmp_path: Path) -> None:
     )
 
     with pytest.raises(StrategyScanStatusError, match="requires direction"):
-        publish_strategy_scan_status_index_v2(
+        _publish_v2_index(
             report_dir=report_dir,
             run_id="run-wheel",
-            account="lx",
-            account_config_sha256="a" * 64,
             expected=[
                 {
                     "market": "US",
@@ -190,18 +191,10 @@ def test_v4_index_rejects_mixed_wheel_identity(tmp_path: Path) -> None:
 
 
 def test_v2_index_rejects_scope_config_hash_mismatch(tmp_path: Path) -> None:
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    _publish_combo_status(report_dir)
+    report_dir = _combo_report_dir(tmp_path)
 
     with pytest.raises(StrategyScanStatusError, match="config hash mismatch"):
-        publish_strategy_scan_status_index_v2(
-            report_dir=report_dir,
-            run_id="run-1",
-            account="lx",
-            account_config_sha256="a" * 64,
-            expected=_v2_expected(config_hash="b" * 64),
-        )
+        _publish_v2_index(report_dir=report_dir, expected=_v2_expected(config_hash="b" * 64))
 
 
 def test_v2_index_does_not_synthesize_missing_status(tmp_path: Path) -> None:
@@ -209,13 +202,7 @@ def test_v2_index_does_not_synthesize_missing_status(tmp_path: Path) -> None:
     report_dir.mkdir()
 
     with pytest.raises(StrategyScanStatusError, match="unreadable"):
-        publish_strategy_scan_status_index_v2(
-            report_dir=report_dir,
-            run_id="run-1",
-            account="lx",
-            account_config_sha256="a" * 64,
-            expected=_v2_expected(),
-        )
+        _publish_v2_index(report_dir=report_dir)
     assert not (report_dir / "nvda_combo_yield_candidates.csv").exists()
 
 
@@ -224,16 +211,8 @@ def test_v2_index_rejects_noncanonical_candidate_count(
     tmp_path: Path,
     candidate_count: object,
 ) -> None:
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    _publish_combo_status(report_dir)
-    payload = publish_strategy_scan_status_index_v2(
-        report_dir=report_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256="a" * 64,
-        expected=_v2_expected(),
-    )
+    report_dir = _combo_report_dir(tmp_path)
+    payload = _publish_v2_index(report_dir=report_dir)
     payload.pop("index_path")
     payload["items"][0]["candidate_count"] = candidate_count
     payload["content_sha256"] = sha256_bytes(
@@ -258,19 +237,11 @@ def test_v2_index_rejects_noncanonical_candidate_count(
 def test_v2_index_rejects_incomplete_quote_binding(
     tmp_path: Path,
 ) -> None:
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    _publish_combo_status(report_dir)
+    report_dir = _combo_report_dir(tmp_path)
     status_path = report_dir / "nvda_combo_yield_scan_status.json"
     status = json.loads(status_path.read_text(encoding="utf-8"))
     status.pop("receipt_relpath")
     status_path.write_text(json.dumps(status), encoding="utf-8")
 
     with pytest.raises(StrategyScanStatusError, match="quote binding"):
-        publish_strategy_scan_status_index_v2(
-            report_dir=report_dir,
-            run_id="run-1",
-            account="lx",
-            account_config_sha256="a" * 64,
-            expected=_v2_expected(),
-        )
+        _publish_v2_index(report_dir=report_dir)

@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Daily-brief entrypoints owned by tick_notification_flow.py.
+_BRIEF_ENTRYPOINTS = (
+    'assemble_daily_decision_briefs(',
+    'persist_daily_decision_brief_success(',
+    'prepare_daily_decision_brief_delivery(',
+    'render_fixed_report(',
+    'render_candidate_alert(',
+    'render_fixed_failure(',
+    'build_per_account_delivery_batch(',
+)
+
 
 def test_build_opend_unhealthy_execution_plan_matches_legacy_branching() -> None:
     from domain.domain.engine import build_opend_unhealthy_execution_plan
@@ -74,47 +85,40 @@ def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
     }
 
 
+def _dispatch_decision(*, should_send, effective_target, config_error, reason) -> dict:
+    return {
+        'should_send': should_send,
+        'effective_target': effective_target,
+        'config_error': config_error,
+        'reason': reason,
+    }
+
+
 def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
     from domain.domain.engine import decide_notify_dispatch_gate
 
     cases = [
         (
-            {
-                'should_send': False,
-                'effective_target': 'chat-id',
-                'config_error': None,
-                'reason': 'quiet_hours',
-            },
+            _dispatch_decision(should_send=False, effective_target='chat-id', config_error=None,
+                               reason='quiet_hours'),
             {'quiet_window': '23:00-06:00'},
             'skip_quiet_hours',
         ),
         (
-            {
-                'should_send': False,
-                'effective_target': '',
-                'config_error': 'notifications.target is required',
-                'reason': 'config_error',
-            },
+            _dispatch_decision(should_send=False, effective_target='',
+                               config_error='notifications.target is required', reason='config_error'),
             {'quiet_window': ''},
             'config_error',
         ),
         (
-            {
-                'should_send': True,
-                'effective_target': 'chat-id',
-                'config_error': None,
-                'reason': 'send',
-            },
+            _dispatch_decision(should_send=True, effective_target='chat-id', config_error=None,
+                               reason='send'),
             {'quiet_window': ''},
             'send',
         ),
         (
-            {
-                'should_send': False,
-                'effective_target': None,
-                'config_error': None,
-                'reason': 'no_send',
-            },
+            _dispatch_decision(should_send=False, effective_target=None, config_error=None,
+                               reason='no_send'),
             {'quiet_window': ''},
             'skip',
         ),
@@ -138,16 +142,7 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
-    for entrypoint in (
-        'assemble_daily_decision_briefs(',
-        'persist_daily_decision_brief_success(',
-        'prepare_daily_decision_brief_delivery(',
-        'render_fixed_report(',
-        'render_candidate_alert(',
-        'render_fixed_failure(',
-        'build_per_account_delivery_batch(',
-        'decision_builder=decide_notification_delivery',
-    ):
+    for entrypoint in (*_BRIEF_ENTRYPOINTS, 'decision_builder=decide_notification_delivery'):
         assert entrypoint in notification_flow_src
 
 
@@ -170,15 +165,7 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
     assert 'build_opend_unhealthy_execution_plan=build_opend_unhealthy_execution_plan' in guard_flow_src
     assert 'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint' in guard_flow_src
 
-    for entrypoint in (
-        'assemble_daily_decision_briefs(',
-        'persist_daily_decision_brief_success(',
-        'prepare_daily_decision_brief_delivery(',
-        'render_fixed_report(',
-        'render_candidate_alert(',
-        'render_fixed_failure(',
-        'build_per_account_delivery_batch(',
-    ):
+    for entrypoint in _BRIEF_ENTRYPOINTS:
         assert entrypoint in notification_flow_src
 
     for legacy_notification_fragment in (

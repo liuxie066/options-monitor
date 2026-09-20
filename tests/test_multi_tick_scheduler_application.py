@@ -17,6 +17,33 @@ class _FakeRunlog:
         self.events.append(event)
 
 
+def _run_scheduler_flow(*, run_scan_scheduler_cli, audit_fn, build_scheduler_decision_payload_fn,
+                        accounts=("lx", "sy"), force_mode=False) -> Any:
+    from domain.domain import SnapshotDTO
+    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
+    from src.application.multi_tick_scheduler import run_scheduler_flow
+
+    return run_scheduler_flow(
+        vpy=Path("/repo/.venv/bin/python"),
+        base=Path("/repo"),
+        cfg_path=Path("/repo/config.us.json"),
+        base_cfg={},
+        state_path=Path("/repo/output_shared/state/scheduler_state.json"),
+        scheduler_schedule_key="schedule",
+        accounts=list(accounts),
+        force_mode=force_mode,
+        smoke=False,
+        snapshot_cls=SnapshotDTO,
+        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+        account_view_cls=AccountSchedulerDecisionView,
+        run_scan_scheduler_cli=run_scan_scheduler_cli,
+        build_failure_audit_fields=lambda **_kwargs: {},
+        audit_fn=audit_fn,
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
+        build_scheduler_decision_payload_fn=build_scheduler_decision_payload_fn,
+    )
+
+
 def test_resolve_market_run_reports_trading_day_block_without_exiting() -> None:
     from src.application.multi_tick_scheduler import resolve_market_run
 
@@ -49,10 +76,6 @@ def test_resolve_market_run_reports_trading_day_block_without_exiting() -> None:
 
 
 def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
-    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
-    from domain.domain import SnapshotDTO
-    from src.application.multi_tick_scheduler import run_scheduler_flow
-
     payloads = {
         None: {
             "should_run_scan": False,
@@ -83,23 +106,10 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
     def fake_account_scheduler_payload(**kwargs):
         return payloads[kwargs["account"]]
 
-    out = run_scheduler_flow(
-        vpy=Path("/repo/.venv/bin/python"),
-        base=Path("/repo"),
-        cfg_path=Path("/repo/config.us.json"),
-        base_cfg={},
-        state_path=Path("/repo/output_shared/state/scheduler_state.json"),
-        scheduler_schedule_key="schedule",
-        accounts=["lx", "sy"],
-        force_mode=False,
-        smoke=False,
-        snapshot_cls=SnapshotDTO,
-        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
-        account_view_cls=AccountSchedulerDecisionView,
+    out = _run_scheduler_flow(
         run_scan_scheduler_cli=fake_scheduler_cli,
-        build_failure_audit_fields=lambda **_kwargs: {},
-        audit_fn=lambda event_type, action, **kwargs: audit_events.append({"event_type": event_type, "action": action, **kwargs}),
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
+        audit_fn=lambda event_type, action, **kwargs: audit_events.append(
+            {"event_type": event_type, "action": action, **kwargs}),
         build_scheduler_decision_payload_fn=fake_account_scheduler_payload,
     )
 
@@ -121,10 +131,6 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
 
 
 def test_run_scheduler_flow_passes_force_to_global_and_account_decisions() -> None:
-    from domain.domain import SnapshotDTO
-    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
-    from src.application.multi_tick_scheduler import run_scheduler_flow
-
     global_calls: list[dict[str, Any]] = []
     account_calls: list[dict[str, Any]] = []
     payload = {
@@ -142,23 +148,11 @@ def test_run_scheduler_flow_passes_force_to_global_and_account_decisions() -> No
         account_calls.append(dict(kwargs))
         return payload
 
-    run_scheduler_flow(
-        vpy=Path('/repo/.venv/bin/python'),
-        base=Path('/repo'),
-        cfg_path=Path('/repo/config.us.json'),
-        base_cfg={},
-        state_path=Path('/repo/output_shared/state/scheduler_state.json'),
-        scheduler_schedule_key='schedule',
+    _run_scheduler_flow(
         accounts=['lx'],
         force_mode=True,
-        smoke=False,
-        snapshot_cls=SnapshotDTO,
-        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
-        account_view_cls=AccountSchedulerDecisionView,
         run_scan_scheduler_cli=fake_scheduler_cli,
-        build_failure_audit_fields=lambda **_kwargs: {},
         audit_fn=lambda *_args, **_kwargs: None,
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
         build_scheduler_decision_payload_fn=fake_account_scheduler_payload,
     )
 
@@ -167,10 +161,6 @@ def test_run_scheduler_flow_passes_force_to_global_and_account_decisions() -> No
 
 
 def test_run_scheduler_flow_fails_closed_for_one_account_exception() -> None:
-    from domain.domain import SnapshotDTO
-    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
-    from src.application.multi_tick_scheduler import run_scheduler_flow
-
     global_payload = {
         "should_run_scan": True,
         "is_notify_window_open": True,
@@ -187,30 +177,14 @@ def test_run_scheduler_flow_fails_closed_for_one_account_exception() -> None:
             "reason": "sy_due",
         }
 
-    out = run_scheduler_flow(
-        vpy=Path("/repo/.venv/bin/python"),
-        base=Path("/repo"),
-        cfg_path=Path("/repo/config.us.json"),
-        base_cfg={},
-        state_path=Path("/repo/output_shared/state/scheduler_state.json"),
-        scheduler_schedule_key="schedule",
-        accounts=["lx", "sy"],
-        force_mode=False,
-        smoke=False,
-        snapshot_cls=SnapshotDTO,
-        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
-        account_view_cls=AccountSchedulerDecisionView,
+    out = _run_scheduler_flow(
         run_scan_scheduler_cli=lambda **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=json.dumps(global_payload),
             stderr="",
         ),
-        build_failure_audit_fields=lambda **_kwargs: {},
         audit_fn=lambda event_type, action, **kwargs: audit_events.append(
             {"event_type": event_type, "action": action, **kwargs}
-        ),
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError(kwargs)
         ),
         build_scheduler_decision_payload_fn=account_payload,
     )

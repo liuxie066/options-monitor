@@ -13,26 +13,38 @@ from src.application.trades.intake import (
 )
 
 
+def _deal(**overrides: object) -> NormalizedTradeDeal:
+    """Build a ``NormalizedTradeDeal``.
+
+    The defaults are the 0700.HK put deal this module repeats most often, so a
+    call site spells out only the fields that differ from it.
+    """
+    base = {
+        "broker": "富途",
+        "futu_account_id": "REAL_1",
+        "internal_account": "lx",
+        "deal_id": "deal-1",
+        "order_id": "order-1",
+        "symbol": "0700.HK",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 2,
+        "price": 3.93,
+        "strike": 480.0,
+        "multiplier": 100,
+        "multiplier_source": "cache",
+        "expiration_ymd": "2026-04-29",
+        "currency": "HKD",
+        "trade_time_ms": 1000,
+        "raw_payload": {"deal_id": "deal-1"},
+    }
+    base.update(overrides)
+    return NormalizedTradeDeal(**base)
+
+
 def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
-        deal_id="deal-1",
-        order_id="order-1",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=2,
-        price=3.93,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="cache",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
-        raw_payload={"deal_id": "deal-1"},
+    deal = _deal(
         visible_account_fields={"trade_acc_id": "REAL_1"},
         account_mapping_keys=["REAL_1"],
         normalization_diagnostics={"multiplier_resolution": {"selected_source": "cache"}},
@@ -149,26 +161,7 @@ def test_build_received_audit_rejects_conflicting_push_source_context() -> None:
 def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tmp_path: Path) -> None:
     import src.application.trades.auto_intake as intake
 
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
-        deal_id="deal-1",
-        order_id="order-1",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=2,
-        price=3.93,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="cache",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
-        raw_payload={"deal_id": "deal-1"},
-    )
+    deal = _deal()
 
     events: list[dict] = []
 
@@ -223,24 +216,17 @@ def test_auto_intake_routes_short_call_open_through_wheel_intent_writer(
 ) -> None:
     import src.application.trades.auto_intake as intake
 
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="wheel-call-1",
         order_id="wheel-order-1",
         symbol="NVDA",
         option_type="call",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=2.0,
         strike=110.0,
-        multiplier=100,
         multiplier_source="broker",
         expiration_ymd="2026-08-21",
         currency="USD",
-        trade_time_ms=1_000,
         raw_payload={"deal_id": "wheel-call-1"},
     )
     coverage = {
@@ -310,23 +296,14 @@ def test_process_payload_close_invalidates_context_and_attaches_projection_diagn
     account_ctx.write_text("{}", encoding="utf-8")
     shared_ctx.write_text("{}", encoding="utf-8")
 
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-close-1",
-        order_id="order-1",
-        symbol="0700.HK",
         option_type="call",
         side="buy",
         position_effect="close",
-        contracts=2,
         price=1.2,
         strike=510.0,
-        multiplier=100,
-        multiplier_source="cache",
         expiration_ymd="2026-05-28",
-        currency="HKD",
         trade_time_ms=1779260747577,
         raw_payload={"deal_id": "deal-close-1"},
     )
@@ -414,10 +391,7 @@ def test_process_payload_assignment_invalidates_context_cache(tmp_path: Path) ->
     account_ctx.write_text("{}", encoding="utf-8")
     shared_ctx.write_text("{}", encoding="utf-8")
 
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="stock-settlement-1",
         order_id="stock-order-1",
         symbol="TIGR",
@@ -503,26 +477,7 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
 
     monkeypatch.setattr(intake, "enrich_trade_push_payload_with_account_id", lambda payload, **kwargs: _EnrichResult())
 
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="123",
-        internal_account="lx",
-        deal_id="deal-1",
-        order_id="order-1",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=2,
-        price=3.93,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="cache",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
-        raw_payload={"deal_id": "deal-1"},
-    )
+    deal = _deal(futu_account_id="123")
     monkeypatch.setattr(intake, "normalize_trade_deal", lambda payload, futu_account_mapping=None: deal)
 
     class _Result:
@@ -562,24 +517,13 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
 
 
 def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
+    deal = _deal(
         futu_account_id="999000000000000001",
         internal_account=None,
         deal_id="deal-2",
         order_id="order-2",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=1.0,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="cache",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "deal-2", "trade_acc_id": "999000000000000001"},
         visible_account_fields={"trade_acc_id": "999000000000000001"},
         account_mapping_keys=["999999999999999999"],
@@ -608,24 +552,18 @@ def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> Non
 
 
 def test_build_audit_event_keeps_shared_visible_account_fields_after_normalization() -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
+    deal = _deal(
         futu_account_id="FUTU_1",
-        internal_account="lx",
         deal_id="deal-3",
         order_id="order-3",
         symbol="NVDA",
         option_type="call",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=1.0,
         strike=100.0,
-        multiplier=100,
         multiplier_source="payload",
         expiration_ymd="2026-06-18",
         currency="USD",
-        trade_time_ms=1000,
         raw_payload={"trade_acc_id": "TRADE_1", "account_id": "ACCOUNT_1", "futu_account_id": "FUTU_1"},
         visible_account_fields={
             "futu_account_id": "FUTU_1",
@@ -646,24 +584,16 @@ def test_build_audit_event_keeps_shared_visible_account_fields_after_normalizati
 
 
 def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-retry-1",
         order_id="order-retry-1",
         symbol="9992.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=6.3,
         strike=150.0,
         multiplier=None,
         multiplier_source=None,
         expiration_ymd="2026-05-28",
-        currency="HKD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "deal-retry-1"},
         normalization_diagnostics={
             "symbol": {"canonical": "9992.HK", "raw_fields": {"code": "HK.POP260528P150000"}},
@@ -776,20 +706,15 @@ def test_attach_receipt_state_preserves_confirmed_receipt_on_unresolved_skip() -
 def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
     tmp_path: Path,
 ) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-lifecycle-final",
         order_id="order-lifecycle-final",
         symbol="TIGR",
-        option_type="put",
         side="buy",
         position_effect="close",
         contracts=1,
         price=0.0,
         strike=6.0,
-        multiplier=100,
         multiplier_source="payload",
         expiration_ymd="2026-05-22",
         currency="USD",
@@ -870,20 +795,15 @@ def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
 
 
 def test_process_payload_passes_retry_failed_to_resolver(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-failed-1",
         order_id="order-failed-1",
         symbol="TIGR",
-        option_type="put",
         side="buy",
         position_effect="close",
         contracts=1,
         price=0.0,
         strike=6.0,
-        multiplier=100,
         multiplier_source="payload",
         expiration_ymd="2026-05-22",
         currency="USD",
@@ -943,24 +863,11 @@ def test_process_payload_passes_retry_failed_to_resolver(tmp_path: Path) -> None
 
 
 def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-failed-1",
         order_id="order-failed-1",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
-        price=3.93,
-        strike=480.0,
-        multiplier=100,
         multiplier_source="payload",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "deal-failed-1"},
     )
     events: list[dict] = []
@@ -991,16 +898,11 @@ def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Pat
 
 
 def test_process_payload_records_non_option_deal_once_without_receipt(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-stock-1",
         order_id="order-stock-1",
         symbol="TIGR",
         option_type=None,
-        side="sell",
-        position_effect="open",
         contracts=500,
         price=4.32,
         strike=None,
@@ -1106,24 +1008,16 @@ def test_process_payload_records_non_option_deal_once_without_receipt(tmp_path: 
 
 
 def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-receipt-1",
         order_id="order-receipt-1",
         symbol="NVDA",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=1.23,
         strike=120.0,
-        multiplier=100,
         multiplier_source="payload",
         expiration_ymd="2026-06-19",
         currency="USD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "deal-receipt-1"},
     )
 
@@ -1183,24 +1077,16 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
 
 
 def test_process_payload_preserves_confirmed_receipt_on_duplicate_skip(tmp_path: Path) -> None:
-    deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    deal = _deal(
         deal_id="deal-duplicate-1",
         order_id="order-duplicate-1",
         symbol="NVDA",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=1.23,
         strike=120.0,
-        multiplier=100,
         multiplier_source="payload",
         expiration_ymd="2026-06-19",
         currency="USD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "deal-duplicate-1"},
     )
 

@@ -16,6 +16,22 @@ def _write_executable(path: Path, text: str) -> Path:
     return path
 
 
+def _minimal_repo(tmp_path: Path) -> Path:
+    """Lay out the smallest repo root the setup checks accept."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    return tmp_path
+
+
+def _stub_toolchain(monkeypatch, node: Path, npm: Path) -> None:
+    """Pin ``node``/``npm`` lookups to the fake executables and hide ``uv``."""
+    monkeypatch.setattr(
+        "src.application.setup.check.shutil.which",
+        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
+    )
+
+
 def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_000) -> tuple[Path, Path, Path]:
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
@@ -53,11 +69,9 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
 
 
 def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    repo_root = _minimal_repo(tmp_path)
 
-    out = run_setup_check(repo_root=tmp_path, markets=["us"], include_local_env_file=False)
+    out = run_setup_check(repo_root=repo_root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
     assert isinstance(out["summary"]["ok"], bool)
@@ -72,9 +86,7 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
 
 
 def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    _minimal_repo(tmp_path)
     monkeypatch.setattr("src.application.setup.check.shutil.which", lambda _name: None)
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "uv")
 
@@ -87,9 +99,7 @@ def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Pat
 
 
 def test_setup_check_no_longer_requires_yfinance(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    _minimal_repo(tmp_path)
 
     def _find_spec(name: str):
         if name == "yfinance":
@@ -107,9 +117,7 @@ def test_setup_check_no_longer_requires_yfinance(monkeypatch, tmp_path: Path) ->
 
 
 def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    _minimal_repo(tmp_path)
     monkeypatch.setattr(
         "src.application.setup.check.inspect_futu_sdk_earnings_calendar_capability",
         lambda: {
@@ -135,10 +143,7 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
     root, node, npm = _prepare_pi_setup_root(tmp_path)
     runtime = tmp_path / "runtime"
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
-    monkeypatch.setattr(
-        "src.application.setup.check.shutil.which",
-        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
-    )
+    _stub_toolchain(monkeypatch, node, npm)
     before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
@@ -162,10 +167,7 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     config["assistant"]["llm"]["max_output_tokens"] = 4_096
     config_path.write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "src.application.setup.check.shutil.which",
-        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
-    )
+    _stub_toolchain(monkeypatch, node, npm)
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
@@ -178,10 +180,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
     root, node, npm = _prepare_pi_setup_root(tmp_path)
     missing_audit = tmp_path / "missing" / "state" / "inbound_control.sqlite3"
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(missing_audit))
-    monkeypatch.setattr(
-        "src.application.setup.check.shutil.which",
-        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
-    )
+    _stub_toolchain(monkeypatch, node, npm)
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     missing_check = {item["name"]: item for item in missing["checks"]}["bot.session_path"]
@@ -215,10 +214,7 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
     lexical_parent.symlink_to(physical_parent, target_is_directory=True)
     audit_db = lexical_parent / "inbound_control.sqlite3"
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(audit_db))
-    monkeypatch.setattr(
-        "src.application.setup.check.shutil.which",
-        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
-    )
+    _stub_toolchain(monkeypatch, node, npm)
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     check = {item["name"]: item for item in out["checks"]}["bot.session_path"]
@@ -233,9 +229,7 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
 def test_setup_check_reports_stale_runtime_config_and_schedule_readiness(monkeypatch, tmp_path: Path) -> None:
     from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 
-    (tmp_path / "src").mkdir()
-    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    _minimal_repo(tmp_path)
     source = tmp_path / "config.yaml"
     source.write_text("accounts: {}\n", encoding="utf-8")
     runtime_config = tmp_path / "config.us.json"

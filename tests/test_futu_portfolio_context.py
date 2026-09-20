@@ -14,6 +14,21 @@ def _offline_market_fx(monkeypatch):
     monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda: None)
 
 
+def _futu_context(*, balance_rows=None, position_rows=None, account: str = "lx", **overrides):
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    return build_futu_portfolio_context(
+        balance_rows=[] if balance_rows is None else balance_rows,
+        position_rows=[] if position_rows is None else position_rows,
+        account=account,
+        **overrides,
+    )
+
+
+def _futu_portfolio_cfg(**extra) -> dict:
+    return {"portfolio": {"futu": {"host": "127.0.0.1", "port": 11111, "trd_env": "REAL"}}, **extra}
+
+
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
     from src.application.account_config import resolve_trade_intake_futu_account_ids
 
@@ -150,9 +165,7 @@ def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> No
 
 
 def test_build_futu_portfolio_context_merges_explicit_cash_and_fund_assets_and_normalizes_symbols() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
+    out = _futu_context(
         balance_rows=[
             {"currency": "rmb", "cn_cash": 100000, "fund_assets": 25000},
             {"currency": "USD", "us_cash": 1000},
@@ -185,15 +198,11 @@ def test_build_futu_portfolio_context_merges_explicit_cash_and_fund_assets_and_n
 
 
 def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {"code": "HK.09992", "qty": 100, "can_sell_qty": 80, "average_cost": 120, "currency": "HKD", "stock_name": "Pop Mart"},
             {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "average_cost": 125, "currency": "HKD", "sec_type": "STOCK"},
         ],
-        account="lx",
         market="富途",
         base_currency="CNY",
     )
@@ -205,10 +214,7 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
 
 
 def test_build_futu_portfolio_context_maps_average_cost_not_diluted_cost() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {
                 "code": "HK.00883",
@@ -233,10 +239,7 @@ def test_build_futu_portfolio_context_maps_average_cost_not_diluted_cost() -> No
 
 
 def test_build_futu_portfolio_context_does_not_treat_diluted_cost_as_average_cost() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {
                 "code": "HK.00883",
@@ -260,15 +263,11 @@ def test_build_futu_portfolio_context_does_not_treat_diluted_cost_as_average_cos
 
 
 def test_build_futu_portfolio_context_does_not_apply_partial_cost_basis_to_all_shares() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {"code": "US.NVDA", "qty": 50, "average_cost": 100, "currency": "USD"},
             {"code": "US.NVDA", "qty": 50, "average_cost": None, "currency": "USD"},
         ],
-        account="lx",
         market="富途",
         base_currency="CNY",
     )
@@ -282,15 +281,11 @@ def test_build_futu_portfolio_context_does_not_apply_partial_cost_basis_to_all_s
 
 
 def test_build_futu_portfolio_context_fails_sellability_closed_when_one_row_is_unknown() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {"code": "US.NVDA", "qty": 50, "can_sell_qty": 50, "currency": "USD"},
             {"code": "US.NVDA", "qty": 50, "currency": "USD"},
         ],
-        account="lx",
     )
 
     stock = out["stocks_by_symbol"]["NVDA"]
@@ -300,10 +295,7 @@ def test_build_futu_portfolio_context_fails_sellability_closed_when_one_row_is_u
 
 
 def test_mixed_ordinary_and_assigned_shares_remain_unallocated_for_wheel_return() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {
                 "code": "US.NVDA",
@@ -322,7 +314,6 @@ def test_mixed_ordinary_and_assigned_shares_remain_unallocated_for_wheel_return(
                 "holding_origin": "sell_put_assignment",
             },
         ],
-        account="lx",
     )
 
     stock = out["stocks_by_symbol"]["NVDA"]
@@ -406,23 +397,16 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
     try:
         fc.build_ready_futu_broker_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
-            cfg={
-                "portfolio": {
-                    "futu": {
-                        "host": "127.0.0.1",
-                        "port": 11111,
-                        "trd_env": "REAL",
-                    }
-                },
-                "trade_intake": {
+            cfg=_futu_portfolio_cfg(
+                trade_intake={
                     "account_mapping": {
                         "futu": {
                             FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx",
                             FAKE_FUTU_ACC_ID_LX_SECONDARY: "sy",
                         }
                     }
-                },
-            },
+                }
+            ),
             account="lx",
             market="富途",
             base_currency="CNY",
@@ -441,23 +425,16 @@ def test_fetch_futu_portfolio_context_rejects_multiple_physical_accounts() -> No
 
     with pytest.raises(ValueError, match="exactly one physical account_id"):
         fc.fetch_futu_portfolio_context(
-            cfg={
-                "portfolio": {
-                    "futu": {
-                        "host": "127.0.0.1",
-                        "port": 11111,
-                        "trd_env": "REAL",
-                    }
-                },
-                "trade_intake": {
+            cfg=_futu_portfolio_cfg(
+                trade_intake={
                     "account_mapping": {
                         "futu": {
                             FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx",
                             FAKE_FUTU_ACC_ID_LX_SECONDARY: "lx",
                         }
                     }
-                },
-            },
+                }
+            ),
             account="lx",
         )
 
@@ -616,22 +593,15 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
         fc.build_ready_futu_broker_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
         with pytest.raises(ValueError, match="mapped account_id=not-a-number"):
             fc.fetch_futu_portfolio_context(
-                cfg={
-                    "portfolio": {
-                        "futu": {
-                            "host": "127.0.0.1",
-                            "port": 11111,
-                            "trd_env": "REAL",
-                        }
-                    },
-                    "trade_intake": {
+                cfg=_futu_portfolio_cfg(
+                    trade_intake={
                         "account_mapping": {
                             "futu": {
                                 "not-a-number": "lx",
                             }
                         }
-                    },
-                },
+                    }
+                ),
                 account="lx",
                 market="富途",
                 base_currency="CNY",
@@ -641,10 +611,7 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
 
 
 def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[
             {"code": "US.NVDA", "qty": 100, "average_cost": 120, "currency": "USD", "position_side": "LONG", "sec_type": "STOCK"},
             {"code": "US.AAPL", "qty": 100, "average_cost": 180, "currency": "USD", "position_side": "SHORT", "sec_type": "STOCK"},
@@ -653,7 +620,6 @@ def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> 
             {"code": "US.PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "stock_name": "PDD 260626 91.00C"},
             {"symbol": "PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "name": "PDD 260626 91.00C"},
         ],
-        account="lx",
         market="富途",
         base_currency="USD",
     )
@@ -663,15 +629,12 @@ def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> 
 
 
 def test_build_futu_portfolio_context_ignores_legacy_balance_aliases_and_cash() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
+    out = _futu_context(
         balance_rows=[
             {"currency": "USD", "available_funds": 9999, "withdraw_cash": 8888, "power": 7777},
             {"currency": "USD", "cash": 100},
         ],
         position_rows=[],
-        account="lx",
     )
 
     assert out["cash_by_currency"] == {}
@@ -684,12 +647,8 @@ def test_build_futu_portfolio_context_ignores_legacy_balance_aliases_and_cash() 
 
 
 def test_build_futu_portfolio_context_rejects_empty_balance_snapshot() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
-        balance_rows=[],
+    out = _futu_context(
         position_rows=[],
-        account="lx",
     )
 
     assert out["cash_by_currency"] == {}
@@ -700,9 +659,7 @@ def test_build_futu_portfolio_context_rejects_empty_balance_snapshot() -> None:
 
 
 def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_legacy_cash() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
+    out = _futu_context(
         balance_rows=[
             {
                 "currency": "HKD",
@@ -721,7 +678,6 @@ def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_leg
             },
         ],
         position_rows=[],
-        account="lx",
     )
 
     assert out["cash_by_currency"] == {"HKD": 567440.6, "USD": -0.01}
@@ -736,9 +692,7 @@ def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_leg
 
 
 def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
+    out = _futu_context(
         balance_rows=[{
             "currency": "CNY",
             "fund_assets": "N/A",
@@ -752,7 +706,6 @@ def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> N
             "my_cash": "N/A",
         }],
         position_rows=[],
-        account="lx",
     )
 
     assert out["cash_by_currency"] == {}
@@ -763,16 +716,13 @@ def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> N
 
 
 def test_build_futu_portfolio_context_dedups_balance_rows_by_acc_env_currency() -> None:
-    from src.application.futu_portfolio_context import build_futu_portfolio_context
-
-    out = build_futu_portfolio_context(
+    out = _futu_context(
         balance_rows=[
             {"acc_id": "1", "trd_env": "REAL", "currency": "USD", "us_cash": 1000},
             {"acc_id": "1", "trd_env": "REAL", "currency": "USD", "us_cash": 1000},
             {"acc_id": "1", "trd_env": "REAL", "currency": "HKD", "hk_cash": 500},
         ],
         position_rows=[],
-        account="lx",
     )
 
     assert out["cash_by_currency"] == {"USD": 1000.0, "HKD": 500.0}

@@ -45,6 +45,29 @@ def _policy_row(*, mode: str = "put", **overrides):  # type: ignore[no-untyped-d
     return row
 
 
+def _decide(row: dict, *, mode: str = "put", **kwargs):  # type: ignore[no-untyped-def]
+    return evaluate_opening_candidate_policy(row, mode=mode, **kwargs)
+
+
+def _symbol_row(symbol: str, ret, discount, concentration):  # type: ignore[no-untyped-def]
+    return _policy_row(
+        symbol=symbol,
+        contract_symbol=f"{symbol}_PUT",
+        period_net_return_on_cash_basis=ret,
+        net_assignment_discount_pct=discount,
+        symbol_concentration_after=concentration,
+    )
+
+
+def _option_market_row(symbol: str, ret, concentration):  # type: ignore[no-untyped-def]
+    return _policy_row(
+        symbol=symbol,
+        contract_symbol=f"{symbol}_PUT",
+        period_net_return_on_cash_basis=ret,
+        option_market_concentration_after=concentration,
+    )
+
+
 def _reasons(decision: dict) -> set[str]:
     return {str(item["reason"]) for item in decision["rejects"]}
 
@@ -74,24 +97,9 @@ def test_candidate_engine_stage_contract_and_reject_payload_are_stable() -> None
 
 
 def test_sell_put_recall_window_uses_smaller_of_config_max_and_spot_then_80_pct() -> None:
-    accepted = evaluate_opening_candidate_policy(
-        _policy_row(strike=88.0),
-        mode="put",
-        min_strike=70.0,
-        max_strike=120.0,
-    )
-    below = evaluate_opening_candidate_policy(
-        _policy_row(strike=87.99),
-        mode="put",
-        min_strike=70.0,
-        max_strike=120.0,
-    )
-    above = evaluate_opening_candidate_policy(
-        _policy_row(strike=110.01),
-        mode="put",
-        min_strike=70.0,
-        max_strike=120.0,
-    )
+    accepted = _decide(_policy_row(strike=88.0), min_strike=70.0, max_strike=120.0)
+    below = _decide(_policy_row(strike=87.99), min_strike=70.0, max_strike=120.0)
+    above = _decide(_policy_row(strike=110.01), min_strike=70.0, max_strike=120.0)
 
     assert accepted["accepted"] is True
     assert "hard_strike" in _reasons(below)
@@ -99,32 +107,17 @@ def test_sell_put_recall_window_uses_smaller_of_config_max_and_spot_then_80_pct(
 
 
 def test_covered_call_recall_window_starts_at_spot_and_caps_at_120_pct() -> None:
-    assert evaluate_opening_candidate_policy(
-        _policy_row(mode="call", strike=110.0),
-        mode="call",
-        min_strike=100.0,
-        max_strike=150.0,
-    )["accepted"] is True
+    assert _decide(_policy_row(mode="call", strike=110.0), mode="call", min_strike=100.0, max_strike=150.0)["accepted"] is True
     assert "hard_strike" in _reasons(
-        evaluate_opening_candidate_policy(
-            _policy_row(mode="call", strike=109.99),
-            mode="call",
-            min_strike=100.0,
-            max_strike=150.0,
-        )
+        _decide(_policy_row(mode="call", strike=109.99), mode="call", min_strike=100.0, max_strike=150.0)
     )
     assert "hard_strike" in _reasons(
-        evaluate_opening_candidate_policy(
-            _policy_row(mode="call", strike=132.01),
-            mode="call",
-            min_strike=100.0,
-            max_strike=150.0,
-        )
+        _decide(_policy_row(mode="call", strike=132.01), mode="call", min_strike=100.0, max_strike=150.0)
     )
 
 
 def test_wheel_can_disable_only_the_default_covered_call_strike_cap() -> None:
-    decision = evaluate_opening_candidate_policy(
+    decision = _decide(
         _policy_row(mode="call", strike=140.0),
         mode="call",
         min_strike=100.0,
@@ -152,12 +145,7 @@ def test_wheel_can_disable_only_the_default_covered_call_strike_cap() -> None:
     ],
 )
 def test_sell_put_formal_gates_fail_closed(overrides: dict, reason: str) -> None:
-    decision = evaluate_opening_candidate_policy(
-        _policy_row(**overrides),
-        mode="put",
-        min_dte=7,
-        max_dte=60,
-    )
+    decision = _decide(_policy_row(**overrides), min_dte=7, max_dte=60)
     assert reason in _reasons(decision)
 
 
@@ -173,10 +161,7 @@ def test_earnings_window_is_inclusive_on_days_zero_and_six_only(
     event_date: str,
     accepted: bool,
 ) -> None:
-    decision = evaluate_opening_candidate_policy(
-        _policy_row(**_earnings_evidence(event_date=event_date)),
-        mode="put",
-    )
+    decision = _decide(_policy_row(**_earnings_evidence(event_date=event_date)))
 
     assert decision["accepted"] is accepted
 
@@ -194,27 +179,18 @@ def test_same_market_day_earnings_remains_pending_without_timestamp_semantics() 
             "earnings_nonblocking_events": [event],
         }
     )
-    decision = evaluate_opening_candidate_policy(
-        _policy_row(**evidence),
-        mode="put",
-    )
+    decision = _decide(_policy_row(**evidence))
 
     assert decision["accepted"] is True
 
 
 def test_optional_oi_volume_and_delta_do_not_create_hard_gates() -> None:
-    decision = evaluate_opening_candidate_policy(
-        _policy_row(open_interest=None, volume=None, delta=None),
-        mode="put",
-    )
+    decision = _decide(_policy_row(open_interest=None, volume=None, delta=None))
     assert decision["accepted"] is True
 
 
 def test_covered_call_requires_physical_share_capacity() -> None:
-    decision = evaluate_opening_candidate_policy(
-        _policy_row(mode="call", covered_contracts_available=0, max_new_contracts=0),
-        mode="call",
-    )
+    decision = _decide(_policy_row(mode="call", covered_contracts_available=0, max_new_contracts=0), mode="call")
     assert "hard_capacity_call" in _reasons(decision)
 
 
@@ -277,34 +253,10 @@ def test_select_best_candidate_per_symbol_preserves_canonical_symbol_winner() ->
 
 def test_sell_put_ranking_profiles_have_exact_cross_symbol_orders() -> None:
     rows = [
-        _policy_row(
-            symbol="A",
-            contract_symbol="A_PUT",
-            period_net_return_on_cash_basis=0.0200,
-            net_assignment_discount_pct=0.05,
-            symbol_concentration_after=0.50,
-        ),
-        _policy_row(
-            symbol="B",
-            contract_symbol="B_PUT",
-            period_net_return_on_cash_basis=0.0185,
-            net_assignment_discount_pct=0.04,
-            symbol_concentration_after=0.20,
-        ),
-        _policy_row(
-            symbol="C",
-            contract_symbol="C_PUT",
-            period_net_return_on_cash_basis=0.0150,
-            net_assignment_discount_pct=0.10,
-            symbol_concentration_after=0.10,
-        ),
-        _policy_row(
-            symbol="D",
-            contract_symbol="D_PUT",
-            period_net_return_on_cash_basis=0.0300,
-            net_assignment_discount_pct=0.20,
-            symbol_concentration_after=None,
-        ),
+        _symbol_row("A", 0.0200, 0.05, 0.50),
+        _symbol_row("B", 0.0185, 0.04, 0.20),
+        _symbol_row("C", 0.0150, 0.10, 0.10),
+        _symbol_row("D", 0.0300, 0.20, None),
     ]
 
     def order(profile: str) -> list[str]:
@@ -331,18 +283,8 @@ def test_sell_put_ranking_profiles_have_exact_cross_symbol_orders() -> None:
 
 def test_option_market_concentration_profile_uses_explicit_return_band() -> None:
     rows = [
-        _policy_row(
-            symbol="A",
-            contract_symbol="A_PUT",
-            period_net_return_on_cash_basis=0.020,
-            option_market_concentration_after=0.80,
-        ),
-        _policy_row(
-            symbol="B",
-            contract_symbol="B_PUT",
-            period_net_return_on_cash_basis=0.015,
-            option_market_concentration_after=0.10,
-        ),
+        _option_market_row("A", 0.020, 0.80),
+        _option_market_row("B", 0.015, 0.10),
     ]
 
     def top1(threshold: float) -> str:
@@ -390,20 +332,8 @@ def test_current_tie_break_ranks_known_return_before_null_return() -> None:
 
 def test_concentration_first_uses_existing_ties_inside_equal_concentration() -> None:
     rows = [
-        _policy_row(
-            symbol="E",
-            contract_symbol="E_PUT",
-            period_net_return_on_cash_basis=0.010,
-            net_assignment_discount_pct=0.02,
-            symbol_concentration_after=0.20,
-        ),
-        _policy_row(
-            symbol="F",
-            contract_symbol="F_PUT",
-            period_net_return_on_cash_basis=0.009,
-            net_assignment_discount_pct=0.10,
-            symbol_concentration_after=0.20,
-        ),
+        _symbol_row("E", 0.010, 0.02, 0.20),
+        _symbol_row("F", 0.009, 0.10, 0.20),
     ]
 
     assert [

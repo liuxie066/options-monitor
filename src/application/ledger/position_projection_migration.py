@@ -51,6 +51,8 @@ from src.infrastructure.private_storage import (
     private_path,
     secure_sqlite_artifacts,
 )
+from src.infrastructure.io_utils import utc_now as _now_iso
+from src.application.payload_helpers import canonical_json_bytes as _canonical_bytes
 
 
 INVENTORY_SCHEMA = "position_projection_migration_inventory.v1"
@@ -79,20 +81,6 @@ REQUIRED_TRIGGERS = (
     "trg_position_lots_generation_update_new",
     *TRADE_EVENT_PAGINATION_TRIGGERS,
 )
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _sha256(value: Any) -> str:

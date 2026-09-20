@@ -15,6 +15,81 @@ import src.application.ledger.repository as ledger_repository
 import src.application.ledger.writer as ledger_writer
 
 
+_OM_PROG = "om option-positions"
+
+
+def _om_cli_args(data_config: Path, *args: object) -> list[str]:
+    """argv (without the program name) for ``cli_mod.main(argv)``."""
+
+    return ["--data-config", str(data_config), *(str(arg) for arg in args)]
+
+
+def _set_om_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    data_config: Path,
+    *args: object,
+) -> None:
+    """Point ``sys.argv`` at one ``om option-positions`` invocation."""
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [_OM_PROG, *_om_cli_args(data_config, *args)],
+    )
+
+
+def _active_ledger_context(tmp_path: Path):
+    """Data config plus the repo the CLI resolves to when both paths agree."""
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    return data_config, repo
+
+
+def _legacy_ledger_context(tmp_path: Path):
+    """Data config still declaring the deprecated path, repo on the canonical one."""
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    return data_config, repo
+
+
+def _open_position(
+    repo,
+    *,
+    symbol: str,
+    currency: str,
+    strike: float,
+    expiration_ymd: str,
+    premium_per_share: float,
+    opened_at_ms: int,
+    broker: str = "富途",
+    account: str = "lx",
+    option_type: str = "put",
+    side: str = "short",
+    contracts: int = 1,
+    multiplier: int = 100,
+):
+    """Persist one manual open event so the CLI has a lot to read back."""
+
+    return ledger_manual_trades.persist_manual_open_event(
+        repo,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        opened_at_ms=opened_at_ms,
+    )
+
 
 def test_projection_migration_inventory_uses_read_only_store_path(
     monkeypatch: pytest.MonkeyPatch,
@@ -43,14 +118,7 @@ def test_projection_migration_inventory_uses_read_only_store_path(
         inventory,
     )
 
-    assert cli_mod.main(
-        [
-            "--data-config",
-            str(data_config),
-            "projection-migration",
-            "inventory",
-        ]
-    ) == 0
+    assert cli_mod.main(_om_cli_args(data_config, "projection-migration", "inventory")) == 0
 
     assert captured["path"] == sqlite_path
     assert json.loads(capsys.readouterr().out) == {"path": str(sqlite_path)}
@@ -145,9 +213,7 @@ def test_decision_projection_reads_use_resolved_store_without_write_guard(
         lambda **_kwargs: pytest.fail("read command invoked write guard"),
     )
 
-    assert cli_mod.main(
-        ["--data-config", str(data_config), "decision-projection", command]
-    ) == 0
+    assert cli_mod.main(_om_cli_args(data_config, "decision-projection", command)) == 0
     assert captured["path"] == sqlite_path
     assert json.loads(capsys.readouterr().out) == {"path": str(sqlite_path)}
 
@@ -235,20 +301,10 @@ def test_projection_migration_activate_requires_both_evidence_files(
         },
     )
 
-    assert cli_mod.main(
-        [
-            "--data-config",
-            str(data_config),
-            "projection-migration",
-            "activate",
-            "--acceptance-manifest",
-            str(acceptance),
-            "--shadow-manifest",
-            str(shadow),
-            "--apply",
-            "--yes",
-        ]
-    ) == 0
+    assert cli_mod.main(_om_cli_args(data_config,
+        "projection-migration", "activate", "--acceptance-manifest", str(acceptance), "--shadow-manifest", str(shadow),
+        "--apply", "--yes",
+    )) == 0
     assert json.loads(capsys.readouterr().out)["operation"] == "activate"
 
 
@@ -323,32 +379,14 @@ def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
 
 def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _legacy_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["om option-positions", "--data-config", str(data_config), "events", "--format", "json", "--account", "lx"],
-    )
+    _set_om_argv(monkeypatch, data_config, "events", "--format", "json", "--account", "lx")
 
     cli_mod.main()
 
@@ -361,28 +399,14 @@ def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -
 
 def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _legacy_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(sys, "argv", ["om option-positions", "--data-config", str(data_config), "rebuild", "--apply"])
+    _set_om_argv(monkeypatch, data_config, "rebuild", "--apply")
 
     cli_mod.main()
 
@@ -400,11 +424,7 @@ def test_option_positions_cli_rebuild_ignores_deprecated_sqlite_path(monkeypatch
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["om option-positions", "--data-config", str(data_config), "rebuild", "--format", "json"],
-    )
+    _set_om_argv(monkeypatch, data_config, "rebuild", "--format", "json")
 
     cli_mod.main()
 
@@ -416,33 +436,17 @@ def test_option_positions_cli_rebuild_ignores_deprecated_sqlite_path(monkeypatch
 
 def test_option_positions_cli_store_inspect_reports_parallel_sqlite_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
     legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
     active_db = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=legacy_db)
     for db_path, symbol in ((active_db, "TSLA"), (legacy_db, "NVDA")):
         repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
-        ledger_manual_trades.persist_manual_open_event(
-            repo,
-            broker="富途",
-            account="lx",
-            symbol=symbol,
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=1.23,
+        _open_position(repo,
+            symbol=symbol, currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
             opened_at_ms=1000,
         )
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["om option-positions", "--data-config", str(data_config), "store", "inspect", "--format", "json"],
-    )
+    _set_om_argv(monkeypatch, data_config, "store", "inspect", "--format", "json")
 
     cli_mod.main()
 
@@ -458,40 +462,15 @@ def test_option_positions_cli_store_inspect_reports_parallel_sqlite_candidates(m
 
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _legacy_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "inspect",
-            "--record-id",
-            lot["record_id"],
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "inspect", "--record-id", lot["record_id"])
 
     cli_mod.main()
 
@@ -508,12 +487,16 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     assert payload["related_events"][0]["event_id"].startswith("manual-open-")
 
 
-def test_option_positions_cli_parent_runtime_root_survives_inspect_subparser(monkeypatch, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize("placement", ("parent", "subcommand"))
+def test_option_positions_cli_inspect_accepts_runtime_root_at_either_level(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    placement: str,
+) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _legacy_ledger_context(tmp_path)
     runtime_root = tmp_path / "runtime"
     captured: dict[str, object] = {}
 
@@ -523,49 +506,12 @@ def test_option_positions_cli_parent_runtime_root_survives_inspect_subparser(mon
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", _fake_resolve)
 
-    rc = cli_mod.main(
-        [
-            "--data-config",
-            str(data_config),
-            "--runtime-root",
-            str(runtime_root),
-            "inspect",
-            "--record-id",
-            "missing-lot",
-        ]
+    tail = (
+        ["--runtime-root", str(runtime_root), "inspect", "--record-id", "missing-lot"]
+        if placement == "parent"
+        else ["inspect", "--runtime-root", str(runtime_root), "--record-id", "missing-lot"]
     )
-
-    assert rc == 0
-    json.loads(capsys.readouterr().out)
-    assert captured["runtime_root"] == str(runtime_root)
-
-
-def test_option_positions_cli_inspect_accepts_subcommand_runtime_root(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    runtime_root = tmp_path / "runtime"
-    captured: dict[str, object] = {}
-
-    def _fake_resolve(**kwargs: object) -> tuple[Path, object]:
-        captured.update(kwargs)
-        return data_config, repo
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", _fake_resolve)
-
-    rc = cli_mod.main(
-        [
-            "--data-config",
-            str(data_config),
-            "inspect",
-            "--runtime-root",
-            str(runtime_root),
-            "--record-id",
-            "missing-lot",
-        ]
-    )
+    rc = cli_mod.main(_om_cli_args(data_config, *tail))
 
     assert rc == 0
     json.loads(capsys.readouterr().out)
@@ -576,9 +522,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     import src.interfaces.cli.option_positions as cli_mod
     from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _legacy_ledger_context(tmp_path)
     repo.upsert_trade_event(
         TradeEvent(
             event_id="manual-close-missing-lot",
@@ -610,18 +554,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "inspect",
-            "--record-id",
-            "rec_missing",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "inspect", "--record-id", "rec_missing")
 
     cli_mod.main()
 
@@ -635,39 +568,13 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
 
 def test_option_positions_cli_verify_projection_writes_report_and_checkpoint(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "verify-projection",
-            "--publish-evidence",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "verify-projection", "--publish-evidence", "--format", "json")
 
     cli_mod.main()
 
@@ -725,7 +632,6 @@ def test_option_positions_cli_verify_projection_is_read_only_by_default(
     capsys,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
@@ -734,19 +640,8 @@ def test_option_positions_cli_verify_projection_is_read_only_by_default(
         tmp_path / "option_positions.sqlite3"
     )
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
     monkeypatch.setattr(
@@ -754,18 +649,7 @@ def test_option_positions_cli_verify_projection_is_read_only_by_default(
         "resolve_option_positions_repo",
         lambda **_kwargs: (data_config, repo),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "verify-projection",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "verify-projection", "--format", "json")
 
     cli_mod.main()
 
@@ -782,55 +666,18 @@ def test_option_positions_cli_verify_projection_is_read_only_by_default(
 
 def test_option_positions_cli_inspect_surfaces_projection_verify_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "verify-projection",
-            "--publish-evidence",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "verify-projection", "--publish-evidence", "--format", "json")
     cli_mod.main()
     capsys.readouterr()
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "inspect",
-            "--record-id",
-            lot["record_id"],
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "inspect", "--record-id", lot["record_id"])
     cli_mod.main()
 
     payload = json.loads(capsys.readouterr().out)
@@ -840,97 +687,41 @@ def test_option_positions_cli_inspect_surfaces_projection_verify_state(monkeypat
     assert payload["latest_projection_verify_report"]["source_of_truth"] == "trade_events"
 
 
-def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize(
+    ("request_id", "symbol", "strike", "exp", "expected_currency"),
+    (
+        ("test-add-hk-dry-run", "0700.HK", "510", "2026-06-29", "HKD"),
+        ("test-add-us-dry-run", "PLTR", "30", "2026-05-15", "USD"),
+    ),
+    ids=("hk-symbol-infers-hkd", "us-symbol-infers-usd"),
+)
+def test_option_positions_cli_add_dry_run_infers_currency_from_symbol(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    request_id: str,
+    symbol: str,
+    strike: str,
+    exp: str,
+    expected_currency: str,
+) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "add",
-            "--request-id",
-            "test-add-hk-dry-run",
-            "--account",
-            "lx",
-            "--symbol",
-            "0700.HK",
-            "--option-type",
-            "put",
-            "--side",
-            "short",
-            "--contracts",
-            "1",
-            "--strike",
-            "510",
-            "--multiplier",
-            "100",
-            "--exp",
-            "2026-06-29",
-            "--premium-per-share",
-            "1.235",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "add", "--request-id", request_id, "--account", "lx", "--symbol", symbol, "--option-type", "put",
+        "--side", "short", "--contracts", "1", "--strike", strike, "--multiplier", "100", "--exp", exp,
+        "--premium-per-share", "1.235", "--dry-run",
+)
 
     cli_mod.main()
 
     out = capsys.readouterr().out
     fields = json.loads(out[out.index("{"):])
-    assert fields["currency"] == "HKD"
-    assert fields["premium"] == 1.235
-
-
-def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "add",
-            "--request-id",
-            "test-add-us-dry-run",
-            "--account",
-            "lx",
-            "--symbol",
-            "PLTR",
-            "--option-type",
-            "put",
-            "--side",
-            "short",
-            "--contracts",
-            "1",
-            "--strike",
-            "30",
-            "--multiplier",
-            "100",
-            "--exp",
-            "2026-05-15",
-            "--premium-per-share",
-            "1.235",
-            "--dry-run",
-        ],
-    )
-
-    cli_mod.main()
-
-    out = capsys.readouterr().out
-    fields = json.loads(out[out.index("{"):])
-    assert fields["currency"] == "USD"
+    assert fields["currency"] == expected_currency
     assert fields["premium"] == 1.235
 
 
@@ -996,39 +787,14 @@ def test_lifecycle_write_requires_apply_and_confirmation_together() -> None:
 def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _legacy_ledger_context(tmp_path)
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
 
-    cli_mod.main([
-        "--data-config",
-        str(data_config),
-        "add",
-        "--request-id",
-        "test-add-confirm",
-        "--account",
-        "lx",
-        "--symbol",
-        "0700.HK",
-        "--option-type",
-        "put",
-        "--side",
-        "short",
-        "--contracts",
-        "1",
-        "--strike",
-        "510",
-        "--multiplier",
-        "100",
-        "--exp",
-        "2027-06-29",
-        "--premium-per-share",
-        "1.235",
-        "--confirm",
-        "--format",
-        "json",
-    ])
+    cli_mod.main(_om_cli_args(data_config,
+        "add", "--request-id", "test-add-confirm", "--account", "lx", "--symbol", "0700.HK", "--option-type", "put",
+        "--side", "short", "--contracts", "1", "--strike", "510", "--multiplier", "100", "--exp", "2027-06-29",
+        "--premium-per-share", "1.235", "--confirm", "--format", "json",
+    ))
 
     out = json.loads(capsys.readouterr().out)
     assert out["dry_run"] is False
@@ -1042,60 +808,18 @@ def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatc
 
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
     near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
     far_exp = (datetime.now().date() + timedelta(days=21)).isoformat()
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd=near_exp,
-        premium_per_share=1.23,
-        opened_at_ms=1000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd=near_exp, premium_per_share=1.23, opened_at_ms=1000,
     )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=110.0,
-        multiplier=100,
-        expiration_ymd=far_exp,
-        premium_per_share=1.5,
-        opened_at_ms=2000,
+    _open_position(repo,
+        symbol="NVDA", currency="USD", strike=110.0, expiration_ymd=far_exp, premium_per_share=1.5, opened_at_ms=2000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "list",
-            "--account",
-            "lx",
-            "--format",
-            "json",
-            "--exp-within-days",
-            "7",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "list", "--account", "lx", "--format", "json", "--exp-within-days", "7")
 
     cli_mod.main()
 
@@ -1118,31 +842,14 @@ def test_option_positions_cli_list_default_text_format_renders_lot_id(
     import src.interfaces.cli.option_positions as cli_mod
     from src.application.ledger.read_model import list_position_rows
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd=(datetime.now().date() + timedelta(days=1)).isoformat(),
-        premium_per_share=1.23,
-        opened_at_ms=1000,
+    near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd=near_exp, premium_per_share=1.23, opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["om option-positions", "--data-config", str(data_config), "list", "--account", "lx"],
-    )
+    _set_om_argv(monkeypatch, data_config, "list", "--account", "lx")
 
     assert cli_mod.main() == 0
 
@@ -1157,52 +864,17 @@ def test_option_positions_cli_list_default_text_format_renders_lot_id(
 
 def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="0700.HK", contracts=2, currency="HKD", strike=480.0, expiration_ymd="2026-04-29",
+        premium_per_share=3.93, opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "buy-close",
-            "--account",
-            "lx",
-            "--symbol",
-            "0700.HK",
-            "--option-type",
-            "put",
-            "--strike",
-            "480",
-            "--exp",
-            "2026-04-29",
-            "--contracts",
-            "1",
-            "--close-price",
-            "1.2",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "buy-close", "--account", "lx", "--symbol", "0700.HK", "--option-type", "put", "--strike", "480",
+        "--exp", "2026-04-29", "--contracts", "1", "--close-price", "1.2", "--dry-run",
+)
 
     cli_mod.main()
 
@@ -1215,53 +887,18 @@ def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch
 
 def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _active_ledger_context(tmp_path)
     for opened_at in (1000, 2000):
-        ledger_manual_trades.persist_manual_open_event(
-            repo,
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
+        _open_position(repo,
+            symbol="0700.HK", currency="HKD", strike=480.0, expiration_ymd="2026-04-29", premium_per_share=3.93,
             opened_at_ms=opened_at,
         )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "buy-close",
-            "--account",
-            "lx",
-            "--symbol",
-            "0700.HK",
-            "--option-type",
-            "put",
-            "--strike",
-            "480",
-            "--exp",
-            "2026-04-29",
-            "--contracts",
-            "1",
-            "--close-price",
-            "1.2",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "buy-close", "--account", "lx", "--symbol", "0700.HK", "--option-type", "put", "--strike", "480",
+        "--exp", "2026-04-29", "--contracts", "1", "--close-price", "1.2", "--dry-run",
+)
 
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.main()
@@ -1274,60 +911,18 @@ def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(mon
 
 def test_option_positions_cli_assign_confirm_writes_assignment_event(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.15,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TIGR", contracts=10, currency="USD", strike=6.0, expiration_ymd="2026-05-22", premium_per_share=0.15,
         opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "assign",
-            "--request-id",
-            "test-assignment-confirm",
-            "--account",
-            "lx",
-            "--symbol",
-            "TIGR",
-            "--option-type",
-            "put",
-            "--strike",
-            "6",
-            "--exp",
-            "2026-05-22",
-            "--contracts",
-            "10",
-            "--stock-side",
-            "buy",
-            "--stock-qty",
-            "1000",
-            "--stock-price",
-            "6",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "assign", "--request-id", "test-assignment-confirm", "--account", "lx", "--symbol", "TIGR",
+        "--option-type", "put", "--strike", "6", "--exp", "2026-05-22", "--contracts", "10", "--stock-side", "buy",
+        "--stock-qty", "1000", "--stock-price", "6", "--confirm", "--format", "json",
+)
 
     cli_mod.main()
 
@@ -1344,58 +939,18 @@ def test_option_positions_cli_assign_confirm_writes_assignment_event(monkeypatch
 
 def test_option_positions_cli_assign_rejects_wrong_stock_side(monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.15,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TIGR", contracts=10, currency="USD", strike=6.0, expiration_ymd="2026-05-22", premium_per_share=0.15,
         opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "assign",
-            "--request-id",
-            "test-assignment-wrong-side",
-            "--account",
-            "lx",
-            "--symbol",
-            "TIGR",
-            "--option-type",
-            "put",
-            "--strike",
-            "6",
-            "--exp",
-            "2026-05-22",
-            "--contracts",
-            "10",
-            "--stock-side",
-            "sell",
-            "--stock-qty",
-            "1000",
-            "--stock-price",
-            "6",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "assign", "--request-id", "test-assignment-wrong-side", "--account", "lx", "--symbol", "TIGR",
+        "--option-type", "put", "--strike", "6", "--exp", "2026-05-22", "--contracts", "10", "--stock-side", "sell",
+        "--stock-qty", "1000", "--stock-price", "6", "--dry-run",
+)
 
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.main()
@@ -1406,60 +961,18 @@ def test_option_positions_cli_assign_rejects_wrong_stock_side(monkeypatch, tmp_p
 
 def test_option_positions_cli_exercise_confirm_writes_exercise_event(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="call",
-        side="long",
-        contracts=2,
-        currency="USD",
-        strike=200.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=1.5,
-        opened_at_ms=1000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="AAPL", option_type="call", side="long", contracts=2, currency="USD", strike=200.0,
+        expiration_ymd="2026-05-22", premium_per_share=1.5, opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "exercise",
-            "--request-id",
-            "test-exercise-confirm",
-            "--account",
-            "lx",
-            "--symbol",
-            "AAPL",
-            "--option-type",
-            "call",
-            "--strike",
-            "200",
-            "--exp",
-            "2026-05-22",
-            "--contracts",
-            "2",
-            "--stock-side",
-            "buy",
-            "--stock-qty",
-            "200",
-            "--stock-price",
-            "200",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "exercise", "--request-id", "test-exercise-confirm", "--account", "lx", "--symbol", "AAPL",
+        "--option-type", "call", "--strike", "200", "--exp", "2026-05-22", "--contracts", "2", "--stock-side", "buy",
+        "--stock-qty", "200", "--stock-price", "200", "--confirm", "--format", "json",
+)
 
     cli_mod.main()
 
@@ -1477,9 +990,7 @@ def test_option_positions_cli_exercise_confirm_writes_exercise_event(monkeypatch
 def test_option_positions_cli_lifecycle_list_includes_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _active_ledger_context(tmp_path)
     repo.upsert_trade_lifecycle_case(
         {
             "case_id": "lc_tigr_assignment",
@@ -1509,22 +1020,9 @@ def test_option_positions_cli_lifecycle_list_includes_evidence(monkeypatch, tmp_
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "list",
-            "--status",
-            "waiting_settlement_evidence",
-            "--include-evidence",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "list", "--status", "waiting_settlement_evidence", "--include-evidence", "--format", "json",
+)
 
     cli_mod.main()
 
@@ -1537,9 +1035,7 @@ def test_option_positions_cli_lifecycle_list_includes_evidence(monkeypatch, tmp_
 def test_option_positions_cli_lifecycle_inspect_shows_case_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    data_config, repo = _active_ledger_context(tmp_path)
     repo.upsert_trade_lifecycle_case(
         {
             "case_id": "lc_tigr_conflict",
@@ -1569,21 +1065,7 @@ def test_option_positions_cli_lifecycle_inspect_shows_case_evidence(monkeypatch,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "inspect",
-            "--case-id",
-            "lc_tigr_conflict",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "lifecycle", "inspect", "--case-id", "lc_tigr_conflict", "--format", "json")
 
     cli_mod.main()
 
@@ -1599,24 +1081,10 @@ def test_option_positions_cli_lifecycle_confirm_expired_is_retired(
     capsys,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=440.0,
-        multiplier=100,
-        expiration_ymd="2026-06-05",
-        premium_per_share=0.86,
-        opened_at_ms=1780354364000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="0700.HK", contracts=2, currency="HKD", strike=440.0, expiration_ymd="2026-06-05",
+        premium_per_share=0.86, opened_at_ms=1780354364000,
     )
     repo.upsert_trade_lifecycle_case(
         {
@@ -1652,22 +1120,9 @@ def test_option_positions_cli_lifecycle_confirm_expired_is_retired(
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "confirm-expired",
-            "--deal-id",
-            "775828694842258876",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "confirm-expired", "--deal-id", "775828694842258876", "--confirm", "--format", "json",
+)
 
     with pytest.raises(
         SystemExit,
@@ -1695,19 +1150,8 @@ def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
         tmp_path / "option_positions.sqlite3"
     )
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100,
-        multiplier=100,
-        expiration_ymd="2026-08-21",
-        premium_per_share=1,
+    _open_position(repo,
+        symbol="NVDA", currency="USD", strike=100, expiration_ymd="2026-08-21", premium_per_share=1,
         opened_at_ms=1_700_000_000_000,
     )
     observation_start = expiration_observation_start_ms("2026-08-21", "US")
@@ -1717,24 +1161,10 @@ def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
         "resolve_option_positions_repo",
         lambda **_kwargs: (data_config, repo),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "reconcile",
-            "--account",
-            "lx",
-            "--observed-at-ms",
-            str(observation_start),
-            "--dry-run",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "reconcile", "--account", "lx", "--observed-at-ms", str(observation_start),
+        "--dry-run", "--format", "json",
+)
     cli_mod.main()
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["operation"] == "lifecycle_reconcile"
@@ -1742,25 +1172,10 @@ def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
     assert len(dry_run["discovery"]["would_create_case_ids"]) == 1
     assert repo.list_trade_lifecycle_cases() == []
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "reconcile",
-            "--account",
-            "lx",
-            "--observed-at-ms",
-            str(observation_start),
-            "--apply",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "reconcile", "--account", "lx", "--observed-at-ms", str(observation_start), "--apply", "--confirm",
+        "--format", "json",
+)
     cli_mod.main()
     applied = json.loads(capsys.readouterr().out)
     assert applied["dry_run"] is False
@@ -1831,23 +1246,10 @@ def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
     )
 
     assert (
-        cli_mod.main(
-            [
-                "--data-config",
-                str(data_config),
-                "lifecycle",
-                "reconcile-due",
-                "--account",
-                "lx",
-                "--config",
-                str(runtime_config),
-                "--observed-at-ms",
-                "123",
-                "--dry-run",
-                "--format",
-                "json",
-            ]
-        )
+        cli_mod.main(_om_cli_args(data_config,
+            "lifecycle", "reconcile-due", "--account", "lx", "--config", str(runtime_config), "--observed-at-ms", "123",
+            "--dry-run", "--format", "json",
+    ))
         == 0
     )
 
@@ -1974,24 +1376,10 @@ def test_option_positions_cli_reconcile_due_apply_checkpoints_before_gateways(
     )
 
     assert (
-        cli_mod.main(
-            [
-                "--data-config",
-                str(data_config),
-                "lifecycle",
-                "reconcile-due",
-                "--runtime-root",
-                str(tmp_path),
-                "--account",
-                "lx",
-                "--config",
-                str(runtime_config),
-                "--apply",
-                "--confirm",
-                "--format",
-                "json",
-            ]
-        )
+        cli_mod.main(_om_cli_args(data_config,
+            "lifecycle", "reconcile-due", "--runtime-root", str(tmp_path), "--account", "lx",
+            "--config", str(runtime_config), "--apply", "--confirm", "--format", "json",
+    ))
         == expected_return_code
     )
 
@@ -2082,22 +1470,10 @@ def test_option_positions_cli_checkpoint_failure_blocks_gateways(
     )
 
     with pytest.raises(SystemExit, match="seal_persist_failed: OSError"):
-        cli_mod.main(
-            [
-                "--data-config",
-                str(data_config),
-                "lifecycle",
-                "reconcile-due",
-                "--runtime-root",
-                str(tmp_path),
-                "--account",
-                "lx",
-                "--config",
-                str(runtime_config),
-                "--apply",
-                "--confirm",
-            ]
-        )
+        cli_mod.main(_om_cli_args(data_config,
+            "lifecycle", "reconcile-due", "--runtime-root", str(tmp_path), "--account", "lx",
+            "--config", str(runtime_config), "--apply", "--confirm",
+    ))
 
     assert gateway_calls == 0
 
@@ -2108,24 +1484,10 @@ def test_option_positions_cli_lifecycle_confirm_expired_alias_path_is_retired(
     capsys,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=440.0,
-        multiplier=100,
-        expiration_ymd="2026-06-05",
-        premium_per_share=0.86,
-        opened_at_ms=1780354364000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="0700.HK", contracts=2, currency="HKD", strike=440.0, expiration_ymd="2026-06-05",
+        premium_per_share=0.86, opened_at_ms=1780354364000,
     )
     repo.upsert_trade_lifecycle_case(
         {
@@ -2161,22 +1523,9 @@ def test_option_positions_cli_lifecycle_confirm_expired_alias_path_is_retired(
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "confirm-expired",
-            "--deal-id",
-            "775828694842258876",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "confirm-expired", "--deal-id", "775828694842258876", "--confirm", "--format", "json",
+)
 
     with pytest.raises(
         SystemExit,
@@ -2190,40 +1539,14 @@ def test_option_positions_cli_lifecycle_confirm_expired_alias_path_is_retired(
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    open_result = ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
+    data_config, repo = _legacy_ledger_context(tmp_path)
+    open_result = _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=1.23,
         opened_at_ms=1000,
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-            [
-                "om option-positions",
-                "--data-config",
-                str(data_config),
-                "void-event",
-                "--event-id",
-                str(open_result.event_id),
-                "--confirm",
-            ],
-        )
+    _set_om_argv(monkeypatch, data_config, "void-event", "--event-id", str(open_result.event_id), "--confirm")
 
     cli_mod.main()
 
@@ -2234,43 +1557,17 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
 
 def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="NVDA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=2.5,
         opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "adjust-lot",
-            "--record-id",
-            lot["record_id"],
-            "--premium-per-share",
-            "3.1",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "adjust-lot", "--record-id", lot["record_id"], "--premium-per-share", "3.1", "--dry-run",
+)
 
     cli_mod.main()
 
@@ -2285,45 +1582,18 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
     capsys,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="call",
-        side="long",
-        contracts=1,
-        currency="USD",
-        strike=140.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.0,
-        opened_at_ms=1000,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="NVDA", option_type="call", side="long", currency="USD", strike=140.0, expiration_ymd="2026-06-19",
+        premium_per_share=1.0, opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "adjust-lot",
-            "--record-id",
-            lot["record_id"],
-            "--strategy",
-            "combo_yield",
-            "--leg-role",
-            "enhancement_call",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "adjust-lot", "--record-id", lot["record_id"], "--strategy", "combo_yield", "--leg-role", "enhancement_call",
+        "--dry-run",
+)
 
     cli_mod.main()
 
@@ -2336,23 +1606,9 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
 
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="NVDA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=2.5,
         opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
@@ -2386,11 +1642,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["om option-positions", "--data-config", str(data_config), "history", "--record-id", lot["record_id"], "--format", "json"],
-    )
+    _set_om_argv(monkeypatch, data_config, "history", "--record-id", lot["record_id"], "--format", "json")
 
     cli_mod.main()
 
@@ -2414,7 +1666,6 @@ def test_option_positions_cli_history_reads_voided_open_tombstone(
     capsys,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
@@ -2422,19 +1673,8 @@ def test_option_positions_cli_history_reads_voided_open_tombstone(
     repo = ledger_repository.SQLiteOptionPositionsRepository(
         tmp_path / "option_positions.sqlite3"
     )
-    open_result = ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-08-21",
-        premium_per_share=2.5,
+    open_result = _open_position(repo,
+        symbol="NVDA", currency="USD", strike=100.0, expiration_ymd="2026-08-21", premium_per_share=2.5,
         opened_at_ms=1000,
     )
     lot_id = str(open_result.lot_id)
@@ -2451,17 +1691,7 @@ def test_option_positions_cli_history_reads_voided_open_tombstone(
         "resolve_option_positions_repo",
         lambda **_kwargs: (data_config, repo),
     )
-    cli_mod.main(
-        [
-            "--data-config",
-            str(data_config),
-            "history",
-            "--record-id",
-            lot_id,
-            "--format",
-            "json",
-        ]
-    )
+    cli_mod.main(_om_cli_args(data_config, "history", "--record-id", lot_id, "--format", "json"))
 
     rows = json.loads(capsys.readouterr().out)
     assert [row["position_effect"] for row in rows] == ["open", "void"]
@@ -2475,22 +1705,9 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     from src.application.ledger.commands import record_manual_assignment
     from src.application.positions.assigned_stock_view import build_assigned_stock_view
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="NVDA", currency="USD", strike=100.0, expiration_ymd="2026-06-19", premium_per_share=2.5,
         opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
@@ -2507,32 +1724,10 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     lot_id = f"assigned-stock-{assignment_event['event_id']}"
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "assigned-stock-sale",
-            "--target-stock-lot-id",
-            lot_id,
-            "--account",
-            "lx",
-            "--symbol",
-            "NVDA",
-            "--currency",
-            "USD",
-            "--shares",
-            "100",
-            "--price",
-            "105",
-            "--trade-time-ms",
-            "3000",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "assigned-stock-sale", "--target-stock-lot-id", lot_id, "--account", "lx", "--symbol", "NVDA",
+        "--currency", "USD", "--shares", "100", "--price", "105", "--trade-time-ms", "3000", "--format", "json",
+)
 
     cli_mod.main()
 
@@ -2545,33 +1740,11 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert dry_run_payload["sale_event"]["fee_provenance"]["amount"] == "2.5261"
     assert repo.list_assigned_stock_events() == []
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "assigned-stock-sale",
-            "--target-stock-lot-id",
-            lot_id,
-            "--account",
-            "lx",
-            "--symbol",
-            "NVDA",
-            "--currency",
-            "USD",
-            "--shares",
-            "100",
-            "--price",
-            "105",
-            "--trade-time-ms",
-            "3000",
-            "--confirm",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "assigned-stock-sale", "--target-stock-lot-id", lot_id, "--account", "lx", "--symbol", "NVDA",
+        "--currency", "USD", "--shares", "100", "--price", "105", "--trade-time-ms", "3000", "--confirm", "--format",
+        "json",
+)
 
     cli_mod.main()
 
@@ -2659,31 +1832,11 @@ def test_option_positions_cli_adopt_combo_identity_dry_run(
         "resolve_option_positions_repo",
         lambda **_kwargs: (data_config, repo),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "adopt-combo-identity",
-            "--strategy-group-id",
-            "combo:lx:9992",
-            "--funding-put-record-id",
-            "lot-put-open",
-            "--funding-put-open-event-id",
-            "put-open",
-            "--participation-call-record-id",
-            "lot-call-open",
-            "--participation-call-open-event-id",
-            "call-open",
-            "--expected-contracts",
-            "1",
-            "--dry-run",
-            "--format",
-            "json",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "adopt-combo-identity", "--strategy-group-id", "combo:lx:9992", "--funding-put-record-id", "lot-put-open",
+        "--funding-put-open-event-id", "put-open", "--participation-call-record-id", "lot-call-open",
+        "--participation-call-open-event-id", "call-open", "--expected-contracts", "1", "--dry-run", "--format", "json",
+)
 
     cli_mod.main()
 
@@ -2827,20 +1980,7 @@ def test_lifecycle_receipt_cli_inspects_batch_and_members(
     )
     rows = _enqueue_lifecycle_cli_intents(repo)
     batch = _create_lifecycle_cli_batch(repo, rows)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "inspect",
-            "--batch-id",
-            str(batch["batch_id"]),
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config, "lifecycle", "receipts", "inspect", "--batch-id", str(batch["batch_id"]))
 
     cli_mod.main()
 
@@ -2860,27 +2000,10 @@ def test_lifecycle_receipt_cli_refuses_multi_member_reconcile_by_outbox(
     )
     rows = _enqueue_lifecycle_cli_intents(repo)
     batch = _create_lifecycle_cli_batch(repo, rows)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "reconcile",
-            "--outbox-id",
-            str(rows[0]["outbox_id"]),
-            "--mark",
-            "confirmed",
-            "--broker-ref",
-            "provider-check",
-            "--note",
-            "verified",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "reconcile", "--outbox-id", str(rows[0]["outbox_id"]), "--mark", "confirmed",
+        "--broker-ref", "provider-check", "--note", "verified", "--dry-run",
+)
 
     with pytest.raises(
         SystemExit,
@@ -2918,27 +2041,10 @@ def test_lifecycle_receipt_cli_batch_reconcile_dry_run_is_no_write(
         ),
     )
     batch_id = str(result["batch"]["batch_id"])
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "reconcile",
-            "--batch-id",
-            batch_id,
-            "--mark",
-            "confirmed",
-            "--broker-ref",
-            "provider-check",
-            "--note",
-            "verified",
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "reconcile", "--batch-id", batch_id, "--mark", "confirmed",
+        "--broker-ref", "provider-check", "--note", "verified", "--dry-run",
+)
 
     cli_mod.main()
 
@@ -2971,24 +2077,9 @@ def test_lifecycle_receipt_cli_dispatch_dry_run_does_not_bind_or_send(
             + QUIET_WINDOW_MS
         ),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "dispatch",
-            "--once",
-            "--account",
-            "lx",
-            "--config",
-            str(runtime_config),
-            "--dry-run",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "dispatch", "--once", "--account", "lx", "--config", str(runtime_config), "--dry-run",
+)
 
     cli_mod.main()
 
@@ -3015,25 +2106,10 @@ def test_lifecycle_receipt_cli_applied_dispatch_rejects_account_scope(
         "_guard_write",
         lambda **_kwargs: {"ok": True},
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "dispatch",
-            "--once",
-            "--account",
-            "lx",
-            "--config",
-            str(runtime_config),
-            "--apply",
-            "--confirm",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "dispatch", "--once", "--account", "lx", "--config", str(runtime_config),
+        "--apply", "--confirm",
+)
 
     with pytest.raises(
         SystemExit,
@@ -3082,23 +2158,9 @@ def test_lifecycle_receipt_cli_applied_dispatch_filters_disabled_account(
             "message_id": "provider-message",
         },
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "dispatch",
-            "--once",
-            "--config",
-            str(runtime_config),
-            "--apply",
-            "--confirm",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "dispatch", "--once", "--config", str(runtime_config), "--apply", "--confirm",
+)
 
     cli_mod.main()
 
@@ -3151,23 +2213,9 @@ def test_lifecycle_receipt_cli_disabled_config_is_no_write(
         "send_trade_lifecycle_outbox_payload",
         lambda **kwargs: calls.append(dict(kwargs)),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "dispatch",
-            "--once",
-            "--config",
-            str(runtime_config),
-            "--apply",
-            "--confirm",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "dispatch", "--once", "--config", str(runtime_config), "--apply", "--confirm",
+)
 
     cli_mod.main()
 
@@ -3202,23 +2250,9 @@ def test_lifecycle_receipt_cli_applied_idle_reports_no_write(
         "send_trade_lifecycle_outbox_payload",
         lambda **kwargs: calls.append(dict(kwargs)),
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "lifecycle",
-            "receipts",
-            "dispatch",
-            "--once",
-            "--config",
-            str(runtime_config),
-            "--apply",
-            "--confirm",
-        ],
-    )
+    _set_om_argv(monkeypatch, data_config,
+        "lifecycle", "receipts", "dispatch", "--once", "--config", str(runtime_config), "--apply", "--confirm",
+)
 
     cli_mod.main()
 

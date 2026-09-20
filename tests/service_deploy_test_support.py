@@ -274,3 +274,188 @@ def _credential_migration_runner(
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     return _run_cmd
+
+
+RELEASE_TAGS = ("1.0.0", "1.0.1")
+
+
+def _write_cloned_release_with_server_deps(target: Path, version: str = "1.0.1") -> None:
+    """Release tree that the fake ``git clone`` fallback materializes.
+
+    Mirrors the tree an upgrade reads when the release carries ``server.txt``
+    dependency files in addition to the runtime ones.
+    """
+
+    target.mkdir(parents=True)
+    (target / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (target / "requirements").mkdir()
+    (target / "constraints").mkdir()
+    (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+    (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+    (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+    (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+    (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
+    (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
+
+
+def _write_cloned_release_with_configs(
+    target: Path,
+    version: str = "1.0.1",
+    *,
+    system_json: bool = True,
+) -> None:
+    """Release tree that the fake ``git clone`` fallback materializes.
+
+    Mirrors the older release layout: a ``configs`` directory instead of the
+    ``server.txt`` dependency files.
+    """
+
+    target.mkdir(parents=True)
+    (target / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (target / "configs").mkdir()
+    if system_json:
+        (target / "configs" / "system.json").write_text("{}", encoding="utf-8")
+    (target / "requirements").mkdir()
+    (target / "constraints").mkdir()
+    (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+    (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+    (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+    (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+
+
+def _fake_upgrade_release_runner(
+    record=None,  # type: ignore[no-untyped-def]
+    *,
+    tags: tuple[str, ...] = RELEASE_TAGS,
+    version: str = "1.0.1",
+    materialize: bool = True,
+    clone_release=None,  # type: ignore[no-untyped-def]
+    venv_stdout: str = "venv\n",
+    tail=None,  # type: ignore[no-untyped-def]
+):  # type: ignore[no-untyped-def]
+    """Compose the RunCmd fake shared by the service_upgrade/service_rollback tests.
+
+    Claims, in this order: release-tag discovery, git-cache materialization, the
+    ``git clone`` release skeleton (only when ``clone_release`` is given, so a
+    caller that wants the clone command to fall through can pass ``None``), and
+    ``python -m venv``.  ``record(command, kwargs)`` observes every command;
+    ``tail(command)`` handles whatever the leading branches did not claim and
+    may return ``None`` to fall back to the plain success result.
+    """
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        if record is not None:
+            record(command, kwargs)
+        target_query = _fake_release_target_query(command, tags=tags)
+        if target_query is not None:
+            return target_query
+        if materialize:
+            materialized = _fake_git_cache_materialize(command, version=version)
+            if materialized is not None:
+                return materialized
+        if clone_release is not None and command[:2] == ["git", "clone"]:
+            clone_release(Path(command[-1]))
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+            return subprocess.CompletedProcess(command, 0, stdout=venv_stdout, stderr="")
+        if tail is not None:
+            result = tail(command)
+            if result is not None:
+                return result
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    return _run_cmd
+
+
+def _fake_legacy_config_build(command: list[str]) -> subprocess.CompletedProcess | None:
+    """Answer ``./om config build --source legacy`` by writing the output config."""
+
+    if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
+        Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+    return None
+
+
+def _fake_systemd_query_runner(
+    record=None,  # type: ignore[no-untyped-def]
+    *,
+    enabled: str = "enabled\n",
+    active: str = "active\n",
+    result: str = "success\n",
+    fallback: str = "ok\n",
+):  # type: ignore[no-untyped-def]
+    """RunCmd fake answering the systemctl queries service_drift issues."""
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        if record is not None:
+            record(command, kwargs)
+        if "is-enabled" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=enabled, stderr="")
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=active, stderr="")
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=result, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=fallback, stderr="")
+
+    return _run_cmd
+
+
+def _render_bundle(
+    repo_root: Path,
+    runtime_root: Path | None = None,
+    *,
+    target: str = "systemd",
+    **kwargs: object,
+) -> dict:
+    """Render a service bundle rooted at ``repo_root``.
+
+    ``runtime_root`` stays optional because the rejection tests render before a
+    runtime root exists.
+    """
+
+    from src.application.service_deploy import render_service_bundle
+
+    if runtime_root is None:
+        return render_service_bundle(
+            target=target,
+            repo_root=repo_root,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    return render_service_bundle(
+        target=target,
+        repo_root=repo_root,
+        runtime_root=runtime_root,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _drift_roots(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create the repo/runtime/systemd roots a ``service_drift`` fixture needs."""
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    return repo, runtime, systemd_root
+
+
+def _drift_at(
+    repo_root: Path,
+    runtime_root: Path,
+    systemd_unit_root: Path,
+    **kwargs: object,
+):  # type: ignore[no-untyped-def]
+    """Run ``service_drift`` against an explicit repo/runtime/unit root triple."""
+
+    from src.application.service_drift import service_drift
+
+    return service_drift(
+        repo_root=repo_root,
+        runtime_root=runtime_root,
+        systemd_unit_root=systemd_unit_root,
+        **kwargs,  # type: ignore[arg-type]
+    )

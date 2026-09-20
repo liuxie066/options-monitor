@@ -696,34 +696,7 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
 
     _write_combo_calls(
         tmp_path,
-        [
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-08-21",
-                "dte": 35,
-                "contract_symbol": "NVDA260821C00120000",
-                "strike": 120.0,
-                "spot": 110.0,
-                "bid": 0.9,
-                "ask": 1.0,
-                "mid": 0.95,
-                "open_interest": 500,
-                "volume": 50,
-                "implied_volatility": 0.40,
-                "currency": "USD",
-                "delta": 0.30,
-                "multiplier": 100,
-                "opening_contract_status": "ready",
-                "underlier_observation_status": "ready",
-                "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
-                "option_standard_type": "STANDARD",
-                "stock_owner": "NVDA",
-                "price_tick": 0.01,
-                "chain_multiplier": 100,
-                "snapshot_multiplier": 100,
-            }
-        ],
+        [_call_candidate(bid=0.9, ask=1.0, mid=0.95, delta=0.30)],
     )
 
     evidence: list[dict] = []
@@ -761,12 +734,7 @@ def test_combo_yield_uses_one_pair_admission_time_for_both_legs_and_occurrence(
     evidence: list[dict] = []
     _rows, _trace, _scan, summary = _run(
         tmp_path,
-        candidates=[
-            _candidate(
-                annualized_net_return_on_cash_basis=0.18,
-                funding_put_eligible=True,
-            )
-        ],
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18, funding_put_eligible=True)],
         find_pairs_fn=helper.find_sell_put_combo_yield_pairs,
         combo_evidence_sink_fn=evidence.append,
         account_run_scope=True,
@@ -788,10 +756,7 @@ def test_combo_yield_call_evidence_controls_full_pair_scope_status(
 ) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    common_put = _candidate(
-        annualized_net_return_on_cash_basis=0.18,
-        funding_put_eligible=True,
-    )
+    common_put = _candidate(annualized_net_return_on_cash_basis=0.18, funding_put_eligible=True)
     stale = _call_candidate(
         contract_symbol="NVDA260821C00125000",
         strike=125.0,
@@ -808,10 +773,7 @@ def test_combo_yield_call_evidence_controls_full_pair_scope_status(
     assert unavailable["_strategy_reason"] == "data_unavailable"
     assert unavailable["_evidence_summary"]["pair_evidence_unavailable_count"] == 1
 
-    _write_combo_calls(
-        tmp_path / "partial",
-        [_call_candidate(), stale],
-    )
+    _write_combo_calls(tmp_path / "partial", [_call_candidate(), stale])
     _rows, _trace, _scan, partial = _run(
         tmp_path / "partial",
         candidates=[common_put],
@@ -822,10 +784,7 @@ def test_combo_yield_call_evidence_controls_full_pair_scope_status(
     assert partial["_strategy_reason"] == "partial_data"
     assert partial["_evidence_summary"]["pair_evaluable_count"] == 1
 
-    _write_combo_calls(
-        tmp_path / "rejected",
-        [_call_candidate(option_standard_type="NON_STANDARD")],
-    )
+    _write_combo_calls(tmp_path / "rejected", [_call_candidate(option_standard_type="NON_STANDARD")])
     _rows, _trace, _scan, rejected = _run(
         tmp_path / "rejected",
         candidates=[common_put],
@@ -840,11 +799,7 @@ def test_combo_yield_call_evidence_controls_full_pair_scope_status(
         **common_put,
         "snapshot_received_at_utc": "2026-07-17T13:50:00Z",
     }
-    _write_combo_calls(
-        tmp_path / "put_unavailable",
-        [_call_candidate()],
-        put_rows=[stale_put],
-    )
+    _write_combo_calls(tmp_path / "put_unavailable", [_call_candidate()], put_rows=[stale_put])
     _rows, _trace, _scan, put_unavailable = _run(
         tmp_path / "put_unavailable",
         candidates=[common_put],
@@ -866,11 +821,7 @@ def test_combo_yield_ignores_unrelated_call_gap_without_eligible_put(
 
     _write_combo_calls(
         tmp_path,
-        [
-            _call_candidate(
-                snapshot_received_at_utc="2026-07-17T13:50:00Z",
-            )
-        ],
+        [_call_candidate(snapshot_received_at_utc="2026-07-17T13:50:00Z")],
     )
     _rows, _trace, _scan, summary = _run(
         tmp_path,
@@ -914,12 +865,7 @@ def test_combo_yield_call_scope_distinguishes_identity_gap_from_clean_absence(
 
     _rows, _trace, _scan, summary = _run(
         tmp_path,
-        candidates=[
-            _candidate(
-                annualized_net_return_on_cash_basis=0.18,
-                funding_put_eligible=True,
-            )
-        ],
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18, funding_put_eligible=True)],
         find_pairs_fn=find_sell_put_combo_yield_pairs,
     )
 
@@ -937,10 +883,7 @@ def test_combo_yield_requires_one_exact_raw_put_before_call_admission(
 ) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    candidate = _candidate(
-        annualized_net_return_on_cash_basis=0.18,
-        funding_put_eligible=True,
-    )
+    candidate = _candidate(annualized_net_return_on_cash_basis=0.18, funding_put_eligible=True)
     cases = (
         ("missing", [], "combo_put_source_missing"),
         ("duplicate", [_candidate(), _candidate()], "combo_put_source_duplicate"),
@@ -981,12 +924,7 @@ def test_combo_yield_rejected_put_does_not_admit_related_call_gap(
     evidence: list[dict[str, Any]] = []
     _rows, _trace, _scan, summary = _run(
         tmp_path,
-        candidates=[
-            _candidate(
-                annualized_net_return_on_cash_basis=0.18,
-                funding_put_eligible=True,
-            )
-        ],
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18, funding_put_eligible=True)],
         find_pairs_fn=find_sell_put_combo_yield_pairs,
         combo_evidence_sink_fn=evidence.append,
     )
@@ -1131,11 +1069,7 @@ def test_combo_yield_emits_shadow_rank_evidence_without_changing_selection(tmp_p
 
 
 def test_combo_yield_does_not_write_candidate_compatibility_csv(tmp_path: Path) -> None:
-    _run(
-        tmp_path,
-        candidates=[_candidate()],
-        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
-    )
+    _run(tmp_path, candidates=[_candidate()], find_pairs_fn=lambda **_kwargs: pd.DataFrame())
 
     assert not list((tmp_path / "reports").glob("*combo_yield*.csv"))
 
@@ -1171,10 +1105,6 @@ def test_combo_yield_demo_capacity_does_not_render_manual_alert(
 
 
 def test_empty_combo_yield_does_not_materialize_candidate_csv(tmp_path: Path) -> None:
-    _run(
-        tmp_path,
-        candidates=[],
-        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
-    )
+    _run(tmp_path, candidates=[], find_pairs_fn=lambda **_kwargs: pd.DataFrame())
 
     assert not list((tmp_path / "reports").glob("*.csv"))

@@ -562,6 +562,53 @@ def _rewrite_quote_bundle(root: Path, update) -> None:
     )
 
 
+def _seal(root: Path, manifest_path: Path, summary: dict) -> dict:
+    return seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=summary,
+    )
+
+
+def _resolve(
+    root: Path,
+    manifest_path: Path,
+    symbol: str = "3690.HK",
+    **overrides,
+) -> dict:
+    kwargs = {
+        "manifest_path": manifest_path,
+        "expected_run_id": "run-1",
+        "symbol": symbol,
+        "required_data_root": root,
+    }
+    kwargs.update(overrides)
+    return resolve_frozen_required_data(**kwargs)
+
+
+def _retire(
+    root: Path,
+    manifest_path: Path,
+    manifest: dict,
+    manifest_bytes: bytes,
+) -> dict:
+    return retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+
+
+def _batch(root: Path, manifest_path: Path):
+    return resolve_frozen_required_data_csv_bytes_batch(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        required_data_root=root,
+    )
+
+
 def _sealed_canonical_snapshot(
     tmp_path: Path,
     *,
@@ -570,12 +617,7 @@ def _sealed_canonical_snapshot(
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1", canonical_blob=True)
     symbols = ("3690.HK", "9898.HK") if include_failed_symbol else ("3690.HK",)
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary(*symbols),
-    )
+    manifest = _seal(root, manifest_path, _summary(*symbols))
     return root, manifest_path, manifest, manifest_path.read_bytes()
 
 
@@ -583,12 +625,7 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
 
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
 
     assert manifest["status"] == "complete"
     assert manifest["summary"] == {"symbols_total": 1, "ready": 1, "failed": 0}
@@ -604,12 +641,7 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
     }
     evidence = None
     for _account in ("lx", "sy"):
-        evidence = resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        evidence = _resolve(root, manifest_path)
     assert evidence is not None
     assert evidence["snapshot_id"] == manifest["symbols"]["3690.HK"]["snapshot_id"]
     assert evidence["plan_id"] == _summary("3690.HK")[
@@ -632,18 +664,8 @@ def test_compact_snapshot_cleanup_retires_shadows_and_reenters(
     csv = root / entry["required_data_csv_relpath"]
     expected_bytes = raw.stat().st_size + csv.stat().st_size
 
-    first = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_bytes,
-    )
-    second = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_bytes,
-    )
+    first = _retire(root, manifest_path, manifest, manifest_bytes)
+    second = _retire(root, manifest_path, manifest, manifest_bytes)
 
     assert first == {
         "removed_files": 2,
@@ -659,12 +681,7 @@ def test_compact_snapshot_cleanup_retires_shadows_and_reenters(
     }
     assert not raw.exists()
     assert not csv.exists()
-    assert resolve_frozen_required_data(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        symbol="3690.HK",
-        required_data_root=root,
-    )["read_source"] == "canonical_blob"
+    assert _resolve(root, manifest_path)["read_source"] == "canonical_blob"
 
 
 def test_cleanup_durability_failure_preserves_every_shadow(
@@ -691,12 +708,7 @@ def test_cleanup_durability_failure_preserves_every_shadow(
         fail_manifest_flush,
     )
 
-    result = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_bytes,
-    )
+    result = _retire(root, manifest_path, manifest, manifest_bytes)
 
     assert result["failed_files"] == 2
     assert raw.is_file()
@@ -716,12 +728,7 @@ def test_cleanup_processes_one_blob_payload_at_a_time(
             symbol=symbol,
             canonical_blob=True,
         )
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK", "0700.HK"),
-    )
+    manifest = _seal(root, manifest_path, _summary("3690.HK", "0700.HK"))
     events: list[str] = []
     original_load = required_data_snapshot_module.load_required_data_scan_blob
     original_retire = required_data_snapshot_module.retire_required_data_shadow_file
@@ -746,12 +753,7 @@ def test_cleanup_processes_one_blob_payload_at_a_time(
         retire_one,
     )
 
-    result = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_path.read_bytes(),
-    )
+    result = _retire(root, manifest_path, manifest, manifest_path.read_bytes())
 
     assert result["removed_files"] == 4
     assert result["failed_files"] == 0
@@ -783,12 +785,7 @@ def test_cleanup_preserves_each_unsafe_shadow(
         raw.parent.rename(real_raw)
         raw.parent.symlink_to(real_raw, target_is_directory=True)
 
-    result = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_bytes,
-    )
+    result = _retire(root, manifest_path, manifest, manifest_bytes)
 
     assert result["removed_files"] == 1
     assert result["failed_files"] == 1
@@ -803,26 +800,11 @@ def test_cleanup_handles_partial_manifest_and_skips_legacy_receipt(
         tmp_path / "partial",
         include_failed_symbol=True,
     )
-    partial = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_bytes,
-    )
+    partial = _retire(root, manifest_path, manifest, manifest_bytes)
     legacy_root, legacy_manifest_path = _workspace(tmp_path / "legacy")
     _publish_quote(legacy_root, run_id="run-1")
-    legacy_manifest = seal_required_data_snapshot(
-        manifest_path=legacy_manifest_path,
-        required_data_root=legacy_root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
-    legacy = retire_required_data_snapshot_shadows(
-        manifest_path=legacy_manifest_path,
-        required_data_root=legacy_root,
-        manifest=legacy_manifest,
-        manifest_bytes=legacy_manifest_path.read_bytes(),
-    )
+    legacy_manifest = _seal(legacy_root, legacy_manifest_path, _summary("3690.HK"))
+    legacy = _retire(legacy_root, legacy_manifest_path, legacy_manifest, legacy_manifest_path.read_bytes())
 
     assert manifest["status"] == "partial"
     assert partial["removed_files"] == 2
@@ -853,19 +835,9 @@ def test_cleanup_preserves_historical_dual_output_receipt(tmp_path: Path) -> Non
             }
         ),
     )
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
 
-    result = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_path.read_bytes(),
-    )
+    result = _retire(root, manifest_path, manifest, manifest_path.read_bytes())
 
     assert result == {
         "removed_files": 0,
@@ -887,19 +859,9 @@ def test_cleanup_rejects_noncanonical_and_traversal_paths(tmp_path: Path) -> Non
         root,
         lambda bundle: bundle.update({"raw_json_relpath": "raw/custom.json"}),
     )
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
 
-    result = retire_required_data_snapshot_shadows(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        manifest=manifest,
-        manifest_bytes=manifest_path.read_bytes(),
-    )
+    result = _retire(root, manifest_path, manifest, manifest_path.read_bytes())
 
     assert manifest["status"] == "complete"
     assert result["failed_files"] == 2
@@ -935,19 +897,9 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
     (root / bundle["raw_json_relpath"]).unlink()
     (root / bundle["required_data_csv_relpath"]).unlink()
 
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
     entry = manifest["symbols"]["3690.HK"]
-    evidence = resolve_frozen_required_data(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        symbol="3690.HK",
-        required_data_root=root,
-    )
+    evidence = _resolve(root, manifest_path)
 
     assert entry["scan_blob_ref"] == bundle["scan_blob_ref"]
     assert evidence["scan_blob_ref"] == entry["scan_blob_ref"]
@@ -960,12 +912,7 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
         FrozenRequiredDataUnavailable,
         match="receipt_or_payload_mismatch",
     ):
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
 
 
 
@@ -975,12 +922,7 @@ def test_manifest_snapshot_returns_the_exact_validated_generation(
 ) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    sealed = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    sealed = _seal(root, manifest_path, _summary("3690.HK"))
 
     payload, resolved_root, manifest_bytes = (
         load_required_data_snapshot_manifest_snapshot(
@@ -1002,11 +944,10 @@ def test_sealed_snapshot_accepts_positive_success_empty_evidence(
     root, manifest_path = _workspace(tmp_path)
     observed_at = _publish_empty_quote(root, run_id="run-1")
 
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary(
+    manifest = _seal(
+        root,
+        manifest_path,
+        _summary(
             "3690.HK",
             outcomes={"3690.HK": "success_empty"},
         ),
@@ -1017,12 +958,7 @@ def test_sealed_snapshot_accepts_positive_success_empty_evidence(
     assert entry["status"] == "ready"
     assert entry["source_outcome"] == "success_empty"
     assert entry["reason_code"] == "no_expirations"
-    evidence = resolve_frozen_required_data(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        symbol="3690.HK",
-        required_data_root=root,
-    )
+    evidence = _resolve(root, manifest_path)
     assert evidence["source_outcome"] == "success_empty"
     assert evidence["reason_code"] == "no_expirations"
     assert evidence["source_observed_at"] == observed_at
@@ -1033,20 +969,15 @@ def test_live_batch_rechecks_success_empty_freshness_when_symbol_is_resolved(
 ) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_empty_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary(
+    _seal(
+        root,
+        manifest_path,
+        _summary(
             "3690.HK",
             outcomes={"3690.HK": "success_empty"},
         ),
     )
-    batch = resolve_frozen_required_data_csv_bytes_batch(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        required_data_root=root,
-    )
+    batch = _batch(root, manifest_path)
     expires_at = datetime.fromisoformat(
         str(batch.entries["3690.HK"][0]["expires_at"]).replace("Z", "+00:00")
     )
@@ -1089,32 +1020,17 @@ def test_frozen_bundle_rejects_rows_with_non_success_source_outcome(
 def test_sealed_snapshot_rejects_tampered_csv_and_other_run_receipt(tmp_path: Path) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK"))
     csv_path = root / "parsed" / "3690.HK_required_data.csv"
     csv_path.write_bytes(csv_path.read_bytes() + b"\n")
 
     with pytest.raises(FrozenRequiredDataUnavailable) as tampered:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
     assert tampered.value.reason == "receipt_or_payload_mismatch"
 
     other_root, other_manifest = _workspace(tmp_path / "other")
     _publish_quote(other_root, run_id="older-run")
-    failed = seal_required_data_snapshot(
-        manifest_path=other_manifest,
-        required_data_root=other_root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    failed = _seal(other_root, other_manifest, _summary("3690.HK"))
     assert failed["status"] == "failed"
     assert failed["symbols"]["3690.HK"]["reason"] == "quote_receipt_unavailable"
 
@@ -1133,21 +1049,12 @@ def test_partial_snapshot_keeps_ready_symbol_and_types_failed_symbol(tmp_path: P
         }
     ]
 
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=summary,
-    )
+    manifest = _seal(root, manifest_path, summary)
 
     assert manifest["status"] == "partial"
     assert manifest["symbols"]["3690.HK"]["status"] == "ready"
     assert manifest["symbols"]["9898.HK"]["status"] == "failed"
-    batch = resolve_frozen_required_data_csv_bytes_batch(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        required_data_root=root,
-    )
+    batch = _batch(root, manifest_path)
     evidence, csv_bytes = batch.resolve("3690.HK")
     assert evidence["snapshot_id"] == manifest["symbols"]["3690.HK"][
         "snapshot_id"
@@ -1157,13 +1064,7 @@ def test_partial_snapshot_keeps_ready_symbol_and_types_failed_symbol(tmp_path: P
         batch.resolve("9898.HK")
     assert failed.value.reason == "empty_chain"
     with pytest.raises(FrozenRequiredDataUnavailable) as compatible:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="9898.HK",
-            required_data_root=root,
-            now=datetime(2099, 1, 1, tzinfo=timezone.utc),
-        )
+        _resolve(root, manifest_path, symbol="9898.HK", now=datetime(2099, 1, 1, tzinfo=timezone.utc))
     assert compatible.value.reason == "empty_chain"
 
 
@@ -1176,12 +1077,7 @@ def test_batch_validates_each_ready_symbol_once(
     root, manifest_path = _workspace(tmp_path)
     for symbol in ("3690.HK", "9898.HK"):
         _publish_quote(root, run_id="run-1", symbol=symbol)
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK", "9898.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK", "9898.HK"))
     original_validate = snapshot._validate_ready_entry
     validated_symbols: list[str] = []
 
@@ -1190,11 +1086,7 @@ def test_batch_validates_each_ready_symbol_once(
         return original_validate(**kwargs)
 
     monkeypatch.setattr(snapshot, "_validate_ready_entry", _count_validate)
-    batch = snapshot.resolve_frozen_required_data_csv_bytes_batch(
-        manifest_path=manifest_path,
-        expected_run_id="run-1",
-        required_data_root=root,
-    )
+    batch = _batch(root, manifest_path)
 
     assert validated_symbols == ["3690.HK", "9898.HK"]
     assert b"3690.HK" in batch.resolve("3690.HK")[1]
@@ -1218,12 +1110,7 @@ def test_contract_mismatch_fails_one_symbol_without_losing_ready_peer(
         fetch_plans={"9898.HK": mismatched_plan},
     )
 
-    manifest = seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=summary,
-    )
+    manifest = _seal(root, manifest_path, summary)
 
     assert manifest["status"] == "partial"
     assert manifest["symbols"]["3690.HK"]["status"] == "ready"
@@ -1249,35 +1136,20 @@ def test_snapshot_seal_rejects_self_inconsistent_plan_authority(
         RequiredDataSnapshotError,
         match="global plan fetch plan contradicts its contract",
     ):
-        seal_required_data_snapshot(
-            manifest_path=manifest_path,
-            required_data_root=root,
-            run_id="run-1",
-            prefetch_summary=summary,
-        )
+        _seal(root, manifest_path, summary)
     assert not manifest_path.exists()
 
 
 def test_frozen_snapshot_rejects_manifest_content_tampering(tmp_path: Path) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK"))
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["status"] = "partial"
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(FrozenRequiredDataUnavailable) as tampered:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
     assert tampered.value.reason == "manifest_invalid"
 
 
@@ -1291,12 +1163,7 @@ def test_snapshot_seal_rejects_mismatched_plan_id(tmp_path: Path) -> None:
         RequiredDataSnapshotError,
         match="global required-data plan id mismatch",
     ):
-        seal_required_data_snapshot(
-            manifest_path=manifest_path,
-            required_data_root=root,
-            run_id="run-1",
-            prefetch_summary=summary,
-        )
+        _seal(root, manifest_path, summary)
     assert not manifest_path.exists()
 
 
@@ -1305,12 +1172,7 @@ def test_frozen_snapshot_cross_checks_manifest_plan_against_receipt(
 ) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK"))
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["symbols"]["3690.HK"]["fetch_plan"]["min_dte"] = 999
     payload["content_sha256"] = canonical_sha256(
@@ -1323,12 +1185,7 @@ def test_frozen_snapshot_cross_checks_manifest_plan_against_receipt(
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(FrozenRequiredDataUnavailable) as mismatched:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
     assert mismatched.value.reason == "receipt_or_payload_mismatch"
 
 
@@ -1337,12 +1194,7 @@ def test_frozen_snapshot_rejects_forged_manifest_contract(
 ) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK"))
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     forged_plan = _fetch_plan("3690.HK")
     forged_plan["side_plans"][0]["planning_reason"] = (
@@ -1368,12 +1220,7 @@ def test_frozen_snapshot_rejects_forged_manifest_contract(
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(FrozenRequiredDataUnavailable) as mismatched:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
     assert mismatched.value.reason == "receipt_or_payload_mismatch"
 
 
@@ -1382,29 +1229,13 @@ def test_frozen_snapshot_rejects_expired_receipt_and_missing_manifest(
 ) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-    )
+    _seal(root, manifest_path, _summary("3690.HK"))
 
     with pytest.raises(FrozenRequiredDataUnavailable) as expired:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-            now=datetime(2099, 1, 1, tzinfo=timezone.utc),
-        )
+        _resolve(root, manifest_path, now=datetime(2099, 1, 1, tzinfo=timezone.utc))
     assert expired.value.reason == "receipt_or_payload_mismatch"
 
     manifest_path.unlink()
     with pytest.raises(FrozenRequiredDataUnavailable) as missing:
-        resolve_frozen_required_data(
-            manifest_path=manifest_path,
-            expected_run_id="run-1",
-            symbol="3690.HK",
-            required_data_root=root,
-        )
+        _resolve(root, manifest_path)
     assert missing.value.reason == "manifest_invalid"

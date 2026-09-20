@@ -2983,10 +2983,6 @@ def _known_execution_associations(source_key: str, payloads: Iterable[dict[str, 
     }
 
 
-def _canonical_inbox_economic_hash(source_key: str, payload: dict[str, Any]) -> str:
-    return _execution_content_hash(_inbox_execution_content(source_key, payload))
-
-
 def _migrate_trade_source_evidence(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """SELECT e.rowid AS evidence_rowid, e.*, i.broker_deal_key

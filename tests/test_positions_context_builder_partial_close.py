@@ -20,6 +20,29 @@ from src.application.positions.context_builder import (
 )
 
 
+def _lot(**overrides: object) -> dict:
+    """A position-lot record with the common short-option field defaults.
+
+    ``record_id`` selects the record id; every other keyword replaces the
+    matching field verbatim.
+    """
+    record_id = overrides.pop("record_id", "rec_1")
+    return {
+        "record_id": record_id,
+        "fields": {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "NVDA",
+            "status": "open",
+            "side": "short",
+            "option_type": "put",
+            "contracts": 1,
+            "contracts_open": 1,
+            **overrides,
+        },
+    }
+
+
 def test_raw_option_context_validator_accepts_explicit_trusted_empty_slice() -> None:
     validate_option_positions_context_account(
         {
@@ -63,24 +86,8 @@ def test_raw_option_context_validator_rejects_missing_or_foreign_account(
 
 
 def test_build_context_preserves_record_id_without_position_key() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途证券（香港）",
-                "account": "LX",
-                "symbol": "NVDA",
-                "status": "OPEN",
-                "side": "Sell To Open",
-                "option_type": "认沽",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 1000,
-                "currency": "美元",
-                "premium": 1.23,
-            },
-        }
-    ]
+    records = [_lot(broker="富途证券（香港）", account="LX", status="OPEN", side="Sell To Open", option_type="认沽",
+                    cash_secured_amount=1000, currency="美元", premium=1.23)]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
@@ -129,28 +136,9 @@ def test_position_lot_risk_view_is_typed_context_read_model() -> None:
 
 
 def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "9992.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "currency": "HKD",
-                "strike": 167.5,
-                "multiplier": 200,
-                "premium": 6.38,
-                "strategy": "yield_enhancement",
-                "leg_role": "sell_put",
-                "yield_enhancement_mode": "vol_convexity_enhancement",
-            },
-        }
-    ]
+    records = [_lot(account="sy", symbol="9992.HK", currency="HKD", strike=167.5, multiplier=200, premium=6.38,
+                    strategy="yield_enhancement", leg_role="sell_put",
+                    yield_enhancement_mode="vol_convexity_enhancement")]
 
     ctx = build_context(records, broker="富途", account="sy", rates={"HKDCNY": 0.92})
 
@@ -224,24 +212,7 @@ def test_build_context_preserves_canonical_strategy_relationships(
 
 
 def test_build_context_reads_premium_from_note_fallback() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 1000,
-                "currency": "USD",
-                "note": "premium_per_share=0.88",
-            },
-        }
-    ]
+    records = [_lot(cash_secured_amount=1000, currency="USD", note="premium_per_share=0.88")]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
@@ -251,28 +222,8 @@ def test_build_context_reads_premium_from_note_fallback() -> None:
 def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
     expiration_ms = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp() * 1000)
     as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - expiration_business_today()).days
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 1000,
-                "currency": "USD",
-                "strike": 120.0,
-                "multiplier": 100,
-                "expiration": expiration_ms,
-                "opened_at": 1,
-                "premium": 1.0,
-            },
-        }
-    ]
+    records = [_lot(cash_secured_amount=1000, currency="USD", strike=120.0, multiplier=100, expiration=expiration_ms,
+                    opened_at=1, premium=1.0)]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
@@ -291,42 +242,10 @@ def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
 def test_build_context_fail_closed_on_ledger_identity_conflict() -> None:
     expiration_ms = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp() * 1000)
     records = [
-        {
-            "record_id": "dup_lot",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 12000,
-                "currency": "USD",
-                "strike": 120.0,
-                "multiplier": 100,
-                "expiration": expiration_ms,
-            },
-        },
-        {
-            "record_id": "dup_lot",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 12000,
-                "currency": "USD",
-                "strike": 120.0,
-                "multiplier": 100,
-                "expiration": expiration_ms,
-            },
-        },
+        _lot(record_id="dup_lot", cash_secured_amount=12000, currency="USD", strike=120.0, multiplier=100,
+             expiration=expiration_ms),
+        _lot(record_id="dup_lot", cash_secured_amount=12000, currency="USD", strike=120.0, multiplier=100,
+             expiration=expiration_ms),
     ]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
@@ -389,24 +308,7 @@ def test_build_shared_context_requires_broker_on_persisted_rows() -> None:
 
 
 def test_build_context_scales_cash_secured_for_partial_close() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 4,
-                "contracts_open": 1,
-                "contracts_closed": 3,
-                "cash_secured_amount": 4000,
-                "currency": "USD",
-            },
-        }
-    ]
+    records = [_lot(contracts=4, contracts_closed=3, cash_secured_amount=4000, currency="USD")]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
@@ -467,23 +369,8 @@ def test_build_context_excludes_expired_put_after_one_day_settlement_buffer() ->
 
 
 def test_build_context_scales_locked_shares_for_partial_close() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "AAPL",
-                "status": "open",
-                "side": "short",
-                "option_type": "call",
-                "contracts": 3,
-                "contracts_open": 2,
-                "contracts_closed": 1,
-                "underlying_share_locked": 300,
-            },
-        }
-    ]
+    records = [_lot(account="sy", symbol="AAPL", option_type="call", contracts=3, contracts_open=2,
+                    contracts_closed=1, underlying_share_locked=300)]
 
     ctx = build_context(records, broker="富途", account="sy")
 
@@ -491,22 +378,7 @@ def test_build_context_scales_locked_shares_for_partial_close() -> None:
 
 
 def test_build_context_uses_multiplier_when_locked_shares_missing() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "700.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "call",
-                "contracts": 1,
-                "contracts_open": 1,
-                "multiplier": 500,
-            },
-        }
-    ]
+    records = [_lot(account="sy", symbol="700.HK", option_type="call", multiplier=500)]
 
     ctx = build_context(records, broker="富途", account="sy")
 
@@ -515,21 +387,7 @@ def test_build_context_uses_multiplier_when_locked_shares_missing() -> None:
 
 
 def test_build_context_marks_short_call_lock_unavailable_without_real_multiplier() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "700.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "call",
-                "contracts": 1,
-                "contracts_open": 1,
-            },
-        }
-    ]
+    records = [_lot(account="sy", symbol="700.HK", option_type="call")]
 
     ctx = build_context(records, broker="富途", account="sy")
 
@@ -539,24 +397,7 @@ def test_build_context_marks_short_call_lock_unavailable_without_real_multiplier
 
 
 def test_build_context_derives_missing_cash_secured_from_strike_multiplier() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "700.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "strike": 480,
-                "multiplier": 500,
-                "currency": "HKD",
-            },
-        }
-    ]
+    records = [_lot(symbol="700.HK", strike=480, multiplier=500, currency="HKD")]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
 
@@ -565,23 +406,7 @@ def test_build_context_derives_missing_cash_secured_from_strike_multiplier() -> 
 
 
 def test_build_context_marks_short_put_cash_secured_unavailable_when_basis_missing() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "700.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "strike": 480,
-                "currency": "HKD",
-            },
-        }
-    ]
+    records = [_lot(symbol="700.HK", strike=480, currency="HKD")]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
 
@@ -591,23 +416,7 @@ def test_build_context_marks_short_put_cash_secured_unavailable_when_basis_missi
 
 
 def test_build_context_marks_short_put_cash_secured_unavailable_when_currency_missing() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "700.HK",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "strike": 480,
-                "multiplier": 500,
-            },
-        }
-    ]
+    records = [_lot(symbol="700.HK", strike=480, multiplier=500)]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
 
@@ -617,25 +426,7 @@ def test_build_context_marks_short_put_cash_secured_unavailable_when_currency_mi
 
 
 def test_build_context_derives_missing_cash_secured_then_scales_partial_close() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "AAPL",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 4,
-                "contracts_open": 1,
-                "contracts_closed": 3,
-                "strike": 100,
-                "multiplier": 100,
-                "currency": "USD",
-            },
-        }
-    ]
+    records = [_lot(symbol="AAPL", contracts=4, contracts_closed=3, strike=100, multiplier=100, currency="USD")]
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 

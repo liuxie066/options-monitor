@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from src.application.payload_helpers import parse_utc as _parse_datetime
 
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
@@ -44,6 +45,21 @@ _CLOSE_RECOMMENDATION_LABELS = {
 }
 _PARTIAL_DATA_REASON_TEXT = {
     "term_matched_rv_unavailable": "期限匹配的已实现波动率（RV）证据不可用",
+}
+# 变化行按（分组名, 策略族）聚合计数，分组名决定末尾选用哪一句汇总文案；
+# 其余变化类型各自单独成行，故不在此表内。action 级增删（第二张表）只在
+# 动作本身是候选开仓动作时才计数，见 _candidate_change_group。
+_CANDIDATE_GROUP_BY_CHANGE_TYPE = {
+    "candidate_added": "candidate_added",
+    "candidate_priority_upgraded_to_p0": "candidate_priority_changed",
+    "candidate_priority_downgraded": "candidate_priority_changed",
+}
+_CANDIDATE_GROUP_BY_ACTION_CHANGE_TYPE = {
+    "action_added": "candidate_added",
+    "action_invalidated": "candidate_invalidated",
+    "priority_upgraded_to_p0": "candidate_priority_changed",
+    "priority_downgraded": "candidate_priority_changed",
+    "priority_changed": "candidate_priority_changed",
 }
 
 
@@ -1850,6 +1866,17 @@ def _canonical_decimal_text(value: Any) -> str:
     return _decimal_text(number) if number is not None else ""
 
 
+def _candidate_change_group(change_type: str, *, candidate_action: bool) -> str | None:
+    """Return the group name a change counts into, or None if it renders alone."""
+
+    group = _CANDIDATE_GROUP_BY_CHANGE_TYPE.get(change_type)
+    if group is not None:
+        return group
+    if not candidate_action:
+        return None
+    return _CANDIDATE_GROUP_BY_ACTION_CHANGE_TYPE.get(change_type)
+
+
 def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     changes = [item for item in diff.get("changes") or [] if isinstance(item, Mapping)]
     recovered = any(_lower(item.get("change_type")) == "recovered" for item in changes)
@@ -1874,6 +1901,7 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
         family = _lower(action.get("strategy_family"))
         action_type = _lower(action.get("action_type"))
         candidate_action = action_type in {"open_candidate", "open_combo_yield"}
+        group = _candidate_change_group(change_type, candidate_action=candidate_action)
         if change_type == "candidate_event_date_changed":
             summary = _event_change_summary(change, market=market)
             if summary:
@@ -1887,8 +1915,8 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
             summary = _event_change_summary(change, market=market)
             if summary:
                 event_summaries.append(summary)
-        elif change_type == "candidate_added":
-            grouped[(change_type, family)] = grouped.get((change_type, family), 0) + 1
+        elif group is not None:
+            grouped[(group, family)] = grouped.get((group, family), 0) + 1
         elif change_type == "candidate_invalidated":
             label = _change_contract_label(action, market=market)
             if label:
@@ -1906,20 +1934,6 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
             summaries.append(
                 f"较上一轮：{label or '候选'} 行情证据已恢复"
             )
-        elif change_type in {
-            "candidate_priority_upgraded_to_p0",
-            "candidate_priority_downgraded",
-        }:
-            grouped[("candidate_priority_changed", family)] = grouped.get(("candidate_priority_changed", family), 0) + 1
-        elif candidate_action and change_type in {"action_added", "action_invalidated"}:
-            normalized = "candidate_added" if change_type == "action_added" else "candidate_invalidated"
-            grouped[(normalized, family)] = grouped.get((normalized, family), 0) + 1
-        elif candidate_action and change_type in {
-            "priority_upgraded_to_p0",
-            "priority_downgraded",
-            "priority_changed",
-        }:
-            grouped[("candidate_priority_changed", family)] = grouped.get(("candidate_priority_changed", family), 0) + 1
         elif change_type == "candidate_capacity_changed":
             label = _change_contract_label(action, market=market)
             before = _whole_number(change.get("before"))
@@ -2319,19 +2333,6 @@ def _decimal_text(value: Decimal) -> str:
     if normalized == normalized.to_integral():
         return format(normalized, "f").split(".", 1)[0]
     return format(normalized, "f")
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _safe_zoneinfo(name: str) -> ZoneInfo:

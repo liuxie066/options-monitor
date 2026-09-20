@@ -61,6 +61,20 @@ def _service(tmp_path: Path, payload: dict) -> OMQualityService:
     )
 
 
+def _append_dataset(payload: dict, **overrides) -> None:
+    """Append a dataset row cloned from the first one, with per-key overrides applied in place."""
+    payload["datasets"].append({**payload["datasets"][0], **overrides})
+
+
+def _expect_blocked(
+    service: OMQualityService, account: str | None = None, market: str | None = None,
+) -> QualityGateBlocked:
+    """Assert the close_advice gate blocks, and return the raised error."""
+    with pytest.raises(QualityGateBlocked) as exc:
+        assert_quality_allows("close_advice", account=account, market=market, service=service)
+    return exc.value
+
+
 def test_gate_is_inactive_before_onboarding(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("OM_QUALITY_ONBOARDED", raising=False)
     assert_quality_allows("close_advice", service=_service(tmp_path, _payload(blocked=True)))
@@ -69,22 +83,13 @@ def test_gate_is_inactive_before_onboarding(monkeypatch, tmp_path: Path) -> None
 def test_gate_blocks_only_matching_account_after_onboarding(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
     payload = _payload(blocked=True)
-    payload["datasets"].append(
-        {
-            **payload["datasets"][0],
-            "scope": {"account": "sy", "market": "us"},
-            "status": "trusted",
-            "required_evidence_complete": True,
-            "usable_for": ["close_advice"],
-            "blocked_consumers": [],
-            "blocked_by": [],
-            "reason_codes": [],
-        }
+    _append_dataset(
+        payload, scope={"account": "sy", "market": "us"}, status="trusted", required_evidence_complete=True,
+        usable_for=["close_advice"], blocked_consumers=[], blocked_by=[], reason_codes=[],
     )
     service = _service(tmp_path, payload)
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows("close_advice", account="lx", market="us", service=service)
-    assert exc.value.blocked_by == ("OM-POS-002",)
+    exc = _expect_blocked(service, account="lx", market="us")
+    assert exc.blocked_by == ("OM-POS-002",)
     assert_quality_allows("close_advice", account="sy", market="us", service=service)
 
 
@@ -94,16 +99,10 @@ def test_gate_fails_closed_when_target_position_dataset_is_missing(
 ) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
 
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows(
-            "close_advice",
-            account="sy",
-            market="us",
-            service=_service(tmp_path, _payload()),
-        )
+    exc = _expect_blocked(_service(tmp_path, _payload()), account="sy", market="us")
 
-    assert exc.value.reason_code == "QUALITY_DATASET_UNAVAILABLE"
-    assert exc.value.blocked_by == ("OM-POS-001",)
+    assert exc.reason_code == "QUALITY_DATASET_UNAVAILABLE"
+    assert exc.blocked_by == ("OM-POS-001",)
 
 
 def test_gate_fails_closed_when_target_position_dataset_is_ambiguous(
@@ -114,24 +113,17 @@ def test_gate_fails_closed_when_target_position_dataset_is_ambiguous(
     payload = _payload()
     payload["datasets"].append(dict(payload["datasets"][0]))
 
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows(
-            "close_advice",
-            account="lx",
-            market="us",
-            service=_service(tmp_path, payload),
-        )
+    exc = _expect_blocked(_service(tmp_path, payload), account="lx", market="us")
 
-    assert exc.value.reason_code == "QUALITY_DATASET_AMBIGUOUS"
-    assert exc.value.blocked_by == ("OM-POS-001",)
+    assert exc.reason_code == "QUALITY_DATASET_AMBIGUOUS"
+    assert exc.blocked_by == ("OM-POS-001",)
 
 
 def test_gate_fails_closed_on_stale_artifact(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "1")
     stale = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows("close_advice", service=_service(tmp_path, _payload(observed_at=stale)))
-    assert exc.value.reason_code == "QUALITY_STATUS_STALE"
+    exc = _expect_blocked(_service(tmp_path, _payload(observed_at=stale)))
+    assert exc.reason_code == "QUALITY_STATUS_STALE"
 
 
 def test_gate_fails_closed_on_stale_position_source_inside_fresh_artifact(
@@ -144,16 +136,10 @@ def test_gate_fails_closed_on_stale_position_source_inside_fresh_artifact(
         datetime.now(timezone.utc) - timedelta(hours=1)
     ).isoformat().replace("+00:00", "Z")
 
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows(
-            "close_advice",
-            account="lx",
-            market="us",
-            service=_service(tmp_path, payload),
-        )
+    exc = _expect_blocked(_service(tmp_path, payload), account="lx", market="us")
 
-    assert exc.value.reason_code == "QUALITY_DATASET_STALE"
-    assert exc.value.blocked_by == ("OM-POS-001",)
+    assert exc.reason_code == "QUALITY_DATASET_STALE"
+    assert exc.blocked_by == ("OM-POS-001",)
 
 
 def test_shadow_lifecycle_summary_never_changes_legacy_gate_authority(
@@ -162,15 +148,10 @@ def test_shadow_lifecycle_summary_never_changes_legacy_gate_authority(
 ) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
     payload = _payload()
-    payload["datasets"].append(
-        {
-            **payload["datasets"][0],
-            "dataset_id": "om.lifecycle_evidence_summary",
-            "status": "unavailable",
-            "blocked_consumers": ["close_advice"],
-            "blocked_by": ["OM-LCY-SHADOW-001"],
-            "reason_codes": ["CURRENT_DECISION_QUALITY_MISMATCH"],
-        }
+    _append_dataset(
+        payload, dataset_id="om.lifecycle_evidence_summary", status="unavailable",
+        blocked_consumers=["close_advice"], blocked_by=["OM-LCY-SHADOW-001"],
+        reason_codes=["CURRENT_DECISION_QUALITY_MISMATCH"],
     )
 
     assert_quality_allows(
@@ -190,25 +171,14 @@ def test_current_lifecycle_summary_becomes_gate_authority_after_cutover(
     payload["extensions"] = {
         "quality_hot_path_cutover": {"status": "active"}
     }
-    payload["datasets"].append(
-        {
-            **payload["datasets"][0],
-            "dataset_id": "om.lifecycle_evidence_summary",
-            "status": "unavailable",
-            "blocked_consumers": ["close_advice"],
-            "blocked_by": ["OM-LCY-CURRENT-001"],
-            "reason_codes": ["CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"],
-        }
+    _append_dataset(
+        payload, dataset_id="om.lifecycle_evidence_summary", status="unavailable",
+        blocked_consumers=["close_advice"], blocked_by=["OM-LCY-CURRENT-001"],
+        reason_codes=["CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"],
     )
 
-    with pytest.raises(QualityGateBlocked) as exc:
-        assert_quality_allows(
-            "close_advice",
-            account="lx",
-            market="us",
-            service=_service(tmp_path, payload),
-        )
-    assert exc.value.reason_code == "CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"
+    exc = _expect_blocked(_service(tmp_path, payload), account="lx", market="us")
+    assert exc.reason_code == "CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"
 
 
 def test_quality_reads_count_declared_and_unexplained_without_payloads(
@@ -220,16 +190,9 @@ def test_quality_reads_count_declared_and_unexplained_without_payloads(
             "quality_consumer_telemetry": {},
         }
     }
-    payload["datasets"].append(
-        {
-            **payload["datasets"][0],
-            "dataset_id": "om.lifecycle_evidence",
-            "scope": {
-                "account": "lx",
-                "market": "us",
-                "lifecycle_case_id": "case-1",
-            },
-        }
+    _append_dataset(
+        payload, dataset_id="om.lifecycle_evidence",
+        scope={"account": "lx", "market": "us", "lifecycle_case_id": "case-1"},
     )
     service = _service(tmp_path, payload)
 

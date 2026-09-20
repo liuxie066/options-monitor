@@ -7,9 +7,26 @@ from pathlib import Path
 import pytest
 
 
-def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
-
+def _build_gateway(backend_cls, client_cls, **overrides):
     from src.infrastructure.futu_gateway import build_futu_gateway
+
+    return build_futu_gateway(backend_cls=backend_cls, client_cls=client_cls, **overrides)
+
+
+class _BrokerClient:
+    def __init__(self, backend, **_kwargs):
+        self.backend = backend
+
+    @staticmethod
+    def _unwrap(value):
+        return value[1]
+
+    @staticmethod
+    def _rows(value):
+        return list(value)
+
+
+def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
 
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
@@ -27,13 +44,7 @@ def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
         def get_stock_basicinfo(self, **kwargs):
             return kwargs
 
-    gw = build_futu_gateway(
-        host="127.0.0.9",
-        port=11119,
-        is_option_chain_cache_enabled=True,
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = _build_gateway(FakeBackend, FakeClient, host="127.0.0.9", port=11119, is_option_chain_cache_enabled=True)
     data = gw.get_snapshot(["US.NVDA", "US.TSLA"])
 
     assert gw.host == "127.0.0.9"
@@ -69,11 +80,7 @@ def test_futu_api_client_stock_basicinfo_unwraps_quote_result() -> None:
     backend = FakeBackend()
     client = _FutuAPIClient(backend, is_option_chain_cache_enabled=False)
 
-    rows = client.get_stock_basicinfo(
-        market="US",
-        stock_type="STOCK",
-        code_list=["US.NVDA"],
-    )
+    rows = client.get_stock_basicinfo(market="US", stock_type="STOCK", code_list=["US.NVDA"])
 
     assert rows == [{"code": "US.NVDA", "name": "NVIDIA"}]
     assert backend.quote.calls == [
@@ -130,11 +137,7 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape(
     class FakeTrade:
         def history_order_list_query(self, **_kwargs):
             positive_row = dict(base_row, order_id="manual", price=0.01)
-            wrong_day_row = dict(
-                base_row,
-                order_id="wrong-day",
-                create_time="2020-01-01 16:00:00",
-            )
+            wrong_day_row = dict(base_row, order_id="wrong-day", create_time="2020-01-01 16:00:00")
             return 0, [
                 base_row, positive_row, wrong_day_row,
                 dict(base_row, order_origin="client"),
@@ -171,8 +174,6 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape(
 
 def test_get_trading_days_normalizes_market_label() -> None:
 
-    from src.infrastructure.futu_gateway import build_futu_gateway
-
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
             self.host = host
@@ -189,13 +190,7 @@ def test_get_trading_days_normalizes_market_label() -> None:
         def get_trading_days_with_receipt(self, **kwargs):
             return {"market": kwargs.get("market"), "coverage_complete": True}
 
-    gw = build_futu_gateway(
-        host="127.0.0.9",
-        port=11119,
-        is_option_chain_cache_enabled=True,
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = _build_gateway(FakeBackend, FakeClient, host="127.0.0.9", port=11119, is_option_chain_cache_enabled=True)
 
     data = gw.get_trading_days(market="us", start="2026-08-01")
     assert data["market"] == "US"
@@ -205,9 +200,6 @@ def test_get_trading_days_normalizes_market_label() -> None:
 
 def test_get_trading_days_rejects_unknown_market() -> None:
     import pytest
-
-
-    from src.infrastructure.futu_gateway import build_futu_gateway
 
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
@@ -222,13 +214,7 @@ def test_get_trading_days_rejects_unknown_market() -> None:
         def get_trading_days(self, **kwargs):  # pragma: no cover - must not be called
             raise AssertionError("client must not be called for unknown market")
 
-    gw = build_futu_gateway(
-        host="127.0.0.9",
-        port=11119,
-        is_option_chain_cache_enabled=True,
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = _build_gateway(FakeBackend, FakeClient, host="127.0.0.9", port=11119, is_option_chain_cache_enabled=True)
 
     with pytest.raises(Exception, match="unsupported trade date market"):
         gw.get_trading_days(market="MOON", start="2026-08-01")
@@ -236,7 +222,7 @@ def test_get_trading_days_rejects_unknown_market() -> None:
 
 def test_gateway_error_mapping_need_2fa() -> None:
 
-    from src.infrastructure.futu_gateway import build_futu_gateway, FutuGatewayNeed2FAError
+    from src.infrastructure.futu_gateway import FutuGatewayNeed2FAError
 
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
@@ -251,10 +237,7 @@ def test_gateway_error_mapping_need_2fa() -> None:
         def get_snapshot(self, **kwargs):
             raise RuntimeError("phone verification required")
 
-    gw = build_futu_gateway(
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = _build_gateway(FakeBackend, FakeClient)
     try:
         _ = gw.get_snapshot(["US.AAPL"])
     except FutuGatewayNeed2FAError:
@@ -288,10 +271,7 @@ def test_build_ready_gateway_ensures_quote_ready() -> None:
             self.backend = backend
             self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
 
-    gw = build_ready_futu_gateway(
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = build_ready_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
     assert gw.host == "127.0.0.1"
     assert gw.port == 11111
     assert gw.backend.quote.ready_calls == 1
@@ -319,8 +299,6 @@ def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
 
 def test_gateway_request_history_kline_returns_page_key() -> None:
 
-    from src.infrastructure.futu_gateway import build_futu_gateway
-
     class FakeQuote:
         def __init__(self) -> None:
             self.kwargs = None
@@ -343,7 +321,7 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
             self.backend = backend
             self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
 
-    gw = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    gw = _build_gateway(FakeBackend, FakeClient)
     out = gw.request_history_kline(
         code="US.NVDA",
         start="2026-05-01",
@@ -368,8 +346,6 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
 def test_gateway_request_history_kline_maps_canonical_fields_to_sdk(monkeypatch) -> None:
     import sys
     from types import SimpleNamespace
-
-    from src.infrastructure.futu_gateway import build_futu_gateway
 
     fake_futu = SimpleNamespace(
         KLType=SimpleNamespace(K_DAY="k-day"),
@@ -400,10 +376,7 @@ def test_gateway_request_history_kline_maps_canonical_fields_to_sdk(monkeypatch)
             self.backend = backend
             self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
 
-    gateway = build_futu_gateway(
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gateway = _build_gateway(FakeBackend, FakeClient)
 
     gateway.request_history_kline(
         code="US.NVDA",
@@ -418,8 +391,6 @@ def test_gateway_request_history_kline_maps_canonical_fields_to_sdk(monkeypatch)
 
 
 def test_gateway_market_state_delegates_to_quote_client() -> None:
-    from src.infrastructure.futu_gateway import build_futu_gateway
-
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
             self.host = host
@@ -434,7 +405,7 @@ def test_gateway_market_state_delegates_to_quote_client() -> None:
             self.calls.append(dict(kwargs))
             return [{"code": "US.NVDA", "market_state": "MORNING"}]
 
-    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    gateway = _build_gateway(FakeBackend, FakeClient)
 
     rows = gateway.get_market_state(["US.NVDA"])
 
@@ -443,8 +414,6 @@ def test_gateway_market_state_delegates_to_quote_client() -> None:
 
 
 def test_gateway_earnings_calendar_delegates_exact_market_window() -> None:
-    from src.infrastructure.futu_gateway import build_futu_gateway
-
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
             self.host = host
@@ -466,16 +435,9 @@ def test_gateway_earnings_calendar_delegates_exact_market_window() -> None:
                 }
             ]
 
-    gw = build_futu_gateway(
-        backend_cls=FakeBackend,
-        client_cls=FakeClient,
-    )
+    gw = _build_gateway(FakeBackend, FakeClient)
 
-    rows = gw.get_earnings_calendar(
-        market="US",
-        begin_date="2026-08-17",
-        end_date="2026-08-21",
-    )
+    rows = gw.get_earnings_calendar(market="US", begin_date="2026-08-17", end_date="2026-08-21")
 
     assert rows == [
         {
@@ -515,11 +477,7 @@ def test_futu_api_client_earnings_calendar_unwraps_empty_result() -> None:
     backend = FakeBackend()
     client = _FutuAPIClient(backend, is_option_chain_cache_enabled=False)
 
-    assert client.get_earnings_calendar(
-        market="HK",
-        begin_date="2026-08-06",
-        end_date="2026-08-06",
-    ) == []
+    assert client.get_earnings_calendar(market="HK", begin_date="2026-08-06", end_date="2026-08-06") == []
     assert backend.quote.calls == [
         {
             "market": "HK",
@@ -542,11 +500,7 @@ def test_futu_api_client_earnings_calendar_fails_with_stable_capability_reason()
     client = _FutuAPIClient(FakeBackend(), is_option_chain_cache_enabled=False)
 
     with pytest.raises(FutuGatewayCapabilityUnavailableError) as _caught:
-        client.get_earnings_calendar(
-            market="US",
-            begin_date="2026-08-06",
-            end_date="2026-08-06",
-        )
+        client.get_earnings_calendar(market="US", begin_date="2026-08-06", end_date="2026-08-06")
     exc = _caught.value
     assert exc.code == "CAPABILITY_UNAVAILABLE"
     assert exc.reason_code == "opend_earnings_calendar_unsupported"
@@ -574,10 +528,7 @@ def test_inspect_futu_sdk_earnings_calendar_capability_requires_version_and_meth
         package_root=package_root,
         installed_version=FUTU_EARNINGS_CALENDAR_MIN_VERSION,
     )
-    old = inspect_futu_sdk_earnings_calendar_capability(
-        package_root=package_root,
-        installed_version="10.8.6808",
-    )
+    old = inspect_futu_sdk_earnings_calendar_capability(package_root=package_root, installed_version="10.8.6808")
     source.write_text("class OpenQuoteContext:\n    pass\n", encoding="utf-8")
     missing_method = inspect_futu_sdk_earnings_calendar_capability(
         package_root=package_root,
@@ -618,17 +569,7 @@ def test_broker_ready_builder_never_constructs_quote_context() -> None:
                 self._trade_client = Trade()
             return self._trade_client
 
-    class Client:
-        def __init__(self, backend, **_kwargs):
-            self.backend = backend
-
-        @staticmethod
-        def _unwrap(value):
-            return value[1]
-
-        @staticmethod
-        def _rows(value):
-            return list(value)
+    Client = _BrokerClient
 
     gateway = build_ready_futu_broker_gateway(
         host="broker",
@@ -743,17 +684,7 @@ def test_broker_readiness_requires_every_identity_in_requested_environment() -> 
         def _ensure_trade_client(self):
             return self._trade_client
 
-    class Client:
-        def __init__(self, backend, **_kwargs):
-            self.backend = backend
-
-        @staticmethod
-        def _unwrap(value):
-            return value[1]
-
-        @staticmethod
-        def _rows(value):
-            return list(value)
+    Client = _BrokerClient
 
     with pytest.raises(FutuGatewayError) as _caught:
         build_ready_futu_broker_gateway(
@@ -798,24 +729,10 @@ def test_account_metadata_reads_only_exact_simulated_account_list_match() -> Non
         def _ensure_trade_client(self):
             return self._trade_client
 
-    class Client:
-        def __init__(self, backend, **_kwargs):
-            self.backend = backend
-
-        @staticmethod
-        def _unwrap(value):
-            return value[1]
-
-        @staticmethod
-        def _rows(value):
-            return list(value)
+    Client = _BrokerClient
 
     gateway = build_futu_gateway(backend_cls=Backend, client_cls=Client)
-    metadata = gateway.get_account_metadata(
-        expected_account_id="90000001",
-        trd_env="SIMULATE",
-        expected_market="US",
-    )
+    metadata = gateway.get_account_metadata(expected_account_id="90000001", trd_env="SIMULATE", expected_market="US")
 
     assert metadata == {
         "matched": True,
@@ -849,17 +766,7 @@ def test_broker_readiness_rejects_missing_explicit_global_state_facts() -> None:
         def _ensure_trade_client(self):
             return self._trade_client
 
-    class Client:
-        def __init__(self, backend, **_kwargs):
-            self.backend = backend
-
-        @staticmethod
-        def _unwrap(value):
-            return value[1]
-
-        @staticmethod
-        def _rows(value):
-            return list(value)
+    Client = _BrokerClient
 
     with pytest.raises(FutuGatewayError) as _caught:
         build_ready_futu_broker_gateway(
@@ -966,12 +873,7 @@ def test_unreachable_trade_client_fails_fast(monkeypatch) -> None:
 
     t0 = time.monotonic()
     with pytest.raises(mod.FutuGatewayUnreachableError):
-        mod.build_ready_futu_broker_gateway(
-            host="127.0.0.9",
-            port=11119,
-            expected_account_ids=[],
-            trd_env="REAL",
-        )
+        mod.build_ready_futu_broker_gateway(host="127.0.0.9", port=11119, expected_account_ids=[], trd_env="REAL")
     assert time.monotonic() - t0 < 1.0
     assert constructed == []
 

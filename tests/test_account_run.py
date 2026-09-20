@@ -104,6 +104,31 @@ def _request_for_account(request: Any, account: str, **changes: Any) -> Any:
     )
 
 
+def _allow_schema_validation(**_kwargs) -> None:
+    return None
+
+
+def _reject_schema_validation(**_kwargs) -> None:
+    raise AssertionError("schema validation should not fail")
+
+
+def _run_account(
+    request: Any,
+    env: dict[str, Any],
+    runlog: Any,
+    fail_schema_validation: Any = _reject_schema_validation,
+) -> Any:
+    """Run one account with the runlog/audit wiring these cases share."""
+    from src.application.account_run import run_one_account
+
+    return run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=fail_schema_validation,
+    )
+
+
 def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     from src.application import account_run as mod
 
@@ -223,8 +248,6 @@ def test_run_one_account_rejects_tampered_prepublished_config_before_children(
 
 
 def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(tmp_path)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
@@ -241,12 +264,7 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
     )
     monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is False
     assert outcome.prefetch_done is False
@@ -262,8 +280,6 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
@@ -288,12 +304,7 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is True
     assert outcome.prefetch_done is True
@@ -307,8 +318,6 @@ def test_experience_account_run_uses_local_report_and_skips_notification_artifac
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     request = replace(
         _make_request(tmp_path, prefetch_done=True, close_advice_enabled=True),
         experience=True,
@@ -368,12 +377,7 @@ def test_experience_account_run_uses_local_report_and_skips_notification_artifac
         },
     )
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, runlog, _allow_schema_validation)
 
     assert outcome.result.should_notify is False
     assert outcome.result.notification_text == "体验模式报告"
@@ -388,7 +392,6 @@ def test_run_one_account_fails_closed_when_prepared_option_context_changes_after
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
     from src.application.prepared_option_positions_context import (
         PreparedOptionPositionsContextError,
     )
@@ -459,12 +462,7 @@ def test_run_one_account_fails_closed_when_prepared_option_context_changes_after
             PreparedOptionPositionsContextError("payload hash mismatch")
         ),
     )
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, runlog, _allow_schema_validation)
 
     assert outcome.ran_pipeline is False
     assert outcome.result.ran_scan is True
@@ -482,7 +480,6 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
     from src.application.tick_run_workspace import canonical_account_run_config_bytes
 
     request = replace(
@@ -541,12 +538,7 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         },
     )
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, runlog, _allow_schema_validation)
 
     assert outcome.ran_pipeline is True
     assert outcome.result.ran_scan is True
@@ -574,8 +566,6 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
     error_code: str,
     expected_reason: str,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     request = replace(
         _make_request(tmp_path, prefetch_done=True),
         account_config_generation_frozen=True,
@@ -619,12 +609,7 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
         },
     )
 
-    outcome = run_one_account(
-        request=request,
-        runlog=_FakeRunlog(),
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, _FakeRunlog(), _allow_schema_validation)
 
     assert outcome.ran_pipeline is False
     assert outcome.result.ran_scan is False
@@ -635,8 +620,6 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
 
 
 def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
     repo_root = tmp_path / "code"
     repo_root.mkdir()
     request = replace(
@@ -669,12 +652,7 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is True
     assert seen_pipeline["base"] == repo_root
@@ -701,8 +679,6 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
 
 
 def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
     request = replace(
         _make_request(tmp_path, prefetch_done=True),
         should_run_global=False,
@@ -739,12 +715,7 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert seen_gate["should_run"] is True
     assert seen_gate["reason"] == "lx_due"
@@ -753,8 +724,6 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
 
 
 def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
@@ -776,12 +745,7 @@ def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch,
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": False, "ran_scan": True, "meaningful": False, "reason": "pipeline failed"})
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is False
     assert outcome.prefetch_done is True
@@ -793,8 +757,6 @@ def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch,
 
 
 def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
@@ -821,12 +783,7 @@ def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypa
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
     monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is True
     assert outcome.result.notification_text == "artifact text"
@@ -840,8 +797,6 @@ def test_run_one_account_does_not_notify_close_advice_diagnostics(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(
         tmp_path,
         prefetch_done=True,
@@ -897,12 +852,7 @@ def test_run_one_account_does_not_notify_close_advice_diagnostics(
         },
     )
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
+    outcome = _run_account(request, env, runlog)
 
     assert outcome.result.notification_text == ""
     final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
@@ -916,8 +866,6 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     request = _make_request(
         tmp_path,
         prefetch_done=True,
@@ -988,12 +936,7 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
         },
     )
 
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, runlog, _allow_schema_validation)
 
     assert outcome.ran_pipeline is False
     assert outcome.result.ran_scan is True
@@ -1016,8 +959,6 @@ def test_run_one_account_reuses_validated_close_inputs_and_result_text(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.account_run import run_one_account
-
     prepared_manifest = tmp_path / "prepared-option-context.manifest.json"
     request = replace(
         _make_request(
@@ -1098,12 +1039,7 @@ def test_run_one_account_reuses_validated_close_inputs_and_result_text(
 
     monkeypatch.setattr(env["mod"], "run_close_advice", _run_close_advice)
 
-    outcome = run_one_account(
-        request=request,
-        runlog=_FakeRunlog(),
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **_kwargs: None,
-    )
+    outcome = _run_account(request, env, _FakeRunlog(), _allow_schema_validation)
 
     assert observed["context_override"] == validated_context
     assert observed["required_data_snapshot_manifest_sha256"] == "b" * 64

@@ -8,6 +8,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.application.tick_notification_flow as mod
+from src.application.daily_decision_brief_repository import (
+    persist_daily_decision_brief_success,
+    read_daily_decision_brief_delivery_state,
+    read_daily_decision_brief_fixed_recovery,
+    read_latest_daily_decision_brief,
+    read_retryable_daily_decision_brief_delivery,
+)
+
+
 MARKET_DATE = "2026-07-21"
 FIXED_TARGET = "2026-07-21T10:00:00-04:00"
 HALF_TARGET = "2026-07-21T10:30:00-04:00"
@@ -156,7 +166,6 @@ def _request(
     trigger_kind: str = "scheduled",
     markets_to_run: tuple[str, ...] = ("US",),
 ):
-    import src.application.tick_notification_flow as mod
     from src.application.multi_tick.misc import AccountResult
 
     target = FIXED_TARGET if fixed else HALF_TARGET
@@ -206,8 +215,6 @@ def _request(
 
 
 def _patch_assembler(monkeypatch, *, blocked: bool = False, candidate: bool = True) -> None:
-    import src.application.tick_notification_flow as mod
-
     monkeypatch.setattr(
         mod,
         "assemble_daily_decision_briefs",
@@ -225,8 +232,6 @@ def _patch_sender(
     calls: list[dict] | None = None,
     order: list[str] | None = None,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-
     def send(**kwargs):
         if order is not None:
             order.append("provider")
@@ -254,8 +259,6 @@ def _patch_sender(
 
 
 def test_scheduled_daily_brief_ignores_deprecated_enabled_switch(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     enabled = mod._prepare_daily_brief_notification(
         _request(tmp_path / "enabled", run_id="enabled", config=_config(enabled=True)).request
@@ -279,12 +282,6 @@ def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
     trigger_kind: str,
     target: str | None,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-        read_latest_daily_decision_brief,
-    )
-
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
@@ -307,8 +304,6 @@ def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
 
 
 def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_send(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     monkeypatch.setattr(
         mod,
         "assemble_daily_decision_briefs",
@@ -327,8 +322,6 @@ def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_sen
 
 
 def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
     from src.application.notification_delivery_adapter import build_notification_transport_key
 
     _patch_assembler(monkeypatch)
@@ -346,11 +339,6 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
 
 
 def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-    )
-
     _patch_assembler(monkeypatch)
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
     calls: list[dict] = []
@@ -390,8 +378,6 @@ def test_confirmed_delivery_records_degraded_evidence_when_tick_metrics_write_fa
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     _patch_sender(monkeypatch)
     monkeypatch.setattr(
@@ -436,9 +422,6 @@ def test_no_send_four_way_matrix_updates_snapshot_without_publishing_envelope(
     candidate: bool,
     expected_pending: int,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief, read_retryable_daily_decision_brief_delivery
-
     _patch_assembler(monkeypatch, candidate=candidate)
     bundle = _request(tmp_path, run_id=f"no-send-{fixed}-{candidate}", fixed=fixed, no_send=True)
     assert mod.run_tick_notification_flow(bundle.request) == 0
@@ -454,9 +437,6 @@ def test_no_send_four_way_matrix_updates_snapshot_without_publishing_envelope(
 
 
 def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_retryable_daily_decision_brief_delivery
-
     _patch_assembler(monkeypatch)
     monkeypatch.setattr(mod, "evaluate_dnd_quiet_hours", lambda **_kwargs: {"is_quiet": True, "quiet_window": "00:00-23:59", "parse_error": None})
     bundle = _request(tmp_path, run_id="quiet")
@@ -467,8 +447,6 @@ def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path) -
 
 
 def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     bundle = _request(tmp_path, run_id="candidate", fixed=False)
     prep = mod._prepare_daily_brief_notification(bundle.request)
@@ -481,9 +459,6 @@ def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: 
 
 
 def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief
-
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed", pipeline_ok=False)
     prep = mod._prepare_daily_brief_notification(bundle.request)
@@ -497,8 +472,6 @@ def test_pending_fixed_failure_without_provider_attempt_is_preserved(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch, blocked=True)
     failed = _request(
         tmp_path,
@@ -529,11 +502,6 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-    )
-
     _patch_assembler(monkeypatch, blocked=True)
     failed_calls: list[dict] = []
     _patch_sender(
@@ -580,11 +548,6 @@ def test_ambiguous_fixed_failure_retries_same_frozen_delivery_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-    )
-
     _patch_assembler(monkeypatch, blocked=True)
     ambiguous_calls: list[dict] = []
     _patch_sender(
@@ -633,11 +596,6 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-    )
-
     def assemble(
         *,
         base: Path,
@@ -705,8 +663,6 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
 
 
 def test_fixed_report_without_candidates_still_contains_positions_and_funds(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch, candidate=False)
     bundle = _request(tmp_path, run_id="fixed-empty")
     prep = mod._prepare_daily_brief_notification(bundle.request)
@@ -719,8 +675,6 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
 
 
 def test_pipeline_failure_nonfixed_is_quiet_and_keeps_scan_retryable(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed-half", fixed=False, pipeline_ok=False)
     assert mod.run_tick_notification_flow(bundle.request) == 0
@@ -729,13 +683,6 @@ def test_pipeline_failure_nonfixed_is_quiet_and_keeps_scan_retryable(monkeypatch
 
 
 def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_daily_decision_brief_delivery_state,
-        read_latest_daily_decision_brief,
-        read_retryable_daily_decision_brief_delivery,
-    )
-
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
@@ -776,8 +723,6 @@ def test_post_delivery_sidecar_runs_after_provider_before_tick_completion(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     order: list[str] = []
     _patch_sender(monkeypatch, order=order)
@@ -822,8 +767,6 @@ def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     _patch_sender(monkeypatch)
     order: list[str] = []
@@ -858,9 +801,6 @@ def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_retryable_daily_decision_brief_delivery
-
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls, result={"ok": False, "command_ok": False, "delivery_confirmed": False, "returncode": 1, "error_code": "SEND_FAILED"})
@@ -903,12 +843,7 @@ def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
     tmp_path: Path,
     retry_status: str,
 ) -> None:
-    import src.application.tick_notification_flow as mod
     from domain.domain.daily_decision_brief import daily_brief_compatible_digests
-    from src.application.daily_decision_brief_repository import (
-        read_retryable_daily_decision_brief_delivery,
-    )
-
     _patch_assembler(monkeypatch)
     first_calls: list[dict] = []
     _patch_sender(
@@ -1005,12 +940,7 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
     from domain.domain.daily_decision_brief import daily_brief_compatible_digests
-    from src.application.daily_decision_brief_repository import (
-        read_retryable_daily_decision_brief_delivery,
-    )
-
     _patch_assembler(monkeypatch)
     _patch_sender(
         monkeypatch,
@@ -1082,11 +1012,6 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
 
 
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        read_retryable_daily_decision_brief_delivery,
-    )
-
     _patch_assembler(monkeypatch)
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
     first_calls: list[dict] = []
@@ -1130,9 +1055,6 @@ def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tm
 
 
 def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_retryable_daily_decision_brief_delivery
-
     _patch_assembler(monkeypatch)
     seed = _request(tmp_path, run_id="seed-pending")
     mod._prepare_daily_brief_notification(seed.request)
@@ -1155,8 +1077,6 @@ def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monk
 
 
 def test_delivery_only_without_envelope_is_read_only_and_skips_assembler(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     monkeypatch.setattr(mod, "assemble_daily_decision_briefs", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not assemble")))
     bundle = _request(tmp_path, run_id="delivery-only-empty", delivery_only=True)
     assert mod.run_tick_notification_flow(bundle.request) == 0
@@ -1168,14 +1088,6 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import (
-        persist_daily_decision_brief_success,
-        read_daily_decision_brief_fixed_recovery,
-        read_daily_decision_brief_delivery_state,
-        read_latest_daily_decision_brief,
-        read_retryable_daily_decision_brief_delivery,
-    )
     from src.application.daily_decision_brief_renderer import (
         render_fixed_report as actual_render_fixed_report,
     )
@@ -1252,9 +1164,6 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
 
 
 def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief
-
     monkeypatch.setattr(
         mod,
         "assemble_daily_decision_briefs",
@@ -1270,8 +1179,6 @@ def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_pa
 
 
 def test_scheduled_renderer_uses_beijing_batch_time_without_leaking_revision(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     prep = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="render").request)
     message = prep.prepared_messages.messages_by_account["lx"]
@@ -1282,8 +1189,6 @@ def test_scheduled_renderer_uses_beijing_batch_time_without_leaking_revision(mon
 
 
 def test_later_nonfixed_scan_preserves_existing_pending_candidate_envelope(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     first = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="candidate-1", fixed=False).request)
     first_envelope = first.lifecycles_by_account["lx"]["envelope"]
@@ -1299,9 +1204,6 @@ def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
     tmp_path: Path,
 ) -> None:
     import copy
-
-    import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
 
     def assemble(*, base, run_id, account, markets_to_run, **_kwargs):
         brief = _brief(base=base, run_id=run_id, account=account)
@@ -1350,8 +1252,6 @@ def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
 
 
 def test_multi_market_flow_records_terminal_failure_and_nonzero_exit(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     bundle = _request(tmp_path, run_id="multi-terminal")
     bundle.request = replace(
@@ -1372,8 +1272,6 @@ def test_multi_market_flow_records_terminal_failure_and_nonzero_exit(monkeypatch
 
 @pytest.mark.parametrize('failure', ['no_send', 'unconfirmed', 'confirmation_error'])
 def test_report_reference_requires_confirmed_delivery(monkeypatch, tmp_path: Path, failure: str) -> None:
-    import src.application.tick_notification_flow as mod
-
     _patch_assembler(monkeypatch)
     result = {'ok': True, 'command_ok': True, 'delivery_confirmed': False, 'ambiguous_send': True} if failure == 'unconfirmed' else None
     _patch_sender(monkeypatch, result=result)

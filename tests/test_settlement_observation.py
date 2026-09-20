@@ -943,6 +943,28 @@ class _UntypedFailedReceiptGateway(_Gateway):
         }
 
 
+def _collect_broker_observation(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    lifecycle_case: dict,
+    case_id: str,
+    now_ms: int,
+    gateway: _Gateway,
+) -> dict:
+    return collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=gateway,
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+
+
 def _collect(
     tmp_path: Path,
     gateway: _Gateway,
@@ -951,16 +973,11 @@ def _collect(
         _repo_with_pending_case(tmp_path)
     )
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    return collect_broker_settlement_observation(
+    return _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=str(lifecycle_case["case_id"]),
-            now_ms=now_ms,
-        ),
+        case_id=str(lifecycle_case["case_id"]),
         gateway=gateway,
-        futu_account_id="1001",
         now_ms=now_ms,
     )
 
@@ -1340,6 +1357,41 @@ def test_calendar_or_anchor_history_mismatch_blocks_observation(
     }.issubset(observation["incomplete_reason_codes"])
 
 
+_OPTION_CLOSE_DEAL = {
+    "deal_id": "option-close-1",
+    "acc_id": "1001",
+    "code": OPTION_CODE,
+    "price": "0",
+    "qty": 1,
+}
+
+
+def _stock_settlement_deal(
+    deal_id: str,
+    *,
+    trade_time_ms: int,
+    order_id: str | None = None,
+) -> dict:
+    row = {
+        "deal_id": deal_id,
+        "acc_id": "1001",
+        "code": "US.NVDA",
+        "price": "100",
+        "qty": 100,
+        "trd_side": "BUY",
+        "trade_time_ms": trade_time_ms,
+    }
+    if order_id is not None:
+        row["order_id"] = order_id
+    return row
+
+
+def _settlement_gateway(*stock_rows: dict) -> _Gateway:
+    return _Gateway(
+        history_deals=[dict(_OPTION_CLOSE_DEAL), *stock_rows]
+    )
+
+
 def _collect_stock_settlement_observation(
     repo: SQLiteOptionPositionsRepository,
     *,
@@ -1349,36 +1401,17 @@ def _collect_stock_settlement_observation(
 ) -> tuple[dict, int]:
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=str(lifecycle_case["case_id"]),
-            now_ms=now_ms,
+        case_id=str(lifecycle_case["case_id"]),
+        gateway=_settlement_gateway(
+            _stock_settlement_deal(
+                stock_deal_id,
+                trade_time_ms=stock_time_ms,
+                order_id=f"order:{stock_deal_id}",
+            )
         ),
-        gateway=_Gateway(
-            history_deals=[
-                {
-                    "deal_id": "option-close-1",
-                    "acc_id": "1001",
-                    "code": OPTION_CODE,
-                    "price": "0",
-                    "qty": 1,
-                },
-                {
-                    "deal_id": stock_deal_id,
-                    "acc_id": "1001",
-                    "code": "US.NVDA",
-                    "price": "100",
-                    "qty": 100,
-                    "trd_side": "BUY",
-                    "trade_time_ms": stock_time_ms,
-                    "order_id": f"order:{stock_deal_id}",
-                },
-            ]
-        ),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     assert observation["stock_settlement_present"] is True
@@ -1710,39 +1743,17 @@ def test_duplicate_polled_stock_settlement_is_applied_once(
     )
     case_id = str(lifecycle_case["case_id"])
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
-    stock_row = {
-        "deal_id": "stock-settlement-duplicate",
-        "acc_id": "1001",
-        "code": "US.NVDA",
-        "price": "100",
-        "qty": 100,
-        "trd_side": "BUY",
-        "trade_time_ms": stock_time_ms,
-        "order_id": "stock-order-duplicate",
-    }
+    stock_row = _stock_settlement_deal(
+        "stock-settlement-duplicate",
+        trade_time_ms=stock_time_ms,
+        order_id="stock-order-duplicate",
+    )
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
-        gateway=_Gateway(
-            history_deals=[
-                {
-                    "deal_id": "option-close-1",
-                    "acc_id": "1001",
-                    "code": OPTION_CODE,
-                    "price": "0",
-                    "qty": 1,
-                },
-                stock_row,
-                dict(stock_row),
-            ]
-        ),
-        futu_account_id="1001",
+        case_id=case_id,
+        gateway=_settlement_gateway(stock_row, dict(stock_row)),
         now_ms=now_ms,
     )
 
@@ -1770,44 +1781,20 @@ def test_multiple_polled_stock_settlements_require_review_before_writes(
     case_id = str(lifecycle_case["case_id"])
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
+        case_id=case_id,
+        gateway=_settlement_gateway(
+            _stock_settlement_deal(
+                "stock-settlement-a",
+                trade_time_ms=stock_time_ms,
+            ),
+            _stock_settlement_deal(
+                "stock-settlement-b",
+                trade_time_ms=stock_time_ms,
+            ),
         ),
-        gateway=_Gateway(
-            history_deals=[
-                {
-                    "deal_id": "option-close-1",
-                    "acc_id": "1001",
-                    "code": OPTION_CODE,
-                    "price": "0",
-                    "qty": 1,
-                },
-                {
-                    "deal_id": "stock-settlement-a",
-                    "acc_id": "1001",
-                    "code": "US.NVDA",
-                    "price": "100",
-                    "qty": 100,
-                    "trd_side": "BUY",
-                    "trade_time_ms": stock_time_ms,
-                },
-                {
-                    "deal_id": "stock-settlement-b",
-                    "acc_id": "1001",
-                    "code": "US.NVDA",
-                    "price": "100",
-                    "qty": 100,
-                    "trd_side": "BUY",
-                    "trade_time_ms": stock_time_ms,
-                },
-            ]
-        ),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
 
@@ -1843,35 +1830,16 @@ def test_polled_settlement_generation_drift_writes_no_evidence(
     case_id = str(lifecycle_case["case_id"])
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
+        case_id=case_id,
+        gateway=_settlement_gateway(
+            _stock_settlement_deal(
+                "stock-settlement-stale",
+                trade_time_ms=stock_time_ms,
+            )
         ),
-        gateway=_Gateway(
-            history_deals=[
-                {
-                    "deal_id": "option-close-1",
-                    "acc_id": "1001",
-                    "code": OPTION_CODE,
-                    "price": "0",
-                    "qty": 1,
-                },
-                {
-                    "deal_id": "stock-settlement-stale",
-                    "acc_id": "1001",
-                    "code": "US.NVDA",
-                    "price": "100",
-                    "qty": 100,
-                    "trd_side": "BUY",
-                    "trade_time_ms": stock_time_ms,
-                },
-            ]
-        ),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     candidate = observation["stock_settlement_candidates"][0]
@@ -2214,16 +2182,11 @@ def test_settlement_observation_uses_validated_legacy_bridge_anchor(
     )
 
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_Gateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
 
@@ -2365,16 +2328,11 @@ def test_close_reason_threads_one_attempt_to_terminal_owner(
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
     _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=gateway,
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     envelope = build_lifecycle_attempt_audit_envelope(
@@ -2429,16 +2387,11 @@ def test_state_only_owner_appends_once_and_exact_replay_reads_no_business(
     now_ms = int(timing["pairing_until_ms"]) + 1
     assert now_ms < int(policy["settlement_deadline_ms"])
     _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_Gateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     envelope = build_lifecycle_attempt_audit_envelope(
@@ -2533,16 +2486,11 @@ def test_terminal_owner_rolls_back_business_when_audit_append_fails(
         now_ms = int(timing["pairing_until_ms"]) + 1
     else:
         now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=gateway,
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     before = {
@@ -2618,16 +2566,11 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
     case_id = str(lifecycle_case["case_id"])
     observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
     _bootstrap_current_decision_shadow(repo, now_ms=observed_at_ms)
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=observed_at_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=observed_at_ms,
     )
     def write(observed: dict, invocation_id: str) -> dict:
@@ -2745,16 +2688,11 @@ def test_issue_business_and_sidecar_roll_back_together_on_audit_failure(
     )
     case_id = str(lifecycle_case["case_id"])
     observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=observed_at_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=observed_at_ms,
     )
     case_before = repo.get_trade_lifecycle_case(case_id)
@@ -2825,16 +2763,11 @@ def test_cleanup_failure_warns_without_reclassifying_committed_attempt(
     )
     case_id = str(lifecycle_case["case_id"])
     observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation_r0 = collect_broker_settlement_observation(
+    observation_r0 = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=observed_at_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=observed_at_ms,
     )
 
@@ -2926,16 +2859,11 @@ def test_issue_writer_rejects_tampered_frozen_semantic_projection(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     evidence = _settlement_issue_evidence(observation)
@@ -2978,16 +2906,11 @@ def test_terminal_writer_rejects_tampered_embedded_semantic_projection(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_Gateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     evidence = _settlement_terminal_evidence(observation)
@@ -3033,16 +2956,11 @@ def test_settlement_writer_dedupes_latest_but_preserves_a_b_a(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation_a = collect_broker_settlement_observation(
+    observation_a = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     assert observation_a["complete"] is False
@@ -3124,16 +3042,11 @@ def test_concurrent_same_generation_writers_admit_one_transition(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
 
@@ -3194,16 +3107,11 @@ def test_same_millisecond_rows_repair_head_by_rowid_without_regression(
         "now_ms",
         lambda: fixed_created_at_ms,
     )
-    observation_a = collect_broker_settlement_observation(
+    observation_a = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=observed_at_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=observed_at_ms,
     )
     assert _record_issue(
@@ -3268,28 +3176,22 @@ def test_same_millisecond_rows_repair_head_by_rowid_without_regression(
     assert head["evidence_id"] == observation_b["observation_id"]
 
 
-def test_terminal_settlement_duplicate_does_not_advance_business_state(
+def _admitted_terminal_settlement(
     tmp_path: Path,
-) -> None:
+) -> tuple[SQLiteOptionPositionsRepository, str, int, dict]:
+    """Collect and admit one complete terminal settlement observation."""
     repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
         tmp_path
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_Gateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
-    assert observation["complete"] is True
-
     first = reconcile_lifecycle_close_reason(
         repo,
         case_id=case_id,
@@ -3301,6 +3203,40 @@ def test_terminal_settlement_duplicate_does_not_advance_business_state(
         first["write_result"]["ledger_result"]["admission_status"]
         == "admitted_semantic"
     )
+    return repo, case_id, now_ms, observation
+
+
+def _rebase_terminal_duplicate(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    case_id: str,
+    observation: dict,
+    derived_summary: dict,
+    attempt_audit: object | None = None,
+) -> dict:
+    return record_lifecycle_allocation(
+        repo,
+        case_id=case_id,
+        evidence=_settlement_terminal_evidence(observation),
+        terminal_events=[],
+        allocations=[],
+        derived_status="ledger_written",
+        derived_summary=derived_summary,
+        expected_lifecycle_generation_token=str(
+            observation["expected_lifecycle_generation_token"]
+        ),
+        attempt_audit=attempt_audit,
+    )
+
+
+def test_terminal_settlement_duplicate_does_not_advance_business_state(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, now_ms, observation = _admitted_terminal_settlement(
+        tmp_path
+    )
+    assert observation["complete"] is True
+
     evidence_before = repo.list_trade_lifecycle_evidence(
         case_id=case_id
     )
@@ -3316,21 +3252,11 @@ def test_terminal_settlement_duplicate_does_not_advance_business_state(
         observation=observation,
         previous_evidence_id=str(observation["observation_id"]),
     )
-    duplicate = record_lifecycle_allocation(
+    duplicate = _rebase_terminal_duplicate(
         repo,
         case_id=case_id,
-        evidence=_settlement_terminal_evidence(
-            duplicate_observation
-        ),
-        terminal_events=[],
-        allocations=[],
-        derived_status="ledger_written",
+        observation=duplicate_observation,
         derived_summary=dict(case_before.get("derived_summary") or {}),
-        expected_lifecycle_generation_token=str(
-            duplicate_observation[
-                "expected_lifecycle_generation_token"
-            ]
-        ),
     )
 
     assert duplicate["admission_status"] == "duplicate_semantic"
@@ -3346,33 +3272,8 @@ def test_terminal_settlement_duplicate_does_not_advance_business_state(
 def test_terminal_duplicate_opens_span_from_admitted_r0_and_audits_r1(
     tmp_path: Path,
 ) -> None:
-    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
-        tmp_path
-    )
-    case_id = str(lifecycle_case["case_id"])
-    observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation_r0 = collect_broker_settlement_observation(
-        repo,
-        lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=observed_at_ms,
-        ),
-        gateway=_Gateway(),
-        futu_account_id="1001",
-        now_ms=observed_at_ms,
-    )
-    first = reconcile_lifecycle_close_reason(
-        repo,
-        case_id=case_id,
-        now_ms=observed_at_ms,
-        observation=observation_r0,
-        apply_changes=True,
-    )
-    assert (
-        first["write_result"]["ledger_result"]["admission_status"]
-        == "admitted_semantic"
+    repo, case_id, observed_at_ms, observation_r0 = (
+        _admitted_terminal_settlement(tmp_path)
     )
     case_before = repo.get_trade_lifecycle_case(case_id)
     assert case_before is not None
@@ -3392,17 +3293,11 @@ def test_terminal_duplicate_opens_span_from_admitted_r0_and_audits_r1(
         observation=observation_r1,
     )
 
-    result = record_lifecycle_allocation(
+    result = _rebase_terminal_duplicate(
         repo,
         case_id=case_id,
-        evidence=_settlement_terminal_evidence(observation_r1),
-        terminal_events=[],
-        allocations=[],
-        derived_status="ledger_written",
+        observation=observation_r1,
         derived_summary=dict(case_before.get("derived_summary") or {}),
-        expected_lifecycle_generation_token=str(
-            observation_r1["expected_lifecycle_generation_token"]
-        ),
         attempt_audit=envelope,
     )
 
@@ -3428,33 +3323,8 @@ def test_terminal_duplicate_opens_span_from_admitted_r0_and_audits_r1(
 def test_terminal_settlement_duplicate_with_missing_allocation_fails_closed(
     tmp_path: Path,
 ) -> None:
-    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+    repo, case_id, _now_ms, observation = _admitted_terminal_settlement(
         tmp_path
-    )
-    case_id = str(lifecycle_case["case_id"])
-    now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
-        repo,
-        lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
-        gateway=_Gateway(),
-        futu_account_id="1001",
-        now_ms=now_ms,
-    )
-    first = reconcile_lifecycle_close_reason(
-        repo,
-        case_id=case_id,
-        now_ms=now_ms,
-        observation=observation,
-        apply_changes=True,
-    )
-    assert (
-        first["write_result"]["ledger_result"]["admission_status"]
-        == "admitted_semantic"
     )
     with repo._connect() as conn:  # noqa: SLF001 - corruption fixture
         conn.execute(
@@ -3475,21 +3345,11 @@ def test_terminal_settlement_duplicate_with_missing_allocation_fails_closed(
         SettlementAdmissionStateIncoherent,
         match="summary is incoherent|allocations are missing",
     ):
-        record_lifecycle_allocation(
+        _rebase_terminal_duplicate(
             repo,
             case_id=case_id,
-            evidence=_settlement_terminal_evidence(
-                duplicate_observation
-            ),
-            terminal_events=[],
-            allocations=[],
-            derived_status="ledger_written",
+            observation=duplicate_observation,
             derived_summary=dict(case_before["derived_summary"]),
-            expected_lifecycle_generation_token=str(
-                duplicate_observation[
-                    "expected_lifecycle_generation_token"
-                ]
-            ),
         )
 
     assert repo.list_trade_lifecycle_evidence(
@@ -3506,16 +3366,11 @@ def test_issue_duplicate_with_malformed_revision_fails_with_typed_state_error(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     assert _record_issue(
@@ -3570,16 +3425,11 @@ def test_settlement_writer_types_foreign_key_violation_but_not_store_failure(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
 
@@ -3645,14 +3495,10 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
     ) in enumerate(cases):
         case_id = str(case["case_id"])
         observed_at_ms = int(case_policy["settlement_deadline_ms"]) + 1
-        observation = collect_broker_settlement_observation(
+        observation = _collect_broker_observation(
             repo,
             lifecycle_case=case,
-            read_model=lifecycle_case_read_model(
-                repo,
-                case_id=case_id,
-                now_ms=observed_at_ms,
-            ),
+            case_id=case_id,
             gateway=_Gateway(
                 history_deals=[
                     {
@@ -3664,7 +3510,6 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
                     }
                 ]
             ),
-            futu_account_id="1001",
             now_ms=observed_at_ms,
         )
         legacy_observation = deepcopy(observation)
@@ -3905,16 +3750,11 @@ def test_latest_legacy_observation_bootstraps_admission_head_without_duplicate(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     assert _record_issue(
@@ -3992,16 +3832,11 @@ def test_legacy_observation_without_matching_business_state_fails_closed(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     legacy_evidence = _settlement_issue_evidence(observation)
@@ -4044,16 +3879,11 @@ def test_malformed_latest_legacy_observation_fails_closed(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
-    observation = collect_broker_settlement_observation(
+    observation = _collect_broker_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model=lifecycle_case_read_model(
-            repo,
-            case_id=case_id,
-            now_ms=now_ms,
-        ),
+        case_id=case_id,
         gateway=_IncompleteGateway(),
-        futu_account_id="1001",
         now_ms=now_ms,
     )
     malformed = _settlement_issue_evidence(observation)

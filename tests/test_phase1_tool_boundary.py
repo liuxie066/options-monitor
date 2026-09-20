@@ -66,6 +66,58 @@ def _declared_put_symbol(
     }
 
 
+def _execution_payload(
+    intent,
+    *,
+    symbol: str | None = None,
+    idempotency_key: str = "k",
+    status: str = "fetched",
+    ok: bool = True,
+    message: str = "fetched",
+    returncode: int = 0,
+    error_code: str | None = None,
+) -> dict[str, object]:
+    """Shape a ToolExecutionService.execute result; defaults are the fixture literals."""
+    return {
+        "schema_kind": "tool_execution",
+        "schema_version": "1.0",
+        "tool_name": intent.tool_name,
+        "symbol": intent.symbol if symbol is None else symbol,
+        "source": intent.source,
+        "limit_exp": int(intent.limit_exp),
+        "idempotency_key": idempotency_key,
+        "status": status,
+        "ok": ok,
+        "message": message,
+        **({"error_code": error_code} if error_code is not None else {}),
+        "returncode": returncode,
+        "started_at_utc": "2026-01-01T00:00:00+00:00",
+        "finished_at_utc": "2026-01-01T00:00:01+00:00",
+    }
+
+
+def _prefetch(
+    tmp_path: Path,
+    symbols: list[dict],
+    *,
+    runtime: dict | None = None,
+    **kwargs,
+) -> dict:
+    """Run prefetch_required_data against the fixture subprocess config and tmp root."""
+    from src.application.multi_tick import required_data_prefetch as mod
+
+    return mod.prefetch_required_data(
+        vpy=Path("/usr/bin/python3"),
+        base=Path(tmp_path),
+        cfg={
+            "runtime": {"prefetch": {"execution_mode": "subprocess"}} if runtime is None else runtime,
+            "symbols": symbols,
+        },
+        shared_required=Path(tmp_path) / "required_data",
+        **kwargs,
+    )
+
+
 def test_scheduler_decision_schema_boundary() -> None:
     from domain.domain import normalize_scheduler_decision_payload
 
@@ -168,42 +220,21 @@ def test_prefetch_required_data_idempotency_audit(tmp_path: Path) -> None:
 
     def _fake_execute(self, intent):
         calls.append((intent.tool_name, intent.symbol, int(intent.limit_exp)))
-        return {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "tool_name": intent.tool_name,
-            "symbol": intent.symbol,
-            "source": intent.source,
-            "limit_exp": int(intent.limit_exp),
-            "idempotency_key": "k",
-            "status": "fetched" if len(calls) == 1 else "skipped",
-            "ok": True,
-            "message": "fetched" if len(calls) == 1 else "idempotent_duplicate",
-            "returncode": 0,
-            "started_at_utc": "2026-01-01T00:00:00+00:00",
-            "finished_at_utc": "2026-01-01T00:00:01+00:00",
-        }
+        return _execution_payload(
+            intent,
+            idempotency_key="k",
+            status="fetched" if len(calls) == 1 else "skipped",
+            message="fetched" if len(calls) == 1 else "idempotent_duplicate",
+        )
 
     mod.ToolExecutionService.execute = _fake_execute
     try:
-        td = tmp_path
-        out = mod.prefetch_required_data(
-            vpy=Path("/usr/bin/python3"),
-            base=Path(td),
-            cfg={
-                "runtime": {"prefetch": {"execution_mode": "subprocess"}},
-                "symbols": [
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "yahoo", "limit_expirations": 8},
-                    ),
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "yahoo", "limit_expirations": 8},
-                    ),
-                ]
-            },
-            shared_required=Path(td) / "required_data",
+        out = _prefetch(
+            tmp_path,
+            [
+                _declared_put_symbol("AAPL", {"source": "yahoo", "limit_expirations": 8}),
+                _declared_put_symbol("AAPL", {"source": "yahoo", "limit_expirations": 8}),
+            ],
         )
         assert out["fetched_ok"] == 1
         assert out["skipped"] == 0
@@ -224,28 +255,16 @@ def test_prefetch_required_data_fails_closed_when_merged_put_plan_lacks_spot(
         "src.application.required_data_planning.get_underlier_spot",
         lambda *_args, **_kwargs: None,
     )
-    td = tmp_path
     with pytest.raises(
         RuntimeError,
         match="global required-data plan incomplete",
     ):
-        mod.prefetch_required_data(
-            vpy=Path("/usr/bin/python3"),
-            base=Path(td),
-            cfg={
-                "runtime": {"prefetch": {"execution_mode": "subprocess"}},
-                "symbols": [
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "yahoo", "limit_expirations": 8},
-                    ),
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "yahoo", "limit_expirations": 8},
-                    ),
-                ],
-            },
-            shared_required=Path(td) / "required_data",
+        _prefetch(
+            tmp_path,
+            [
+                _declared_put_symbol("AAPL", {"source": "yahoo", "limit_expirations": 8}),
+                _declared_put_symbol("AAPL", {"source": "yahoo", "limit_expirations": 8}),
+            ],
         )
 
 
@@ -262,87 +281,36 @@ def test_prefetch_required_data_protections_minimal(monkeypatch, tmp_path: Path)
         sym = str(intent.symbol)
         calls.append(sym)
         if sym == "AAPL":
-            return {
-                "schema_kind": "tool_execution",
-                "schema_version": "1.0",
-                "tool_name": intent.tool_name,
-                "symbol": sym,
-                "source": intent.source,
-                "limit_exp": int(intent.limit_exp),
-                "idempotency_key": f"k-{sym}",
-                "status": "fetched",
-                "ok": True,
-                "message": "warning error=should_not_count",
-                "returncode": 0,
-                "started_at_utc": "2026-01-01T00:00:00+00:00",
-                "finished_at_utc": "2026-01-01T00:00:01+00:00",
-            }
+            return _execution_payload(
+                intent, symbol=sym, idempotency_key=f"k-{sym}",
+                message="warning error=should_not_count",
+            )
         if sym == "MSFT":
-            return {
-                "schema_kind": "tool_execution",
-                "schema_version": "1.0",
-                "tool_name": intent.tool_name,
-                "symbol": sym,
-                "source": intent.source,
-                "limit_exp": int(intent.limit_exp),
-                "idempotency_key": f"k-{sym}",
-                "status": "error",
-                "ok": False,
-                "message": "OpenD rate limit too frequent",
-                "error_code": "OPEND_RATE_LIMIT",
-                "returncode": 2,
-                "started_at_utc": "2026-01-01T00:00:00+00:00",
-                "finished_at_utc": "2026-01-01T00:00:01+00:00",
-            }
-        return {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "tool_name": intent.tool_name,
-            "symbol": sym,
-            "source": intent.source,
-            "limit_exp": int(intent.limit_exp),
-            "idempotency_key": f"k-{sym}",
-            "status": "error",
-            "ok": False,
-            "message": "generic failure",
-            "returncode": 3,
-            "started_at_utc": "2026-01-01T00:00:00+00:00",
-            "finished_at_utc": "2026-01-01T00:00:01+00:00",
-        }
+            return _execution_payload(
+                intent, symbol=sym, idempotency_key=f"k-{sym}", status="error", ok=False,
+                message="OpenD rate limit too frequent", returncode=2, error_code="OPEND_RATE_LIMIT",
+            )
+        return _execution_payload(
+            intent, symbol=sym, idempotency_key=f"k-{sym}", status="error", ok=False,
+            message="generic failure", returncode=3,
+        )
 
     mod.ToolExecutionService.execute = _fake_execute
     try:
-        td = tmp_path
-        out = mod.prefetch_required_data(
-            vpy=Path("/usr/bin/python3"),
-            base=Path(td),
-            cfg={
-                "runtime": {
-                    "prefetch": {"execution_mode": "subprocess"},
-                    "prefetch_max_workers": 1,
-                    "prefetch_fail_budget_consecutive": 2,
-                    "prefetch_fail_budget_total": 2,
-                },
-                "symbols": [
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "opend", "limit_expirations": 8},
-                    ),
-                    _declared_put_symbol(
-                        "MSFT",
-                        {"source": "opend", "limit_expirations": 8},
-                    ),
-                    _declared_put_symbol(
-                        "TSLA",
-                        {"source": "opend", "limit_expirations": 8},
-                    ),
-                    _declared_put_symbol(
-                        "BABA",
-                        {"source": "opend", "limit_expirations": 8},
-                    ),
-                ],
+        out = _prefetch(
+            tmp_path,
+            [
+                _declared_put_symbol("AAPL", {"source": "opend", "limit_expirations": 8}),
+                _declared_put_symbol("MSFT", {"source": "opend", "limit_expirations": 8}),
+                _declared_put_symbol("TSLA", {"source": "opend", "limit_expirations": 8}),
+                _declared_put_symbol("BABA", {"source": "opend", "limit_expirations": 8}),
+            ],
+            runtime={
+                "prefetch": {"execution_mode": "subprocess"},
+                "prefetch_max_workers": 1,
+                "prefetch_fail_budget_consecutive": 2,
+                "prefetch_fail_budget_total": 2,
             },
-            shared_required=Path(td) / "required_data",
         )
         assert out["max_workers"] == 1
         assert out["errors"] == 3
@@ -365,39 +333,11 @@ def test_prefetch_required_data_defaults_to_opend_source(tmp_path: Path) -> None
 
     def _fake_execute(self, intent):
         seen.append((str(intent.symbol), str(intent.source)))
-        return {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "tool_name": intent.tool_name,
-            "symbol": intent.symbol,
-            "source": intent.source,
-            "limit_exp": int(intent.limit_exp),
-            "idempotency_key": "k-default-opend",
-            "status": "fetched",
-            "ok": True,
-            "message": "fetched",
-            "returncode": 0,
-            "started_at_utc": "2026-01-01T00:00:00+00:00",
-            "finished_at_utc": "2026-01-01T00:00:01+00:00",
-        }
+        return _execution_payload(intent, idempotency_key="k-default-opend")
 
     mod.ToolExecutionService.execute = _fake_execute
     try:
-        td = tmp_path
-        out = mod.prefetch_required_data(
-            vpy=Path("/usr/bin/python3"),
-            base=Path(td),
-            cfg={
-                "runtime": {"prefetch": {"execution_mode": "subprocess"}},
-                "symbols": [
-                    _declared_put_symbol(
-                        "CRDO",
-                        {"limit_expirations": 8},
-                    ),
-                ]
-            },
-            shared_required=Path(td) / "required_data",
-        )
+        out = _prefetch(tmp_path, [_declared_put_symbol("CRDO", {"limit_expirations": 8})])
         assert out["fetched_ok"] == 1
         assert seen == [("CRDO", "opend")]
     finally:
@@ -423,38 +363,13 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache(
 
     def _fake_execute(self, intent):
         seen.append((str(intent.symbol), bool(intent.force_refresh)))
-        return {
-            "schema_kind": "tool_execution",
-            "schema_version": "1.0",
-            "tool_name": intent.tool_name,
-            "symbol": intent.symbol,
-            "source": intent.source,
-            "limit_exp": int(intent.limit_exp),
-            "idempotency_key": "k-force-cache",
-            "status": "fetched",
-            "ok": True,
-            "message": "fetched",
-            "returncode": 0,
-            "started_at_utc": "2026-01-01T00:00:00+00:00",
-            "finished_at_utc": "2026-01-01T00:00:01+00:00",
-        }
+        return _execution_payload(intent, idempotency_key="k-force-cache")
 
     mod.ToolExecutionService.execute = _fake_execute
     try:
-        td = tmp_path
-        out = mod.prefetch_required_data(
-            vpy=Path("/usr/bin/python3"),
-            base=Path(td),
-            cfg={
-                "runtime": {"prefetch": {"execution_mode": "subprocess"}},
-                "symbols": [
-                    _declared_put_symbol(
-                        "AAPL",
-                        {"source": "opend", "limit_expirations": 8},
-                    ),
-                ]
-            },
-            shared_required=Path(td) / "required_data",
+        out = _prefetch(
+            tmp_path,
+            [_declared_put_symbol("AAPL", {"source": "opend", "limit_expirations": 8})],
             force_refresh=True,
         )
         assert out["fetched_ok"] == 1

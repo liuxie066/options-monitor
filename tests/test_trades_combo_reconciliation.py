@@ -23,21 +23,10 @@ def test_auto_combo_rechecks_unique_match_at_the_durable_writer(tmp_path, monkey
     import src.application.trades.combo_reconciliation as module
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    for event in (
-        _event("call-open", "call-lot", option_type="call", side="long", strike=110, event_time_ms=BASE_TIME_MS + 1_000),
-        _event("put-open", "put-lot", option_type="put", side="short", strike=100, event_time_ms=BASE_TIME_MS + 2_000),
-    ):
+    for event in _open_events():
         persist_trade_event_object(repo, event)
     original = repo.list_trade_events()
-    exposure = {
-        "candidate_exposure_id": "exposure-1", "candidate_occurrence_id": "occurrence-1",
-        "account": "lx", "market": "US", "currency": "USD", "multiplier": 100,
-        "put_contract_key": {"underlying_symbol": "NVDA", "option_type": "put", "expiration_ymd": "2026-08-21", "strike": 100},
-        "call_contract_key": {"underlying_symbol": "NVDA", "option_type": "call", "expiration_ymd": "2026-08-21", "strike": 110},
-        "generated_at_ms": BASE_TIME_MS, "valid_until_ms": BASE_TIME_MS + 10_000,
-        "delivery_confirmed": True,
-    }
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", lambda **_kwargs: {"available": True, "exposures": [exposure]})
+    monkeypatch.setattr(module, "read_combo_candidate_exposures", lambda **_kwargs: {"available": True, "exposures": [_exposure()]})
     actual_adopt = module.adopt_post_trade_combo_pair
 
     def adopt_after_new_fill(**kwargs):
@@ -58,6 +47,24 @@ def test_auto_combo_rechecks_unique_match_at_the_durable_writer(tmp_path, monkey
     if competing_leg:
         assert len(events) == 3
         assert "no longer a unique delivered match" in result["auto_adoption_errors"][0]["error"]
+
+
+def _exposure() -> dict:
+    return {
+        "candidate_exposure_id": "exposure-1", "candidate_occurrence_id": "occurrence-1",
+        "account": "lx", "market": "US", "currency": "USD", "multiplier": 100,
+        "put_contract_key": {"underlying_symbol": "NVDA", "option_type": "put", "expiration_ymd": "2026-08-21", "strike": 100},
+        "call_contract_key": {"underlying_symbol": "NVDA", "option_type": "call", "expiration_ymd": "2026-08-21", "strike": 110},
+        "generated_at_ms": BASE_TIME_MS, "valid_until_ms": BASE_TIME_MS + 10_000,
+        "delivery_confirmed": True,
+    }
+
+
+def _open_events() -> tuple[TradeEvent, TradeEvent]:
+    return (
+        _event("call-open", "call-lot", option_type="call", side="long", strike=110, event_time_ms=BASE_TIME_MS + 1_000),
+        _event("put-open", "put-lot", option_type="put", side="short", strike=100, event_time_ms=BASE_TIME_MS + 2_000),
+    )
 
 
 def _event(
@@ -112,58 +119,13 @@ def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
     import src.application.trades.combo_reconciliation as module
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in _open_events():
         persist_trade_event_object(repo, event)
     reads: list[tuple[str, str]] = []
 
     def _read_exposures(**kwargs):
         reads.append((kwargs["market"], kwargs["market_trading_date"]))
-        return {
-            "available": True,
-            "reason": "ok",
-            "exposures": [
-                {
-                    "candidate_exposure_id": "exposure-1",
-                    "candidate_occurrence_id": "occurrence-1",
-                    "account": "lx",
-                    "market": "US",
-                    "currency": "USD",
-                    "multiplier": 100,
-                    "put_contract_key": {
-                        "underlying_symbol": "NVDA",
-                        "option_type": "put",
-                        "expiration_ymd": "2026-08-21",
-                        "strike": 100,
-                    },
-                    "call_contract_key": {
-                        "underlying_symbol": "NVDA",
-                        "option_type": "call",
-                        "expiration_ymd": "2026-08-21",
-                        "strike": 110,
-                    },
-                    "generated_at_ms": BASE_TIME_MS,
-                    "valid_until_ms": BASE_TIME_MS + 10_000,
-                    "delivery_confirmed": True,
-                }
-            ],
-        }
+        return {"available": True, "reason": "ok", "exposures": [_exposure()]}
 
     monkeypatch.setattr(module, "read_combo_candidate_exposures", _read_exposures)
     result = reconcile_account_post_trade_combos(

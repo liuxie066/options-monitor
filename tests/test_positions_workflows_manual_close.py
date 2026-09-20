@@ -6,6 +6,33 @@ import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
 
+def _persist_open_lot(
+    repo,
+    *,
+    contracts: int,
+    strike: float,
+    premium_per_share: float,
+    opened_at_ms: int,
+    account: str = "lx",
+    option_type: str = "put",
+    expiration_ymd: str = "2026-04-29",
+) -> None:
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        broker="富途",
+        account=account,
+        symbol="0700.HK",
+        option_type=option_type,
+        side="short",
+        contracts=contracts,
+        currency="HKD",
+        strike=strike,
+        multiplier=100,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        opened_at_ms=opened_at_ms,
+    )
+
 
 def test_manual_open_record_id_prefers_explicit_record_id_before_event_id_guess() -> None:
     import src.application.positions.workflows as workflows
@@ -26,21 +53,7 @@ def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_val
     import src.application.positions.workflows as workflows
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
-    )
+    _persist_open_lot(repo, contracts=1, strike=480.0, premium_per_share=3.93, opened_at_ms=1000)
     lot = repo.list_position_lots()[0]
 
     first = workflows.execute_manual_close(
@@ -112,36 +125,8 @@ def test_execute_manual_close_auto_matches_unique_selector(tmp_path: Path) -> No
     import src.application.positions.workflows as workflows
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="HKD",
-        strike=500.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=2.1,
-        opened_at_ms=2000,
-    )
+    _persist_open_lot(repo, contracts=2, strike=480.0, premium_per_share=3.93, opened_at_ms=1000)
+    _persist_open_lot(repo, contracts=1, strike=500.0, premium_per_share=2.1, opened_at_ms=2000)
     target_lot = next(row for row in repo.list_position_lots() if row["fields"]["strike"] == "480")
 
     out = workflows.execute_manual_close(
@@ -178,17 +163,12 @@ def test_execute_manual_close_sy_0700_same_strike_different_expiry_targets_exact
         ("put", 450.0, "2026-05-28", 6),
         ("put", 450.0, "2026-06-29", 3),
     ):
-        ledger_manual_trades.persist_manual_open_event(
+        _persist_open_lot(
             repo,
-            broker="富途",
             account="sy",
-            symbol="0700.HK",
             option_type=option_type,
-            side="short",
             contracts=contracts,
-            currency="HKD",
             strike=strike,
-            multiplier=100,
             expiration_ymd=expiration_ymd,
             premium_per_share=1.0,
             opened_at_ms=1000 + contracts,
@@ -228,21 +208,7 @@ def test_execute_manual_close_auto_match_rejects_multiple_candidates(tmp_path: P
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at in (1000, 2000):
-        ledger_manual_trades.persist_manual_open_event(
-            repo,
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=opened_at,
-        )
+        _persist_open_lot(repo, contracts=1, strike=480.0, premium_per_share=3.93, opened_at_ms=opened_at)
 
     with pytest.raises(workflows.ManualCloseMatchError) as exc_info:
         workflows.execute_manual_close(
@@ -269,21 +235,7 @@ def test_execute_manual_close_auto_match_not_found_includes_near_candidates(tmp_
     import src.application.positions.workflows as workflows
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="HKD",
-        strike=500.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=2.1,
-        opened_at_ms=1000,
-    )
+    _persist_open_lot(repo, contracts=1, strike=500.0, premium_per_share=2.1, opened_at_ms=1000)
 
     with pytest.raises(workflows.ManualCloseMatchError) as exc_info:
         workflows.execute_manual_close(

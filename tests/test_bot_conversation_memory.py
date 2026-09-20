@@ -23,6 +23,45 @@ from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
 from src.infrastructure.pi_agent_process import derive_pi_session_id
 
 
+def _bot_run_namespace(**overrides) -> Namespace:
+    """CLI Namespace for ``bot run``; defaults are the repeated flag set."""
+    base = {
+        "bot_command": "run",
+        "text": "检查运行状态",
+        "config_key": None,
+        "config_path": None,
+        "symbol": None,
+        "month": None,
+        "include_events": False,
+        "host_db": None,
+        "session_key": None,
+        "model_config_json": None,
+        "assistant_config": None,
+    }
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def _run_channel(**overrides):
+    """Call the channel facade with this module's repeated request envelope."""
+    base = {
+        "user_message": "检查运行状态",
+        "config_key": None,
+        "channel": "feishu",
+        "sender_id": "ou_1",
+        "conversation_id": "group_1",
+    }
+    base.update(overrides)
+    return channel_facade.run_channel_request(**base)
+
+
+def _store(tmp_path, run_id: str) -> BotHostStore:
+    """Fresh host store already holding one started run for ``run_id``."""
+    store = BotHostStore(tmp_path / "bot.sqlite3")
+    store.start_run(run_id, contract=_contract("运行状态"), session_key="wechat:chat")
+    return store
+
+
 def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
     monkeypatch, tmp_path, example_config_path
 ) -> None:
@@ -41,14 +80,7 @@ def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
         fake_run,
     )
 
-    result = channel_facade.run_channel_request(
-        user_message="检查运行状态",
-        config_key="us",
-        channel="feishu",
-        sender_id="ou_1",
-        conversation_id="chat_1",
-        host_db_path=str(database),
-    )
+    result = _run_channel(config_key="us", conversation_id="chat_1", host_db_path=str(database))
 
     assert result.status == "answered"
     assert captured["session_key"] == derive_pi_session_id(
@@ -159,21 +191,7 @@ def test_bot_run_cli_passes_normalized_market_and_path(
         return AppResult(status="answered", user_response="结论：运行正常。")
 
     monkeypatch.setattr(bot_ops, "_run_local_request", fake_run)
-    payload = handle_bot_command(
-        Namespace(
-            bot_command="run",
-            text="检查运行状态",
-            config_key=None,
-            config_path=str(example_config_path),
-            symbol=None,
-            month=None,
-            include_events=False,
-            host_db=None,
-            session_key=None,
-            model_config_json=None,
-            assistant_config=None,
-        )
-    )
+    payload = handle_bot_command(_bot_run_namespace(config_path=str(example_config_path)))
 
     request = captured["request"]
     assert payload["status"] == "answered"
@@ -190,21 +208,7 @@ def test_bot_run_cli_preserves_conceptual_request_without_config(monkeypatch) ->
         return AppResult(status="answered", user_response="结论：我是 Bot。")
 
     monkeypatch.setattr(bot_ops, "_run_local_request", fake_run)
-    payload = handle_bot_command(
-        Namespace(
-            bot_command="run",
-            text="介绍一下自己",
-            config_key=None,
-            config_path=None,
-            symbol=None,
-            month=None,
-            include_events=False,
-            host_db=None,
-            session_key=None,
-            model_config_json=None,
-            assistant_config=None,
-        )
-    )
+    payload = handle_bot_command(_bot_run_namespace(text="介绍一下自己"))
 
     request = captured["request"]
     assert payload["status"] == "answered"
@@ -225,21 +229,7 @@ def test_bot_run_cli_config_failure_is_safe_and_precedes_model(
 
     monkeypatch.setattr(bot_ops, "_run_local_request", unexpected_run)
     missing = tmp_path / "private-runtime-config.json"
-    payload = handle_bot_command(
-        Namespace(
-            bot_command="run",
-            text="检查运行状态",
-            config_key=None,
-            config_path=str(missing),
-            symbol=None,
-            month=None,
-            include_events=False,
-            host_db=None,
-            session_key=None,
-            model_config_json=None,
-            assistant_config=None,
-        )
-    )
+    payload = handle_bot_command(_bot_run_namespace(config_path=str(missing)))
 
     assert payload["status"] == "not_ready"
     assert payload["error"] == {"code": "CONFIG_ERROR", "reason": "config_missing"}
@@ -270,14 +260,7 @@ def test_invalid_channel_identity_or_scope_fails_before_model_gate(
     )
 
     for case, reason in cases:
-        request = {
-            "user_message": "检查运行状态",
-            "channel": "feishu",
-            "sender_id": "ou_1",
-            "conversation_id": "group_1",
-            **case,
-        }
-        result = channel_facade.run_channel_request(**request)
+        result = _run_channel(**case)
         assert result.error == {
             "code": "CHANNEL_NOT_READY",
             "reason": reason,
@@ -319,14 +302,7 @@ def test_channel_config_readiness_failures_are_safe_and_precede_model_gate(
     )
 
     for config_path, reason in cases:
-        result = channel_facade.run_channel_request(
-            user_message="检查运行状态",
-            config_key=None,
-            config_path=str(config_path),
-            channel="feishu",
-            sender_id="ou_1",
-            conversation_id="group_1",
-        )
+        result = _run_channel(config_path=str(config_path))
         assert result.status == "not_ready"
         assert result.error == {"code": "CHANNEL_NOT_READY", "reason": reason}
         assert str(config_path) not in result.user_response
@@ -336,14 +312,7 @@ def test_channel_config_readiness_failures_are_safe_and_precede_model_gate(
 
 
 def test_valid_channel_config_still_requires_the_model_gate(example_config_path) -> None:
-    result = channel_facade.run_channel_request(
-        user_message="检查运行状态",
-        config_key=None,
-        config_path=str(example_config_path),
-        channel="feishu",
-        sender_id="ou_1",
-        conversation_id="group_1",
-    )
+    result = _run_channel(config_path=str(example_config_path))
 
     assert result.status == "not_ready"
     assert result.error == {
@@ -365,15 +334,7 @@ def test_channel_config_path_stays_out_of_model_visible_context(
         return AppResult(status="answered", user_response="结论：运行正常。")
 
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
-    result = channel_facade.run_channel_request(
-        user_message="检查运行状态",
-        config_key=None,
-        config_path=str(config_path),
-        channel="feishu",
-        sender_id="ou_1",
-        conversation_id="group_1",
-        host_db_path=str(tmp_path / "audit.sqlite3"),
-    )
+    result = _run_channel(config_path=str(config_path), host_db_path=str(tmp_path / "audit.sqlite3"))
 
     prepared = captured["prepared"]
     canonical = str(config_path.resolve())
@@ -406,12 +367,8 @@ def test_host_store_migrates_existing_session_schema(tmp_path) -> None:
     assert messages_json == ('[{"role":"user","content":"hello"}]',)
 
 
-
-
 def test_cancel_request_only_updates_active_run(tmp_path) -> None:
-    store = BotHostStore(tmp_path / "bot.sqlite3")
-    contract = _contract("运行状态")
-    store.start_run("run_active", contract=contract, session_key="wechat:chat")
+    store = _store(tmp_path, "run_active")
 
     assert store.request_cancel("run_active") is True
     assert store.is_cancel_requested("run_active") is True
@@ -468,8 +425,7 @@ def test_cancel_and_commit_compare_and_set_have_exactly_one_winner(tmp_path) -> 
 
 
 def test_stale_run_becomes_terminal_without_resumable_progress(tmp_path) -> None:
-    store = BotHostStore(tmp_path / "bot.sqlite3")
-    store.start_run("run_stale", contract=_contract("运行状态"), session_key="wechat:chat")
+    store = _store(tmp_path, "run_stale")
     with store._connect() as conn:
         conn.execute(
             "UPDATE bot_runs SET started_at = '2000-01-01T00:00:00+00:00' "
@@ -480,20 +436,6 @@ def test_stale_run_becomes_terminal_without_resumable_progress(tmp_path) -> None
     record = store.run_record("run_stale")
     assert (record["status"], record["admission_state"]) == ("interrupted", "discard")
     assert json.loads(record["progress_json"]) == {}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_reply_outbox_is_idempotent_retryable_and_deliverable(tmp_path) -> None:
@@ -600,7 +542,7 @@ def test_channel_capacity_exhaustion_does_not_invoke_model_runtime(
     monkeypatch.setattr(channel_facade, "run_prepared_contract", unexpected_run)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
 
-    result = channel_facade.run_channel_request(
+    result = _run_channel(
         user_message="7月收益",
         config_key="us",
         channel="wechat",
@@ -612,8 +554,6 @@ def test_channel_capacity_exhaustion_does_not_invoke_model_runtime(
     assert result.status == "not_ready"
     assert result.error == {"code": "CHANNEL_NOT_READY", "reason": "channel_capacity_exhausted"}
     assert invoked is False
-
-
 
 
 def _contract(text: str):
@@ -632,8 +572,7 @@ def _contract(text: str):
 
 
 def test_cancel_survives_short_schema_writer_contention(tmp_path, monkeypatch) -> None:
-    store = BotHostStore(tmp_path / "bot.sqlite3")
-    store.start_run("contended", contract=_contract("运行状态"), session_key="wechat:chat")
+    store = _store(tmp_path, "contended")
     reached_write = threading.Event()
     connect = store._connect
 
@@ -668,8 +607,7 @@ def test_cancel_survives_short_schema_writer_contention(tmp_path, monkeypatch) -
 
 
 def test_schema_writer_wait_respects_admission_deadline(tmp_path) -> None:
-    store = BotHostStore(tmp_path / "bot.sqlite3")
-    store.start_run("existing", contract=_contract("运行状态"), session_key="wechat:chat")
+    store = _store(tmp_path, "existing")
     with sqlite3.connect(store.path) as blocker:
         blocker.execute("BEGIN IMMEDIATE")
         for acquire in (

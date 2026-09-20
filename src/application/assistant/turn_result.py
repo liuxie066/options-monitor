@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.assistant.contracts import AssistantTurnResult
+from src.application.payload_helpers import optional_text as _text
 
 
 def with_assistant_turn_result(response: dict[str, Any], *, route: str) -> dict[str, Any]:
@@ -111,11 +112,6 @@ def _turn_identifier(data: dict[str, Any], *keys: str) -> str | None:
         if value:
             return value
     return None
-
-
-def _text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _text_list(value: Any) -> list[str]:

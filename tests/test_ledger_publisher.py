@@ -24,35 +24,48 @@ def _key(
         )
 
 
+def _event(**overrides: object) -> TradeEvent:
+    """Build one stored ledger trade event.
+
+    The defaults are the manual NVDA put open this module repeats most often,
+    so a call site spells out only the fields that differ from it. ``lot_id``,
+    ``target_lot_id`` and ``raw_payload`` are deliberately absent from the
+    defaults: open events set ``lot_id``, close/adjust/void events set
+    ``target_lot_id``/``target_event_id``, and leaving them unset keeps each
+    call site's field set exactly what it was.
+    """
+    base: dict[str, object] = {
+        "event_id": "open-nvda",
+        "event_type": "open",
+        "event_time_ms": 1000,
+        "contract_key": _key(strike=100.0, expiration_ymd="2026-06-19"),
+        "contracts": 1,
+        "price": 2.5,
+        "currency": "USD",
+        "source": "cli_manual_open",
+        "multiplier": 100,
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
 def test_publisher_applies_adjust_patch_to_legacy_position_lot_fields() -> None:
     adjusted_exp_ms = parse_exp_to_ms("2026-07-17")
     assert adjusted_exp_ms is not None
 
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
-                event_id="open-nvda",
-                event_type="open",
-                event_time_ms=1000,
-                contract_key=_key(strike=100.0, expiration_ymd="2026-06-19"),
-                contracts=1,
-                price=2.5,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
+            _event(
                 lot_id="lot_open-nvda",
                 raw_payload={"source": "test", "source_type": "manual_trade_event", "side": "sell"},
             ),
-            TradeEvent(
+            _event(
                 event_id="adjust-nvda",
                 event_type="adjust",
                 event_time_ms=3000,
-                contract_key=_key(strike=100.0, expiration_ymd="2026-06-19"),
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="cli_manual_adjust",
-                multiplier=100,
                 target_lot_id="lot_open-nvda",
                 raw_payload={
                     "record_id": "lot_open-nvda",
@@ -94,16 +107,7 @@ def test_publisher_applies_adjust_patch_to_legacy_position_lot_fields() -> None:
 def test_publisher_preserves_open_strategy_snapshot() -> None:
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
-                event_id="open-nvda",
-                event_type="open",
-                event_time_ms=1000,
-                contract_key=_key(strike=100.0, expiration_ymd="2026-06-19"),
-                contracts=1,
-                price=2.5,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
+            _event(
                 lot_id="lot_open-nvda",
                 raw_payload={
                     "source": "test",
@@ -132,20 +136,15 @@ def test_publisher_preserves_open_strategy_snapshot() -> None:
 def test_publisher_preserves_open_strategy_metadata_fields() -> None:
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="open-pdd-call",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=_key(
                     strike=100.0,
                     expiration_ymd="2026-07-17",
                     option_type="call",
                 ),
-                contracts=1,
                 price=0.73,
-                currency="USD",
                 source="opend_push",
-                multiplier=100,
                 lot_id="lot_open-pdd-call",
                 raw_payload={
                     "side": "buy",
@@ -175,29 +174,21 @@ def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
 
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="open-nvda-call",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=open_key,
-                contracts=1,
                 price=1.0,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
                 lot_id="lot_open-nvda-call",
                 raw_payload={"source": "test", "source_type": "manual_trade_event", "side": "buy"},
             ),
-            TradeEvent(
+            _event(
                 event_id="adjust-nvda-call-strategy",
                 event_type="adjust",
                 event_time_ms=3000,
                 contract_key=open_key,
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="cli_manual_adjust",
-                multiplier=100,
                 target_lot_id="lot_open-nvda-call",
                 raw_payload={
                     "record_id": "lot_open-nvda-call",
@@ -237,16 +228,10 @@ def test_fallback_strategy_snapshot_patch_preserves_risk_semantics(
     key = _key(strike=100.0, expiration_ymd="2026-06-19")
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="legacy-open",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=key,
-                contracts=1,
-                price=2.5,
-                currency="USD",
                 source="legacy",
-                multiplier=100,
                 lot_id="legacy-lot",
                 raw_payload={
                     "side": "sell",
@@ -254,31 +239,24 @@ def test_fallback_strategy_snapshot_patch_preserves_risk_semantics(
                     "yield_enhancement_mode": "vol_convexity_enhancement",
                 },
             ),
-            TradeEvent(
+            _event(
                 event_id="new-adjust",
                 event_type="adjust",
                 event_time_ms=2000,
                 contract_key=key,
                 contracts=0,
                 price=0,
-                currency="USD",
                 source="cli_manual_adjust",
-                multiplier=100,
                 target_lot_id="legacy-lot",
-                raw_payload={
-                    "patch": {"strategy_snapshot": snapshot}
-                },
+                raw_payload={"patch": {"strategy_snapshot": snapshot}},
             ),
-            TradeEvent(
+            _event(
                 event_id="unrelated-invalid-close",
                 event_type="close",
                 event_time_ms=3000,
                 contract_key=key,
-                contracts=1,
                 price=1,
-                currency="USD",
                 source="legacy",
-                multiplier=100,
                 target_lot_id="missing-lot",
             ),
         ]
@@ -297,29 +275,21 @@ def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:
     )
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="open-nvda-call",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=open_key,
-                contracts=1,
                 price=1.0,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
                 lot_id="lot_open-nvda-call",
                 raw_payload={"side": "buy"},
             ),
-            TradeEvent(
+            _event(
                 event_id="adjust-nvda-call",
                 event_type="adjust",
                 event_time_ms=2000,
                 contract_key=open_key,
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="cli_manual_adjust",
-                multiplier=100,
                 target_lot_id="lot_open-nvda-call",
                 raw_payload={
                     "patch": {
@@ -328,16 +298,14 @@ def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:
                     }
                 },
             ),
-            TradeEvent(
+            _event(
                 event_id="void-adjust-nvda-call",
                 event_type="void",
                 event_time_ms=3000,
                 contract_key=open_key,
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="test",
-                multiplier=100,
                 target_event_id="adjust-nvda-call",
             ),
         ]
@@ -357,53 +325,42 @@ def test_publisher_ignores_import_diagnostics_for_voided_invalid_event() -> None
     )
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="open-nvda-call",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=key,
                 contracts=2,
                 price=4.1,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
                 lot_id="lot_open-nvda-call",
                 raw_payload={"side": "sell"},
             ),
-            TradeEvent(
+            _event(
                 event_id="invalid-close",
                 event_type="close",
                 event_time_ms=0,
                 contract_key=key,
                 contracts=2,
                 price=0.28,
-                currency="USD",
                 source="opend_push",
-                multiplier=100,
                 target_lot_id="lot_open-nvda-call",
             ),
-            TradeEvent(
+            _event(
                 event_id="void-invalid-close",
                 event_type="void",
                 event_time_ms=2000,
                 contract_key=key,
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="cli_trade_event_repair",
-                multiplier=100,
                 target_event_id="invalid-close",
             ),
-            TradeEvent(
+            _event(
                 event_id="replacement-close",
                 event_type="close",
                 event_time_ms=3000,
                 contract_key=key,
                 contracts=2,
                 price=0.28,
-                currency="USD",
                 source="cli_trade_event_repair",
-                multiplier=100,
                 target_lot_id="lot_open-nvda-call",
             ),
         ]
@@ -416,19 +373,9 @@ def test_publisher_ignores_import_diagnostics_for_voided_invalid_event() -> None
 def test_publisher_keeps_import_diagnostics_for_active_invalid_event() -> None:
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="invalid-open",
-                event_type="open",
                 event_time_ms=0,
-                contract_key=_key(
-                    strike=100.0,
-                    expiration_ymd="2026-06-19",
-                ),
-                contracts=1,
-                price=2.5,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
                 lot_id="lot_invalid-open",
             ),
         ]
@@ -449,29 +396,21 @@ def test_publisher_does_not_apply_strategy_patch_from_rejected_adjust() -> None:
     )
     projection = project_stored_trade_events_to_position_lots(
         [
-            TradeEvent(
+            _event(
                 event_id="open-nvda-call",
-                event_type="open",
-                event_time_ms=1000,
                 contract_key=open_key,
-                contracts=1,
                 price=1.0,
-                currency="USD",
-                source="cli_manual_open",
-                multiplier=100,
                 lot_id="lot_open-nvda-call",
                 raw_payload={"side": "buy"},
             ),
-            TradeEvent(
+            _event(
                 event_id="adjust-missing-lot",
                 event_type="adjust",
                 event_time_ms=2000,
                 contract_key=open_key,
                 contracts=0,
                 price=0.0,
-                currency="USD",
                 source="cli_manual_adjust",
-                multiplier=100,
                 target_lot_id="lot_missing",
                 raw_payload={"patch": {"strategy": "yield_enhancement"}},
             ),
