@@ -17,6 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The public surface check compares against the merge base of the pull
+          # request, which a single-commit checkout cannot resolve honestly.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -40,9 +44,9 @@ jobs:
       - name: Public surface check
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          git fetch --no-tags --unshallow origin || true
-          base="$(git merge-base "origin/${{ github.event.pull_request.base.ref }}" HEAD)" || {
-            echo "::error::Unable to resolve the public-surface base revision"
+          base_ref="${{ github.event.pull_request.base.ref }}"
+          base="$(git merge-base "origin/${base_ref}" HEAD)" || {
+            echo "::error::Unable to resolve the public-surface base revision origin/${base_ref}"
             exit 1
           }
           ./.venv/bin/python scripts/guardrails_check.py \

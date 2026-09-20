@@ -58,7 +58,7 @@ Run it locally against any revision:
 ./.venv/bin/python scripts/guardrails_check.py --check-public-surface --public-surface-base <rev>
 ```
 
-The base revision is never defaulted: `--check-public-surface` without `--public-surface-base` fails instead of comparing nothing. The workflow runs this check on `pull_request` events and nowhere else — a push to `main` reuses the required pull-request result, which is the same policy the full regression already follows. The workflow passes a merge base, so a branch that trails `main` is not charged for deletions made on `main` itself.
+The base revision is never defaulted: `--check-public-surface` without `--public-surface-base` fails instead of comparing nothing. The workflow runs this check on `pull_request` events and nowhere else — a push to `main` reuses the required pull-request result, which is the same policy the full regression already follows. The workflow passes a merge base, so a branch that trails `main` is not charged for deletions made on `main` itself. Resolving that merge base needs the history behind it, so the workflow checks out the full history instead of a single commit; when the base revision cannot be resolved the step fails with an error annotation rather than skipping the comparison.
 
 ## C) Symbol Canonicalization Rule
 
