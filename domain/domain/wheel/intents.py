@@ -26,6 +26,7 @@ from .projection import (
     _trade_option_type,
     _trade_position_side,
     _trade_symbol,
+    lot_contract_key,
 )
 
 
@@ -135,15 +136,16 @@ def wheel_started_event_from_assignment(
     if _event_type(event) != "assignment":
         return None
     fields = _lot_fields(source_put_lot)
+    contract_key = lot_contract_key(fields)
     if (
-        str(fields.get("option_type") or "").strip().lower() != "put"
-        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        str(contract_key.get("option_type") or "").strip().lower() != "put"
+        or str(fields.get("position_side") or "").strip().lower()
         != "short"
     ):
         return None
     event_id = _required_text(event.get("event_id"), "source_trade_event_id")
     account = _required_text(
-        event.get("account") or fields.get("account"),
+        event.get("account") or contract_key.get("account"),
         "account",
     ).lower()
     stock = _stock_settlement(event)
@@ -193,6 +195,7 @@ def wheel_called_away_event_from_call_assignment(
     if _event_type(event) != "assignment":
         return None
     fields = _lot_fields(source_call_lot)
+    contract_key = lot_contract_key(fields)
     strategy = str(fields.get("strategy") or "").strip().lower()
     leg_role = str(fields.get("leg_role") or "").strip().lower()
     lot_id = str(fields.get("source_stock_lot_id") or "").strip()
@@ -203,8 +206,8 @@ def wheel_called_away_event_from_call_assignment(
         or leg_role != "wheel_call"
         or not lot_id
         or str(fields.get("strategy_group_id") or "").strip()
-        or str(fields.get("option_type") or "").strip().lower() != "call"
-        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        or str(contract_key.get("option_type") or "").strip().lower() != "call"
+        or str(fields.get("position_side") or "").strip().lower()
         != "short"
     ):
         raise ValueError("Wheel Call assignment has incomplete or conflicting linkage")
@@ -232,7 +235,7 @@ def wheel_called_away_event_from_call_assignment(
         return None
     source_event_id = _required_text(event.get("event_id"), "source_trade_event_id")
     account = _required_text(
-        event.get("account") or fields.get("account"),
+        event.get("account") or contract_key.get("account"),
         "account",
     ).lower()
     occurred_at_ms = _positive_int(

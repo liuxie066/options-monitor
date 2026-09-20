@@ -1331,10 +1331,15 @@ def _apply_close_event(
         if lot_fee.basis.value == "actual" and lot_fee.amount is not None
         else 0.0
     )
+    # The close ids are retained so ``close_event_ids`` is a real pointer to the
+    # events that closed this lot, produced by the same transition for every
+    # entry mode. The full-mode post pass that re-applies the retained ids then
+    # only restates what the fold path already carries, instead of the published
+    # value flipping with the presence of an unrelated diagnostic (I-1).
     lots_by_id[target_lot_id] = lot.apply_close(
         event,
         actual_fee_amount=actual_fee_amount,
-        retain_close_event_ids=False,
+        retain_close_event_ids=True,
     )
     allocated_open_fee_by_lot_id[target_lot_id] = allocated_after
     if allocate_economics and allocation is not None:

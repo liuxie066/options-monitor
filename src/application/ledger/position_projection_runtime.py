@@ -855,8 +855,11 @@ def _try_fast_path(
         tail_open_events[lot_id] = str(event.get("event_id") or "")
     if set(tail_open_events) & set(checkpoint.publication_state.fields_by_lot_id):
         return "new_lot_id_collision"
+    # The converged payload (``PositionLot.to_dict()``) spells the open event's
+    # identity ``open_event_id``; the pre-convergence flat spelling
+    # ``source_event_id`` no longer exists in it.
     stored_open_ids = {
-        str(item["record_id"]): str((item.get("fields") or {}).get("source_event_id") or "")
+        str(item["record_id"]): str((item.get("fields") or {}).get("open_event_id") or "")
         for item in repo.get_position_lots_by_ids(tuple(tail_open_events), conn=conn)
     }
     tail_event_ids = {str(item["event_id"]) for item in tail_rows}

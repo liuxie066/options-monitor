@@ -127,7 +127,12 @@ def test_execute_manual_close_auto_matches_unique_selector(tmp_path: Path) -> No
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _persist_open_lot(repo, contracts=2, strike=480.0, premium_per_share=3.93, opened_at_ms=1000)
     _persist_open_lot(repo, contracts=1, strike=500.0, premium_per_share=2.1, opened_at_ms=2000)
-    target_lot = next(row for row in repo.list_position_lots() if row["fields"]["strike"] == "480")
+    # ``strike`` moved under ``contract_key`` (``write-side-definition.md`` §2).
+    target_lot = next(
+        row
+        for row in repo.list_position_lots()
+        if (row["fields"].get("contract_key") or {}).get("strike") == "480"
+    )
 
     out = workflows.execute_manual_close(
         repo,
@@ -176,7 +181,9 @@ def test_execute_manual_close_sy_0700_same_strike_different_expiry_targets_exact
     target_lot = next(
         row
         for row in repo.list_position_lots()
-        if row["fields"]["option_type"] == "put" and effective_expiration_ymd(row["fields"]) == "2026-05-28"
+        if (row["fields"].get("contract_key") or {}).get("option_type") == "put"
+        and (row["fields"].get("contract_key") or {}).get("expiration_ymd")
+        == "2026-05-28"
     )
 
     out = workflows.execute_manual_close(

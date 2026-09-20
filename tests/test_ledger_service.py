@@ -231,9 +231,9 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
     assert result.ledger_preflight.contracts_open_after == 5
     assert result.result.created is True
     adjusted = repo.get_record_fields(lot["record_id"])
-    assert adjusted["contracts"] == 5
+    assert adjusted["contracts_opened"] == 5
     assert adjusted["contracts_open"] == 5
-    assert adjusted["premium"] == "8.5"
+    assert adjusted["premium_open"] == "8.5"
     assert repo.list_trade_events()[-1]["raw_payload"]["record_id"] == lot["record_id"]
 
 

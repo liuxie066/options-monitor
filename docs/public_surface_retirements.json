@@ -1,4 +1,10 @@
 {
   "description": "Declared public names that were deliberately retired from src/, domain/ and scripts/. Append-only: an entry is never deleted, because the gate reads this file to explain every name that disappeared between two revisions. The one exception is a \"*\" entry whose module has come back -- it is then false, and the gate only lets it be dropped, never rewritten. See docs/GUARDRAILS.md section B.",
-  "retirements": []
+  "retirements": [
+    {
+      "module": "domain/domain/ledger/position_fields.py",
+      "name": "upsert_note_kv",
+      "reason": "Note-key/value upsert retired with the note-as-fact path: exp/multiplier are no longer written into note, because facts live in structured keys; merge_note is the surviving note writer."
+    }
+  ]
 }

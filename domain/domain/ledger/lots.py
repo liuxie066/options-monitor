@@ -7,7 +7,7 @@ from typing import Any
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.ledger.position_fields import PositionLotPatch, decode_position_lot_patch
-from domain.domain.money import canonical_decimal_text, to_decimal
+from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.option_position_identity import exp_ms_to_ymd, normalize_side
 from domain.domain.trade_contract_identity import derive_position_side
 
@@ -268,10 +268,10 @@ class PositionLot:
             "contracts_open": self.contracts_open,
             "contracts_closed": self.contracts_closed,
             "status": self.status,
-            "premium_open": canonical_decimal_text(self.premium_open),
+            "premium_open": _money_text(self.premium_open),
             "multiplier": self.multiplier,
             "currency": self.currency,
-            "realized_pnl": canonical_decimal_text(self.realized_pnl),
+            "realized_pnl": _money_text(self.realized_pnl),
             "last_event_id": self.last_event_id,
             "close_event_ids": list(self.close_event_ids),
             "asset_type": self.asset_type,
@@ -280,12 +280,28 @@ class PositionLot:
             payload["shares_opened"] = _optional_decimal_text(self.shares_opened)
             payload["shares_open"] = _optional_decimal_text(self.shares_open)
             payload["shares_closed"] = _optional_decimal_text(self.shares_closed)
-            payload["cost_basis_total"] = _optional_decimal_text(self.cost_basis_total)
+            payload["cost_basis_total"] = _optional_money_text(self.cost_basis_total)
         return payload
+
+
+def _money_text(value: Decimal) -> str:
+    """Render one money amount under the project's single money rule (§7.4).
+
+    ``quantize_money`` is applied here, at the write side's only money render
+    point, so every money key of ``to_dict()`` -- and therefore every published
+    ``fields_json`` -- carries ``MONEY_QUANTUM`` (6 places, ROUND_HALF_UP) instead
+    of whatever precision the event happened to arrive with (a float price can
+    hold 17 digits). ``shares_*`` are quantities, not money, and stay unquantized.
+    """
+    return canonical_decimal_text(quantize_money(value))
 
 
 def _optional_decimal_text(value: Decimal | None) -> str | None:
     return None if value is None else canonical_decimal_text(value)
+
+
+def _optional_money_text(value: Decimal | None) -> str | None:
+    return None if value is None else _money_text(value)
 
 
 def lot_is_stock(lot: PositionLot) -> bool:

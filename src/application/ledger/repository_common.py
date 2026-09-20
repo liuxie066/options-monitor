@@ -16,7 +16,14 @@ from pathlib import Path
 
 from typing import Any, Mapping, Protocol, Sequence, cast
 
-from domain.domain.ledger.position_fields import effective_expiration, now_ms
+# ``effective_expiration`` and ``now_ms`` stay on this import line because
+# ``repository_schema`` re-exports them from here; ``parse_exp_to_ms`` is the
+# midnight-UTC ymd->ms conversion the derived ``expiration`` column uses.
+from domain.domain.ledger.position_fields import (
+    effective_expiration,
+    now_ms,
+    parse_exp_to_ms,
+)
 
 from domain.domain.ledger.position_fingerprint import (
     ordered_position_lots_fingerprint,
@@ -183,12 +190,25 @@ def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
+def _position_lot_contract_key(fields: dict[str, Any]) -> dict[str, Any]:
+    """The payload's nested ``contract_key``, or ``{}`` when it is not an object.
+
+    The converged payload shape (``PositionLot.to_dict()``) carries the option
+    contract under ``contract_key`` instead of as flat ``account`` /
+    ``option_type`` / ``strike`` / ``expiration_ymd`` siblings, and the write
+    side's guards and derived columns read it from there.
+    """
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
 def _validate_position_lot_fields(*, lot_id: str, fields: dict[str, Any]) -> None:
-    option_type = str(fields.get("option_type") or "").strip().lower()
+    contract_key = _position_lot_contract_key(fields)
+    option_type = str(contract_key.get("option_type") or "").strip().lower()
     if option_type not in {"put", "call"}:
         return
-    expiration = fields.get("expiration")
-    strike = safe_float(fields.get("strike"))
+    expiration = contract_key.get("expiration_ymd")
+    strike = safe_float(contract_key.get("strike"))
     missing: list[str] = []
     if expiration in (None, ""):
         missing.append("expiration")
@@ -199,22 +219,36 @@ def _validate_position_lot_fields(*, lot_id: str, fields: dict[str, Any]) -> Non
         raise ValueError(f"incomplete option position lot {lot_id}: missing {joined}")
 
 def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, float | None, float | None]:
-    expiration_ms, _ = effective_expiration(fields)
-    strike = safe_float(fields.get("strike"))
+    """The three contract scalars, read from the converged payload shape.
+
+    ``expiration`` is the ``contract_key.expiration_ymd`` rendered as midnight
+    UTC by ``parse_exp_to_ms`` (``domain/domain/option_position_identity.py:218``)
+    -- deliberately *not* ``expiration_timestamp_to_ymd``'s inverse under
+    ``EXPIRATION_DATE_TZ``, which is UTC+8 and would shift every stored value by
+    eight hours. ``strike`` moves into ``contract_key``; ``multiplier`` stays a
+    top-level key. All three note fallbacks are retired: a note is display text,
+    never a fact source (``write-side-definition.md`` §4).
+    """
+    contract_key = _position_lot_contract_key(fields)
+    expiration_ms = parse_exp_to_ms(contract_key.get("expiration_ymd"))
+    if expiration_ms is None:
+        expiration_ms, _ = effective_expiration(fields)
+    strike = safe_float(contract_key.get("strike"))
+    if strike is None:
+        strike = safe_float(fields.get("strike"))
     multiplier = safe_float(fields.get("multiplier"))
-    if multiplier is None:
-        multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
     return expiration_ms, strike, multiplier
 
 def _position_lot_storage_values(
     record: PositionLotRecord,
-) -> tuple[str, str, str, str | None, int | None, float | None, float | None, str]:
+) -> tuple[str, str, str, str | None, int | None, float | None, float | None]:
     if not isinstance(record, PositionLotRecord):
         raise TypeError("replace_position_lots requires PositionLotRecord records")
     lot_id = record.lot_id
     fields = record.fields
     _validate_position_lot_fields(lot_id=lot_id, fields=fields)
-    account = str(fields.get("account") or "").strip()
+    contract_key = _position_lot_contract_key(fields)
+    account = str(contract_key.get("account") or fields.get("account") or "").strip()
     if not account:
         raise ValueError(f"position lot account is required: record_id={lot_id}")
     if account != account.lower():
@@ -226,7 +260,8 @@ def _position_lot_storage_values(
         allow_nan=False,
     )
     expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
-    source_event_id = str(fields.get("source_event_id")) if fields.get("source_event_id") else None
+    source_event_id_value = fields.get("open_event_id") or fields.get("source_event_id")
+    source_event_id = str(source_event_id_value) if source_event_id_value else None
     return (
         lot_id,
         account,
@@ -235,11 +270,6 @@ def _position_lot_storage_values(
         int(expiration_ms) if expiration_ms is not None else None,
         float(strike) if strike is not None else None,
         float(multiplier) if multiplier is not None else None,
-        # Dual-write carrier: lot_id is the canonical identity name, record_id is
-        # the legacy storage name. Both are written from the same source here so
-        # that the eventual rename is data-neutral. Trailing position keeps the
-        # pre-existing tuple indexes (values[0], values[1]) stable.
-        lot_id,
     )
 
 def _canonical_existing_fields_json(raw: Any) -> str | None:

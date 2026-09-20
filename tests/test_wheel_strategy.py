@@ -105,18 +105,63 @@ def _assigned_stock(*, remaining: int = 100) -> dict:
     }
 
 
-def test_wheel_projection_is_order_independent_and_tracks_linked_call() -> None:
-    call_lot = _call_lot()
-    call_trade = {
+def _call_lot_fields(*, status: str, contracts_open: int) -> dict:
+    """A stored Call lot payload in the converged shape.
+
+    The contract travels under ``contract_key`` and the strategy-metadata family
+    is not in the payload at all (design §7.5); the fixtures below declare it on
+    the trade events instead, which is where the read side resolves it from.
+    """
+    return {
+        "lot_id": "call-lot-1",
+        "open_event_id": "open-call-1",
+        "contract_key": {
+            "broker": "富途",
+            "account": "lx",
+            "underlying_symbol": "NVDA",
+            "option_type": "call",
+            "strike": "110",
+            "expiration_ymd": "2026-08-21",
+            "asset_type": "option",
+        },
+        "position_side": "short",
+        "status": status,
+        "contracts_open": contracts_open,
+        "contracts_opened": 1,
+        "multiplier": 100,
+    }
+
+
+#: The Wheel Call linkage the retired payload used to carry, declared on the
+#: event that created the lot.
+WHEEL_CALL_STRATEGY = {
+    "strategy": "wheel",
+    "leg_role": "wheel_call",
+    "source_stock_lot_id": "assigned-stock-assign-put",
+}
+
+
+def _call_open_trade() -> dict:
+    return {
         "event_id": "open-call-1",
         "event_type": "open",
         "event_time_ms": 2_500,
+        "lot_id": "call-lot-1",
         "account": "lx",
         "symbol": "NVDA",
         "option_type": "call",
         "position_side": "short",
         "multiplier": 100,
+        "raw_payload": dict(WHEEL_CALL_STRATEGY),
     }
+
+
+def test_wheel_projection_is_order_independent_and_tracks_linked_call() -> None:
+    call_lot = {
+        "record_id": "call-lot-1",
+        "fields": _call_lot_fields(status="open", contracts_open=1),
+    }
+    call_trade = _call_open_trade()
     first = project_wheel_lifecycles(
         [_started_event()],
         [_assignment_trade(), call_trade],
@@ -140,7 +185,10 @@ def test_wheel_projection_is_order_independent_and_tracks_linked_call() -> None:
 
 
 def test_wheel_projection_fails_closed_when_called_away_event_is_missing() -> None:
-    closed_call = _call_lot(status="close", contracts_open=0)
+    closed_call = {
+        "record_id": "call-lot-1",
+        "fields": _call_lot_fields(status="close", contracts_open=0),
+    }
     call_assignment = {
         "event_id": "assign-call",
         "event_type": "assignment",
@@ -155,7 +203,7 @@ def test_wheel_projection_fails_closed_when_called_away_event_is_missing() -> No
 
     batch = project_wheel_lifecycles(
         [_started_event()],
-        [_assignment_trade(), call_assignment],
+        [_assignment_trade(), _call_open_trade(), call_assignment],
         [closed_call],
         _assigned_stock(remaining=0),
         4_000,
@@ -629,14 +677,21 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
             {
                 "record_id": "call-lot-1",
                 "fields": {
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "option_type": "call",
-                    "side": "short",
+                    "lot_id": "call-lot-1",
+                    "open_event_id": "call-open-1",
+                    "contract_key": {
+                        "broker": "富途",
+                        "account": "lx",
+                        "underlying_symbol": "NVDA",
+                        "option_type": "call",
+                        "strike": "110",
+                        "expiration_ymd": "2026-08-21",
+                        "asset_type": "option",
+                    },
+                    "position_side": "short",
                     "status": "open",
                     "contracts_open": 1,
                     "multiplier": 100,
-                    "source_event_id": "call-open-1",
                 },
             }
         ],

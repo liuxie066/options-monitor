@@ -63,6 +63,7 @@ from .intents import (
     wheel_started_event_from_assignment,
 )
 from .projection import (
+    STRATEGY_METADATA_KEYS,
     _active_trade_events,
     _contracts_open,
     _event_type,
@@ -74,7 +75,12 @@ from .projection import (
     _trade_option_type,
     _trade_position_side,
     _trade_symbol,
+    attach_lot_strategy_metadata,
     effective_wheel_events,
+    lot_contract_key,
+    lot_strategy_metadata_for_lot,
+    lot_strategy_metadata_from_trade_events,
+    merge_lot_strategy_metadata,
     project_wheel_branches,
     project_wheel_call_intents,
     project_wheel_call_linkage_candidates,

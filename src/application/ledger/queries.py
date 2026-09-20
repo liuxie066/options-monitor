@@ -147,6 +147,15 @@ def position_lot_snapshot(item: dict[str, Any]) -> PositionLotSnapshot:
     return PositionLotSnapshot.from_record(normalize_position_lot_snapshot(item))
 
 
+def attach_event_strategy_metadata(
+    records: Any,
+    trade_events: Any,
+) -> list[dict[str, Any]]:
+    from src.application.ledger.read_model import attach_event_strategy_metadata as _impl
+
+    return _impl(records, trade_events)
+
+
 def list_position_lot_snapshots(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:
     from src.application.ledger.read_model import load_position_lot_records as _impl
 
@@ -1181,6 +1190,7 @@ __all__ = [
     "PositionLotSnapshot",
     "RiskPositionView",
     "apply_position_ledger_runtime_config",
+    "attach_event_strategy_metadata",
     "format_position_cash_secured",
     "format_position_money",
     "list_canonical_position_lot_snapshots",

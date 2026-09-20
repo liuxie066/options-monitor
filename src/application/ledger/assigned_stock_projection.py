@@ -14,6 +14,10 @@ from domain.domain.performance.models import (
     ValuationMarkFact,
     select_valuation_mark,
 )
+from domain.domain.wheel import (
+    lot_strategy_metadata_from_trade_events,
+    merge_lot_strategy_metadata,
+)
 from src.application.ledger.event_codec import (
     stored_trade_event_to_ledger_event,
     valid_void_target_event_id,
@@ -89,6 +93,9 @@ def project_assigned_stock_lifecycle_from_rows(
     published = project_trade_event_log(selected_rows)
     projection = published.ledger_projection
     current_fields = {item.lot_id: item.fields for item in published.lots}
+    # The strategy-metadata family is read from the event layer now (design
+    # §7.5), so each lot is handed the metadata its own events declare.
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(selected_rows)
     selected_ids = {
         str(row.get("event_id") or "").strip()
         for row in selected_rows
@@ -105,7 +112,10 @@ def project_assigned_stock_lifecycle_from_rows(
         option_open_lots=[
             assigned_stock_position_lot_row(
                 item,
-                current_fields=current_fields.get(item.lot_id),
+                current_fields=merge_lot_strategy_metadata(
+                    current_fields.get(item.lot_id) or {},
+                    strategy_by_lot_id.get(item.lot_id, {}),
+                ),
                 valuation_marks=valuation_marks,
                 at_ms=instant,
             )

@@ -36,6 +36,54 @@ from domain.domain.wheel import (
     project_wheel_intents,
     project_wheel_linkage_candidates,
 )
+def _lot_contract_key(fields: Mapping[str, Any], *, account: str) -> ContractKey:
+    """The lot's contract identity, read from the converged payload shape.
+
+    ``fields_json`` carries the option contract under ``contract_key`` now
+    (``write-side-definition.md`` §2); the retired flat siblings stay readable
+    for a row that predates the shape switch.
+    """
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
+
+    def value(nested_key: str, *flat_keys: str) -> Any:
+        nested = contract_key.get(nested_key)
+        if nested not in (None, ""):
+            return nested
+        for flat_key in flat_keys:
+            flat = fields.get(flat_key)
+            if flat not in (None, ""):
+                return flat
+        return None
+
+    strike, expiration_ymd = _lot_contract_scalars(fields)
+    return ContractKey.from_values(
+        broker=value("broker", "broker", "market"),
+        account=account or value("account", "account"),
+        underlying_symbol=value("underlying_symbol", "symbol"),
+        option_type=value("option_type", "option_type"),
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+    )
+
+
+def _lot_contract_scalars(fields: Mapping[str, Any]) -> tuple[Any, Any]:
+    """The lot's ``(strike, expiration_ymd)`` under the converged shape."""
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
+    strike = contract_key.get("strike")
+    if strike in (None, ""):
+        strike = fields.get("strike")
+    if strike in (None, ""):
+        strike = effective_strike(fields)
+    expiration_ymd = contract_key.get("expiration_ymd")
+    if expiration_ymd in (None, ""):
+        expiration_ymd = fields.get("expiration_ymd")
+    if expiration_ymd in (None, ""):
+        expiration_ymd = effective_expiration_ymd(fields)
+    return strike, expiration_ymd
+
+
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_contract import sha256_text
 from src.application.runtime_config_paths import authoritative_config_yaml_path
@@ -1445,14 +1493,7 @@ def confirm_wheel_call_linkage(
             event_id=f"wheel-call-linkage-confirmed:{digest}",
             event_type="adjust",
             event_time_ms=instant,
-            contract_key=ContractKey.from_values(
-                broker=fields.get("broker"),
-                account=account_value,
-                underlying_symbol=fields.get("symbol"),
-                option_type=fields.get("option_type"),
-                strike=effective_strike(fields),
-                expiration_ymd=effective_expiration_ymd(fields),
-            ),
+            contract_key=_lot_contract_key(fields, account=account_value),
             contracts=0,
             price=0,
             currency=str(fields.get("currency") or ""),
@@ -1546,12 +1587,40 @@ def confirm_wheel_call_linkage(
                 intent_event=intent_event,
             )
         else:
+            # The linkage facts this guard compares are the strategy family, which
+            # left the lot payload (``write-side-definition.md`` §2 RECONSTRUCTIBLE;
+            # §7 moves it to the strategy/event side) -- a converged lot answers all
+            # four with ``None``. The adjust event this branch just wrote is their
+            # carrier now, so the guard reads it back from the store and checks the
+            # patch it applied. The retired flat lot keys stay as the fallback for a
+            # row written before the shape switch.
             linked = sqlite_repo.get_position_lot_fields(call_lot_value, conn=conn)
+            written_rows = sqlite_repo.read_lifecycle_account_rows(
+                account=account_value, conn=conn
+            )
+            written = next(
+                (
+                    item
+                    for item in written_rows.get("trade_events") or []
+                    if str(item.get("event_id") or "") == event.event_id
+                ),
+                None,
+            )
+            applied = dict(
+                ((written or {}).get("raw_payload") or {}).get("patch") or {}
+            )
+
+            def _linkage_value(key: str) -> Any:
+                value = applied.get(key)
+                if value in (None, ""):
+                    value = linked.get(key)
+                return value
+
             if (
-                linked.get("strategy") != "wheel"
-                or linked.get("leg_role") != "wheel_call"
-                or linked.get("source_stock_lot_id") != stock_lot_value
-                or linked.get("source_wheel_branch_id") != batch["wheel_branch_id"]
+                _linkage_value("strategy") != "wheel"
+                or _linkage_value("leg_role") != "wheel_call"
+                or _linkage_value("source_stock_lot_id") != stock_lot_value
+                or _linkage_value("source_wheel_branch_id") != batch["wheel_branch_id"]
             ):
                 raise ValueError("Wheel Call linkage verification failed")
         finalize_trade_event_decision_projection(
@@ -2505,14 +2574,7 @@ def confirm_wheel_linkage(
                 event_id=f"wheel-put-linkage-confirmed:{digest}",
                 event_type="adjust",
                 event_time_ms=instant,
-                contract_key=ContractKey.from_values(
-                    broker=fields.get("broker"),
-                    account=account_value,
-                    underlying_symbol=fields.get("symbol"),
-                    option_type=fields.get("option_type"),
-                    strike=effective_strike(fields),
-                    expiration_ymd=effective_expiration_ymd(fields),
-                ),
+                contract_key=_lot_contract_key(fields, account=account_value),
                 contracts=0,
                 price=0,
                 currency=str(fields.get("currency") or ""),
@@ -2562,12 +2624,12 @@ def confirm_wheel_linkage(
                 },
             ):
                 payload = intent.get("payload") or {}
+                intent_strike, intent_expiration_ymd = _lot_contract_scalars(fields)
                 if (
                     intent.get("status") == "active"
-                    and float(payload.get("strike") or 0)
-                    == float(effective_strike(fields) or 0)
+                    and float(payload.get("strike") or 0) == float(intent_strike or 0)
                     and str(payload.get("expiration_ymd") or "")
-                    == str(effective_expiration_ymd(fields) or "")
+                    == str(intent_expiration_ymd or "")
                     and int(payload.get("multiplier") or 0)
                     == int(float(effective_multiplier(fields) or 0))
                 ):

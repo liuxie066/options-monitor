@@ -49,7 +49,8 @@ def test_projection_creates_long_lot_for_buy_open() -> None:
     assert result.diagnostics == []
     assert len(result.lots) == 1
     fields = result.lots[0].fields
-    assert fields["side"] == "long"
+    # ``side`` converged onto ``position_side`` (``write-side-definition.md`` §2).
+    assert fields["position_side"] == "long"
     assert fields["contracts_open"] == 2
     assert fields["contracts_closed"] == 0
 
@@ -66,12 +67,14 @@ def test_projection_sell_close_closes_long_lot() -> None:
     assert result.diagnostics == []
     assert len(result.lots) == 1
     fields = result.lots[0].fields
-    assert fields["side"] == "long"
+    assert fields["position_side"] == "long"
     assert fields["contracts_open"] == 0
     assert fields["contracts_closed"] == 2
     assert fields["status"] == "close"
-    assert fields["close_type"] == "sell_to_close"
-    assert fields["close_reason"] == "broker_trade_sell_to_close"
+    assert fields["last_event_id"] == "evt-close-long-1"
+    # ``close_type``/``close_reason`` are RECONSTRUCTIBLE and left the payload:
+    # the closing trade_event carries them (``write-side-definition.md`` §2/§7).
+    # The quantities above are what this projection is the source of.
 
 
 def test_projection_buy_close_still_closes_short_lot() -> None:
@@ -86,10 +89,10 @@ def test_projection_buy_close_still_closes_short_lot() -> None:
     assert result.diagnostics == []
     assert len(result.lots) == 1
     fields = result.lots[0].fields
-    assert fields["side"] == "short"
+    assert fields["position_side"] == "short"
     assert fields["contracts_open"] == 0
-    assert fields["close_type"] == "buy_to_close"
-    assert fields["close_reason"] == "broker_trade_buy_to_close"
+    assert fields["status"] == "close"
+    assert fields["last_event_id"] == "evt-close-short-1"
 
 
 def test_projection_explicit_close_does_not_cross_same_strike_different_expiry() -> None:

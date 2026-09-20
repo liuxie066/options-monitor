@@ -15,6 +15,25 @@ from src.application.ledger.sqlite_row_codec import (
 )
 
 
+def _lot_account(fields: Any) -> str:
+    """The lot payload's account under its converged path.
+
+    ``account`` moved inside ``contract_key`` (``write-side-definition.md`` §2);
+    the retired flat sibling is still read for a row written before the shape
+    switch. A missing or empty account reads as ``""``, the same "no account"
+    the flat read answered, so the caller's filter drops the row either way.
+    """
+    if not isinstance(fields, dict):
+        return ""
+    contract_key = fields.get("contract_key")
+    if isinstance(contract_key, dict):
+        account = contract_key.get("account")
+        if account not in (None, ""):
+            return str(account)
+    account = fields.get("account")
+    return "" if account in (None, "") else str(account)
+
+
 def open_trade_reconciliation_evidence_repo(
     sqlite_path: str | Path,
 ) -> Any:
@@ -256,9 +275,7 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
             "account_position_lots": [
                 item
                 for item in lots
-                if str((item.get("fields") or {}).get("account") or "")
-                .strip()
-                .lower()
+                if str(_lot_account(item.get("fields") or "")).strip().lower()
                 == account_value
             ],
             "account_lifecycle_cases": cases,

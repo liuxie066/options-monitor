@@ -15,6 +15,29 @@ from src.application.payload_helpers import text as _group_id
 COMBO_GROUP_MEMBERSHIP_SCHEMA = "account_combo_group_membership.v1"
 
 
+def _lot_contract_value(
+    fields: Mapping[str, Any],
+    nested_key: str,
+    *flat_keys: str,
+) -> Any:
+    """One contract identity value: nested ``contract_key`` first, flat after.
+
+    ``position_lots.fields_json`` carries the contract under ``contract_key``
+    now (``write-side-definition.md`` §2); the flat siblings it replaced stay
+    readable for a row that predates the shape switch.
+    """
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
+    value = contract_key.get(nested_key)
+    if value not in (None, ""):
+        return value
+    for flat_key in flat_keys:
+        value = fields.get(flat_key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class ComboMembershipResolution:
     fact: dict[str, Any]
@@ -48,10 +71,19 @@ def resolve_combo_group_membership(
 
     history = _effective_group_history(trade_events)
     current_rows = _current_lot_rows(projected_position_lots)
+    # ``strategy_group_id`` left the lot payload (write-side-definition.md §2
+    # RECONSTRUCTIBLE; §7 moves the family to the strategy/event side). The
+    # event-layer replay ``_effective_group_history`` already derives answers
+    # the live binding; the retired flat key stays readable for a row written
+    # before the shape switch.
     current_members = {
         lot_id: item
         for lot_id, item in current_rows.items()
-        if _group_id(item.get("strategy_group_id")) == group_value
+        if _group_id(
+            history.group_by_record.get(lot_id)
+            or item.get("strategy_group_id")
+        )
+        == group_value
     }
     live_ids = {
         lot_id
@@ -66,23 +98,36 @@ def resolve_combo_group_membership(
     current_account_ids = sorted(
         lot_id
         for lot_id, item in current_members.items()
-        if _text(item.get("account"), lower=True) == account_value
+        if _text(_lot_contract_value(item, "account", "account"), lower=True)
+        == account_value
     )
     occurrence_ids = set(current_members) | historical_ids
     external_ids = sorted(
         lot_id
         for lot_id in occurrence_ids
-        if _text((known_rows.get(lot_id) or {}).get("account"), lower=True)
+        if _text(
+            _lot_contract_value(known_rows.get(lot_id) or {}, "account", "account"),
+            lower=True,
+        )
         != account_value
     )
     cross_symbol = any(
         symbol_value
-        and _text((known_rows.get(lot_id) or {}).get("symbol"), upper=True)
+        and _text(
+            _lot_contract_value(
+                known_rows.get(lot_id) or {}, "underlying_symbol", "symbol"
+            ),
+            upper=True,
+        )
         != symbol_value
         for lot_id in occurrence_ids
     )
     bindings = [
-        _allowlisted_binding(lot_id, current_members[lot_id])
+        _allowlisted_binding(
+            lot_id,
+            current_members[lot_id],
+            binding=history.binding_by_record.get(lot_id) or {},
+        )
         for lot_id in current_account_ids
     ]
     bindings.sort(
@@ -125,8 +170,18 @@ def resolve_combo_group_membership(
     external_tuples = sorted(
         (
             lot_id,
-            _text((known_rows.get(lot_id) or {}).get("account"), lower=True),
-            _text((known_rows.get(lot_id) or {}).get("symbol"), upper=True),
+            _text(
+                _lot_contract_value(
+                    known_rows.get(lot_id) or {}, "account", "account"
+                ),
+                lower=True,
+            ),
+            _text(
+                _lot_contract_value(
+                    known_rows.get(lot_id) or {}, "underlying_symbol", "symbol"
+                ),
+                upper=True,
+            ),
         )
         for lot_id in external_ids
     )
@@ -178,20 +233,26 @@ def resolve_account_combo_memberships(
     account_value = _text(account, lower=True)
     identity_rows = [dict(item) for item in identities]
     group_symbols = {
-        _group_id(item.get("group_id")): _text(item.get("symbol"), upper=True)
+        _group_id(item.get("group_id")): _text(
+            _lot_contract_value(item, "underlying_symbol", "symbol"), upper=True
+        )
         for item in identity_rows
-        if _text(item.get("account"), lower=True) == account_value
+        if _text(_lot_contract_value(item, "account", "account"), lower=True)
+        == account_value
         and _group_id(item.get("group_id"))
     }
     for lot_id, item in _current_lot_rows(lots).items():
         del lot_id
-        if _text(item.get("account"), lower=True) != account_value:
+        if _text(_lot_contract_value(item, "account", "account"), lower=True) != account_value:
             continue
         group_value = _group_id(item.get("strategy_group_id"))
         if group_value:
             group_symbols.setdefault(
                 group_value,
-                _text(item.get("symbol"), upper=True),
+                _text(
+                    _lot_contract_value(item, "underlying_symbol", "symbol"),
+                    upper=True,
+                ),
             )
     return [
         resolve_combo_group_membership(
@@ -397,6 +458,13 @@ class _GroupHistory:
     historical_by_group: dict[str, set[str]]
     retag_by_group: dict[str, list[tuple[str, str, str, str]]]
     open_bindings: dict[str, dict[str, Any]]
+    # lot_id -> the group currently bound to it, replayed from the open and
+    # adjust events. This is the strategy side's answer now that the lot
+    # payload no longer carries ``strategy_group_id``.
+    group_by_record: dict[str, str]
+    # lot_id -> ``strategy_group_id`` / ``leg_role`` / ``strategy`` as the
+    # event layer last bound them.
+    binding_by_record: dict[str, dict[str, str]]
 
 
 def _effective_group_history(
@@ -422,6 +490,10 @@ def _effective_group_history(
         ),
     )
     group_by_record: dict[str, str] = {}
+    # The strategy family's home: ``strategy_group_id`` / ``leg_role`` /
+    # ``strategy`` are replayed per lot from the open event and the adjust
+    # patches that follow it, because the lot payload no longer carries them.
+    binding_by_record: dict[str, dict[str, str]] = {}
     historical: dict[str, set[str]] = {}
     retags: dict[str, list[tuple[str, str, str, str]]] = {}
     open_bindings: dict[str, dict[str, Any]] = {}
@@ -478,6 +550,11 @@ def _effective_group_history(
                 or _snapshot_value(payload, "strategy_group_id")
             )
             group_by_record[lot_id] = group_value
+            binding_by_record[lot_id] = {
+                "strategy_group_id": group_value,
+                "leg_role": binding["role"],
+                "strategy": binding["strategy"],
+            }
             if group_value:
                 historical.setdefault(group_value, set()).add(lot_id)
             continue
@@ -494,6 +571,14 @@ def _effective_group_history(
         before = group_by_record.get(lot_id, "")
         after = _group_id(patch.get("strategy_group_id"))
         group_by_record[lot_id] = after
+        recorded = binding_by_record.setdefault(
+            lot_id,
+            {"strategy_group_id": before, "leg_role": "", "strategy": ""},
+        )
+        recorded["strategy_group_id"] = after
+        for key in ("leg_role", "strategy"):
+            if key in patch:
+                recorded[key] = _text(patch.get(key), lower=True)
         if after:
             historical.setdefault(after, set()).add(lot_id)
         if before and after and before != after:
@@ -504,7 +589,23 @@ def _effective_group_history(
         historical_by_group=historical,
         retag_by_group=retags,
         open_bindings=open_bindings,
+        group_by_record=group_by_record,
+        binding_by_record=binding_by_record,
     )
+
+
+def resolve_lot_group_bindings(
+    trade_events: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """``record_id`` -> the strategy family as the event layer last bound it.
+
+    ``strategy_group_id`` / ``leg_role`` / ``strategy`` are no longer in the lot
+    payload (``write-side-definition.md`` §2 RECONSTRUCTIBLE; §7 moves the
+    family to the strategy/event side). Consumers that used to read them off a
+    lot ask this instead: open-event payload, then the adjust patches that
+    follow it, with voided events excluded.
+    """
+    return _effective_group_history(trade_events).binding_by_record
 
 
 def _current_lot_rows(
@@ -537,14 +638,28 @@ def _current_lot_rows(
 def _allowlisted_binding(
     lot_id: str,
     fields: Mapping[str, Any],
+    *,
+    binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # ``leg_role`` / ``strategy`` left the lot payload; the event layer's
+    # replay (``_GroupHistory.binding_by_record``) answers them, with the
+    # retired flat keys kept as the legacy-row fallback.
+    replay = dict(binding or {})
     return {
         "record_id": lot_id,
-        "role": _text(fields.get("leg_role"), lower=True),
-        "open_event_id": _text(fields.get("source_event_id")),
-        "strategy": _text(fields.get("strategy"), lower=True),
-        "account": _text(fields.get("account"), lower=True),
-        "symbol": _text(fields.get("symbol"), upper=True),
+        "role": _text(
+            replay.get("leg_role") or fields.get("leg_role"), lower=True
+        ),
+        "open_event_id": _text(
+            fields.get("open_event_id") or fields.get("source_event_id")
+        ),
+        "strategy": _text(
+            replay.get("strategy") or fields.get("strategy"), lower=True
+        ),
+        "account": _text(_lot_contract_value(fields, "account", "account"), lower=True),
+        "symbol": _text(
+            _lot_contract_value(fields, "underlying_symbol", "symbol"), upper=True
+        ),
     }
 
 

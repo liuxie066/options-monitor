@@ -360,21 +360,33 @@ def test_service_uses_account_coherent_lifecycle_read_for_position_coverage(
         [
             PositionLotRecord(
                 lot_id="lot-nvda",
+                # §1/§3: the row carries the converged payload.
                 fields={
-                    "account": "lx",
-                    "broker": "futu",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
+                    "lot_id": "lot-nvda",
+                    "open_event_id": "open-lot-nvda",
+                    "contract_key": {
+                        "broker": "futu",
+                        "account": "lx",
+                        "underlying_symbol": "NVDA",
+                        "option_type": "put",
+                        "strike": "100",
+                        "expiration_ymd": "2026-07-17",
+                        "asset_type": "option",
+                    },
+                    "position_side": "short",
+                    "position_key": "futu|lx|NVDA|2026-07-17|100P|short",
+                    "opened_at_ms": 1_784_246_400_000,
+                    "contracts_opened": 1,
                     "contracts_open": 1,
                     "contracts_closed": 0,
                     "currency": "USD",
-                    "strike": 100,
                     "multiplier": 100,
-                    "expiration": 1784246400000,
-                    "expiration_ymd": "2026-07-17",
+                    "premium_open": "0",
+                    "realized_pnl": "0",
+                    "last_event_id": "open-lot-nvda",
+                    "close_event_ids": [],
                     "status": "open",
+                    "asset_type": "option",
                 },
             )
         ]
@@ -507,16 +519,33 @@ def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(
         [
             PositionLotRecord(
                 lot_id="rec-nvda",
+                # §1/§3: the row carries the converged payload.
                 fields={
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
+                    "lot_id": "rec-nvda",
+                    "open_event_id": "open-rec-nvda",
+                    "contract_key": {
+                        "broker": "futu",
+                        "account": "lx",
+                        "underlying_symbol": "NVDA",
+                        "option_type": "put",
+                        "strike": "100",
+                        "expiration_ymd": "2026-07-17",
+                        "asset_type": "option",
+                    },
+                    "position_side": "short",
+                    "position_key": "futu|lx|NVDA|2026-07-17|100P|short",
+                    "opened_at_ms": 1_784_246_400_000,
+                    "contracts_opened": 1,
                     "contracts_open": 1,
-                    "expiration": 1784246400000,
-                    "expiration_ymd": "2026-07-17",
-                    "strike": 100,
+                    "contracts_closed": 0,
+                    "currency": "USD",
                     "multiplier": 100,
+                    "premium_open": "0",
+                    "realized_pnl": "0",
+                    "last_event_id": "open-rec-nvda",
+                    "close_event_ids": [],
+                    "status": "open",
+                    "asset_type": "option",
                 },
             )
         ]

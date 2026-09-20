@@ -31,6 +31,72 @@ from .current_decision_lifecycle import (
 
 from domain.domain.trade_contract_identity import derive_position_side
 
+from .lot_resolver import contract_key_from_lot_fields, lot_contract_value
+
+
+def _lot_value(fields: Mapping[str, Any], nested_key: str, *flat_keys: str) -> Any:
+    """One lot-payload value: the nested key first, the retired flat keys after.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option contract
+    under ``contract_key``, the side under ``position_side``, and the open event
+    and open instant as ``open_event_id`` / ``opened_at_ms``. The flat siblings
+    they replaced stay readable for a row written before the shape switch (the
+    shared ``lot_resolver`` rule).
+    """
+    return lot_contract_value(
+        dict(fields),
+        contract_key_from_lot_fields(dict(fields)),
+        nested_key,
+        *flat_keys,
+    )
+
+
+def _lot_identity(fields: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    """A lot payload's ``(account, broker, symbol, currency)``, normalised."""
+    return (
+        str(_lot_value(fields, "account", "account") or "").strip().lower(),
+        str(_lot_value(fields, "broker", "broker") or "").strip().lower(),
+        str(_lot_value(fields, "underlying_symbol", "symbol") or "").strip().upper(),
+        str(fields.get("currency") or "").strip().upper(),
+    )
+
+
+#: Field name used by the covered-call linkage facts -> the converged payload's
+#: location for it, spelled as ``(nested_key, *flat_keys)`` for ``_lot_value``.
+#: ``currency`` has no ``contract_key`` member, so it answers from the top level.
+_LOT_CONTRACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "broker": ("broker", "broker", "market"),
+    "account": ("account", "account"),
+    "symbol": ("underlying_symbol", "symbol"),
+    "option_type": ("option_type", "option_type"),
+    "side": ("position_side", "position_side", "side"),
+    "currency": ("currency", "currency"),
+}
+
+
+def _lot_contract_text(fields: Mapping[str, Any], field: str) -> str:
+    """One contract value of a lot payload *or* an assigned-stock fact row.
+
+    The converged lot payload carries the contract under ``contract_key`` and the
+    side under ``position_side`` (``write-side-definition.md`` §2); the retired
+    flat siblings stay readable for a row written before the shape switch, and the
+    assigned-stock fact rows keep the flat spelling -- so both sources come
+    through here.
+    """
+    nested_key, *flat_keys = _LOT_CONTRACT_FIELDS.get(field, (field,))
+    return str(_lot_value(fields, nested_key, *flat_keys) or "").strip().lower()
+
+
+def _lot_open_event_id(fields: Mapping[str, Any]) -> str:
+    return str(
+        _lot_value(fields, "open_event_id", "open_event_id", "source_event_id") or ""
+    ).strip()
+
+
+def _lot_opened_at_ms(fields: Mapping[str, Any]) -> Any:
+    return _lot_value(fields, "opened_at_ms", "opened_at_ms", "opened_at")
+
+
 def _sale_fact_chain(event_ids: Iterable[str]) -> tuple[int, str]:
     chain = bytes(32)
     count = 0
@@ -57,8 +123,7 @@ def compact_assigned_stock_view(
         raise CurrentDecisionProjectionError("assigned stock account is required")
     active_open_event_ids = {
         str(
-            (item.get("fields") or {}).get("source_event_id")
-            or (item.get("fields") or {}).get("open_event_id")
+            _lot_open_event_id(item.get("fields") or {})
             or item.get("source_event_id")
             or ""
         ).strip()
@@ -468,14 +533,17 @@ def _require_final_option_lot(
         raise CurrentDecisionProjectionError(
             "assigned-stock transition final option lot mismatch"
         )
+    account, broker, symbol, currency = _lot_identity(fields)
     if (
-        str(fields.get("account") or "").strip().lower() != settlement["account"]
-        or str(fields.get("broker") or "").strip().lower() != settlement["broker"]
-        or str(fields.get("symbol") or "").strip().upper() != settlement["symbol"]
-        or str(fields.get("currency") or "").strip().upper() != settlement["currency"]
-        or str(fields.get("option_type") or "").strip().lower()
+        account != settlement["account"]
+        or broker != settlement["broker"]
+        or symbol != settlement["symbol"]
+        or currency != settlement["currency"]
+        or str(_lot_value(fields, "option_type", "option_type") or "").strip().lower()
         != settlement["option_type"]
-        or str(fields.get("side") or "").strip().lower()
+        or str(_lot_value(fields, "position_side", "position_side", "side") or "")
+        .strip()
+        .lower()
         != settlement["position_side"]
     ):
         raise CurrentDecisionProjectionError(
@@ -731,7 +799,7 @@ def update_assigned_stock_fact(
             )
             lots_by_id[lot_id] = prior_lot
         active_open_event_ids = {
-            str(fields.get("source_event_id") or fields.get("open_event_id") or "")
+            _lot_open_event_id(fields)
             for fields in _position_lot_fields(current_position_lots).values()
             if str(fields.get("status") or "").strip().lower() == "open"
             and int(fields.get("contracts_open") or 0) > 0
@@ -834,13 +902,11 @@ def update_assigned_stock_fact(
                 "covered-call linkage allocations must be a list"
             )
         active_open_events = {
-            str(fields.get("source_event_id") or fields.get("open_event_id") or ""): fields
+            _lot_open_event_id(fields): fields
             for fields in _position_lot_fields(current_position_lots).values()
             if str(fields.get("status") or "").strip().lower() == "open"
             and int(fields.get("contracts_open") or 0) > 0
-            and str(
-                fields.get("source_event_id") or fields.get("open_event_id") or ""
-            ).strip()
+            and _lot_open_event_id(fields)
         }
         shares_by_stock_lot: dict[str, int] = {}
         shares_by_open_event: dict[str, int] = {}
@@ -856,13 +922,12 @@ def update_assigned_stock_fact(
                 row.get("linkage_basis"), field="linkage_basis", lower=True
             )
             if option is None or stock is None or any(
-                str(row.get(field) or "").strip().lower()
-                != str(source.get(field) or "").strip().lower()
+                _lot_contract_text(row, field) != _lot_contract_text(source, field)
                 for source in (stock, option)
                 for field in ("account", "broker", "symbol", "currency")
             ) or (
-                str(option.get("option_type") or "").strip().lower() != "call"
-                or str(option.get("side") or "").strip().lower() != "short"
+                _lot_contract_text(option, "option_type") != "call"
+                or _lot_contract_text(option, "side") != "short"
             ):
                 raise CurrentDecisionProjectionError(
                     "covered-call linkage identity mismatch"
@@ -969,7 +1034,7 @@ def _settlement_transition_from_event(
         minimum=1,
     )
     opened_at_ms = _integer(
-        final_fields.get("opened_at"),
+        _lot_opened_at_ms(final_fields),
         field="final option opened_at",
         minimum=1,
     )
@@ -1186,17 +1251,19 @@ def _sync_covered_call_allocations(
         if (
             str(fields.get("status") or "").strip().lower() == "open"
             and int(fields.get("contracts_open") or 0) > 0
-            and str(fields.get("option_type") or "").strip().lower() == "call"
-            and str(fields.get("side") or "").strip().lower() == "short"
+            and str(_lot_value(fields, "option_type", "option_type") or "").strip().lower()
+            == "call"
+            and str(_lot_value(fields, "position_side", "position_side", "side") or "")
+            .strip()
+            .lower()
+            == "short"
         ):
-            open_event_id = str(
-                fields.get("source_event_id") or fields.get("open_event_id") or ""
-            ).strip()
+            open_event_id = _lot_open_event_id(fields)
             if open_event_id:
                 active_calls.append((open_event_id, call_lot_id, fields))
     active_calls.sort(
         key=lambda row: (
-            int(row[2].get("opened_at") or 0),
+            int(_lot_opened_at_ms(row[2]) or 0),
             row[0],
             row[1],
         )
@@ -1245,16 +1312,12 @@ def _sync_covered_call_allocations(
         explicit = explicit_by_open_event.get(open_event_id)
         group_id = str(fields.get("strategy_group_id") or "").strip()
         opened_at = _integer(
-            fields.get("opened_at"),
+            _lot_opened_at_ms(fields),
             field="covered call opened_at",
             minimum=1,
         )
-        identity = (
-            str(fields.get("account") or "").strip().lower(),
-            str(fields.get("broker") or "").strip().lower(),
-            str(fields.get("symbol") or "").strip().upper(),
-            str(fields.get("currency") or "").strip().upper(),
-        )
+        identity = _lot_identity(fields)
+        lot_account, lot_broker, lot_symbol, lot_currency = identity
         base_candidates = [
             row
             for row in identity_candidates.get(identity, ())
@@ -1335,10 +1398,10 @@ def _sync_covered_call_allocations(
             {
                 "open_event_id": open_event_id,
                 "stock_lot_id": lot_id,
-                "account": str(fields.get("account") or "").strip().lower(),
-                "broker": str(fields.get("broker") or "").strip().lower(),
-                "symbol": str(fields.get("symbol") or "").strip().upper(),
-                "currency": str(fields.get("currency") or "").strip().upper(),
+                "account": lot_account,
+                "broker": lot_broker,
+                "symbol": lot_symbol,
+                "currency": lot_currency,
                 "shares": required,
                 "start_at_ms": opened_at,
                 "end_at_ms": None,

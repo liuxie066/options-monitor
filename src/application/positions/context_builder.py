@@ -42,6 +42,15 @@ from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
 JsonDict = dict[str, Any]
 
+#: Where this context's strategy family came from. The family's home is the
+#: event layer (``write-side-definition.md`` §2 RECONSTRUCTIBLE), so it reaches
+#: the combo inventory through the read model's records rather than through
+#: ``fields_json``. A context cached before that re-pointing has the key absent,
+#: and its ``combo_yield_groups`` were built from an empty family; the value
+#: travels in the payload so the cache check can reject that earlier shape
+#: instead of serving its empty groups until the TTL expires.
+STRATEGY_FAMILY_SOURCE = "event_layer"
+
 
 def validate_option_positions_context_account(
     context: Mapping[str, Any],
@@ -142,6 +151,7 @@ def _empty_context(
         "strategy_group_identities": [],
         "decision_state_fingerprint": None,
         "decision_snapshot_status": "snapshot_unavailable",
+        "strategy_family_source": STRATEGY_FAMILY_SOURCE,
     }
     if ledger_status is not None:
         out["ledger"] = ledger_status
@@ -383,6 +393,7 @@ def build_context(
             (decision_snapshot or {}).get("snapshot_status")
             or "snapshot_unavailable"
         ),
+        "strategy_family_source": STRATEGY_FAMILY_SOURCE,
     }
     out["ledger"] = ledger_status
     return out

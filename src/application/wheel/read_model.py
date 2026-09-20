@@ -4,6 +4,8 @@ from typing import Any, Mapping
 
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
+    attach_lot_strategy_metadata,
+    lot_strategy_metadata_from_trade_events,
     project_wheel_branches,
     project_wheel_linkage_candidates,
     project_wheel_lifecycles,
@@ -164,12 +166,22 @@ def build_wheel_read_model_from_rows(
         and _event_time_ms(item, "occurred_at_ms") <= instant
     ]
     projected = project_position_lots_from_trade_facts(trade_events)
+    # The strategy-metadata family is read from the event layer now (design
+    # §7.5), so every lot this read model scopes carries the metadata its own
+    # events declare -- the linkage checks below read it off the lot fields.
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(trade_events)
     scoped_rows = {
         **dict(rows),
         "trade_events": trade_events,
         "account_wheel_events": wheel_events,
         "account_position_lots": [
-            {"record_id": item.lot_id, "fields": dict(item.fields)}
+            {
+                "record_id": item.lot_id,
+                "fields": attach_lot_strategy_metadata(
+                    {"record_id": item.lot_id, "fields": dict(item.fields)},
+                    strategy_by_lot_id,
+                ),
+            }
             for item in projected.lots
         ],
     }

@@ -10,12 +10,11 @@ from typing import Any
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
-    effective_expiration_ymd,
-    effective_strike,
     exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
     now_ms,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
@@ -156,7 +155,12 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
     raw_payload = {
         "source_type": "bootstrap_snapshot",
         "lot_record_id": lot_id,
-        "fields": raw_fields,
+        # The legacy ``fields`` snapshot is deliberately NOT seeded. The payload
+        # is a pure function of the projected lot (I-1), and a verbatim copy of a
+        # historical row is an open set: any legacy spelling it happens to carry
+        # (``exp``, ``underlying_shares_locked``) would ride into a new payload.
+        # The values the event needs are on the event itself (``contract_key``,
+        # ``contracts``, ``price``, ``multiplier``, ``side``, ``currency``).
         "source": source_name,
         "multiplier_source": "bootstrap_snapshot" if raw_multiplier is not None else None,
         "multiplier_evidence": multiplier_evidence,
@@ -167,6 +171,17 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         ),
         "side": derive_trade_side("open", fields.get("side")),
     }
+    # The strategy family is the one fact whose home this batch declares to be
+    # the event layer (``write-side-definition.md`` §2), and the read side reads
+    # it off the payload's top level
+    # (``wheel.lot_strategy_metadata_from_trade_events``). Seeding the whole
+    # snapshot is what the note above rules out; seeding the family is not the
+    # same act -- these are declared patch keys, not an open set of spellings --
+    # and without it an imported lot has no carrier left for its family once the
+    # payload keys are dropped.
+    raw_payload.update(
+        strategy_metadata_fields_from_payload(raw_fields, include_legacy=True)
+    )
     try:
         contract_key = ContractKey.from_values(
             broker=broker,
@@ -220,24 +235,19 @@ def _has_retired_feishu_bootstrap_opt_in(cfg: dict[str, Any]) -> bool:
 
 
 def _raise_if_local_bootstrap_projection_failed(events: list[Any], projection: Any) -> None:
+    """Re-raise a failed local bootstrap import with the ledger's error codes.
+
+    The per-field pass that used to sit here read the open event's legacy
+    ``fields`` snapshot (``_bootstrap_event_raw_fields``) to name a missing
+    ``expiration``/``strike``. That snapshot is no longer seeded -- the event
+    carries its own contract -- so there is nothing left to name a field off, and
+    the diagnostic codes below are the whole message.
+    """
     position_lot_sources = {"sqlite_position_lots", "legacy_position_lots"}
     if not any(_bootstrap_event_source(event) in position_lot_sources for event in events):
         return
     if not bool(getattr(projection, "has_errors", False)):
         return
-    missing_fields: list[str] = []
-    for event in events:
-        if _bootstrap_event_source(event) not in position_lot_sources:
-            continue
-        fields = _bootstrap_event_raw_fields(event)
-        if not isinstance(fields, dict):
-            continue
-        if not effective_expiration_ymd(fields) and "expiration" not in missing_fields:
-            missing_fields.append("expiration")
-        if effective_strike(fields) is None and "strike" not in missing_fields:
-            missing_fields.append("strike")
-    if missing_fields:
-        raise ValueError(f"local position_lots bootstrap projection invalid: missing {', '.join(missing_fields)}")
     diagnostics = getattr(projection, "diagnostics", [])
     codes = ", ".join(str(getattr(item, "code", "") or "") for item in diagnostics if getattr(item, "severity", "") == "error")
     raise ValueError(f"local position_lots bootstrap projection invalid: {codes or 'unknown'}")
@@ -247,14 +257,6 @@ def _bootstrap_event_source(event: Any) -> str:
     if isinstance(event, dict):
         return str(event.get("source_name") or (event.get("raw_payload") or {}).get("source") or "").strip()
     return str(getattr(event, "source", "") or "").strip()
-
-
-def _bootstrap_event_raw_fields(event: Any) -> dict[str, Any]:
-    raw_payload = event.get("raw_payload") if isinstance(event, dict) else getattr(event, "raw_payload", None)
-    if not isinstance(raw_payload, dict):
-        return {}
-    fields = raw_payload.get("fields")
-    return dict(fields) if isinstance(fields, dict) else {}
 
 
 def materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: list[Any]) -> int:

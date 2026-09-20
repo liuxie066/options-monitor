@@ -10,8 +10,8 @@ from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     SELL_TO_CLOSE,
-    exp_ms_to_datetime,
-    exp_ms_to_ymd,
+    exp_ms_to_datetime as exp_ms_to_datetime,
+    exp_ms_to_ymd as exp_ms_to_ymd,
     norm_symbol,
     normalize_account,
     normalize_broker,
@@ -230,8 +230,15 @@ def calc_cash_secured(strike: float, multiplier: float, contracts: int | float) 
     return float(strike) * float(multiplier) * int(float(contracts))
 
 
+def _contract_key(fields: dict[str, Any]) -> dict[str, Any]:
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
 def effective_contracts(fields: dict[str, Any]) -> int:
-    v = safe_float(fields.get("contracts"))
+    v = safe_float(fields.get("contracts_opened"))
+    if v is None:
+        v = safe_float(fields.get("contracts"))
     return max(0, int(v or 0))
 
 
@@ -259,34 +266,46 @@ def effective_contracts_closed(fields: dict[str, Any]) -> int:
 
 
 def effective_expiration(fields: dict[str, Any]) -> tuple[int | None, str]:
+    # Converged payloads carry the contract under
+    # ``contract_key.expiration_ymd``; the flat ``expiration`` ms sibling is
+    # retired (write-side-definition §2) but stays as a legacy fallback until
+    # the window replay rewrites every row. ``parse_exp_to_ms`` renders
+    # midnight UTC -- never ``EXPIRATION_DATE_TZ`` (UTC+8).
+    exp_ms = parse_exp_to_ms(_contract_key(fields).get("expiration_ymd"))
+    if exp_ms is not None:
+        return int(exp_ms), "contract_key.expiration_ymd"
     exp_ms = fields.get("expiration")
     parsed_exp = exp_ms_to_datetime(exp_ms)
     if parsed_exp is not None:
         return int(parsed_exp.timestamp() * 1000), "expiration"
-    exp_note = parse_note_kv(fields.get("note") or "", "exp")
-    exp_ms2 = parse_exp_to_ms(exp_note)
-    if exp_ms2 is not None:
-        return exp_ms2, "note.exp"
     return None, "none"
 
 
 def effective_expiration_ymd(fields: dict[str, Any]) -> str | None:
+    ymd = _contract_key(fields).get("expiration_ymd")
+    if ymd:
+        return ymd
     exp_ms, _source = effective_expiration(fields)
     return exp_ms_to_ymd(exp_ms)
 
 
 def effective_strike(fields: dict[str, Any]) -> float | None:
-    strike = safe_float(fields.get("strike"))
+    strike = safe_float(_contract_key(fields).get("strike"))
+    if strike is None:
+        strike = safe_float(fields.get("strike"))
     if strike is not None:
         return float(strike)
-    return safe_float(parse_note_kv(fields.get("note") or "", "strike"))
+    return None
 
 
 def effective_multiplier(fields: dict[str, Any]) -> float | None:
+    # ``note.multiplier`` fallback retired (write-side-definition §4/§0.9).
+    # ``multiplier`` keeps its top-level key in the converged payload, so the
+    # primary read itself does not move.
     multiplier = safe_float(fields.get("multiplier"))
     if multiplier is not None:
         return float(multiplier)
-    return safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+    return None
 
 
 # §7.1: ``build_position_id`` and its ``_fmt_strike`` helper are retired. The
@@ -580,34 +599,6 @@ def apply_strategy_metadata_patch(
     return out
 
 
-def upsert_note_kv(note: str | None, kv: dict[str, Any]) -> str:
-    raw = str(note or "").strip()
-    pairs: list[tuple[str, str]] = []
-    replaced_keys = {str(key).strip() for key in kv if str(key).strip()}
-    for part in raw.replace(",", ";").split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" not in part:
-            pairs.append((part, ""))
-            continue
-        key, value = part.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if key in replaced_keys:
-            continue
-        pairs.append((key, value))
-    for key, value in kv.items():
-        clean_key = str(key).strip()
-        if not clean_key or value in (None, ""):
-            continue
-        pairs.append((clean_key, str(value).strip()))
-    out: list[str] = []
-    for key, value in pairs:
-        out.append(key if value == "" else f"{key}={value}")
-    return ";".join(out)
-
-
 def build_open_adjustment_patch_contract(
     fields: dict[str, Any],
     *,
@@ -646,9 +637,10 @@ def build_open_adjustment_patch_contract(
     ):
         raise ValueError("at least one adjustment field is required")
 
-    symbol = norm_symbol(fields.get("symbol") or "")
-    option_type = normalize_option_type(fields.get("option_type"), strict=True)
-    side = normalize_side(fields.get("side"), strict=True)
+    contract_key = _contract_key(fields)
+    symbol = norm_symbol(contract_key.get("underlying_symbol") or fields.get("symbol") or "")
+    option_type = normalize_option_type(contract_key.get("option_type") or fields.get("option_type"), strict=True)
+    side = normalize_side(fields.get("position_side") or fields.get("side"), strict=True)
     status = normalize_status(fields.get("status"), strict=True)
     total_contracts = effective_contracts(fields)
     closed_contracts = effective_contracts_closed(fields)
@@ -673,7 +665,6 @@ def build_open_adjustment_patch_contract(
         if parsed_exp_ms is None:
             raise ValueError("expiration_ymd must be YYYY-MM-DD")
 
-    note_updates: dict[str, Any] = {}
     patch_contracts: _PatchValue = _UNSET
     patch_contracts_open: _PatchValue = _UNSET
     patch_contracts_closed: _PatchValue = _UNSET
@@ -684,7 +675,6 @@ def build_open_adjustment_patch_contract(
     patch_opened_at: _PatchValue = _UNSET
     patch_cash_secured: _PatchValue = _UNSET
     patch_underlying_locked: _PatchValue = _UNSET
-    patch_note: _PatchValue = _UNSET
     canonical_strategy = strip_retired_strategy_metadata({"strategy": strategy}).get("strategy")
     patch_strategy = _optional_patch_text(canonical_strategy, "strategy")
     patch_leg_role = _optional_patch_text(leg_role, "leg_role")
@@ -707,21 +697,17 @@ def build_open_adjustment_patch_contract(
         if next_strike is None:
             raise ValueError("strike must be numeric")
         patch_strike = next_strike
-        note_updates["strike"] = None
     if premium_per_share is not None:
         patch_premium = normalize_trade_price(premium_per_share, "premium_per_share")
-        note_updates["premium_per_share"] = None
     if multiplier is not None:
         assert next_multiplier is not None
         if float(next_multiplier).is_integer():
             patch_multiplier = int(float(next_multiplier))
         else:
             patch_multiplier = float(next_multiplier)
-        note_updates["multiplier"] = None
     if expiration_ymd is not None:
         assert parsed_exp_ms is not None
         patch_expiration = int(parsed_exp_ms)
-        note_updates["exp"] = None
     if opened_at_ms is not None:
         patch_opened_at = int(opened_at_ms)
 
@@ -739,8 +725,6 @@ def build_open_adjustment_patch_contract(
             raise ValueError("short call adjustment requires multiplier")
         patch_underlying_locked = _short_call_locked_shares(float(next_multiplier), next_contracts)
 
-    if note_updates:
-        patch_note = upsert_note_kv(fields.get("note"), note_updates)
     return PositionLotPatch(
         contracts=patch_contracts,
         contracts_open=patch_contracts_open,
@@ -753,7 +737,6 @@ def build_open_adjustment_patch_contract(
         opened_at=patch_opened_at,
         cash_secured_amount=patch_cash_secured,
         underlying_share_locked=patch_underlying_locked,
-        note=patch_note,
         strategy=patch_strategy,
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
@@ -821,7 +804,7 @@ def build_close_patch_contract(
     if close_type:
         effective_close_type = normalize_close_type(close_type) or str(close_type).strip().lower()
     else:
-        normalized_side = normalize_side(fields.get("side"), strict=True)
+        normalized_side = normalize_side(fields.get("position_side") or fields.get("side"), strict=True)
         effective_close_type = (BUY_TO_CLOSE if normalized_side == "short" else SELL_TO_CLOSE)
 
     close_price_value: _PatchValue = _UNSET

@@ -579,7 +579,7 @@ def _preflight_lot_close(
         )
 
     target_lot = target_lots[0]
-    if target_lot.position_key != position_key_for(current_key, normalize_side(current_fields.get("side"))):
+    if target_lot.position_key != position_key_for(current_key, normalize_side(_position_side(current_fields))):
         raise LedgerPreflightError(
             "target_contract_mismatch",
             f"{operation_label} ledger preflight target identity differs from current record fields",
@@ -625,10 +625,9 @@ def _preflight_lot_close(
             "record_id": resolved_lot_id,
             # §9.2 step 3: the close side is no longer implied by the contract
             # key, so publish the trade side the projection derives it from.
-            "side": derive_trade_side(
-                event_type, current_fields.get("side")
-            )
-            or "",
+            # The position side converged onto ``position_side``; the retired
+            # flat ``side`` spelling stays readable for a legacy row.
+            "side": derive_trade_side(event_type, _position_side(current_fields)) or "",
         },
     )
     after = _preview_append_projection(
@@ -828,7 +827,7 @@ def _build_lot_adjust_preflight_candidate(
             details={"record_id": resolved_lot_id, "count": len(target_lots)},
         )
     target_lot = target_lots[0]
-    if target_lot.position_key != position_key_for(current_key, normalize_side(current_fields.get("side"))):
+    if target_lot.position_key != position_key_for(current_key, normalize_side(_position_side(current_fields))):
         raise LedgerPreflightError(
             "target_contract_mismatch",
             f"{operation_label} ledger preflight target identity differs from current record fields",
@@ -864,14 +863,26 @@ def _build_lot_adjust_preflight_candidate(
         event_time_ms=event_time_ms,
         contract_key=current_key,
         contracts=0,
-        price=float(adjusted_fields.get("premium") or current_fields.get("premium") or 0.0),
+        # ``premium`` converged onto ``premium_open``; the retired flat spelling
+        # is the fallback for a row written before the shape switch.
+        price=float(
+            adjusted_fields.get("premium_open")
+            or current_fields.get("premium_open")
+            or adjusted_fields.get("premium")
+            or current_fields.get("premium")
+            or 0.0
+        ),
         currency=normalize_currency(adjusted_fields.get("currency") or current_fields.get("currency")),
         source=source,
         multiplier=float(effective_multiplier(adjusted_fields) or effective_multiplier(current_fields) or 100),
         target_lot_id=resolved_lot_id,
         raw_payload={
             "record_id": resolved_lot_id,
-            "adjust_target_source_event_id": str(current_fields.get("source_event_id") or "").strip() or None,
+            "adjust_target_source_event_id": str(
+                current_fields.get("open_event_id")
+                or current_fields.get("source_event_id")
+                or ""
+            ).strip() or None,
             "patch": patch,
         },
     )
@@ -913,15 +924,26 @@ def _split_close_deal_for_target(
 ) -> Any:
     source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
     event_id = f"{source_deal_id}:close:{lot_id}" if source_deal_id else f"close:{lot_id}"
+    contract_key = lot_contract_key(fields)
     raw_payload = dict(getattr(deal, "raw_payload", {}) or {})
     raw_payload.update(
         {
             "source_deal_id": source_deal_id or None,
             "record_id": str(lot_id),
             "target_lot_id": str(lot_id),
-            "close_target_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
-            "close_target_account": normalize_account(fields.get("account")),
-            "close_target_broker": normalize_broker(fields.get("broker") or fields.get("market")),
+            # ``source_event_id`` converged onto ``open_event_id``
+            # (``write-side-definition.md`` §2); the close target's opening event
+            # is the same fact under its new name.
+            "close_target_source_event_id": str(
+                fields.get("open_event_id") or fields.get("source_event_id") or ""
+            ).strip()
+            or None,
+            "close_target_account": normalize_account(
+                lot_contract_value(fields, contract_key, "account", "account")
+            ),
+            "close_target_broker": normalize_broker(
+                lot_contract_value(fields, contract_key, "broker", "broker", "market")
+            ),
         }
     )
     if close_target_resolution is not None:
@@ -1181,14 +1203,58 @@ def _list_trade_events(repo: Any) -> list[dict[str, Any]]:
     return [item for item in rows if isinstance(item, dict)]
 
 
+def lot_contract_key(fields: dict[str, Any]) -> dict[str, Any]:
+    """The payload's nested ``contract_key``, or ``{}`` when it is not an object.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option
+    contract under ``contract_key`` instead of as flat ``broker`` / ``symbol`` /
+    ``option_type`` / ``strike`` / ``expiration_ymd`` siblings. ``{}`` is the
+    answer for a row that predates the shape switch, which is what keeps its
+    retired flat spellings readable.
+    """
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
+def lot_contract_value(
+    fields: dict[str, Any],
+    contract_key: dict[str, Any],
+    nested_key: str,
+    *flat_keys: str,
+) -> Any:
+    """One contract identity value: the nested key first, the flat siblings after."""
+    value = contract_key.get(nested_key)
+    if value not in (None, ""):
+        return value
+    for flat_key in flat_keys:
+        value = fields.get(flat_key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _position_side(fields: dict[str, Any]) -> Any:
+    """The lot's position side under its converged spelling, flat ``side`` after."""
+    return lot_contract_value(
+        fields, lot_contract_key(fields), "position_side", "position_side", "side"
+    )
+
+
 def _contract_key_from_fields(fields: dict[str, Any]) -> ContractKey:
+    contract_key = lot_contract_key(fields)
+    strike = lot_contract_value(fields, contract_key, "strike")
+    if strike in (None, ""):
+        strike = effective_strike(fields)
+    expiration_ymd = lot_contract_value(fields, contract_key, "expiration_ymd")
+    if expiration_ymd in (None, ""):
+        expiration_ymd = effective_expiration_ymd(fields)
     return ContractKey.from_values(
-        broker=fields.get("broker") or fields.get("market"),
-        account=fields.get("account"),
-        underlying_symbol=fields.get("symbol"),
-        option_type=fields.get("option_type"),
-        strike=effective_strike(fields),
-        expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
+        broker=lot_contract_value(fields, contract_key, "broker", "broker", "market"),
+        account=lot_contract_value(fields, contract_key, "account", "account"),
+        underlying_symbol=lot_contract_value(fields, contract_key, "underlying_symbol", "symbol"),
+        option_type=lot_contract_value(fields, contract_key, "option_type", "option_type"),
+        strike=strike,
+        expiration_ymd=expiration_ymd,
     )
 
 
@@ -1208,7 +1274,10 @@ def _assert_fields_match_current(
         mismatches.append("currency")
     if _optional_float(effective_multiplier(current_fields)) != _optional_float(effective_multiplier(fields)):
         mismatches.append("multiplier")
-    if str(current_fields.get("source_event_id") or "").strip() != str(fields.get("source_event_id") or "").strip():
+    # ``source_event_id`` converged onto ``open_event_id``: leaving this leg on
+    # the retired spelling would make both sides read ``None`` and the leg would
+    # stop appending ``source_event_id`` for any mismatched target (§2).
+    if _open_event_id(current_fields) != _open_event_id(fields):
         mismatches.append("source_event_id")
     if mismatches:
         raise LedgerPreflightError(
@@ -1216,6 +1285,16 @@ def _assert_fields_match_current(
             f"{operation_label} ledger preflight target fields do not match current lot state",
             details={"record_id": lot_id, "mismatches": mismatches},
         )
+
+
+def _open_event_id(fields: dict[str, Any]) -> str:
+    """The lot's opening event id under its converged spelling.
+
+    ``source_event_id`` was renamed to ``open_event_id``
+    (``write-side-definition.md`` §2/§3); the retired spelling stays readable so
+    a row written before the shape switch still compares.
+    """
+    return str(fields.get("open_event_id") or fields.get("source_event_id") or "").strip()
 
 
 def _optional_float(value: Any) -> float | None:

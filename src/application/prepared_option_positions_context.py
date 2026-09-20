@@ -21,6 +21,7 @@ from src.infrastructure.exchange_rates import (
 )
 from src.application.ledger.api import (
     CURRENT_DECISION_READ_SCHEMA,
+    attach_event_strategy_metadata,
     decision_state_snapshot_from_rows,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config,
@@ -632,7 +633,10 @@ def prepare_option_positions_contexts(
                 rows_by_account,
                 accounts,
             )
-            records = list(first_rows["stored_position_lots"])
+            records = attach_event_strategy_metadata(
+                first_rows["stored_position_lots"],
+                first_rows.get("trade_events"),
+            )
             snapshots = {}
             for account in accounts:
                 try:

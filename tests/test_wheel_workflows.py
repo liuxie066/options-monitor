@@ -9,6 +9,7 @@ import pytest
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.wheel.workflows as wheel_workflows
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.wheel import lot_strategy_metadata_for_lot
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import (
@@ -408,6 +409,25 @@ def _trusted_multiplier_payload(event_id: str, **extra: object) -> dict[str, obj
     }
 
 
+def _lot_row_for_option_type(repo, option_type: str) -> dict:
+    """The stored lot row for one option type (contract is nested now)."""
+    return next(
+        row
+        for row in repo.list_position_lots()
+        if (row["fields"].get("contract_key") or {}).get("option_type") == option_type
+    )
+
+
+def _lot_strategy_metadata(repo, lot_id: str, account: str = "lx") -> dict:
+    """A lot's strategy metadata, resolved from the event layer (design §7.5).
+
+    The family left ``fields_json`` with the converged payload shape, so the
+    assertions that used to read it off the lot read it off the events.
+    """
+    rows = repo.read_lifecycle_account_rows(account=account)
+    return lot_strategy_metadata_for_lot(lot_id, rows.get("trade_events") or [])
+
+
 def _create_call_intent(
     repo: SQLiteOptionPositionsRepository,
     lot_id: str,
@@ -703,11 +723,11 @@ def test_combo_funding_put_assignment_does_not_bootstrap_wheel_and_preserves_com
             },
         )
 
-    lots = repo.list_position_lots()
-    funding_put = next(row for row in lots if row["fields"]["option_type"] == "put")
+    funding_put_row = _lot_row_for_option_type(repo, "put")
+    funding_put_id = str(funding_put_row["record_id"])
     record_manual_assignment(
         repo,
-        lot_id=str(funding_put["record_id"]),
+        lot_id=funding_put_id,
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -718,11 +738,8 @@ def test_combo_funding_put_assignment_does_not_bootstrap_wheel_and_preserves_com
     )
     model = build_wheel_read_model(repo, "lx", 3_000)
     assigned_stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
-    residual_call = next(
-        row["fields"]
-        for row in repo.list_position_lots()
-        if row["fields"]["option_type"] == "call"
-    )
+    residual_call = _lot_row_for_option_type(repo, "call")["fields"]
+    residual_metadata = _lot_strategy_metadata(repo, str(residual_call["lot_id"]))
 
     assert model["batches"] == []
     assert model["wheel_branches"] == []
@@ -730,8 +747,8 @@ def test_combo_funding_put_assignment_does_not_bootstrap_wheel_and_preserves_com
     assert assigned_stock["leg_role"] == "assigned_stock"
     assert assigned_stock["source_option_leg_role"] == "funding_put"
     assert residual_call["status"] == "open"
-    assert residual_call["strategy_group_id"] == group_id
-    assert residual_call["leg_role"] == "participation_call"
+    assert residual_metadata["strategy_group_id"] == group_id
+    assert residual_metadata["leg_role"] == "participation_call"
 
 
 def test_assignment_replay_does_not_backfill_wheel_start(tmp_path: Path) -> None:
@@ -997,15 +1014,12 @@ def test_short_call_fill_consumes_matching_intent_atomically(tmp_path: Path) -> 
     result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
 
     batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    call_lot = next(
-        item
-        for item in repo.list_position_lots()
-        if item["fields"].get("option_type") == "call"
-    )
+    call_lot = _lot_row_for_option_type(repo, "call")
+    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
     assert result["wheel_linkage_status"] == "matched_intent"
     assert result["wheel_intent_event_id"]
-    assert call_lot["fields"]["strategy"] == "wheel"
-    assert call_lot["fields"]["source_stock_lot_id"] == lot_id
+    assert call_metadata["strategy"] == "wheel"
+    assert call_metadata["source_stock_lot_id"] == lot_id
     assert batch["phase"] == "call_open"
     assert batch["active_intent_ids"] == []
     assert created["intent_id"] not in batch["active_intent_ids"]
@@ -1031,15 +1045,12 @@ def test_unmatched_short_call_fill_stays_unlinked_and_is_still_recorded(
 
     result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
 
-    call_lot = next(
-        item
-        for item in repo.list_position_lots()
-        if item["fields"].get("option_type") == "call"
-    )
+    call_lot = _lot_row_for_option_type(repo, "call")
+    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
     model = build_wheel_read_model(repo, "lx", 6_000)
     assert result["created"] is True
     assert result["wheel_linkage_status"] == "no_matching_intent"
-    assert call_lot["fields"].get("strategy") is None
+    assert call_metadata.get("strategy") is None
     assert model["batches"][0]["phase"] == "linkage_unresolved"
     assert len(model["linkage_candidates"]) == 1
 
@@ -1076,8 +1087,14 @@ def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path: Path) ->
     batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
     adjust = next(item for item in repo.list_trade_events() if item["event_type"] == "adjust")
     assert result["status"] == "confirmed"
-    assert fields["strategy"] == "wheel"
-    assert fields["source_stock_lot_id"] == lot_id
+    # §2 RECONSTRUCTIBLE / §7: the linkage facts are carried by the adjust event
+    # this confirmation writes, not by the lot payload -- the guard that reads the
+    # event back is ``confirm_wheel_call_linkage``'s own, and it is what makes the
+    # status above ``confirmed``.
+    for retired in ("strategy", "leg_role", "source_stock_lot_id", "source_wheel_branch_id"):
+        assert retired not in fields, retired
+    assert adjust["raw_payload"]["patch"]["strategy"] == "wheel"
+    assert adjust["raw_payload"]["patch"]["source_stock_lot_id"] == lot_id
     assert set(adjust["raw_payload"]["patch"]) == {
         "last_action_at",
         "strategy",

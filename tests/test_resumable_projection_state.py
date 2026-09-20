@@ -180,10 +180,23 @@ def test_resumable_state_round_trip_is_canonical_active_only_and_bounded() -> No
     assert result.eligible is True
     assert result.state is not None
     payload = result.state.to_json_bytes()
-    assert b"close_event_ids" not in payload
+    # The checkpoint carries the lot's close pointer list: it is a cache of the
+    # projection, so a resumed run must republish the same list a full replay
+    # would (and not an empty one). ``last_close_event_id`` stays the
+    # accumulator's single restore pointer for the same fact.
+    expected_close_event_ids = tuple(f"close-{index:02d}" for index in range(25))
+    assert result.state.active_lots[0].close_event_ids == expected_close_event_ids
+    assert (
+        b'"close_event_ids":["close-00","close-01","close-02","close-03"'
+        in payload
+    )
     assert b'"last_close_event_id":"close-24"' in payload
-    assert result.retained_lots[0].close_event_ids == tuple(
-        f"close-{index:02d}" for index in range(25)
+    assert result.retained_lots[0].close_event_ids == expected_close_event_ids
+    assert (
+        ResumableProjectionState.from_json_bytes(payload)
+        .active_lots[0]
+        .close_event_ids
+        == expected_close_event_ids
     )
     assert ResumableProjectionState.from_json_bytes(payload) == result.state
 
@@ -656,11 +669,20 @@ def test_full_publisher_preserves_open_order_and_legacy_close_adjust_precedence(
     assert projection.diagnostics == []
     assert [item.lot_id for item in projection.lots] == ["lot-z", "lot-a"]
     fields = projection.lots[0].fields
-    assert fields["last_close_event_id"] == "normal-partial"
-    assert fields["last_action_at"] == 4
-    assert fields["strategy"] == "yield_enhancement"
-    assert "auto_close_exp_src" not in fields
-    assert "auto_close_grace_days" not in fields
+    # The RECONSTRUCTIBLE family (``last_close_event_id`` / ``last_action_at``
+    # / ``strategy`` / ``auto_close_*``) left the payload in the convergence
+    # batch; the lot keeps the last event it saw and the quantities it closed.
+    # The close left one contract open and the later adjust did not reopen the
+    # closed half (the "legacy close/adjust precedence" this test is named for).
+    assert fields["last_event_id"] == "adjust-after-close"
+    assert fields["contracts_open"] == 1
+    # The lot closes twice (``expire-partial`` then ``normal-partial``) and stays
+    # open; ``close_event_ids`` is the close path's own pointer, so it carries
+    # both in order -- the fact the retired flat ``last_close_event_id`` used to
+    # hold one of.
+    assert fields["close_event_ids"] == ["expire-partial", "normal-partial"]
+    for retired in ("last_close_event_id", "last_action_at", "strategy", "auto_close_exp_src", "auto_close_grace_days"):
+        assert retired not in fields, retired
 
 
 def test_snapshot_baseline_fields_and_adjust_without_real_close_match_oracle() -> None:
@@ -688,7 +710,9 @@ def test_snapshot_baseline_fields_and_adjust_without_real_close_match_oracle() -
     expected_after_adjust = project_stored_trade_events_to_position_lots(
         [open_event, adjust]
     )
-    assert expected_after_adjust.lots[0].fields["last_action_at"] == 2
+    # ``last_action_at`` is RECONSTRUCTIBLE and left the payload; the lot's
+    # last event id is the surviving pointer to that adjust.
+    assert expected_after_adjust.lots[0].fields["last_event_id"] == "adjust"
 
     prefix = project_stored_trade_events_to_resumable_position_lots(
         [open_event, adjust],
@@ -710,8 +734,12 @@ def test_snapshot_baseline_fields_and_adjust_without_real_close_match_oracle() -
     )
     assert resumed.eligible is True
     assert resumed.touched_lots[0].to_dict() == oracle.lots[0].to_dict()
-    assert resumed.touched_lots[0].fields["auto_close_exp_src"] == "bootstrap"
-    assert resumed.touched_lots[0].fields["auto_close_grace_days"] == 9
+    # The oracle above pins both sides to the plain ``to_dict()`` key set, so
+    # the open event's legacy ``fields`` snapshot (``auto_close_exp_src`` /
+    # ``auto_close_grace_days`` / ``last_close_event_id``) cannot ride along: the
+    # seeding branch is closed (write-side-definition §6).
+    for leaked in ("auto_close_exp_src", "auto_close_grace_days", "last_close_event_id", "note"):
+        assert leaked not in resumed.touched_lots[0].fields, leaked
 
 
 def test_full_publisher_retains_finalized_row_for_later_full_only_adjust() -> None:
@@ -735,9 +763,9 @@ def test_full_publisher_retains_finalized_row_for_later_full_only_adjust() -> No
     assert len(projection.lots) == 1
     fields = projection.lots[0].fields
     assert fields["status"] == "close"
-    assert fields["strategy"] == "closed_history"
-    assert fields["last_close_event_id"] == "close"
-    assert fields["last_action_at"] == 2
+    assert fields["last_event_id"] == "adjust-closed"
+    for retired in ("strategy", "leg_role", "last_close_event_id", "last_action_at"):
+        assert retired not in fields, retired
 
 
 def test_final_close_emits_exact_row_then_evicts_and_later_target_forces_full() -> None:
@@ -770,7 +798,12 @@ def test_final_close_emits_exact_row_then_evicts_and_later_target_forces_full() 
     assert resumed.active_lots == ()
     assert len(resumed.touched_lots) == 1
     assert resumed.touched_lots[0].to_dict() == oracle.lots[0].to_dict()
-    assert resumed.touched_lots[0].fields["last_close_event_id"] == "final"
+    assert resumed.touched_lots[0].fields["status"] == "close"
+    # The finalized row publishes the closing ids the resumed state carried plus
+    # the one this batch applied -- the retired flat ``last_close_event_id`` held
+    # only the second, and the state used to drop the first entirely.
+    assert resumed.touched_lots[0].fields["close_event_ids"] == ["partial", "final"]
+    assert "last_close_event_id" not in resumed.touched_lots[0].fields
 
     later = project_resumable_trade_events(
         [
@@ -853,18 +886,19 @@ def test_publication_state_is_canonical_and_does_not_alias_results() -> None:
                 1,
                 key=_key(),
                 lot_id="lot-a",
-                raw_payload={"strategy_snapshot": {"nested": {"value": 1}}},
             )
         ],
         entry_mode="full",
     )
     assert projection.publication_state is not None
-    projection.active_lots[0].fields["strategy_snapshot"]["nested"]["value"] = 2
-    assert (
-        projection.publication_state.fields_by_lot_id["lot-a"]
-        ["strategy_snapshot"]["nested"]["value"]
-        == 1
-    )
+    published_fields = projection.publication_state.fields_by_lot_id["lot-a"]
+    # The publication state keeps its own copy of the payload, nested objects
+    # included: mutating the active lot's ``contract_key`` (or adding to it) must
+    # not reach what was published.
+    projection.active_lots[0].fields["contract_key"]["broker"] = "mutated"
+    projection.active_lots[0].fields["contract_key"]["nested"] = {"value": 2}
+    assert published_fields["contract_key"]["broker"] != "mutated"
+    assert "nested" not in published_fields["contract_key"]
 
 
 @pytest.mark.parametrize("event_type", ["void", "repair"])
@@ -948,8 +982,8 @@ def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
     fields = resumed.touched_lots[0].fields
     assert "strategy" not in fields
     assert "leg_role" not in fields
-    assert fields["close_type"] == "expire_auto_close"
-    assert fields["auto_close_grace_days"] == 1
+    assert "close_type" not in fields
+    assert "auto_close_grace_days" not in fields
 
 
 def test_domain_layer_has_no_application_or_sqlite_dependency() -> None:

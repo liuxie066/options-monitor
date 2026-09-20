@@ -32,6 +32,7 @@ from src.application.ledger.current_decision_projection import (
     finalize_current_decision_projection,
 )
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
+from src.application.ledger.lot_resolver import contract_key_from_lot_fields, lot_contract_value
 from src.application.ledger.order_fee_semantics import futu_order_namespace_issue, zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
@@ -1288,6 +1289,22 @@ def _fill_pending_fee_fx(change: _Change, *, fx_payload: Mapping[str, Any] | Non
     return change
 
 
+def _lot_account(item: Mapping[str, Any]) -> str:
+    """The lot row's account: nested ``contract_key`` first, flat for legacy rows.
+
+    ``repo.list_position_lots`` hands back the stored payload untouched, so a
+    converged row answers only under ``contract_key``.
+    """
+    fields = item.get("fields")
+    fields = dict(fields) if isinstance(fields, Mapping) else {}
+    return str(
+        lot_contract_value(
+            fields, contract_key_from_lot_fields(fields), "account", "account"
+        )
+        or ""
+    ).strip().lower()
+
+
 def _assigned_after_by_account(
     repo: SQLiteOptionPositionsRepository,
     *,
@@ -1316,10 +1333,7 @@ def _assigned_after_by_account(
             report,
             account=account,
             current_position_lots=[
-                item
-                for item in lots
-                if str((item.get("fields") or {}).get("account") or "").strip().lower()
-                == account
+                item for item in lots if _lot_account(item) == account
             ],
             as_of_ms=as_of_ms,
         )

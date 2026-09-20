@@ -8,6 +8,10 @@ from domain.domain.option_lifecycle import build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import derive_position_side
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
@@ -1743,27 +1747,60 @@ def _lot_matches_explicit_contract(
     *,
     contract: dict[str, Any],
 ) -> bool:
+    # The converged payload carries the contract under ``contract_key`` and the
+    # side / currency / multiplier as top-level siblings
+    # (``write-side-definition.md`` §2); the retired flat spellings stay
+    # readable for a row written before the shape switch.
+    lot_contract_key = contract_key_from_lot_fields(fields)
     return (
-        str(fields.get("account") or "").strip().lower()
-        == str(contract.get("account") or "")
-        and str(fields.get("broker") or "").strip()
-        == str(contract.get("broker") or "")
-        and canonical_symbol(fields.get("symbol"))
-        == contract.get("symbol")
-        and str(fields.get("option_type") or "").strip().lower()
-        == contract.get("option_type")
-        and str(
-            fields.get("position_side")
-            or fields.get("side")
+        str(
+            lot_contract_value(
+                fields, lot_contract_key, "account", "account"
+            )
             or ""
         )
         .strip()
         .lower()
+        == str(contract.get("account") or "")
+        and str(
+            lot_contract_value(
+                fields, lot_contract_key, "broker", "broker"
+            )
+            or ""
+        )
+        .strip()
+        == str(contract.get("broker") or "")
+        and canonical_symbol(
+            lot_contract_value(
+                fields, lot_contract_key, "underlying_symbol", "symbol"
+            )
+        )
+        == contract.get("symbol")
+        and str(
+            lot_contract_value(
+                fields, lot_contract_key, "option_type", "option_type"
+            )
+            or ""
+        )
+        .strip()
+        .lower()
+        == contract.get("option_type")
+        and str(fields.get("position_side") or fields.get("side") or "")
+        .strip()
+        .lower()
         == contract.get("position_side")
-        and str(fields.get("expiration_ymd") or "").strip()
+        and str(
+            lot_contract_value(
+                fields, lot_contract_key, "expiration_ymd", "expiration_ymd"
+            )
+            or ""
+        )
+        .strip()
         == contract.get("expiration_ymd")
         and _decimal_equal(
-            fields.get("strike"),
+            lot_contract_value(
+                fields, lot_contract_key, "strike", "strike"
+            ),
             contract.get("strike"),
         )
         and str(fields.get("currency") or "").strip().upper()

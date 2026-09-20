@@ -48,6 +48,7 @@ _LOT_KEYS = {
     "realized_pnl",
     "last_event_id",
     "last_close_event_id",
+    "close_event_ids",
     "open_event",
     "allocated_open_fee",
 }
@@ -280,6 +281,13 @@ class ResumableLotState:
     shares_open: Decimal | None = None
     shares_closed: Decimal | None = None
     cost_basis_total: Decimal | None = None
+    #: The events that closed this lot, in order (``PositionLot.close_event_ids``).
+    #: Carried so a resumed projection republishes the close pointer list a full
+    #: replay would: this checkpoint is a cache of the projection, and a payload
+    #: field it dropped could only come back wrong. ``last_close_event_id`` stays
+    #: the accumulator's restore pointer for the same fact; both are written from
+    #: the same close transition.
+    close_event_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         lot_id = str(self.lot_id or "").strip()
@@ -397,6 +405,16 @@ class ResumableLotState:
         _decimal_text(self.allocated_open_fee)
         if self.allocated_open_fee < 0:
             raise ValueError("allocated_open_fee must be >= 0")
+        raw_close_event_ids = self.close_event_ids or ()
+        if not isinstance(raw_close_event_ids, (list, tuple)):
+            raise ValueError(
+                "resumable lot close_event_ids must be a sequence of event ids"
+            )
+        close_event_ids = tuple(
+            str(item or "").strip() for item in raw_close_event_ids
+        )
+        if any(not item for item in close_event_ids):
+            raise ValueError("resumable lot close_event_ids must be non-empty ids")
         object.__setattr__(self, "lot_id", lot_id)
         object.__setattr__(self, "open_event_id", open_event_id)
         object.__setattr__(self, "opened_at_ms", opened_at_ms)
@@ -415,6 +433,7 @@ class ResumableLotState:
         object.__setattr__(self, "shares_open", shares_open)
         object.__setattr__(self, "shares_closed", shares_closed)
         object.__setattr__(self, "cost_basis_total", cost_basis_total)
+        object.__setattr__(self, "close_event_ids", close_event_ids)
 
     @classmethod
     def from_position_lot(
@@ -448,6 +467,9 @@ class ResumableLotState:
             shares_open=lot.shares_open,
             shares_closed=lot.shares_closed,
             cost_basis_total=lot.cost_basis_total,
+            # The checkpoint is a cache of the projection, so it hands back the
+            # close pointer list it was given, not an empty one.
+            close_event_ids=lot.close_event_ids,
         )
 
     def to_position_lot(self) -> PositionLot:
@@ -466,7 +488,7 @@ class ResumableLotState:
             currency=self.currency,
             realized_pnl=self.realized_pnl,
             last_event_id=self.last_event_id,
-            close_event_ids=(),
+            close_event_ids=tuple(self.close_event_ids),
             asset_type=self.contract_key.asset_type,
             shares_opened=self.shares_opened,
             shares_open=self.shares_open,
@@ -490,6 +512,7 @@ class ResumableLotState:
             "realized_pnl": _decimal_text(self.realized_pnl, field_name="realized_pnl"),
             "last_event_id": self.last_event_id,
             "last_close_event_id": self.last_close_event_id,
+            "close_event_ids": list(self.close_event_ids),
             "open_event": self.open_event.to_dict(),
             "allocated_open_fee": _decimal_text(self.allocated_open_fee),
         }
@@ -547,6 +570,7 @@ class ResumableLotState:
             cost_basis_total=_parse_optional_decimal(
                 payload.get("cost_basis_total"), field_name="cost_basis_total"
             ),
+            close_event_ids=payload["close_event_ids"],
         )
 
 

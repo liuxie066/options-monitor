@@ -34,6 +34,29 @@ from src.application.runtime_config_paths import resolve_data_config_ref
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 
+def _lot_contract_value(fields: dict[str, Any], nested_key: str, *flat_keys: str) -> Any:
+    """One lot-payload value: the nested ``contract_key`` key first, flat after.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option
+    contract under ``contract_key``; the flat siblings it replaced stay readable
+    for a row written before the shape switch. Spelled out here rather than
+    imported: ``src/application/positions`` may only reach the ledger through its
+    public API (``tests/test_option_positions_legacy_retirement.py``), so the
+    ledger-side ``lot_resolver.lot_contract_value`` is not importable from this
+    layer.
+    """
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, dict) else {}
+    value = contract_key.get(nested_key)
+    if value not in (None, ""):
+        return value
+    for flat_key in flat_keys:
+        value = fields.get(flat_key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _emit_auto_close_stage(account: str | None, stage: str) -> None:
     account_label = str(account or "-").strip().lower() or "-"
     print(
@@ -105,11 +128,13 @@ def _open_positions_for_account(
         fields = item.get("fields") or item
         if not isinstance(fields, dict):
             continue
-        if normalized_account and normalize_account(fields.get("account")) != normalized_account:
+        if normalized_account and normalize_account(_lot_contract_value(fields, "account", "account")) != normalized_account:
             continue
-        if normalized_broker and normalize_broker(fields.get("broker") or fields.get("market")) != normalized_broker:
+        # ``market`` was never a lot-payload key of the converged shape; the
+        # broker is the contract's broker (``contract_key.broker``).
+        if normalized_broker and normalize_broker(_lot_contract_value(fields, "broker", "broker")) != normalized_broker:
             continue
-        if normalized_market and symbol_market(fields.get("symbol"), symbol_aliases=symbol_aliases) != normalized_market:
+        if normalized_market and symbol_market(_lot_contract_value(fields, "underlying_symbol", "symbol"), symbol_aliases=symbol_aliases) != normalized_market:
             continue
         if normalize_status(fields.get("status")) != "open":
             continue
@@ -189,9 +214,9 @@ def _requires_expiry_assignment_quote(
             return False
     if str(fields.get("_auto_close_skip_reason") or "").strip():
         return False
-    option_type = str(fields.get("option_type") or "").strip().lower()
-    position_side = str(fields.get("side") or fields.get("position_side") or "").strip().lower()
-    symbol = str(fields.get("symbol") or "").strip()
+    option_type = str(_lot_contract_value(fields, "option_type", "option_type") or "").strip().lower()
+    position_side = str(_lot_contract_value(fields, "position_side", "position_side", "side") or "").strip().lower()
+    symbol = str(_lot_contract_value(fields, "underlying_symbol", "symbol") or "").strip()
     return bool(symbol) and position_side == "short" and option_type in {"put", "call", "p", "c"}
 
 
@@ -208,7 +233,7 @@ def _expiry_assignment_quote_symbols(
             eligible_lot_ids=eligible_lot_ids,
         ):
             continue
-        symbol = str(item.get("symbol") or "").strip()
+        symbol = str(_lot_contract_value(item, "underlying_symbol", "symbol") or "").strip()
         if not symbol or symbol in seen:
             continue
         seen.add(symbol)
@@ -227,7 +252,7 @@ def _enrich_positions_with_assignment_quotes(
     for item in positions:
         row = dict(item)
         if _requires_expiry_assignment_quote(row, eligible_lot_ids=eligible_lot_ids):
-            symbol = str(row.get("symbol") or "").strip()
+            symbol = str(_lot_contract_value(row, "underlying_symbol", "symbol") or "").strip()
             quote = quote_by_symbol.get(symbol)
             if quote:
                 row["_auto_close_underlying_spot"] = float(quote["spot"])

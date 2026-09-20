@@ -65,23 +65,44 @@ def _event(
 
 
 def _lot(lot_id: str, *, account: str = "lx", contracts_open: int = 1) -> PositionLotRecord:
+    """A published record in the converged shape (``PositionLot.to_dict()``).
+
+    ``position_lots.fields_json`` is exactly the lot's ``to_dict()`` after the
+    convergence batch (``write-side-definition.md`` §1): one nested
+    ``contract_key``, ``position_side``, and the renamed
+    ``contracts_opened``/``premium_open``/``opened_at_ms``/``open_event_id``
+    keys. A record written in the retired flat spelling is refused by the
+    writer's guards (``repository_common._position_lot_storage_values``).
+    """
+    symbol = "NVDA" if account == "lx" else "AAPL"
     return PositionLotRecord(
         lot_id=lot_id,
         fields={
-            "account": account,
-            "broker": "futu",
-            "symbol": "NVDA" if account == "lx" else "AAPL",
-            "option_type": "put",
-            "side": "short",
-            "contracts": 1,
+            "lot_id": lot_id,
+            "open_event_id": f"open-{lot_id}",
+            "contract_key": {
+                "broker": "futu",
+                "account": account,
+                "underlying_symbol": symbol,
+                "option_type": "put",
+                "strike": "100",
+                "expiration_ymd": "2026-06-19",
+                "asset_type": "option",
+            },
+            "position_side": "short",
+            "position_key": f"{symbol}_20260619_100P_short",
+            "opened_at_ms": 1000,
+            "contracts_opened": 1,
             "contracts_open": contracts_open,
             "contracts_closed": 1 - contracts_open,
-            "currency": "USD",
             "status": "open" if contracts_open else "close",
-            "strike": 100,
+            "premium_open": "1",
             "multiplier": 100,
-            "expiration": 1781827200000,
-            "expiration_ymd": "2026-06-19",
+            "currency": "USD",
+            "realized_pnl": "0",
+            "last_event_id": f"open-{lot_id}",
+            "close_event_ids": [],
+            "asset_type": "option",
         },
     )
 
@@ -539,9 +560,13 @@ def test_populated_store_adds_columns_without_backfill_or_normalized_index(tmp_p
             )
             """
         )
+        # The row's public bytes and its ``source_event_id`` already agree with
+        # the published record, so the publication has nothing to rewrite and the
+        # normalised sidecar columns stay NULL: that is the state the explicit
+        # backfill below is asserted against.
         conn.execute(
             "INSERT INTO position_lots VALUES (?, ?, ?, ?)",
-            ("lot-legacy", json.dumps(fields), None, 123),
+            ("lot-legacy", json.dumps(fields), fields["open_event_id"], 123),
         )
         conn.commit()
 

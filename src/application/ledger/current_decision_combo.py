@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
+
 from .current_decision_assigned_stock import (
     _COMBO_GROUP_KEYS,
     _COMBO_MEMBER_KEYS,
@@ -91,15 +96,34 @@ def build_current_combo_facts(
                 fields.get("contracts_open"),
                 field="combo contracts_open",
             )
-            role = str(fields.get("leg_role") or "").strip().lower()
+            # ``contract_key`` carries the option contract now
+            # (``write-side-definition.md`` §2); the retired flat siblings stay
+            # readable for a row written before the shape switch.
+            contract_key = contract_key_from_lot_fields(fields)
+            lot_account = str(
+                lot_contract_value(fields, contract_key, "account", "account") or ""
+            ).strip().lower()
+            lot_symbol = str(
+                lot_contract_value(
+                    fields, contract_key, "underlying_symbol", "symbol"
+                )
+                or ""
+            ).strip().upper()
             open_event_id = str(
-                fields.get("source_event_id") or fields.get("open_event_id") or ""
+                fields.get("open_event_id") or fields.get("source_event_id") or ""
             ).strip()
+            # The strategy family left the lot payload (§2 RECONSTRUCTIBLE; §7
+            # moves it to the strategy side), so the identity row being validated
+            # is what names this leg's role and group. A row written before the
+            # shape switch still carries the retired flat keys, and those stay a
+            # constraint for as long as they are there.
+            lot_role = str(fields.get("leg_role") or "").strip().lower()
+            role = lot_role or expected_role
+            lot_group_id = str(fields.get("strategy_group_id") or "").strip()
             if (
-                str(fields.get("account") or "").strip().lower() != account_value
-                or str(fields.get("symbol") or "").strip().upper()
-                != str(identity["symbol"])
-                or str(fields.get("strategy_group_id") or "").strip() != group_id
+                lot_account != account_value
+                or lot_symbol != str(identity["symbol"])
+                or (lot_group_id and lot_group_id != group_id)
                 or open_event_id != expected_event_id
                 or (
                     expected_role == "funding_put"
@@ -120,7 +144,7 @@ def build_current_combo_facts(
                         "role": role,
                         "open_event_id": open_event_id,
                         "account": account_value,
-                        "symbol": str(fields.get("symbol") or "").strip().upper(),
+                        "symbol": lot_symbol,
                         "contracts_open": contracts_open,
                     }
                 )

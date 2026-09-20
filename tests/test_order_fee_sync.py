@@ -15,12 +15,18 @@ from domain.domain.performance.cash_conversion import (
     validate_observed_cash_conversion,
 )
 from src.application.cash_conversion import build_cash_conversion
-from src.application.ledger.order_fee_migration import _conversion_for_amount, enrich_order_fees
+from src.application.ledger import api as ledger_api
+from src.application.ledger.order_fee_migration import (
+    _assigned_after_by_account,
+    _conversion_for_amount,
+    enrich_order_fees,
+)
 from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
 from src.application.ledger.interventions import persist_manual_order_identity_binding
 from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
+from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trades import order_fee_sync as order_fee_sync_module
 from src.application.trades.order_fee_sync import recover_order_fee_targets, sync_order_fees
 
@@ -608,6 +614,48 @@ def test_legacy_assignment_migrates_to_actual_zero(tmp_path: Path) -> None:
         "reason": "assignment_without_option_trade",
         "frozen_at_ms": EVENT_MS + 10,
     }
+
+
+def test_assigned_view_keeps_converged_covered_calls_after_fee_migration(
+    tmp_path: Path,
+) -> None:
+    """The migration's account filter must read the converged lot payload.
+
+    ``repo.list_position_lots`` hands back the stored payload untouched, and a
+    converged row carries ``account`` only under ``contract_key``. A flat read
+    there drops every lot, so the assigned-stock view the fee migration
+    finalises loses its covered-call allocations.
+    """
+    repo = SQLiteOptionPositionsRepository(tmp_path / "assigned-view.sqlite3")
+    ledger_api.record_manual_position_open(
+        repo,
+        broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
+        contracts=2, currency="USD", strike=100, multiplier=100, expiration_ymd="2026-08-21",
+        premium_per_share=2, opened_at_ms=1_000,
+    )
+    put_id = repo.list_position_lots()[0]["record_id"]
+    ledger_api.record_manual_assignment(
+        repo, lot_id=put_id, contracts_to_close=2,
+        stock_side="buy", stock_qty=200, stock_price=100, as_of_ms=2_000,
+    )
+    stock_id = build_assigned_stock_view(
+        repo, account="lx", as_of_ms=2_000
+    )["assigned_stock_lots"][0]["stock_lot_id"]
+    ledger_api.record_manual_position_open(
+        repo,
+        broker="富途", account="lx", symbol="NVDA", option_type="call", side="short",
+        contracts=2, currency="USD", strike=110, multiplier=100, expiration_ymd="2026-08-21",
+        premium_per_share=2, opened_at_ms=3_000,
+        strategy_snapshot={"source_stock_lot_id": stock_id},
+    )
+    # Premise: the newest row is the call lot, stored in the converged shape.
+    assert "account" not in repo.list_position_lots()[0]["fields"]
+
+    view = _assigned_after_by_account(
+        repo, conn=None, accounts=["lx"], as_of_ms=3_000
+    )["lx"]
+
+    assert [row["shares"] for row in view["covered_call_allocations"]] == [200]
 
 
 def test_legacy_expiry_without_executed_order_migrates_to_actual_zero(

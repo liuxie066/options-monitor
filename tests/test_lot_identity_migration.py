@@ -69,6 +69,75 @@ def _stock_open(
     )
 
 
+def _restore_legacy_flat_keys(path: Path) -> None:
+    """Write the retired flat vocabulary back into every stored payload.
+
+    The write path converges the payload onto ``contract_key``
+    (``write-side-definition.md`` §2), so a store it built no longer carries the
+    flat keys this module classifies. A pre-switch row does, and that row is the
+    module's subject matter — this is the degradation the fixture's own
+    ``position_id`` injection models, one vocabulary further back.
+    """
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT record_id, fields_json FROM position_lots"
+        ).fetchall():
+            fields = json.loads(row["fields_json"])
+            contract_key = fields.get("contract_key")
+            contract_key = contract_key if isinstance(contract_key, dict) else {}
+            fields.update(
+                {
+                    "account": contract_key.get("account"),
+                    "broker": contract_key.get("broker"),
+                    "symbol": contract_key.get("underlying_symbol"),
+                    "option_type": contract_key.get("option_type"),
+                    "side": fields.get("position_side"),
+                    "expiration": contract_key.get("expiration_ymd"),
+                    "strike": contract_key.get("strike"),
+                    "contracts": fields.get("contracts_opened"),
+                    "premium": fields.get("premium_open"),
+                    "opened_at": fields.get("opened_at_ms"),
+                }
+            )
+            if str(fields.get("status") or "").strip().lower() == "close":
+                fields.update(
+                    {
+                        "close_type": "assign",
+                        "close_reason": "assignment",
+                        "close_price": 0.0,
+                        "closed_at": 3_000,
+                        "last_action_at": 3_000,
+                    }
+                )
+            conn.execute(
+                "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+                (
+                    json.dumps(
+                        fields,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
+                    row["record_id"],
+                ),
+            )
+        conn.commit()
+
+
+def _lot_option_type(fields: dict) -> str:
+    """The contract's option type under the converged shape.
+
+    The payload carries the contract under ``contract_key`` now
+    (``write-side-definition.md`` §2); the retired flat sibling stays readable
+    for a row written before the shape switch.
+    """
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, dict) else {}
+    return str(contract_key.get("option_type") or fields.get("option_type") or "")
+
+
 def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
     """A store holding both lot families, degraded to the pre-migration shape.
 
@@ -101,7 +170,7 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
     )
     put_lot = next(
         item for item in repo.list_position_lots()
-        if (item.get("fields") or {}).get("option_type") == "put"
+        if _lot_option_type(item.get("fields") or {}) == "put"
     )
     record_manual_assignment(
         repo, lot_id=put_lot["record_id"], contracts_to_close=1,
@@ -246,9 +315,16 @@ def test_inventory_classifies_every_dropped_key_and_loses_nothing(tmp_path: Path
     This is the assertion that would have caught the §13.3 "非空即 fail" rule:
     under it, ``carried`` and ``reconstructible`` would both be empty and every
     real store would report ~15 blocking keys.
+
+    The fixture's payload is the converged shape, so the flat contract
+    vocabulary is not a dropped key on it at all; the retired pre-switch
+    vocabulary is what the rest of this test writes back in, which is exactly the
+    row this module migrates.
     """
 
-    inventory = module.build_lot_identity_migration_inventory(_legacy_store(tmp_path))
+    path = _legacy_store(tmp_path)
+    _restore_legacy_flat_keys(path)
+    inventory = module.build_lot_identity_migration_inventory(path)
     classification = inventory["dropped_key_classification"]
 
     assert classification["lost"] == {}
@@ -289,22 +365,138 @@ def test_the_strategy_family_is_classified_as_one_group() -> None:
     assert unclassified == []
 
 
-def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
-    """The sampled store's shape: the scalar is in the note and the column, not the payload.
+def _put_lot_record_id(path: Path) -> str:
+    return next(
+        record_id
+        for record_id, stored in _stored_rows(path).items()
+        if _lot_option_type(stored["fields"]) == "put"
+    )
 
-    On that store the payload has no ``multiplier`` key while the derived
-    ``multiplier`` column holds the value — the column is filled from this same
-    note fallback (``repository_common._position_lot_contract_scalars``) and the
-    rebuild does not drop it. Reading only the payload field reported a fact as
-    lost that is still in the row. Nulling the column is what proves the column
-    is the carrier, rather than some other path rescuing the key.
+
+def test_a_family_key_no_event_carries_is_reported_lost(tmp_path: Path) -> None:
+    """The event layer is a home only where it actually holds the fact.
+
+    ``RECONSTRUCTIBLE_DROPPED_KEYS`` says where the family's home is; it cannot
+    say whether this store's open event ever put it there. An import that never
+    seeded the family leaves the row's own copy as the only one, so the gate has
+    to report the loss rather than certify it as reconstructible — the verdict
+    that kept this instrument green on a fact nothing here can bring back.
+    """
+
+    path = _legacy_store(tmp_path)
+    record_id = _put_lot_record_id(path)
+    _edit_lot_fields(
+        path,
+        record_id,
+        lambda fields: fields.update({"strategy": "wheel", "leg_role": "short_put"}),
+    )
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+    classification = inventory["dropped_key_classification"]
+
+    assert set(classification["lost"]) == {"strategy", "leg_role"}
+    assert classification["lost"]["strategy"] == {
+        "rows_non_empty": 1,
+        "disposition": "lost",
+        "reason": "event_layer_carrier_absent",
+        "sample_lot_ids": [record_id],
+    }
+    assert "strategy" not in classification["reconstructible"]
+    report = module.verify_lot_identity_migration(path)
+    assert report["blocking_keys"] == ["leg_role", "strategy"]
+    assert report["ok"] is False
+    assert "dropped_payload_keys_would_lose_facts" in report["readiness_reasons"]
+
+
+def test_a_family_key_the_open_event_carries_is_reconstructible(tmp_path: Path) -> None:
+    """Measured, not looked up: the same key answers per lot and per fact.
+
+    Only ``strategy``/``leg_role`` ride the open event here — ``strategy_group_id``
+    was never written by it — so one row must report two different verdicts. A
+    table cannot express that split, which is the whole point of measuring.
+    """
+
+    path = tmp_path / "ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    persist_manual_open_event(
+        repo, broker="futu", account="lx", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100.0, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2.5, opened_at_ms=1_000,
+        strategy_snapshot={"strategy": "wheel", "leg_role": "short_put"},
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        record_id = str(
+            conn.execute("SELECT record_id FROM position_lots").fetchone()["record_id"]
+        )
+    _edit_lot_fields(
+        path,
+        record_id,
+        lambda fields: fields.update(
+            {
+                "strategy": "wheel",
+                "leg_role": "short_put",
+                "strategy_group_id": "group-a",
+            }
+        ),
+    )
+
+    classification = module.build_lot_identity_migration_inventory(path)[
+        "dropped_key_classification"
+    ]
+
+    assert set(classification["reconstructible"]) & {"strategy", "leg_role"} == {
+        "strategy",
+        "leg_role",
+    }
+    assert classification["reconstructible"]["strategy"]["reason"] == (
+        "the open event payload's strategy metadata"
+    )
+    assert set(classification["lost"]) == {"strategy_group_id"}
+    assert classification["lost"]["strategy_group_id"]["reason"] == (
+        "event_layer_carrier_absent"
+    )
+
+
+def test_the_measured_family_is_exactly_the_strategy_patch_family() -> None:
+    """The measurement must cover the family, no more and no less.
+
+    ``POSITION_LOT_STRATEGY_PATCH_FIELDS`` is what ``strategy_metadata_fields_from_payload``
+    can hand back, so those are exactly the keys a measured verdict has an
+    answer for. A family member outside the measured set would silently return
+    to being declared, which is the defect this pin exists to prevent.
+    """
+
+    from domain.domain.ledger.position_fields import POSITION_LOT_STRATEGY_PATCH_FIELDS
+
+    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) == set(
+        POSITION_LOT_STRATEGY_PATCH_FIELDS
+    )
+    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) <= set(
+        module.RECONSTRUCTIBLE_DROPPED_KEYS
+    )
+
+
+def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) -> None:
+    """A note-only scalar no longer survives anywhere (write-side-definition §4).
+
+    The note fallbacks that used to fill the ``multiplier``/``strike`` columns
+    (``repository_common._position_lot_contract_scalars``,
+    ``position_fields.effective_*``) are retired -- a note is display text,
+    never a fact source -- so ``NOTE_KV_SURVIVING_COLUMNS`` declares no column
+    home: a rebuild would not refill the column from the note, and a value
+    still sitting in it is a stale copy the retired fallback once wrote, not a
+    surviving fact. This test's previous shape asserted that column rescue;
+    the rescue is the retired behavior, pinned from the other side by
+    ``test_verify_fails_when_a_fact_lives_only_in_the_note``.
     """
 
     path = _legacy_store(tmp_path)
     lot_id = next(
         key
         for key, value in _stored_rows(path).items()
-        if (value["fields"] or {}).get("option_type") == "put"
+        if _lot_option_type(value["fields"] or {}) == "put"
     )
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
@@ -312,11 +504,14 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
             "SELECT fields_json, multiplier FROM position_lots WHERE record_id = ?",
             (lot_id,),
         ).fetchone()
+        # The column still holds the value the retired fallback wrote...
         assert raw["multiplier"] == 100.0
         fields = json.loads(raw["fields_json"])
         assert fields["multiplier"] == 100
         fields.pop("multiplier")
-        fields["note"] = f"{fields['note']};multiplier=100"
+        # ...and the note is written whole (the converged payload carries no
+        # ``note`` key, ``write-side-definition.md`` §2).
+        fields["note"] = "multiplier=100"
         conn.execute(
             "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
             (json.dumps(fields, ensure_ascii=False, sort_keys=True), lot_id),
@@ -326,16 +521,14 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
     classification = module.build_lot_identity_migration_inventory(path)[
         "dropped_key_classification"
     ]
-    assert classification["lost"] == {}
-    assert classification["reconstructible"]["note"]["reason"] == (
-        module._NOTE_KV_RECONSTRUCTION
-    )
+    # The populated column does not rescue the fact: nothing refills it after a
+    # rebuild, so the note's copy is the only live one and D3 cannot drop it.
+    assert classification["lost"]["note"]["reason"] == "note_kv_only:multiplier"
+    # No key declares a surviving column anymore. ``exp``'s column is the one
+    # D1 drops, and the same retirement removed the others' refills.
+    assert module.NOTE_KV_SURVIVING_COLUMNS == {}
 
-    # ``exp`` keeps its teeth in the same situation: the column D1 drops cannot
-    # be a surviving home, which ``test_verify_fails_when_a_fact_lives_only_in_the_note``
-    # pins from the other side.
-    assert "exp" not in module.NOTE_KV_SURVIVING_COLUMNS
-
+    # Nulling the column changes nothing: the classification already ignores it.
     with sqlite3.connect(path) as conn:
         conn.execute(
             "UPDATE position_lots SET multiplier = NULL WHERE record_id = ?",
@@ -383,11 +576,14 @@ def test_inventory_reports_where_each_contract_scalar_lives(tmp_path: Path) -> N
         _legacy_store(tmp_path)
     )["contract_scalar_carriers"]
 
-    # Both stock rows legitimately have no expiration/strike at all.
+    # Both stock rows legitimately have no expiration at all. Their converged
+    # ``contract_key`` does carry the option vocabulary's placeholders — one of
+    # which is the canonical ``"0"`` a stock lot's ``strike`` renders as, so a
+    # value *is* present there even though no strike is.
     assert carriers["expiration"]["structured"] == 2
     assert carriers["expiration"]["absent"] == 2
     assert carriers["expiration"]["rows"] == 4
-    assert carriers["strike"]["structured"] == 2
+    assert carriers["strike"]["structured"] == 4
     assert carriers["multiplier"]["structured"] == 4
 
 
@@ -558,19 +754,27 @@ def test_verify_is_clean_on_a_strategy_tagged_store(tmp_path: Path) -> None:
         )
 
     # The fixture must actually carry the family, or this test proves nothing.
-    assert fields["strategy"] == "wheel"
-    assert fields["leg_role"] == "short_put"
-    assert fields["strategy_snapshot"]
+    # The converged write path no longer puts it in the payload
+    # (``write-side-definition.md`` §2/§7 moves it to the strategy/event side), so
+    # the carrier asserted here is the open event's ``raw_payload``.
+    assert not {"strategy", "leg_role", "strategy_snapshot"} & set(fields)
+    event_payload = json.loads(
+        conn.execute(
+            "SELECT event_json FROM trade_events ORDER BY event_id LIMIT 1"
+        ).fetchone()["event_json"]
+    )["raw_payload"]
+    assert event_payload["strategy"] == "wheel"
+    assert event_payload["leg_role"] == "short_put"
+    assert event_payload["strategy_snapshot"]
 
     report = module.verify_lot_identity_migration(path)
 
     assert report["blocking_keys"] == []
     assert report["ok"] is True
-    assert set(report["payload_keys"]["reconstructible"]) >= {
-        "strategy",
-        "leg_role",
-        "strategy_snapshot",
-    }
+    # The family is never a fact nobody vouched for. On the converged payload it
+    # is not a dropped key at all, and the declaration that would cover a
+    # pre-switch row is pinned by
+    # ``test_the_strategy_family_is_classified_as_one_group``.
     assert report["payload_keys"]["lost"] == {}
     assert "dropped_payload_keys_would_lose_facts" not in report["readiness_reasons"]
 
@@ -585,9 +789,16 @@ def test_verify_fails_when_a_fact_lives_only_in_the_note(tmp_path: Path) -> None
 
     path = _legacy_store(tmp_path)
     def _note_only_expiration(fields: dict) -> None:
+        # ``expiration`` moved under ``contract_key`` (``write-side-definition.md``
+        # §2), so the structured copy is removed there; the flat key is popped too
+        # so a legacy spelling cannot rescue the fact. The converged payload
+        # carries no ``note`` key either, so the note is written whole.
         fields.pop("expiration", None)
         fields.pop("expiration_ymd", None)
-        fields["note"] = f"{fields['note']} exp=2026-06-19"
+        contract_key = fields.get("contract_key")
+        if isinstance(contract_key, dict):
+            contract_key.pop("expiration_ymd", None)
+        fields["note"] = "exp=2026-06-19"
 
     _edit_lot_fields(path, "lot_assign-1", _note_only_expiration)
 
@@ -884,27 +1095,40 @@ def test_lot_scalar_carriers_match_the_write_paths_reading_of_them() -> None:
     """The migration's carrier vocabulary and the writer's must not diverge.
 
     ``_position_lot_contract_scalars`` is what the contract columns are filled
-    from; if it grew a fourth scalar or changed its note fallbacks, the
-    inventory's ``contract_scalar_carriers`` would be describing a different
+    from; if it grew a fourth scalar or changed where it reads the scalars from,
+    the inventory's ``contract_scalar_carriers`` would be describing a different
     derivation than the one the store was written with.
     """
 
+    from domain.domain.option_position_identity import parse_exp_to_ms
     from src.application.ledger.repository_common import _position_lot_contract_scalars
 
     assert module.CONTRACT_SCALARS == ("expiration", "strike", "multiplier")
+    # The converged shape: the contract under ``contract_key``, ``multiplier``
+    # top level. ``expiration_ymd`` renders as midnight UTC (``parse_exp_to_ms``),
+    # which is asserted against the round trip in the parity probe's own suite.
     structured = _position_lot_contract_scalars(
-        {"strike": 12.5, "expiration": 1_800_000_000_000, "multiplier": 100}
+        {
+            "contract_key": {
+                "strike": 12.5,
+                "expiration_ymd": "2026-06-19",
+            },
+            "multiplier": 100,
+        }
     )
-    assert structured == (1_800_000_000_000, 12.5, 100.0)
+    assert structured == (
+        parse_exp_to_ms("2026-06-19"),
+        12.5,
+        100.0,
+    )
 
-    # The asymmetry §13.5 R6 warns about, pinned: ``expiration`` and
-    # ``multiplier`` fall back to the note, ``strike`` does not. So a note-only
-    # strike really is a fact the row could lose, while a note-only expiration
-    # is one it has already been reading from there.
-    note_only = _position_lot_contract_scalars({"note": "exp=2026-06-19;multiplier=100"})
-    assert note_only[1] is None
-    assert note_only[0] is not None
-    assert note_only[2] == 100.0
+    # Every note fallback is retired (``write-side-definition.md`` §4: a note is
+    # display text, never a fact source), so a note carrying all three carries
+    # nothing the writer can still read.
+    note_only = _position_lot_contract_scalars(
+        {"note": "exp=2026-06-19;strike=12.5;multiplier=100"}
+    )
+    assert note_only == (None, None, None)
 
 
 def test_quantity_unit_declares_a_carrier_only_where_one_exists() -> None:
@@ -916,17 +1140,17 @@ def test_quantity_unit_declares_a_carrier_only_where_one_exists() -> None:
     """
 
     assert module._drop_disposition(
-        "quantity_unit", "share", {"asset_type": "stock"}, {}
+        "quantity_unit", "share", {"asset_type": "stock"}, {}, {}
     ) == ("carried", "asset_type + shares_*")
     assert module._drop_disposition(
-        "quantity_unit", "contract", {"asset_type": "option"}, {}
+        "quantity_unit", "contract", {"asset_type": "option"}, {}, {}
     ) == ("lost", "no_declared_carrier")
     # Same dispatch the shape oracle uses, down to its case sensitivity and its
     # default for a payload that does not say.
     assert module._drop_disposition(
-        "quantity_unit", "share", {"asset_type": "Stock"}, {}
+        "quantity_unit", "share", {"asset_type": "Stock"}, {}, {}
     ) == ("lost", "no_declared_carrier")
-    assert module._drop_disposition("quantity_unit", "share", {}, {}) == (
+    assert module._drop_disposition("quantity_unit", "share", {}, {}, {}) == (
         "lost",
         "no_declared_carrier",
     )

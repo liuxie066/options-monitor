@@ -341,7 +341,17 @@ def _readback_trade_receipt_result(*, repo: Any, deal: Any,
             if getattr(deal, "position_effect", None) != "open":
                 # Lifecycle closes retain their own durable receipt owner.
                 raise ValueError("lifecycle result requires lifecycle readback")
-            projected = {str(row["fields"].get("source_event_id") or "") for row in evidence["position_lots"]}
+            # ``source_event_id`` converged onto ``open_event_id``
+            # (``write-side-definition.md`` §2); a legacy row keeps the old
+            # spelling readable.
+            projected = {
+                str(
+                    row["fields"].get("open_event_id")
+                    or row["fields"].get("source_event_id")
+                    or ""
+                )
+                for row in evidence["position_lots"]
+            }
             if not all(str(event["event_id"]) in projected for event in complete):
                 raise ValueError("recorded execution projection unavailable")
             diagnostics.update(retryable=False, verification_pending=False, recovered_from_ledger=True)

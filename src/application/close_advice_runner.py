@@ -883,25 +883,13 @@ def _position_expiration(pos: dict[str, Any]) -> str | None:
     exp = normalize_expiration(effective_expiration_ymd(pos))
     if exp:
         return exp
-    exp = normalize_expiration(pos.get("expiration"))
-    if exp:
-        return exp
-    note = str(pos.get("note") or "")
-    for token in note.replace(";", " ").split():
-        if token.startswith("exp="):
-            return normalize_expiration(token.split("=", 1)[1])
-    return None
+    return normalize_expiration(pos.get("expiration"))
 
 
 def _position_premium(pos: dict[str, Any]) -> float | None:
-    premium = safe_float(pos.get("premium"))
-    if premium is not None:
-        return premium
-    note = str(pos.get("note") or "")
-    for token in note.replace(";", " ").split():
-        if token.startswith("premium_per_share="):
-            return safe_float(token.split("=", 1)[1])
-    return None
+    # ``note`` is not a payload key (``write-side-definition.md`` §2/§7,
+    # 2026-09-20 ruling), so it carries no ``premium_per_share`` to fall back to.
+    return safe_float(pos.get("premium"))
 
 
 def _is_supported_short_option(pos: dict[str, Any]) -> bool:
