@@ -30,6 +30,7 @@ from src.application.ledger.position_projection_runtime import (
 from src.application.ledger.current_decision_projection import (
     capture_trade_event_decision_projection_fence,
 )
+from src.application.ledger.combo_membership import resolve_lot_group_bindings
 from src.application.ledger.results import LedgerWriteResult
 from src.application.ledger.targets import assert_position_lot_target_matches_current_state
 from src.application.ledger.writer import (
@@ -892,6 +893,24 @@ def persist_manual_adjust_events(
                 """,
                 (*sorted(desired_group_ids), *sorted(seen_lot_ids)),
             ).fetchone()
+            if collision is None:
+                # The family's home is the event layer (§2 RECONSTRUCTIBLE), so a
+                # converged row no longer carries the flat key the SQL above reads:
+                # the binding itself has to answer, or a group id can be handed to a
+                # second lot unnoticed. Both checks stay -- a pre-shape row is still
+                # only visible to the SQL.
+                bindings = resolve_lot_group_bindings(
+                    sqlite_repo.list_trade_events(conn=conn)
+                )
+                for record_id in sorted(bindings):
+                    if record_id in seen_lot_ids:
+                        continue
+                    bound = str(
+                        bindings[record_id].get("strategy_group_id") or ""
+                    ).strip()
+                    if bound in desired_group_ids:
+                        collision = {"record_id": record_id}
+                        break
             if collision is not None:
                 raise ValueError(
                     "strategy_group_id is already assigned to another "

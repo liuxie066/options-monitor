@@ -14,6 +14,7 @@ from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
     now_ms,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
@@ -170,6 +171,17 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         ),
         "side": derive_trade_side("open", fields.get("side")),
     }
+    # The strategy family is the one fact whose home this batch declares to be
+    # the event layer (``write-side-definition.md`` §2), and the read side reads
+    # it off the payload's top level
+    # (``wheel.lot_strategy_metadata_from_trade_events``). Seeding the whole
+    # snapshot is what the note above rules out; seeding the family is not the
+    # same act -- these are declared patch keys, not an open set of spellings --
+    # and without it an imported lot has no carrier left for its family once the
+    # payload keys are dropped.
+    raw_payload.update(
+        strategy_metadata_fields_from_payload(raw_fields, include_legacy=True)
+    )
     try:
         contract_key = ContractKey.from_values(
             broker=broker,

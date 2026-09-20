@@ -1082,6 +1082,51 @@ def test_current_shadow_read_failure_does_not_change_legacy_authority(
     }
 
 
+def test_account_scoped_lots_read_both_payload_shapes(tmp_path: Path) -> None:
+    """A legacy flat row and a converged row both scope to their account.
+
+    ``read_decision_state_rows`` scopes ``list_position_lots()`` by the lot's
+    account, and the repository hands the stored payload back untouched
+    (``sqlite_row_codec`` heals no column): a row written before the shape
+    switch carries only the flat ``account``, a converged row only
+    ``contract_key``. Reading the nested key alone drops the legacy row, so the
+    account answers as one holding nothing while ``stored_position_lots`` still
+    lists that row in the same payload.
+    """
+    repo = _repo(tmp_path)
+    legacy_fields = {
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "PDD",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 1,
+        "contracts_open": 1,
+        "currency": "USD",
+        "source_event_id": "open-lx",
+    }
+    with repo._connect() as conn:  # noqa: SLF001 - legacy row seed
+        conn.execute(
+            """
+            INSERT INTO position_lots (record_id, fields_json, updated_at_ms)
+            VALUES (?, ?, ?)
+            """,
+            (
+                "lot-legacy-flat",
+                json.dumps(legacy_fields, ensure_ascii=False, sort_keys=True),
+                1_000,
+            ),
+        )
+        conn.commit()
+
+    rows = repo.read_decision_state_rows(account="lx")
+    scoped = {row["record_id"] for row in rows["account_position_lots"]}
+    stored = {row["record_id"] for row in rows["stored_position_lots"]}
+
+    assert "lot-legacy-flat" in scoped
+    assert scoped == stored
+
+
 def test_legacy_snapshot_shadow_compares_lifecycle_quality_at_same_clock(
     tmp_path: Path,
 ) -> None:
@@ -1558,6 +1603,90 @@ def test_assigned_stock_lot_adapter_reads_retired_adjustment_mode_from_events() 
     assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
 
 
+def _pre_batch_import_event(*, snapshot_family: dict[str, Any], top_level: dict[str, Any]) -> TradeEvent:
+    """An import event shaped the way ``bootstrap`` wrote them before this batch."""
+
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        strike=100.0,
+        expiration_ymd="2026-06-19",
+    )
+    return TradeEvent(
+        event_id="imported-open",
+        event_type="open",
+        event_time_ms=1_000,
+        contract_key=key,
+        contracts=1,
+        price=1,
+        currency="USD",
+        source="bootstrap_snapshot",
+        multiplier=100,
+        lot_id="lot-imported",
+        raw_payload={
+            "source_type": "bootstrap_snapshot",
+            "lot_record_id": "lot-imported",
+            # The whole legacy row, seeded verbatim by the pre-batch importer.
+            "fields": {"account": "lx", "broker": "futu", "symbol": "NVDA", **snapshot_family},
+            "side": "sell",
+            **top_level,
+        },
+    )
+
+
+def test_a_pre_batch_import_event_serves_its_family_from_the_snapshot() -> None:
+    """The family of an already-imported lot must not become unreachable.
+
+    ``bootstrap._bootstrap_trade_event`` used to seed the whole legacy lot row
+    under ``fields``, and the retired publisher assembly copied the family out
+    of that copy into ``fields_json``. New imports no longer seed it, but the
+    events already in a store still carry it — so a reader that only looks at
+    the payload's top level strands every imported lot's family the moment
+    ``fields_json`` stops carrying it. Only declared patch keys are read back.
+    """
+
+    event = _pre_batch_import_event(
+        snapshot_family={
+            "strategy": "wheel",
+            "leg_role": "short_put",
+            "strategy_group_id": "group-a",
+            "strategy_snapshot": {"strategy": "wheel", "leg_role": "short_put"},
+            "exp": "20260619",
+        },
+        top_level={},
+    )
+
+    metadata = lot_strategy_metadata_from_trade_events([event.to_dict()])
+
+    assert metadata["lot-imported"] == {
+        "strategy": "wheel",
+        "leg_role": "short_put",
+        "strategy_group_id": "group-a",
+        "strategy_snapshot": {"strategy": "wheel", "leg_role": "short_put"},
+    }
+
+
+def test_the_payload_top_level_wins_over_the_import_snapshot() -> None:
+    """The snapshot is a fallback, never an override.
+
+    It is a historical copy of a row; the payload's own keys are what the event
+    was actually written to say. Letting the copy win would resurrect a value
+    the canonical shape has already replaced.
+    """
+
+    event = _pre_batch_import_event(
+        snapshot_family={"strategy": "wheel", "leg_role": "short_put"},
+        top_level={"strategy": "combo_yield", "leg_role": "funding_put"},
+    )
+
+    metadata = lot_strategy_metadata_from_trade_events([event.to_dict()])
+
+    assert metadata["lot-imported"]["strategy"] == "combo_yield"
+    assert metadata["lot-imported"]["leg_role"] == "funding_put"
+
+
 def test_assigned_oracle_does_not_restore_mode_absent_from_bound_source_lot() -> None:
     transition = _buy_transition()
     transition["broker"] = "富途"
@@ -1941,6 +2070,56 @@ def test_resolved_covered_call_identity_removes_stale_review() -> None:
 
     assert len(repaired["covered_call_allocations"]) == 1
     assert repaired["review_facts"] == []
+
+
+def test_converged_call_lot_reads_its_group_from_the_event_layer(
+    tmp_path: Path,
+) -> None:
+    """A converged call lot still links: its group id comes back from the events.
+
+    ``strategy_group_id`` left the lot payload (``write-side-definition.md`` §2
+    RECONSTRUCTIBLE), so a call lot opened for an assigned-stock combo no longer
+    names its group in ``fields``. The family's home is the event layer, and the
+    finalizer hands the advance family-attached lots
+    (``read_model.attach_event_strategy_metadata``); without that the option side
+    reads empty, the linkage-basis guard raises "covered-call linkage basis
+    mismatch" and the user-visible link disappears.
+    """
+    repo = _repo(tmp_path)
+    _bootstrap(repo, "lx")
+    writer.persist_trade_event_object(
+        repo,
+        _assignment_event(
+            event_id="assignment-group-a",
+            target_lot_id="lot-lx",
+            raw_payload={
+                "side": "buy",
+                "strategy_group_id": "group-a",
+                "stock_settlement": {
+                    "side": "buy",
+                    "shares": 100,
+                    "price": 100,
+                    "fees": 1,
+                    "event_time_ms": 2_000,
+                },
+            },
+        ),
+    )
+    writer.persist_trade_event_object(
+        repo,
+        _call_event(
+            event_id="call-open",
+            raw_payload={"side": "sell", "strategy_group_id": "group-a"},
+        ),
+    )
+
+    assigned = _trusted(repo, 4_000)["payload"]["assigned_stock"]
+    assert [row["stock_lot_id"] for row in assigned["lots"]] == [
+        "assigned-stock-assignment-group-a"
+    ]
+    assert [
+        row["linkage_basis"] for row in assigned["covered_call_allocations"]
+    ] == ["strategy_group"]
 
 
 def test_covered_call_group_change_revalidates_prior_allocation() -> None:

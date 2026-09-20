@@ -446,6 +446,79 @@ def test_bootstrap_trade_events_skips_invalid_timestamp_rows_without_degrading_b
     assert lot_id == "rec_good_time"
 
 
+def test_bootstrap_seeds_the_strategy_family_onto_the_import_event() -> None:
+    """An imported lot's family has to survive on the event it was imported as.
+
+    The family is the one fact this batch declares RECONSTRUCTIBLE from the
+    event layer (``write-side-definition.md`` §2), and the read side reads it
+    off the payload's top level
+    (``wheel.lot_strategy_metadata_from_trade_events``). Seeding the whole
+    legacy row is what the payload note rules out — an open set of historical
+    spellings would ride into a new payload — and this is not that: the family
+    is a declared key set, and without it an imported lot has no carrier left
+    for its family once the payload keys are dropped.
+    """
+
+    from domain.domain.wheel import lot_strategy_metadata_from_trade_events
+
+    events = bootstrap._bootstrap_trade_events(  # type: ignore[attr-defined]
+        [
+            {
+                "record_id": "rec_wheel",
+                "fields": {
+                    "account": "lx",
+                    "broker": "futu",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "strike": 100.0,
+                    "expiration_ymd": "2026-06-19",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "premium": 2.5,
+                    "currency": "USD",
+                    "opened_at": 1000,
+                    # The retired flat vocabulary rides along, and the payload
+                    # must still not carry it verbatim.
+                    "exp": "20260619",
+                    "underlying_shares_locked": 100,
+                    "strategy": "wheel",
+                    "leg_role": "short_put",
+                    "strategy_group_id": "group-a",
+                    "strategy_snapshot": {"strategy": "wheel", "leg_role": "short_put"},
+                },
+            }
+        ],
+        source_name="test_bootstrap",
+    )
+
+    assert len(events) == 1
+    payload = events[0].raw_payload
+    assert "fields" not in payload
+    assert "exp" not in payload and "underlying_shares_locked" not in payload
+    assert payload["strategy"] == "wheel"
+    assert payload["leg_role"] == "short_put"
+    assert payload["strategy_group_id"] == "group-a"
+    assert payload["strategy_snapshot"] == {"strategy": "wheel", "leg_role": "short_put"}
+    # The read side is the half that has to find it again.
+    metadata = lot_strategy_metadata_from_trade_events(
+        [
+            {
+                "event_id": events[0].event_id,
+                "event_type": "open",
+                "lot_id": events[0].lot_id,
+                "raw_payload": payload,
+            }
+        ]
+    )
+    assert metadata["rec_wheel"]["strategy"] == "wheel"
+    assert metadata["rec_wheel"]["strategy_snapshot"] == {
+        "strategy": "wheel",
+        "leg_role": "short_put",
+    }
+
+
 def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
@@ -2231,6 +2304,57 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
     # §2 RECONSTRUCTIBLE: the derived cash-secured amount is no longer a payload
     # key -- it is recomputed from the contract under ``contract_key``.
     assert "cash_secured_amount" not in adjusted
+
+
+def test_manual_adjust_group_id_collision_comes_from_the_event_layer(tmp_path: Path) -> None:
+    """A group id belongs to one lot, and the check reads the binding, not the payload.
+
+    ``strategy_group_id`` left the lot payload (``write-side-definition.md`` §2
+    RECONSTRUCTIBLE), so the guard's flat SQL over ``position_lots`` can no longer
+    see a group a lot is bound to -- the binding lives on the adjust event that
+    carried it. It has to answer from there, or one group id names two lots and the
+    combo identity resolves to whichever row is read first.
+    """
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(repo, **_open_kwargs())
+    ledger_manual_trades.persist_manual_open_event(
+        repo, **_open_kwargs(strike=110.0, expiration_ymd="2026-08-21")
+    )
+    first_id, second_id = sorted(row["record_id"] for row in repo.list_position_lots())
+
+    def adjust(lot_id: str, group_id: str, as_of_ms: int) -> None:
+        ledger_manual_trades.persist_manual_adjust_events(
+            repo,
+            [
+                {
+                    "record_id": lot_id,
+                    "fields": repo.get_position_lot_fields(lot_id),
+                    "strategy_group_id": group_id,
+                    "as_of_ms": as_of_ms,
+                }
+            ],
+        )
+
+    # The group is bound by the event; the payload never carries it.
+    adjust(first_id, "group-a", 2_000)
+    assert "strategy_group_id" not in repo.get_position_lot_fields(first_id)
+
+    # Handing that same group to another lot is refused from either direction.
+    with pytest.raises(
+        ValueError, match="strategy_group_id is already assigned to another position lot"
+    ):
+        adjust(second_id, "group-a", 3_000)
+    adjust(second_id, "group-b", 4_000)
+    with pytest.raises(
+        ValueError, match="strategy_group_id is already assigned to another position lot"
+    ):
+        adjust(first_id, "group-b", 5_000)
+
+    # A group of its own is still a legitimate single binding, and the bindings
+    # survive the refused attempts on both lots.
+    assert "strategy_group_id" not in repo.get_position_lot_fields(second_id)
+    assert repo.get_position_lot_fields(first_id)
 
 
 def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: Path) -> None:

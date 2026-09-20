@@ -365,6 +365,119 @@ def test_the_strategy_family_is_classified_as_one_group() -> None:
     assert unclassified == []
 
 
+def _put_lot_record_id(path: Path) -> str:
+    return next(
+        record_id
+        for record_id, stored in _stored_rows(path).items()
+        if _lot_option_type(stored["fields"]) == "put"
+    )
+
+
+def test_a_family_key_no_event_carries_is_reported_lost(tmp_path: Path) -> None:
+    """The event layer is a home only where it actually holds the fact.
+
+    ``RECONSTRUCTIBLE_DROPPED_KEYS`` says where the family's home is; it cannot
+    say whether this store's open event ever put it there. An import that never
+    seeded the family leaves the row's own copy as the only one, so the gate has
+    to report the loss rather than certify it as reconstructible — the verdict
+    that kept this instrument green on a fact nothing here can bring back.
+    """
+
+    path = _legacy_store(tmp_path)
+    record_id = _put_lot_record_id(path)
+    _edit_lot_fields(
+        path,
+        record_id,
+        lambda fields: fields.update({"strategy": "wheel", "leg_role": "short_put"}),
+    )
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+    classification = inventory["dropped_key_classification"]
+
+    assert set(classification["lost"]) == {"strategy", "leg_role"}
+    assert classification["lost"]["strategy"] == {
+        "rows_non_empty": 1,
+        "disposition": "lost",
+        "reason": "event_layer_carrier_absent",
+        "sample_lot_ids": [record_id],
+    }
+    assert "strategy" not in classification["reconstructible"]
+    report = module.verify_lot_identity_migration(path)
+    assert report["blocking_keys"] == ["leg_role", "strategy"]
+    assert report["ok"] is False
+    assert "dropped_payload_keys_would_lose_facts" in report["readiness_reasons"]
+
+
+def test_a_family_key_the_open_event_carries_is_reconstructible(tmp_path: Path) -> None:
+    """Measured, not looked up: the same key answers per lot and per fact.
+
+    Only ``strategy``/``leg_role`` ride the open event here — ``strategy_group_id``
+    was never written by it — so one row must report two different verdicts. A
+    table cannot express that split, which is the whole point of measuring.
+    """
+
+    path = tmp_path / "ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    persist_manual_open_event(
+        repo, broker="futu", account="lx", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100.0, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2.5, opened_at_ms=1_000,
+        strategy_snapshot={"strategy": "wheel", "leg_role": "short_put"},
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        record_id = str(
+            conn.execute("SELECT record_id FROM position_lots").fetchone()["record_id"]
+        )
+    _edit_lot_fields(
+        path,
+        record_id,
+        lambda fields: fields.update(
+            {
+                "strategy": "wheel",
+                "leg_role": "short_put",
+                "strategy_group_id": "group-a",
+            }
+        ),
+    )
+
+    classification = module.build_lot_identity_migration_inventory(path)[
+        "dropped_key_classification"
+    ]
+
+    assert set(classification["reconstructible"]) & {"strategy", "leg_role"} == {
+        "strategy",
+        "leg_role",
+    }
+    assert classification["reconstructible"]["strategy"]["reason"] == (
+        "the open event payload's strategy metadata"
+    )
+    assert set(classification["lost"]) == {"strategy_group_id"}
+    assert classification["lost"]["strategy_group_id"]["reason"] == (
+        "event_layer_carrier_absent"
+    )
+
+
+def test_the_measured_family_is_exactly_the_strategy_patch_family() -> None:
+    """The measurement must cover the family, no more and no less.
+
+    ``POSITION_LOT_STRATEGY_PATCH_FIELDS`` is what ``strategy_metadata_fields_from_payload``
+    can hand back, so those are exactly the keys a measured verdict has an
+    answer for. A family member outside the measured set would silently return
+    to being declared, which is the defect this pin exists to prevent.
+    """
+
+    from domain.domain.ledger.position_fields import POSITION_LOT_STRATEGY_PATCH_FIELDS
+
+    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) == set(
+        POSITION_LOT_STRATEGY_PATCH_FIELDS
+    )
+    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) <= set(
+        module.RECONSTRUCTIBLE_DROPPED_KEYS
+    )
+
+
 def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) -> None:
     """A note-only scalar no longer survives anywhere (write-side-definition §4).
 
@@ -1027,17 +1140,17 @@ def test_quantity_unit_declares_a_carrier_only_where_one_exists() -> None:
     """
 
     assert module._drop_disposition(
-        "quantity_unit", "share", {"asset_type": "stock"}, {}
+        "quantity_unit", "share", {"asset_type": "stock"}, {}, {}
     ) == ("carried", "asset_type + shares_*")
     assert module._drop_disposition(
-        "quantity_unit", "contract", {"asset_type": "option"}, {}
+        "quantity_unit", "contract", {"asset_type": "option"}, {}, {}
     ) == ("lost", "no_declared_carrier")
     # Same dispatch the shape oracle uses, down to its case sensitivity and its
     # default for a payload that does not say.
     assert module._drop_disposition(
-        "quantity_unit", "share", {"asset_type": "Stock"}, {}
+        "quantity_unit", "share", {"asset_type": "Stock"}, {}, {}
     ) == ("lost", "no_declared_carrier")
-    assert module._drop_disposition("quantity_unit", "share", {}, {}) == (
+    assert module._drop_disposition("quantity_unit", "share", {}, {}, {}) == (
         "lost",
         "no_declared_carrier",
     )

@@ -9,17 +9,27 @@ from .repository_schema import (
 
 
 def _lot_account(row: dict[str, Any]) -> str:
-    """A lot row's account, read from the converged payload shape.
+    """A lot row's account: the nested ``contract_key`` first, the flat sibling after.
 
     ``fields_json`` now carries the contract under ``contract_key`` (the flat
-    ``account`` sibling is retired), so scoping lots to one account reads the
-    nested key.
+    ``account`` sibling is retired), but the repository hands back the stored
+    payload untouched (``sqlite_row_codec`` heals no column), so a row written
+    before the shape switch answers only from its flat ``account`` -- dropping
+    such a row here would read as "this account holds nothing". Same dual read
+    as ``read_only_evidence._lot_account`` and
+    ``order_fee_migration._lot_account``; ``lot_resolver.lot_contract_value``
+    would be the shared spelling, but this module is a mixin of the very class
+    ``lot_resolver`` imports at module level.
     """
     fields = row.get("fields")
     fields = fields if isinstance(fields, dict) else {}
     contract_key = fields.get("contract_key")
-    contract_key = contract_key if isinstance(contract_key, dict) else {}
-    return str(contract_key.get("account") or "")
+    if isinstance(contract_key, dict):
+        account = contract_key.get("account")
+        if account not in (None, ""):
+            return str(account)
+    account = fields.get("account")
+    return "" if account in (None, "") else str(account)
 
 
 class DecisionReadRepositoryMixin:

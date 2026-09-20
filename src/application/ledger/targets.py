@@ -68,6 +68,15 @@ def assert_position_lot_target_matches_current_state(
         ),
         ("contracts_open", effective_contracts_open(current_fields), effective_contracts_open(fields)),
         (
+            # What this pair can see on today's callers is narrower than its name:
+            # ``commands`` hands over the row it just read (``fields=current_fields``),
+            # and the batch path re-reads the row in-transaction and CASes the whole
+            # dict first — so on those paths it compares the row with itself, and on
+            # a converged row both sides read "". It stays because the function's
+            # contract is target-vs-current and the drifted-group rejection is pinned
+            # by ``tests/test_option_positions_legacy_retirement``; what would newly
+            # reject is a target carrying the read model's event-attached family
+            # against a converged raw row, which no caller passes today.
             "strategy_group_id",
             str(current_fields.get("strategy_group_id") or "").strip(),
             str(fields.get("strategy_group_id") or "").strip(),

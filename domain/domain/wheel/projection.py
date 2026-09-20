@@ -67,6 +67,32 @@ STRATEGY_METADATA_KEYS = (
 )
 
 
+def _pre_batch_snapshot_family(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The family as a pre-batch import event stored it, or ``{}``.
+
+    An import event used to seed the whole legacy lot row under ``fields``
+    (``bootstrap._bootstrap_trade_event``), and the retired publisher assembly
+    copied the family straight out of that snapshot into ``fields_json``. New
+    imports no longer seed the snapshot, but the events already written keep it,
+    so reading it here is what stops an imported lot's family from becoming
+    unrecoverable the moment ``fields_json`` stops carrying it. Only the
+    declared patch keys are read back out -- never the snapshot itself.
+
+    ``include_legacy=False`` on purpose. A nested snapshot is the *retired* row
+    copied verbatim, so its durable keys are the family proper, while its
+    ``yield_enhancement_mode`` is the spelling a later ``adjust`` patch
+    explicitly supersedes -- returning it would let an old import's retired mode
+    outrank that adjust. A family expressible *only* through the retired mode
+    therefore stays unread from a pre-batch snapshot; the canonical top-level
+    read still honours that spelling where a current writer put it.
+    """
+
+    snapshot = payload.get("fields")
+    if not isinstance(snapshot, Mapping):
+        return {}
+    return strategy_metadata_fields_from_payload(dict(snapshot))
+
+
 def lot_strategy_metadata_from_trade_events(
     trade_events: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -100,6 +126,8 @@ def lot_strategy_metadata_from_trade_events(
                 dict(payload),
                 include_legacy=True,
             )
+            if not metadata:
+                metadata = _pre_batch_snapshot_family(payload)
             if metadata:
                 by_lot_id.setdefault(lot_id, {}).update(metadata)
             continue

@@ -29,7 +29,10 @@ the code and are corrected here rather than silently implemented around:
    gate (§13.3 "``verify`` 是只读 dry-run，作为窗口 go/no-go 依据") would be
    void. ``verify`` therefore classifies each non-empty dropped key by whether
    its value survives — carried into the row's target shape, reconstructible
-   from ``trade_events``, or lost — and fails only on ``lost``. The negative
+   from ``trade_events``, or lost — and fails only on ``lost``. A
+   *reconstructible* verdict that rests on the event layer is measured there
+   rather than declared, so a home that turns out empty reports ``lost``
+   instead of certifying a loss (``EVENT_LAYER_MEASURED_DROPPED_KEYS``). The negative
    case §13.4 row 3 asks for (structured field empty, fact only in ``note`` KV)
    lands in ``lost``, which is the case this rule was written for.
 2. **D1/D2's rebuild cannot be executed by this batch.** The column contract is
@@ -86,6 +89,7 @@ import sqlite3
 import time
 from typing import Any, Callable, Mapping
 
+from domain.domain.wheel.projection import lot_strategy_metadata_from_trade_events
 from src.application.ledger.position_projection_migration import (
     _assert_read_only_persistent_sizes,
     _column_names,
@@ -206,10 +210,12 @@ RECONSTRUCTIBLE_DROPPED_KEYS = {
     # that whole family in one pass off the same open-event payload
     # (``strategy_metadata_fields_from_payload``), so these share
     # ``strategy_snapshot``'s home rather than being a second, unrelated fact.
-    # They are not decoration: every wheel-tagged open carries ``strategy`` and
-    # ``leg_role``, so leaving them unmapped would report
+    # They are not decoration: leaving them unmapped would report
     # ``no_declared_carrier`` — and a blocking key — on the project's principal
     # strategy, i.e. a permanently red gate on the stores the window targets.
+    # Whether this declared home actually holds the family is a property of the
+    # store, and it is settled per row by ``EVENT_LAYER_MEASURED_DROPPED_KEYS``
+    # below rather than asserted here.
     "strategy": "the open event payload's strategy metadata",
     "leg_role": "the open event payload's strategy metadata",
     "strategy_group_id": "the open event payload's strategy metadata",
@@ -227,6 +233,28 @@ RECONSTRUCTIBLE_DROPPED_KEYS = {
     "auto_close_exp_src": "the closing trade_event payload's auto_close_exp_src",
     "auto_close_grace_days": "the closing trade_event payload's auto_close_grace_days",
 }
+
+#: The entries of ``RECONSTRUCTIBLE_DROPPED_KEYS`` whose verdict this module
+#: **measures** rather than looks up: the whole strategy family, whose declared
+#: carrier is the open event's payload. A table can say where a fact's home is;
+#: whether that home holds it is a property of the store, and for this family it
+#: is decided by whoever wrote the open event — an import event that never
+#: carried the family leaves the fact with no carrier at all once ``fields_json``
+#: stops carrying it. Reporting that as ``reconstructible`` is what kept the
+#: go/no-go gate green on a loss nothing here can repair. The remaining entries
+#: stay declarations: their carriers are the row's own carried values, or a
+#: closing event this surface does not replay.
+#: Pinned against ``POSITION_LOT_STRATEGY_PATCH_FIELDS`` by the test module.
+EVENT_LAYER_MEASURED_DROPPED_KEYS = frozenset(
+    {
+        "strategy",
+        "leg_role",
+        "strategy_group_id",
+        "source_stock_lot_id",
+        "source_wheel_branch_id",
+        "strategy_snapshot",
+    }
+)
 
 #: ``note`` KV vocabulary: every key the codebase writes into or reads out of a
 #: note, and where its fact lives besides the note. A note ``k=v`` whose fact is
@@ -479,11 +507,49 @@ def _note_disposition(
     return None
 
 
+def _event_layer_strategy_families(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    """The family each lot can still be read back out of the event layer.
+
+    Deliberately the read model's own reconstruction
+    (``read_model.attach_event_strategy_metadata`` ->
+    ``wheel.lot_strategy_metadata_from_trade_events``) rather than a second
+    derivation: the gate has to measure the claim with the reader that is
+    supposed to honour it, or it certifies a home nobody can actually read.
+    Empty when the store has no ``trade_events`` table at all, which is the
+    honest answer — a payload-only store has no event layer to rebuild from.
+    """
+
+    if not _table_exists(conn, "trade_events"):
+        return {}
+    return lot_strategy_metadata_from_trade_events(_events(_load_event_rows(conn)))
+
+
+def _family_for_row(
+    row: Mapping[str, Any],
+    families: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """The measured family for one scanned lot row.
+
+    Keyed the way the reader keys it (the event's lot id, which the import path
+    sets to the lot's ``record_id``); ``lot_id`` is probed second because D2
+    backfills it, so a store on either side of that step resolves the same lot.
+    """
+
+    for candidate in (row.get("record_id"), row.get("lot_id")):
+        text = str(candidate or "").strip()
+        if text and text in families:
+            return families[text]
+    return {}
+
+
 def _drop_disposition(
     key: str,
     value: Any,
     fields: Mapping[str, Any],
     surviving_columns: Mapping[str, Any],
+    event_metadata: Mapping[str, Any],
 ) -> tuple[str, str]:
     """Classify one non-empty dropped key as carried / reconstructible / lost."""
 
@@ -502,6 +568,14 @@ def _drop_disposition(
     if carrier:
         return "carried", carrier
     derivation = RECONSTRUCTIBLE_DROPPED_KEYS.get(key)
+    if key in EVENT_LAYER_MEASURED_DROPPED_KEYS:
+        # Measured, not declared: ask this row's event layer whether the family
+        # is actually there. An import event that never carried it, or a
+        # payload-only row with no open event at all, leaves the fact with no
+        # carrier — a loss the gate has to report instead of certifying.
+        if _non_empty(event_metadata.get(key)):
+            return "reconstructible", derivation or "the open event payload's strategy metadata"
+        return "lost", "event_layer_carrier_absent"
     if derivation:
         return "reconstructible", derivation
     return "lost", "no_declared_carrier"
@@ -681,8 +755,19 @@ def _pending_work(
     }
 
 
-def _classify_dropped_keys(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per-key disposition of every non-empty dropped payload key."""
+def _classify_dropped_keys(
+    rows: list[dict[str, Any]],
+    event_families: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Per-key disposition of every non-empty dropped payload key.
+
+    ``event_families`` is the measured event layer (see
+    ``_event_layer_strategy_families``); the keys in
+    ``EVENT_LAYER_MEASURED_DROPPED_KEYS`` are answered per row from it, so the
+    same key can land in ``reconstructible`` for one lot and ``lost`` for
+    another — which is the truth about a store where only some opens carried the
+    family.
+    """
 
     buckets: dict[str, dict[str, Any]] = {
         "carried": {},
@@ -694,10 +779,13 @@ def _classify_dropped_keys(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if fields is None:
             continue
         target = _lot_shape_keys(fields.get("asset_type"))
+        event_metadata = _family_for_row(row, event_families)
         for key, value in fields.items():
             if key in target or not _non_empty(value):
                 continue
-            disposition, reason = _drop_disposition(key, value, fields, row)
+            disposition, reason = _drop_disposition(
+                key, value, fields, row, event_metadata
+            )
             bucket = buckets[disposition].setdefault(
                 key,
                 {
@@ -775,7 +863,9 @@ def _inventory_from_conn(
             "common": sorted(LOT_SHAPE_KEYS_COMMON),
             "stock_extra": sorted(LOT_SHAPE_KEYS_STOCK_EXTRA),
         },
-        "dropped_key_classification": _classify_dropped_keys(rows),
+        "dropped_key_classification": _classify_dropped_keys(
+            rows, _event_layer_strategy_families(conn)
+        ),
     }
     return {
         **stable,

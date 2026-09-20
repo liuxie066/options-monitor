@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from domain.domain.wheel import (
+    attach_lot_strategy_metadata,
+    lot_strategy_metadata_from_trade_events,
+)
+
 from .current_decision_assigned_stock import (
     _trade_event_contract,
     advance_assigned_stock_fact_for_trade_events,
@@ -267,16 +272,46 @@ def finalize_current_decision_projection(
             include_identities=False,
         )
         event_assigned_after = assigned_after.get(account)
+        # The events that touch the account's lots carry the strategy family now
+        # (``write-side-definition.md`` §2 RECONSTRUCTIBLE) -- the open event for a
+        # leg opened as part of a combo, the adjusting event for a leg adopted into
+        # one afterwards -- read here, bounded by the current lots, because the
+        # assigned-stock advance below compares the option lot's group id with the
+        # stock fact's and a converged lot payload no longer names its group. The
+        # identity lookup further down shares this fetch.
+        carrier_event_ids: set[str] = set()
+        for fields in _position_lot_fields(list(inputs.get("lots") or [])).values():
+            for key in ("open_event_id", "source_event_id", "last_event_id"):
+                event_id = str(fields.get(key) or "").strip()
+                if event_id:
+                    carrier_event_ids.add(event_id)
+        carrier_events = list(
+            repo.get_trade_events_by_ids(sorted(carrier_event_ids), conn=conn)
+        )
         if event_assigned_after is None and event_mutations_by_account.get(account):
             projection = inputs.get("projection")
             if not isinstance(projection, Mapping):
                 raise CurrentDecisionProjectionError(
                     "current decision projection disappeared"
                 )
+            # The read model attaches the family the same way for its consumers
+            # (``read_model.attach_event_strategy_metadata``), but this module
+            # cannot reach for that wrapper: ``bootstrap`` imports this module,
+            # ``read_model`` imports ``bootstrap``, and the dependency-graph guard
+            # counts an import wherever it sits in the file, so even a function-local
+            # one closes the cycle it exists to report. The composition below is that
+            # wrapper's rule over the same two domain helpers -- one reconstruction,
+            # two spellings.
+            family_by_lot_id = lot_strategy_metadata_from_trade_events(carrier_events)
+            current_lots = [
+                {**lot, "fields": attach_lot_strategy_metadata(lot, family_by_lot_id)}
+                for lot in (inputs.get("lots") or [])
+                if isinstance(lot, Mapping)
+            ]
             event_assigned_after = advance_assigned_stock_fact_for_trade_events(
                 _decode_projection_row_payload(projection)["assigned_stock"],
                 event_mutations=event_mutations_by_account[account],
-                current_position_lots=list(inputs.get("lots") or []),
+                current_position_lots=current_lots,
             )
         projection = inputs.get("projection")
         if not isinstance(projection, Mapping):
@@ -302,15 +337,7 @@ def finalize_current_decision_projection(
             str(lot.get("strategy_group_id") or "").strip()
             for lot in combo_assigned["lots"]
         }
-        carrier_event_ids: set[str] = set()
-        for fields in _position_lot_fields(list(inputs.get("lots") or [])).values():
-            for key in ("open_event_id", "source_event_id", "last_event_id"):
-                event_id = str(fields.get(key) or "").strip()
-                if event_id:
-                    carrier_event_ids.add(event_id)
-        for event in repo.get_trade_events_by_ids(
-            sorted(carrier_event_ids), conn=conn
-        ):
+        for event in carrier_events:
             payload = event.get("raw_payload") or {}
             event_group_id = ""
             for source in (

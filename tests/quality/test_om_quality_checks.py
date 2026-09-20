@@ -611,6 +611,38 @@ def _void_event(*, event_id: str, target_event_id: str) -> dict:
     ).to_dict()
 
 
+def test_vacuous_replay_guard_fails_an_active_open_that_materializes_nothing() -> None:
+    """The G-M3 guard's failing path: an active ``open`` with evidence on neither side.
+
+    ``open`` is the only lot-materializing event type, so an account whose active
+    events include one must leave evidence on at least one side of the comparison.
+    Here the open's contract key cannot produce a lot at all -- the projector
+    reports a projection error and builds nothing -- and the materialized side is
+    empty too, so the comparison is a 0/0 that must not read as a match.
+
+    The two mutations this pair of tests holds, which no single one of them holds
+    alone: dropping the guard leg entirely (``vacuous_comparison = False``) turns
+    this verdict into ``LEDGER_REPLAY_MISMATCH`` and reddens *this* test, while
+    keeping the leg but dropping its two ``not ...`` conditions reddens
+    ``test_full_replay_mismatch_blocks_position_consumers`` (:581) instead, which
+    asserts the mismatch verdict for an account whose open does materialize a lot.
+    """
+    malformed_open = _open_event(event_id="event-1", deal_id="deal-1")
+    malformed_open["contract_key"].pop("option_type")
+    datasets = build_ledger_datasets(
+        repo=_LedgerRepo([malformed_open], []),
+        accounts=["lx"],
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+    )
+    dataset = datasets[0]
+    check = dataset["checks"][0]
+    assert check["status"] == "fail"
+    assert check["reason_code"] == "LEDGER_REPLAY_EMPTY"
+    assert check["observed"]["summary"] == {"projection_error": 1}
+    assert "close_advice" in dataset["blocked_consumers"]
+
+
 def test_void_cleared_account_is_not_a_vacuous_replay_failure() -> None:
     datasets = build_ledger_datasets(
         repo=_LedgerRepo(
