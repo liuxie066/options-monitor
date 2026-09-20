@@ -182,8 +182,14 @@ PUBLIC_SURFACE_LEDGER_KEYS = frozenset({"module", "name", "reason"})
 PUBLIC_SURFACE_WILDCARD = "*"
 PUBLIC_SURFACE_MIN_REASON_LENGTH = 20
 PUBLIC_SURFACE_SAMPLE_LIMIT = 12
+# ``D``/``M``/``T`` can take a declared name away; ``A`` only adds surface and is
+# the one status this check skips. Any other status means git is describing a
+# state the check cannot interpret, and that is reported instead of skipped.
 _PUBLIC_SURFACE_STATUSES = frozenset({"D", "M", "T"})
+_PUBLIC_SURFACE_SKIPPED_STATUSES = frozenset({"A"})
+_PUBLIC_SURFACE_SYMLINK_MODE = "120000"
 _PUBLIC_SURFACE_CALLS = frozenset({"sorted", "list", "tuple", "set", "frozenset"})
+_PUBLIC_SURFACE_ALL_MUTATORS = frozenset({"append", "extend", "insert", "remove", "pop", "clear"})
 
 
 class PublicSurfaceUnavailable(Exception):
@@ -596,6 +602,84 @@ def _module_all_value(tree: ast.Module) -> ast.expr | None:
     return None
 
 
+_MODULE_SCOPE_CONTROL = (ast.If, ast.Try, ast.For, ast.While, ast.With, ast.AsyncWith, ast.AsyncFor)
+
+
+def _module_scope_statements(tree: ast.Module):
+    """Module-scope statements, descending into control flow but never into a ``def`` or ``class``.
+
+    A name bound under ``if``/``try`` is still bound in the module namespace, so
+    reading only the direct children of the module body made a guarded definition
+    look like a removal.
+    """
+    stack = list(reversed(tree.body))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, _MODULE_SCOPE_CONTROL):
+            stack.extend(reversed(node.body))
+            stack.extend(reversed(getattr(node, "orelse", [])))
+            stack.extend(reversed(getattr(node, "finalbody", [])))
+            for handler in getattr(node, "handlers", []):
+                stack.extend(reversed(handler.body))
+
+
+def _assignment_targets(node: ast.stmt) -> list[ast.expr]:
+    if isinstance(node, ast.Assign):
+        return list(node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return [node.target]
+    return []
+
+
+def _starts_at_all(node: ast.expr) -> bool:
+    """Whether ``node`` is ``__all__`` itself or an item/attribute reached through it."""
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        node = node.value
+    return isinstance(node, ast.Name) and node.id == "__all__"
+
+
+def _module_all_unreadable_reason(tree: ast.Module) -> str | None:
+    """Why a module-level ``__all__`` cannot be trusted, or ``None`` when it can.
+
+    Only one shape is followed: a single top-level assignment to a literal that
+    ``_resolve_declared_sequence`` can read. Every other way of building
+    ``__all__`` is reported, because reading those as "this module declares
+    nothing" would quietly stop protecting the names it still exports.
+    """
+    top_level = {id(node) for node in tree.body}
+    assignments = 0
+    for node in _module_scope_statements(tree):
+        if isinstance(node, ast.AugAssign) and _starts_at_all(node.target):
+            return "`__all__` is built with an augmented assignment; assign it once as a literal"
+        if isinstance(node, ast.Delete) and any(_starts_at_all(target) for target in node.targets):
+            return "`__all__` is deleted; the declared surface must be a single literal assignment"
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            function = node.value.func
+            if (
+                isinstance(function, ast.Attribute)
+                and function.attr in _PUBLIC_SURFACE_ALL_MUTATORS
+                and _starts_at_all(function.value)
+            ):
+                return f"`__all__` is mutated with .{function.attr}(...); assign it once as a literal"
+        for target in _assignment_targets(node):
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                if id(node) not in top_level:
+                    return (
+                        "`__all__` is assigned inside a conditional or try block; "
+                        "assign it once at the top level"
+                    )
+                assignments += 1
+            elif _starts_at_all(target):
+                return (
+                    f"`__all__` is modified in place with `{ast.unparse(target)}`; "
+                    "assign it once as a literal"
+                )
+    if assignments > 1:
+        return "`__all__` is assigned more than once; the declared surface must be a single literal"
+    return None
+
+
 def _module_literal_bindings(tree: ast.Module) -> dict[str, ast.expr]:
     """Module-level single-name bindings, the only ones ``__all__`` may refer to."""
     bindings: dict[str, ast.expr] = {}
@@ -660,12 +744,23 @@ def _resolve_declared_sequence(
 
 
 def _conventional_public_names(tree: ast.Module) -> frozenset[str]:
-    """Names a module declares without ``__all__``: its own top-level public definitions."""
+    """Names a module declares without ``__all__``: its own top-level public definitions.
+
+    A ``def``/``class`` guarded by ``if``/``try`` still ships that name, so the
+    walk descends into module-level control flow for definitions. Plain
+    assignments are read only at the top level: a name assigned inside a guard is
+    how a module spells a platform fallback (``except ImportError: fcntl = None``)
+    or a temporary used by an error message, and protecting those would fail
+    changes that never touched the public surface.
+    """
     names: set[str] = set()
-    for node in tree.body:
+    top_level = {id(node) for node in tree.body}
+    for node in _module_scope_statements(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if not node.name.startswith("_"):
                 names.add(node.name)
+        elif id(node) not in top_level:
+            continue
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and not target.id.startswith("_"):
@@ -687,6 +782,9 @@ def _parse_module(source: str) -> ast.Module:
 
 def _explicit_all_names(tree: ast.Module) -> frozenset[str] | None:
     """Resolved ``__all__``, or ``None`` when the module does not declare one."""
+    unreadable = _module_all_unreadable_reason(tree)
+    if unreadable is not None:
+        raise PublicSurfaceUnavailable(unreadable)
     explicit = _module_all_value(tree)
     if explicit is None:
         return None
@@ -700,9 +798,14 @@ def _explicit_all_names(tree: ast.Module) -> frozenset[str] | None:
 
 
 def _bound_names(tree: ast.Module) -> frozenset[str]:
-    """Every name the module binds at top level, whether by definition, assignment or import."""
+    """Every name the module binds at module scope, whether by definition, assignment or import.
+
+    Control flow counts: a name bound inside ``if``/``try`` is reachable on the
+    module just the same, so treating it as gone would fail a change that only
+    moved the definition behind a guard.
+    """
     names: set[str] = set()
-    for node in tree.body:
+    for node in _module_scope_statements(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Assign):
@@ -770,10 +873,64 @@ def _head_file_text(relative: str, *, staged: bool) -> str | None:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _head_path_exists(relative: str, *, staged: bool) -> bool:
+def _git_tree_mode(revision: str, relative: str) -> str | None:
+    """Mode of ``relative`` in ``revision``'s tree, or ``None`` when it is not in it.
+
+    Reads the tree alone, so it still answers when the blob is not available
+    locally -- a partial clone, a pruned object store -- which is exactly the
+    case that must not be mistaken for "the path is gone".
+    """
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "ls-tree", "-z", revision, "--", relative],
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"[guardrails] failed to read the tree of {revision}: "
+            f"{result.stderr.decode('utf-8', errors='ignore').strip()}"
+        )
+    entry = result.stdout.decode("utf-8", errors="surrogateescape")
+    if not entry:
+        return None
+    return entry.split("\t", 1)[0].split(" ", 1)[0]
+
+
+def _head_entry_mode(relative: str, *, staged: bool) -> str | None:
+    """Git mode of the module at the revision under review, ``None`` when it is not there.
+
+    Only the mode is asked for, so a symlink is recognisable before its content
+    (the link target's path, which can pass for valid Python) is read as source.
+    """
     if staged:
-        return index_path_exists(Path(relative), {path.as_posix() for path in git_index_paths()})
-    return working_tree_path_exists(Path(relative))
+        result = subprocess.run(
+            ["git", "--literal-pathspecs", "ls-files", "-s", "-z", "--", relative],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout.decode("utf-8", errors="surrogateescape").split(" ", 1)[0]
+    if (ROOT / relative).is_symlink():
+        return _PUBLIC_SURFACE_SYMLINK_MODE
+    return None
+
+
+def _head_module_exists(relative: str, *, staged: bool) -> bool:
+    """Whether the module is still there at the revision under review.
+
+    Deliberately mirrors ``_head_file_text``: the index under ``--staged``, the
+    working tree otherwise, so the answer cannot disagree with the content the
+    check actually compared. A symlink counts as present even when it dangles --
+    this check never follows links, so "still there" must not depend on where one
+    points.
+    """
+    if staged:
+        return _head_file_text(relative, staged=True) is not None
+    path = ROOT / relative
+    return path.is_symlink() or path.is_file()
 
 
 def _git_revision_exists(revision: str) -> bool:
@@ -816,19 +973,52 @@ def public_surface_removals(
     removals: list[tuple[str, str]] = []
     issues: list[Violation] = []
     for status, relative in _public_surface_changed_paths(base_revision, staged=staged):
-        if status not in _PUBLIC_SURFACE_STATUSES or not relative.endswith(".py"):
+        if not relative.endswith(".py") or status in _PUBLIC_SURFACE_SKIPPED_STATUSES:
+            continue
+        if status not in _PUBLIC_SURFACE_STATUSES:
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    f"git reports status {status!r} for this module, which this check cannot "
+                    "interpret; finish the operation in progress and run it again",
+                    status,
+                )
+            )
+            continue
+        if _git_tree_mode(base_revision, relative) == _PUBLIC_SURFACE_SYMLINK_MODE:
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    "the module is a symbolic link at the base revision, so its declared "
+                    "public surface cannot be compared",
+                    status,
+                )
+            )
+            continue
+        if _head_entry_mode(relative, staged=staged) == _PUBLIC_SURFACE_SYMLINK_MODE:
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    "the module is a symbolic link at the revision under review, so its declared "
+                    "public surface cannot be compared",
+                    status,
+                )
+            )
             continue
         base_text = _git_blob_text(f"{base_revision}:{relative}")
         if base_text is None:
-            if status != "D":
-                issues.append(
-                    Violation(
-                        Path(relative),
-                        1,
-                        "module is modified at the base revision but its content could not be read",
-                        status,
-                    )
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    f"the module's content at base {base_revision[:12]} could not be read, so its "
+                    "declared public surface cannot be compared",
+                    status,
                 )
+            )
             continue
         head_text = _head_file_text(relative, staged=staged)
         try:
@@ -966,8 +1156,23 @@ def check_public_surface(base_revision: str, *, staged: bool = False) -> list[Vi
             "fetch it before running this check"
         )
     issues: list[Violation] = []
+    ledger_relative = PUBLIC_SURFACE_LEDGER.as_posix()
+    base_ledger = _git_blob_text(f"{base_revision}:{ledger_relative}")
+    if base_ledger is None and _git_tree_mode(base_revision, ledger_relative) is not None:
+        # The ledger is in the base tree but not readable here. Reading that as
+        # "no ledger at base" would empty the append-only comparison and let this
+        # very change drop recorded retirements unnoticed.
+        issues.append(
+            Violation(
+                PUBLIC_SURFACE_LEDGER,
+                1,
+                f"the retirement ledger at base {base_revision[:12]} could not be read, so "
+                "append-only cannot be verified for this change",
+                ledger_relative,
+            )
+        )
     base_entries, base_issues = _retirement_entries(
-        _git_blob_text(f"{base_revision}:{PUBLIC_SURFACE_LEDGER.as_posix()}"),
+        base_ledger,
         label=f"base {base_revision[:12]}",
     )
     issues.extend(base_issues)
@@ -980,11 +1185,21 @@ def check_public_surface(base_revision: str, *, staged: bool = False) -> list[Vi
     head_keys = {(entry["module"], entry["name"]) for entry in head_entries}
     base_keys = {(entry["module"], entry["name"]) for entry in base_entries}
     for module, name in sorted(base_keys - head_keys):
+        if name == PUBLIC_SURFACE_WILDCARD and _head_module_exists(module, staged=staged):
+            # The module came back, so this entry no longer records a retirement
+            # -- it would otherwise exempt every later removal from that module
+            # (see the wildcard exemption below). Restoring a retired module
+            # means dropping its now-false entry, and that has to be allowed --
+            # but only dropping it: rewriting the '*' into some other entry for
+            # the same module would just re-exempt a name that is still there.
+            if not any(other == module for other, _ in head_keys):
+                continue
         issues.append(
             Violation(
                 PUBLIC_SURFACE_LEDGER,
                 1,
-                "retirement ledger entries are append-only; this recorded retirement was dropped",
+                "retirement ledger entries are append-only; this recorded retirement was dropped "
+                "(a '*' entry stays until the module it retires is back)",
                 f"{module} :: {name}",
             )
         )
@@ -992,7 +1207,7 @@ def check_public_surface(base_revision: str, *, staged: bool = False) -> list[Vi
     for entry in head_entries:
         if entry["name"] != PUBLIC_SURFACE_WILDCARD:
             continue
-        if _head_path_exists(entry["module"], staged=staged):
+        if _head_module_exists(entry["module"], staged=staged):
             issues.append(
                 Violation(
                     PUBLIC_SURFACE_LEDGER,
@@ -1009,7 +1224,9 @@ def check_public_surface(base_revision: str, *, staged: bool = False) -> list[Vi
     for module, name in removals:
         if (module, name) in head_keys:
             continue
-        if (module, PUBLIC_SURFACE_WILDCARD) in head_keys and not _head_path_exists(module, staged=staged):
+        if (module, PUBLIC_SURFACE_WILDCARD) in head_keys and not _head_module_exists(
+            module, staged=staged
+        ):
             continue
         uncovered.setdefault(module, []).append(name)
     for module, names in sorted(uncovered.items()):
