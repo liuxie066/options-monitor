@@ -91,6 +91,34 @@ def _option(
     }
 
 
+def _holding(
+    code,
+    name,
+    asset_type,
+    *,
+    quantity,
+    market_value_cny,
+    currency="CNY",
+    normalized_type="cash",
+    broker="富途",
+):
+    return {
+        "account": "lx",
+        "broker": broker,
+        "code": code,
+        "name": name,
+        "asset_type": asset_type,
+        "normalized_type": normalized_type,
+        "quantity": quantity,
+        "currency": currency,
+        "market_value_cny": market_value_cny,
+    }
+
+
+def _us_put(lot_id="put-us"):
+    return _option(lot_id, option_type="put", symbol="NVDA", strike=100, currency="USD")
+
+
 def _snapshot():
     return {
         "snapshot_id": "assignment-test",
@@ -106,39 +134,12 @@ def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
         accounts=["lx"],
         portfolio_evidence=_evidence(
             holdings=[
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "CNY-CASH",
-                    "name": "人民币现金",
-                    "asset_type": "cash",
-                    "normalized_type": "cash",
-                    "quantity": 100000,
-                    "currency": "CNY",
-                    "market_value_cny": 100000,
-                },
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "CNY-MMF",
-                    "name": "货币基金",
-                    "asset_type": "mmf",
-                    "normalized_type": "cash",
-                    "quantity": 20000,
-                    "currency": "CNY",
-                    "market_value_cny": 20000,
-                },
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "0700.HK",
-                    "name": "腾讯控股",
-                    "asset_type": "hk_stock",
-                    "normalized_type": "stock",
-                    "quantity": 100,
-                    "currency": "HKD",
-                    "market_value_cny": 36800,
-                },
+                _holding("CNY-CASH", "人民币现金", "cash", quantity=100000, market_value_cny=100000),
+                _holding("CNY-MMF", "货币基金", "mmf", quantity=20000, market_value_cny=20000),
+                _holding(
+                    "0700.HK", "腾讯控股", "hk_stock",
+                    quantity=100, market_value_cny=36800, currency="HKD", normalized_type="stock",
+                ),
             ],
             quotes=[
                 _quote("0700.HK"),
@@ -184,19 +185,7 @@ def test_uncovered_call_becomes_short_stock_liability_not_error():
     result = project_assignment_scenario(
         accounts=["lx"],
         portfolio_evidence=_evidence(
-            holdings=[
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "CNY-CASH",
-                    "name": "现金",
-                    "asset_type": "cash",
-                    "normalized_type": "cash",
-                    "quantity": 0,
-                    "currency": "CNY",
-                    "market_value_cny": 0,
-                }
-            ],
+            holdings=[_holding("CNY-CASH", "现金", "cash", quantity=0, market_value_cny=0)],
             quotes=[_quote("0700.HK")],
         ),
         option_positions=[
@@ -220,17 +209,7 @@ def test_us_assignment_uses_unified_stock_calculator_but_fails_closed_on_missing
         accounts=["lx"],
         portfolio_evidence=_evidence(
             holdings=[
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "USD-CASH",
-                    "name": "美元现金",
-                    "asset_type": "cash",
-                    "normalized_type": "cash",
-                    "quantity": 20000,
-                    "currency": "USD",
-                    "market_value_cny": 144000,
-                }
+                _holding("USD-CASH", "美元现金", "cash", quantity=20000, market_value_cny=144000, currency="USD")
             ],
             quotes=[
                 _quote(
@@ -243,15 +222,7 @@ def test_us_assignment_uses_unified_stock_calculator_but_fails_closed_on_missing
                 )
             ],
         ),
-        option_positions=[
-            _option(
-                "put-us",
-                option_type="put",
-                symbol="NVDA",
-                strike=100,
-                currency="USD",
-            )
-        ],
+        option_positions=[_us_put()],
         snapshot=_snapshot(),
     )
 
@@ -270,19 +241,7 @@ def test_hk_assignment_stock_fee_estimate_fails_closed_without_account_plan():
     result = project_assignment_scenario(
         accounts=["lx"],
         portfolio_evidence=_evidence(
-            holdings=[
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "CNY-CASH",
-                    "name": "现金",
-                    "asset_type": "cash",
-                    "normalized_type": "cash",
-                    "quantity": 100000,
-                    "currency": "CNY",
-                    "market_value_cny": 100000,
-                }
-            ],
+            holdings=[_holding("CNY-CASH", "现金", "cash", quantity=100000, market_value_cny=100000)],
             quotes=[_quote("0700.HK")],
         ),
         option_positions=[_option("put-hk", option_type="put", strike=350)],
@@ -349,15 +308,7 @@ def test_missing_explicit_fx_never_infers_from_native_and_cny_prices():
                 }
             ],
         ),
-        option_positions=[
-            _option(
-                "put-us",
-                option_type="put",
-                symbol="NVDA",
-                strike=100,
-                currency="USD",
-            )
-        ],
+        option_positions=[_us_put()],
         snapshot=_snapshot(),
     )
 
@@ -400,19 +351,7 @@ def test_long_options_are_not_read_into_the_projection():
     result = project_assignment_scenario(
         accounts=["lx"],
         portfolio_evidence=_evidence(
-            holdings=[
-                {
-                    "account": "lx",
-                    "broker": "富途",
-                    "code": "CNY-CASH",
-                    "name": "现金",
-                    "asset_type": "cash",
-                    "normalized_type": "cash",
-                    "quantity": 1000,
-                    "currency": "CNY",
-                    "market_value_cny": 1000,
-                }
-            ],
+            holdings=[_holding("CNY-CASH", "现金", "cash", quantity=1000, market_value_cny=1000)],
             quotes=[],
         ),
         option_positions=[

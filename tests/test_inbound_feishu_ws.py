@@ -50,6 +50,46 @@ def _message_payload(
     }
 
 
+def _settings(**overrides: Any) -> FeishuWsSettings:
+    """The ``us`` / ``feishu:ou_1`` websocket settings this module repeats.
+
+    Call sites pass only the fields that differ from that envelope.
+    """
+    base: dict[str, Any] = {
+        "config_key": "us",
+        "allowed_senders": "feishu:ou_1",
+        "app_id": "app_1",
+        "app_secret": "secret_1",
+    }
+    base.update(overrides)
+    return FeishuWsSettings(**base)
+
+
+def _bot_channel_service(*, message_id: str, command_id: str, markdown: str) -> Any:
+    """A channel service whose handler returns one rendered bot reply."""
+
+    class _BotChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            del channel, payload, kwargs
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": message_id},
+                    "response_text": markdown,
+                    "inbound_result": {
+                        "ok": True,
+                        "command_id": command_id,
+                        "render_route": "bot",
+                        "response_text": markdown,
+                    },
+                },
+            )
+
+    return _BotChannelService()
+
+
 def test_prepare_feishu_ack_target_accepts_allowed_text_message() -> None:
     out = prepare_feishu_ack_target(_message_payload(), allowed_senders="feishu:ou_1")
 
@@ -137,14 +177,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
 
     out = handle_feishu_ws_event(
         _message_payload(),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="Typing",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        ),
+        settings=_settings(ack_reaction="Typing", audit_db=str(tmp_path / "audit.sqlite3")),
         reply_fn=_reply,
         reaction_fn=_reaction,
         execute_tool_fn=_execute,
@@ -214,13 +247,7 @@ def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) ->
     database = tmp_path / "audit.sqlite3"
     out = handle_feishu_ws_event(
         _message_payload(),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(database),
-        ),
+        settings=_settings(audit_db=str(database)),
         reply_fn=lambda **_kwargs: {"code": 230001, "msg": "temporary failure"},
         channel_service=FakeChannelService(),  # type: ignore[arg-type]
     )
@@ -243,38 +270,15 @@ def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: P
     )
     replies: list[dict[str, Any]] = []
 
-    class FakeChannelService:
-        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            del channel, payload, kwargs
-            return build_response(
-                tool_name="inbound.feishu",
-                ok=True,
-                data={
-                    "kind": "message",
-                    "request": {"message_id": "msg_table"},
-                    "response_text": markdown,
-                    "inbound_result": {
-                        "ok": True,
-                        "command_id": "cmd_table",
-                        "render_route": "bot",
-                        "response_text": markdown,
-                    },
-                },
-            )
-
     database = tmp_path / "audit.sqlite3"
     out = handle_feishu_ws_event(
         _message_payload(message_id="msg_table"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(database),
-        ),
+        settings=_settings(audit_db=str(database)),
         reply_fn=lambda **kwargs: replies.append(dict(kwargs))
         or {"code": 0, "data": {"message_id": "reply_table"}},
-        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+        channel_service=_bot_channel_service(
+            message_id="msg_table", command_id="cmd_table", markdown=markdown
+        ),  # type: ignore[arg-type]
     )
 
     assert out["ok"] is True
@@ -294,25 +298,6 @@ def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Pa
     markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
     calls: list[dict[str, Any]] = []
 
-    class FakeChannelService:
-        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            del channel, payload, kwargs
-            return build_response(
-                tool_name="inbound.feishu",
-                ok=True,
-                data={
-                    "kind": "message",
-                    "request": {"message_id": "msg_fallback"},
-                    "response_text": markdown,
-                    "inbound_result": {
-                        "ok": True,
-                        "command_id": "cmd_fallback",
-                        "render_route": "bot",
-                        "response_text": markdown,
-                    },
-                },
-            )
-
     def _reply(**kwargs: Any) -> dict[str, Any]:
         calls.append(dict(kwargs))
         if kwargs.get("msg_type") == "interactive":
@@ -326,15 +311,11 @@ def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Pa
     database = tmp_path / "audit.sqlite3"
     out = handle_feishu_ws_event(
         _message_payload(message_id="msg_fallback"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(database),
-        ),
+        settings=_settings(audit_db=str(database)),
         reply_fn=_reply,
-        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+        channel_service=_bot_channel_service(
+            message_id="msg_fallback", command_id="cmd_fallback", markdown=markdown
+        ),  # type: ignore[arg-type]
     )
 
     assert out["ok"] is True
@@ -350,26 +331,7 @@ def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp
     from src.application.bot.host_store import BotHostStore
 
     calls: list[dict[str, Any]] = []
-
-    class FakeChannelService:
-        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            del channel, payload, kwargs
-            markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
-            return build_response(
-                tool_name="inbound.feishu",
-                ok=True,
-                data={
-                    "kind": "message",
-                    "request": {"message_id": "msg_ambiguous"},
-                    "response_text": markdown,
-                    "inbound_result": {
-                        "ok": True,
-                        "command_id": "cmd_ambiguous",
-                        "render_route": "bot",
-                        "response_text": markdown,
-                    },
-                },
-            )
+    markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         calls.append(dict(kwargs))
@@ -381,15 +343,11 @@ def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp
     database = tmp_path / "audit.sqlite3"
     out = handle_feishu_ws_event(
         _message_payload(message_id="msg_ambiguous"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(database),
-        ),
+        settings=_settings(audit_db=str(database)),
         reply_fn=_reply,
-        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+        channel_service=_bot_channel_service(
+            message_id="msg_ambiguous", command_id="cmd_ambiguous", markdown=markdown
+        ),  # type: ignore[arg-type]
     )
 
     assert out["ok"] is False
@@ -488,13 +446,7 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
 
     out = handle_feishu_ws_event(
         _message_payload(),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            reply_enabled=True,
-        ),
+        settings=_settings(reply_enabled=True),
         reply_fn=_reply,
         channel_service=FakeChannelService(),  # type: ignore[arg-type]
     )
@@ -580,12 +532,8 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, t
 
     out = handle_feishu_ws_event(
         _message_payload(text="分析 lx 6月的净现金流明细"),
-        settings=FeishuWsSettings(
-            config_key="us",
+        settings=_settings(
             assistant_config_path=str(assistant_config_path),
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
         reply_fn=_reply,
@@ -654,12 +602,8 @@ def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
 
     out = handle_feishu_ws_event(
         _message_payload(text="系统健康检查"),
-        settings=FeishuWsSettings(
-            config_key="us",
+        settings=_settings(
             assistant_config_path=str(assistant_config_path),
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
         reply_fn=_reply,
@@ -689,14 +633,7 @@ def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Pat
 
     out = handle_feishu_ws_event(
         _message_payload(text="/status"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="SMILE",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        ),
+        settings=_settings(ack_reaction="SMILE", audit_db=str(tmp_path / "audit.sqlite3")),
         reply_fn=_reply,
         reaction_fn=_reaction,
         execute_tool_fn=_execute,
@@ -949,7 +886,7 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:
-    settings = FeishuWsSettings(config_key="us", allowed_senders="feishu:ou_1", app_id="app_1", app_secret="secret_1")
+    settings = _settings()
 
     out = check_feishu_ws_settings(settings, sdk_available_fn=lambda: False)
 
@@ -988,13 +925,7 @@ def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
         kwargs["on_event"](_message_payload(text="/status"))
 
     serve_feishu_ws(
-        FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        ),
+        _settings(audit_db=str(tmp_path / "audit.sqlite3")),
         reply_fn=_reply,
         reaction_fn=_reaction,
         execute_tool_fn=_execute,
@@ -1039,14 +970,7 @@ def test_feishu_ws_service_ack_is_independent_from_blocked_business(
         release_business.set()
 
     serve_feishu_ws(
-        FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="SMILE",
-            queue_size=2,
-        ),
+        _settings(ack_reaction="SMILE", queue_size=2),
         reaction_fn=_reaction,
         start_client_fn=_start_client,
         lock_path=tmp_path / "feishu-ws-independent.lock",
@@ -1094,14 +1018,7 @@ def test_feishu_ws_service_does_not_ack_business_queue_rejection(
 
     with caplog.at_level(logging.INFO):
         serve_feishu_ws(
-            FeishuWsSettings(
-                config_key="us",
-                allowed_senders="feishu:ou_1",
-                app_id="app_1",
-                app_secret="secret_1",
-                ack_reaction="SMILE",
-                queue_size=1,
-            ),
+            _settings(ack_reaction="SMILE", queue_size=1),
             reaction_fn=_reaction,
             start_client_fn=_start_client,
             lock_path=tmp_path / "feishu-ws-queue-full.lock",
@@ -1121,14 +1038,7 @@ def test_feishu_ws_service_handler_preserves_reaction_classification(tmp_path: P
 
     allowed = handle_feishu_ws_event(
         _message_payload(text="/status"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="SMILE",
-            audit_db=str(tmp_path / "allowed.sqlite3"),
-        ),
+        settings=_settings(ack_reaction="SMILE", audit_db=str(tmp_path / "allowed.sqlite3")),
         reaction_fn=lambda **kwargs: reactions.append(dict(kwargs)) or {"code": 0},
         reply_fn=lambda **_kwargs: {"code": 0},
         execute_tool_fn=lambda tool_name, payload: build_response(
@@ -1153,13 +1063,7 @@ def test_feishu_ws_service_handler_preserves_reaction_classification(tmp_path: P
     )
     disabled = handle_feishu_ws_event(
         _message_payload(text="/status"),
-        settings=FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            audit_db=str(tmp_path / "disabled.sqlite3"),
-        ),
+        settings=_settings(audit_db=str(tmp_path / "disabled.sqlite3")),
         reply_fn=lambda **_kwargs: {"code": 0},
         execute_tool_fn=lambda tool_name, payload: build_response(
             tool_name=tool_name,
@@ -1315,13 +1219,7 @@ def test_feishu_ws_preflight_failure_does_not_block_business(
 
     with caplog.at_level(logging.INFO):
         serve_feishu_ws(
-            FeishuWsSettings(
-                config_key="us",
-                allowed_senders="feishu:ou_1",
-                app_id="app_1",
-                app_secret="secret_1",
-                ack_reaction="SMILE",
-            ),
+            _settings(ack_reaction="SMILE"),
             reaction_fn=lambda **kwargs: reactions.append(dict(kwargs)) or {"code": 0},
             start_client_fn=_start_client,
             lock_path=tmp_path / "feishu-ws-preflight-error.lock",
@@ -1414,14 +1312,7 @@ def test_feishu_ws_service_sends_one_ack_and_keeps_reply_flow(tmp_path: Path) ->
         assert reply_done.wait(2)
 
     serve_feishu_ws(
-        FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="Typing",
-            audit_db=str(tmp_path / "send-once.sqlite3"),
-        ),
+        _settings(ack_reaction="Typing", audit_db=str(tmp_path / "send-once.sqlite3")),
         reaction_fn=_reaction,
         reply_fn=_reply,
         execute_tool_fn=lambda tool_name, payload: build_response(
@@ -1474,14 +1365,7 @@ def test_feishu_ws_ack_queue_full_does_not_block_business(
 
     with caplog.at_level(logging.INFO):
         serve_feishu_ws(
-            FeishuWsSettings(
-                config_key="us",
-                allowed_senders="feishu:ou_1",
-                app_id="app_1",
-                app_secret="secret_1",
-                ack_reaction="SMILE",
-                queue_size=10,
-            ),
+            _settings(ack_reaction="SMILE", queue_size=10),
             reaction_fn=_reaction,
             start_client_fn=_start_client,
             lock_path=tmp_path / "feishu-ws-ack-full.lock",
@@ -1530,13 +1414,7 @@ def test_feishu_ws_duplicate_delivery_gets_one_logical_ack_each(
         assert two_business_runs.wait(2)
 
     serve_feishu_ws(
-        FeishuWsSettings(
-            config_key="us",
-            allowed_senders="feishu:ou_1",
-            app_id="app_1",
-            app_secret="secret_1",
-            ack_reaction="SMILE",
-        ),
+        _settings(ack_reaction="SMILE"),
         reaction_fn=_reaction,
         start_client_fn=_start_client,
         lock_path=tmp_path / "feishu-ws-duplicate.lock",
@@ -1571,13 +1449,7 @@ def test_feishu_ws_service_reaction_failure_does_not_block_business(
 
     with caplog.at_level(logging.WARNING):
         serve_feishu_ws(
-            FeishuWsSettings(
-                config_key="us",
-                allowed_senders="feishu:ou_1",
-                app_id="app_1",
-                app_secret="secret_1",
-                ack_reaction="SMILE",
-            ),
+            _settings(ack_reaction="SMILE"),
             reaction_fn=_reaction,
             start_client_fn=_start_client,
             lock_path=tmp_path / "feishu-ws-reaction-failure.lock",

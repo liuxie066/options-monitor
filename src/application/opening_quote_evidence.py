@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from src.application.opend_normalize import normalize_iv
+from src.application.payload_helpers import text as _text
 
 
 OPENING_UNDERLIER_OBSERVATION_SCHEMA = "opening_underlier_observation.v1"
@@ -44,10 +45,6 @@ _NON_CONTINUOUS_MARKET_STATES = frozenset(
 )
 _MISSING_ENUM_VALUES = frozenset({"", "N/A", "NONE", "UNKNOWN"})
 _OPEND_OPTION_SECURITY_TYPE = "DRVT"
-
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _enum(value: Any) -> str:

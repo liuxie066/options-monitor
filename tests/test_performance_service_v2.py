@@ -138,6 +138,18 @@ def _period():
     )
 
 
+def _build_report(repo, **overrides):
+    return build_option_period_performance(
+        repo,
+        **{
+            "period": _period(),
+            "config_key": "us",
+            "configured_accounts": ("lx",),
+            **overrides,
+        },
+    )
+
+
 def _contains_not_observed(value: object) -> bool:
     if isinstance(value, dict):
         return any(_contains_not_observed(item) for item in value.values())
@@ -164,13 +176,7 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
         ]
     )
 
-    report = build_option_period_performance(
-        repo,
-        period=_period(),
-        config_key="us",
-        configured_accounts=("lx", "sy"),
-        include_rows=True,
-    )
+    report = _build_report(repo, configured_accounts=("lx", "sy"), include_rows=True)
 
     assert repo.read_count == 1
     assert set(report) == {
@@ -216,20 +222,8 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
 
 
 def test_service_keeps_native_cash_when_cny_conversion_is_missing() -> None:
-    report = build_option_period_performance(
-        _Repo(
-            [
-                _event(
-                    "open",
-                    "open",
-                    "2026-09-01T10:00:00",
-                    fx_rate=None,
-                ).to_dict()
-            ]
-        ),
-        period=_period(),
-        config_key="us",
-        configured_accounts=("lx",),
+    report = _build_report(
+        _Repo([_event("open", "open", "2026-09-01T10:00:00", fx_rate=None).to_dict()])
     )
 
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 200.0
@@ -259,12 +253,7 @@ def test_service_keeps_native_cash_when_cny_conversion_is_malformed(
     conversions["option_trade_cash_gross"] = gross
     raw_payload["cash_conversions"] = conversions
 
-    report = build_option_period_performance(
-        _Repo([replace(event, raw_payload=raw_payload).to_dict()]),
-        period=_period(),
-        config_key="us",
-        configured_accounts=("lx",),
-    )
+    report = _build_report(_Repo([replace(event, raw_payload=raw_payload).to_dict()]))
 
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 200.0
     assert report["option_net_cashflow"]["cny_total"]["amount"] is None
@@ -275,13 +264,7 @@ def test_service_keeps_native_cash_when_cny_conversion_is_malformed(
 def test_service_fails_before_read_when_scope_is_unproved() -> None:
     repo = _Repo([])
     with pytest.raises(OptionPerformanceReadError) as caught:
-        build_option_period_performance(
-            repo,
-            period=_period(),
-            config_key="us",
-            configured_accounts=("lx",),
-            account="ghost",
-        )
+        _build_report(repo, account="ghost")
     assert caught.value.reason_codes == ("scope_unproven",)
     assert repo.read_count == 0
 
@@ -289,13 +272,7 @@ def test_service_fails_before_read_when_scope_is_unproved() -> None:
 def test_service_reports_observed_empty_for_a_canonical_broker_with_no_matching_events() -> None:
     repo = _Repo([_event("open", "open", "2026-09-01T10:00:00").to_dict()])
 
-    report = build_option_period_performance(
-        repo,
-        period=_period(),
-        config_key="us",
-        configured_accounts=("lx",),
-        broker="ibkr",
-    )
+    report = _build_report(repo, broker="ibkr")
 
     assert report["scope"]["brokers"] == ["ibkr"]
     assert report["quality"]["status"] == "observed"
@@ -306,13 +283,7 @@ def test_service_reports_observed_empty_for_a_canonical_broker_with_no_matching_
 def test_service_canonicalizes_futu_broker_aliases_before_filtering() -> None:
     repo = _Repo([_event("open", "open", "2026-09-01T10:00:00").to_dict()])
 
-    report = build_option_period_performance(
-        repo,
-        period=_period(),
-        config_key="us",
-        configured_accounts=("lx",),
-        broker="FUTU",
-    )
+    report = _build_report(repo, broker="FUTU")
 
     assert report["scope"]["brokers"] == ["富途"]
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 200.0
@@ -321,12 +292,7 @@ def test_service_canonicalizes_futu_broker_aliases_before_filtering() -> None:
 def test_service_rejects_an_invalid_repository_result_instead_of_reporting_empty() -> None:
     repo = _InvalidRepo([])
     with pytest.raises(OptionPerformanceReadError) as caught:
-        build_option_period_performance(
-            repo,
-            period=_period(),
-            config_key="us",
-            configured_accounts=("lx",),
-        )
+        _build_report(repo)
     assert caught.value.reason_codes == ("ledger_read_failed",)
     assert repo.read_count == 1
 
@@ -334,12 +300,7 @@ def test_service_rejects_an_invalid_repository_result_instead_of_reporting_empty
 def test_service_classifies_tuple_and_control_graph_failures() -> None:
     duplicate = _event("same", "open", "2026-09-01T10:00:00").to_dict()
     with pytest.raises(OptionPerformanceReadError) as tuple_error:
-        build_option_period_performance(
-            _Repo([duplicate, duplicate]),
-            period=_period(),
-            config_key="us",
-            configured_accounts=("lx",),
-        )
+        _build_report(_Repo([duplicate, duplicate]))
     assert tuple_error.value.reason_codes == ("ledger_tuple_invalid",)
 
     missing_target = _event(
@@ -349,10 +310,5 @@ def test_service_classifies_tuple_and_control_graph_failures() -> None:
         target_event_id="missing",
     ).to_dict()
     with pytest.raises(OptionPerformanceReadError) as graph_error:
-        build_option_period_performance(
-            _Repo([missing_target]),
-            period=_period(),
-            config_key="us",
-            configured_accounts=("lx",),
-        )
+        _build_report(_Repo([missing_target]))
     assert graph_error.value.reason_codes == ("ledger_control_graph_invalid",)

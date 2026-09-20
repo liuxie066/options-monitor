@@ -59,6 +59,14 @@ def _valuation_response(*, accounts=None):
     }
 
 
+def _patch_positions(monkeypatch, positions):
+    monkeypatch.setattr(
+        application,
+        "_load_runtime_and_positions",
+        lambda accounts: (positions, "config.us.json", {"portfolio_management": {"enabled": True}}),
+    )
+
+
 def test_normalize_assignment_accounts_trims_lowercases_and_deduplicates():
     assert application.normalize_assignment_accounts([" LX ", "sy", "lx"]) == ["lx", "sy"]
 
@@ -151,15 +159,7 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
         }
     ]
     seen = {}
-    monkeypatch.setattr(
-        application,
-        "_load_runtime_and_positions",
-        lambda accounts: (
-            positions,
-            "config.us.json",
-            {"portfolio_management": {"enabled": True}},
-        ),
-    )
+    _patch_positions(monkeypatch, positions)
 
     def evidence_reader(
         *,
@@ -200,15 +200,7 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
 
 
 def test_query_returns_business_unavailable_when_portfolio_source_is_down(monkeypatch):
-    monkeypatch.setattr(
-        application,
-        "_load_runtime_and_positions",
-        lambda accounts: (
-            [],
-            "config.us.json",
-            {"portfolio_management": {"enabled": True}},
-        ),
-    )
+    _patch_positions(monkeypatch, [])
     monkeypatch.setattr(
         application,
         "read_portfolio_valuation_evidence",

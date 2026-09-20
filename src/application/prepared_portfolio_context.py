@@ -45,6 +45,7 @@ from src.application.tick_run_workspace import (
 )
 from src.application.payload_helpers import required_text
 from functools import partial
+from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
 
 
 _required_text = partial(required_text, error=lambda m: PreparedPortfolioContextError(m))
@@ -999,19 +1000,6 @@ def _prepared_context_account_mismatch_reason(
         dict(context),
         requested_account=requested_norm,
     )
-
-
-def _json_file_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _is_sha256(value: str) -> bool:

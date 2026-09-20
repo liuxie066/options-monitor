@@ -34,6 +34,45 @@ class _Audit:
         return None
 
 
+def _manifest_payload(*, run_id: str, status: str = "complete", symbols=None, summary=None) -> dict:
+    """The minimal `required_data_snapshot_manifest.v1` payload the seal stubs write."""
+    return {
+        "schema_version": "required_data_snapshot_manifest.v1",
+        "run_id": run_id,
+        "status": status,
+        "plan_id": "a" * 64,
+        "symbols": {} if symbols is None else symbols,
+        "summary": {} if summary is None else summary,
+    }
+
+
+def _seal_stub(*, status: str = "complete", symbols=None, summary=None):
+    """A `seal_required_data_snapshot` stub that writes and returns the minimal manifest."""
+
+    def _seal(**kwargs):
+        from src.infrastructure.io_utils import atomic_write_json
+
+        payload = _manifest_payload(
+            run_id=kwargs["run_id"], status=status, symbols=symbols, summary=summary
+        )
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    return _seal
+
+
+def _outcome(acct: str, outcome: str = "ok"):
+    """The successful per-account outcome the `run_one_account` stubs return."""
+    from src.application import tick_account_execution as mod
+
+    return mod.AccountRunOutcome(
+        result=AccountResult(acct, True, False, outcome, ""),
+        acct_metrics={"account": acct},
+        prefetch_done=True,
+        ran_pipeline=True,
+    )
+
+
 def _portfolio_context(account: str) -> dict:
     return {
         "filters": {"account": account},
@@ -109,6 +148,11 @@ def _request(
         audit_helper=_Audit(),
         trigger_kind=trigger_kind,
     )
+
+
+def _lx_request(tmp_path: Path):
+    """The single-account `lx` tick request shared by the barrier tests."""
+    return _request(tmp_path, accounts=["lx"], workers=1, force=False)
 
 
 def _fake_prepare(**kwargs):
@@ -339,18 +383,7 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
         ).is_file()
         assert request.allow_notifications is False
         account_requests.append(request)
-        return mod.AccountRunOutcome(
-            result=AccountResult(
-                request.acct,
-                True,
-                False,
-                "ok",
-                "",
-            ),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
     monkeypatch.setattr(mod, "prefetch_required_data", fake_prefetch)
@@ -487,28 +520,11 @@ def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
         },
     )
 
-    def _seal(**kwargs):
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "complete",
-            "plan_id": "a" * 64,
-            "symbols": {},
-            "summary": {},
-        }
-        atomic_write_json(kwargs["manifest_path"], payload)
-        return payload
-
-    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
 
     def _run_one_account(*, request, **_kwargs):
         captured.append(request)
-        return mod.AccountRunOutcome(
-            result=AccountResult(request.acct, True, False, "experience", ""),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct, "experience")
 
     monkeypatch.setattr(mod, "run_one_account", _run_one_account)
 
@@ -652,31 +668,13 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     def _seal(**kwargs):
         plan_path = kwargs["close_advice_required_data_plan_path"]
         assert plan_path is not None and plan_path.is_file()
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "complete",
-            "plan_id": "a" * 64,
-            "symbols": {},
-            "summary": {},
-        }
+        payload = _manifest_payload(run_id=kwargs["run_id"])
         atomic_write_json(kwargs["manifest_path"], payload)
         return payload
 
     def _run_one_account(*, request, **_kwargs):
         account_requests.append(request)
-        return mod.AccountRunOutcome(
-            result=AccountResult(
-                request.acct,
-                True,
-                False,
-                "ok",
-                "",
-            ),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     monkeypatch.setattr(mod, "prefetch_required_data", _prefetch)
     monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
@@ -833,12 +831,7 @@ def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
         QualityArtifactRepository,
     )
 
-    request = _request(
-        tmp_path,
-        accounts=["lx"],
-        workers=1,
-        force=False,
-    )
+    request = _lx_request(tmp_path)
     account_config = {
         "portfolio": {"broker": "富途"},
         "close_advice": {"enabled": True},
@@ -944,12 +937,7 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     from src.infrastructure.io_utils import atomic_write_json
 
     request = replace(
-        _request(
-            tmp_path,
-            accounts=["lx"],
-            workers=1,
-            force=False,
-        ),
+        _lx_request(tmp_path),
         prefetch_done=True,
     )
     state_dir = request.run_dir / "state"
@@ -1065,18 +1053,7 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
 
     def _run_one_account(*, request, **_kwargs):
         account_requests.append(request)
-        return mod.AccountRunOutcome(
-            result=AccountResult(
-                request.acct,
-                True,
-                False,
-                "ok",
-                "",
-            ),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     monkeypatch.setattr(mod, "run_one_account", _run_one_account)
 
@@ -1106,12 +1083,7 @@ def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
 ) -> None:
     from src.application import tick_account_execution as mod
 
-    request = _request(
-        tmp_path,
-        accounts=["lx"],
-        workers=1,
-        force=False,
-    )
+    request = _lx_request(tmp_path)
     request.audit_helper.audit = Mock()
     request.runlog.safe_event = Mock()
     expected = {
@@ -1204,14 +1176,9 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
     def fake_seal(**kwargs):
         if seal_behavior == "raise":
             raise RuntimeError("atomic publish failed")
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "failed",
-            "plan_id": "a" * 64,
-            "symbols": {},
-            "summary": {"ready": 0, "failed": 1},
-        }
+        payload = _manifest_payload(
+            run_id=kwargs["run_id"], status="failed", summary={"ready": 0, "failed": 1}
+        )
         atomic_write_json(kwargs["manifest_path"], payload)
         return payload
 
@@ -1286,19 +1253,11 @@ def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(
 
     def fake_seal(**kwargs):
         fact = kwargs["prefetch_summary"]["results"]["3690.HK"]
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "complete",
-            "plan_id": "a" * 64,
-            "symbols": {
-                "3690.HK": {
-                    "status": "ready",
-                    "market_fact": fact,
-                }
-            },
-            "summary": {"ready": 1, "failed": 0},
-        }
+        payload = _manifest_payload(
+            run_id=kwargs["run_id"],
+            symbols={"3690.HK": {"status": "ready", "market_fact": fact}},
+            summary={"ready": 1, "failed": 0},
+        )
         atomic_write_json(kwargs["manifest_path"], payload)
         return payload
 
@@ -1315,12 +1274,7 @@ def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(
             "market_fact": manifest["symbols"]["3690.HK"]["market_fact"],
             "capacity": capacities[request.acct],
         }
-        return mod.AccountRunOutcome(
-            result=AccountResult(request.acct, True, False, "ok", ""),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     request = _request(
         tmp_path,
@@ -1360,12 +1314,7 @@ def test_config_archive_conflict_fails_closed_before_any_account_child(
     from src.application import tick_account_execution as mod
     from src.application.tick_run_workspace import account_run_config_paths
 
-    request = _request(
-        tmp_path,
-        accounts=["lx"],
-        workers=1,
-        force=False,
-    )
+    request = _lx_request(tmp_path)
     historical = (
         tmp_path
         / "output_accounts"
@@ -1429,12 +1378,7 @@ def test_config_hash_drift_returns_typed_failure_before_pipeline_and_close_advic
     from src.application import tick_account_execution as mod
     from src.application.tick_run_workspace import account_run_config_paths
 
-    request = _request(
-        tmp_path,
-        accounts=["lx"],
-        workers=1,
-        force=False,
-    )
+    request = _lx_request(tmp_path)
 
     def _tamper_after_publication(**_kwargs):
         state_path, _compatibility_path = account_run_config_paths(
@@ -1485,12 +1429,7 @@ def test_config_failure_projection_does_not_follow_output_runs_symlink(
     from src.application import tick_account_execution as mod
     from src.application.tick_run_workspace import AccountRunConfigError
 
-    request = _request(
-        tmp_path,
-        accounts=["lx"],
-        workers=1,
-        force=False,
-    )
+    request = _lx_request(tmp_path)
     output_runs = tmp_path / "output_runs"
     preserved = tmp_path / "output_runs-preserved"
     output_runs.rename(preserved)
@@ -1569,25 +1508,13 @@ def test_unavailable_prepared_context_fails_closed_before_shared_prefetch(
         return prepared
 
     def _seal(**kwargs):
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "complete",
-            "plan_id": "a" * 64,
-            "symbols": {},
-            "summary": {},
-        }
+        payload = _manifest_payload(run_id=kwargs["run_id"])
         atomic_write_json(kwargs["manifest_path"], payload)
         return payload
 
     def _run_one_account(*, request, **_kwargs):
         account_children.append(request.acct)
-        return mod.AccountRunOutcome(
-            result=AccountResult(request.acct, True, False, "ok", ""),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
@@ -1683,25 +1610,13 @@ def test_config_drift_isolated_to_one_account_before_shared_prefetch(
         }
 
     def _seal(**kwargs):
-        payload = {
-            "schema_version": "required_data_snapshot_manifest.v1",
-            "run_id": kwargs["run_id"],
-            "status": "complete",
-            "plan_id": "a" * 64,
-            "symbols": {},
-            "summary": {},
-        }
+        payload = _manifest_payload(run_id=kwargs["run_id"])
         atomic_write_json(kwargs["manifest_path"], payload)
         return payload
 
     def _run_one_account(*, request, **_kwargs):
         account_children.append(request.acct)
-        return mod.AccountRunOutcome(
-            result=AccountResult(request.acct, True, False, "ok", ""),
-            acct_metrics={"account": request.acct},
-            prefetch_done=True,
-            ran_pipeline=True,
-        )
+        return _outcome(request.acct)
 
     monkeypatch.setattr(mod, "_account_pipeline_is_required", _scan_gate)
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)

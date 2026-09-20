@@ -9,10 +9,7 @@ from typing import Callable
 
 from domain.domain import build_tool_idempotency_key, normalize_tool_execution_payload
 from domain.storage.repositories import state_repo
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from domain.domain.canonical_schema import utc_now_iso as _utc_now_iso
 
 
 @dataclass(frozen=True)

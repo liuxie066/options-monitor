@@ -6,15 +6,32 @@ from datetime import time
 from pathlib import Path
 
 
-def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
+def _dispatch_result(**overrides: object) -> dict:
+    base = {'should_send': False, 'effective_target': None, 'config_error': None, 'reason': 'no_send'}
+    return {**base, **overrides}
+
+
+def _dnd(quiet_hours: dict, now_bj_time: time) -> dict:
     from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 
-    out = evaluate_dnd_quiet_hours(
-        quiet_hours={'start': '23:00', 'end': '06:00'},
+    return evaluate_dnd_quiet_hours(
+        quiet_hours=quiet_hours,
         no_send=False,
-        now_bj_time=time(0, 30),
+        now_bj_time=now_bj_time,
         parse_hhmm_fn=lambda s: time.fromisoformat(s),
     )
+
+
+def _channel_target(notifications: dict, cli_channel=None, cli_target=None) -> dict:
+    from domain.domain.multi_tick import resolve_notification_channel_target
+
+    return resolve_notification_channel_target(
+        notifications=notifications, cli_channel=cli_channel, cli_target=cli_target
+    )
+
+
+def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
+    out = _dnd({'start': '23:00', 'end': '06:00'}, time(0, 30))
 
     assert out['enabled'] is True
     assert out['quiet_window'] == '23:00-06:00'
@@ -23,14 +40,7 @@ def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
 
 
 def test_evaluate_dnd_quiet_hours_parse_error_keeps_non_blocking_behavior() -> None:
-    from domain.domain.multi_tick import evaluate_dnd_quiet_hours
-
-    out = evaluate_dnd_quiet_hours(
-        quiet_hours={'start': 'BAD', 'end': '06:00'},
-        no_send=False,
-        now_bj_time=time(3, 0),
-        parse_hhmm_fn=lambda s: time.fromisoformat(s),
-    )
+    out = _dnd({'start': 'BAD', 'end': '06:00'}, time(3, 0))
 
     assert out['enabled'] is True
     assert out['is_quiet'] is False
@@ -40,43 +50,23 @@ def test_evaluate_dnd_quiet_hours_parse_error_keeps_non_blocking_behavior() -> N
 def test_decide_notify_dispatch_preserves_route_and_target_rules() -> None:
     from domain.domain.multi_tick import decide_notify_dispatch
 
-    assert decide_notify_dispatch(no_send=True, target='chat-id', dnd_is_quiet=False) == {
-        'should_send': False,
-        'effective_target': None,
-        'config_error': None,
-        'reason': 'no_send',
-    }
+    assert decide_notify_dispatch(no_send=True, target='chat-id', dnd_is_quiet=False) == _dispatch_result()
 
-    assert decide_notify_dispatch(no_send=False, target='', dnd_is_quiet=False) == {
-        'should_send': False,
-        'effective_target': '',
-        'config_error': 'notifications.target is required',
-        'reason': 'config_error',
-    }
+    assert decide_notify_dispatch(no_send=False, target='', dnd_is_quiet=False) == _dispatch_result(
+        effective_target='', config_error='notifications.target is required', reason='config_error'
+    )
 
-    assert decide_notify_dispatch(no_send=False, target='chat-id', dnd_is_quiet=True) == {
-        'should_send': False,
-        'effective_target': 'chat-id',
-        'config_error': None,
-        'reason': 'quiet_hours',
-    }
+    assert decide_notify_dispatch(no_send=False, target='chat-id', dnd_is_quiet=True) == _dispatch_result(
+        effective_target='chat-id', reason='quiet_hours'
+    )
 
 
 def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
-    from domain.domain.multi_tick import resolve_notification_channel_target
-
-    out_default = resolve_notification_channel_target(
-        notifications={'target': 'user:cfg'},
-        cli_channel=None,
-        cli_target=None,
-    )
+    out_default = _channel_target({'target': 'user:cfg'})
     assert out_default == {'provider': 'wechat_clawbot', 'channel': 'wechat_clawbot', 'target': 'user:cfg'}
 
-    out_cli = resolve_notification_channel_target(
-        notifications={'channel': 'cfg-chan', 'target': 'user:cfg'},
-        cli_channel='cli-chan',
-        cli_target='user:cli',
-    )
+    out_cli = _channel_target({'channel': 'cfg-chan', 'target': 'user:cfg'}, cli_channel='cli-chan',
+                              cli_target='user:cli')
     assert out_cli == {'provider': 'wechat_clawbot', 'channel': 'wechat_clawbot', 'target': 'user:cli'}
 
 
@@ -107,9 +97,7 @@ def test_notification_channel_helpers_accept_wechat_clawbot() -> None:
 def test_resolve_notification_route_from_config_centralizes_notifications_reads() -> None:
     from domain.domain.multi_tick import resolve_notification_route_from_config
 
-    out = resolve_notification_route_from_config(
-        config={'notifications': {'target': 'user:cfg'}},
-    )
+    out = resolve_notification_route_from_config(config={'notifications': {'target': 'user:cfg'}})
     assert out == {
         'notifications': {'target': 'user:cfg'},
         'provider': 'wechat_clawbot',
@@ -117,11 +105,8 @@ def test_resolve_notification_route_from_config_centralizes_notifications_reads(
         'target': 'user:cfg',
     }
 
-    out_cli = resolve_notification_route_from_config(
-        config={'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'}},
-        cli_channel='cli-chan',
-        cli_target='user:cli',
-    )
+    out_cli = resolve_notification_route_from_config(config={'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'}},
+                                                     cli_channel='cli-chan', cli_target='user:cli')
     assert out_cli == {
         'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'},
         'provider': 'wechat_clawbot',

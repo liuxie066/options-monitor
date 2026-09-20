@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from scripts import benchmark_data_storage_projection as module
+from scripts import benchmark_support as support
 
 
 def test_public_script_entrypoint_exposes_cli(tmp_path: Path) -> None:
@@ -934,9 +935,9 @@ def test_darwin_hardware_identity_collects_cpu_and_machine_model(
         }[command[-1]]
 
     monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(module, "_command_value", fake_command_value)
+    monkeypatch.setattr(support, "_command_value", fake_command_value)
 
-    assert module._hardware_identity() == ("arm", "Mac16,10")
+    assert support._hardware_identity() == ("arm", "Mac16,10")
     assert calls == ["machdep.cpu.brand_string", "hw.model"]
 
 
@@ -944,22 +945,22 @@ def test_darwin_hardware_identity_falls_back_to_bounded_system_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(module, "_command_value", lambda _command: None)
+    monkeypatch.setattr(support, "_command_value", lambda _command: None)
     monkeypatch.setattr(
-        module,
+        support,
         "_darwin_hardware_details",
         lambda: {"chip_type": "Apple M4", "machine_model": "Mac16,10"},
     )
 
-    assert module._hardware_identity() == ("Apple M4", "Mac16,10")
+    assert support._hardware_identity() == ("Apple M4", "Mac16,10")
 
 
 def test_host_fingerprint_binds_cpu_and_hardware_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(module, "_hardware_identity", lambda: ("Apple M4", "Mac16,10"))
+    monkeypatch.setattr(support, "_hardware_identity", lambda: ("Apple M4", "Mac16,10"))
     first = module._host_profile()
-    monkeypatch.setattr(module, "_hardware_identity", lambda: ("Apple M4", "Mac16,11"))
+    monkeypatch.setattr(support, "_hardware_identity", lambda: ("Apple M4", "Mac16,11"))
     second = module._host_profile()
 
     assert first["cpu_model"] == "Apple M4"
@@ -998,135 +999,6 @@ def test_parent_publishes_all_six_artifacts_atomically_and_labels_smoke(
     )
     assert acceptance["status"] == "fail"
     assert acceptance["readiness"] == "not_ready"
-
-
-def test_lifecycle_attempt_benchmark_reuses_harness_and_publishes_one_artifact(
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "lifecycle-attempt-benchmark"
-
-    result = module.run_lifecycle_attempt_audit_benchmark(
-        repo_root=Path.cwd(),
-        output_dir=output,
-        warmups=0,
-        repetitions=1,
-        prior_attempts=20,
-        receipt_bytes=8 * 1024,
-        p99_receipt_bytes=9 * 1024,
-        moves=2,
-        reference_host_fingerprint="f" * 64,
-    )
-
-    assert result["status"] == "not_evaluable"
-    assert {path.name for path in output.iterdir()} == {
-        module.LIFECYCLE_ATTEMPT_ARTIFACT_FILENAME
-    }
-    artifact = json.loads(
-        (output / module.LIFECYCLE_ATTEMPT_ARTIFACT_FILENAME).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert artifact["schema_version"] == module.LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA
-    assert artifact["dimensions"]["prior_attempts"] == 20
-    assert [item["receipt"]["uncompressed_bytes"] for item in artifact["classes"]] == [
-        8 * 1024,
-        9 * 1024,
-    ]
-    for item in artifact["classes"]:
-        assert item["checks"]["exact_replay_zero_rows"] is True
-        assert item["checks"]["exact_replay_zero_physical_bytes"] is True
-        assert item["checks"]["shadow_verifier"] is True
-        assert item["checks"]["forbidden_work_zero"] is True
-        assert item["hot_write_probe"]["attempt_history_scan_count"] == 0
-        assert item["sealing"]["non_durable_append"]["fsync_count"] == 0
-        assert item["checks"]["concurrent_append_integrity"] is True
-    assert artifact["runtime_sealing"]["status"] == "pass"
-    assert artifact["runtime_sealing"]["one_touched"]["seal_count"] == 1
-    assert artifact["runtime_sealing"]["zero_touched"]["seal_count"] == 0
-    assert not any(artifact["forbidden_work"].values())
-
-
-def test_lifecycle_forbidden_work_detects_real_attempt_history_reader() -> None:
-    with module._temporary_lifecycle_attempt_fixture(
-        prior_attempts=20,
-        receipt_bytes=8 * 1024,
-        seed=module.SEED,
-    ) as fixture:
-        repo = fixture["repo"]
-        trace: list[str] = []
-        conn = repo._connect()
-        try:
-            conn.set_trace_callback(trace.append)
-            rows = repo.list_trade_lifecycle_attempt_audits(
-                case_id="benchmark-case",
-                conn=conn,
-            )
-        finally:
-            conn.close()
-
-    assert len(rows) == 20
-    assert module._lifecycle_forbidden_work(trace)["attempt_history_scan"] == 1
-
-
-@pytest.mark.parametrize(
-    "forbidden_key",
-    [
-        "attempt_history_scan",
-        "evidence_history_scan",
-        "full_replay",
-        "global_blob_sweep",
-        "decision_projection_write",
-        "per_attempt_checkpoint",
-    ],
-)
-def test_lifecycle_attempt_benchmark_fails_for_observed_forbidden_work(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    forbidden_key: str,
-) -> None:
-    fingerprint = "a" * 64
-    forbidden = {
-        "attempt_history_scan": 0,
-        "evidence_history_scan": 0,
-        "full_replay": 0,
-        "global_blob_sweep": 0,
-        "decision_projection_write": 0,
-        "per_attempt_checkpoint": 0,
-    }
-    forbidden[forbidden_key] = 1
-    monkeypatch.setattr(
-        module,
-        "_host_profile",
-        lambda: {"fingerprint": fingerprint},
-    )
-    monkeypatch.setattr(
-        module,
-        "_measure_lifecycle_receipt_class",
-        lambda **_kwargs: {
-            "status": "pass",
-            "checks": {"forbidden_work_zero": False},
-            "forbidden_work": dict(forbidden),
-        },
-    )
-    monkeypatch.setattr(
-        module,
-        "_measure_lifecycle_runtime_sealing",
-        lambda: {
-            "status": "pass",
-            "checks": {"forbidden_work_zero": True},
-            "forbidden_work": {key: 0 for key in forbidden},
-        },
-    )
-
-    result = module.run_lifecycle_attempt_audit_benchmark(
-        repo_root=Path.cwd(),
-        output_dir=tmp_path / forbidden_key,
-        reference_host_fingerprint=fingerprint,
-    )
-
-    assert result["status"] == "fail"
-    artifact = json.loads(Path(result["artifact"]).read_text(encoding="utf-8"))
-    assert artifact["forbidden_work"][forbidden_key] == 2
 
 
 def test_phase_3a_gate_passes_only_complete_reference_evidence() -> None:

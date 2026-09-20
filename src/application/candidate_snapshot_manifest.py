@@ -66,6 +66,7 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
+from src.application.payload_helpers import readable_json_bytes as _canonical_json_bytes
 
 
 CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA = "candidate_snapshot_manifest.v1"
@@ -105,19 +106,6 @@ class CandidateSnapshotManifestError(RuntimeError):
 
     run_id: str | None = None
     account: str | None = None
-
-
-def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _run_account_dir(base: Path, run_id: str, account: str) -> Path:

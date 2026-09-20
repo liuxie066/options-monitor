@@ -164,16 +164,6 @@ def _reject(
     }
 
 
-def _annualized_return(row: dict[str, Any], *, mode: str) -> float | None:
-    if mode == "call":
-        return _first_float(row, "annualized_net_premium_return", "annualized_return")
-    return _first_float(row, "annualized_net_return_on_cash_basis", "annualized_return")
-
-
-def _net_income_for_threshold(row: dict[str, Any]) -> float | None:
-    return _first_float(row, "net_income_cny")
-
-
 def _vol_edge(row: dict[str, Any]) -> tuple[float | None, float | None]:
     ratio = _float(row.get("iv_rv_ratio"))
     spread = _float(row.get("iv_minus_rv"))

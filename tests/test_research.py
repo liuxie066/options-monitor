@@ -370,6 +370,30 @@ def _tool_kwargs(tmp_path: Path) -> _ToolKwargs:
     }
 
 
+def _payload(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """The ``research_tool`` payload head this module repeats.
+
+    ``write_outputs`` is deliberately not defaulted: one test asserts the tool's
+    own default for that key.
+    """
+    base: dict[str, Any] = {"config_path": str(tmp_path / "config.us.json")}
+    base.update(overrides)
+    return base
+
+
+def _scheduler_evidence(**overrides: Any) -> dict[str, Any]:
+    """The systemd ``us-tick`` scheduler evidence this module repeats."""
+    base: dict[str, Any] = {
+        "provider": "systemd",
+        "job_name": "us-tick",
+        "last_triggered_at": "2026-05-16T01:00:00Z",
+        "last_status": "success",
+        "last_exit_code": 0,
+    }
+    base.update(overrides)
+    return base
+
+
 def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
     from src.application.research.service import research_tool
 
@@ -377,18 +401,15 @@ def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
         return _runtime_status_data(), [], {}
 
     data, warnings, meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "failed",
-                "last_exit_code": 1,
-                "stderr_tail": "Traceback: boom",
-            },
-        },
+        _payload(
+            tmp_path,
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(
+                last_status="failed",
+                last_exit_code=1,
+                stderr_tail="Traceback: boom",
+            ),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -413,10 +434,7 @@ def test_research_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -> N
         return runtime_data, ["runtime warning"], {}
 
     data, warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-        },
+        _payload(tmp_path, write_outputs=False),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -445,17 +463,17 @@ def test_research_preserves_scheduler_run_id_and_downgrades_confirmed_stale_runt
         return runtime_data, ["runtime output is stale"], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
+        _payload(
+            tmp_path,
+            write_outputs=False,
+            scheduler_evidence={
                 "provider": "cron",
                 "job_name": "hk-tick",
                 "last_run_id": "run-1",
                 "last_status": "success",
                 "last_exit_code": 0,
             },
-        },
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -494,18 +512,15 @@ def test_research_downgrades_remediated_upgrade_failure_to_warning(tmp_path: Pat
         return runtime_data, ["service upgrade remediated"], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "cron",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:55:00Z",
-                "last_run_id": "run-1",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(
+                provider="cron",
+                last_triggered_at="2026-05-16T01:55:00Z",
+                last_run_id="run-1",
+            ),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -542,18 +557,15 @@ def test_research_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_path: 
         return runtime_data, ["service upgrade failed"], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "cron",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:55:00Z",
-                "last_run_id": "run-1",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(
+                provider="cron",
+                last_triggered_at="2026-05-16T01:55:00Z",
+                last_run_id="run-1",
+            ),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -641,18 +653,12 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
         return _runtime_status_data(), [], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "candidate_report_dir": str(report_dir),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            candidate_report_dir=str(report_dir),
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -780,18 +786,12 @@ def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path
         return runtime_data, [], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "profile_path": str(profile_path),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            profile_path=str(profile_path),
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -838,18 +838,12 @@ def test_research_collect_uses_explicit_archive_run_dir(tmp_path: Path) -> None:
         return _runtime_status_data(), [], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "run_dir": str(archive_root / "output_runs" / "run-1"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            run_dir=str(archive_root / "output_runs" / "run-1"),
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -872,19 +866,14 @@ def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
         return runtime_data, [], {}
 
     data, warnings, meta = research_tool(
-        {
-            "scope": "full",
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-                "stdout_tail": "https://example.com/webhook/token for 999000000000000001",
-            },
-        },
+        _payload(
+            tmp_path,
+            scope="full",
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(
+                stdout_tail="https://example.com/webhook/token for 999000000000000001",
+            ),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -932,18 +921,7 @@ def test_research_ledger_quality_uses_projection_verify_evidence(tmp_path: Path)
         return runtime_data, [], {}
 
     data, warnings, _meta = research_tool(
-        {
-            "scope": "full",
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(tmp_path, scope="full", write_outputs=False, scheduler_evidence=_scheduler_evidence()),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -984,19 +962,13 @@ def test_research_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> N
         )
 
     data, warnings, meta = research_tool(
-        {
-            "scope": "full",
-            "config_path": str(tmp_path / "config.us.json"),
-            "include_healthcheck": True,
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            scope="full",
+            include_healthcheck=True,
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(),
+        ),
         runtime_status_tool_fn=_runtime_status,
         healthcheck_tool_fn=_healthcheck,
         **_tool_kwargs(tmp_path),
@@ -1042,20 +1014,14 @@ def test_research_healthcheck_loads_env_file_from_service_profile(monkeypatch, t
         )
 
     data, warnings, meta = research_tool(
-        {
-            "scope": "full",
-            "config_path": str(tmp_path / "config.us.json"),
-            "profile_path": str(profile_path),
-            "include_healthcheck": True,
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            scope="full",
+            profile_path=str(profile_path),
+            include_healthcheck=True,
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(),
+        ),
         runtime_status_tool_fn=_runtime_status,
         healthcheck_tool_fn=_healthcheck,
         **_tool_kwargs(tmp_path),
@@ -1075,20 +1041,13 @@ def test_research_writes_bundle_and_handoff(tmp_path: Path) -> None:
         return _runtime_status_data(), [], {}
 
     data, warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": True,
-            "research_output_dir": str(tmp_path / "research"),
-            "research_current_dir": str(tmp_path / "current"),
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-                "stdout_tail": "https://example.com/webhook/token",
-            },
-        },
+        _payload(
+            tmp_path,
+            write_outputs=True,
+            research_output_dir=str(tmp_path / "research"),
+            research_current_dir=str(tmp_path / "current"),
+            scheduler_evidence=_scheduler_evidence(stdout_tail="https://example.com/webhook/token"),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -1113,16 +1072,7 @@ def test_research_defaults_to_no_output_writes(tmp_path: Path) -> None:
         return _runtime_status_data(), [], {}
 
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(tmp_path, scheduler_evidence=_scheduler_evidence()),
         runtime_status_tool_fn=_runtime_status,
         **_tool_kwargs(tmp_path),
     )
@@ -1140,18 +1090,12 @@ def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
 
     with pytest.raises(AgentToolError) as _caught:
         research_tool(
-            {
-                "config_path": str(tmp_path / "config.us.json"),
-                "write_outputs": True,
-                "research_output_dir": str(tmp_path.parent / "outside-research"),
-                "scheduler_evidence": {
-                    "provider": "systemd",
-                    "job_name": "us-tick",
-                    "last_triggered_at": "2026-05-16T01:00:00Z",
-                    "last_status": "success",
-                    "last_exit_code": 0,
-                },
-            },
+            _payload(
+                tmp_path,
+                write_outputs=True,
+                research_output_dir=str(tmp_path.parent / "outside-research"),
+                scheduler_evidence=_scheduler_evidence(),
+            ),
             runtime_status_tool_fn=_runtime_status,
             **_tool_kwargs(tmp_path),
         )
@@ -1247,13 +1191,7 @@ def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> N
             "accounts_root": str(accounts_root),
             "runs_root": str(runs_root),
             "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
+            "scheduler_evidence": _scheduler_evidence(),
         },
     )
 
@@ -1397,19 +1335,13 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
     kwargs = _tool_kwargs(tmp_path)
     kwargs["load_runtime_config"] = _load_config(tmp_path, {"accounts": ["lx", "sy"], "symbols": []})
     data, _warnings, _meta = research_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "candidate_report_dir": str(report_dir),
-            "scope": "candidate",
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "systemd",
-                "job_name": "us-tick",
-                "last_triggered_at": "2026-07-16T08:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
+        _payload(
+            tmp_path,
+            candidate_report_dir=str(report_dir),
+            scope="candidate",
+            write_outputs=False,
+            scheduler_evidence=_scheduler_evidence(last_triggered_at="2026-07-16T08:00:00Z"),
+        ),
         runtime_status_tool_fn=_runtime_status,
         **kwargs,
     )

@@ -19,6 +19,25 @@ def _fixed_now() -> datetime:
     return datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def _tag_listing_run(stdout: str):
+    def _run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+    return _run
+
+
+def _auto_apply(**overrides) -> dict[str, object]:
+    """Keyword defaults shared by the ``bump="auto"`` apply cases."""
+    return {
+        "bump": "auto",
+        "apply": True,
+        "recommendation_digest": "sha256:" + "a" * 64,
+        "expected_base_version": "1.0.0",
+        "expected_target_version": "1.1.0",
+        **overrides,
+    }
+
+
 def test_parse_version_orders_prerelease_before_stable() -> None:
     assert compare_versions("0.1.0-beta.3", "0.1.0") < 0
     assert compare_versions("0.1.0-beta.3", "0.1.0-beta.10") < 0
@@ -70,22 +89,9 @@ def test_update_local_version_rejects_downgrade_by_default(tmp_path: Path) -> No
 
 def test_check_version_update_reports_newer_release(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "0.1.0-beta.3")
+    tags = "\n".join(["abc refs/tags/not-a-version", "abc refs/tags/v0.1.0-beta.4", "abc refs/tags/v0.1.0-beta.10"])
 
-    def _run(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="\n".join(
-                [
-                    "abc refs/tags/not-a-version",
-                    "abc refs/tags/v0.1.0-beta.4",
-                    "abc refs/tags/v0.1.0-beta.10",
-                ]
-            ),
-            stderr="",
-        )
-
-    out = check_version_update(base_dir=base, run_cmd=_run, now_fn=_fixed_now)
+    out = check_version_update(base_dir=base, run_cmd=_tag_listing_run(tags), now_fn=_fixed_now)
     assert out["ok"] is True
     assert out["current_version"] == "0.1.0-beta.3"
     assert out["latest_version"] == "0.1.0-beta.10"
@@ -110,16 +116,9 @@ def test_release_tag_parser_orders_multi_digit_patch_versions() -> None:
 
 def test_check_version_update_reports_latest(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "0.1.0")
-
-    def _run(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="abc refs/tags/v0.1.0\nabc refs/tags/v0.0.9\n",
-            stderr="",
-        )
-
-    out = check_version_update(base_dir=base, run_cmd=_run, now_fn=_fixed_now)
+    out = check_version_update(
+        base_dir=base, run_cmd=_tag_listing_run("abc refs/tags/v0.1.0\nabc refs/tags/v0.0.9\n"), now_fn=_fixed_now
+    )
     assert out["ok"] is True
     assert out["update_available"] is False
     assert out["message"] == "没有可升级版本。当前已是最新版本 0.1.0"
@@ -127,16 +126,9 @@ def test_check_version_update_reports_latest(tmp_path: Path) -> None:
 
 def test_check_version_update_reports_current_ahead(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "0.2.0")
-
-    def _run(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="abc refs/tags/v0.1.9\n",
-            stderr="",
-        )
-
-    out = check_version_update(base_dir=base, run_cmd=_run, now_fn=_fixed_now)
+    out = check_version_update(
+        base_dir=base, run_cmd=_tag_listing_run("abc refs/tags/v0.1.9\n"), now_fn=_fixed_now
+    )
     assert out["ok"] is True
     assert out["update_available"] is False
     assert "高于远端最新版本" in out["message"]
@@ -159,10 +151,7 @@ def test_check_version_update_reports_remote_failure(tmp_path: Path) -> None:
 def test_check_version_update_reports_missing_tags(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "0.1.0")
 
-    def _run(*_args, **_kwargs):
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="abc refs/tags/foo\n", stderr="")
-
-    out = check_version_update(base_dir=base, run_cmd=_run, now_fn=_fixed_now)
+    out = check_version_update(base_dir=base, run_cmd=_tag_listing_run("abc refs/tags/foo\n"), now_fn=_fixed_now)
     assert out["ok"] is False
     assert out["error"] == "no valid release tags found on remote"
     assert out["message"] == "未找到可用发布版本"
@@ -213,13 +202,11 @@ def test_update_local_version_auto_apply_recomputes_and_writes_only_version(tmp_
 
     out = update_local_version(
         base_dir=base,
-        bump="auto",
-        apply=True,
-        remote_name="origin",
-        recommendation_digest=digest,
-        expected_base_version="1.0.0",
-        expected_target_version="1.1.0",
-        recommendation_fn=lambda **_kwargs: _auto_recommendation(digest=digest),
+        **_auto_apply(
+            remote_name="origin",
+            recommendation_digest=digest,
+            recommendation_fn=lambda **_kwargs: _auto_recommendation(digest=digest),
+        ),
     )
 
     assert out["status"] == "applied"
@@ -233,12 +220,7 @@ def test_update_local_version_auto_apply_rejects_stale_digest(tmp_path: Path) ->
 
     out = update_local_version(
         base_dir=base,
-        bump="auto",
-        apply=True,
-        recommendation_digest="sha256:" + "a" * 64,
-        expected_base_version="1.0.0",
-        expected_target_version="1.1.0",
-        recommendation_fn=lambda **_kwargs: _auto_recommendation(digest="sha256:" + "b" * 64),
+        **_auto_apply(recommendation_fn=lambda **_kwargs: _auto_recommendation(digest="sha256:" + "b" * 64)),
     )
 
     assert out["status"] == "stale"
@@ -253,15 +235,7 @@ def test_update_local_version_auto_retry_at_target_is_noop_without_remote(tmp_pa
     def _unexpected(**_kwargs):
         raise AssertionError("already_at_target must not query remote")
 
-    out = update_local_version(
-        base_dir=base,
-        bump="auto",
-        apply=True,
-        recommendation_digest="sha256:" + "a" * 64,
-        expected_base_version="1.0.0",
-        expected_target_version="1.1.0",
-        recommendation_fn=_unexpected,
-    )
+    out = update_local_version(base_dir=base, **_auto_apply(recommendation_fn=_unexpected))
 
     assert out["status"] == "already_at_target"
     assert out["write"]["changed"] is False

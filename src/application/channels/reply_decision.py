@@ -112,10 +112,35 @@ def trim_reply(value: str, *, max_chars: int) -> str:
     return text[: max(0, max_chars - 20)].rstrip() + "\n...(truncated)"
 
 
+def public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
+    data = _dict(inbound.get("data"))
+    error = _dict(inbound.get("error"))
+    result = _dict(data.get("inbound_result")) or _dict(data.get("result"))
+    result_data = _dict(result.get("data"))
+    control = _dict(result_data.get("control"))
+    decision = _dict(result_data.get("decision"))
+    assistant = _dict(_dict(result.get("meta")).get("assistant"))
+    return {
+        key: value
+        for key, value in {
+            "ok": bool(inbound.get("ok", False)),
+            "kind": data.get("kind"),
+            "status": data.get("status") or result.get("status"),
+            "intent_name": result.get("intent_name") or control.get("intent_name"),
+            "tool_name": result.get("tool_name") or control.get("tool_name"),
+            "route": result.get("render_route") or assistant.get("route"),
+            "decision_reason": decision.get("reason"),
+            "error_code": error.get("code"),
+        }.items()
+        if value is not None
+    }
+
+
 __all__ = [
     "InboundReplyDecision",
     "PERMISSION_DENIED_CODE",
     "decide_inbound_reply",
+    "public_inbound_summary",
     "inbound_command_id",
     "inbound_error_code",
     "inbound_message_data",

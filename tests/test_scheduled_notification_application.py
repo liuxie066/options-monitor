@@ -4,6 +4,17 @@ from __future__ import annotations
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
+def _delivery_decision(*, should_send, effective_target, reason, **extra) -> dict:
+    return {
+        "should_send": should_send,
+        "meaningful": True,
+        "config_error": None,
+        "effective_target": effective_target,
+        "reason": reason,
+        **extra,
+    }
+
+
 def test_build_per_account_delivery_batch_supports_one_account_message() -> None:
     from src.application.scheduled_notification import build_per_account_delivery_batch
 
@@ -17,13 +28,7 @@ def test_build_per_account_delivery_batch_supports_one_account_message() -> None
 
     def _build_decision(**kwargs):
         seen["decision_kwargs"] = kwargs
-        return {
-            "should_send": True,
-            "meaningful": True,
-            "config_error": None,
-            "effective_target": "user:test",
-            "reason": "send",
-        }
+        return _delivery_decision(should_send=True, effective_target="user:test", reason="send")
 
     decision, batch, target = build_per_account_delivery_batch(
         channel="wechat_clawbot",
@@ -47,14 +52,7 @@ def test_build_per_account_delivery_batch_supports_skip_paths() -> None:
 
     def _decision_builder(**kwargs):
         assert kwargs["notification_text"] == "hello\nworld"
-        return {
-            "should_send": False,
-            "meaningful": True,
-            "config_error": None,
-            "effective_target": None,
-            "reason": "no_send",
-            "action": "skip",
-        }
+        return _delivery_decision(should_send=False, effective_target=None, reason="no_send", action="skip")
 
     decision, batch, target = build_per_account_delivery_batch(
         channel="wechat_clawbot",
@@ -82,14 +80,9 @@ def test_build_per_account_delivery_batch_builds_delivery_batch() -> None:
         target="user:test",
         account_messages={"lx": "hello"},
         delivery_plan_cls=FakeDeliveryPlan,
-        decision_builder=lambda **_kwargs: {
-            "should_send": True,
-            "meaningful": True,
-            "config_error": None,
-            "effective_target": "user:test",
-            "reason": "send",
-            "action": "send",
-        },
+        decision_builder=lambda **_kwargs: _delivery_decision(
+            should_send=True, effective_target="user:test", reason="send", action="send"
+        ),
     )
 
     assert decision["should_send"] is True

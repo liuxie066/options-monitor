@@ -12,6 +12,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Upgrade invocation shared by the release-switch tests, in the order they pass it.
+_UPGRADE_ARGS = (
+    "--version",
+    "v9.9.10",
+    "--repo-url",
+    "https://example.invalid/options-monitor.git",
+)
+
 
 def test_install_script_is_shell_parseable_and_has_no_service_side_effects() -> None:
     script = ROOT / "scripts" / "install.sh"
@@ -220,6 +228,12 @@ def _run_installer_without_version(
     )
 
 
+def _installed_baseline(tmp_path: Path) -> tuple[dict[str, str], subprocess.CompletedProcess[str]]:
+    """Install the v9.9.9 baseline release the release-switch tests start from."""
+    env = _installer_env(tmp_path)
+    return env, _run_installer(tmp_path, env=env)
+
+
 def test_install_script_resolves_latest_release_by_default(tmp_path: Path) -> None:
     env = _installer_env(tmp_path)
     result = _run_installer_without_version(tmp_path, env=env)
@@ -252,8 +266,7 @@ def test_install_script_creates_user_cli_wrappers_by_default(tmp_path: Path) -> 
 
 
 def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     second = _run_installer(tmp_path, env=env)
 
     assert first.returncode == 0, first.stderr + first.stdout
@@ -263,8 +276,7 @@ def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) 
 
 
 def test_install_script_rejects_force_for_active_release_before_mutation(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     active = prefix / "releases" / "v9.9.9"
     marker = active / "preserve-me"
@@ -311,22 +323,14 @@ def test_install_script_force_replaces_inactive_target_only_after_smoke(tmp_path
 
 
 def test_install_script_python_import_failures_preserve_active_release(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     active = (prefix / "current").resolve()
 
     for flag in ("FAKE_SMOKE_FAIL",):
         env["FAKE_RELEASE_PATCH"] = "10"
         env[flag] = "1"
-        result = _run_installer_without_version(
-            tmp_path,
-            "--version",
-            "v9.9.10",
-            "--repo-url",
-            "https://example.invalid/options-monitor.git",
-            env=env,
-        )
+        result = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
         assert result.returncode != 0
         assert (prefix / "current").resolve() == active
         assert not (prefix / "releases" / "v9.9.10").exists()
@@ -337,8 +341,7 @@ def test_install_script_python_import_failures_preserve_active_release(tmp_path:
 
 
 def test_install_script_cli_validation_failure_preserves_current_and_wrappers(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     current = prefix / "current"
     wrappers = [tmp_path / "home" / ".local" / "bin" / name for name in ("om", "om-agent")]
@@ -346,14 +349,7 @@ def test_install_script_cli_validation_failure_preserves_current_and_wrappers(tm
     previous_wrappers = [(path.read_bytes(), path.stat().st_mode) for path in wrappers]
     env.update({"FAKE_RELEASE_PATCH": "10", "FAKE_MISSING_OM_AGENT": "1"})
 
-    failed = _run_installer_without_version(
-        tmp_path,
-        "--version",
-        "v9.9.10",
-        "--repo-url",
-        "https://example.invalid/options-monitor.git",
-        env=env,
-    )
+    failed = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
 
     assert first.returncode == 0, first.stderr + first.stdout
     assert failed.returncode != 0
@@ -364,8 +360,7 @@ def test_install_script_cli_validation_failure_preserves_current_and_wrappers(tm
 
 
 def test_install_script_current_publish_failure_restores_wrappers(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     current = prefix / "current"
     wrappers = [tmp_path / "home" / ".local" / "bin" / name for name in ("om", "om-agent")]
@@ -373,14 +368,7 @@ def test_install_script_current_publish_failure_restores_wrappers(tmp_path: Path
     previous_wrappers = [(path.read_bytes(), path.stat().st_mode) for path in wrappers]
     env.update({"FAKE_RELEASE_PATCH": "10", "FAKE_CURRENT_REPLACE_FAIL": "1"})
 
-    failed = _run_installer_without_version(
-        tmp_path,
-        "--version",
-        "v9.9.10",
-        "--repo-url",
-        "https://example.invalid/options-monitor.git",
-        env=env,
-    )
+    failed = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
 
     assert first.returncode == 0, first.stderr + first.stdout
     assert failed.returncode != 0
@@ -391,8 +379,7 @@ def test_install_script_current_publish_failure_restores_wrappers(tmp_path: Path
 
 
 def test_install_script_current_switch_has_no_missing_link_window(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     current = prefix / "current"
     previous_target = os.readlink(current)
@@ -414,14 +401,7 @@ def test_install_script_current_switch_has_no_missing_link_window(tmp_path: Path
     observer.start()
     ready.wait(timeout=1)
     try:
-        upgraded = _run_installer_without_version(
-            tmp_path,
-            "--version",
-            "v9.9.10",
-            "--repo-url",
-            "https://example.invalid/options-monitor.git",
-            env=env,
-        )
+        upgraded = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
     finally:
         stop.set()
         observer.join(timeout=1)
@@ -433,21 +413,13 @@ def test_install_script_current_switch_has_no_missing_link_window(tmp_path: Path
 
 
 def test_install_script_accepts_old_node(tmp_path: Path) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     active = (prefix / "current").resolve()
     env["FAKE_NODE_VERSION"] = "v22.18.9"
     env["FAKE_RELEASE_PATCH"] = "10"
 
-    result = _run_installer_without_version(
-        tmp_path,
-        "--version",
-        "v9.9.10",
-        "--repo-url",
-        "https://example.invalid/options-monitor.git",
-        env=env,
-    )
+    result = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
 
     assert first.returncode == 0, first.stderr
     assert result.returncode == 0, result.stderr
@@ -464,8 +436,7 @@ def test_install_script_accepts_missing_node_or_npm(
     missing_tool: str,
     expected: str,
 ) -> None:
-    env = _installer_env(tmp_path)
-    first = _run_installer(tmp_path, env=env)
+    env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     active = (prefix / "current").resolve()
     fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
@@ -473,14 +444,7 @@ def test_install_script_accepts_missing_node_or_npm(
     env["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
     env["FAKE_RELEASE_PATCH"] = "10"
 
-    result = _run_installer_without_version(
-        tmp_path,
-        "--version",
-        "v9.9.10",
-        "--repo-url",
-        "https://example.invalid/options-monitor.git",
-        env=env,
-    )
+    result = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
 
     assert first.returncode == 0, first.stderr
     assert result.returncode == 0, result.stderr

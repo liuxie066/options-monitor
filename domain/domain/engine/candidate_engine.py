@@ -1181,9 +1181,45 @@ def _sell_put_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _covered_call_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+    # Not merged with _sell_put_within_symbol_tie_key: element 0 is a
+    # mode-specific quantity (negative assignment discount vs negative strike),
+    # not one quantity read through a differently named field.
+    return (
+        -float(_first_float(src, "strike") or 0.0),
+        *_known_low_sort(_first_float(src, "spread_ratio")),
+        *_known_high_sort(_first_float(src, "open_interest")),
+        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
+        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
+    )
+
+
+# Concentration-after field names per mode; the call side prefers its own names
+# and falls back to the field shared with the put side.
+_CONCENTRATION_AFTER_FIELDS: dict[StrategyMode, tuple[str, ...]] = {
+    "put": ("symbol_concentration_after",),
+    "call": (
+        "remaining_symbol_concentration_after",
+        "symbol_concentration_after_call",
+        "symbol_concentration_after",
+    ),
+}
+
+
+def _candidate_concentration_sort(
+    src: dict[str, Any], *, mode: StrategyMode
+) -> tuple[bool, float]:
+    return _known_low_sort(_first_float(src, *_CONCENTRATION_AFTER_FIELDS[mode]))
+
+
 def _sell_put_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
-    explicit = _first_float(src, "symbol_concentration_after")
-    return _known_low_sort(explicit)
+    return _candidate_concentration_sort(src, mode="put")
+
+
+def _covered_call_remaining_concentration_sort(
+    src: dict[str, Any],
+) -> tuple[bool, float]:
+    return _candidate_concentration_sort(src, mode="call")
 
 
 def _sell_put_option_market_concentration_sort(
@@ -1193,11 +1229,40 @@ def _sell_put_option_market_concentration_sort(
     return _known_low_sort(explicit)
 
 
-def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+def _candidate_cross_symbol_tie_key_without_concentration(
+    src: dict[str, Any], *, mode: StrategyMode
+) -> tuple[Any, ...]:
     return (
-        *_sell_put_concentration_sort(src),
-        *_sell_put_cross_symbol_tie_key_without_concentration(src),
+        -_candidate_tie_break_margin(src, mode=mode),
+        *_known_low_sort(_first_float(src, "spread_ratio")),
+        *_known_high_sort(_first_float(src, "open_interest")),
+        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
+        str(src.get("symbol") or "").strip().upper(),
+        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
     )
+
+
+def _candidate_cross_symbol_tie_key(
+    src: dict[str, Any], *, mode: StrategyMode
+) -> tuple[Any, ...]:
+    return (
+        *_candidate_concentration_sort(src, mode=mode),
+        *_candidate_cross_symbol_tie_key_without_concentration(src, mode=mode),
+    )
+
+
+def _sell_put_cross_symbol_tie_key_without_concentration(
+    src: dict[str, Any],
+) -> tuple[Any, ...]:
+    return _candidate_cross_symbol_tie_key_without_concentration(src, mode="put")
+
+
+def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+    return _candidate_cross_symbol_tie_key(src, mode="put")
+
+
+def _covered_call_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+    return _candidate_cross_symbol_tie_key(src, mode="call")
 
 
 def _sell_put_option_market_cross_symbol_tie_key(
@@ -1205,20 +1270,7 @@ def _sell_put_option_market_cross_symbol_tie_key(
 ) -> tuple[Any, ...]:
     return (
         *_sell_put_option_market_concentration_sort(src),
-        *_sell_put_cross_symbol_tie_key_without_concentration(src),
-    )
-
-
-def _sell_put_cross_symbol_tie_key_without_concentration(
-    src: dict[str, Any],
-) -> tuple[Any, ...]:
-    return (
-        -_candidate_tie_break_margin(src, mode="put"),
-        *_known_low_sort(_first_float(src, "spread_ratio")),
-        *_known_high_sort(_first_float(src, "open_interest")),
-        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
-        str(src.get("symbol") or "").strip().upper(),
-        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
+        *_candidate_cross_symbol_tie_key_without_concentration(src, mode="put"),
     )
 
 
@@ -1264,38 +1316,6 @@ def _rank_return_bands(
         band_indices = {index for index, _row in band}
         remaining = [item for item in remaining if item[0] not in band_indices]
     return ranked
-
-
-def _covered_call_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        -float(_first_float(src, "strike") or 0.0),
-        *_known_low_sort(_first_float(src, "spread_ratio")),
-        *_known_high_sort(_first_float(src, "open_interest")),
-        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
-        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
-    )
-
-
-def _covered_call_remaining_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
-    explicit = _first_float(
-        src,
-        "remaining_symbol_concentration_after",
-        "symbol_concentration_after_call",
-        "symbol_concentration_after",
-    )
-    return _known_low_sort(explicit)
-
-
-def _covered_call_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        *_covered_call_remaining_concentration_sort(src),
-        -_candidate_tie_break_margin(src, mode="call"),
-        *_known_low_sort(_first_float(src, "spread_ratio")),
-        *_known_high_sort(_first_float(src, "open_interest")),
-        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
-        str(src.get("symbol") or "").strip().upper(),
-        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
-    )
 
 
 def _candidate_recommendation_sort_tuple(

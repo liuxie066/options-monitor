@@ -6,43 +6,67 @@ import pandas as pd
 from conftest import phase2_opening_row
 
 
+def _opening_row(contract_symbol: str, **fields: object) -> dict:
+    return phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-05-01",
+            "contract_symbol": contract_symbol,
+            "strike": 90.0,
+            "spot": 100.0,
+            "bid": 0.01,
+            "ask": 0.01,
+            "implied_volatility": 0.30,
+            "multiplier": 100,
+            "currency": "USD",
+            **fields,
+        }
+    )
+
+
+def _write_rows(root: Path, filename: str, rows: list[dict]) -> None:
+    parsed_dir = root / "parsed"
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(parsed_dir / filename, index=False)
+
+
+def _decision(reason: str, *, metric_value: dict | None = None) -> dict:
+    reject = {"reason": reason}
+    if metric_value is not None:
+        reject["metric_value"] = metric_value
+    return {"opening_decision": {"accepted": False, "rejects": [reject]}}
+
+
 def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters(tmp_path: Path) -> None:
     from src.application.scan_sell_put import run_sell_put_scan
 
-    td = tmp_path
-    root = Path(td)
-    parsed_dir = root / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-
-    pd.DataFrame(
+    _write_rows(
+        tmp_path,
+        "0700.HK_required_data.csv",
         [
-            phase2_opening_row({
-                "symbol": "0700.HK",
-                "market": "hk",
-                "option_type": "put",
-                "expiration": "2026-05-01",
-                "dte": 14,
-                "contract_symbol": "TSTP",
-                "strike": 90.0,
-                "spot": 100.0,
-                "bid": 1.9,
-                "ask": 2.1,
-                "mid": 2.0,
-                "quote_update_time": "2026-04-17 10:00:00",
-                "snapshot_received_at_utc": "2026-04-17T02:00:00Z",
-                "open_interest": 0,
-                "volume": 0,
-                "implied_volatility": 0.2,
-                "delta": -0.2,
-                "multiplier": 100,
-                "currency": "HKD",
-            })
-        ]
-    ).to_csv(parsed_dir / "0700.HK_required_data.csv", index=False)
+            _opening_row(
+                "TSTP",
+                dte=14,
+                symbol="0700.HK",
+                market="hk",
+                bid=1.9,
+                ask=2.1,
+                mid=2.0,
+                quote_update_time="2026-04-17 10:00:00",
+                snapshot_received_at_utc="2026-04-17T02:00:00Z",
+                open_interest=0,
+                volume=0,
+                implied_volatility=0.2,
+                delta=-0.2,
+                currency="HKD",
+            )
+        ],
+    )
 
     out = run_sell_put_scan(
-            symbols=["0700.HK"],
-            input_root=root,
+        symbols=["0700.HK"],
+        input_root=tmp_path,
         min_open_interest=999_999,
         min_volume=999_999,
         min_net_income=0,
@@ -56,36 +80,16 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters(tmp_path:
 def test_sell_put_scan_emits_calculation_reject_without_csv_authority(tmp_path: Path) -> None:
     from src.application.scan_sell_put import run_sell_put_scan
 
-    td = tmp_path
-    root = Path(td)
-    parsed_dir = root / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        [
-            phase2_opening_row(
-                {
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "expiration": "2026-05-01",
-                    "dte": 14,
-                    "contract_symbol": "BAD_MULTIPLIER",
-                    "strike": 90.0,
-                    "spot": 100.0,
-                    "bid": 1.9,
-                    "ask": 2.1,
-                    "implied_volatility": 0.30,
-                    "multiplier": 100,
-                    "snapshot_multiplier": 50,
-                    "currency": "USD",
-                }
-            )
-        ]
-    ).to_csv(parsed_dir / "NVDA_required_data.csv", index=False)
+    _write_rows(
+        tmp_path,
+        "NVDA_required_data.csv",
+        [_opening_row("BAD_MULTIPLIER", dte=14, bid=1.9, ask=2.1, snapshot_multiplier=50)],
+    )
     captured: list[dict] = []
 
     out = run_sell_put_scan(
-            symbols=["NVDA"],
-            input_root=root,
+        symbols=["NVDA"],
+        input_root=tmp_path,
         min_net_income=0,
         min_annualized_net_return=0,
         calculation_decision_sink_fn=captured.extend,
@@ -120,35 +124,16 @@ def test_us_sell_put_non_positive_net_premium_is_a_definitive_reject(tmp_path: P
     )
     from src.application.scan_sell_put import run_sell_put_scan
 
-    td = tmp_path
-    root = Path(td)
-    parsed_dir = root / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        [
-            phase2_opening_row(
-                {
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "expiration": "2026-05-01",
-                    "dte": 14,
-                    "contract_symbol": "TINY_PREMIUM_PUT",
-                    "strike": 90.0,
-                    "spot": 100.0,
-                    "bid": 0.01,
-                    "ask": 0.01,
-                    "implied_volatility": 0.30,
-                    "multiplier": 100,
-                    "currency": "USD",
-                }
-            )
-        ]
-    ).to_csv(parsed_dir / "NVDA_required_data.csv", index=False)
+    _write_rows(
+        tmp_path,
+        "NVDA_required_data.csv",
+        [_opening_row("TINY_PREMIUM_PUT", dte=14)],
+    )
     captured: list[dict] = []
 
     out = run_sell_put_scan(
         symbols=["NVDA"],
-        input_root=root,
+        input_root=tmp_path,
         min_net_income=0,
         min_annualized_net_return=0,
         calculation_decision_sink_fn=captured.extend,
@@ -183,36 +168,26 @@ def test_hk_covered_call_non_positive_net_premium_is_a_definitive_reject(tmp_pat
     )
     from src.application.scan_sell_call import run_sell_call_scan
 
-    td = tmp_path
-    root = Path(td)
-    parsed_dir = root / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
+    _write_rows(
+        tmp_path,
+        "0700.HK_required_data.csv",
         [
-            phase2_opening_row(
-                {
-                    "symbol": "0700.HK",
-                    "market": "HK",
-                    "option_type": "call",
-                    "expiration": "2026-05-01",
-                    "dte": 14,
-                    "contract_symbol": "TINY_PREMIUM_CALL",
-                    "strike": 110.0,
-                    "spot": 100.0,
-                    "bid": 0.01,
-                    "ask": 0.01,
-                    "implied_volatility": 0.30,
-                    "multiplier": 100,
-                    "currency": "HKD",
-                }
+            _opening_row(
+                "TINY_PREMIUM_CALL",
+                dte=14,
+                symbol="0700.HK",
+                market="HK",
+                option_type="call",
+                strike=110.0,
+                currency="HKD",
             )
-        ]
-    ).to_csv(parsed_dir / "0700.HK_required_data.csv", index=False)
+        ],
+    )
     captured: list[dict] = []
 
     out = run_sell_call_scan(
         symbols=["0700.HK"],
-        input_root=root,
+        input_root=tmp_path,
         avg_cost=90.0,
         shares=100,
         shares_can_sell=100,
@@ -253,21 +228,9 @@ def test_non_positive_net_premium_requires_explicit_ready_opening_status() -> No
 
     contract = CandidateContractInput.from_row(
         pd.Series(
-            phase2_opening_row(
-                {
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "expiration": "2026-05-01",
-                    "contract_symbol": "MISSING_OPENING_STATUS",
-                    "strike": 90.0,
-                    "spot": 100.0,
-                    "bid": 0.01,
-                    "ask": 0.01,
-                    "implied_volatility": 0.30,
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "opening_contract_status": "",
-                }
+            _opening_row(
+                "MISSING_OPENING_STATUS",
+                opening_contract_status="",
             )
         ),
         mode="put",
@@ -307,20 +270,10 @@ def test_zero_bid_only_scope_projects_no_candidate_not_partial_data() -> None:
     from src.application.sell_put_steps import _evidence_scan_status
 
     decisions = [
-        {
-            "opening_decision": {
-                "accepted": False,
-                "rejects": [
-                    {
-                        "reason": "contract_ineligible",
-                        "metric_value": {
-                            "reason_codes": ["option_no_current_bid"],
-                            "status": "ineligible",
-                        },
-                    }
-                ],
-            }
-        }
+        _decision(
+            "contract_ineligible",
+            metric_value={"reason_codes": ["option_no_current_bid"], "status": "ineligible"},
+        )
     ]
     evidence = evidence_summary_from_decisions(
         decisions=decisions,
@@ -340,19 +293,7 @@ def test_input_invalid_only_scope_projects_data_unavailable_not_no_candidate() -
     from src.application.sell_put_steps import _evidence_scan_status
 
     decisions = [
-        {
-            "opening_decision": {
-                "accepted": False,
-                "rejects": [
-                    {
-                        "reason": "input_invalid",
-                        "metric_value": {
-                            "reason_code": "term_matched_rv_unavailable",
-                        },
-                    }
-                ],
-            }
-        }
+        _decision("input_invalid", metric_value={"reason_code": "term_matched_rv_unavailable"})
     ]
     evidence = evidence_summary_from_decisions(
         decisions=decisions,
@@ -374,20 +315,7 @@ def test_mixed_input_invalid_scope_projects_partial_data_not_no_candidate() -> N
     from src.application.candidate_scanning import evidence_summary_from_decisions
     from src.application.sell_call_steps import _evidence_scan_status
 
-    decisions = [
-        {
-            "opening_decision": {
-                "accepted": False,
-                "rejects": [{"reason": "input_missing"}],
-            }
-        },
-        {
-            "opening_decision": {
-                "accepted": False,
-                "rejects": [{"reason": "contract_ineligible"}],
-            }
-        },
-    ]
+    decisions = [_decision("input_missing"), _decision("contract_ineligible")]
     evidence = evidence_summary_from_decisions(
         decisions=decisions,
         accepted_count=0,

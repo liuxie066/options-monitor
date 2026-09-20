@@ -5,6 +5,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
+def _build_context(tmp_path: Path, **overrides):
+    from src.application import pipeline_context as ctx
+
+    kwargs = {
+        "py": "python",
+        "base": tmp_path,
+        "cfg": {"portfolio": {"account": "paper"}},
+        "report_dir": tmp_path / "reports",
+        "portfolio_timeout_sec": 1,
+        "runtime": {},
+        "is_scheduled": True,
+        "state_dir": tmp_path / "state",
+        "log": lambda _message: None,
+        "no_context": False,
+        "want_scan": True,
+    }
+    kwargs.update(overrides)
+    return ctx.build_pipeline_context(**kwargs)
+
+
 def test_load_exchange_rates_fetches_latest_when_cache_missing(monkeypatch, tmp_path: Path) -> None:
     from src.application import pipeline_context as ctx
     from src.infrastructure import exchange_rates
@@ -118,20 +138,7 @@ def test_market_data_only_context_never_reads_account_authority(
         lambda **_kwargs: (0.14, 0.93),
     )
 
-    assert ctx.build_pipeline_context(
-        py="python",
-        base=tmp_path,
-        cfg={"portfolio": {"account": "paper"}},
-        report_dir=tmp_path / "reports",
-        portfolio_timeout_sec=1,
-        runtime={},
-        is_scheduled=True,
-        state_dir=tmp_path / "state",
-        log=lambda _message: None,
-        no_context=False,
-        want_scan=True,
-        market_data_only=True,
-    ) == (None, None, 0.14, 0.93)
+    assert _build_context(tmp_path, market_data_only=True) == (None, None, 0.14, 0.93)
 
 
 def test_fetch_opend_exchange_rate_observation_uses_market_fetch(
@@ -199,40 +206,25 @@ def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
     )
     monkeypatch.setattr(ctx, "_persist_source_snapshot", lambda *_args: None)
 
-    portfolio, option, usd_per_cny, cny_per_hkd = (
-        ctx.build_pipeline_context(
-            py="python",
-            base=tmp_path,
-            cfg={
-                "portfolio": {
-                    "account": "lx",
-                    "broker": "富途",
-                    "data_config": "portfolio.runtime.json",
-                },
-                "symbols": [],
+    portfolio, option, usd_per_cny, cny_per_hkd = _build_context(
+        tmp_path,
+        cfg={
+            "portfolio": {
+                "account": "lx",
+                "broker": "富途",
+                "data_config": "portfolio.runtime.json",
             },
-            report_dir=tmp_path / "reports",
-            portfolio_timeout_sec=1,
-            runtime={},
-            is_scheduled=True,
-            state_dir=tmp_path / "state",
-            shared_state_dir=tmp_path / "shared",
-            log=lambda _message: None,
-            no_context=False,
-            want_scan=True,
-            prepared_portfolio_context_manifest=tmp_path
-            / "prepared-portfolio.json",
-            prepared_portfolio_context_run_id="run-1",
-            prepared_portfolio_context_account_config_sha256="a" * 64,
-            prepared_portfolio_context_manifest_sha256="b" * 64,
-            prepared_option_positions_context_manifest=tmp_path
-            / "prepared-options.json",
-            prepared_option_positions_context_run_id="run-1",
-            prepared_option_positions_context_account_config_sha256=(
-                "a" * 64
-            ),
-            prepared_option_positions_context_manifest_sha256="c" * 64,
-        )
+            "symbols": [],
+        },
+        shared_state_dir=tmp_path / "shared",
+        prepared_portfolio_context_manifest=tmp_path / "prepared-portfolio.json",
+        prepared_portfolio_context_run_id="run-1",
+        prepared_portfolio_context_account_config_sha256="a" * 64,
+        prepared_portfolio_context_manifest_sha256="b" * 64,
+        prepared_option_positions_context_manifest=tmp_path / "prepared-options.json",
+        prepared_option_positions_context_run_id="run-1",
+        prepared_option_positions_context_account_config_sha256="a" * 64,
+        prepared_option_positions_context_manifest_sha256="c" * 64,
     )
 
     assert portfolio == {"cash_by_currency": {"USD": 1000}}

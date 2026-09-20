@@ -58,12 +58,7 @@ def test_fresh_exhausted_page_covers_full_query_but_continuation_does_not(
         repo,
         {"account": "lx", "position_effect": "close", "limit": 20},
     )
-    second_ten = _page(
-        repo,
-        {"cursor": first_ten["next_cursor"], "limit": 10},
-        account=None,
-        now_epoch_s=1_001,
-    )
+    second_ten = _continuation(repo, first_ten["next_cursor"], limit=10)
 
     assert first_ten["coverage"]["complete_for"] == "requested_page"
     assert first_ten["coverage"]["included_count"] == 10
@@ -138,6 +133,15 @@ def _page(
     )
 
 
+def _continuation(
+    repo: object, cursor: object, *, limit: int, **extra: object
+) -> dict[str, object]:
+    """Fetch a follow-up page from a cursor; continuation pages carry no account."""
+    return _page(
+        repo, {"cursor": cursor, "limit": limit, **extra}, account=None, now_epoch_s=1_001
+    )
+
+
 def _legacy_store(path: Path, events: tuple[TradeEvent, ...]) -> None:
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -176,6 +180,33 @@ def _legacy_store(path: Path, events: tuple[TradeEvent, ...]) -> None:
             )
 
 
+def _ingest_sequences(db_path: Path) -> list[int]:
+    with sqlite3.connect(db_path) as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT ingest_seq FROM trade_events ORDER BY ingest_seq"
+            )
+        ]
+
+
+def _force_zero_event_time(path: Path, event_id: str) -> None:
+    """Rewrite one stored row to ``event_time_ms = 0`` in both copies of the time."""
+
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()[0]
+        )
+        payload["event_time_ms"] = 0
+        conn.execute(
+            "UPDATE trade_events SET event_json = ?, trade_time_ms = 0 WHERE event_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), event_id),
+        )
+
+
 def test_variable_page_sizes_do_not_repeat_and_freeze_late_inserts(
     tmp_path: Path,
 ) -> None:
@@ -195,12 +226,7 @@ def test_variable_page_sizes_do_not_repeat_and_freeze_late_inserts(
     )
     repo.upsert_trade_event(_event("inserted-newest", event_time_ms=99_999, event_type="close"))
     repo.upsert_trade_event(_event("inserted-late", event_time_ms=1, event_type="close"))
-    second = _page(
-        repo,
-        {"cursor": first["next_cursor"], "limit": 20, "include_total": True},
-        account=None,
-        now_epoch_s=1_001,
-    )
+    second = _continuation(repo, first["next_cursor"], limit=20, include_total=True)
     third = _page(
         repo,
         {"cursor": second["next_cursor"], "limit": 10},
@@ -227,12 +253,7 @@ def test_same_time_ties_use_descending_event_id_keyset(tmp_path: Path) -> None:
         repo.upsert_trade_event(_event(event_id, event_time_ms=5_000))
 
     first = _page(repo, {"limit": 2})
-    second = _page(
-        repo,
-        {"cursor": first["next_cursor"], "limit": 2},
-        account=None,
-        now_epoch_s=1_001,
-    )
+    second = _continuation(repo, first["next_cursor"], limit=2)
 
     assert [row["event_id"] for row in first["rows"]] == ["same-c", "same-b"]
     assert [row["event_id"] for row in second["rows"]] == ["same-a"]
@@ -346,18 +367,7 @@ def test_backfill_preserves_voided_legacy_event_with_non_positive_time(
         target_event_id=target.event_id,
     )
     _legacy_store(path, (target, void))
-    with sqlite3.connect(path) as conn:
-        payload = json.loads(
-            conn.execute(
-                "SELECT event_json FROM trade_events WHERE event_id = ?",
-                (target.event_id,),
-            ).fetchone()[0]
-        )
-        payload["event_time_ms"] = 0
-        conn.execute(
-            "UPDATE trade_events SET event_json = ?, trade_time_ms = 0 WHERE event_id = ?",
-            (json.dumps(payload, ensure_ascii=False, sort_keys=True), target.event_id),
-        )
+    _force_zero_event_time(path, target.event_id)
 
     inventory = build_position_projection_migration_inventory(path)
     applied = apply_position_projection_migration(path, inventory)
@@ -380,18 +390,7 @@ def test_backfill_rejects_unvoided_legacy_event_with_non_positive_time(
     path = tmp_path / "legacy-active-invalid-time.sqlite3"
     target = _event("legacy-close", event_time_ms=10, event_type="close")
     _legacy_store(path, (target,))
-    with sqlite3.connect(path) as conn:
-        payload = json.loads(
-            conn.execute(
-                "SELECT event_json FROM trade_events WHERE event_id = ?",
-                (target.event_id,),
-            ).fetchone()[0]
-        )
-        payload["event_time_ms"] = 0
-        conn.execute(
-            "UPDATE trade_events SET event_json = ?, trade_time_ms = 0 WHERE event_id = ?",
-            (json.dumps(payload, ensure_ascii=False, sort_keys=True), target.event_id),
-        )
+    _force_zero_event_time(path, target.event_id)
 
     inventory = build_position_projection_migration_inventory(path)
     with pytest.raises(ValueError, match="event_time_must_be_positive"):
@@ -432,12 +431,7 @@ def test_storage_guards_only_snapshot_membership_and_query_fields(tmp_path: Path
             (json.dumps(payload, ensure_ascii=False, sort_keys=True),),
         )
 
-    second = _page(
-        repo,
-        {"cursor": first["next_cursor"], "limit": 2},
-        account=None,
-        now_epoch_s=1_001,
-    )
+    second = _continuation(repo, first["next_cursor"], limit=2)
     assert [row["event_id"] for row in second["rows"]] == ["event-1", "event-0"]
     assert second["rows"][1]["price"] == 9.0
 
@@ -804,13 +798,7 @@ def test_open_reseeds_a_lost_ingest_sequence_allocator(tmp_path: Path) -> None:
     reopened = SQLiteOptionPositionsRepository(db_path)
     reopened.upsert_trade_event(_event("open-3", event_time_ms=2000))
 
-    with sqlite3.connect(db_path) as conn:
-        sequences = [
-            row[0]
-            for row in conn.execute(
-                "SELECT ingest_seq FROM trade_events ORDER BY ingest_seq"
-            )
-        ]
+    sequences = _ingest_sequences(db_path)
     assert sequences == [1, 2, 3, 4]
 
 
@@ -927,13 +915,7 @@ def test_open_republishes_the_guards_of_a_duplicate_ingest_sequence_store(
 
     assert _pagination_guards_carry_current_definition(db_path)
     reopened.upsert_trade_event(_event("open-2", event_time_ms=2000))
-    with sqlite3.connect(db_path) as conn:
-        sequences = [
-            row[0]
-            for row in conn.execute(
-                "SELECT ingest_seq FROM trade_events ORDER BY ingest_seq"
-            )
-        ]
+    sequences = _ingest_sequences(db_path)
     # the duplicates survive, and the allocator resumed above them
     assert sequences == [7, 7, 8]
     with pytest.raises(TradeEventPaginationError) as error:
@@ -968,13 +950,7 @@ def test_open_repairs_an_allocator_that_lags_behind_the_stored_rows(
         ).fetchone() == (3,)
 
     reopened.upsert_trade_event(_event("open-3", event_time_ms=2000))
-    with sqlite3.connect(db_path) as conn:
-        sequences = [
-            row[0]
-            for row in conn.execute(
-                "SELECT ingest_seq FROM trade_events ORDER BY ingest_seq"
-            )
-        ]
+    sequences = _ingest_sequences(db_path)
     assert sequences == [1, 2, 3, 4]
 
 

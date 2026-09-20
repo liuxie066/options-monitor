@@ -17,6 +17,7 @@ from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.preflight import _preflight_open_event, preflight_manual_close
 from src.application.ledger.position_projection_runtime import (
     CHECKPOINT_ROTATE_EVENT_COUNT,
+    ProjectionRuntimeResult,
     compare_full_and_resumed_position_projection,
     extend_event_prefix_chain,
     initial_event_prefix_chain,
@@ -88,6 +89,26 @@ def _enable(repo: SQLiteOptionPositionsRepository) -> None:
 
 def _checkpoint_rows(repo: SQLiteOptionPositionsRepository) -> list[dict[str, object]]:
     return repo.list_position_projection_checkpoints()
+
+
+def _seed_open(repo: SQLiteOptionPositionsRepository) -> ProjectionRuntimeResult:
+    return run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a")],
+        seed_checkpoint=True,
+    )
+
+
+def _seed(
+    repo: SQLiteOptionPositionsRepository, events: list[TradeEvent]
+) -> ProjectionRuntimeResult:
+    return run_position_projection_forced_full(repo, events, seed_checkpoint=True)
+
+
+def _fast(
+    repo: SQLiteOptionPositionsRepository, events: list[TradeEvent]
+) -> ProjectionRuntimeResult:
+    return run_position_projection_fast_if_safe(repo, events)
 
 
 def _legacy_s1_store(tmp_path: Path) -> Path:
@@ -185,11 +206,7 @@ def test_forced_full_seed_then_strict_tail_uses_no_full_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
-    seeded = run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
-        seed_checkpoint=True,
-    )
+    seeded = _seed(repo, [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)])
     assert seeded.mode_used == "full"
     assert seeded.checkpoint_written is True
     _enable(repo)
@@ -203,19 +220,9 @@ def test_forced_full_seed_then_strict_tail_uses_no_full_history(
         "src.application.ledger.position_projection_runtime.project_stored_trade_events_to_position_lots",
         _unexpected_full,
     )
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "partial",
-                "close",
-                2_000,
-                target_lot_id="lot-a",
-                contracts=1,
-                price=0.5,
-            )
-        ],
-    )
+    result = _fast(repo, [
+        _event("partial", "close", 2_000, target_lot_id="lot-a", contracts=1, price=0.5)
+    ])
 
     assert result.mode_used == "fast_tail"
     assert result.tail_event_count == 1
@@ -231,11 +238,7 @@ def test_resumed_preview_uses_checkpoint_without_reading_full_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)])
     _enable(repo)
 
     def _unexpected_full(*_args: object, **_kwargs: object) -> object:
@@ -276,10 +279,7 @@ def test_public_single_writer_and_fifo_use_bounded_fast_runtime_when_enabled(
         repo,
         _event("open", "open", 1_000, lot_id="lot-a", contracts=2),
     )
-    run_position_projection_forced_full(
-        repo,
-        seed_checkpoint=True,
-    )
+    run_position_projection_forced_full(repo, seed_checkpoint=True)
     _enable(repo)
 
     def _unexpected_full(*_args: object, **_kwargs: object) -> object:
@@ -313,11 +313,7 @@ def test_public_close_preflight_uses_bounded_resumed_preview_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)])
     _enable(repo)
     fields = repo.get_position_lot_fields("lot-a")
     assert fields is not None
@@ -353,11 +349,7 @@ def test_open_preflight_preserves_candidate_projection_error_contract(
     checkpoint_enabled: bool,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     if checkpoint_enabled:
         _enable(repo)
 
@@ -378,35 +370,15 @@ def test_open_preflight_preserves_candidate_projection_error_contract(
 
 def test_read_only_shadow_reports_full_resumed_parity(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [
-            _event("closed-open", "open", 500, lot_id="lot-closed"),
-            _event(
-                "closed-close",
-                "close",
-                600,
-                target_lot_id="lot-closed",
-                price=0.5,
-            ),
-            _event("open", "open", 1_000, lot_id="lot-a", contracts=2),
-        ],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [
+        _event("closed-open", "open", 500, lot_id="lot-closed"),
+        _event("closed-close", "close", 600, target_lot_id="lot-closed", price=0.5),
+        _event("open", "open", 1_000, lot_id="lot-a", contracts=2),
+    ])
     _enable(repo)
-    run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "partial",
-                "close",
-                2_000,
-                target_lot_id="lot-a",
-                contracts=1,
-                price=0.5,
-            )
-        ],
-    )
+    _fast(repo, [
+        _event("partial", "close", 2_000, target_lot_id="lot-a", contracts=1, price=0.5)
+    ])
 
     result = compare_full_and_resumed_position_projection(repo)
 
@@ -421,11 +393,7 @@ def test_fast_path_avoids_global_readiness_and_all_checkpoint_payload_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
 
     def _unexpected(*_args: object, **_kwargs: object) -> object:
@@ -433,10 +401,7 @@ def test_fast_path_avoids_global_readiness_and_all_checkpoint_payload_reads(
 
     monkeypatch.setattr(repo, "position_projection_normalized_columns_ready", _unexpected)
     monkeypatch.setattr(repo, "list_position_projection_checkpoints", _unexpected)
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify", "verification", 2_000, contracts=0, price=0)],
-    )
+    result = _fast(repo, [_event("verify", "verification", 2_000, contracts=0, price=0)])
     assert result.mode_used == "fast_tail"
 
 
@@ -526,37 +491,23 @@ def test_runtime_uses_process_frozen_implementation_without_source_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
 
     def _unexpected_source_read(*_args: object, **_kwargs: object) -> bytes:
         raise AssertionError("runtime must use the process-frozen implementation id")
 
     monkeypatch.setattr(Path, "read_bytes", _unexpected_source_read)
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify", "verification", 2_000, contracts=0, price=0)],
-    )
+    result = _fast(repo, [_event("verify", "verification", 2_000, contracts=0, price=0)])
     assert result.mode_used == "fast_tail"
 
 
 def test_zero_lot_account_remains_fast_path_eligible(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("verify-1", "verification", 1_000, contracts=0, price=0)],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [_event("verify-1", "verification", 1_000, contracts=0, price=0)])
     _enable(repo)
 
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify-2", "verification", 2_000, contracts=0, price=0)],
-    )
+    result = _fast(repo, [_event("verify-2", "verification", 2_000, contracts=0, price=0)])
 
     assert result.mode_used == "fast_tail"
     assert result.position_lot_count == 0
@@ -564,35 +515,18 @@ def test_zero_lot_account_remains_fast_path_eligible(tmp_path: Path) -> None:
 
 def test_backdate_and_control_invalidate_and_seed_full_recovery(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 2_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [_event("open", "open", 2_000, lot_id="lot-a")])
     _enable(repo)
 
-    backdated = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify-old", "verification", 1_000, contracts=0, price=0)],
-    )
+    backdated = _fast(repo, [_event("verify-old", "verification", 1_000, contracts=0, price=0)])
     assert backdated.mode_used == "full"
     assert backdated.fallback_reason == "checkpoint_missing_or_invalidated"
     assert backdated.checkpoint_written is True
     assert repo.read_position_projection_source_state()["checkpoint_mode"] == "enabled"
 
-    control = run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "void-open",
-                "void",
-                3_000,
-                target_event_id="open",
-                contracts=0,
-                price=0,
-            )
-        ],
-    )
+    control = _fast(repo, [
+        _event("void-open", "void", 3_000, target_event_id="open", contracts=0, price=0)
+    ])
     assert control.mode_used == "full"
     assert control.checkpoint_written is True
     assert repo.read_position_projection_source_state()["checkpoint_mode"] == "enabled"
@@ -602,25 +536,12 @@ def test_insertion_inside_existing_tail_invalidates_only_intersected_checkpoint(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
-    run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                f"verify-{index:03d}",
-                "verification",
-                2_000 + index,
-                contracts=0,
-                price=0,
-            )
-            for index in range(CHECKPOINT_ROTATE_EVENT_COUNT)
-        ],
-    )
+    _fast(repo, [
+        _event(f"verify-{index:03d}", "verification", 2_000 + index, contracts=0, price=0)
+        for index in range(CHECKPOINT_ROTATE_EVENT_COUNT)
+    ])
     rows_before = _checkpoint_rows(repo)
     oldest = min(rows_before, key=lambda row: int(row["prefix_event_count"]))
     newest = max(rows_before, key=lambda row: int(row["prefix_event_count"]))
@@ -655,11 +576,7 @@ def test_control_event_trigger_invalidates_all_checkpoints(
     event_type: str,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     with repo._connect() as conn:  # type: ignore[attr-defined]
         assert repo.upsert_trade_event(
@@ -682,11 +599,7 @@ def test_control_event_trigger_invalidates_all_checkpoints(
 
 def test_unclassified_append_invalidates_all_checkpoints(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     payload = _event("future", "future_event", 2_000, contracts=0, price=0).to_dict()
     with repo._connect() as conn:  # type: ignore[attr-defined]
         conn.execute(
@@ -729,11 +642,7 @@ def test_unclassified_append_invalidates_all_checkpoints(tmp_path: Path) -> None
 
 def test_corrupt_checkpoint_falls_back_and_keeps_mode_untrusted(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     with repo._connect() as conn:  # type: ignore[attr-defined]
         conn.execute(
@@ -741,10 +650,7 @@ def test_corrupt_checkpoint_falls_back_and_keeps_mode_untrusted(tmp_path: Path) 
         )
         conn.commit()
 
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify", "verification", 2_000, contracts=0, price=0)],
-    )
+    result = _fast(repo, [_event("verify", "verification", 2_000, contracts=0, price=0)])
 
     assert result.mode_used == "full"
     assert result.fallback_reason.startswith("checkpoint_untrusted:")
@@ -760,11 +666,7 @@ def test_corrupt_checkpoint_falls_back_and_keeps_mode_untrusted(tmp_path: Path) 
 
 def test_stale_parent_metadata_is_diagnostic_only(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     tail = [
         _event(
@@ -786,21 +688,14 @@ def test_stale_parent_metadata_is_diagnostic_only(tmp_path: Path) -> None:
         )
         conn.commit()
 
-    resumed = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify-next", "verification", 3_000, contracts=0, price=0)],
-    )
+    resumed = _fast(repo, [_event("verify-next", "verification", 3_000, contracts=0, price=0)])
     assert resumed.mode_used == "fast_tail"
     assert resumed.tail_event_count == 1
 
 
 def test_rotation_at_100_events_and_pruning_stays_bounded(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     verification_events = [
         _event(
@@ -841,18 +736,9 @@ def test_rotation_at_one_mib_tail_bytes(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     run_position_projection_forced_full(repo, seed_checkpoint=True)
     _enable(repo)
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "large-open",
-                "open",
-                1_000,
-                lot_id="large-lot",
-                raw_payload={"opaque": "x" * 1_100_000},
-            )
-        ],
-    )
+    result = _fast(repo, [
+        _event("large-open", "open", 1_000, lot_id="large-lot", raw_payload={"opaque": "x" * 1_100_000})
+    ])
     assert result.mode_used == "fast_tail"
     assert result.tail_event_count == 1
     assert result.tail_event_bytes >= 1_048_576
@@ -861,19 +747,10 @@ def test_rotation_at_one_mib_tail_bytes(tmp_path: Path) -> None:
 
 def test_checkpoint_decode_peak_allocation_stays_within_contract(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [
-            _event(
-                f"open-{index:04d}",
-                "open",
-                1_000 + index,
-                lot_id=f"lot-{index:04d}",
-            )
-            for index in range(4_000)
-        ],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [
+        _event(f"open-{index:04d}", "open", 1_000 + index, lot_id=f"lot-{index:04d}")
+        for index in range(4_000)
+    ])
     _enable(repo)
     state_bytes = int(_checkpoint_rows(repo)[0]["state_bytes"])
 
@@ -890,35 +767,14 @@ def test_checkpoint_decode_peak_allocation_stays_within_contract(tmp_path: Path)
 
 def test_cross_account_head_capture_and_final_close_tail(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [
-            _event("open-lx", "open", 1_000, lot_id="lot-lx", contracts=2),
-            _event(
-                "open-sy",
-                "open",
-                1_100,
-                account="sy",
-                symbol="AAPL",
-                lot_id="lot-sy",
-            ),
-        ],
-        seed_checkpoint=True,
-    )
+    _seed(repo, [
+        _event("open-lx", "open", 1_000, lot_id="lot-lx", contracts=2),
+        _event("open-sy", "open", 1_100, account="sy", symbol="AAPL", lot_id="lot-sy"),
+    ])
     _enable(repo)
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "close-lx",
-                "close",
-                2_000,
-                target_lot_id="lot-lx",
-                contracts=2,
-                price=0.2,
-            )
-        ],
-    )
+    result = _fast(repo, [
+        _event("close-lx", "close", 2_000, target_lot_id="lot-lx", contracts=2, price=0.2)
+    ])
     assert result.mode_used == "fast_tail"
     lx = read_current_position_projection(repo, account="lx")
     sy = read_current_position_projection(repo, account="sy")
@@ -946,70 +802,34 @@ def test_new_open_fast_path_allows_its_trigger_row_but_rejects_real_collision(
     repo = _repo(tmp_path)
     run_position_projection_forced_full(repo, seed_checkpoint=True)
     _enable(repo)
-    opened = run_position_projection_fast_if_safe(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-    )
+    opened = _fast(repo, [_event("open", "open", 1_000, lot_id="lot-a")])
     assert opened.mode_used == "fast_tail"
-    partial = run_position_projection_fast_if_safe(
-        repo,
-        [
-            _event(
-                "partial",
-                "close",
-                2_000,
-                target_lot_id="lot-a",
-                contracts=1,
-                price=0.5,
-            )
-        ],
-    )
+    partial = _fast(repo, [
+        _event("partial", "close", 2_000, target_lot_id="lot-a", contracts=1, price=0.5)
+    ])
     assert partial.mode_used == "fast_tail"
 
     other = SQLiteOptionPositionsRepository(tmp_path / "collision.sqlite3")
-    run_position_projection_forced_full(
-        other,
-        [
-            _event("historical", "open", 500, lot_id="lot-a"),
-            _event(
-                "historical-close",
-                "close",
-                600,
-                target_lot_id="lot-a",
-                price=0.5,
-            ),
-        ],
-        seed_checkpoint=True,
-    )
+    _seed(other, [
+        _event("historical", "open", 500, lot_id="lot-a"),
+        _event("historical-close", "close", 600, target_lot_id="lot-a", price=0.5),
+    ])
     _enable(other)
     with pytest.raises(ValueError, match="duplicate_lot_id"):
-        run_position_projection_fast_if_safe(
-            other,
-            [_event("open", "open", 1_000, lot_id="lot-a")],
-        )
+        _fast(other, [_event("open", "open", 1_000, lot_id="lot-a")])
     assert other.count_trade_events() == 2
 
 
 def test_fast_path_rejects_reopened_checkpoint_lot_id(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
-    closed = run_position_projection_fast_if_safe(
-        repo,
-        [_event("close", "close", 2_000, target_lot_id="lot-a", price=0.5)],
-    )
+    closed = _fast(repo, [_event("close", "close", 2_000, target_lot_id="lot-a", price=0.5)])
     assert closed.mode_used == "fast_tail"
     closed_row = repo.get_position_lot_fields("lot-a")
 
     with pytest.raises(ValueError, match="duplicate_lot_id"):
-        run_position_projection_fast_if_safe(
-            repo,
-            [_event("reopen", "open", 3_000, lot_id="lot-a")],
-        )
+        _fast(repo, [_event("reopen", "open", 3_000, lot_id="lot-a")])
 
     assert repo.count_trade_events() == 2
     assert repo.get_position_lot_fields("lot-a") == closed_row
@@ -1021,14 +841,11 @@ def test_fast_path_rejects_reopened_lot_id_within_one_tail(tmp_path: Path) -> No
     _enable(repo)
 
     with pytest.raises(ValueError, match="duplicate_lot_id"):
-        run_position_projection_fast_if_safe(
-            repo,
-            [
-                _event("open", "open", 1_000, lot_id="lot-a"),
-                _event("close", "close", 2_000, target_lot_id="lot-a", price=0.5),
-                _event("reopen", "open", 3_000, lot_id="lot-a"),
-            ],
-        )
+        _fast(repo, [
+            _event("open", "open", 1_000, lot_id="lot-a"),
+            _event("close", "close", 2_000, target_lot_id="lot-a", price=0.5),
+            _event("reopen", "open", 3_000, lot_id="lot-a"),
+        ])
 
     assert repo.count_trade_events() == 0
 
@@ -1043,11 +860,7 @@ def test_oversized_checkpoint_is_not_written_or_required(
         1,
     )
 
-    result = run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    result = _seed_open(repo)
 
     assert result.mode_used == "full"
     assert result.checkpoint_written is False
@@ -1073,11 +886,7 @@ def test_failure_injection_rolls_back_event_lot_head_and_checkpoint(
     stage: str,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     before_events = repo.count_trade_events()
     before_lots = repo.list_position_lots()
@@ -1178,11 +987,7 @@ def test_metadata_update_and_enrichment_invalidate_as_before_but_delete_is_rejec
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     checkpoint_id = str(_checkpoint_rows(repo)[0]["checkpoint_id"])
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -1352,11 +1157,7 @@ def test_warning_only_full_projection_without_state_remains_fail_closed(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     before = {
         "events": repo.list_trade_events(),
         "lots": repo.list_position_lots(),
@@ -1403,10 +1204,7 @@ def test_unavailable_implementation_keeps_full_projection_compatible(
         "src.application.ledger.position_projection_publication.loaded_projector_implementation_fingerprint",
         _unavailable,
     )
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-    )
+    result = _fast(repo, [_event("open", "open", 1_000, lot_id="lot-a")])
 
     assert result.mode_used == "full"
     assert result.fallback_reason == "projector_implementation_unavailable"
@@ -1422,11 +1220,7 @@ def test_implementation_or_schema_cookie_mismatch_stays_untrusted(
     mismatch: str,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / f"{mismatch}.sqlite3")
-    run_position_projection_forced_full(
-        repo,
-        [_event("open", "open", 1_000, lot_id="lot-a")],
-        seed_checkpoint=True,
-    )
+    _seed_open(repo)
     _enable(repo)
     with repo._connect() as conn:  # type: ignore[attr-defined]
         if mismatch == "implementation":
@@ -1438,10 +1232,7 @@ def test_implementation_or_schema_cookie_mismatch_stays_untrusted(
             conn.execute("CREATE TABLE schema_cookie_probe(value INTEGER)")
         conn.commit()
 
-    result = run_position_projection_fast_if_safe(
-        repo,
-        [_event("verify", "verification", 2_000, contracts=0, price=0)],
-    )
+    result = _fast(repo, [_event("verify", "verification", 2_000, contracts=0, price=0)])
     assert result.mode_used == "full"
     assert result.checkpoint_written is False
     state = repo.read_position_projection_source_state()
@@ -1457,12 +1248,12 @@ def test_historical_close_persists_after_void_and_newer_unrelated_event(
     from src.application.ledger import writer_trade_events
 
     repo = _repo(tmp_path)
-    run_position_projection_forced_full(repo, [
+    _seed(repo, [
         _event("open", "open", 1_000, lot_id="lot-a"),
         _event("old-close", "close", 2_000, target_lot_id="lot-a"),
         _event("other", "open", 3_000, account="sy", lot_id="lot-b"),
         _event("void-close", "void", 4_000, target_event_id="old-close"),
-    ], seed_checkpoint=True)
+    ])
     if checkpoint_enabled:
         _enable(repo)
         assert repo.read_newest_trusted_position_projection_checkpoint() is not None

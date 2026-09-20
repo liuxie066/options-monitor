@@ -39,6 +39,15 @@ def _contract(settings, *, sender="ou_1", conversation=None):
     return contract, session
 
 
+def _open_run(tmp_path, config_path, run_id="active", **settings_kwargs):
+    """Settings plus a store already holding one open run named ``run_id``."""
+    settings = _settings(tmp_path, config_path, **settings_kwargs)
+    contract, session = _contract(settings)
+    store = BotHostStore(settings.audit_db)
+    store.start_run(run_id, contract=contract, session_key=session)
+    return settings, contract, session, store
+
+
 @pytest.mark.parametrize("text", ["再看一下", "为什么说取消分析", "‘取消分析’", '"停止分析"',
     "取消执行", "取消交易", "停止分析后会怎样", "不要取消分析", "> 取消分析"])
 def test_only_explicit_analysis_control_is_recognized(text):
@@ -128,10 +137,7 @@ def test_receiver_cancels_before_paused_model_and_queue_preserves_deadline(monke
 
 
 def test_cancel_message_dedup_keeps_exact_target_and_commit_winner(tmp_path, example_config_path):
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("first", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "first")
     event = _message_payload(text="停止分析", message_id="cancel")
     first = _preflight(event, settings)
     assert first["status"] == "cancelled" and first["target_run_id"] == "first"
@@ -148,10 +154,7 @@ def test_cancel_message_dedup_keeps_exact_target_and_commit_winner(tmp_path, exa
 
 
 def test_cancel_dedup_is_atomic_across_receivers(tmp_path, example_config_path):
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("active", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
     audit = InboundAuditStore(settings.audit_db)
     audit.find_by_message(channel="feishu", message_id="unused")
     event = _message_payload(text="取消分析", message_id="same")
@@ -175,10 +178,7 @@ def test_cancel_dedup_is_atomic_across_receivers(tmp_path, example_config_path):
 
 
 def test_cancellation_wrong_identity_and_database_fail_closed(tmp_path, example_config_path):
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("active", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
     denied = _message_payload(sender="not-allowed", text="取消分析")
     from src.application.agent_tool_contracts import AgentToolError
     with pytest.raises(AgentToolError, match="not authorized"):
@@ -199,10 +199,7 @@ def test_cancellation_wrong_identity_and_database_fail_closed(tmp_path, example_
 
 
 def test_queue_full_still_cancels_without_claiming_replacement_was_queued(monkeypatch, tmp_path, example_config_path, caplog):
-    settings = _settings(tmp_path, example_config_path, queue_size=1)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("blocked", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "blocked", queue_size=1)
     started, release = threading.Event(), threading.Event()
     handled = []
 
@@ -235,10 +232,7 @@ def test_commit_winner_reply_is_deterministic_and_never_retracted(monkeypatch, t
     from src.application.assistant.inbound_service import handle_assistant_request
     from src.application.inbound.feishu import feishu_payload_to_inbound_request
 
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("committed", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "committed")
     assert store.claim_admission_decision("committed", "commit") == "commit"
     event = _message_payload(text="取消分析", message_id="late-cancel")
     assert _preflight(event, settings)["status"] == "completed"
@@ -256,10 +250,7 @@ def test_commit_winner_reply_is_deterministic_and_never_retracted(monkeypatch, t
 
 
 def test_processed_provider_message_cannot_be_reused_to_cancel(tmp_path, example_config_path):
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("active", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
     audit = InboundAuditStore(settings.audit_db)
     audit.record_result({"command_id": "previous", "channel": "feishu", "sender_id": "ou_1",
         "message_id": "previous", "raw_text": "之前的问题", "decision": "bot", "response": {"ok": True}})
@@ -269,10 +260,7 @@ def test_processed_provider_message_cannot_be_reused_to_cancel(tmp_path, example
 
 
 def test_failed_cancel_transaction_rolls_back_and_cannot_retry_from_queue(monkeypatch, tmp_path, example_config_path, caplog):
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("active", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
     original = BotHostStore.cancel_session_run
     handled = []
 
@@ -299,10 +287,7 @@ def test_control_redelivery_completes_request_once_after_dispatch_loss(
 ):
     from src.application.bot.contracts import AppResult
 
-    settings = _settings(tmp_path, example_config_path, queue_size=1)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("original", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "original", queue_size=1)
     blocked, release, drained, processed = (threading.Event() for _ in range(4))
     model_calls, results, handled, deliveries = [], [], [], []
     text = "取消当前分析，改为解释新问题" if replacement else "取消分析"
@@ -397,10 +382,7 @@ def test_analysis_control_deadline_rolls_back_before_commit(
     from src.application.agent_tool_contracts import AgentToolError
     from src.application.assistant import audit as audit_module
 
-    settings = _settings(tmp_path, example_config_path)
-    contract, session = _contract(settings)
-    store = BotHostStore(settings.audit_db)
-    store.start_run("active", contract=contract, session_key=session)
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
     clock = [time.monotonic()]
     audit = InboundAuditStore(settings.audit_db, deadline_monotonic=clock[0] + 1)
     original_prepare = audit._ensure_schema

@@ -6,30 +6,39 @@ import json
 from datetime import datetime, timezone
 
 
-def test_scan_scheduler_emits_notify_window_for_downstream_delivery() -> None:
-    from src.application.scan_scheduler import decide
-
-    schedule_cfg = {
+def _hk_schedule_cfg(*, breaks: list[dict], **overrides) -> dict:
+    cfg = {
         'enabled': True,
         'timezone': 'Asia/Hong_Kong',
         'cron_interval_min': 10,
         'run_window': {
             'start': '09:30',
             'end': '16:00',
-            'breaks': [],
+            'breaks': breaks,
         },
         'run_points': {
             'start_plus_min': 10,
             'hourly_minute': 0,
             'end_minus_min': 10,
         },
-        'beijing_timezone': 'Asia/Shanghai',
     }
-    state = {
+    cfg.update(overrides)
+    return cfg
+
+
+def _empty_state() -> dict:
+    return {
         'last_run_utc_by_account': {},
         'last_notify_utc': None,
         'last_notify_utc_by_account': {},
     }
+
+
+def test_scan_scheduler_emits_notify_window_for_downstream_delivery() -> None:
+    from src.application.scan_scheduler import decide
+
+    schedule_cfg = _hk_schedule_cfg(breaks=[], beijing_timezone='Asia/Shanghai')
+    state = _empty_state()
     now_utc = datetime(2026, 4, 1, 1, 0, 0, tzinfo=timezone.utc)
 
     decision = decide(schedule_cfg, state, now_utc, account='lx', schedule_key='schedule_hk')
@@ -42,29 +51,13 @@ def test_scan_scheduler_emits_notify_window_for_downstream_delivery() -> None:
 def test_scan_scheduler_uses_simple_market_day_targets() -> None:
     from src.application.scan_scheduler import decide
 
-    schedule_cfg = {
-        'enabled': True,
-        'timezone': 'Asia/Hong_Kong',
-        'cron_interval_min': 10,
-        'run_window': {
-            'start': '09:30',
-            'end': '16:00',
-            'breaks': [
-                {'start': '12:00', 'end': '13:00'},
-            ],
-        },
-        'run_points': {
-            'start_plus_min': 10,
-            'hourly_minute': 0,
-            'end_minus_min': 10,
-        },
-        'beijing_timezone': 'Asia/Shanghai',
-    }
-    empty_state = {
-        'last_run_utc_by_account': {},
-        'last_notify_utc': None,
-        'last_notify_utc_by_account': {},
-    }
+    schedule_cfg = _hk_schedule_cfg(
+        breaks=[
+            {'start': '12:00', 'end': '13:00'},
+        ],
+        beijing_timezone='Asia/Shanghai',
+    )
+    empty_state = _empty_state()
 
     before_first = decide(
         schedule_cfg,
@@ -144,35 +137,8 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
 def test_scan_scheduler_us_beijing_before_2am_gate_handles_dst() -> None:
     from src.application.scan_scheduler import decide
 
-    schedule_cfg = {
-        'enabled': True,
-        'timezone': 'America/New_York',
-        'cron_interval_min': 10,
-        'run_window': {
-            'start': '09:30',
-            'end': '16:00',
-            'breaks': [],
-        },
-        'run_points': {
-            'start_plus_min': 10,
-            'hourly_minute': 0,
-            'end_minus_min': 10,
-        },
-        'gates': [
-            {
-                'type': 'before',
-                'timezone': 'Asia/Shanghai',
-                'time': '02:00',
-                'day_offset_from_window_start': 1,
-            }
-        ],
-        'beijing_timezone': 'Asia/Shanghai',
-    }
-    empty_state = {
-        'last_run_utc_by_account': {},
-        'last_notify_utc': None,
-        'last_notify_utc_by_account': {},
-    }
+    schedule_cfg = _us_schedule_with_beijing_cutoff()
+    empty_state = _empty_state()
 
     summer_allowed = decide(
         schedule_cfg,
@@ -323,17 +289,7 @@ def test_scheduler_catchup_keeps_original_batch_and_force_has_no_batch() -> None
 def test_scan_scheduler_adds_half_hour_candidate_targets_without_0930() -> None:
     from src.application.scan_scheduler import decide
 
-    cfg = {
-        "enabled": True,
-        "timezone": "Asia/Hong_Kong",
-        "cron_interval_min": 10,
-        "run_window": {
-            "start": "09:30",
-            "end": "16:00",
-            "breaks": [{"start": "12:00", "end": "13:00"}],
-        },
-        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
-    }
+    cfg = _hk_schedule_cfg(breaks=[{"start": "12:00", "end": "13:00"}])
     state = {
         "last_run_utc_by_account": {},
         "last_processed_scan_target_utc_by_account": {},
@@ -360,13 +316,7 @@ def test_scan_scheduler_adds_half_hour_candidate_targets_without_0930() -> None:
 def test_processed_target_watermark_does_not_let_late_completion_swallow_next_target() -> None:
     from src.application.scan_scheduler import decide
 
-    cfg = {
-        "enabled": True,
-        "timezone": "Asia/Hong_Kong",
-        "cron_interval_min": 10,
-        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
-        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
-    }
+    cfg = _hk_schedule_cfg(breaks=[])
     state = {
         "last_run_utc_by_account": {"lx": "2026-07-21T02:01:00+00:00"},
         "last_processed_scan_target_utc_by_account": {"lx": "2026-07-21T01:40:00+00:00"},
@@ -387,13 +337,7 @@ def test_processed_target_watermark_does_not_let_late_completion_swallow_next_ta
 def test_processed_target_watermark_is_account_isolated() -> None:
     from src.application.scan_scheduler import decide
 
-    cfg = {
-        "enabled": True,
-        "timezone": "Asia/Hong_Kong",
-        "cron_interval_min": 10,
-        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
-        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
-    }
+    cfg = _hk_schedule_cfg(breaks=[])
     state = {
         "last_run_utc_by_account": {
             "lx": "2026-07-21T02:00:05+00:00",

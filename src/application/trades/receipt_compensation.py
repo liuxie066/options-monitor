@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +15,7 @@ from domain.domain.strategy_vocab import (
     STRATEGY_SELL_PUT,
     strategy_action_label,
 )
+from src.application.file_locks import exclusive_lock as _exclusive_lock
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
@@ -973,17 +973,6 @@ def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
     except FileExistsError:
         raise
-
-
-@contextmanager
-def _exclusive_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _normalized_scalar(value: Any) -> str:

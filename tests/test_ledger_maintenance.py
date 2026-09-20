@@ -69,6 +69,80 @@ def _auto_close_payloads(*args, **kwargs):
     return payload["decisions"], payload["applied"], payload["errors"]
 
 
+def _auto_close_decisions(repo, positions, as_of_ms):
+    """The unchanged grace/max-close settings every auto-close case in this module uses."""
+    return _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+
+def _auto_close_positions(
+    repo: ledger_repository.SQLiteOptionPositionsRepository,
+    *,
+    as_of_ymd: str,
+) -> tuple[int, list[dict[str, object]]]:
+    as_of_ms = parse_exp_to_ms(as_of_ymd)
+    assert as_of_ms is not None
+    return as_of_ms, [
+        dict(item["fields"], record_id=item["record_id"])
+        for item in repo.list_position_lots()
+    ]
+
+
+def _seed_tigr_put(
+    repo: ledger_repository.SQLiteOptionPositionsRepository,
+    *,
+    lot_id: str = "lot_tigr_put_6_20260522",
+) -> None:
+    _seed_open_lot_event(
+        repo,
+        lot_id=lot_id,
+        account="lx",
+        symbol="TIGR",
+        option_type="put",
+        side="short",
+        contracts=10,
+        currency="USD",
+        strike=6,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+
+
+def _tigr_expire_case(case_id: str) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+        "account": "lx",
+        "symbol": "TIGR",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 6,
+        "expiration_ymd": "2026-05-22",
+        "contracts": 10,
+        "status": "waiting_settlement_evidence",
+        "decision_type": "needs_review",
+        "target_lot_ids": [],
+    }
+
+
+def _tigr_zero_price_close_evidence(case_id: str) -> dict[str, object]:
+    return {
+        "evidence_id": "ev_tigr_zero_close",
+        "case_id": case_id,
+        "source_type": "opend_deal",
+        "source_event_id": "deal-zero-close",
+        "evidence_type": "option_zero_price_close",
+        "account": "lx",
+        "symbol": "TIGR",
+    }
+
+
 def test_auto_close_uses_provided_projection_state_without_rebuild(monkeypatch) -> None:
     from src.application.ledger import maintenance as mod
     from src.application.ledger.results import ProjectionRefreshResult
@@ -521,13 +595,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
     positions[0]["_auto_close_underlying_spot"] = 101
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert len(decisions) == 1
     assert decisions[0]["should_close"] is True
@@ -597,13 +665,7 @@ def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_cl
     as_of_ms = parse_exp_to_ms("2026-05-03")
     assert as_of_ms is not None
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        stale_positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, stale_positions, as_of_ms)
 
     assert applied == []
     assert errors == []
@@ -657,13 +719,7 @@ def test_auto_close_expired_positions_skips_non_current_candidate_record_id(tmp_
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        [compat_position],
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, [compat_position], as_of_ms)
 
     assert applied == []
     assert errors == []
@@ -936,19 +992,11 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
         expiration_ymd="2026-06-29",
         opened_at_ms=3000,
     )
-    as_of_ms = parse_exp_to_ms("2026-05-31")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-31")
     for item in positions:
         item["_auto_close_underlying_spot"] = 500
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
     assert {item["record_id"] for item in applied} == {
@@ -982,48 +1030,12 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
 
 def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    _seed_open_lot_event(
-        repo,
-        lot_id="lot_tigr_put_6_20260522",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        opened_at_ms=1000,
-    )
-    repo.upsert_trade_lifecycle_case(
-        {
-            "case_id": "lc_tigr_assignment",
-            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
-            "account": "lx",
-            "symbol": "TIGR",
-            "option_type": "put",
-            "position_side": "short",
-            "strike": 6,
-            "expiration_ymd": "2026-05-22",
-            "contracts": 10,
-            "status": "waiting_settlement_evidence",
-            "decision_type": "needs_review",
-            "target_lot_ids": [],
-        }
-    )
-    as_of_ms = parse_exp_to_ms("2026-05-25")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    _seed_tigr_put(repo)
+    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_assignment"))
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
     assert applied == []
@@ -1036,59 +1048,13 @@ def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tm
 
 def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pending_case(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    _seed_open_lot_event(
-        repo,
-        lot_id="lot_tigr_put_6_20260522",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        opened_at_ms=1000,
-    )
-    repo.upsert_trade_lifecycle_case(
-        {
-            "case_id": "lc_tigr_expire",
-            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
-            "account": "lx",
-            "symbol": "TIGR",
-            "option_type": "put",
-            "position_side": "short",
-            "strike": 6,
-            "expiration_ymd": "2026-05-22",
-            "contracts": 10,
-            "status": "waiting_settlement_evidence",
-            "decision_type": "needs_review",
-            "target_lot_ids": [],
-        }
-    )
-    repo.upsert_trade_lifecycle_evidence(
-        {
-            "evidence_id": "ev_tigr_zero_close",
-            "case_id": "lc_tigr_expire",
-            "source_type": "opend_deal",
-            "source_event_id": "deal-zero-close",
-            "evidence_type": "option_zero_price_close",
-            "account": "lx",
-            "symbol": "TIGR",
-        }
-    )
-    as_of_ms = parse_exp_to_ms("2026-05-25")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    _seed_tigr_put(repo)
+    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
+    repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
     assert len(applied) == 1
@@ -1134,33 +1100,8 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
         expiration_ymd="2026-05-22",
         opened_at_ms=1000,
     )
-    repo.upsert_trade_lifecycle_case(
-        {
-            "case_id": "lc_tigr_expire",
-            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
-            "account": "lx",
-            "symbol": "TIGR",
-            "option_type": "put",
-            "position_side": "short",
-            "strike": 6,
-            "expiration_ymd": "2026-05-22",
-            "contracts": 10,
-            "status": "waiting_settlement_evidence",
-            "decision_type": "needs_review",
-            "target_lot_ids": [],
-        }
-    )
-    repo.upsert_trade_lifecycle_evidence(
-        {
-            "evidence_id": "ev_tigr_zero_close",
-            "case_id": "lc_tigr_expire",
-            "source_type": "opend_deal",
-            "source_event_id": "deal-zero-close",
-            "evidence_type": "option_zero_price_close",
-            "account": "lx",
-            "symbol": "TIGR",
-        }
-    )
+    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
+    repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
     original_preflight = maintenance_mod._resolve_preflight_expire_auto_close()
 
     def repair_after_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -1179,18 +1120,10 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
         "_resolve_preflight_expire_auto_close",
         lambda: repair_after_preflight,
     )
-    as_of_ms = parse_exp_to_ms("2026-05-25")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert applied == []
     assert errors and "target fields do not match current lot state" in errors[0]
@@ -1213,62 +1146,13 @@ def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_wri
             return super().upsert_trade_lifecycle_case(case, conn=conn)
 
     repo = FailingCaseRepo(tmp_path / "option_positions.sqlite3")
-    _seed_open_lot_event(
-        repo,
-        lot_id="lot_tigr_put_6_20260522",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        opened_at_ms=1000,
-    )
-    repo.upsert_trade_lifecycle_case(
-        {
-            "case_id": "lc_tigr_expire",
-            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
-            "account": "lx",
-            "symbol": "TIGR",
-            "option_type": "put",
-            "position_side": "short",
-            "strike": 6,
-            "expiration_ymd": "2026-05-22",
-            "contracts": 10,
-            "status": "waiting_settlement_evidence",
-            "decision_type": "needs_review",
-            "target_lot_ids": [],
-        }
-    )
-    repo.upsert_trade_lifecycle_evidence(
-        {
-            "evidence_id": "ev_tigr_zero_close",
-            "case_id": "lc_tigr_expire",
-            "source_type": "opend_deal",
-            "source_event_id": "deal-zero-close",
-            "evidence_type": "option_zero_price_close",
-            "account": "lx",
-            "symbol": "TIGR",
-        }
-    )
-    as_of_ms = parse_exp_to_ms("2026-05-25")
-    assert as_of_ms is not None
-    positions = [
-        dict(item["fields"], record_id=item["record_id"])
-        for item in repo.list_position_lots()
-    ]
+    _seed_tigr_put(repo)
+    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
+    repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
-    _decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    _decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert applied == []
     assert errors and "injected lifecycle case write failure" in errors[0]
@@ -1312,17 +1196,9 @@ def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tm
             "raw": {"broker": "富途", "deal_id": "deal-aapl-stock"},
         }
     )
-    as_of_ms = parse_exp_to_ms("2026-05-25")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
     assert applied == []
@@ -1367,18 +1243,10 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
             },
         }
     )
-    as_of_ms = parse_exp_to_ms("2026-08-01")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-08-01")
     positions[0]["_auto_close_underlying_spot"] = 500
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
     assert [item["record_id"] for item in applied] == ["lot_0700_put_440_20260730"]
@@ -1418,18 +1286,10 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
         premium_per_share=1.0,
         opened_at_ms=1000,
     )
-    as_of_ms = parse_exp_to_ms("2026-05-31")
-    assert as_of_ms is not None
-    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-31")
     positions[0]["_auto_close_underlying_spot"] = 500
 
-    decisions, applied, errors = _auto_close_payloads(
-        repo,
-        positions,
-        as_of_ms=as_of_ms,
-        grace_days=1,
-        max_close=5,
-    )
+    decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert applied == []
     assert errors == []

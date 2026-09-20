@@ -23,6 +23,8 @@ from src.application.short_vol_risk_context import (
     enrich_short_vol_contract_cny_fields,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
+from src.application.payload_helpers import config_optional_float as _optional_float_setting
 
 
 def resolve_sell_put_underwriting_config(raw: dict[str, Any] | None) -> InsuranceUnderwritingConfig:
@@ -138,31 +140,3 @@ def evaluate_sell_put_underwriting_row(
     cfg: InsuranceUnderwritingConfig,
 ) -> dict[str, Any]:
     return evaluate_underwriting_candidate(row, mode="put", cfg=cfg)
-
-
-def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
-    try:
-        value = raw.get(key, default)
-        if value is None:
-            return float(default)
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _float_setting_from_sources(key: str, default: float, *sources: dict[str, Any]) -> float:
-    for source in sources:
-        if not isinstance(source, dict) or key not in source:
-            continue
-        return _float_setting(source, key, default)
-    return float(default)
-
-
-def _optional_float_setting(raw: dict[str, Any], key: str) -> float | None:
-    try:
-        value = raw.get(key)
-        if value is None or value == "":
-            return None
-        return float(value)
-    except Exception:
-        return None

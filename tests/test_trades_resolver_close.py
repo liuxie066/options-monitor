@@ -121,6 +121,39 @@ def _long_record(lot_id: str, opened_at: int, contracts_open: int) -> dict:
     return row
 
 
+def _persist_lot(repo: object, **overrides: object) -> None:
+    """Persist one manual open lot into ``repo``.
+
+    The defaults are the TIGR short put this module repeats most often, so a
+    call site spells out only the fields that differ from it.
+    """
+    base: dict[str, object] = {
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "TIGR",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 10,
+        "currency": "USD",
+        "strike": 6.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-05-22",
+        "premium_per_share": 0.2,
+        "opened_at_ms": 1779129617118,
+    }
+    base.update(overrides)
+    ledger_manual_trades.persist_manual_open_event(repo, **base)
+
+
+def _open_lot(tmp_path, **overrides: object):
+    """Build a fresh SQLite position repo holding a single manual open lot."""
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    _persist_lot(repo, **overrides)
+    return repo
+
+
 def _deal(**overrides: object) -> NormalizedTradeDeal:
     base = {
         "broker": "富途",
@@ -258,19 +291,27 @@ def test_ledger_close_helpers_canonicalize_aliases_and_summarize_candidates() ->
     }
 
 
-def test_resolve_trade_close_dry_run_builds_patches() -> None:
-    repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
+@pytest.mark.parametrize(
+    ("side", "close_action", "close_type"),
+    [
+        pytest.param("buy", "buy_close", "buy_to_close", id="close_dry_run_builds_patches"),
+        pytest.param("sell", "sell_close", "sell_to_close", id="long_close_dry_run_builds_patches"),
+    ],
+)
+def test_resolve_trade_close_dry_run_builds_patches(side, close_action, close_type) -> None:
+    record = _long_record if side == "sell" else _record
+    repo = FakeRepo([record("rec1", 100, 1), record("rec2", 200, 2)])
 
-    result = resolve_trade_deal(_deal(), repo=repo, state={}, apply_changes=False)
+    result = resolve_trade_deal(_deal(side=side), repo=repo, state={}, apply_changes=False)
 
     assert result.status == "dry_run"
     assert result.action == "close"
     assert result.diagnostics["close_target_resolution"]["record_ids"] == ["rec1", "rec2"]
     assert len(result.operations) == 2
     assert result.operations[0].to_payload()["close_target_resolution"]["record_ids"] == ["rec1", "rec2"]
-    assert result.operations[0].to_payload()["action"] == "buy_close"
+    assert result.operations[0].to_payload()["action"] == close_action
     assert result.operations[0].to_payload()["patch"]["contracts_open"] == 0
-    assert result.operations[0].to_payload()["patch"]["close_type"] == "buy_to_close"
+    assert result.operations[0].to_payload()["patch"]["close_type"] == close_type
 
 
 def test_resolve_unknown_buy_call_prefers_existing_short_call_close() -> None:
@@ -369,23 +410,18 @@ def test_resolve_trade_open_accepts_futu_float_transport_noise() -> None:
     assert result.operations[0].to_payload()["fields"]["premium"] == 1.57
 
 
-def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
-    repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
-
-    result = resolve_trade_deal(_deal(side="sell"), repo=repo, state={}, apply_changes=False)
-
-    assert result.status == "dry_run"
-    assert result.action == "close"
-    assert len(result.operations) == 2
-    assert result.operations[0].to_payload()["action"] == "sell_close"
-    assert result.operations[0].to_payload()["patch"]["contracts_open"] == 0
-    assert result.operations[0].to_payload()["patch"]["close_type"] == "sell_to_close"
-
-
-def test_resolve_trade_close_apply_updates_records() -> None:
-    repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
+@pytest.mark.parametrize(
+    ("side", "close_action"),
+    [
+        pytest.param("buy", "buy_close", id="close_apply_updates_records"),
+        pytest.param("sell", "sell_close", id="long_close_apply_updates_records"),
+    ],
+)
+def test_resolve_trade_close_apply_updates_records(side, close_action) -> None:
+    record = _long_record if side == "sell" else _record
+    repo = FakeRepo([record("rec1", 100, 1), record("rec2", 200, 2)])
     result = resolve_trade_deal(
-        _deal(),
+        _deal(side=side),
         repo=repo,
         state={},
         apply_changes=True,
@@ -394,41 +430,30 @@ def test_resolve_trade_close_apply_updates_records() -> None:
 
     assert result.status == "applied"
     assert [row.lot_id for row in result.operations] == ["rec1", "rec2"]
+    assert [row.action for row in result.operations] == [close_action, close_action]
     assert result.diagnostics["close_target_resolution"]["strategy"] == "strict_exact_fifo"
     assert repo.updated == []
 
 
-def test_resolve_trade_long_close_apply_updates_records() -> None:
-    repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
-    result = resolve_trade_deal(
-        _deal(side="sell"),
-        repo=repo,
-        state={},
-        apply_changes=True,
-        persist_trade_event_fn=lambda repo, deal: {"event_id": deal.deal_id, "created": True},
-    )
+# Kept as a by-name entry point for the merged long-lot cases above.
+def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
+    test_resolve_trade_close_dry_run_builds_patches("sell", "sell_close", "sell_to_close")
 
-    assert result.status == "applied"
-    assert [row.lot_id for row in result.operations] == ["rec1", "rec2"]
-    assert [row.action for row in result.operations] == ["sell_close", "sell_close"]
-    assert repo.updated == []
+
+def test_resolve_trade_long_close_apply_updates_records() -> None:
+    test_resolve_trade_close_apply_updates_records("sell", "sell_close")
 
 
 def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at, contracts in ((100, 1), (200, 2)):
-        ledger_manual_trades.persist_manual_open_event(
+        _persist_lot(
             repo,
-            broker="富途",
-            account="lx",
             symbol="0700.HK",
-            option_type="put",
-            side="short",
             contracts=contracts,
             currency="HKD",
             strike=480.0,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             premium_per_share=3.93,
             opened_at_ms=opened_at,
@@ -474,17 +499,12 @@ def test_multi_lot_broker_close_rolls_back_every_split_when_second_write_fails(
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at, contracts in ((100, 1), (200, 2)):
-        ledger_manual_trades.persist_manual_open_event(
+        _persist_lot(
             repo,
-            broker="富途",
-            account="lx",
             symbol="0700.HK",
-            option_type="put",
-            side="short",
             contracts=contracts,
             currency="HKD",
             strike=480.0,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             premium_per_share=3.93,
             opened_at_ms=opened_at,
@@ -524,17 +544,12 @@ def test_multi_lot_broker_close_declares_complete_deal_split_metadata(tmp_path) 
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at, contracts in ((100, 1), (200, 2)):
-        ledger_manual_trades.persist_manual_open_event(
+        _persist_lot(
             repo,
-            broker="富途",
-            account="lx",
             symbol="0700.HK",
-            option_type="put",
-            side="short",
             contracts=contracts,
             currency="HKD",
             strike=480.0,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             premium_per_share=3.93,
             opened_at_ms=opened_at,
@@ -566,23 +581,7 @@ def test_multi_lot_broker_close_declares_complete_deal_split_metadata(tmp_path) 
 def test_late_zero_price_evidence_does_not_adopt_unbound_expire_close(
     tmp_path,
 ) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=1)
     lot_id = repo.list_position_lots()[0]["record_id"]
     persist_trade_event_object(
         repo,
@@ -641,23 +640,7 @@ def test_late_zero_price_evidence_does_not_adopt_unbound_expire_close(
 
 
 def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_stock_settlement(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
 
     result = resolve_trade_deal(
@@ -691,19 +674,12 @@ def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_s
 def test_confirm_lifecycle_expired_unassigned_fails_closed_without_broker_observation(
     tmp_path,
 ) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
+    repo = _open_lot(
+        tmp_path,
         symbol="0700.HK",
-        option_type="put",
-        side="short",
         contracts=2,
         currency="HKD",
         strike=440.0,
-        multiplier=100,
         expiration_ymd="2026-06-05",
         premium_per_share=0.86,
         opened_at_ms=1780354364000,
@@ -747,19 +723,11 @@ def test_confirm_lifecycle_expired_unassigned_fails_closed_without_broker_observ
 
 
 def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_lifecycle_pending(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
+    repo = _open_lot(
+        tmp_path,
         symbol="FUTU",
-        option_type="put",
-        side="short",
         contracts=1,
-        currency="USD",
         strike=120.0,
-        multiplier=100,
         expiration_ymd="2026-06-05",
         premium_per_share=3.6,
         opened_at_ms=1779129615442,
@@ -881,28 +849,36 @@ def test_resolve_trade_lifecycle_retry_without_open_target_fails_closed(
     assert repo.list_trade_lifecycle_evidence() == []
 
 
-def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_expiration(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
+@pytest.mark.parametrize(
+    ("first_leg", "pending_reason"),
+    [
+        pytest.param(
+            "option",
+            "waiting_settlement_evidence",
+            id="option_first_records_early_assignment_before_expiration",
+        ),
+        pytest.param(
+            "stock",
+            "stock_settlement_waiting_option_leg",
+            id="stock_first_records_early_assignment_before_expiration",
+        ),
+    ],
+)
+def test_resolve_trade_lifecycle_records_early_assignment_before_expiration(
+    tmp_path, first_leg: str, pending_reason: str
+) -> None:
+    repo = _open_lot(
+        tmp_path,
         symbol="FUTU",
-        option_type="put",
-        side="short",
         contracts=1,
-        currency="USD",
         strike=117.45,
-        multiplier=100,
         expiration_ymd="2026-06-18",
         premium_per_share=5.2,
         opened_at_ms=1779129615891,
     )
     lot_id = repo.list_position_lots()[0]["record_id"]
-
-    option_result = resolve_trade_deal(
-        _deal(
+    legs = {
+        "option": _deal(
             deal_id="6182783325760874067",
             order_id="FH1CA6D913A3AE8000",
             symbol="FUTU",
@@ -914,16 +890,7 @@ def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_ex
             trade_time_ms=1781025088633,
             raw_payload={"deal_id": "6182783325760874067", "code": "US.FUTU260618P117450"},
         ),
-        repo=repo,
-        state={},
-        apply_changes=True,
-    )
-
-    assert option_result.status == "unresolved"
-    assert option_result.reason == "waiting_settlement_evidence"
-
-    stock_result = resolve_trade_deal(
-        _deal(
+        "stock": _deal(
             deal_id="8433576313500456302",
             order_id="FH1CA6D9142E648000",
             symbol="FUTU",
@@ -939,14 +906,19 @@ def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_ex
             trade_time_ms=1781025089183,
             raw_payload={"deal_id": "8433576313500456302", "code": "US.FUTU"},
         ),
-        repo=repo,
-        state={},
-        apply_changes=True,
-    )
+    }
+    other_leg = "stock" if first_leg == "option" else "option"
 
-    assert stock_result.status == "applied"
-    assert stock_result.action == "assignment"
-    assert stock_result.reason == "assignment_recorded"
+    first_result = resolve_trade_deal(legs[first_leg], repo=repo, state={}, apply_changes=True)
+
+    assert first_result.status == "unresolved"
+    assert first_result.reason == pending_reason
+
+    second_result = resolve_trade_deal(legs[other_leg], repo=repo, state={}, apply_changes=True)
+
+    assert second_result.status == "applied"
+    assert second_result.action == "assignment"
+    assert second_result.reason == "assignment_recorded"
     assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
     assert len(assignment_events) == 1
     assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
@@ -960,96 +932,23 @@ def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_ex
     assert _lot_close_type(repo, lot_id) == "assignment"
 
 
+# These two names are a by-name contract: tests/quality/test_om_quality_checks.py
+# reaches them with getattr() to reuse the fixture they build, so the merged
+# parametrized body above keeps thin entries under the original names.
+def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_expiration(tmp_path) -> None:
+    test_resolve_trade_lifecycle_records_early_assignment_before_expiration(
+        tmp_path, "option", "waiting_settlement_evidence"
+    )
+
+
 def test_resolve_trade_lifecycle_stock_first_records_early_assignment_before_expiration(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="FUTU",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=117.45,
-        multiplier=100,
-        expiration_ymd="2026-06-18",
-        premium_per_share=5.2,
-        opened_at_ms=1779129615891,
-    )
-
-    stock_result = resolve_trade_deal(
-        _deal(
-            deal_id="8433576313500456302",
-            order_id="FH1CA6D9142E648000",
-            symbol="FUTU",
-            option_type=None,
-            side="buy",
-            position_effect=None,
-            contracts=100,
-            price=117.45,
-            strike=None,
-            multiplier=None,
-            expiration_ymd=None,
-            currency="USD",
-            trade_time_ms=1781025089183,
-            raw_payload={"deal_id": "8433576313500456302", "code": "US.FUTU"},
-        ),
-        repo=repo,
-        state={},
-        apply_changes=True,
-    )
-
-    assert stock_result.status == "unresolved"
-    assert stock_result.reason == "stock_settlement_waiting_option_leg"
-
-    option_result = resolve_trade_deal(
-        _deal(
-            deal_id="6182783325760874067",
-            order_id="FH1CA6D913A3AE8000",
-            symbol="FUTU",
-            contracts=1,
-            price=0.0,
-            strike=117.45,
-            expiration_ymd="2026-06-18",
-            currency="USD",
-            trade_time_ms=1781025088633,
-            raw_payload={"deal_id": "6182783325760874067", "code": "US.FUTU260618P117450"},
-        ),
-        repo=repo,
-        state={},
-        apply_changes=True,
-    )
-
-    assert option_result.status == "applied"
-    assert option_result.action == "assignment"
-    assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
-    assert len(assignment_events) == 1
-    assert (
-        assignment_events[0]["raw_payload"]["stock_settlement"]["source_event_id"]
-        == "futu:lx:REAL_1:8433576313500456302"
+    test_resolve_trade_lifecycle_records_early_assignment_before_expiration(
+        tmp_path, "stock", "stock_settlement_waiting_option_leg"
     )
 
 
 def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
 
     option_result = resolve_trade_deal(
@@ -1104,23 +1003,7 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
 
 
 def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
     observation_start = expiration_observation_start_ms("2026-05-22", "US")
     assert observation_start is not None
@@ -1198,25 +1081,7 @@ def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_p
 def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
     tmp_path,
 ) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=2)
     lot_id = repo.list_position_lots()[0]["record_id"]
     observation_start = expiration_observation_start_ms("2026-05-22", "US")
     assert observation_start is not None
@@ -1300,25 +1165,7 @@ def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
 def test_broker_lifecycle_adapter_creates_v2_case_for_partial_stock_settlement(
     tmp_path,
 ) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=2)
     lot_id = repo.list_position_lots()[0]["record_id"]
     observation_start = expiration_observation_start_ms("2026-05-22", "US")
     assert observation_start is not None
@@ -1405,23 +1252,7 @@ def test_lifecycle_evidence_identity_is_scoped_by_broker_account(tmp_path) -> No
 
 
 def test_resolve_trade_lifecycle_option_first_ignores_pre_expiration_stock_trade(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     option_result = resolve_trade_deal(
         _deal(
             deal_id="option-leg-pre-exp-stock",
@@ -1468,23 +1299,7 @@ def test_resolve_trade_lifecycle_option_first_ignores_pre_expiration_stock_trade
 
 
 def test_resolve_trade_lifecycle_option_leg_ignores_pre_expiration_stock_evidence(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     repo.upsert_trade_lifecycle_evidence(
         {
             "evidence_id": "pre_expiration_stock_evidence",
@@ -1526,23 +1341,7 @@ def test_resolve_trade_lifecycle_option_leg_ignores_pre_expiration_stock_evidenc
 
 
 def test_resolve_trade_lifecycle_duplicate_option_leg_after_assignment_is_idempotent(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     option_deal = _deal(
         deal_id="option-leg-dup",
         symbol="TIGR",
@@ -1588,22 +1387,14 @@ def test_resolve_trade_lifecycle_duplicate_option_leg_after_assignment_is_idempo
 
 
 def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
+    repo = _open_lot(
+        tmp_path,
         symbol="AAPL",
         option_type="call",
         side="long",
         contracts=2,
-        currency="USD",
         strike=200.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
         premium_per_share=1.5,
-        opened_at_ms=1779129617118,
     )
     lot_id = repo.list_position_lots()[0]["record_id"]
 
@@ -1660,23 +1451,7 @@ def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -
 
 
 def test_resolve_trade_lifecycle_stock_first_then_long_put_exercise_records_exercise(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
-        side="long",
-        contracts=1,
-        currency="USD",
-        strike=180.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=1.5,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, symbol="AAPL", side="long", contracts=1, strike=180.0, premium_per_share=1.5)
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -1727,23 +1502,7 @@ def test_resolve_trade_lifecycle_stock_first_then_long_put_exercise_records_exer
 
 
 def test_resolve_trade_lifecycle_stock_first_then_option_leg_records_assignment(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -1795,23 +1554,7 @@ def test_resolve_trade_lifecycle_stock_first_then_option_leg_records_assignment(
 def test_resolve_trade_lifecycle_late_assignment_does_not_adopt_unbound_expire_close(
     tmp_path,
 ) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
     persist_trade_event_object(
         repo,
@@ -1893,24 +1636,7 @@ def test_stock_evidence_same_key_economic_drift_fails_closed(
     tmp_path,
 ) -> None:
 
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=1)
     first = _deal(
         deal_id="drift-stock-1",
         symbol="TIGR",
@@ -1991,24 +1717,7 @@ def test_push_stock_after_expire_close_reaches_conflict_writer(
     tmp_path,
 ) -> None:
 
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=1)
     lot_id = repo.list_position_lots()[0]["record_id"]
     option_time_ms = 1779468493916
     option = _deal(
@@ -2089,24 +1798,7 @@ def test_option_anchor_cannot_rebind_case_to_other_futu_account(
     tmp_path,
 ) -> None:
 
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path, contracts=1)
     first = _deal(
         deal_id="account-one-option",
         symbol="TIGR",
@@ -2149,23 +1841,7 @@ def test_option_anchor_cannot_rebind_case_to_other_futu_account(
 
 
 def test_resolve_trade_close_retry_failed_keeps_zero_price_option_leg_pending(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=10,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-05-22",
-        premium_per_share=0.2,
-        opened_at_ms=1779129617118,
-    )
+    repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
 
     result = resolve_trade_deal(
@@ -2204,19 +1880,12 @@ def test_resolve_trade_close_rejects_missing_trade_time_before_write() -> None:
 
 
 def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_close_lot(tmp_path) -> None:
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="lx",
+    repo = _open_lot(
+        tmp_path,
         symbol="0700.HK",
-        option_type="put",
-        side="short",
         contracts=2,
         currency="HKD",
         strike=480.0,
-        multiplier=100,
         expiration_ymd="2026-04-29",
         premium_per_share=3.93,
         opened_at_ms=1000,

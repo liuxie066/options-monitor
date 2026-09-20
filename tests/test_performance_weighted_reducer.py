@@ -132,6 +132,19 @@ def _period(
     )
 
 
+def _project_and_reduce(events, **kwargs):
+    projection = project_trade_events(events)
+    return projection, reduce_option_performance(projection, period=_period(), **kwargs)
+
+
+def _reduce_with_lx_diagnostic(projection, diagnostic):
+    return reduce_option_performance(
+        replace(projection, diagnostics=[diagnostic]),
+        period=_period(),
+        account="lx",
+    )
+
+
 def test_period_normalization_and_cohort_use_effective_opening_date() -> None:
     current = _period()
     assert current.requested_start_date == "2026-09-01"
@@ -547,7 +560,7 @@ def test_combo_attribution_rejects_cross_broker_membership() -> None:
         "strategy": "combo_yield",
         "strategy_group_id": "combo_yield:cross-broker",
     }
-    projection = project_trade_events(
+    projection, reduction = _project_and_reduce(
         [
             _event(
                 "put",
@@ -568,15 +581,13 @@ def test_combo_attribution_rejects_cross_broker_membership() -> None:
         ]
     )
 
-    reduction = reduce_option_performance(projection, period=_period())
-
     assert "csp_lc_membership_incomplete" in {item.code for item in projection.diagnostics}
     assert "csp_lc" not in {fact.attribution_strategy for fact in reduction.facts}
     assert reduction.bundle["status"] == MetricStatus.PARTIAL
 
 
 def test_incomplete_combo_buyer_remains_unassigned() -> None:
-    projection = project_trade_events(
+    projection, reduction = _project_and_reduce(
         [
             _event(
                 "call",
@@ -593,8 +604,6 @@ def test_incomplete_combo_buyer_remains_unassigned() -> None:
         ]
     )
 
-    reduction = reduce_option_performance(projection, period=_period())
-
     assert projection.diagnostics == []
     assert reduction.facts[0].attribution_strategy == "unassigned"
     assert reduction.facts[0].strategy_group_id is None
@@ -603,7 +612,7 @@ def test_incomplete_combo_buyer_remains_unassigned() -> None:
 
 def test_strategy_clear_changes_wheel_call_back_to_cc() -> None:
     key = _key(side="short", option_type="call")
-    projection = project_trade_events(
+    _projection, reduction = _project_and_reduce(
         [
             _event(
                 "open",
@@ -636,14 +645,12 @@ def test_strategy_clear_changes_wheel_call_back_to_cc() -> None:
         ]
     )
 
-    reduction = reduce_option_performance(projection, period=_period())
-
     assert [fact.attribution_strategy for fact in reduction.facts] == ["cc"]
     assert reduction.bundle["status"] == MetricStatus.OBSERVED
 
 
 def test_strategy_conflict_only_degrades_the_attribution_view() -> None:
-    projection = project_trade_events(
+    _projection, reduction = _project_and_reduce(
         [
             _event(
                 "open",
@@ -658,7 +665,6 @@ def test_strategy_conflict_only_degrades_the_attribution_view() -> None:
             )
         ]
     )
-    reduction = reduce_option_performance(projection, period=_period())
 
     assert reduction.bundle["status"] == MetricStatus.PARTIAL
     assert reduction.bundle["missing"] == ("strategy_attribution_conflict",)
@@ -742,28 +748,16 @@ def test_diagnostics_are_filtered_after_projection_and_missing_dimensions_fail_s
         account="sy",
         broker="futu",
     )
-    scoped = reduce_option_performance(
-        replace(projection, diagnostics=[other_account]),
-        period=_period(),
-        account="lx",
-    )
+    scoped = _reduce_with_lx_diagnostic(projection, other_account)
     assert scoped.bundle["status"] == MetricStatus.OBSERVED
 
     unscoped = replace(other_account, event_id="unknown", account=None, broker=None)
-    fail_safe = reduce_option_performance(
-        replace(projection, diagnostics=[unscoped]),
-        period=_period(),
-        account="lx",
-    )
+    fail_safe = _reduce_with_lx_diagnostic(projection, unscoped)
     assert fail_safe.bundle["status"] == MetricStatus.PARTIAL
     assert fail_safe.bundle["missing"] == ("economic_adjust_invalid",)
 
     error = replace(unscoped, severity="error")
-    isolated = reduce_option_performance(
-        replace(projection, diagnostics=[error]),
-        period=_period(),
-        account="lx",
-    )
+    isolated = _reduce_with_lx_diagnostic(projection, error)
     assert isolated.bundle["status"] == MetricStatus.PARTIAL
     assert isolated.bundle["missing"] == ("economic_adjust_invalid",)
 

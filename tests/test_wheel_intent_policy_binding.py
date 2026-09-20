@@ -22,17 +22,46 @@ POLICY_A = {"wheel": {"call": {"min_dte": 30}, "put": {"min_dte": 30}}}
 POLICY_B = {"wheel": {"call": {"min_dte": 7}, "put": {"min_dte": 7}}}
 
 
+def _patch_cli(monkeypatch, *, runtime, config, repo, resolved, capacity) -> None:
+    monkeypatch.setattr(cli, "_open_runtime", lambda *_a, **_k: (runtime, config, repo))
+    monkeypatch.setattr(cli, "_now_ms", lambda: 5_000)
+    monkeypatch.setattr(cli, "resolve_wheel_config", lambda *_a, **_k: resolved)
+    monkeypatch.setattr(cli, "_coverage", lambda *_a, **_k: capacity)
+    monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
+
+
+def _patch_agent(monkeypatch, *, runtime, config, repo, resolved, capacity) -> None:
+    monkeypatch.setattr(agent, "_wheel_runtime", lambda _: (runtime, config, repo, {}))
+    monkeypatch.setattr(agent, "_wheel_now_ms", lambda _: 5_000)
+    monkeypatch.setattr(agent, "resolve_wheel_config", lambda *_a, **_k: resolved)
+    monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
+    monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
+
+
+def _cli_intent_args(branch, direction, *, run_id, expected_snapshot_hash):
+    return cli.parse_args(["intent", "create", "--config-key", "us", "--account", "lx",
+        "--wheel-branch-id", branch["wheel_branch_id"], "--direction", direction,
+        "--expected-batch-generation-hash", branch["batch_generation_hash"], "--run-id", run_id,
+        "--final-candidate-id", "candidate", "--expected-snapshot-hash", expected_snapshot_hash,
+        "--expires-at-ms", "10000", "--request-id", "intent-request", "--actor", "tester"])
+
+
+def _agent_payload(branch, direction, *, run_id, expected_snapshot_hash):
+    return dict(config_key="us", account="lx", action="create", direction=direction,
+        wheel_branch_id=branch["wheel_branch_id"], expected_batch_generation_hash=branch["batch_generation_hash"],
+        run_id=run_id, final_candidate_id="candidate", expected_snapshot_hash=expected_snapshot_hash,
+        expires_at_ms=10_000, request_id="intent-request", actor="tester", apply=False)
+
+
 def _environment(tmp_path, direction, monkeypatch):
     repo, _, stock_id = _assign_short_put(tmp_path, wheel_start_enabled=direction == "call")
     if direction == "put":
         key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
-                                      option_type="call", strike=110,
-                                      expiration_ymd="2026-09-18")
+                                      option_type="call", strike=110, expiration_ymd="2026-09-18")
         _open_test_activation(repo)
         for event in [
-            TradeEvent(event_id="cc-open", event_type="open", event_time_ms=3_000,
-                       contract_key=key, contracts=1, price=2, currency="USD", source="test",
-                       multiplier=100, lot_id="cc-lot",
+            TradeEvent(event_id="cc-open", event_type="open", event_time_ms=3_000, contract_key=key,
+                       contracts=1, price=2, currency="USD", source="test", multiplier=100, lot_id="cc-lot",
                        # §9.2 step 3: the contract key no longer carries the
                        # position side, so the short call side travels as the
                        # trade side.
@@ -44,8 +73,8 @@ def _environment(tmp_path, direction, monkeypatch):
                            # §9.2 step 3: closing a short call is a buy.
                            "side": "buy",
                            "target_lot_id": "cc-lot", "stock_settlement": {
-                               "side": "sell", "shares": 100, "price": 110, "fees": 1,
-                               "currency": "USD", "fee_provenance": {"basis": "actual", "source": "test"}}}),
+                               "side": "sell", "shares": 100, "price": 110, "fees": 1, "currency": "USD",
+                               "fee_provenance": {"basis": "actual", "source": "test"}}}),
         ]:
             persist_trade_event_objects_atomically(repo, [event])
         monkeypatch.setattr(workflows, "revalidate_selected_wheel_put_candidate_from_rows",
@@ -56,16 +85,14 @@ def _environment(tmp_path, direction, monkeypatch):
     assert branch["direction"] == direction
     candidate = {"final_candidate_id": "candidate", "symbol": "NVDA", "strike": 100,
                  "expiration_ymd": "2026-09-18", "granted_contracts": 1, "multiplier": 100,
-                 "currency": "USD", "direction": direction,
-                 "wheel_branch_id": branch["wheel_branch_id"], "stock_lot_id": branch.get("stock_lot_id"),
-                 "batch_generation_hash": branch["batch_generation_hash"],
+                 "currency": "USD", "direction": direction, "wheel_branch_id": branch["wheel_branch_id"],
+                 "stock_lot_id": branch.get("stock_lot_id"), "batch_generation_hash": branch["batch_generation_hash"],
                  "capacity_identity_hash": "capacity", "cash_reservation_currency": "USD"}
     snapshot = {"account": "lx", "snapshot_hash": "snapshot",
                 "strategy_policy_sha256": strategy_policy_hash(POLICY_A),
                 "batches": [{**branch, "final_candidate": candidate}]}
-    capacity = {"account": "lx", "symbol": "NVDA", "capacity_identity_hash": "capacity",
-                "status": "available", "shares_eligible": 100, "shares_locked": 0,
-                "shares_reserved": 0, "shares_available_for_cover": 100}
+    capacity = {"account": "lx", "symbol": "NVDA", "capacity_identity_hash": "capacity", "status": "available",
+                "shares_eligible": 100, "shares_locked": 0, "shares_reserved": 0, "shares_available_for_cover": 100}
     descriptor = repo.get_current_wheel_activation_window(market="us", account="lx")
     resolved = {"market": "us", "enabled_for_new_lifecycle": True,
                 "activation_descriptor": descriptor, "policy_sha256": "a" * 64}
@@ -125,33 +152,18 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
     runtime = tmp_path / "config.us.json"
     before = repo.list_wheel_events(account="lx")
     if entry.startswith("cli"):
-        monkeypatch.setattr(cli, "_open_runtime", lambda *_a, **_k: (runtime, config, repo))
-        monkeypatch.setattr(cli, "_now_ms", lambda: 5_000)
+        _patch_cli(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
         monkeypatch.setattr(cli, "load_wheel_candidate_snapshot", lambda **_: snapshot)
-        monkeypatch.setattr(cli, "resolve_wheel_config", lambda *_a, **_k: resolved)
-        monkeypatch.setattr(cli, "_coverage", lambda *_a, **_k: capacity)
-        monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
-        args = cli.parse_args(["intent", "create", "--config-key", "us", "--account", "lx",
-            "--wheel-branch-id", branch["wheel_branch_id"], "--direction", direction,
-            "--expected-batch-generation-hash", branch["batch_generation_hash"],
-            "--run-id", "old-run", "--final-candidate-id", "candidate", "--expected-snapshot-hash", "snapshot",
-            "--expires-at-ms", "10000", "--request-id", "intent-request", "--actor", "tester"])
+        args = _cli_intent_args(branch, direction, run_id="old-run", expected_snapshot_hash="snapshot")
         with pytest.raises(ValueError, match="candidate strategy policy changed"):
             cli.execute(args)
         config.clear()
         config.update(deepcopy(POLICY_A))
         assert cli.execute(args)["status"] == "planned"
     else:
-        monkeypatch.setattr(agent, "_wheel_runtime", lambda _: (runtime, config, repo, {}))
-        monkeypatch.setattr(agent, "_wheel_now_ms", lambda _: 5_000)
+        _patch_agent(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
         monkeypatch.setattr(agent, "load_wheel_candidate_snapshot", lambda **_: snapshot)
-        monkeypatch.setattr(agent, "resolve_wheel_config", lambda *_a, **_k: resolved)
-        monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
-        monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
-        payload = dict(config_key="us", account="lx", action="create", direction=direction,
-            wheel_branch_id=branch["wheel_branch_id"], expected_batch_generation_hash=branch["batch_generation_hash"],
-            run_id="old-run", final_candidate_id="candidate", expected_snapshot_hash="snapshot",
-            expires_at_ms=10_000, request_id="intent-request", actor="tester", apply=False)
+        payload = _agent_payload(branch, direction, run_id="old-run", expected_snapshot_hash="snapshot")
         tool = agent.WHEEL_INTENT_TOOL
         if entry == "agent_legacy_call":
             tool = agent.WHEEL_CALL_INTENT_TOOL
@@ -199,28 +211,13 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
     assert snapshot["strategy_policy_sha256"] != strategy_policy_hash(config)
     before = repo.list_wheel_events(account="lx")
     if entry.startswith("cli"):
-        monkeypatch.setattr(cli, "_open_runtime", lambda *_a, **_k: (runtime, config, repo))
-        monkeypatch.setattr(cli, "_now_ms", lambda: 5_000)
-        monkeypatch.setattr(cli, "resolve_wheel_config", lambda *_a, **_k: resolved)
-        monkeypatch.setattr(cli, "_coverage", lambda *_a, **_k: capacity)
-        monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
-        args = cli.parse_args(["intent", "create", "--config-key", "us", "--account", "lx",
-            "--wheel-branch-id", branch["wheel_branch_id"], "--direction", direction,
-            "--expected-batch-generation-hash", branch["batch_generation_hash"],
-            "--run-id", "scoped", "--final-candidate-id", "candidate", "--expected-snapshot-hash", snapshot["snapshot_hash"],
-            "--expires-at-ms", "10000", "--request-id", "intent-request", "--actor", "tester"])
+        _patch_cli(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
+        args = _cli_intent_args(branch, direction, run_id="scoped", expected_snapshot_hash=snapshot["snapshot_hash"])
         invoke = lambda: cli.execute(args)
         error = ValueError
     else:
-        monkeypatch.setattr(agent, "_wheel_runtime", lambda _: (runtime, config, repo, {}))
-        monkeypatch.setattr(agent, "_wheel_now_ms", lambda _: 5_000)
-        monkeypatch.setattr(agent, "resolve_wheel_config", lambda *_a, **_k: resolved)
-        monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
-        monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
-        payload = dict(config_key="us", account="lx", action="create", direction=direction,
-            wheel_branch_id=branch["wheel_branch_id"], expected_batch_generation_hash=branch["batch_generation_hash"],
-            run_id="scoped", final_candidate_id="candidate", expected_snapshot_hash=snapshot["snapshot_hash"],
-            expires_at_ms=10_000, request_id="intent-request", actor="tester", apply=False)
+        _patch_agent(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
+        payload = _agent_payload(branch, direction, run_id="scoped", expected_snapshot_hash=snapshot["snapshot_hash"])
         tool = agent.WHEEL_INTENT_TOOL
         if entry == "agent_legacy_call":
             tool = agent.WHEEL_CALL_INTENT_TOOL

@@ -208,23 +208,37 @@ def _tool_argument_json_schema(*, key: str, description: str) -> dict[str, Any]:
     enum = _tool_argument_enum(description)
     if enum:
         schema: dict[str, Any] = {"type": "string", "enum": enum}
-    elif key in _BOOL_ARGUMENT_NAMES or "bool" in tokens or "boolean" in tokens:
-        schema = {"type": "boolean"}
-    elif key in _INTEGER_ARGUMENT_NAMES or "int" in tokens or "integer" in tokens:
-        schema = {"type": "integer"}
-    elif "list/dict" in lowered or "list or dict" in lowered:
-        schema = {"type": ["array", "object"]}
-    elif "numeric" in tokens or "number" in tokens:
-        schema = {"type": "number"}
-    elif "object" in tokens or "structured" in tokens:
-        schema = {"type": "object"}
-    elif _tool_argument_is_array(key=key, description=description):
-        schema = {"type": "array", "items": {"type": "string"}}
     else:
-        schema = {"type": "string"}
+        schema = _tool_argument_json_type(key=key, description=description, lowered=lowered, tokens=tokens)
     if description:
         schema["description"] = description
     return schema
+
+
+def _tool_argument_json_type(
+    *,
+    key: str,
+    description: str,
+    lowered: str,
+    tokens: set[str],
+) -> dict[str, Any]:
+    """Return the JSON schema type for a tool argument that declares no schema of its own.
+
+    The rules are ordered: the first one that matches wins, and string is the fallback.
+    """
+    if key in _BOOL_ARGUMENT_NAMES or "bool" in tokens or "boolean" in tokens:
+        return {"type": "boolean"}
+    if key in _INTEGER_ARGUMENT_NAMES or "int" in tokens or "integer" in tokens:
+        return {"type": "integer"}
+    if "list/dict" in lowered or "list or dict" in lowered:
+        return {"type": ["array", "object"]}
+    if "numeric" in tokens or "number" in tokens:
+        return {"type": "number"}
+    if "object" in tokens or "structured" in tokens:
+        return {"type": "object"}
+    if _tool_argument_is_array(key=key, description=description):
+        return {"type": "array", "items": {"type": "string"}}
+    return {"type": "string"}
 
 
 def _tool_argument_tokens(text: str) -> set[str]:

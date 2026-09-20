@@ -13,6 +13,10 @@ from src.application.assistant.permission_request import build_permission_reques
 
 
 CandidateHintFn = Callable[[str, Any], str]
+ResolveOperationFn = Callable[..., tuple[str, dict[str, Any], dict[str, Any]]]
+PreviewOperationFn = Callable[[dict[str, Any]], dict[str, Any]]
+ApplyOperationFn = Callable[[dict[str, Any]], dict[str, Any]]
+RenderOperationResponseFn = Callable[..., str]
 PreviewResponseTextFn = Callable[[dict[str, Any]], str]
 ACTION_LIFECYCLE_SCHEMA_VERSION = "om-agent-action-lifecycle-v1"
 
@@ -242,6 +246,132 @@ def confirm_previewed_operation_or_raise(
         operation_resolution=operation_resolution,
         payload=payload,
         payload_hash=current_hash,
+    )
+
+
+def cancel_pending_operation_or_raise(
+    *,
+    operation_id: str | None,
+    request: AssistantRequest,
+    store: InboundOperationStore,
+    resolve: ResolveOperationFn,
+    tool_name: str,
+    subject: str,
+    cancel_suffix: str,
+) -> dict[str, Any]:
+    """解析待取消的操作并落库取消回执；各家族传解析器、工具名与取消文案。"""
+    operation_id, operation, operation_resolution = resolve(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=True,
+        action="取消",
+    )
+    return build_cancelled_operation_response(
+        tool_name=tool_name,
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        response_text=f"{subject}已取消，{cancel_suffix}。\ncommand_id: {operation_id}",
+    )
+
+
+def preview_and_save_operation(
+    payload: dict[str, Any],
+    *,
+    request: AssistantRequest,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+    tool_name: str,
+    preview_operation: PreviewOperationFn,
+    render: RenderOperationResponseFn,
+) -> dict[str, Any]:
+    """生成预览并保存待确认操作；各家族传工具名、构建预览与渲染 text 的实现。"""
+    preview = preview_operation(payload)
+    return build_previewed_operation_response(
+        tool_name=tool_name,
+        operation_id=command_id,
+        request=request,
+        store=store,
+        payload=payload,
+        preview=preview,
+        ttl_seconds=ttl_seconds,
+        response_text=lambda operation: render(
+            status="previewed",
+            operation_id=command_id,
+            payload=payload,
+            preview=preview,
+            expires_at=str(operation.get("expires_at") or ""),
+        ),
+    )
+
+
+def confirm_and_apply_operation(
+    *,
+    operation_id: str | None,
+    request: AssistantRequest,
+    store: InboundOperationStore,
+    resolve: ResolveOperationFn,
+    tool_name: str,
+    subject: str,
+    expired_message: str,
+    expired_hint: str,
+    hash_mismatch_message: str,
+    apply_failure_message: str,
+    preview_operation: PreviewOperationFn,
+    apply_operation: ApplyOperationFn,
+    render: RenderOperationResponseFn,
+) -> dict[str, Any]:
+    """解析、校验、执行并落库一个待确认操作；各家族传解析器、执行实现与文案。"""
+    operation_id, operation, operation_resolution = resolve(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="确认",
+    )
+    confirmed = confirm_previewed_operation_or_raise(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        subject=subject,
+        expired_message=expired_message,
+        expired_hint=expired_hint,
+        hash_mismatch_message=hash_mismatch_message,
+    )
+    operation_id = confirmed.operation_id
+    operation_resolution = confirmed.operation_resolution
+    payload = confirmed.payload
+    try:
+        preview = preview_operation(payload)
+        result = apply_operation(payload)
+    except AgentToolError as exc:
+        store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
+        raise
+    except Exception as exc:
+        failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
+        store.mark_failed(operation_id, result=failed)
+        raise AgentToolError(code="INTERNAL_ERROR", message=apply_failure_message, details=failed) from exc
+    store.mark_applied(operation_id, result=result)
+    text = render(status="applied", operation_id=operation_id, payload=payload, preview=preview, result=result)
+    return build_response(
+        tool_name=tool_name,
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            **operation_resolution,
+            "operation_type": payload["operation_type"],
+            "status": "applied",
+            "payload_hash": confirmed.payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "result": result,
+            "response_text": text,
+        },
+        meta={"audit_db": mask_path(store.path)},
     )
 
 

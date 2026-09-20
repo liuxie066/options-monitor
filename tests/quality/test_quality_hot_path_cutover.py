@@ -137,6 +137,7 @@ def test_quality_benchmark_counter_is_executable() -> None:
         "src/application/ledger/repository_trade_events.py",
         "src/application/ledger/writer_trade_events.py",
         "scripts/benchmark_data_storage_projection.py",
+        "scripts/benchmark_support.py",
         "src/infrastructure/quality/artifact_repository.py",
     ),
 )

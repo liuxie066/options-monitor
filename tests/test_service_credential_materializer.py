@@ -41,6 +41,26 @@ def _secure_store(tmp_path: Path, credential_id: str) -> tuple[Path, Path]:
     return store, source
 
 
+def _materialize(
+    helper: ModuleType,
+    *,
+    store: Path,
+    runtime_root: Path,
+    decrypt_credential,
+):
+    return helper.materialize_credentials(
+        unit_name="options-monitor-trade-intake.service",
+        credential_ids=("om-feishu-bot-app-secret",),
+        store_root=store,
+        runtime_root=runtime_root,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+        required_source_uid=os.getuid(),
+        verify_runtime_filesystem=lambda _path: None,
+        decrypt_credential=decrypt_credential,
+    )
+
+
 def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> None:
     helper = _load_helper()
     credential_id = "om-feishu-bot-app-secret"
@@ -52,16 +72,8 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
         observed.append((name, encrypted_path, output_path))
         output_path.write_text("test-secret-value\n", encoding="utf-8")
 
-    result = helper.materialize_credentials(
-        unit_name="options-monitor-trade-intake.service",
-        credential_ids=(credential_id,),
-        store_root=store,
-        runtime_root=runtime_root,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
-        required_source_uid=os.getuid(),
-        verify_runtime_filesystem=lambda _path: None,
-        decrypt_credential=fake_decrypt,
+    result = _materialize(
+        helper, store=store, runtime_root=runtime_root, decrypt_credential=fake_decrypt
     )
 
     target_dir = runtime_root / "options-monitor-trade-intake.service"
@@ -80,20 +92,10 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     }
     assert "test-secret-value" not in json.dumps(result)
 
-    rotated = helper.materialize_credentials(
-        unit_name="options-monitor-trade-intake.service",
-        credential_ids=(credential_id,),
-        store_root=store,
-        runtime_root=runtime_root,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
-        required_source_uid=os.getuid(),
-        verify_runtime_filesystem=lambda _path: None,
-        decrypt_credential=(
-            lambda _name, _source, output_path: output_path.write_text(
-                "rotated-secret-value\n",
-                encoding="utf-8",
-            )
+    rotated = _materialize(
+        helper, store=store, runtime_root=runtime_root,
+        decrypt_credential=lambda _name, _source, output_path: output_path.write_text(
+            "rotated-secret-value\n", encoding="utf-8"
         ),
     )
     assert rotated["credential_count"] == 1
@@ -121,20 +123,10 @@ def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversa
     runtime_parent.chmod(0o700)
     runtime_root = runtime_parent / "credentials"
 
-    helper.materialize_credentials(
-        unit_name="options-monitor-trade-intake.service",
-        credential_ids=(credential_id,),
-        store_root=store,
-        runtime_root=runtime_root,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
-        required_source_uid=os.getuid(),
-        verify_runtime_filesystem=lambda _path: None,
-        decrypt_credential=(
-            lambda _name, _source, output_path: output_path.write_text(
-                "test-secret-value\n",
-                encoding="utf-8",
-            )
+    _materialize(
+        helper, store=store, runtime_root=runtime_root,
+        decrypt_credential=lambda _name, _source, output_path: output_path.write_text(
+            "test-secret-value\n", encoding="utf-8"
         ),
     )
 
@@ -148,21 +140,16 @@ def test_materializer_rejects_symlinked_encrypted_source(tmp_path: Path) -> None
     helper = _load_helper()
     credential_id = "om-feishu-bot-app-secret"
     store = tmp_path / "credstore.encrypted"
-    store.mkdir()
+    store.mkdir(mode=0o755)
     outside = tmp_path / "outside"
     outside.write_text("encrypted-fixture", encoding="utf-8")
     (store / credential_id).symlink_to(outside)
 
     with pytest.raises(helper.MaterializerError, match="regular file"):
-        helper.materialize_credentials(
-            unit_name="options-monitor-trade-intake.service",
-            credential_ids=(credential_id,),
-            store_root=store,
+        _materialize(
+            helper,
+            store=store,
             runtime_root=tmp_path / "run" / "credentials",
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-            required_source_uid=os.getuid(),
-            verify_runtime_filesystem=lambda _path: None,
             decrypt_credential=lambda _name, _source, _target: None,
         )
 
@@ -179,15 +166,10 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
     linked_parent.symlink_to(real_parent, target_is_directory=True)
 
     with pytest.raises(helper.MaterializerError, match="symbolic links"):
-        helper.materialize_credentials(
-            unit_name="options-monitor-trade-intake.service",
-            credential_ids=(credential_id,),
-            store_root=linked_parent / store.name,
+        _materialize(
+            helper,
+            store=linked_parent / store.name,
             runtime_root=tmp_path / "run" / "credentials",
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-            required_source_uid=os.getuid(),
-            verify_runtime_filesystem=lambda _path: None,
             decrypt_credential=lambda _name, _source, _target: None,
         )
 
@@ -195,8 +177,11 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
 def test_materializer_cleanup_refuses_unexpected_entries(tmp_path: Path) -> None:
     helper = _load_helper()
     runtime_root = tmp_path / "run" / "credentials"
+    runtime_root.mkdir(parents=True, mode=0o700)
+    runtime_root.chmod(0o700)
     target = runtime_root / "options-monitor-trade-intake.service"
-    target.mkdir(parents=True)
+    target.mkdir(mode=0o700)
+    target.chmod(0o700)
     unexpected = target / "not-a-registered-credential"
     unexpected.write_text("must-remain", encoding="utf-8")
 

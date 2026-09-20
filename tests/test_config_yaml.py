@@ -109,10 +109,7 @@ inbound:
 """
 
 
-def test_yaml_config_rejects_opening_threshold_typo_before_runtime_build(tmp_path: Path) -> None:
-    config_path = _write_yaml(
-        tmp_path / "config.yaml",
-        """\
+_US_FUTU_YAML_HEAD = """\
 accounts:
   lx:
     type: futu
@@ -121,6 +118,40 @@ markets:
   us:
     accounts: [lx]
     symbols: [NVDA]
+"""
+
+_US_HOLDINGS_YAML_HEAD = """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+"""
+
+
+_FUTU_ACCOUNTS_YAML = """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+"""
+
+_ASSISTANT_DEFAULTS_YAML = """\
+assistant:
+  enabled: true
+  bot:
+    enabled: true
+"""
+
+
+def test_yaml_config_rejects_opening_threshold_typo_before_runtime_build(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _US_FUTU_YAML_HEAD
+        + """\
     overrides:
       NVDA:
         sell_put:
@@ -576,11 +607,8 @@ def test_yaml_runtime_build_defaults_to_canonical_runtime_path(tmp_path: Path) -
 def test_yaml_config_rejects_symbol_from_another_market(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 markets:
   us:
     accounts: [lx]
@@ -628,11 +656,8 @@ def test_yaml_config_rejects_unsafe_control_plane_values(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        f"""\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + f"""\
 {section}
 markets:
   us:
@@ -650,11 +675,8 @@ def test_yaml_combo_yield_keeps_only_authored_fields_explicit(tmp_path: Path) ->
 
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 markets:
   us:
     accounts: [lx]
@@ -700,11 +722,8 @@ markets:
 def test_yaml_config_keeps_explicit_sell_put_underwriting_thresholds(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 templates:
   put_base:
     sell_put:
@@ -742,15 +761,8 @@ markets:
 def test_yaml_config_accepts_legacy_sell_call_authoring_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
+        _US_FUTU_YAML_HEAD
+        + """\
     overrides:
       NVDA:
         sell_call:
@@ -771,15 +783,8 @@ markets:
 def test_yaml_config_rejects_covered_call_and_sell_call_conflict(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
+        _US_FUTU_YAML_HEAD
+        + """\
     overrides:
       NVDA:
         covered_call:
@@ -812,11 +817,8 @@ def test_yaml_config_explain_maps_covered_call_authoring_key(tmp_path: Path) -> 
 def test_yaml_config_maps_covered_call_passthrough_authoring_keys(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 templates:
   call_base:
     covered_call:
@@ -1046,15 +1048,8 @@ def test_yaml_account_remove_keeps_global_definition_used_by_other_market(tmp_pa
 def test_yaml_symbol_set_preserves_existing_legacy_sell_call_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
+        _US_FUTU_YAML_HEAD
+        + """\
   hk:
     accounts: [lx]
     symbols: [0700.HK]
@@ -1098,15 +1093,8 @@ def test_yaml_symbol_set_rejects_empty_setting(tmp_path: Path) -> None:
 def test_yaml_assistant_config_merges_system_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
+        _US_HOLDINGS_YAML_HEAD
+        + """\
 inbound:
   feishu_ws:
     ack_reaction: THUMBSUP
@@ -1136,16 +1124,7 @@ inbound:
 def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-""",
+        _US_HOLDINGS_YAML_HEAD,
     )
     system_path = tmp_path / "system.json"
     system_path.write_text(
@@ -1195,19 +1174,9 @@ markets:
 def test_yaml_assistant_config_resolves_active_model_profile(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _US_HOLDINGS_YAML_HEAD
+        + _ASSISTANT_DEFAULTS_YAML
+        + """\
   active_model: deepseek-default
   models:
     deepseek-default:
@@ -1245,11 +1214,8 @@ assistant:
 def test_yaml_assistant_model_profile_requires_declared_context_window(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _ASSISTANT_DEFAULTS_YAML
+        + """\
   active_model: deepseek-default
   models:
     deepseek-default:
@@ -1266,11 +1232,8 @@ assistant:
 def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _ASSISTANT_DEFAULTS_YAML
+        + """\
   active_model: local
   models:
     local:
@@ -1296,19 +1259,9 @@ assistant:
 def test_yaml_assistant_config_rejects_unknown_active_model_profile(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _US_HOLDINGS_YAML_HEAD
+        + _ASSISTANT_DEFAULTS_YAML
+        + """\
   active_model: missing
   models:
     deepseek-default:
@@ -1327,19 +1280,9 @@ assistant:
 def test_yaml_assistant_config_rejects_user_configurable_hooks(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _US_HOLDINGS_YAML_HEAD
+        + _ASSISTANT_DEFAULTS_YAML
+        + """\
   hooks:
     pre_tool_use: custom
 """,
@@ -1352,19 +1295,9 @@ assistant:
 def test_yaml_assistant_config_omits_retired_bot_keys(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _US_HOLDINGS_YAML_HEAD
+        + _ASSISTANT_DEFAULTS_YAML
+        + """\
     channel_scenes: [operations_diagnostics]
     human_review: false
 """,
@@ -1385,19 +1318,9 @@ assistant:
 def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: external_holdings
-    holdings_account: lx
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-assistant:
-  enabled: true
-  bot:
-    enabled: true
+        _US_HOLDINGS_YAML_HEAD
+        + _ASSISTANT_DEFAULTS_YAML
+        + """\
   active_model: unsafe
   models:
     unsafe:
@@ -1531,16 +1454,7 @@ def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
 def test_yaml_config_requires_explicit_market(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
-""",
+        _US_FUTU_YAML_HEAD,
     )
 
     with pytest.raises(AgentToolError, match="markets.hk is required"):
@@ -1560,11 +1474,8 @@ def test_yaml_config_rejects_tabs(tmp_path: Path) -> None:
 def test_yaml_config_rejects_global_combo_yield_switch(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 features:
   combo_yield: true
 markets:
@@ -1581,11 +1492,8 @@ markets:
 def test_yaml_config_rejects_write_gates(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 writes:
   feishu: true
 markets:
@@ -1602,11 +1510,8 @@ markets:
 def test_yaml_config_rejects_trade_intake_write_policy(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 trade_intake:
   mode: apply
 markets:
@@ -1626,11 +1531,8 @@ def test_yaml_config_migrates_trade_intake_holdings_sync_alias(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 trade_intake:
   holdings_sync:
     enabled: true
@@ -1678,11 +1580,8 @@ def test_yaml_config_accepts_root_portfolio_management(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        f"""\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + f"""\
 portfolio_management:
   enabled: {str(enabled).lower()}
 markets:
@@ -1706,15 +1605,8 @@ def test_yaml_config_rejects_market_scoped_or_conflicting_pm_gate(
 ) -> None:
     market_scoped = _write_yaml(
         tmp_path / "market.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
+        _US_FUTU_YAML_HEAD
+        + """\
     portfolio_management:
       enabled: true
 """,
@@ -1728,11 +1620,8 @@ markets:
 
     conflict = _write_yaml(
         tmp_path / "conflict.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 portfolio_management:
   enabled: true
 trade_intake:
@@ -1757,11 +1646,8 @@ def test_yaml_config_accepts_settlement_observation_kill_switch(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 trade_intake:
   settlement_observation:
     enabled: false
@@ -1796,11 +1682,8 @@ def test_yaml_config_rejects_invalid_settlement_observation(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        f"""\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + f"""\
 trade_intake:
   settlement_observation:
     {settlement_yaml}
@@ -1822,11 +1705,8 @@ markets:
 def test_yaml_config_accepts_account_scoped_combo_reconciliation(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 trade_intake:
   combo_reconciliation:
     default_mode: off
@@ -1875,11 +1755,8 @@ def test_yaml_config_rejects_invalid_combo_reconciliation(
 ) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        f"""\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + f"""\
 trade_intake:
   combo_reconciliation:
     {combo_yaml}
@@ -1901,11 +1778,8 @@ markets:
 def test_yaml_config_rejects_invalid_trade_intake_holdings_sync(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
+        _FUTU_ACCOUNTS_YAML
+        + """\
 trade_intake:
   holdings_sync:
     enabled: "true"
@@ -1927,15 +1801,8 @@ markets:
 def test_yaml_config_rejects_override_for_symbol_not_in_market(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
+        _US_FUTU_YAML_HEAD
+        + """\
     overrides:
       FUTU:
         sell_put:

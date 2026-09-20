@@ -2,8 +2,42 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 
+def _service(tmp_path: Path) -> tuple[Any, Path, list[list[str]]]:
+    """ToolExecutionService over a recording runner; returns (service, base, calls)."""
+    from domain.services import ToolExecutionService
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    calls: list[list[str]] = []
+
+    def _runner(cmd, **_kwargs):
+        calls.append(cmd)
+        return _Proc()
+
+    base = Path(tmp_path)
+    return ToolExecutionService(base=base, runner=_runner), base, calls
+
+
+def _intent(base: Path, **overrides: object) -> Any:
+    """Required-data prefetch intent on the idempotency cases' defaults."""
+    from domain.services import ToolExecutionIntent
+
+    values: dict[str, object] = {
+        "tool_name": "required_data_prefetch",
+        "symbol": "AAPL",
+        "source": "yahoo",
+        "limit_exp": 8,
+        "cmd": ["python", "fake.py"],
+        "cwd": base,
+        "idempotency_scope": "required_data_prefetch",
+    }
+    return ToolExecutionIntent(**{**values, **overrides})
 
 
 def test_subprocess_boundary_wrappers() -> None:
@@ -74,8 +108,7 @@ def test_subprocess_boundary_wrappers() -> None:
 def test_state_repo_idempotency_and_audit_helpers(tmp_path: Path) -> None:
     from domain.storage.repositories import state_repo
 
-    td = tmp_path
-    base = Path(td)
+    base = Path(tmp_path)
     started_at = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
     finished_at = started_at + timedelta(seconds=1)
     r1 = state_repo.put_idempotency_success(
@@ -116,31 +149,8 @@ def test_state_repo_idempotency_and_audit_helpers(tmp_path: Path) -> None:
 
 
 def test_tool_execution_service_idempotency_and_audit(tmp_path: Path) -> None:
-    from domain.services import ToolExecutionIntent, ToolExecutionService
-
-    class _Proc:
-        returncode = 0
-        stdout = "ok\n"
-        stderr = ""
-
-    calls: list[list[str]] = []
-
-    def _runner(cmd, **kwargs):
-        calls.append(cmd)
-        return _Proc()
-
-    td = tmp_path
-    base = Path(td)
-    svc = ToolExecutionService(base=base, runner=_runner)
-    intent = ToolExecutionIntent(
-        tool_name="required_data_prefetch",
-        symbol="AAPL",
-        source="yahoo",
-        limit_exp=8,
-        cmd=["python", "fake.py"],
-        cwd=base,
-        idempotency_scope="required_data_prefetch",
-    )
+    svc, base, calls = _service(tmp_path)
+    intent = _intent(base)
     p1 = svc.execute(intent)
     p2 = svc.execute(intent)
 
@@ -153,44 +163,9 @@ def test_tool_execution_service_idempotency_and_audit(tmp_path: Path) -> None:
 
 
 def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency(tmp_path: Path) -> None:
-    from domain.services import ToolExecutionIntent, ToolExecutionService
-
-    class _Proc:
-        returncode = 0
-        stdout = "ok\n"
-        stderr = ""
-
-    calls: list[list[str]] = []
-
-    def _runner(cmd, **kwargs):
-        calls.append(cmd)
-        return _Proc()
-
-    td = tmp_path
-    base = Path(td)
-    svc = ToolExecutionService(base=base, runner=_runner)
-    base_intent = ToolExecutionIntent(
-        tool_name="required_data_prefetch",
-        symbol="AAPL",
-        source="yahoo",
-        limit_exp=8,
-        cmd=["python", "fake.py"],
-        cwd=base,
-        idempotency_scope="required_data_prefetch",
-    )
-    forced_intent = ToolExecutionIntent(
-        tool_name="required_data_prefetch",
-        symbol="AAPL",
-        source="yahoo",
-        limit_exp=8,
-        cmd=["python", "fake.py"],
-        cwd=base,
-        idempotency_scope="required_data_prefetch",
-        force_refresh=True,
-    )
-
-    p1 = svc.execute(base_intent)
-    p2 = svc.execute(forced_intent)
+    svc, base, calls = _service(tmp_path)
+    p1 = svc.execute(_intent(base))
+    p2 = svc.execute(_intent(base, force_refresh=True))
 
     assert p1["status"] == "fetched"
     assert p2["status"] == "fetched"

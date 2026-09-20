@@ -45,28 +45,126 @@ from src.application.trades.settlement_attempts import (
 )
 
 
-def _state(*, now_ms: int = 1_000) -> dict:
+def _account(**overrides: object) -> dict:
+    """Source/account scope kwargs shared by the case-id-list reads."""
+
+    base = {
+        "source_id": "lx",
+        "account": "lx",
+    }
+    base.update(overrides)
+    return base
+
+
+def _case(**overrides: object) -> dict:
+    """Identity kwargs shared by the inline settlement attempt literals."""
+
+    return _account(case_id="case-1", **overrides)
+
+
+def _prepare(
+    current: dict | None,
+    now_ms: int,
+    *,
+    case_scope_fingerprint_value: str = "case-scope-1",
+    provider_input_scope_fingerprint_value: str = "provider-scope-1",
+    capability_fingerprint: str = "capability-1",
+) -> dict:
     return prepare_provider_required_state(
-        None,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint_value="case-scope-1",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=now_ms,
+        current,
+        **_case(
+            case_scope_fingerprint_value=case_scope_fingerprint_value,
+            provider_input_scope_fingerprint_value=provider_input_scope_fingerprint_value,
+            contract_version="collector.v1",
+            capability_fingerprint=capability_fingerprint,
+            now_ms=now_ms,
+        ),
     )
+
+
+def _claim(**overrides: object) -> dict:
+    """Lease kwargs shared by the reserve/claim/renew call sites."""
+
+    base = {
+        **_case(),
+        "case_scope_fingerprint": "case-scope-1",
+        "claim_id": "claim-1",
+        "now_ms": 1_000,
+        "lease_ms": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _diagnostic(outcome: SettlementAttemptOutcome) -> bytes:
+    return lifecycle_attempt_diagnostic_sha256(
+        reason_code=outcome.reason_code,
+        provider_code=outcome.provider_code,
+        error_class=outcome.error_class,
+    )
+
+
+def _reconcile(state: dict, **overrides: object) -> dict:
+    """Identity kwargs plus the rolled-back invocation id for reconcile."""
+
+    base = {**_case(), "invocation_id": str(state["invocation_id"])}
+    base.update(overrides)
+    return base
+
+
+def _provider_invocation(
+    invocation_id: str,
+    outcome: SettlementAttemptOutcome,
+    *,
+    outcome_code: int,
+    claim_id: str = "claim-1",
+    control_now_ms: int = 2_000,
+) -> dict:
+    return {
+        **_case(),
+        "claim_id": claim_id,
+        "invocation_id": str(invocation_id),
+        "outcome": outcome,
+        "outcome_code": outcome_code,
+        "semantic_fingerprint": None,
+        "receipt_sha256": None,
+        "diagnostic_sha256": _diagnostic(outcome),
+        "control_now_ms": control_now_ms,
+    }
+
+
+def _replan(
+    current: dict,
+    outcome_kind: str,
+    now_ms: int,
+    *,
+    case_scope_fingerprint_value: str = "case-scope-1",
+    provider_input_scope_fingerprint_value: str = "provider-scope-1",
+    semantic_fingerprint: str | None = None,
+    provider_attempted: bool | None = None,
+) -> dict:
+    return settlement_attempt_updates_after_outcome(
+        current,
+        outcome=_outcome(outcome_kind),
+        now_ms=now_ms,
+        case_scope_fingerprint_value=case_scope_fingerprint_value,
+        provider_input_scope_fingerprint_value=provider_input_scope_fingerprint_value,
+        semantic_fingerprint=semantic_fingerprint,
+        provider_attempted=provider_attempted,
+    )
+
+
+def _state(*, now_ms: int = 1_000) -> dict:
+    return _prepare(None, now_ms)
 
 
 def _outcome(kind: str) -> SettlementAttemptOutcome:
     return SettlementAttemptOutcome(
         kind=kind,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
+        **_case(
+            contract_version="collector.v1",
+            capability_fingerprint="capability-1",
+        ),
         reason_code=f"reason:{kind}",
         error_class="unknown",
     )
@@ -74,16 +172,7 @@ def _outcome(kind: str) -> SettlementAttemptOutcome:
 
 def _reserved(path: Path) -> dict:
     upsert_settlement_attempt_state(path, state=_state())
-    reserved = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=1,
-    )
+    reserved = reserve_settlement_attempt_invocation(path, **_claim())
     assert reserved is not None
     return reserved
 
@@ -92,10 +181,7 @@ def _reserve_started(path: Path) -> dict:
     reserved = _reserved(path)
     return mark_settlement_attempt_provider_started(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
+        **_case(claim_id="claim-1"),
         invocation_id=str(reserved["invocation_id"]),
         attempted_at_ms=1_500,
     )
@@ -103,25 +189,13 @@ def _reserve_started(path: Path) -> dict:
 
 def _failure_finished(path: Path) -> dict:
     started = _reserve_started(path)
-    outcome = _outcome("unknown_error")
-    diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=outcome.reason_code,
-        provider_code=outcome.provider_code,
-        error_class=outcome.error_class,
-    )
     return finish_settlement_attempt_provider_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
-        invocation_id=str(started["invocation_id"]),
-        outcome=outcome,
-        outcome_code=7,
-        semantic_fingerprint=None,
-        receipt_sha256=None,
-        diagnostic_sha256=diagnostic,
-        control_now_ms=2_000,
+        **_provider_invocation(
+            started["invocation_id"],
+            _outcome("unknown_error"),
+            outcome_code=7,
+        ),
     )
 
 
@@ -146,6 +220,16 @@ def _failure_audit(
         "last_invocation_id": invocation,
         "chain_sha256": b"c" * 32,
     }
+
+
+def _stored_state_row(conn: sqlite3.Connection) -> dict:
+    """The single settlement attempt row held by this test's own fixture."""
+
+    return dict(
+        conn.execute(
+            "SELECT * FROM lifecycle_settlement_attempt_state"
+        ).fetchone()
+    )
 
 
 def _execute_base_14d06ca1_writer_sql(
@@ -328,14 +412,7 @@ def test_attempt_updates_sanitize_malformed_persisted_counters() -> None:
         "no_progress_count": -5,
     }
 
-    updates = settlement_attempt_updates_after_outcome(
-        state,
-        outcome=_outcome("unknown_error"),
-        now_ms=1_000,
-        case_scope_fingerprint_value="case-scope-1",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        provider_attempted=True,
-    )
+    updates = _replan(state, "unknown_error", 1_000, provider_attempted=True)
 
     assert updates["attempt_count"] == 1
     assert updates["no_progress_count"] == 0
@@ -362,18 +439,12 @@ def test_minute_ticks_have_exact_bounded_calls_through_24_hours(
         if next_attempt is not None and int(next_attempt) > now_ms:
             continue
         call_count += 1
-        updates = settlement_attempt_updates_after_outcome(
+        updates = _replan(
             state,
-            outcome=_outcome(outcome_kind),
-            now_ms=now_ms,
-            case_scope_fingerprint_value="case-scope-1",
-            provider_input_scope_fingerprint_value=(
-                "provider-scope-1"
-            ),
+            outcome_kind,
+            now_ms,
             semantic_fingerprint=(
-                "semantic-1"
-                if outcome_kind == "observed_incomplete"
-                else None
+                "semantic-1" if outcome_kind == "observed_incomplete" else None
             ),
             provider_attempted=True,
         )
@@ -391,27 +462,16 @@ def test_case_scope_change_preserves_backoff_when_provider_scope_is_stable() -> 
         "last_attempt_at_ms": 2_000,
     }
 
-    changed_case = prepare_provider_required_state(
+    changed_case = _prepare(
         prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        3_000,
         case_scope_fingerprint_value="case-scope-2",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=3_000,
     )
-    changed_capability = prepare_provider_required_state(
+    changed_capability = _prepare(
         prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        3_000,
         case_scope_fingerprint_value="case-scope-2",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        contract_version="collector.v1",
         capability_fingerprint="capability-2",
-        now_ms=3_000,
     )
 
     assert changed_case["attempt_count"] == 3
@@ -459,52 +519,35 @@ def test_effective_anchor_identity_resets_provider_backoff_only_when_changed() -
             "reservation_evidence_ids": ["anchor-evidence-2"],
         },
     )
-    prior = prepare_provider_required_state(
+    prior = _prepare(
         None,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint_value="case-scope-1",
+        1_000,
         provider_input_scope_fingerprint_value=scope_a,
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=1_000,
     )
     prior = {
         **prior,
-        **settlement_attempt_updates_after_outcome(
+        **_replan(
             prior,
-            outcome=_outcome("unknown_error"),
-            now_ms=1_000,
-            case_scope_fingerprint_value="case-scope-1",
+            "unknown_error",
+            1_000,
             provider_input_scope_fingerprint_value=scope_a,
             provider_attempted=True,
         ),
     }
 
-    unchanged = prepare_provider_required_state(
+    unchanged = _prepare(
         prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        2_000,
         case_scope_fingerprint_value="case-scope-2",
         provider_input_scope_fingerprint_value=(
             scope_with_unrelated_context
         ),
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=2_000,
     )
-    changed_anchor = prepare_provider_required_state(
+    changed_anchor = _prepare(
         prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        2_000,
         case_scope_fingerprint_value="case-scope-2",
         provider_input_scope_fingerprint_value=scope_b,
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=2_000,
     )
 
     assert scope_with_unrelated_context == scope_a
@@ -523,27 +566,11 @@ def test_legacy_semantic_block_rechecks_after_evidence_scope_changes() -> None:
         "last_attempt_at_ms": 2_000,
     }
 
-    unchanged = prepare_provider_required_state(
+    unchanged = _prepare(prior, 3_000)
+    repaired_evidence = _prepare(
         prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint_value="case-scope-1",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=3_000,
-    )
-    repaired_evidence = prepare_provider_required_state(
-        prior,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        3_000,
         case_scope_fingerprint_value="case-scope-2",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        contract_version="collector.v1",
-        capability_fingerprint="capability-1",
-        now_ms=3_000,
     )
 
     assert unchanged["outcome_kind"] == "legacy_semantic_unavailable"
@@ -555,13 +582,7 @@ def test_unknown_errors_never_promote_to_permanent_block() -> None:
     state = _state()
     now_ms = 1_000
     for _ in range(10):
-        updates = settlement_attempt_updates_after_outcome(
-            state,
-            outcome=_outcome("unknown_error"),
-            now_ms=now_ms,
-            case_scope_fingerprint_value="case-scope-1",
-            provider_input_scope_fingerprint_value="provider-scope-1",
-        )
+        updates = _replan(state, "unknown_error", now_ms)
         state = {**state, **updates}
         now_ms = int(state["next_attempt_at_ms"])
 
@@ -572,20 +593,18 @@ def test_unknown_errors_never_promote_to_permanent_block() -> None:
 def test_stale_revalidation_does_not_count_as_provider_attempt() -> None:
     state = _state()
 
-    before_call = settlement_attempt_updates_after_outcome(
+    before_call = _replan(
         state,
-        outcome=_outcome("stale_generation"),
-        now_ms=2_000,
+        "stale_generation",
+        2_000,
         case_scope_fingerprint_value="case-scope-2",
-        provider_input_scope_fingerprint_value="provider-scope-1",
         provider_attempted=False,
     )
-    after_call = settlement_attempt_updates_after_outcome(
+    after_call = _replan(
         state,
-        outcome=_outcome("stale_generation"),
-        now_ms=2_000,
+        "stale_generation",
+        2_000,
         case_scope_fingerprint_value="case-scope-2",
-        provider_input_scope_fingerprint_value="provider-scope-1",
         provider_attempted=True,
     )
 
@@ -602,23 +621,11 @@ def test_claim_completion_is_atomic_and_stale_owner_cannot_overwrite(
 ) -> None:
     path = tmp_path / "inbox.sqlite3"
     upsert_settlement_attempt_state(path, state=_state())
-    assert claim_settlement_attempt(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=1,
-    )
+    assert claim_settlement_attempt(path, **_claim())
 
     attempted_overwrite = upsert_settlement_attempt_state(
         path,
-        state={
-            **_state(now_ms=2_000),
-            "outcome_kind": "unknown_error",
-        },
+        state={**_state(now_ms=2_000), "outcome_kind": "unknown_error"},
     )
     assert attempted_overwrite["claim_id"] == "claim-1"
     assert attempted_overwrite["outcome_kind"] is None
@@ -629,19 +636,13 @@ def test_claim_completion_is_atomic_and_stale_owner_cannot_overwrite(
     ):
         complete_settlement_attempt(
             path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            claim_id="stale-claim",
+            **_case(claim_id="stale-claim"),
             updates={"outcome_kind": "unknown_error"},
         )
 
     completed = complete_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
+        **_case(claim_id="claim-1"),
         updates={
             "outcome_kind": "unknown_error",
             "next_attempt_at_ms": 301_000,
@@ -650,12 +651,7 @@ def test_claim_completion_is_atomic_and_stale_owner_cannot_overwrite(
     )
     assert completed["claim_id"] is None
     assert completed["outcome_kind"] == "unknown_error"
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == completed
+    assert get_settlement_attempt_state(path, **_case()) == completed
 
 
 def test_invocation_columns_upgrade_additively_and_legacy_rows_remain_valid(
@@ -715,12 +711,7 @@ def test_invocation_columns_upgrade_additively_and_legacy_rows_remain_valid(
             ),
         )
 
-    stored = get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    )
+    stored = get_settlement_attempt_state(path, **_case())
     assert stored is not None
     assert stored["invocation_state"] is None
     assert stored["invocation_writer_epoch"] == 0
@@ -743,12 +734,7 @@ def test_invocation_columns_upgrade_additively_and_legacy_rows_remain_valid(
             "committed_chain_sha256",
         )
     )
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == stored
+    assert get_settlement_attempt_state(path, **_case()) == stored
     with sqlite3.connect(path) as conn:
         columns = [
             row[1]
@@ -818,19 +804,11 @@ def test_base_writer_sql_updates_only_legacy_null_invocation_rows(
 
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        before = dict(
-            conn.execute(
-                "SELECT * FROM lifecycle_settlement_attempt_state"
-            ).fetchone()
-        )
+        before = _stored_state_row(conn)
         if invocation_state is None:
             _execute_base_14d06ca1_writer_sql(conn, operation)
             conn.commit()
-            after = dict(
-                conn.execute(
-                    "SELECT * FROM lifecycle_settlement_attempt_state"
-                ).fetchone()
-            )
+            after = _stored_state_row(conn)
             assert after["updated_at_ms"] == 2_000
             assert after["invocation_writer_epoch"] == 0
             assert after != before
@@ -841,11 +819,7 @@ def test_base_writer_sql_updates_only_legacy_null_invocation_rows(
             ):
                 _execute_base_14d06ca1_writer_sql(conn, operation)
             conn.rollback()
-            after = dict(
-                conn.execute(
-                    "SELECT * FROM lifecycle_settlement_attempt_state"
-                ).fetchone()
-            )
+            after = _stored_state_row(conn)
             assert after == before
 
 
@@ -855,16 +829,7 @@ def test_reservation_reuses_uuid_and_blocks_legacy_claim_path(
     path = tmp_path / "inbox.sqlite3"
     upsert_settlement_attempt_state(path, state=_state())
 
-    reserved = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=1,
-    )
+    reserved = reserve_settlement_attempt_invocation(path, **_claim())
     assert reserved is not None
     parsed = uuid.UUID(str(reserved["invocation_id"]))
     assert parsed.version == 4
@@ -873,56 +838,29 @@ def test_reservation_reuses_uuid_and_blocks_legacy_claim_path(
     assert reserved["invocation_attempted_at_ms"] is None
 
     same_owner = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=2_000,
-        lease_ms=1,
+        path, **_claim(now_ms=2_000)
     )
     assert same_owner is not None
     assert same_owner["invocation_id"] == reserved["invocation_id"]
-    assert reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-2",
-        now_ms=120_999,
-        lease_ms=1,
-    ) is None
+    assert (
+        reserve_settlement_attempt_invocation(
+            path, **_claim(claim_id="claim-2", now_ms=120_999)
+        )
+        is None
+    )
 
     reused = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-2",
-        now_ms=122_000,
-        lease_ms=1,
+        path, **_claim(claim_id="claim-2", now_ms=122_000)
     )
     assert reused is not None
     assert reused["invocation_id"] == reserved["invocation_id"]
     assert not claim_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="legacy-worker",
-        now_ms=242_000,
-        lease_ms=1,
+        **_claim(claim_id="legacy-worker", now_ms=242_000),
     )
     summary = settlement_attempt_summary(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1",),
-        now_ms=242_000,
+        **_account(case_ids=("case-1",), now_ms=242_000),
     )
     assert summary["ambiguous_provider_result_count"] == 0
     assert summary["eligible_count"] == 1
@@ -933,33 +871,13 @@ def test_reserved_pre_call_completion_clears_invocation_without_attempt(
 ) -> None:
     path = tmp_path / "inbox.sqlite3"
     upsert_settlement_attempt_state(path, state=_state())
-    reserved = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=1,
-    )
+    reserved = reserve_settlement_attempt_invocation(path, **_claim())
     assert reserved is not None
-    outcome = _outcome("blocked_static")
-    updates = settlement_attempt_updates_after_outcome(
-        reserved,
-        outcome=outcome,
-        now_ms=2_000,
-        case_scope_fingerprint_value="case-scope-1",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        provider_attempted=False,
-    )
+    updates = _replan(reserved, "blocked_static", 2_000, provider_attempted=False)
 
     completed = complete_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
+        **_case(claim_id="claim-1"),
         updates=updates,
     )
 
@@ -997,10 +915,7 @@ def test_legacy_completion_rejects_post_start_invocation_states(
     ):
         complete_settlement_attempt(
             started_path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            claim_id="claim-1",
+            **_case(claim_id="claim-1"),
             updates={},
         )
 
@@ -1012,10 +927,7 @@ def test_legacy_completion_rejects_post_start_invocation_states(
     ):
         complete_settlement_attempt(
             finished_path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            claim_id="claim-1",
+            **_case(claim_id="claim-1"),
             updates={},
         )
 
@@ -1039,32 +951,24 @@ def test_provider_finished_reconciles_exact_current_audit_and_control(
     audit = _failure_audit(finished)
     committed = reconcile_settlement_attempt_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(finished["invocation_id"]),
-        audit=audit,
+        **_reconcile(finished, audit=audit),
     )
     assert committed["invocation_state"] == "ledger_committed"
     assert committed["claim_id"] is None
     assert committed["attempt_count"] == 1
     assert committed["committed_audit_ordinal"] == 1
     assert committed["committed_chain_sha256"] == b"c" * 32
-    assert reconcile_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(finished["invocation_id"]),
-        audit=audit,
-    ) == committed
+    assert (
+        reconcile_settlement_attempt_invocation(
+            path,
+            **_reconcile(finished, audit=audit),
+        )
+        == committed
+    )
 
     replanned = upsert_settlement_attempt_state(
         path,
-        state={
-            **_state(now_ms=3_000),
-            "classification": "local",
-        },
+        state={**_state(now_ms=3_000), "classification": "local"},
     )
     assert replanned["classification"] == "local"
     assert replanned["invocation_state"] is None
@@ -1127,11 +1031,7 @@ def test_real_ledger_lookup_reconciles_without_case_id_splicing(
     assert audit["case_id"] == "case-1"
     committed = reconcile_settlement_attempt_invocation(
         inbox_path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(finished["invocation_id"]),
-        audit=audit,
+        **_reconcile(finished, audit=audit),
     )
     assert committed["invocation_state"] == "ledger_committed"
     assert committed["committed_audit_ordinal"] == written["audit_ordinal"]
@@ -1146,48 +1046,26 @@ def test_provider_finish_replay_is_zero_write_and_mismatch_fails_closed(
     path = tmp_path / "inbox.sqlite3"
     finished = _failure_finished(path)
     outcome = _outcome("unknown_error")
-    diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=outcome.reason_code,
-        provider_code=outcome.provider_code,
-        error_class=outcome.error_class,
-    )
 
     replay = finish_settlement_attempt_provider_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
-        invocation_id=str(finished["invocation_id"]),
-        outcome=outcome,
-        outcome_code=7,
-        semantic_fingerprint=None,
-        receipt_sha256=None,
-        diagnostic_sha256=diagnostic,
-        control_now_ms=2_000,
+        **_provider_invocation(
+            finished["invocation_id"],
+            outcome,
+            outcome_code=7,
+        ),
     )
     assert replay == finished
     with pytest.raises(ValueError, match="provider-finish replay mismatch"):
         finish_settlement_attempt_provider_invocation(
             path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            claim_id="claim-1",
-            invocation_id=str(finished["invocation_id"]),
-            outcome=outcome,
-            outcome_code=4,
-            semantic_fingerprint=None,
-            receipt_sha256=None,
-            diagnostic_sha256=diagnostic,
-            control_now_ms=2_000,
+            **_provider_invocation(
+                finished["invocation_id"],
+                outcome,
+                outcome_code=4,
+            ),
         )
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == finished
+    assert get_settlement_attempt_state(path, **_case()) == finished
 
 
 def test_provider_result_replacement_replays_or_reclassifies_once(
@@ -1196,24 +1074,11 @@ def test_provider_result_replacement_replays_or_reclassifies_once(
     path = tmp_path / "inbox.sqlite3"
     finished = _failure_finished(path)
     original_outcome = _outcome("unknown_error")
-    original_diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=original_outcome.reason_code,
-        provider_code=original_outcome.provider_code,
-        error_class=original_outcome.error_class,
+    original_kwargs = _provider_invocation(
+        finished["invocation_id"],
+        original_outcome,
+        outcome_code=7,
     )
-    original_kwargs = {
-        "source_id": "lx",
-        "account": "lx",
-        "case_id": "case-1",
-        "claim_id": "claim-1",
-        "invocation_id": str(finished["invocation_id"]),
-        "outcome": original_outcome,
-        "outcome_code": 7,
-        "semantic_fingerprint": None,
-        "receipt_sha256": None,
-        "diagnostic_sha256": original_diagnostic,
-        "control_now_ms": 2_000,
-    }
 
     assert replace_finished_settlement_attempt_provider_invocation(
         path,
@@ -1221,18 +1086,13 @@ def test_provider_result_replacement_replays_or_reclassifies_once(
     ) == finished
 
     stale_outcome = _outcome("stale_generation")
-    stale_diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=stale_outcome.reason_code,
-        provider_code=stale_outcome.provider_code,
-        error_class=stale_outcome.error_class,
+    stale_diagnostic = _diagnostic(stale_outcome)
+    stale_kwargs = _provider_invocation(
+        finished["invocation_id"],
+        stale_outcome,
+        outcome_code=6,
+        control_now_ms=2_100,
     )
-    stale_kwargs = {
-        **original_kwargs,
-        "outcome": stale_outcome,
-        "outcome_code": 6,
-        "diagnostic_sha256": stale_diagnostic,
-        "control_now_ms": 2_100,
-    }
     replaced = replace_finished_settlement_attempt_provider_invocation(
         path,
         **stale_kwargs,
@@ -1260,39 +1120,20 @@ def test_provider_result_replacement_loses_wrong_owner_or_state(
     path = tmp_path / "inbox.sqlite3"
     state = _reserve_started(path) if wrong_state else _failure_finished(path)
     outcome = _outcome("stale_generation")
-    diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=outcome.reason_code,
-        provider_code=outcome.provider_code,
-        error_class=outcome.error_class,
-    )
-    before = get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    )
+    before = get_settlement_attempt_state(path, **_case())
 
     with pytest.raises(SettlementAttemptClaimOwnershipLost):
         replace_finished_settlement_attempt_provider_invocation(
             path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            claim_id="claim-wrong" if not wrong_state else "claim-1",
-            invocation_id=str(state["invocation_id"]),
-            outcome=outcome,
-            outcome_code=6,
-            semantic_fingerprint=None,
-            receipt_sha256=None,
-            diagnostic_sha256=diagnostic,
-            control_now_ms=2_100,
+            **_provider_invocation(
+                state["invocation_id"],
+                outcome,
+                outcome_code=6,
+                claim_id="claim-wrong" if not wrong_state else "claim-1",
+                control_now_ms=2_100,
+            ),
         )
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == before
+    assert get_settlement_attempt_state(path, **_case()) == before
 
 
 def test_current_invocation_writer_advances_epoch_once_per_mutation(
@@ -1302,66 +1143,30 @@ def test_current_invocation_writer_advances_epoch_once_per_mutation(
     initial = upsert_settlement_attempt_state(path, state=_state())
     assert initial["invocation_writer_epoch"] == 0
 
-    reserved = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=1,
-    )
+    reserved = reserve_settlement_attempt_invocation(path, **_claim())
     assert reserved is not None
     assert reserved["invocation_writer_epoch"] == 1
     assert renew_settlement_attempt_claim(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_100,
-        lease_ms=1,
+        **_claim(now_ms=1_100),
     )
-    renewed = get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    )
+    renewed = get_settlement_attempt_state(path, **_case())
     assert renewed is not None
     assert renewed["invocation_writer_epoch"] == 2
 
     started = mark_settlement_attempt_provider_started(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
+        **_case(claim_id="claim-1"),
         invocation_id=str(reserved["invocation_id"]),
         attempted_at_ms=1_500,
     )
     assert started["invocation_writer_epoch"] == 3
     outcome = _outcome("unknown_error")
-    diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=outcome.reason_code,
-        provider_code=outcome.provider_code,
-        error_class=outcome.error_class,
+    finish_kwargs = _provider_invocation(
+        started["invocation_id"],
+        outcome,
+        outcome_code=7,
     )
-    finish_kwargs = {
-        "source_id": "lx",
-        "account": "lx",
-        "case_id": "case-1",
-        "claim_id": "claim-1",
-        "invocation_id": str(started["invocation_id"]),
-        "outcome": outcome,
-        "outcome_code": 7,
-        "semantic_fingerprint": None,
-        "receipt_sha256": None,
-        "diagnostic_sha256": diagnostic,
-        "control_now_ms": 2_000,
-    }
     finished = finish_settlement_attempt_provider_invocation(
         path,
         **finish_kwargs,
@@ -1375,48 +1180,26 @@ def test_current_invocation_writer_advances_epoch_once_per_mutation(
     audit = _failure_audit(finished)
     committed = reconcile_settlement_attempt_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(finished["invocation_id"]),
-        audit=audit,
+        **_reconcile(finished, audit=audit),
     )
     assert committed["invocation_writer_epoch"] == 5
-    assert reconcile_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(finished["invocation_id"]),
-        audit=audit,
-    ) == committed
+    assert (
+        reconcile_settlement_attempt_invocation(
+            path,
+            **_reconcile(finished, audit=audit),
+        )
+        == committed
+    )
 
     second = reserve_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-2",
-        now_ms=400_000,
-        lease_ms=1,
+        path, **_claim(claim_id="claim-2", now_ms=400_000)
     )
     assert second is not None
     assert second["invocation_writer_epoch"] == 6
-    updates = settlement_attempt_updates_after_outcome(
-        second,
-        outcome=_outcome("blocked_static"),
-        now_ms=401_000,
-        case_scope_fingerprint_value="case-scope-1",
-        provider_input_scope_fingerprint_value="provider-scope-1",
-        provider_attempted=False,
-    )
+    updates = _replan(second, "blocked_static", 401_000, provider_attempted=False)
     cleared = complete_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-2",
+        **_case(claim_id="claim-2"),
         updates=updates,
     )
     assert cleared["invocation_writer_epoch"] == 7
@@ -1427,29 +1210,19 @@ def test_reserved_restart_is_safe_only_without_audit(tmp_path: Path) -> None:
     path = tmp_path / "inbox.sqlite3"
     reserved = _reserved(path)
 
-    assert reconcile_settlement_attempt_invocation(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(reserved["invocation_id"]),
-        audit=None,
-    ) == reserved
+    assert (
+        reconcile_settlement_attempt_invocation(
+            path,
+            **_reconcile(reserved, audit=None),
+        )
+        == reserved
+    )
     with pytest.raises(ValueError, match="conflicts with audit"):
         reconcile_settlement_attempt_invocation(
             path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            invocation_id=str(reserved["invocation_id"]),
-            audit={"case_id": "case-1"},
+            **_reconcile(reserved, audit={"case_id": "case-1"}),
         )
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == reserved
+    assert get_settlement_attempt_state(path, **_case()) == reserved
 
 
 @pytest.mark.parametrize(
@@ -1466,21 +1239,17 @@ def test_unprovable_post_start_restart_becomes_unclaimed_ambiguous(
 
     ambiguous = reconcile_settlement_attempt_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(state["invocation_id"]),
-        audit={"case_id": "wrong-case"} if audit_present else None,
+        **_reconcile(
+            state,
+            audit={"case_id": "wrong-case"} if audit_present else None,
+        ),
     )
     assert ambiguous["invocation_state"] == "ambiguous_provider_result"
     assert ambiguous["claim_id"] is None
     assert ambiguous["claim_until_ms"] is None
     summary = settlement_attempt_summary(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1",),
-        now_ms=999_999,
+        **_account(case_ids=("case-1",), now_ms=999_999),
     )
     assert summary["ambiguous_provider_result_count"] == 1
     assert summary["eligible_count"] == 0
@@ -1492,42 +1261,24 @@ def test_stale_after_call_ambiguity_is_counted_but_not_eligible(
     path = tmp_path / "inbox.sqlite3"
     started = _reserve_started(path)
     outcome = _outcome("stale_generation")
-    diagnostic = lifecycle_attempt_diagnostic_sha256(
-        reason_code=outcome.reason_code,
-        provider_code=outcome.provider_code,
-        error_class=outcome.error_class,
-    )
     finished = finish_settlement_attempt_provider_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        claim_id="claim-1",
-        invocation_id=str(started["invocation_id"]),
-        outcome=outcome,
-        outcome_code=6,
-        semantic_fingerprint=None,
-        receipt_sha256=None,
-        diagnostic_sha256=diagnostic,
-        control_now_ms=2_000,
+        **_provider_invocation(
+            started["invocation_id"],
+            outcome,
+            outcome_code=6,
+        ),
     )
     assert finished["classification"] == "unclassified"
 
     ambiguous = reconcile_settlement_attempt_invocation(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        invocation_id=str(started["invocation_id"]),
-        audit=None,
+        **_reconcile(started, audit=None),
     )
     assert ambiguous["claim_id"] is None
     summary = settlement_attempt_summary(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1",),
-        now_ms=999_999,
+        **_account(case_ids=("case-1",), now_ms=999_999),
     )
     assert summary["provider_required_count"] == 0
     assert summary["ambiguous_provider_result_count"] == 1
@@ -1542,11 +1293,10 @@ def test_reconcile_rejects_historical_or_corrupt_pending_control(
     with pytest.raises(ValueError, match="not the current head"):
         reconcile_settlement_attempt_invocation(
             path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-            invocation_id=str(finished["invocation_id"]),
-            audit=_failure_audit(finished, ordinal=1, last_ordinal=2),
+            **_reconcile(
+                finished,
+                audit=_failure_audit(finished, ordinal=1, last_ordinal=2),
+            ),
         )
     with sqlite3.connect(path) as conn:
         conn.execute(
@@ -1561,12 +1311,7 @@ def test_reconcile_rejects_historical_or_corrupt_pending_control(
         ValueError,
         match="pending settlement control projection mismatch",
     ):
-        get_settlement_attempt_state(
-            path,
-            source_id="lx",
-            account="lx",
-            case_id="case-1",
-        )
+        get_settlement_attempt_state(path, **_case())
 
 
 def test_invocation_storage_rejects_text_hash_and_noninteger_control(
@@ -1595,12 +1340,7 @@ def test_invocation_storage_rejects_text_hash_and_noninteger_control(
                 """,
                 ("not-an-integer",),
             )
-    assert get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    ) == finished
+    assert get_settlement_attempt_state(path, **_case()) == finished
 
 
 def test_attempt_reads_are_scoped_to_current_candidate_ids(
@@ -1651,29 +1391,19 @@ def test_attempt_reads_are_scoped_to_current_candidate_ids(
 
     states = list_settlement_attempt_states(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1", "missing-case"),
+        **_account(case_ids=("case-1", "missing-case")),
     )
     batched_states = list_settlement_attempt_states(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1", *stale_case_ids[:450]),
+        **_account(case_ids=("case-1", *stale_case_ids[:450])),
     )
     summary = settlement_attempt_summary(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=("case-1", "missing-case"),
-        now_ms=1_000,
+        **_account(case_ids=("case-1", "missing-case"), now_ms=1_000),
     )
     empty_summary = settlement_attempt_summary(
         path,
-        source_id="lx",
-        account="lx",
-        case_ids=(),
-        now_ms=1_000,
+        **_account(case_ids=(), now_ms=1_000),
     )
 
     assert set(states) == {"case-1"}
@@ -1695,72 +1425,37 @@ def test_claim_renewal_extends_only_the_current_owners_lease(
 ) -> None:
     path = tmp_path / "inbox.sqlite3"
     upsert_settlement_attempt_state(path, state=_state())
-    assert claim_settlement_attempt(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=1_000,
-        lease_ms=120_000,
-    )
-    claimed = get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    )
+    assert claim_settlement_attempt(path, **_claim(lease_ms=120_000))
+    claimed = get_settlement_attempt_state(path, **_case())
     assert claimed is not None
 
     assert renew_settlement_attempt_claim(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="claim-1",
-        now_ms=120_000,
-        lease_ms=120_000,
+        **_claim(now_ms=120_000, lease_ms=120_000),
     )
-    renewed = get_settlement_attempt_state(
-        path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-    )
+    renewed = get_settlement_attempt_state(path, **_case())
     assert renewed is not None
     assert renewed["claim_until_ms"] == 240_000
     assert renewed["updated_at_ms"] == claimed["updated_at_ms"]
     assert not renew_settlement_attempt_claim(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="stale-owner",
-        now_ms=121_001,
-        lease_ms=120_000,
+        **_claim(claim_id="stale-owner", now_ms=121_001, lease_ms=120_000),
     )
     assert not claim_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="competing-worker",
-        now_ms=121_001,
-        lease_ms=120_000,
+        **_claim(
+            claim_id="competing-worker",
+            now_ms=121_001,
+            lease_ms=120_000,
+        ),
     )
     assert claim_settlement_attempt(
         path,
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
-        case_scope_fingerprint="case-scope-1",
-        claim_id="competing-worker",
-        now_ms=240_000,
-        lease_ms=120_000,
+        **_claim(
+            claim_id="competing-worker",
+            now_ms=240_000,
+            lease_ms=120_000,
+        ),
     )
 
 
@@ -1771,35 +1466,24 @@ def test_provider_batch_lease_is_source_account_scoped_and_owner_checked(
 
     assert claim_settlement_provider_batch(
         path,
-        source_id="lx",
-        account="LX",
-        claim_id="batch-1",
-        now_ms=1_000,
-        lease_ms=1,
+        **_account(
+            account="LX",
+            claim_id="batch-1",
+            now_ms=1_000,
+            lease_ms=1,
+        ),
     )
     assert not claim_settlement_provider_batch(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-2",
-        now_ms=120_999,
-        lease_ms=120_000,
+        **_account(claim_id="batch-2", now_ms=120_999, lease_ms=120_000),
     )
     assert renew_settlement_provider_batch_claim(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-1",
-        now_ms=121_000,
-        lease_ms=120_000,
+        **_account(claim_id="batch-1", now_ms=121_000, lease_ms=120_000),
     )
     assert not renew_settlement_provider_batch_claim(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="stale-owner",
-        now_ms=122_000,
-        lease_ms=120_000,
+        **_account(claim_id="stale-owner", now_ms=122_000, lease_ms=120_000),
     )
     with pytest.raises(
         SettlementAttemptClaimOwnershipLost,
@@ -1807,47 +1491,43 @@ def test_provider_batch_lease_is_source_account_scoped_and_owner_checked(
     ):
         release_settlement_provider_batch_claim(
             path,
-            source_id="lx",
-            account="lx",
-            claim_id="stale-owner",
+            **_account(claim_id="stale-owner"),
         )
     assert not claim_settlement_provider_batch(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-2",
-        now_ms=240_999,
-        lease_ms=120_000,
+        **_account(claim_id="batch-2", now_ms=240_999, lease_ms=120_000),
     )
     assert claim_settlement_provider_batch(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-2",
-        now_ms=241_000,
-        lease_ms=120_000,
+        **_account(claim_id="batch-2", now_ms=241_000, lease_ms=120_000),
     )
     with pytest.raises(SettlementAttemptClaimOwnershipLost):
         release_settlement_provider_batch_claim(
             path,
-            source_id="lx",
-            account="lx",
-            claim_id="batch-1",
+            **_account(claim_id="batch-1"),
         )
     release_settlement_provider_batch_claim(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-2",
+        **_account(claim_id="batch-2"),
     )
     assert claim_settlement_provider_batch(
         path,
-        source_id="lx",
-        account="lx",
-        claim_id="batch-3",
-        now_ms=241_001,
-        lease_ms=120_000,
+        **_account(claim_id="batch-3", now_ms=241_001, lease_ms=120_000),
     )
+
+
+def _observation(**receipt: object) -> dict:
+    """One incomplete history_deals receipt as the provider observation."""
+
+    return {
+        "complete": False,
+        "source_receipts": {
+            "history_deals": {
+                "status": "incomplete",
+                **receipt,
+            },
+        },
+    }
 
 
 def _contract_and_capability() -> tuple[
@@ -1886,21 +1566,13 @@ def test_typed_receipt_errors_map_without_text_inference(
 ) -> None:
     contract, capability = _contract_and_capability()
     outcome = classify_observation_outcome(
-        {
-            "complete": False,
-            "source_receipts": {
-                "history_deals": {
-                    "status": "incomplete",
-                    "error": "arbitrary text must not classify",
-                    "error_class": error_class,
-                    "provider_code": "",
-                    "retry_after_ms": 123_000,
-                }
-            },
-        },
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        _observation(
+            error="arbitrary text must not classify",
+            error_class=error_class,
+            provider_code="",
+            retry_after_ms=123_000,
+        ),
+        **_case(),
         contract=contract,
         capability=capability,
     )
@@ -1931,9 +1603,7 @@ def test_typed_provider_exception_codes_remain_retryable(
 
     outcome = classify_exception_outcome(
         ProviderError("typed provider failure"),
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        **_case(),
         contract=contract,
         capability=capability,
     )
@@ -1955,36 +1625,20 @@ def test_explicit_allowlisted_provider_code_is_the_only_account_block(
         frozenset({"OPERATION_UNSUPPORTED"}),
     )
     blocked = classify_observation_outcome(
-        {
-            "complete": False,
-            "source_receipts": {
-                "history_deals": {
-                    "status": "incomplete",
-                    "error_class": "unknown",
-                    "provider_code": "OPERATION_UNSUPPORTED",
-                }
-            },
-        },
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        _observation(
+            error_class="unknown",
+            provider_code="OPERATION_UNSUPPORTED",
+        ),
+        **_case(),
         contract=contract,
         capability=capability,
     )
     not_allowlisted = classify_observation_outcome(
-        {
-            "complete": False,
-            "source_receipts": {
-                "history_deals": {
-                    "status": "incomplete",
-                    "error_class": "unknown",
-                    "provider_code": "SOME_OTHER_CODE",
-                }
-            },
-        },
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        _observation(
+            error_class="unknown",
+            provider_code="SOME_OTHER_CODE",
+        ),
+        **_case(),
         contract=contract,
         capability=capability,
     )
@@ -1997,9 +1651,7 @@ def test_unclassified_exception_remains_unknown_retry() -> None:
     contract, capability = _contract_and_capability()
     outcome = classify_exception_outcome(
         RuntimeError("permission words in text are not evidence"),
-        source_id="lx",
-        account="lx",
-        case_id="case-1",
+        **_case(),
         contract=contract,
         capability=capability,
     )

@@ -38,14 +38,45 @@ def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
     return path
 
 
-def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
-    cfg_path = _write_config(tmp_path, _assistant_config())
+def _write_env(tmp_path: Path, line: str) -> Path:
+    path = tmp_path / "options-monitor.env"
+    path.write_text(line, encoding="utf-8")
+    return path
 
-    out = check_assistant_llm(
+
+def _llm(**overrides: Any) -> dict[str, Any]:
+    """The enabled openai-compatible LLM block; call sites spell out only what differs."""
+    base: dict[str, Any] = {
+        "enabled": True,
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "api_key_env": "OM_LLM_API_KEY",
+        "confidence_min": 0.75,
+        "timeout_seconds": 9,
+        "context_window_tokens": 24_000,
+        "max_output_tokens": 777,
+    }
+    base.update(overrides)
+    return base
+
+
+def _check_llm(
+    tmp_path: Path,
+    cfg: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Write ``cfg`` (default: bot disabled) and check readiness with the local env ignored."""
+    cfg_path = _write_config(tmp_path, _assistant_config() if cfg is None else cfg)
+    return check_assistant_llm(
         repo_root=tmp_path,
         config_path=cfg_path,
         include_local_env_file=False,
+        **overrides,
     )
+
+
+def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
+    out = _check_llm(tmp_path)
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
@@ -62,7 +93,7 @@ def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
 
 
 def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
         _assistant_config(
             portfolio_enabled=True,
@@ -74,12 +105,6 @@ def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
                 "max_output_tokens": 2048,
             },
         ),
-    )
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        include_local_env_file=False,
     )
 
     assert out["summary"]["assistant_bot_portfolio_enabled"] is True
@@ -98,7 +123,7 @@ def test_ollama_model_config_does_not_require_api_key() -> None:
 
 
 def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
         _assistant_config(
             llm={
@@ -112,8 +137,6 @@ def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
             }
         ),
     )
-
-    out = check_assistant_llm(repo_root=tmp_path, config_path=cfg_path, include_local_env_file=False)
 
     assert out["summary"]["status"] == "ready"
     assert out["llm"]["api_key_configured"] is True
@@ -136,18 +159,8 @@ def test_llm_check_rejects_missing_explicit_assistant_config(tmp_path: Path) -> 
 
 
 def test_llm_check_rejects_invalid_assistant_config(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "config.assistant.json"
-    cfg_path.write_text(
-        json.dumps({"assistant": {"mode": "unknown"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
     with pytest.raises(AgentToolError) as exc:
-        check_assistant_llm(
-            repo_root=tmp_path,
-            config_path=cfg_path,
-            include_local_env_file=False,
-        )
+        _check_llm(tmp_path, {"assistant": {"mode": "unknown"}})
 
     assert exc.value.code == "CONFIG_ERROR"
     assert "assistant config validation failed" in exc.value.message
@@ -155,48 +168,18 @@ def test_llm_check_rejects_invalid_assistant_config(tmp_path: Path) -> None:
 
 
 def test_llm_check_rejects_business_runtime_config_as_assistant_config(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(
-        json.dumps({"accounts": ["sy"], "symbols": [{"symbol": "NVDA"}], "assistant": {}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
     with pytest.raises(AgentToolError) as exc:
-        check_assistant_llm(
-            repo_root=tmp_path,
-            config_path=cfg_path,
-            include_local_env_file=False,
-        )
+        _check_llm(tmp_path, {"accounts": ["sy"], "symbols": [{"symbol": "NVDA"}], "assistant": {}})
 
     assert exc.value.code == "CONFIG_ERROR"
     assert "use config.assistant.json, not config.<market>.json" in exc.value.details["error"]
 
 
 def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
-        _assistant_config(
-            llm={
-                "enabled": True,
-                "provider": "openai",
-                "base_url": "https://llm.example/v1",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 9,
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 777,
-            }
-        ),
-    )
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        env_file=env_file,
-        include_local_env_file=False,
+        _assistant_config(llm=_llm(base_url="https://llm.example/v1")),
+        env_file=_write_env(tmp_path, "OM_LLM_API_KEY=sk-test\n"),
     )
 
     assert out["summary"]["ok"] is True
@@ -213,30 +196,17 @@ def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Pat
 
 
 def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
         _assistant_config(
-            llm={
-                "enabled": True,
-                "provider": "deepseek",
-                "base_url": "https://api.deepseek.com",
-                "model": "deepseek-v4-flash",
-                "api_key_env": "DEEPSEEK_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 9,
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 777,
-            }
+            llm=_llm(
+                provider="deepseek",
+                base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash",
+                api_key_env="DEEPSEEK_API_KEY",
+            )
         ),
-    )
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("DEEPSEEK_API_KEY=sk-test\n", encoding="utf-8")
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        env_file=env_file,
-        include_local_env_file=False,
+        env_file=_write_env(tmp_path, "DEEPSEEK_API_KEY=sk-test\n"),
     )
 
     assert out["summary"]["ok"] is True
@@ -253,30 +223,17 @@ def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
 
 
 def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
         _assistant_config(
-            llm={
-                "enabled": True,
-                "provider": "kimi",
-                "base_url": "https://api.moonshot.ai/v1",
-                "model": "kimi-k2.7-code",
-                "api_key_env": "MOONSHOT_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 9,
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 777,
-            }
+            llm=_llm(
+                provider="kimi",
+                base_url="https://api.moonshot.ai/v1",
+                model="kimi-k2.7-code",
+                api_key_env="MOONSHOT_API_KEY",
+            )
         ),
-    )
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("MOONSHOT_API_KEY=sk-test\n", encoding="utf-8")
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        env_file=env_file,
-        include_local_env_file=False,
+        env_file=_write_env(tmp_path, "MOONSHOT_API_KEY=sk-test\n"),
     )
 
     assert out["summary"]["ok"] is True
@@ -291,30 +248,17 @@ def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
 
 
 def test_llm_check_reports_ready_kimi_code_endpoint(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
         _assistant_config(
-            llm={
-                "enabled": True,
-                "provider": "kimi-code",
-                "base_url": "https://api.kimi.com/coding/v1",
-                "model": "kimi-for-coding",
-                "api_key_env": "KIMI_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 9,
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 777,
-            }
+            llm=_llm(
+                provider="kimi-code",
+                base_url="https://api.kimi.com/coding/v1",
+                model="kimi-for-coding",
+                api_key_env="KIMI_API_KEY",
+            )
         ),
-    )
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("KIMI_API_KEY=sk-test\n", encoding="utf-8")
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        env_file=env_file,
-        include_local_env_file=False,
+        env_file=_write_env(tmp_path, "KIMI_API_KEY=sk-test\n"),
     )
 
     assert out["summary"]["ok"] is True
@@ -329,28 +273,10 @@ def test_llm_check_reports_ready_kimi_code_endpoint(tmp_path: Path) -> None:
 
 
 def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> None:
-    cfg_path = _write_config(
+    out = _check_llm(
         tmp_path,
-        _assistant_config(
-            llm={
-                "enabled": True,
-                "provider": "openai",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 2048,
-            }
-        ),
-    )
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
-
-    out = check_assistant_llm(
-        repo_root=tmp_path,
-        config_path=cfg_path,
-        env_file=env_file,
-        include_local_env_file=False,
+        _assistant_config(llm=_llm(max_output_tokens=2048)),
+        env_file=_write_env(tmp_path, "OM_LLM_API_KEY=sk-test\n"),
         live=True,
     )
 

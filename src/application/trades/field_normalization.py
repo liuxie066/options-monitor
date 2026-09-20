@@ -3,11 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from domain.domain.trade_execution import canonical_decimal
-
-
-def normalize_optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+from src.application.payload_helpers import optional_text as normalize_optional_text
 
 
 def normalize_optional_int(value: Any) -> int | None:

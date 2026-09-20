@@ -22,17 +22,37 @@ from src.application.trades.state import (
 )
 
 
+def _seal(**overrides: object) -> dict:
+    """Build the lifecycle attempt run seal literal this module repeats."""
+    base = {
+        "account": "lx",
+        "source_id": "source-a",
+        "completed_at_ms": 1,
+        "heads": [],
+        "seal_scope": "all_heads_checkpoint",
+        "reason": "process_startup",
+    }
+    base.update(overrides)
+    return build_lifecycle_attempt_run_seal(**base)
+
+
+_REPAIRED_AUDIT_LINES = ['{"phase":"complete"}', '{"phase": "sealed"}']
+
+
+def _applied_open_payload() -> dict:
+    """The processed 'applied' deal payload these cases repeat."""
+    return {"status": "applied", "action": "open", "account": "lx"}
+
+
+def _retryable_unresolved_payload() -> dict:
+    """The retryable 'unresolved' deal payload these cases repeat."""
+    return {"status": "unresolved", "retryable": True, "attempt_count": 1}
+
+
 def _append_audit_rows(path: str, *, durable: bool, count: int) -> None:
     for index in range(count):
         payload = (
-            build_lifecycle_attempt_run_seal(
-                account="lx",
-                source_id="source-a",
-                completed_at_ms=index + 1,
-                heads=[],
-                seal_scope="all_heads_checkpoint",
-                reason="process_startup",
-            )
+            _seal(completed_at_ms=index + 1)
             if durable
             else {"phase": "ordinary", "index": index}
         )
@@ -42,10 +62,8 @@ def _append_audit_rows(path: str, *, durable: bool, count: int) -> None:
 def test_trade_intake_state_round_trip(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     state = upsert_deal_state(
-        {},
-        bucket="processed_deal_ids",
-        deal_id="deal-1",
-        payload={"status": "applied", "action": "open", "account": "lx"},
+        {}, bucket="processed_deal_ids", deal_id="deal-1",
+        payload=_applied_open_payload(),
     )
     write_trade_intake_state(state_path, state)
 
@@ -126,10 +144,7 @@ def test_durable_trade_intake_audit_repairs_only_torn_tail_and_fsyncs(
     append_trade_intake_audit(path, {"phase": "sealed"}, durable=True)
 
     assert path.read_bytes().startswith(complete)
-    assert path.read_text(encoding="utf-8").splitlines() == [
-        '{"phase":"complete"}',
-        '{"phase": "sealed"}',
-    ]
+    assert path.read_text(encoding="utf-8").splitlines() == _REPAIRED_AUDIT_LINES
     assert len(fsync_calls) == 1
 
 
@@ -141,10 +156,7 @@ def test_trade_intake_audit_repairs_large_torn_tail_and_refuses_non_durable_tail
     path.write_bytes(original)
 
     append_trade_intake_audit(path, {"phase": "sealed"}, durable=True)
-    assert path.read_text(encoding="utf-8").splitlines() == [
-        '{"phase":"complete"}',
-        '{"phase": "sealed"}',
-    ]
+    assert path.read_text(encoding="utf-8").splitlines() == _REPAIRED_AUDIT_LINES
 
     path.write_bytes(b"x" * 70_000)
     append_trade_intake_audit(path, {"phase": "sealed"}, durable=True)
@@ -172,14 +184,7 @@ def test_trade_intake_seal_reader_is_strict_and_tolerates_only_torn_eof(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "audit.jsonl"
-    seal = build_lifecycle_attempt_run_seal(
-        account="lx",
-        source_id="source-a",
-        completed_at_ms=1,
-        heads=[],
-        seal_scope="all_heads_checkpoint",
-        reason="process_startup",
-    )
+    seal = _seal()
     append_trade_intake_audit(path, {"phase": "ordinary"})
     append_trade_intake_audit(path, seal)
     with path.open("ab") as handle:
@@ -273,16 +278,12 @@ def test_concurrent_ordinary_and_durable_audit_appends_are_complete(
 
 def test_retryable_unresolved_state_is_distinguishable_from_terminal_state() -> None:
     state = upsert_deal_state(
-        {},
-        bucket="unresolved_deal_ids",
-        deal_id="deal-retry-1",
-        payload={"status": "unresolved", "retryable": True, "attempt_count": 1},
+        {}, bucket="unresolved_deal_ids", deal_id="deal-retry-1",
+        payload=_retryable_unresolved_payload(),
     )
     terminal = upsert_deal_state(
-        state,
-        bucket="processed_deal_ids",
-        deal_id="deal-done-1",
-        payload={"status": "applied", "action": "open", "account": "lx"},
+        state, bucket="processed_deal_ids", deal_id="deal-done-1",
+        payload=_applied_open_payload(),
     )
 
     assert is_retryable_unresolved_deal(terminal, "deal-retry-1") is True
@@ -292,16 +293,12 @@ def test_retryable_unresolved_state_is_distinguishable_from_terminal_state() -> 
 
 def test_failed_deal_state_is_distinguishable_from_processed_state() -> None:
     state = upsert_deal_state(
-        {},
-        bucket="failed_deal_ids",
-        deal_id="deal-failed-1",
+        {}, bucket="failed_deal_ids", deal_id="deal-failed-1",
         payload={"status": "failed", "action": "close", "account": "lx"},
     )
     state = upsert_deal_state(
-        state,
-        bucket="processed_deal_ids",
-        deal_id="deal-done-1",
-        payload={"status": "applied", "action": "open", "account": "lx"},
+        state, bucket="processed_deal_ids", deal_id="deal-done-1",
+        payload=_applied_open_payload(),
     )
 
     assert is_failed_deal(state, "deal-failed-1") is True
@@ -310,16 +307,12 @@ def test_failed_deal_state_is_distinguishable_from_processed_state() -> None:
 
 def test_upsert_deal_state_moves_deal_between_buckets() -> None:
     state = upsert_deal_state(
-        {},
-        bucket="unresolved_deal_ids",
-        deal_id="deal-retry-1",
-        payload={"status": "unresolved", "retryable": True, "attempt_count": 1},
+        {}, bucket="unresolved_deal_ids", deal_id="deal-retry-1",
+        payload=_retryable_unresolved_payload(),
     )
     state = upsert_deal_state(
-        state,
-        bucket="processed_deal_ids",
-        deal_id="deal-retry-1",
-        payload={"status": "applied", "action": "open", "account": "lx"},
+        state, bucket="processed_deal_ids", deal_id="deal-retry-1",
+        payload=_applied_open_payload(),
     )
 
     assert lookup_deal_state_entry(state, "deal-retry-1")[0] == "processed_deal_ids"

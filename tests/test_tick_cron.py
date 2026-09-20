@@ -14,6 +14,19 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def _tick(tmp_path: Path, run_cmd, *, market: str = "hk", **overrides):
+    """Call run_tick_cron with this file's shared lock path and empty environ."""
+    from src.application.tick_cron import run_tick_cron
+
+    return run_tick_cron(
+        market=market,
+        lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=run_cmd,
+        environ={},
+        **overrides,
+    )
+
+
 def test_build_tick_cron_plan_sets_hk_defaults() -> None:
     from src.application.tick_cron import build_tick_cron_plan
 
@@ -102,8 +115,6 @@ def test_run_tick_cron_invokes_tick_with_trigger_environment(tmp_path) -> None:
     assert not (tmp_path / "output_shared").exists()
 
 
-
-
 def test_run_tick_cron_reports_locked_without_running(monkeypatch, tmp_path, capsys) -> None:
     import src.application.tick_cron as mod
 
@@ -112,12 +123,10 @@ def test_run_tick_cron_reports_locked_without_running(monkeypatch, tmp_path, cap
 
     monkeypatch.setattr(mod.fcntl, "flock", _locked)
 
-    rc = mod.run_tick_cron(
-        market="hk",
-        lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
+    rc = _tick(
+        tmp_path,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
         preflight_config_fn=None,
-        environ={},
     )
 
     assert rc == 0
@@ -125,18 +134,10 @@ def test_run_tick_cron_reports_locked_without_running(monkeypatch, tmp_path, cap
 
 
 def test_run_tick_cron_reports_timeout(tmp_path, capsys) -> None:
-    from src.application.tick_cron import run_tick_cron
-
     def _timeout(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
-    rc = run_tick_cron(
-        market="hk",
-        lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=_timeout,
-        preflight_config_fn=None,
-        environ={},
-    )
+    rc = _tick(tmp_path, _timeout, preflight_config_fn=None)
 
     assert rc == 124
     assert capsys.readouterr().err.strip() == "EXEC_TIMEOUT_RC_124"
@@ -192,18 +193,10 @@ def test_default_tick_process_uses_session_and_terminates_process_group(
 
 
 def test_run_tick_cron_reports_process_failure_distinct_from_lock(tmp_path, capsys) -> None:
-    from src.application.tick_cron import run_tick_cron
-
     def _failed(command, **_kwargs):
         return subprocess.CompletedProcess(command, 1)
 
-    rc = run_tick_cron(
-        market="hk",
-        lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=_failed,
-        preflight_config_fn=None,
-        environ={},
-    )
+    rc = _tick(tmp_path, _failed, preflight_config_fn=None)
 
     captured = capsys.readouterr()
     assert rc == 1
@@ -212,8 +205,6 @@ def test_run_tick_cron_reports_process_failure_distinct_from_lock(tmp_path, caps
 
 
 def test_run_tick_cron_preflight_rejects_config_missing_generation_metadata(tmp_path, capsys) -> None:
-    from src.application.tick_cron import run_tick_cron
-
     config = _write_json(
         tmp_path / "config.hk.json",
         {
@@ -224,12 +215,10 @@ def test_run_tick_cron_preflight_rejects_config_missing_generation_metadata(tmp_
         },
     )
 
-    rc = run_tick_cron(
-        market="hk",
+    rc = _tick(
+        tmp_path,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
         config_path=str(config),
-        lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
-        environ={},
     )
 
     captured = capsys.readouterr()
@@ -240,21 +229,13 @@ def test_run_tick_cron_preflight_rejects_config_missing_generation_metadata(tmp_
 
 
 def test_run_tick_cron_allow_stale_config_forwards_emergency_override(tmp_path) -> None:
-    from src.application.tick_cron import run_tick_cron
-
     calls: list[dict] = []
 
     def _run_cmd(command, **kwargs):
         calls.append({"command": command, **kwargs})
         return subprocess.CompletedProcess(command, 0)
 
-    rc = run_tick_cron(
-        market="hk",
-        lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=_run_cmd,
-        allow_stale_config=True,
-        environ={},
-    )
+    rc = _tick(tmp_path, _run_cmd, allow_stale_config=True)
 
     assert rc == 0
     assert calls[0]["command"][-1] == "--allow-stale-config"
@@ -288,8 +269,6 @@ def test_scan_scheduler_external_adapter_forwards_force_flag(monkeypatch, tmp_pa
 def test_tick_cron_real_preflight_after_yaml_edit(
     tmp_path: Path, capsys, market: str, symbol: str, invalid_yaml: bool,
 ) -> None:
-    from src.application.tick_cron import run_tick_cron
-
     source = tmp_path / "config.yaml"
     original = (
         "accounts:\n  lx:\n    type: futu\n    futu_account_id: '12345678'\n"
@@ -312,10 +291,7 @@ def test_tick_cron_real_preflight_after_yaml_edit(
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0)
 
-    rc = run_tick_cron(
-        market=market, config_path=str(runtime), lock_path=str(tmp_path / "tick.lock"),
-        run_cmd=run_command, no_send=True, environ={},
-    )
+    rc = _tick(tmp_path, run_command, market=market, config_path=str(runtime), no_send=True)
 
     captured = capsys.readouterr()
     if invalid_yaml:

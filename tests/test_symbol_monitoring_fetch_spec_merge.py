@@ -6,6 +6,59 @@ from pathlib import Path
 import pytest
 
 
+def _prefilters_fn(**kwargs):
+    """The plain prefilter result used by most cases here."""
+    return type(
+        "Prefilters",
+        (),
+        {
+            "want_put": kwargs["want_put"],
+            "want_call": kwargs["want_call"],
+            "sp": kwargs["sp"],
+            "cc": kwargs["cc"],
+            "stock": None,
+        },
+    )()
+
+
+def _deps(**overrides):
+    import src.application.symbol_monitoring as mod
+
+    kwargs = {
+        "build_converter_fn": lambda **kwargs: object(),
+        "apply_prefilters_fn": _prefilters_fn,
+        "apply_multiplier_cache_fn": lambda **kwargs: None,
+        "ensure_required_data_fn": lambda **kwargs: None,
+        "run_sell_put_scan_fn": lambda **kwargs: {"strategy": "sell_put"},
+        "empty_sell_put_summary_fn": lambda symbol, symbol_cfg: {"strategy": "sell_put"},
+        "run_sell_call_scan_fn": lambda **kwargs: {"strategy": "sell_call"},
+        "empty_sell_call_summary_fn": lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        "run_combo_yield_scan_fn": lambda **kwargs: None,
+        "empty_combo_yield_summary_fn": lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+    }
+    kwargs.update(overrides)
+    return mod.SymbolMonitoringDependencies(**kwargs)
+
+
+def _inputs(tmp_path: Path, **overrides):
+    import src.application.symbol_monitoring as mod
+
+    kwargs = {
+        "py": "python3",
+        "base": tmp_path,
+        "top_n": 3,
+        "portfolio_ctx": None,
+        "usd_per_cny_exchange_rate": None,
+        "cny_per_hkd_exchange_rate": None,
+        "timeout_sec": 10,
+        "required_data_dir": tmp_path / "required_data",
+        "report_dir": tmp_path / "reports",
+        "state_dir": tmp_path / "state",
+        "is_scheduled": False,
+    }
+    kwargs.update(overrides)
+    return mod.SymbolMonitoringInputs(**kwargs)
+
 
 def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
@@ -26,48 +79,20 @@ def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypat
     def _ensure_required_data_fn(**kwargs):  # type: ignore[no-untyped-def]
         captured.update(kwargs)
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=_ensure_required_data_fn,
-        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "0700.HK",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
                 "sell_put": {"enabled": True, "min_dte": 10, "max_dte": 30, "min_strike": 420, "max_strike": 460},
                 "sell_call": {"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 505},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -96,48 +121,24 @@ def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkey
     def _scan_should_not_run(**_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("scan should not run in fetch-only mode")
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
         run_sell_put_scan_fn=_scan_should_not_run,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
         run_sell_call_scan_fn=_scan_should_not_run,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 2},
                 "sell_put": {"enabled": True, "min_dte": 10, "max_dte": 30},
                 "sell_call": {"enabled": True, "min_dte": 10, "max_dte": 60},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
             fetch_only=True,
         ),
         deps=deps,
@@ -173,19 +174,9 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
         scan_kwargs.update(kwargs)
         return {"strategy": "sell_put", "candidate_count": 0}
 
-    deps = mod.SymbolMonitoringDependencies(
+    deps = _deps(
         build_converter_fn=lambda **_kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
+        apply_prefilters_fn=_prefilters_fn,
         apply_multiplier_cache_fn=_multiplier_writer,
         ensure_required_data_fn=_ensure_required_data,
         run_sell_put_scan_fn=_scan,
@@ -221,22 +212,13 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
     )
 
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
             is_scheduled=True,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
@@ -263,7 +245,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     report_dir = tmp_path / "reports"
     capture_statuses: list[dict] = []
 
-    deps = mod.SymbolMonitoringDependencies(
+    deps = _deps(
         build_converter_fn=lambda **_kwargs: object(),
         apply_prefilters_fn=lambda **kwargs: type(
             "Prefilters",
@@ -309,23 +291,15 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     )
 
     rows = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True},
                 "combo_yield": {"enabled": True, "variant": "sp_lc"},
                 "sell_call": {"enabled": True},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
             report_dir=report_dir,
-            state_dir=tmp_path / "state",
             is_scheduled=True,
             runtime_config={"portfolio": {"account": "lx"}},
             final_candidates_sink_fn=lambda _mode, _rows: None,
@@ -427,19 +401,9 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
             "candidate_count": 0,
         }
 
-    deps = mod.SymbolMonitoringDependencies(
+    deps = _deps(
         build_converter_fn=lambda **_kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
+        apply_prefilters_fn=_prefilters_fn,
         apply_multiplier_cache_fn=lambda **_kwargs: None,
         ensure_required_data_fn=lambda **_kwargs: {
             "snapshot_id": "snapshot-empty",
@@ -456,22 +420,14 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
     )
 
     rows = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
             report_dir=report_dir,
-            state_dir=tmp_path / "state",
             is_scheduled=True,
             runtime_config={"portfolio": {"account": "lx"}},
             final_candidates_sink_fn=lambda _mode, _rows: None,
@@ -531,48 +487,20 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
 
     monkeypatch.setattr(mod, "build_required_data_fetch_plan", _build_required_data_fetch_plan)
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
-        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "0700.HK",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
                 "sell_put": {"enabled": True, "min_strike": 420, "max_strike": 460},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
             runtime_config={
                 "runtime": {
                     "option_chain_fetch": {"max_calls": 13, "window_sec": 12, "max_wait_sec": 11},
@@ -622,8 +550,7 @@ def test_run_symbol_monitoring_lifts_sell_call_min_strike_to_avg_cost(monkeypatc
 
     monkeypatch.setattr(mod, "build_required_data_fetch_plan", _build_required_data_fetch_plan)
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
+    deps = _deps(
         apply_prefilters_fn=lambda **kwargs: type(
             "Prefilters",
             (),
@@ -635,35 +562,18 @@ def test_run_symbol_monitoring_lifts_sell_call_min_strike_to_avg_cost(monkeypatc
                 "stock": {"shares": 200, "avg_cost": 120.0},
             },
         )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
-        ensure_required_data_fn=lambda **kwargs: None,
-        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "AAPL",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
                 "sell_put": {"enabled": False},
                 "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 60, "min_strike": 100, "min_strike_cost_multiplier": 1.02},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -708,48 +618,21 @@ def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkey
     def _ensure_required_data_fn(**kwargs):  # type: ignore[no-untyped-def]
         captured.update(kwargs)
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=_ensure_required_data_fn,
-        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "0700.HK",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
                 "sell_put": {"enabled": True, "min_dte": 10, "max_dte": 30, "min_strike": 420, "max_strike": 460},
                 "sell_call": {"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 505},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
             required_data_dir=required_data_dir,
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -775,33 +658,15 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_combo_yield(monkeypatc
         },
     )
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
         run_sell_put_scan_fn=lambda **kwargs: [{"strategy": "sell_put"}, {"strategy": "combo_yield"}],
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
 
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
@@ -813,15 +678,6 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_combo_yield(monkeypatc
                 "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -871,23 +727,17 @@ def test_run_symbol_monitoring_keeps_combo_yield_market_put_scope_after_account_
             },
         )()
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
+    deps = _deps(
         apply_prefilters_fn=_apply_prefilters_fn,
-        apply_multiplier_cache_fn=lambda **kwargs: None,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
         run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put recommendation should be prefiltered")),
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
     )
 
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "9992.HK",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
@@ -901,15 +751,7 @@ def test_run_symbol_monitoring_keeps_combo_yield_market_put_scope_after_account_
                 "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
             portfolio_ctx={"cash_by_currency": {"HKD": 0}},
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -984,23 +826,17 @@ def test_symbol_monitoring_reports_combo_capture_status(
             },
         )()
 
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
+    deps = _deps(
         apply_prefilters_fn=_apply_prefilters_fn,
-        apply_multiplier_cache_fn=lambda **kwargs: None,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
         run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put disabled")),
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
-        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: combo_summary,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
     )
 
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
@@ -1008,15 +844,7 @@ def test_symbol_monitoring_reports_combo_capture_status(
                 "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
             portfolio_ctx={"cash_by_currency": {"USD": 0}},
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
             source_producer_run_id="run-1",
             candidate_capture_status_sink_fn=captured_statuses.append,
         ),
@@ -1057,36 +885,20 @@ def _run_strategy_decoupling_case(
             "to_debug_dict": lambda: {"ok": True},
         },
     )
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
         run_sell_put_scan_fn=sell_put_runner,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put", "count": 0},
-        run_sell_call_scan_fn=(
-            sell_call_runner
-            if sell_call_runner is not None
-            else lambda **kwargs: {"strategy": "sell_call"}
-        ),
+        run_sell_call_scan_fn=(sell_call_runner
+                               if sell_call_runner is not None
+                               else lambda **kwargs: {"strategy": "sell_call"}),
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call", "count": 0},
         run_combo_yield_scan_fn=combo_runner,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     )
     out = mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
@@ -1094,15 +906,6 @@ def _run_strategy_decoupling_case(
                 "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": sell_call_enabled},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
         ),
         deps=deps,
     )
@@ -1143,20 +946,8 @@ def test_combo_yield_capture_preserves_cc_lp_not_applicable(monkeypatch, tmp_pat
             "to_debug_dict": lambda: {"ok": True},
         },
     )
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
-        apply_prefilters_fn=lambda **kwargs: type(
-            "Prefilters",
-            (),
-            {
-                "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
-                "sp": kwargs["sp"],
-                "cc": kwargs["cc"],
-                "stock": None,
-            },
-        )(),
-        apply_multiplier_cache_fn=lambda **kwargs: None,
+    deps = _deps(
+        apply_prefilters_fn=_prefilters_fn,
         ensure_required_data_fn=_ensure_required_data_fn,
         run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put", "count": 0},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put", "count": 0},
@@ -1176,24 +967,14 @@ def test_combo_yield_capture_preserves_cc_lp_not_applicable(monkeypatch, tmp_pat
         },
     )
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "NVDA",
                 "sell_put": {"enabled": False},
                 "combo_yield": {"enabled": True, "variant": "cc_lp"},
                 "sell_call": {"enabled": False},
             },
-            top_n=3,
-            portfolio_ctx=None,
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
             candidate_capture_status_sink_fn=capture_statuses.append,
         ),
         deps=deps,
@@ -1332,11 +1113,8 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
             "to_debug_dict": lambda: {"ok": True},
         },
     )
-    deps = mod.SymbolMonitoringDependencies(
-        build_converter_fn=lambda **kwargs: object(),
+    deps = _deps(
         apply_prefilters_fn=apply_prefilters,
-        apply_multiplier_cache_fn=lambda **kwargs: None,
-        ensure_required_data_fn=lambda **kwargs: None,
         run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("sell_put must stay disabled")
         ),
@@ -1351,7 +1129,6 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
             "strategy": "sell_call",
             "count": 0,
         },
-        run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
             "strategy": "combo_yield",
             "count": 0,
@@ -1359,15 +1136,13 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
     )
 
     mod.run_symbol_monitoring(
-        inputs=mod.SymbolMonitoringInputs(
-            py="python3",
-            base=tmp_path,
+        inputs=_inputs(
+            tmp_path,
             symbol_cfg={
                 "symbol": "3690.HK",
                 "sell_put": {"enabled": False},
                 "sell_call": {"enabled": True},
             },
-            top_n=3,
             portfolio_ctx={
                 "portfolio_source_name": "futu",
                 "capacity_authority": {"status": "available"},
@@ -1380,13 +1155,6 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
                     }
                 },
             },
-            usd_per_cny_exchange_rate=None,
-            cny_per_hkd_exchange_rate=None,
-            timeout_sec=10,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=tmp_path / "reports",
-            state_dir=tmp_path / "state",
-            is_scheduled=False,
             candidate_capture_status_sink_fn=capture_statuses.append,
         ),
         deps=deps,

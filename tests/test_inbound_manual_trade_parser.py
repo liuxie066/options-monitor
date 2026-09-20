@@ -38,6 +38,23 @@ def _patch_multiplier(
     monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
 
+def _draft_kwargs(
+    tmp_path: Path,
+    *,
+    config_key: str = "hk",
+    config_path: str | Path | None = None,
+    allow_opend_refresh: bool = False,
+) -> dict[str, Any]:
+    return {
+        "accounts": ("lx", "sy"),
+        "config_key": config_key,
+        "config_path": config_path,
+        "runtime_config": _runtime_config(),
+        "repo_base": tmp_path,
+        "allow_opend_refresh": allow_opend_refresh,
+    }
+
+
 def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_multiplier(monkeypatch, 1000, expected_allow_opend_refresh=True)
     message = (
@@ -49,12 +66,11 @@ def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypat
     draft = build_manual_trade_draft(
         "manual_open",
         raw_text=f"记录开仓 sy {message}",
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path="/var/lib/options-monitor/config.hk.json",
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=True,
+        **_draft_kwargs(
+            tmp_path,
+            config_path="/var/lib/options-monitor/config.hk.json",
+            allow_opend_refresh=True,
+        ),
     )
 
     assert draft["arguments"] == {
@@ -98,12 +114,7 @@ def test_manual_trade_draft_reads_runtime_multiplier_cache_from_config_path(tmp_
     draft = build_manual_trade_draft(
         "manual_open",
         raw_text=message,
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=runtime / "config.hk.json",
-        runtime_config=_runtime_config(),
-        repo_base=repo,
-        allow_opend_refresh=False,
+        **_draft_kwargs(repo, config_path=runtime / "config.hk.json"),
     )
 
     assert draft["arguments"]["symbol"] == "0883.HK"
@@ -120,12 +131,7 @@ def test_manual_trade_draft_canonicalizes_handwritten_open_and_resolves_multipli
     draft = build_manual_trade_draft(
         "manual_open",
         raw_text="记录开仓 sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path),
     )
 
     assert draft["arguments"]["symbol"] == "0700.HK"
@@ -140,12 +146,7 @@ def test_manual_trade_draft_canonicalizes_handwritten_close_symbol(tmp_path: Pat
     draft = build_manual_trade_draft(
         "manual_close",
         raw_text="记录平仓 sy HK.00700 short put strike 450 exp 2026-05-28 2张 close 1.2",
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path),
     )
 
     assert draft["arguments"]["symbol"] == "0700.HK"
@@ -162,12 +163,7 @@ def test_manual_trade_draft_converts_futu_close_fill_side_to_position_side(tmp_p
     draft = build_manual_trade_draft(
         "manual_close",
         raw_text=f"记录平仓 sy {message}",
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path),
     )
 
     assert draft["arguments"]["symbol"] == "0700.HK"
@@ -185,12 +181,7 @@ def test_manual_trade_draft_parses_futu_assignment_notice(tmp_path: Path) -> Non
     draft = build_manual_trade_draft(
         "manual_assignment",
         raw_text=message,
-        accounts=("lx", "sy"),
-        config_key="us",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path, config_key="us"),
     )
 
     assert draft["arguments"] == {
@@ -224,12 +215,7 @@ def test_manual_trade_draft_parses_futu_early_assignment_notice(tmp_path: Path) 
     draft = build_manual_trade_draft(
         "manual_assignment",
         raw_text=message,
-        accounts=("lx", "sy"),
-        config_key="us",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path, config_key="us"),
     )
 
     assert draft["arguments"] == {
@@ -258,12 +244,7 @@ def test_manual_trade_draft_parses_futu_expiry_notice(tmp_path: Path) -> None:
     draft = build_manual_trade_draft(
         "manual_expiry",
         raw_text=message,
-        accounts=("lx", "sy"),
-        config_key="us",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path, config_key="us"),
     )
 
     assert draft["arguments"] == {
@@ -291,15 +272,7 @@ def test_manual_expiry_drafts_parse_all_contracts_in_futu_notice(tmp_path: Path)
         "-1张腾讯 260710 410.00 沽期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
     )
 
-    drafts = build_manual_expiry_drafts(
-        raw_text=message,
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
-    )
+    drafts = build_manual_expiry_drafts(raw_text=message, **_draft_kwargs(tmp_path))
 
     assert [draft["arguments"] for draft in drafts] == [
         {
@@ -340,16 +313,7 @@ def test_manual_expiry_drafts_parse_all_contracts_in_futu_notice(tmp_path: Path)
     assert {draft["diagnostics"]["batch_size"] for draft in drafts} == {3}
 
     with pytest.raises(ValueError, match="multiple expiry contracts"):
-        build_manual_trade_draft(
-            "manual_expiry",
-            raw_text=message,
-            accounts=("lx", "sy"),
-            config_key="hk",
-            config_path=None,
-            runtime_config=_runtime_config(),
-            repo_base=tmp_path,
-            allow_opend_refresh=False,
-        )
+        build_manual_trade_draft("manual_expiry", raw_text=message, **_draft_kwargs(tmp_path))
 
 
 def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -358,12 +322,7 @@ def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.Monke
     draft = build_manual_trade_draft(
         "manual_open",
         raw_text="记录开仓 sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
-        accounts=("lx", "sy"),
-        config_key="hk",
-        config_path=None,
-        runtime_config=_runtime_config(),
-        repo_base=tmp_path,
-        allow_opend_refresh=False,
+        **_draft_kwargs(tmp_path),
     )
 
     assert "multiplier" in draft["diagnostics"]["missing_fields"]

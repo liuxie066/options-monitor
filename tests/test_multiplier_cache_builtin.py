@@ -22,6 +22,10 @@ from src.application.multiplier_cache import (
 )
 
 
+def _entry(symbol: str, multiplier: int, source: str) -> dict:
+    return {symbol: {"multiplier": multiplier, "source": source}}
+
+
 def test_normalize_hk_symbol_to_four_digit_suffix() -> None:
     assert normalize_symbol("00700.HK") == "0700.HK"
     assert normalize_symbol("700.HK") == "0700.HK"
@@ -38,12 +42,7 @@ def test_resolve_multiplier_returns_none_when_cache_missing_and_refresh_disabled
 
 
 def test_resolve_multiplier_uses_cached_value(tmp_path: Path) -> None:
-    cache = {
-        "0700.HK": {
-            "multiplier": 500,
-            "source": "test",
-        }
-    }
+    cache = _entry("0700.HK", 500, "test")
     cache_path = tmp_path / "output_shared" / "state" / "multiplier_cache.json"
     save_cache(cache_path, cache)
 
@@ -168,25 +167,9 @@ def test_cmd_refresh_persists_opend_receipt(monkeypatch, tmp_path: Path) -> None
 
 def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:
     cache_path = tmp_path / "output_shared" / "state" / "multiplier_cache.json"
-    save_cache(
-        cache_path,
-        {
-            "0700.HK": {
-                "multiplier": 500,
-                "source": "existing",
-            }
-        },
-    )
+    save_cache(cache_path, _entry("0700.HK", 500, "existing"))
 
-    merge_cache_updates(
-        cache_path,
-        {
-            "3690.HK": {
-                "multiplier": 500,
-                "source": "opend",
-            }
-        },
-    )
+    merge_cache_updates(cache_path, _entry("3690.HK", 500, "opend"))
 
     cache = load_cache(cache_path)
     assert cache["0700.HK"]["source"] == "existing"

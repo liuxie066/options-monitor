@@ -23,7 +23,9 @@ if str(REPO_ROOT) not in sys.path:
 from domain.domain.combo_identity import build_combo_identity
 import src.application.quality.service as quality_service_module
 from src.application.ledger.api import (
+    apply_position_projection_migration,
     build_current_decision_projection,
+    build_position_projection_migration_inventory,
     capture_current_decision_projection_fence,
     current_decision_projection_row,
     empty_assigned_stock_fact,
@@ -33,7 +35,7 @@ from src.application.ledger.api import (
     run_position_projection_in_transaction,
 )
 from src.application.quality.service import OMQualityService
-from scripts import benchmark_data_storage_projection as baseline
+from scripts import benchmark_support as baseline
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import (
     QualityControlStateRepository,
@@ -232,10 +234,8 @@ def _history_fixture(
             spec, seed=SEED
         )
         baseline._insert_phase_3a_events(repo, synthetic_events)  # noqa: SLF001
-        inventory = baseline.build_position_projection_migration_inventory(
-            repo.db_path
-        )
-        baseline.apply_position_projection_migration(repo.db_path, inventory)
+        inventory = build_position_projection_migration_inventory(repo.db_path)
+        apply_position_projection_migration(repo.db_path, inventory)
         _seed_combo_identity_history(repo, account, identities)
         _bootstrap(repo, (account,))
         yield {
@@ -940,6 +940,7 @@ def _source_sha256() -> str:
     source_files = {
         "scripts/benchmark_current_decision_projection_slice2.py",
         "scripts/benchmark_data_storage_projection.py",
+        "scripts/benchmark_support.py",
     }
     for pattern in (
         "domain/domain/**/*.py",

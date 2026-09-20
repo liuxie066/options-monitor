@@ -73,51 +73,99 @@ def _event(
     )
 
 
+def _call_open(
+    event_id: str = "call-open",
+    lot_id: str = "call-lot",
+    *,
+    strike: int = 110,
+    event_time_ms: int = BASE_TIME_MS + 1_000,
+    opend_host: str = "127.0.0.1",
+) -> TradeEvent:
+    """A long call open; defaults copied verbatim from the repeated inline fixture."""
+    return _event(
+        event_id,
+        lot_id,
+        option_type="call",
+        position_side="long",
+        strike=strike,
+        event_time_ms=event_time_ms,
+        opend_host=opend_host,
+    )
+
+
+def _put_open(
+    event_id: str = "put-open",
+    lot_id: str = "put-lot",
+    *,
+    strike: int = 100,
+    event_time_ms: int = BASE_TIME_MS + 2_000,
+    opend_host: str = "127.0.0.1",
+) -> TradeEvent:
+    """A short put open; defaults copied verbatim from the repeated inline fixture."""
+    return _event(
+        event_id,
+        lot_id,
+        option_type="put",
+        position_side="short",
+        strike=strike,
+        event_time_ms=event_time_ms,
+        opend_host=opend_host,
+    )
+
+
+def _reconcile(repo, *, effective_now_ms: int, persist: bool = True) -> dict:
+    return reconcile_combo_pair_inferences(
+        repo=repo,
+        account="lx",
+        runtime_environment=RUNTIME_ENVIRONMENT,
+        persist=persist,
+        effective_now_ms=effective_now_ms,
+    )
+
+
+def _adopt(
+    repo,
+    proposal: dict,
+    *,
+    effective_now_ms: int,
+    apply_changes: bool,
+    actor: str = "tester",
+) -> dict:
+    return adopt_post_trade_combo_pair(
+        repo=repo,
+        inference_id=proposal["inference_id"],
+        expected_input_hash=proposal["input_snapshot_hash"],
+        actor=actor,
+        apply_changes=apply_changes,
+        effective_now_ms=effective_now_ms,
+    )
+
+
+def _supersede(repo, proposal: dict, *, effective_now_ms: int) -> dict:
+    return supersede_post_trade_combo_pair(
+        repo=repo,
+        inference_id=proposal["inference_id"],
+        expected_input_hash=proposal["input_snapshot_hash"],
+        reason="wrong pair",
+        actor="tester",
+        apply_changes=True,
+        effective_now_ms=effective_now_ms,
+    )
+
+
 def test_application_reconcile_is_post_trade_and_persists_only_inference_state(
     tmp_path,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    persist_trade_event_object(
-        repo,
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-    )
+    persist_trade_event_object(repo, _call_open())
 
-    waiting = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=False,
-        effective_now_ms=BASE_TIME_MS + 2_000,
-    )
+    waiting = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 2_000, persist=False)
     assert waiting["inferences"] == []
     assert waiting["waiting_for_counterpart"][0]["record_id"] == "call-lot"
     assert repo.list_combo_pair_inferences(account="lx") == []
 
-    persist_trade_event_object(
-        repo,
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    )
-    persisted = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    persist_trade_event_object(repo, _put_open())
+    persisted = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
 
     assert persisted["proposal_ready_count"] == 1
     assert persisted["inserted_inference_count"] == 1
@@ -171,32 +219,9 @@ def test_confirm_accepts_legacy_contracts_original_snapshot_key(tmp_path) -> Non
     "input facts changed" error on rows that are actually intact.
     """
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in (_call_open(), _put_open()):
         persist_trade_event_object(repo, event)
-    reconciled = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    reconciled = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
     proposal = reconciled["inferences"][0]
 
     def to_legacy(snapshot: dict) -> None:
@@ -207,14 +232,7 @@ def test_confirm_accepts_legacy_contracts_original_snapshot_key(tmp_path) -> Non
         repo, inference_id=proposal["inference_id"], mutate=to_legacy
     )
 
-    preview = adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=False,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )
+    preview = _adopt(repo, proposal, apply_changes=False, effective_now_ms=BASE_TIME_MS + 4_000)
     assert preview["status"] == "dry_run"
 
     # The alias must only bridge the key rename: a genuine fact change still
@@ -226,44 +244,14 @@ def test_confirm_accepts_legacy_contracts_original_snapshot_key(tmp_path) -> Non
         repo, inference_id=proposal["inference_id"], mutate=to_drifted_strike
     )
     with pytest.raises(ValueError, match="input facts changed: .*strike"):
-        adopt_post_trade_combo_pair(
-            repo=repo,
-            inference_id=proposal["inference_id"],
-            expected_input_hash=proposal["input_snapshot_hash"],
-            actor="tester",
-            apply_changes=False,
-            effective_now_ms=BASE_TIME_MS + 4_000,
-        )
+        _adopt(repo, proposal, apply_changes=False, effective_now_ms=BASE_TIME_MS + 4_000)
 
 
 def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in (_call_open(), _put_open()):
         persist_trade_event_object(repo, event)
-    reconciled = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    reconciled = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
     proposal = reconciled["inferences"][0]
     with repo._connect() as conn:  # noqa: SLF001 - migrated generation seed
         conn.execute(
@@ -286,25 +274,11 @@ def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> No
     repo.upsert_current_decision_projection(
         current_decision_projection_row(projection)
     )
-    preview = adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=False,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )
+    preview = _adopt(repo, proposal, apply_changes=False, effective_now_ms=BASE_TIME_MS + 4_000)
     assert preview["status"] == "dry_run"
     assert len(repo.list_trade_events()) == 2
 
-    adopted = adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )
+    adopted = _adopt(repo, proposal, apply_changes=True, effective_now_ms=BASE_TIME_MS + 4_000)
     assert adopted["membership"]["status"] == "exact"
     assert adopted["decision_projection"]["statuses"] == {"lx": "published"}
     assert read_current_decision_projection(
@@ -315,26 +289,11 @@ def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> No
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "user_confirmed"
     assert len(repo.list_trade_events()) == 4
 
-    repeated = adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 5_000,
-    )
+    repeated = _adopt(repo, proposal, apply_changes=True, effective_now_ms=BASE_TIME_MS + 5_000)
     assert repeated["status"] == "already_confirmed"
     assert len(repo.list_trade_events()) == 4
 
-    superseded = supersede_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        reason="wrong pair",
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 6_000,
-    )
+    superseded = _supersede(repo, proposal, effective_now_ms=BASE_TIME_MS + 6_000)
     assert superseded["membership"]["status"] != "exact"
     assert superseded["decision_projection"]["statuses"] == {
         "lx": "explicit_rebuild_required"
@@ -353,40 +312,13 @@ def test_supersede_reactivates_alternative_that_expired_only_while_leg_was_claim
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for event in (
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "call-a-open",
-            "call-a-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-        _event(
-            "call-b-open",
-            "call-b-lot",
-            option_type="call",
-            position_side="long",
-            strike=120,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
+        _put_open(event_time_ms=BASE_TIME_MS + 1_000),
+        _call_open("call-a-open", "call-a-lot", event_time_ms=BASE_TIME_MS + 2_000),
+        _call_open("call-b-open", "call-b-lot", strike=120, event_time_ms=BASE_TIME_MS + 2_000),
     ):
         persist_trade_event_object(repo, event)
 
-    initial = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    initial = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
     assert len(initial["inferences"]) == 2
     chosen = initial["inferences"][0]
     alternative_id = next(
@@ -394,41 +326,14 @@ def test_supersede_reactivates_alternative_that_expired_only_while_leg_was_claim
         for item in initial["inferences"]
         if item["inference_id"] != chosen["inference_id"]
     )
-    adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=chosen["inference_id"],
-        expected_input_hash=chosen["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )
-    reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 5_000,
-    )
+    _adopt(repo, chosen, apply_changes=True, effective_now_ms=BASE_TIME_MS + 4_000)
+    _reconcile(repo, effective_now_ms=BASE_TIME_MS + 5_000)
     assert repo.get_combo_pair_inference(alternative_id)["decision_reason"] == (
         "facts_drifted_or_leg_claimed"
     )
 
-    supersede_post_trade_combo_pair(
-        repo=repo,
-        inference_id=chosen["inference_id"],
-        expected_input_hash=chosen["input_snapshot_hash"],
-        reason="wrong pair",
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 6_000,
-    )
-    reconciled = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 7_000,
-    )
+    _supersede(repo, chosen, effective_now_ms=BASE_TIME_MS + 6_000)
+    reconciled = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 7_000)
 
     assert [item["inference_id"] for item in reconciled["inferences"]] == [
         alternative_id
@@ -446,34 +351,12 @@ def test_reconcile_fails_closed_when_open_events_have_different_runtime_sources(
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for event in (
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 1_000,
-            opend_host="127.0.0.1",
-        ),
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 2_000,
-            opend_host="127.0.0.2",
-        ),
+        _put_open(event_time_ms=BASE_TIME_MS + 1_000, opend_host="127.0.0.1"),
+        _call_open(event_time_ms=BASE_TIME_MS + 2_000, opend_host="127.0.0.2"),
     ):
         persist_trade_event_object(repo, event)
 
-    result = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    result = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
 
     assert result["inferences"] == []
     assert repo.list_combo_pair_inferences(account="lx") == []
@@ -485,38 +368,18 @@ def test_reconcile_fails_closed_when_open_event_runtime_source_is_missing(
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     persist_trade_event_object(
         repo,
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
+        _put_open(event_time_ms=BASE_TIME_MS + 1_000),
     )
     persist_trade_event_object(
         repo,
         replace(
-            _event(
-                "call-open",
-                "call-lot",
-                option_type="call",
-                position_side="long",
-                strike=110,
-                event_time_ms=BASE_TIME_MS + 2_000,
-            ),
+            _call_open(event_time_ms=BASE_TIME_MS + 2_000),
             # §9.2 step 3: still a long call open, but without an intake source.
             raw_payload={"side": "buy"},
         ),
     )
 
-    result = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )
+    result = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
 
     assert result["inferences"] == []
     assert repo.list_combo_pair_inferences(account="lx") == []
@@ -524,32 +387,9 @@ def test_reconcile_fails_closed_when_open_event_runtime_source_is_missing(
 
 def test_reject_is_idempotent_and_does_not_change_trade_events(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in (_call_open(), _put_open()):
         persist_trade_event_object(repo, event)
-    proposal = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )["inferences"][0]
+    proposal = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)["inferences"][0]
     for _ in range(2):
         rejected = reject_post_trade_combo_pair(
             repo=repo,
@@ -568,46 +408,16 @@ def test_confirm_rolls_back_events_projection_identity_and_inference_on_failure(
     monkeypatch,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in (_call_open(), _put_open()):
         persist_trade_event_object(repo, event)
-    proposal = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )["inferences"][0]
+    proposal = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)["inferences"][0]
 
     def _fail_identity(*_args, **_kwargs):
         raise RuntimeError("injected identity failure")
 
     monkeypatch.setattr(repo, "insert_strategy_group_identity", _fail_identity)
     with pytest.raises(RuntimeError, match="injected identity failure"):
-        adopt_post_trade_combo_pair(
-            repo=repo,
-            inference_id=proposal["inference_id"],
-            expected_input_hash=proposal["input_snapshot_hash"],
-            actor="tester",
-            apply_changes=True,
-            effective_now_ms=BASE_TIME_MS + 4_000,
-        )
+        _adopt(repo, proposal, apply_changes=True, effective_now_ms=BASE_TIME_MS + 4_000)
 
     assert len(repo.list_trade_events()) == 2
     assert repo.list_strategy_group_identities(account="lx") == []
@@ -623,40 +433,10 @@ def test_supersede_rolls_back_both_voids_and_projection_on_failure(
     monkeypatch,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for event in (
-        _event(
-            "call-open",
-            "call-lot",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-    ):
+    for event in (_call_open(), _put_open()):
         persist_trade_event_object(repo, event)
-    proposal = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 3_000,
-    )["inferences"][0]
-    adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=proposal["inference_id"],
-        expected_input_hash=proposal["input_snapshot_hash"],
-        actor="tester",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )
+    proposal = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)["inferences"][0]
+    _adopt(repo, proposal, apply_changes=True, effective_now_ms=BASE_TIME_MS + 4_000)
     original_transition = repo.transition_combo_pair_inference
 
     def _fail_supersede(*args, **kwargs):
@@ -666,15 +446,7 @@ def test_supersede_rolls_back_both_voids_and_projection_on_failure(
 
     monkeypatch.setattr(repo, "transition_combo_pair_inference", _fail_supersede)
     with pytest.raises(RuntimeError, match="injected supersede transition failure"):
-        supersede_post_trade_combo_pair(
-            repo=repo,
-            inference_id=proposal["inference_id"],
-            expected_input_hash=proposal["input_snapshot_hash"],
-            reason="wrong pair",
-            actor="tester",
-            apply_changes=True,
-            effective_now_ms=BASE_TIME_MS + 5_000,
-        )
+        _supersede(repo, proposal, effective_now_ms=BASE_TIME_MS + 5_000)
 
     assert len(repo.list_trade_events()) == 4
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "user_confirmed"
@@ -695,59 +467,18 @@ def test_two_confirmations_competing_for_one_leg_allow_only_one_commit(
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for event in (
-        _event(
-            "put-open",
-            "put-lot",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            event_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _event(
-            "call-open-a",
-            "call-lot-a",
-            option_type="call",
-            position_side="long",
-            strike=110,
-            event_time_ms=BASE_TIME_MS + 2_000,
-        ),
-        _event(
-            "call-open-b",
-            "call-lot-b",
-            option_type="call",
-            position_side="long",
-            strike=120,
-            event_time_ms=BASE_TIME_MS + 3_000,
-        ),
+        _put_open(event_time_ms=BASE_TIME_MS + 1_000),
+        _call_open("call-open-a", "call-lot-a", event_time_ms=BASE_TIME_MS + 2_000),
+        _call_open("call-open-b", "call-lot-b", strike=120, event_time_ms=BASE_TIME_MS + 3_000),
     ):
         persist_trade_event_object(repo, event)
-    proposals = reconcile_combo_pair_inferences(
-        repo=repo,
-        account="lx",
-        runtime_environment=RUNTIME_ENVIRONMENT,
-        persist=True,
-        effective_now_ms=BASE_TIME_MS + 4_000,
-    )["inferences"]
+    proposals = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 4_000)["inferences"]
     assert len(proposals) == 2
 
     first, second = proposals
-    adopt_post_trade_combo_pair(
-        repo=repo,
-        inference_id=first["inference_id"],
-        expected_input_hash=first["input_snapshot_hash"],
-        actor="tester-a",
-        apply_changes=True,
-        effective_now_ms=BASE_TIME_MS + 5_000,
-    )
+    _adopt(repo, first, apply_changes=True, effective_now_ms=BASE_TIME_MS + 5_000, actor="tester-a")
     with pytest.raises(ValueError, match="already claimed|facts changed|fully ungrouped"):
-        adopt_post_trade_combo_pair(
-            repo=repo,
-            inference_id=second["inference_id"],
-            expected_input_hash=second["input_snapshot_hash"],
-            actor="tester-b",
-            apply_changes=True,
-            effective_now_ms=BASE_TIME_MS + 6_000,
-        )
+        _adopt(repo, second, apply_changes=True, effective_now_ms=BASE_TIME_MS + 6_000, actor="tester-b")
 
     statuses = {
         item["inference_id"]: item["status"]

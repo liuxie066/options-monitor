@@ -319,12 +319,3 @@ def _capability_summary() -> dict[str, Any]:
         "pure_read_tools": tool_names,
         "toolsets": toolsets,
     }
-
-
-def _source_value(source: Any) -> str | None:
-    if source is None:
-        return None
-    public_value: Callable[[], str] | None = getattr(source, "public_value", None)
-    if callable(public_value):
-        return public_value()
-    return str(source)

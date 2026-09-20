@@ -96,105 +96,130 @@ def _artifact_bytes(payload: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _generation_kwargs(
+    tmp_path: Path,
+    manifest_path: Path,
+    *,
+    run_id: str,
+    authority,
+    manifest_sha256: str,
+) -> dict:
+    """Expected-identity kwargs shared by the loader and the receipt loader."""
+    return {
+        "manifest_path": manifest_path,
+        "expected_base": tmp_path,
+        "expected_run_id": run_id,
+        "expected_account": "lx",
+        "expected_account_config_sha256": authority.account_config_sha256,
+        "expected_manifest_sha256": manifest_sha256,
+        "expected_runtime_config": json.loads(authority.canonical_bytes.decode("utf-8")),
+    }
+
+
+def _prepare(
+    tmp_path: Path,
+    shared: Path,
+    states: dict[str, Path],
+    run_id: str,
+    *,
+    authorities: dict | None = None,
+    **overrides,
+):
+    """Prepare contexts for ``run_id`` with this module's repeated call shape.
+
+    Defaults mirror the inline call each site spells out; ``overrides`` replace
+    or add any keyword, and ``authorities`` defaults to fresh ones for ``run_id``.
+    """
+    kwargs = {
+        "base": tmp_path,
+        "repo_root": tmp_path,
+        "run_id": run_id,
+        "account_config_authorities": (
+            _config_authorities(tmp_path, run_id) if authorities is None else authorities
+        ),
+        "account_state_dirs": states,
+        "shared_state_dir": shared,
+        "timeout_sec": 1,
+        "popen_factory": _CompletedWorker,
+    }
+    kwargs.update(overrides)
+    return prepare_portfolio_contexts(**kwargs)
+
+
+def _write_worker_request(
+    tmp_path: Path,
+    *,
+    authority,
+    run_id: str,
+    token: str,
+    request_path: Path,
+    result_path: Path,
+) -> None:
+    """Write the request file ``run_worker`` reads for ``run_id``."""
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "prepared_portfolio_context_worker_request.v1",
+                "token": token,
+                "run_id": run_id,
+                "account": "lx",
+                "base": str(tmp_path),
+                "state_dir": str(authority.state_path.parent),
+                "shared_state_dir": str(tmp_path / "output_runs" / run_id / "state"),
+                "account_config_path": str(authority.state_path),
+                "account_config_compatibility_path": str(authority.compatibility_path),
+                "account_config_sha256": authority.account_config_sha256,
+                "account_config_canonical_json": authority.canonical_bytes.decode("utf-8"),
+                "result_path": str(result_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_prepare_promotes_only_valid_worker_payloads(tmp_path: Path) -> None:
     shared, states = _state_dirs(tmp_path, "run-1")
     authorities = _config_authorities(tmp_path, "run-1")
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
+    manifests = _prepare(tmp_path, shared, states, "run-1", authorities=authorities)
+    manifest_path = Path(manifests["lx"]["manifest_path"])
+    identity = _generation_kwargs(
+        tmp_path,
+        manifest_path,
         run_id="run-1",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
+        authority=authorities["lx"],
+        manifest_sha256=manifests["lx"]["manifest_sha256"],
     )
 
     assert list(manifests) == ["lx", "sy"]
     assert manifests["lx"]["status"] == "ready"
     assert manifests["sy"]["status"] == "ready"
-    loaded = load_prepared_portfolio_context(
-        manifest_path=Path(manifests["lx"]["manifest_path"]),
-        expected_base=tmp_path,
-        expected_run_id="run-1",
-        expected_account="lx",
-        expected_account_config_sha256=authorities[
-            "lx"
-        ].account_config_sha256,
-        expected_manifest_sha256=manifests["lx"]["manifest_sha256"],
-        expected_runtime_config=json.loads(
-            authorities["lx"].canonical_bytes.decode("utf-8")
-        ),
-    )
+    loaded = load_prepared_portfolio_context(**identity)
     assert loaded["stocks_by_symbol"]["NVDA"]["avg_cost"] == 100
-    receipt = load_prepared_portfolio_context_receipt(
-        manifest_path=Path(manifests["lx"]["manifest_path"]),
-        expected_base=tmp_path,
-        expected_run_id="run-1",
-        expected_account="lx",
-        expected_account_config_sha256=authorities["lx"].account_config_sha256,
-        expected_manifest_sha256=manifests["lx"]["manifest_sha256"],
-        expected_runtime_config=json.loads(
-            authorities["lx"].canonical_bytes.decode("utf-8")
-        ),
-    )
+    receipt = load_prepared_portfolio_context_receipt(**identity)
     assert receipt["payload"] == loaded
     assert receipt["manifest"]["source_as_of_utc"] == loaded["source_observed_at"]
     assert (
         receipt["manifest"]["promoted_at_utc"] == receipt["manifest"]["prepared_at_utc"]
     )
 
-    manifest_path = Path(manifests["lx"]["manifest_path"])
     malformed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     malformed_manifest["promoted_at_utc"] = "2026-08-16T00:00:09+00:00"
     malformed_bytes = _artifact_bytes(malformed_manifest)
     manifest_path.write_bytes(malformed_bytes)
-    malformed_sha256 = hashlib.sha256(malformed_bytes).hexdigest()
-    assert (
-        load_prepared_portfolio_context(
-            manifest_path=manifest_path,
-            expected_base=tmp_path,
-            expected_run_id="run-1",
-            expected_account="lx",
-            expected_account_config_sha256=authorities["lx"].account_config_sha256,
-            expected_manifest_sha256=malformed_sha256,
-            expected_runtime_config=json.loads(
-                authorities["lx"].canonical_bytes.decode("utf-8")
-            ),
-        )
-        == loaded
-    )
+    malformed_identity = {
+        **identity,
+        "expected_manifest_sha256": hashlib.sha256(malformed_bytes).hexdigest(),
+    }
+    assert load_prepared_portfolio_context(**malformed_identity) == loaded
     with pytest.raises(PreparedPortfolioContextError, match="alias mismatch"):
-        load_prepared_portfolio_context_receipt(
-            manifest_path=manifest_path,
-            expected_base=tmp_path,
-            expected_run_id="run-1",
-            expected_account="lx",
-            expected_account_config_sha256=authorities["lx"].account_config_sha256,
-            expected_manifest_sha256=malformed_sha256,
-            expected_runtime_config=json.loads(
-                authorities["lx"].canonical_bytes.decode("utf-8")
-            ),
-        )
+        load_prepared_portfolio_context_receipt(**malformed_identity)
 
     manifest_path.write_bytes(_artifact_bytes(receipt["manifest"]))
 
     context_path = states["lx"] / manifests["lx"]["portfolio_context_relpath"]
     context_path.write_text("{}", encoding="utf-8")
     with pytest.raises(PreparedPortfolioContextError, match="hash mismatch"):
-        load_prepared_portfolio_context(
-            manifest_path=Path(manifests["lx"]["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id="run-1",
-            expected_account="lx",
-            expected_account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            expected_manifest_sha256=manifests["lx"]["manifest_sha256"],
-            expected_runtime_config=json.loads(
-                authorities["lx"].canonical_bytes.decode("utf-8")
-            ),
-        )
+        load_prepared_portfolio_context(**identity)
 
 
 def test_prepared_manifest_is_bound_to_expected_account_config_hash(
@@ -202,25 +227,20 @@ def test_prepared_manifest_is_bound_to_expected_account_config_hash(
 ) -> None:
     shared, states = _state_dirs(tmp_path, "run-config-binding")
     authorities = _config_authorities(tmp_path, "run-config-binding")
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-config-binding",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-config-binding", authorities=authorities)
 
     with pytest.raises(PreparedPortfolioContextError, match="config hash mismatch"):
         load_prepared_portfolio_context(
-            manifest_path=Path(manifests["lx"]["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id="run-config-binding",
-            expected_account="lx",
-            expected_account_config_sha256="0" * 64,
-            expected_manifest_sha256=manifests["lx"]["manifest_sha256"],
+            **{
+                **_generation_kwargs(
+                    tmp_path,
+                    Path(manifests["lx"]["manifest_path"]),
+                    run_id="run-config-binding",
+                    authority=authorities["lx"],
+                    manifest_sha256=manifests["lx"]["manifest_sha256"],
+                ),
+                "expected_account_config_sha256": "0" * 64,
+            }
         )
 
 
@@ -236,16 +256,11 @@ def test_context_workers_share_one_absolute_deadline(tmp_path: Path) -> None:
         )
 
     started = time.monotonic()
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-timeout",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-timeout",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-timeout",
         timeout_sec=0.15,
         kill_grace_sec=0.05,
         popen_factory=blocking_factory,
@@ -279,16 +294,11 @@ def test_worker_exit_race_during_timeout_cleanup_is_isolated(
         def kill(self):
             self.returncode = -9
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-timeout-exit-race",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-timeout-exit-race",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-timeout-exit-race",
         timeout_sec=0.01,
         kill_grace_sec=0.01,
         popen_factory=lambda *_args, **_kwargs: _ExitedDuringTerminate(),
@@ -337,16 +347,11 @@ def test_worker_finishing_after_deadline_check_is_not_promoted(
     )
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-deadline-race",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-deadline-race",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-deadline-race",
         timeout_sec=0.5,
         kill_grace_sec=0.1,
         popen_factory=_FinishesBetweenDeadlineAndCleanup,
@@ -377,16 +382,11 @@ def test_completed_context_is_promoted_while_slow_peer_is_killed(
         slow_processes.append(process)
         return process
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-mixed",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-mixed",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-mixed",
         timeout_sec=0.15,
         kill_grace_sec=0.05,
         popen_factory=mixed_factory,
@@ -415,16 +415,7 @@ def test_worker_request_uses_exact_published_config_authority(
         requests.append(json.loads(Path(command[-1]).read_text(encoding="utf-8")))
         return _CompletedWorker(command, **kwargs)
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-authority",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_capture,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-authority", authorities=authorities, popen_factory=_capture)
 
     assert {item["account"] for item in requests} == {"lx", "sy"}
     for worker_request in requests:
@@ -454,16 +445,7 @@ def test_invalid_config_authority_is_isolated_from_healthy_prepared_worker(
         started_accounts.append(request["account"])
         return _CompletedWorker(command, **kwargs)
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-invalid",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_capture,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-invalid", authorities=authorities, popen_factory=_capture)
 
     assert started_accounts == ["sy"]
     assert manifests["sy"]["status"] == "ready"
@@ -489,26 +471,13 @@ def test_worker_consumes_published_config_bytes_and_hash(
     )
     request_path = tmp_path / "worker-request.json"
     result_path = tmp_path / "worker-result.json"
-    request_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "prepared_portfolio_context_worker_request.v1",
-                "token": "token-1",
-                "run_id": "run-worker",
-                "account": "lx",
-                "base": str(tmp_path),
-                "state_dir": str(authority.state_path.parent),
-                "shared_state_dir": str(tmp_path / "output_runs" / "run-worker" / "state"),
-                "account_config_path": str(authority.state_path),
-                "account_config_compatibility_path": str(authority.compatibility_path),
-                "account_config_sha256": authority.account_config_sha256,
-                "account_config_canonical_json": authority.canonical_bytes.decode(
-                    "utf-8"
-                ),
-                "result_path": str(result_path),
-            }
-        ),
-        encoding="utf-8",
+    _write_worker_request(
+        tmp_path,
+        authority=authority,
+        run_id="run-worker",
+        token="token-1",
+        request_path=request_path,
+        result_path=result_path,
     )
     observed: dict = {}
     monkeypatch.setattr(
@@ -560,26 +529,13 @@ def test_worker_fails_closed_when_config_changes_after_spawn(
     )
     request_path = tmp_path / "tampered-worker-request.json"
     result_path = tmp_path / "tampered-worker-result.json"
-    request_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "prepared_portfolio_context_worker_request.v1",
-                "token": "token-2",
-                "run_id": "run-worker-tamper",
-                "account": "lx",
-                "base": str(tmp_path),
-                "state_dir": str(authority.state_path.parent),
-                "shared_state_dir": str(tmp_path / "output_runs" / "run-worker-tamper" / "state"),
-                "account_config_path": str(authority.state_path),
-                "account_config_compatibility_path": str(authority.compatibility_path),
-                "account_config_sha256": authority.account_config_sha256,
-                "account_config_canonical_json": authority.canonical_bytes.decode(
-                    "utf-8"
-                ),
-                "result_path": str(result_path),
-            }
-        ),
-        encoding="utf-8",
+    _write_worker_request(
+        tmp_path,
+        authority=authority,
+        run_id="run-worker-tamper",
+        token="token-2",
+        request_path=request_path,
+        result_path=result_path,
     )
     authority.state_path.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -601,30 +557,18 @@ def test_loader_rejects_coherent_manifest_and_payload_generation_replacement(
 ) -> None:
     shared, states = _state_dirs(tmp_path, "run-generation")
     authorities = _config_authorities(tmp_path, "run-generation")
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-generation",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-generation", authorities=authorities)
     original = manifests["lx"]
     manifest_path = Path(original["manifest_path"])
-
-    parent_payload = load_prepared_portfolio_context(
-        manifest_path=manifest_path,
-        expected_base=tmp_path,
-        expected_run_id="run-generation",
-        expected_account="lx",
-        expected_account_config_sha256=authorities["lx"].account_config_sha256,
-        expected_manifest_sha256=original["manifest_sha256"],
-        expected_runtime_config=json.loads(
-            authorities["lx"].canonical_bytes.decode("utf-8")
-        ),
+    identity = _generation_kwargs(
+        tmp_path,
+        manifest_path,
+        run_id="run-generation",
+        authority=authorities["lx"],
+        manifest_sha256=original["manifest_sha256"],
     )
+
+    parent_payload = load_prepared_portfolio_context(**identity)
     assert parent_payload is not None
     assert parent_payload["stocks_by_symbol"]["NVDA"]["avg_cost"] == 100
 
@@ -648,19 +592,7 @@ def test_loader_rejects_coherent_manifest_and_payload_generation_replacement(
         PreparedPortfolioContextError,
         match="manifest generation mismatch",
     ):
-        load_prepared_portfolio_context(
-            manifest_path=manifest_path,
-            expected_base=tmp_path,
-            expected_run_id="run-generation",
-            expected_account="lx",
-            expected_account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            expected_manifest_sha256=original["manifest_sha256"],
-            expected_runtime_config=json.loads(
-                authorities["lx"].canonical_bytes.decode("utf-8")
-            ),
-        )
+        load_prepared_portfolio_context(**identity)
 
 
 def test_same_run_reentry_adopts_existing_prepared_generation(
@@ -668,25 +600,14 @@ def test_same_run_reentry_adopts_existing_prepared_generation(
 ) -> None:
     shared, states = _state_dirs(tmp_path, "run-reentry")
     authorities = _config_authorities(tmp_path, "run-reentry")
-    first = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-reentry",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
-    )
+    first = _prepare(tmp_path, shared, states, "run-reentry", authorities=authorities)
 
-    second = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-reentry",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
+    second = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-reentry",
+        authorities=authorities,
         popen_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("an immutable prepared generation must be adopted")
         ),
@@ -703,30 +624,19 @@ def test_same_run_config_failure_does_not_degrade_healthy_existing_generation(
 
     shared, states = _state_dirs(tmp_path, "run-reentry-config-failure")
     authorities = _config_authorities(tmp_path, "run-reentry-config-failure")
-    first = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-reentry-config-failure",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
-    )
+    first = _prepare(tmp_path, shared, states, "run-reentry-config-failure", authorities=authorities)
     replacement = json.loads(authorities["lx"].canonical_bytes.decode("utf-8"))
     replacement.setdefault("runtime", {})["generation"] = "drifted"
     replacement_bytes = canonical_account_run_config_bytes(replacement)
     authorities["lx"].state_path.write_bytes(replacement_bytes)
     authorities["lx"].compatibility_path.write_bytes(replacement_bytes)
 
-    second = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-reentry-config-failure",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
+    second = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-reentry-config-failure",
+        authorities=authorities,
         popen_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("existing generations must not spawn new workers")
         ),
@@ -757,16 +667,7 @@ def test_loader_rejects_foreign_or_missing_prepared_account_identity(
 ) -> None:
     shared, states = _state_dirs(tmp_path, "run-foreign")
     authorities = _config_authorities(tmp_path, "run-foreign")
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-foreign",
-        account_config_authorities=authorities,
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_CompletedWorker,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-foreign", authorities=authorities)
     manifest_path = Path(manifests["lx"]["manifest_path"])
     payload_bytes = _artifact_bytes(foreign_payload)
     payload_digest = hashlib.sha256(payload_bytes).hexdigest()
@@ -778,20 +679,15 @@ def test_loader_rejects_foreign_or_missing_prepared_account_identity(
     manifest_bytes = _artifact_bytes(manifest)
     manifest_path.write_bytes(manifest_bytes)
 
+    identity = _generation_kwargs(
+        tmp_path,
+        manifest_path,
+        run_id="run-foreign",
+        authority=authorities["lx"],
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
     with pytest.raises(PreparedPortfolioContextError, match="account mismatch"):
-        load_prepared_portfolio_context(
-            manifest_path=manifest_path,
-            expected_base=tmp_path,
-            expected_run_id="run-foreign",
-            expected_account="lx",
-            expected_account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            expected_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
-            expected_runtime_config=json.loads(
-                authorities["lx"].canonical_bytes.decode("utf-8")
-            ),
-        )
+        load_prepared_portfolio_context(**identity)
 
 
 def test_second_worker_spawn_failure_preserves_completed_healthy_peer(
@@ -807,19 +703,7 @@ def test_second_worker_spawn_failure_preserves_completed_healthy_peer(
             raise OSError("spawn failed")
         return _CompletedWorker(command, **kwargs)
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-partial-spawn",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-partial-spawn",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
-        timeout_sec=1,
-        popen_factory=_partial_factory,
-    )
+    manifests = _prepare(tmp_path, shared, states, "run-partial-spawn", popen_factory=_partial_factory)
 
     assert manifests["lx"]["status"] == "ready"
     assert manifests["sy"]["status"] == "unavailable"
@@ -863,16 +747,11 @@ def test_partial_spawn_failure_reaps_already_running_worker(
             raise OSError("spawn failed")
         return running
 
-    manifests = prepare_portfolio_contexts(
-        base=tmp_path,
-        repo_root=tmp_path,
-        run_id="run-partial-reap",
-        account_config_authorities=_config_authorities(
-            tmp_path,
-            "run-partial-reap",
-        ),
-        account_state_dirs=states,
-        shared_state_dir=shared,
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-partial-reap",
         timeout_sec=0.03,
         kill_grace_sec=0.01,
         popen_factory=_partial_factory,

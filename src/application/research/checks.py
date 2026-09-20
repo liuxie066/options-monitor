@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import nested as _nested
 
 
 SEVERITY_ORDER = {"info": 0, "warn": 1, "fail": 2}
@@ -324,15 +325,6 @@ def _json_payload(file_info: Any) -> dict[str, Any]:
     info = _dict(file_info)
     payload = info.get("json")
     return payload if isinstance(payload, dict) else {}
-
-
-def _nested(payload: Any, *keys: str) -> Any:
-    cur = payload
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
 
 
 def _as_int_or_none(value: Any) -> int | None:

@@ -52,6 +52,38 @@ def _assignment_trade() -> dict:
     }
 
 
+def _call_lot(*, status: str = "open", contracts_open: int = 1) -> dict:
+    return {
+        "record_id": "call-lot-1",
+        "fields": {
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "call",
+            "side": "short",
+            "status": status,
+            "contracts_open": contracts_open,
+            "multiplier": 100,
+            "strategy": "wheel",
+            "leg_role": "wheel_call",
+            "source_stock_lot_id": "assigned-stock-assign-put",
+            "source_event_id": "open-call-1",
+        },
+    }
+
+
+def _legacy_wheel_start(event_id: str) -> dict:
+    return build_wheel_event(
+        event_id=event_id,
+        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
+        account="lx",
+        lot_id="assigned-stock-legacy",
+        event_type="wheel_started",
+        occurred_at_ms=2_000,
+        recorded_at_ms=2_001,
+        payload={"request_id": "legacy-assignment"},
+    )
+
+
 def _assigned_stock(*, remaining: int = 100) -> dict:
     return {
         "_all_assigned_stock_lots": [
@@ -345,16 +377,7 @@ def test_repository_migrates_wheel_event_v1_without_changing_hash_or_facts(
 ) -> None:
     db_path = tmp_path / "ledger.sqlite3"
     repo = SQLiteOptionPositionsRepository(db_path)
-    event = build_wheel_event(
-        event_id="legacy-wheel-start",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
-        account="lx",
-        lot_id="assigned-stock-legacy",
-        event_type="wheel_started",
-        occurred_at_ms=2_000,
-        recorded_at_ms=2_001,
-        payload={"request_id": "legacy-assignment"},
-    )
+    event = _legacy_wheel_start("legacy-wheel-start")
     payload_json = json.dumps(event["payload"], ensure_ascii=False, sort_keys=True)
     with repo._connect() as conn:
         conn.execute("DROP TABLE wheel_events")
@@ -464,16 +487,7 @@ def test_repository_rejects_wheel_v1_migration_when_hash_does_not_recompute(
 ) -> None:
     db_path = tmp_path / "ledger.sqlite3"
     repo = SQLiteOptionPositionsRepository(db_path)
-    event = build_wheel_event(
-        event_id="legacy-invalid-hash",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
-        account="lx",
-        lot_id="assigned-stock-legacy",
-        event_type="wheel_started",
-        occurred_at_ms=2_000,
-        recorded_at_ms=2_001,
-        payload={"request_id": "legacy-assignment"},
-    )
+    event = _legacy_wheel_start("legacy-invalid-hash")
     with repo._connect() as conn:
         conn.execute("DROP TABLE wheel_events")
         conn.execute(
@@ -566,27 +580,11 @@ def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
         "open_interest": 500,
     }
 
-    accepted = evaluate_wheel_call_candidate(
-        batch,
-        candidate,
-        {"min_abs_delta": 0.25, "max_abs_delta": 0.35},
-        {"basis": "estimated", "amount": 15},
-        1,
-    )
-    below_cost = evaluate_wheel_call_candidate(
-        batch,
-        {**candidate, "strike": 100},
-        {"min_abs_delta": 0.25, "max_abs_delta": 0.35},
-        {"basis": "estimated", "amount": 15},
-        1,
-    )
-    negative_delta = evaluate_wheel_call_candidate(
-        batch,
-        {**candidate, "delta": -0.31},
-        {"min_abs_delta": 0.25, "max_abs_delta": 0.35},
-        {"basis": "estimated", "amount": 15},
-        1,
-    )
+    policy = {"min_abs_delta": 0.25, "max_abs_delta": 0.35}
+    fee_fact = {"basis": "estimated", "amount": 15}
+    accepted = evaluate_wheel_call_candidate(batch, candidate, policy, fee_fact, 1)
+    below_cost = evaluate_wheel_call_candidate(batch, {**candidate, "strike": 100}, policy, fee_fact, 1)
+    negative_delta = evaluate_wheel_call_candidate(batch, {**candidate, "delta": -0.31}, policy, fee_fact, 1)
 
     assert accepted["accepted"] is True
     assert accepted["projected_lifecycle_net_pnl_if_called"] == 705
@@ -726,27 +724,10 @@ def test_wheel_put_candidate_enforces_principal_spot_and_abs_delta() -> None:
     }
     policy = {"min_abs_delta": 0.25, "max_abs_delta": 0.35}
 
-    accepted = evaluate_wheel_put_candidate(
-        branch,
-        candidate,
-        policy,
-        {"basis": "estimated", "amount": 10},
-        1,
-    )
-    over_anchor = evaluate_wheel_put_candidate(
-        {**branch, "principal_anchor": 9_900},
-        candidate,
-        policy,
-        {"basis": "estimated", "amount": 10},
-        1,
-    )
-    above_spot = evaluate_wheel_put_candidate(
-        branch,
-        {**candidate, "strike": 101},
-        policy,
-        {"basis": "estimated", "amount": 10},
-        1,
-    )
+    fee_fact = {"basis": "estimated", "amount": 10}
+    accepted = evaluate_wheel_put_candidate(branch, candidate, policy, fee_fact, 1)
+    over_anchor = evaluate_wheel_put_candidate({**branch, "principal_anchor": 9_900}, candidate, policy, fee_fact, 1)
+    above_spot = evaluate_wheel_put_candidate(branch, {**candidate, "strike": 101}, policy, fee_fact, 1)
 
     assert accepted["accepted"] is True
     assert accepted["projected_assignment_total"] == 9_910

@@ -5,11 +5,7 @@ from datetime import date
 from typing import Any
 
 from domain.domain.symbol_identity import canonical_symbol
-
-
-def _text_or_none(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+from src.application.payload_helpers import optional_text as _text_or_none
 
 
 def _int_or_zero(value: Any) -> int:

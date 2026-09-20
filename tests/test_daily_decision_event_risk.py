@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from domain.domain.daily_decision_event_risk import build_candidate_event_risk
+from domain.domain.daily_decision_event_risk import (
+    build_candidate_event_risk,
+    candidate_event_risk_transitions,
+)
+
+
+def _transitions(before, after):
+    return candidate_event_risk_transitions(
+        before, after, market_trading_date="2026-07-21"
+    )
+
+
+def _changes(before, after):
+    return [item["change_type"] for item in _transitions(before, after)]
 
 
 def _item(*, status: str = "ok", events=None, coverage=None, **extra):
@@ -147,99 +160,59 @@ def _risk(
 
 
 def test_candidate_event_risk_transition_matrix() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     none = _risk("confirmed_none")
     event = _risk("confirmed_event", event_date="2026-08-05")
     unknown = _risk("unknown")
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        none, event, market_trading_date="2026-07-21"
-    )] == ["candidate_event_added"]
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        event, unknown, market_trading_date="2026-07-21"
-    )] == ["candidate_event_evidence_degraded"]
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        unknown, event, market_trading_date="2026-07-21"
-    )] == ["candidate_event_evidence_recovered"]
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        event, none, market_trading_date="2026-07-21"
-    )] == ["candidate_event_removed"]
+    assert _changes(none, event) == ["candidate_event_added"]
+    assert _changes(event, unknown) == ["candidate_event_evidence_degraded"]
+    assert _changes(unknown, event) == ["candidate_event_evidence_recovered"]
+    assert _changes(event, none) == ["candidate_event_removed"]
 
 
 def test_candidate_event_date_change_and_expiry_window_entry_are_material() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     before = _risk("confirmed_event", event_date="2026-08-25", relation="after_expiration")
     after = _risk("confirmed_event", event_date="2026-08-05", relation="before_expiration")
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        before, after, market_trading_date="2026-07-21"
-    )] == ["candidate_event_date_changed", "candidate_event_entered_expiry_window"]
+    assert _changes(before, after) == [
+        "candidate_event_date_changed", "candidate_event_entered_expiry_window"
+    ]
 
 
 def test_candidate_event_removal_requires_same_evidence_chain() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     event = _risk("confirmed_event", event_date="2026-08-05", chain="event-chain-futu")
     none_from_other_chain = _risk("confirmed_none", chain="event-chain-other")
 
-    assert candidate_event_risk_transitions(
-        event, none_from_other_chain, market_trading_date="2026-07-21"
-    ) == []
+    assert _transitions(event, none_from_other_chain) == []
 
 
 def test_unanchored_future_date_correction_requires_unique_occurrence() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     before = _risk(
-        "confirmed_event",
-        event_date="2026-08-06",
-        event_id="event-aug-06",
-        anchored=False,
+        "confirmed_event", event_date="2026-08-06", event_id="event-aug-06", anchored=False
     )
     after = _risk(
-        "confirmed_event",
-        event_date="2026-08-05",
-        event_id="event-aug-05",
-        anchored=False,
+        "confirmed_event", event_date="2026-08-05", event_id="event-aug-05", anchored=False
     )
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        before, after, market_trading_date="2026-07-21"
-    )] == ["candidate_event_date_changed"]
+    assert _changes(before, after) == ["candidate_event_date_changed"]
 
 
 def test_elapsed_recurring_event_is_not_misclassified_as_date_correction() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     elapsed = _risk(
-        "confirmed_event",
-        event_date="2026-07-20",
-        event_id="event-q2-date",
-        anchored=False,
+        "confirmed_event", event_date="2026-07-20", event_id="event-q2-date", anchored=False
     )
     next_quarter = _risk(
-        "confirmed_event",
-        event_date="2026-10-20",
-        event_id="event-q3-date",
-        anchored=False,
+        "confirmed_event", event_date="2026-10-20", event_id="event-q3-date", anchored=False
     )
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        elapsed, next_quarter, market_trading_date="2026-07-21"
-    )] == ["candidate_event_added"]
+    assert _changes(elapsed, next_quarter) == ["candidate_event_added"]
 
 
 def test_freshness_only_event_updates_are_non_material() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     before = _risk("confirmed_event", event_date="2026-08-05")
     after = {**before, "fetched_at": "2026-07-21T15:00:00+00:00", "cache_status": "fetched"}
 
-    assert candidate_event_risk_transitions(
-        before, after, market_trading_date="2026-07-21"
-    ) == []
+    assert _transitions(before, after) == []
 
 
 def test_multiple_unanchored_dates_in_one_series_are_conflict_unknown() -> None:
@@ -257,22 +230,14 @@ def test_multiple_unanchored_dates_in_one_series_are_conflict_unknown() -> None:
 
 
 def test_old_brief_without_event_risk_does_not_fabricate_evidence_recovery() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     current = _risk("confirmed_event", event_date="2026-08-05")
 
-    assert candidate_event_risk_transitions(
-        None, current, market_trading_date="2026-07-21"
-    ) == []
+    assert _transitions(None, current) == []
 
 
 def test_same_chain_removal_is_detected_when_a_later_known_event_remains() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     removed = _risk(
-        "confirmed_event",
-        event_date="2026-08-05",
-        event_id="event-earnings-q2",
+        "confirmed_event", event_date="2026-08-05", event_id="event-earnings-q2",
         series_id="series-earnings",
     )["nearest_event"]
     later = {
@@ -284,28 +249,18 @@ def test_same_chain_removal_is_detected_when_a_later_known_event_remains() -> No
         "anchored": True,
     }
     before = _risk(
-        "confirmed_event",
-        event_date="2026-08-05",
-        event_id="event-earnings-q2",
-        series_id="series-earnings",
-        events=[removed, later],
+        "confirmed_event", event_date="2026-08-05", event_id="event-earnings-q2",
+        series_id="series-earnings", events=[removed, later],
     )
     after = _risk(
-        "confirmed_event",
-        event_date="2026-09-01",
-        event_id="event-dividend-september",
-        series_id="series-dividend",
-        events=[later],
+        "confirmed_event", event_date="2026-09-01", event_id="event-dividend-september",
+        series_id="series-dividend", events=[later],
     )
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        before, after, market_trading_date="2026-07-21"
-    )] == ["candidate_event_removed"]
+    assert _changes(before, after) == ["candidate_event_removed"]
 
 
 def test_combo_event_entry_is_detected_per_leg_expiration() -> None:
-    from domain.domain.daily_decision_event_risk import candidate_event_risk_transitions
-
     before = _risk("confirmed_event", event_date="2026-08-25")
     after = _risk("confirmed_event", event_date="2026-08-25")
     before["expiration_relations"] = {
@@ -317,6 +272,4 @@ def test_combo_event_entry_is_detected_per_leg_expiration() -> None:
         "call": {"expiration": "2026-09-18", "relation": "before_expiration"},
     }
 
-    assert [item["change_type"] for item in candidate_event_risk_transitions(
-        before, after, market_trading_date="2026-07-21"
-    )] == ["candidate_event_entered_expiry_window"]
+    assert _changes(before, after) == ["candidate_event_entered_expiry_window"]

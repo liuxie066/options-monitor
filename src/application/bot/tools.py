@@ -526,16 +526,6 @@ def _summary(
     return _clip(f"{tool_name} returned read-only data; " + "; ".join(details), MAX_SUMMARY_CHARS)
 
 
-def _row_count(data: dict[str, Any], output_contract: dict[str, Any]) -> int | None:
-    field = str(output_contract.get("row_count_field") or "").strip()
-    value = data.get(field) if field else None
-    if isinstance(value, int):
-        return value
-    primary = str(output_contract.get("primary_rows") or "").strip()
-    rows = data.get(primary) if primary else None
-    return len(rows) if isinstance(rows, list) else None
-
-
 def _source(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
     source = data.get("source")
     if isinstance(source, dict):
@@ -547,181 +537,6 @@ def _source(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, 
 def _scope(data: dict[str, Any]) -> dict[str, Any]:
     value = data.get("scope") if isinstance(data.get("scope"), dict) else data.get("filters")
     return deepcopy(value) if isinstance(value, dict) else {}
-
-
-def _coverage_envelope(
-    data: dict[str, Any],
-    projected_value: dict[str, Any],
-    output_contract: dict[str, Any],
-    *,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    policy = str(output_contract.get("coverage") or "unknown")
-    declared = data.get("coverage")
-    scope = _scope(data) or _request_scope(payload)
-    if policy == "source_declared" and isinstance(declared, dict):
-        normalized = _normalize_declared_coverage(
-            declared,
-            require_included_count=(
-                str(output_contract.get("evidence_type") or "") == "collection"
-            ),
-        )
-        if normalized is not None:
-            if scope and not normalized.get("scope"):
-                normalized["scope"] = scope
-            return normalized
-    if policy == "point":
-        return {
-            "status": "complete",
-            "complete_for": "point",
-            **({"scope": scope} if scope else {}),
-        }
-    if policy == "primary_rows":
-        primary = str(output_contract.get("primary_rows") or "").strip()
-        source_rows = data.get(primary) if primary else None
-        projected_rows = projected_value.get(primary) if primary else None
-        if isinstance(source_rows, list) and isinstance(projected_rows, list):
-            included_count = sum(
-                not (isinstance(item, dict) and set(item) == {"_truncated_items"})
-                for item in projected_rows
-            )
-            projection_omitted = max(0, len(source_rows) - included_count)
-            coverage = {
-                "status": "partial" if projection_omitted else "complete",
-                "complete_for": "requested_page",
-                "included_count": included_count,
-                "total_count": None,
-                "omitted_count": projection_omitted or None,
-                **({"scope": scope} if scope else {}),
-            }
-            if projection_omitted:
-                coverage["has_more"] = True
-            return coverage
-        if isinstance(source_rows, list):
-            # The contract deliberately projected scalar/aggregate fields but
-            # not the collection itself.  It can support point claims only.
-            return {
-                "status": "complete",
-                "complete_for": "point",
-                "included_count": 0,
-                "total_count": None,
-                "omitted_count": len(source_rows),
-                **({"scope": scope} if scope else {}),
-            }
-    return {
-        "status": "unknown",
-        "complete_for": "point",
-        **({"scope": scope} if scope else {}),
-    }
-
-
-def _normalize_declared_coverage(
-    value: dict[str, Any],
-    *,
-    require_included_count: bool,
-) -> dict[str, Any] | None:
-    status = str(value.get("status") or "").strip().lower()
-    complete_for = str(value.get("complete_for") or "").strip().lower()
-    if status not in {"complete", "partial", "unknown"}:
-        return None
-    if complete_for not in {"point", "requested_page", "full_query"}:
-        return None
-    normalized: dict[str, Any] = {
-        "status": status,
-        "complete_for": complete_for,
-    }
-    for key in ("included_count", "total_count", "omitted_count"):
-        raw = value.get(key)
-        if raw is None:
-            normalized[key] = None
-        elif isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-            normalized[key] = raw
-        else:
-            return None
-    if require_included_count and normalized.get("included_count") is None:
-        return None
-    has_more = value.get("has_more")
-    if "has_more" in value and has_more is not None and not isinstance(has_more, bool):
-        return None
-    if isinstance(has_more, bool):
-        normalized["has_more"] = has_more
-    included_count = normalized.get("included_count")
-    total_count = normalized.get("total_count")
-    omitted_count = normalized.get("omitted_count")
-    if total_count is not None:
-        if included_count is not None and included_count > total_count:
-            return None
-        if omitted_count is not None and omitted_count > total_count:
-            return None
-        if (
-            included_count is not None
-            and omitted_count is not None
-            and included_count + omitted_count != total_count
-        ):
-            return None
-    if (
-        complete_for == "full_query"
-        and status == "complete"
-        and (
-            included_count is None
-            or total_count is None
-            or omitted_count is None
-            or included_count != total_count
-            or omitted_count != 0
-            or has_more is True
-        )
-    ):
-        return None
-    if isinstance(value.get("scope"), dict):
-        normalized["scope"] = deepcopy(value["scope"])
-    if _is_iso_timestamp(value.get("as_of")):
-        normalized["as_of"] = str(value["as_of"])
-    return normalized
-
-
-def _freshness_envelope(
-    data: dict[str, Any],
-    output_contract: dict[str, Any],
-) -> dict[str, Any]:
-    policy = str(output_contract.get("freshness") or "unknown")
-    if policy == "not_applicable":
-        return {"status": "not_applicable"}
-    if policy != "source_declared":
-        return {"status": "unknown"}
-
-    declared = data.get("freshness")
-    if isinstance(declared, dict):
-        raw_status = str(declared.get("status") or declared.get("kind") or "").strip().lower()
-        status = raw_status if raw_status in {
-            "current",
-            "fresh",
-            "historical",
-            "stale",
-            "not_applicable",
-            "unknown",
-        } else "unknown"
-        as_of = _first_timestamp(declared)
-        trust_status = str(declared.get("trust_status") or "").strip().lower()
-        reason_codes = [
-            _clip(item, 120)
-            for item in (declared.get("reason_codes") or [])
-            if isinstance(item, (str, int, float, bool)) and str(item).strip()
-        ][:8]
-        return {
-            "status": status,
-            **({"as_of": as_of} if as_of else {}),
-            **({"trust_status": trust_status} if trust_status else {}),
-            **({"reason_codes": reason_codes} if reason_codes else {}),
-        }
-
-    declared_values = _contract_values(data, output_contract.get("freshness_fields"))
-    as_of = _first_timestamp(declared_values)
-    if declared_values and as_of:
-        return {"status": "historical", "as_of": as_of}
-    return {
-        "status": "unknown",
-        **({"as_of": as_of} if as_of else {}),
-    }
 
 
 def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
@@ -811,42 +626,6 @@ def _agent_description(description: str, output_contract: dict[str, Any]) -> str
     return " ".join(part for part in parts if part)
 
 
-def _compact_output_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(output_contract, dict):
-        return {}
-    return {
-        key: value
-        for key, value in {
-            "schema_version": output_contract.get("schema_version"),
-            "evidence_type": output_contract.get("evidence_type"),
-            "bounded_projection": output_contract.get("bounded_projection"),
-            "coverage": output_contract.get("coverage"),
-            "freshness": output_contract.get("freshness"),
-            "pagination": deepcopy(output_contract.get("pagination")),
-            "primary_rows": output_contract.get("primary_rows"),
-            "row_count_field": output_contract.get("row_count_field"),
-            "fact_fields": list(output_contract.get("fact_fields") or ())[:16],
-            "missing_data_fields": list(output_contract.get("missing_data_fields") or ())[:8],
-            "source_label": output_contract.get("source_label"),
-        }.items()
-        if value not in (None, "", [])
-    }
-
-
-def _model_value(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
-    # Preserve complete values until the serialized observation budget is checked.
-    # Object width/depth alone says nothing about evidence completeness or size.
-    fields = output_contract.get("model_value_fields")
-    if not fields:
-        return deepcopy(data)
-    out: dict[str, Any] = {}
-    for path in fields:
-        values = _values_at_path(data, str(path).split("."))
-        if values:
-            out[str(path)] = deepcopy(values[0] if len(values) == 1 else values)
-    return out
-
-
 def _preview(
     value: Any,
     *,
@@ -900,30 +679,6 @@ def _preview(
     return str(value)
 
 
-def _contract_values(
-    data: dict[str, Any],
-    paths: Any,
-    *,
-    missing_only: bool = False,
-    preview_max_depth: int = MAX_PREVIEW_DEPTH,
-) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for raw_path in paths or ():
-        path = str(raw_path or "").strip()
-        if not path:
-            continue
-        values = _values_at_path(data, path.split("."))
-        values = [value for value in values if value not in (None, "", [], {})]
-        if missing_only:
-            values = [value for value in values if _indicates_missing_data(value)]
-        if values:
-            out[path] = _preview(
-                values[0] if len(values) == 1 else values,
-                max_depth=preview_max_depth,
-            )
-    return out
-
-
 def _indicates_missing_data(value: Any) -> bool:
     if value is False:
         return True
@@ -960,51 +715,6 @@ def _values_at_path(value: Any, parts: list[str]) -> list[Any]:
             return []
         return [item for child_item in child for item in _values_at_path(child_item, parts[1:])]
     return _values_at_path(child, parts[1:])
-
-
-def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not error:
-        return None
-    safe = {
-        "code": safe_error_code(error.get("code"), default="TOOL_ERROR"),
-        "message": _clip(error.get("message") or "tool failed", MAX_SUMMARY_CHARS),
-    }
-    for key in ("field", "hint", "reason"):
-        value = error.get(key)
-        if isinstance(value, (str, int, float, bool)) and str(value).strip():
-            safe[key] = _clip(value, 240)
-    details = error.get("details")
-    if isinstance(details, dict):
-        safe_details = {
-            key: _bounded_error_detail(value)
-            for key, value in details.items()
-            if key in {
-                "allowed_views",
-                "unknown_views",
-                "first_keyword",
-                "mode",
-                "schema_errors",
-                "tool_name",
-                "consumer",
-                "reason_code",
-                "blocked_by",
-                "account",
-                "run_id",
-                "reason",
-                "hint",
-            }
-        }
-        if safe_details:
-            safe["details"] = safe_details
-    explicit_retryable = error.get("retryable")
-    if not isinstance(explicit_retryable, bool) and isinstance(details, dict):
-        explicit_retryable = details.get("retryable")
-    safe["retryable"] = (
-        explicit_retryable
-        if isinstance(explicit_retryable, bool)
-        else safe["code"] in {"INPUT_ERROR", "READ_ERROR", "INTERNAL_ERROR", "TOOL_ERROR"}
-    )
-    return safe
 
 
 def _bounded_error_detail(value: Any, *, depth: int = 0) -> Any:

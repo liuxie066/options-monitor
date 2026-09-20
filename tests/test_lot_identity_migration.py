@@ -195,6 +195,23 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
     return path
 
 
+def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
+    """Rig one lot's ``fields_json`` the way a degraded store carries it."""
+
+    with sqlite3.connect(path) as conn:
+        raw = conn.execute(
+            "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
+            (record_id,),
+        ).fetchone()
+        fields = json.loads(raw[1])
+        mutate(fields)
+        conn.execute(
+            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+            (json.dumps(fields, ensure_ascii=False, sort_keys=True), raw[0]),
+        )
+        conn.commit()
+
+
 def _stored_rows(path: Path) -> dict[str, object]:
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
@@ -509,19 +526,11 @@ def test_verify_is_content_side_not_shape_side(tmp_path: Path) -> None:
         "matched": 4
     }
 
-    with sqlite3.connect(path) as conn:
-        raw = conn.execute(
-            "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
-            ("lot_assign-1",),
-        ).fetchone()
-        fields = json.loads(raw[1])
+    def _rig_shares(fields: dict) -> None:
         fields["shares_open"] = "1"
         fields["shares_closed"] = "99"
-        conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (json.dumps(fields, ensure_ascii=False, sort_keys=True), raw[0]),
-        )
-        conn.commit()
+
+    _edit_lot_fields(path, "lot_assign-1", _rig_shares)
 
     report = module.verify_lot_identity_migration(path)
     assert report["projection"]["ok"] is False
@@ -666,26 +675,19 @@ def test_verify_fails_when_a_fact_lives_only_in_the_note(tmp_path: Path) -> None
     """
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
-        raw = conn.execute(
-            "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
-            ("lot_assign-1",),
-        ).fetchone()
-        fields = json.loads(raw[1])
+    def _note_only_expiration(fields: dict) -> None:
         # ``expiration`` moved under ``contract_key`` (``write-side-definition.md``
         # §2), so the structured copy is removed there; the flat key is popped too
-        # so a legacy spelling cannot rescue the fact.
+        # so a legacy spelling cannot rescue the fact. The converged payload
+        # carries no ``note`` key either, so the note is written whole.
         fields.pop("expiration", None)
         fields.pop("expiration_ymd", None)
         contract_key = fields.get("contract_key")
         if isinstance(contract_key, dict):
             contract_key.pop("expiration_ymd", None)
         fields["note"] = "exp=2026-06-19"
-        conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (json.dumps(fields, ensure_ascii=False, sort_keys=True), raw[0]),
-        )
-        conn.commit()
+
+    _edit_lot_fields(path, "lot_assign-1", _note_only_expiration)
 
     report = module.verify_lot_identity_migration(path)
 
@@ -730,19 +732,11 @@ def test_verify_rejects_free_prose_in_the_note(tmp_path: Path) -> None:
     """Prose has no other home, so no KV disposition can rescue it."""
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (
-                json.dumps(
-                    {"account": "lx", "note": "rolled into the March cycle"},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-                "lot_assign-1",
-            ),
-        )
-        conn.commit()
+    def _prose_only_note(fields: dict) -> None:
+        fields.clear()
+        fields.update({"account": "lx", "note": "rolled into the March cycle"})
+
+    _edit_lot_fields(path, "lot_assign-1", _prose_only_note)
 
     report = module.verify_lot_identity_migration(path)
     assert report["payload_keys"]["lost"]["note"]["reason"] == "note_prose_only_in_note"

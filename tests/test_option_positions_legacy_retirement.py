@@ -7,6 +7,24 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _read(*parts: str) -> str:
+    """Read a repository file as UTF-8 text."""
+    return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+
+def _ledger_text(*names: str) -> str:
+    """Concatenate sibling ``src/application/ledger`` modules with newlines."""
+    return "\n".join(_read("src", "application", "ledger", name) for name in names)
+
+
+def _ledger_glob(pattern: str) -> str:
+    """Concatenate the sorted ``src/application/ledger`` modules matching a glob."""
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPO_ROOT / "src" / "application" / "ledger").glob(pattern))
+    )
+
+
 def _python_text_offenders(
     roots: list[Path],
     banned: tuple[str, ...],
@@ -161,14 +179,7 @@ def test_position_lot_projection_uses_position_patch_decoder() -> None:
 
 
 def test_position_lot_sync_metadata_is_retired() -> None:
-    repository_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(
-            (REPO_ROOT / "src" / "application" / "ledger").glob(
-                "repository*.py"
-            )
-        )
-    )
+    repository_text = _ledger_glob("repository*.py")
     commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
     assert not (REPO_ROOT / "src" / "application" / "ledger" / "sync_metadata.py").exists()
@@ -182,12 +193,7 @@ def test_position_lot_sync_metadata_is_retired() -> None:
 def test_position_lot_projection_write_path_uses_explicit_record_contract() -> None:
     record_text = (REPO_ROOT / "src" / "application" / "ledger" / "position_records.py").read_text(encoding="utf-8")
     publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
-    repository_text = "\n".join(
-        (
-            REPO_ROOT / "src" / "application" / "ledger" / filename
-        ).read_text(encoding="utf-8")
-        for filename in ("repository_common.py", "repository_projection_tail.py")
-    )
+    repository_text = _ledger_text("repository_common.py", "repository_projection_tail.py")
     writer_text = (
         REPO_ROOT / "src" / "application" / "ledger" / "writer_trade_events.py"
     ).read_text(encoding="utf-8")
@@ -277,13 +283,9 @@ def test_manual_ledger_command_results_use_explicit_contracts() -> None:
 
 def test_auto_close_maintenance_results_use_explicit_contracts() -> None:
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    maintenance_text = (REPO_ROOT / "src" / "application" / "ledger" / "maintenance.py").read_text(
-        encoding="utf-8"
-    )
+    maintenance_text = _ledger_text("maintenance.py")
     commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    position_maintenance_text = (REPO_ROOT / "src" / "application" / "positions" / "maintenance.py").read_text(
-        encoding="utf-8"
-    )
+    position_maintenance_text = _read("src", "application", "positions", "maintenance.py")
 
     assert "class ExpiredCloseDecision" in results_text
     assert "class ExpiredCloseApplyResult" in results_text
@@ -316,9 +318,7 @@ def test_broker_trade_operations_use_explicit_contracts() -> None:
 
 def test_trade_event_interventions_use_explicit_preview_contracts() -> None:
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    interventions_text = (REPO_ROOT / "src" / "application" / "ledger" / "interventions.py").read_text(
-        encoding="utf-8"
-    )
+    interventions_text = _ledger_text("interventions.py")
     commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
     assert "class TradeEventInterventionPreview" in results_text
@@ -446,12 +446,7 @@ def test_trade_intake_lives_under_trades_namespace() -> None:
 
 
 def test_repository_config_and_guards_live_under_ledger_repository() -> None:
-    repository_text = "\n".join(
-        (
-            REPO_ROOT / "src" / "application" / "ledger" / filename
-        ).read_text(encoding="utf-8")
-        for filename in ("repository.py", "repository_common.py")
-    )
+    repository_text = _ledger_text("repository.py", "repository_common.py")
     moved_defs = (
         "class SQLiteOptionPositionsRepository",
         "def option_positions_bootstrap_from_feishu_enabled(",
@@ -477,12 +472,7 @@ def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
 
 def test_event_write_projection_lives_under_ledger_writer() -> None:
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    writer_text = "\n".join(
-        (
-            REPO_ROOT / "src" / "application" / "ledger" / filename
-        ).read_text(encoding="utf-8")
-        for filename in ("writer_common.py", "writer_trade_events.py")
-    )
+    writer_text = _ledger_text("writer_common.py", "writer_trade_events.py")
     moved_defs = (
         "def projection_diagnostics_summary(",
         "def rebuild_position_lots_from_trade_events(",
@@ -499,15 +489,7 @@ def test_event_write_projection_lives_under_ledger_writer() -> None:
 
 def test_trade_event_codec_has_dedicated_storage_boundary() -> None:
     codec_text = (REPO_ROOT / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
-    repository_text = "\n".join(
-        (
-            REPO_ROOT / "src" / "application" / "ledger" / filename
-        ).read_text(encoding="utf-8")
-        for filename in (
-            "repository_trade_events.py",
-            "repository_trade_schema.py",
-        )
-    )
+    repository_text = _ledger_text("repository_trade_events.py", "repository_trade_schema.py")
     publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
 
     assert "def encode_trade_event_for_storage(" in codec_text
@@ -710,9 +692,7 @@ def test_ledger_public_api_is_thin_command_query_facade() -> None:
 
 
 def test_position_risk_context_uses_typed_ledger_view() -> None:
-    context_text = (REPO_ROOT / "src" / "application" / "positions" / "context_builder.py").read_text(
-        encoding="utf-8"
-    )
+    context_text = _read("src", "application", "positions", "context_builder.py")
 
     assert "RiskPositionView" in context_text
     assert "position_lot_risk_view" in context_text
@@ -838,8 +818,6 @@ def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None
             if fragment in text:
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{fragment}")
 
-    ledger_lifecycle_text = (REPO_ROOT / "src" / "application" / "ledger" / "lifecycle.py").read_text(
-        encoding="utf-8"
-    )
+    ledger_lifecycle_text = _ledger_text("lifecycle.py")
     assert "persist_trade_event_objects_atomically(" in ledger_lifecycle_text
     assert offenders == []

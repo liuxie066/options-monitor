@@ -52,162 +52,54 @@ def _stub_upgrade_preparation(monkeypatch: pytest.MonkeyPatch, module, target: P
     monkeypatch.setattr(module, "_load_service_profile", lambda _runtime: {})
 
 
-def _write_executable(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
-    path.chmod(0o755)
+def _fail_lambda(message: str):
+    """A seam stub that fails the test if the seam is reached."""
+
+    def _fail(**_kwargs):
+        pytest.fail(message)
+
+    return _fail
 
 
-def _stage_actual_target_with_old_installer(
+def _upgrade(
+    module,
     *,
-    tmp_path: Path,
-    old_release: Path,
-) -> Path:
-    from test_install_script import _installer_env
-
-    source = Path(__file__).resolve().parents[1]
-    installer_root = tmp_path / "installer"
-    env = _installer_env(installer_root)
-    fake_bin = Path(env["PATH"].split(os.pathsep)[0])
-    _write_executable(
-        fake_bin / "git",
-        f"""#!{sys.executable}
-import os
-import shutil
-import sys
-from pathlib import Path
-
-source = Path(os.environ["PI_TEST_CLONE_SOURCE"])
-destination = Path(sys.argv[-1])
-destination.mkdir(parents=True)
-for name in ("src", "domain", "scripts", "requirements", "constraints", "agent-runtime"):
-    shutil.copytree(source / name, destination / name, symlinks=True)
-for name in ("om", "om-agent", "requirements.txt", "constraints.txt", "pyproject.toml"):
-    os.link(source / name, destination / name)
-version = destination / "VERSION"
-version.write_text("3.5.2\\n", encoding="utf-8")
-smoke = destination / "scripts" / "pi_runtime_smoke.sh"
-smoke.unlink()
-smoke.write_text("#!/usr/bin/env bash\\nset -euo pipefail\\n[[ -x \\\"$4\\\" ]]\\n", encoding="utf-8")
-smoke.chmod(0o755)
-""",
+    current: Path,
+    runtime: Path,
+    target: Path,
+    confirm: bool,
+    restart_services: bool,
+):  # type: ignore[no-untyped-def]
+    """Run the upgrade entrypoint with the fixture's fixed release/runtime arguments."""
+    return module.service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=target.parent,
+        target_version="3.5.2",
+        confirm=confirm,
+        restart_services=restart_services,
+        preserve_activation_state=True,
     )
-    env["PI_TEST_CLONE_SOURCE"] = str(source)
-    prefix = tmp_path / "private-upgrade-control"
-    before_link = (tmp_path / "production" / "current").resolve()
-    completed = subprocess.run(
-        [
-            "bash",
-            str(old_release / "scripts" / "install.sh"),
-            "--version",
-            "v3.5.2",
-            "--prefix",
-            str(prefix),
-            "--repo-url",
-            "https://example.invalid/options-monitor.git",
-            "--no-install-cli",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+
+
+def _cleanup_fixture(tmp_path: Path, versions: list[str]) -> tuple[Path, list[Path], Path]:
+    """Create one release dir per version (newest first) and point `current` at the newest."""
+    releases = tmp_path / "releases"
+    created = [_release(releases / version, version) for version in versions]
+    current = tmp_path / "current"
+    current.symlink_to(created[0], target_is_directory=True)
+    return releases, created, current
+
+
+def _cleanup(module, *, current: Path, releases: Path, **kwargs):  # type: ignore[no-untyped-def]
+    """Run the cleanup entrypoint with the fixture's fixed keep/confirm arguments."""
+    return module.service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        keep_releases=2,
+        confirm=True,
+        **kwargs,
     )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
-    assert (tmp_path / "production" / "current").resolve() == before_link
-    target = prefix / "releases" / "v3.5.2"
-    shutil.rmtree(target / ".venv")
-    (target / ".venv").symlink_to(source / ".venv", target_is_directory=True)
-    return target
-
-
-def _target_cli_env(target: Path, *, extra_python_path: Path | None = None) -> dict[str, str]:
-    env = os.environ.copy()
-    env["OM_PYTHON"] = str(target / ".venv" / "bin" / "python")
-    if extra_python_path is None:
-        env.pop("PYTHONPATH", None)
-    else:
-        env["PYTHONPATH"] = str(extra_python_path)
-    return env
-
-
-def _run_json(command: list[str], *, cwd: Path, env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], dict]:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise AssertionError(completed.stderr + completed.stdout) from exc
-    return completed, payload
-
-
-def _isolated_update_python(tmp_path: Path) -> Path:
-    """Keep target wrapper/argparse/application real; substitute external effects only."""
-    bootstrap = tmp_path / "isolated-update-python"
-    _write_executable(bootstrap, f'''#!{sys.executable}
-import atexit
-import hashlib
-import json
-import os
-import runpy
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-
-if sys.argv[1:2] == ["-c"]:
-    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
-assert sys.argv[1:3] == ["-m", "src.interfaces.cli.main"]
-import src.application.service_upgrade as module
-
-target = Path.cwd()
-assert Path(module.__file__).resolve() == target / "src/application/service_upgrade.py"
-calls = []
-def run_service(command, **kwargs):
-    command = list(command)
-    calls.append(command)
-    output = "enabled\\n" if "is-enabled" in command else "active\\n" if "is-active" in command else "ok\\n"
-    return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
-
-def materialize(**kwargs):
-    destination = kwargs["target_dir"]
-    if not destination.exists():
-        shutil.copytree(target, destination, symlinks=True, copy_function=os.link)
-    return {{"status": "materialized", "target_dir": str(destination)}}
-
-module.service_upgrade_check = lambda **kwargs: {{"ok": True, "latest_version": "3.5.2", "release_tag": "v3.5.2"}}
-module._materialize_release_from_git_cache = materialize
-module._ensure_release_runtime = lambda **kwargs: {{"status": "ready"}}
-module._run_required = lambda *args, **kwargs: {{}}
-module._prepare_runtime_configs_for_release = lambda **kwargs: {{"status": "prepared", "items": []}}
-module._commit_prepared_runtime_configs = lambda **kwargs: {{"status": "committed"}}
-module._validate_committed_runtime_configs = lambda **kwargs: []
-module._load_service_profile = lambda runtime: {{"service_provider": "systemd", "restart": {{"requires_sudo": False, "services": ["options-monitor-feishu-ws.service"]}}}}
-module.service_drift = lambda **kwargs: {{"summary": {{"status": "ok"}}}}
-module._post_upgrade_service_health = lambda **kwargs: {{"ok": True, "status": "ok"}}
-module.service_upgrade.__kwdefaults__["run_cmd"] = run_service
-if os.environ.get("PI_TEST_FAIL_ACTIVATION") == "1":
-    def fail_activation(**kwargs):
-        raise module.ServiceTransitionError("activation snapshot failed", status="service_activation_snapshot_failed")
-    module.capture_preserved_timer_activation_states = fail_activation
-
-argv = sys.argv[3:]
-def record():
-    Path(os.environ["PI_TEST_UPDATE_AUDIT"]).write_text(json.dumps({{
-        "argv": argv, "cwd": str(target), "module": module.__file__,
-        "sha256": hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest(),
-        "calls": calls,
-    }}))
-atexit.register(record)
-sys.argv = ["src.interfaces.cli.main", *argv]
-runpy.run_module("src.interfaces.cli.main", run_name="__main__")
-''')
-    return bootstrap
 
 
 def test_pi_readiness_checks_custom_and_release_local_session_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -267,22 +159,16 @@ def test_upgrade_verify_reports_pi_storage_gate_failure(
     current, previous, _target, runtime = _upgrade_fixture(tmp_path)
     (runtime / "config.us.json").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(module, "_load_service_profile", lambda _runtime: {})
-    monkeypatch.setattr(
-        module,
-        "_runtime_config_verify_summary",
-        lambda **_kwargs: {"ok": True},
-    )
-    monkeypatch.setattr(
-        module,
-        "_pi_storage_readiness",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            module.ServiceTransitionError(
-                "reverse conversion required",
-                status="pi_storage_not_ready",
-                remediation=["keep Agent ingress stopped"],
-            )
-        ),
-    )
+    monkeypatch.setattr(module, "_runtime_config_verify_summary", lambda **_kwargs: {"ok": True})
+
+    def _reject_readiness(**_kwargs):
+        raise module.ServiceTransitionError(
+            "reverse conversion required",
+            status="pi_storage_not_ready",
+            remediation=["keep Agent ingress stopped"],
+        )
+
+    monkeypatch.setattr(module, "_pi_storage_readiness", _reject_readiness)
 
     out = module.service_upgrade_verify(
         repo_root=current,
@@ -307,19 +193,11 @@ def test_upgrade_preview_is_read_only_and_keeps_services_stopped(monkeypatch: py
     current, previous, target, runtime = _upgrade_fixture(tmp_path)
     _stub_upgrade_preparation(monkeypatch, module, target)
     monkeypatch.setattr(module, "_pi_storage_readiness", lambda **_kwargs: {"ok": True, "stores": []})
-    monkeypatch.setattr(module, "_materialize_release_from_git_cache", lambda **_kwargs: pytest.fail("preview materialized release"))
-    monkeypatch.setattr(module, "_switch_current_symlink", lambda **_kwargs: pytest.fail("preview switched current"))
-    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", lambda **_kwargs: pytest.fail("preview restarted service"))
+    monkeypatch.setattr(module, "_materialize_release_from_git_cache", _fail_lambda("preview materialized release"))
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("preview switched current"))
+    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", _fail_lambda("preview restarted service"))
 
-    out = module.service_upgrade(
-        repo_root=current,
-        runtime_root=runtime,
-        releases_root=target.parent,
-        target_version="3.5.2",
-        confirm=False,
-        restart_services=False,
-        preserve_activation_state=True,
-    )
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=False, restart_services=False)
 
     assert out["status"] == "dry_run"
     assert current.resolve() == previous
@@ -347,17 +225,11 @@ def test_upgrade_reads_target_store_before_switch_and_does_not_restart_in_mainte
 
     monkeypatch.setattr(module, "_pi_storage_readiness", _readiness)
     monkeypatch.setattr(module, "_switch_current_symlink", _switch)
-    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", lambda **_kwargs: pytest.fail("maintenance restarted service"))
-
-    out = module.service_upgrade(
-        repo_root=current,
-        runtime_root=runtime,
-        releases_root=target.parent,
-        target_version="3.5.2",
-        confirm=True,
-        restart_services=False,
-        preserve_activation_state=True,
+    monkeypatch.setattr(
+        module, "_restart_services_from_loaded_profile", _fail_lambda("maintenance restarted service")
     )
+
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=True, restart_services=False)
 
     assert out["status"] == "upgraded"
     assert events == ["readiness", "switch"]
@@ -375,15 +247,12 @@ def test_rollback_rejects_incompatible_store_before_switch_or_restart(monkeypatc
         "_prepare_runtime_configs_for_release",
         lambda **_kwargs: {"status": "prepared", "items": []},
     )
-    monkeypatch.setattr(
-        module,
-        "_pi_storage_readiness",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            module.ServiceTransitionError("reverse conversion required", status="pi_storage_not_ready")
-        ),
-    )
-    monkeypatch.setattr(module, "_switch_current_symlink", lambda **_kwargs: pytest.fail("rollback switched current"))
-    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", lambda **_kwargs: pytest.fail("rollback restarted service"))
+    def _reject_readiness(**_kwargs):
+        raise module.ServiceTransitionError("reverse conversion required", status="pi_storage_not_ready")
+
+    monkeypatch.setattr(module, "_pi_storage_readiness", _reject_readiness)
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("rollback switched current"))
+    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", _fail_lambda("rollback restarted service"))
 
     out = module.service_rollback(
         repo_root=current,
@@ -471,37 +340,17 @@ def test_post_publication_failure_before_switch_does_not_resume_old_runtime(
             remediation=["keep Agent ingress stopped"],
         )
 
+    def _fail_activation(**_kwargs):
+        raise module.ServiceTransitionError("activation snapshot failed", status="service_activation_snapshot_failed")
+
     monkeypatch.setattr(module, "_pi_storage_readiness", _readiness)
+    monkeypatch.setattr(module, "capture_preserved_timer_activation_states", _fail_activation)
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("failure path switched current"))
     monkeypatch.setattr(
-        module,
-        "capture_preserved_timer_activation_states",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            module.ServiceTransitionError(
-                "activation snapshot failed",
-                status="service_activation_snapshot_failed",
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "_switch_current_symlink",
-        lambda **_kwargs: pytest.fail("failure path switched current"),
-    )
-    monkeypatch.setattr(
-        module,
-        "_restart_services_from_loaded_profile",
-        lambda **_kwargs: pytest.fail("failure path started old service"),
+        module, "_restart_services_from_loaded_profile", _fail_lambda("failure path started old service")
     )
 
-    out = module.service_upgrade(
-        repo_root=current,
-        runtime_root=runtime,
-        releases_root=target.parent,
-        target_version="3.5.2",
-        confirm=True,
-        restart_services=True,
-        preserve_activation_state=True,
-    )
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=True, restart_services=True)
 
     assert out["status"] == "service_activation_snapshot_failed"
     assert out["compensation"]["status"] == "pi_storage_not_ready"
@@ -512,13 +361,8 @@ def test_post_publication_failure_before_switch_does_not_resume_old_runtime(
 def test_cleanup_keeps_receipt_runtime_outside_keep_count(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.service_cleanup as module
 
-    releases = tmp_path / "releases"
-    current_release = _release(releases / "3.5.3", "3.5.3")
-    _release(releases / "3.5.2", "3.5.2")
-    retained_release = _release(releases / "3.5.1", "3.5.1")
-    stale_release = _release(releases / "3.5.0", "3.5.0")
-    current = tmp_path / "current"
-    current.symlink_to(current_release, target_is_directory=True)
+    releases, created, current = _cleanup_fixture(tmp_path, ["3.5.3", "3.5.2", "3.5.1", "3.5.0"])
+    current_release, _, retained_release, stale_release = created
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     pi_db = runtime / "pi_sessions.sqlite3"
@@ -530,13 +374,7 @@ def test_cleanup_keeps_receipt_runtime_outside_keep_count(monkeypatch: pytest.Mo
         lambda _receipt: (retained_release / "agent-runtime",),
     )
 
-    out = module.service_cleanup(
-        repo_root=current,
-        releases_root=releases,
-        runtime_root=runtime,
-        keep_releases=2,
-        confirm=True,
-    )
+    out = _cleanup(module, current=current, releases=releases, runtime_root=runtime)
 
     assert out["status"] == "cleaned"
     assert {item["version"] for item in out["kept_releases"]} == {"3.5.3", "3.5.2", "3.5.1"}
@@ -552,13 +390,8 @@ def test_cleanup_without_runtime_root_still_keeps_release_local_receipt_runtime(
     import src.application.service_cleanup as module
     from src.application.bot.pi_migration import pi_migration_receipt_path
 
-    releases = tmp_path / "releases"
-    current_release = _release(releases / "3.5.3", "3.5.3")
-    _release(releases / "3.5.2", "3.5.2")
-    retained_release = _release(releases / "3.5.1", "3.5.1")
-    stale_release = _release(releases / "3.5.0", "3.5.0")
-    current = tmp_path / "current"
-    current.symlink_to(current_release, target_is_directory=True)
+    releases, created, current = _cleanup_fixture(tmp_path, ["3.5.3", "3.5.2", "3.5.1", "3.5.0"])
+    current_release, _, retained_release, stale_release = created
     retained_db = retained_release / "output_shared" / "state" / "pi_sessions.sqlite3"
     retained_db.parent.mkdir(parents=True)
     pi_migration_receipt_path(retained_db).write_text("{}\n", encoding="utf-8")
@@ -575,12 +408,7 @@ def test_cleanup_without_runtime_root_still_keeps_release_local_receipt_runtime(
         lambda _receipt: (retained_release / "agent-runtime",),
     )
 
-    out = module.service_cleanup(
-        repo_root=current,
-        releases_root=releases,
-        keep_releases=2,
-        confirm=True,
-    )
+    out = _cleanup(module, current=current, releases=releases)
 
     assert out["status"] == "cleaned"
     assert retained_db in observed
@@ -592,27 +420,18 @@ def test_cleanup_without_runtime_root_still_keeps_release_local_receipt_runtime(
 def test_cleanup_fails_closed_when_receipt_cannot_be_validated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.service_cleanup as module
 
-    releases = tmp_path / "releases"
-    current_release = _release(releases / "3.5.2", "3.5.2")
-    old_release = _release(releases / "3.5.1", "3.5.1")
-    current = tmp_path / "current"
-    current.symlink_to(current_release, target_is_directory=True)
+    releases, created, current = _cleanup_fixture(tmp_path, ["3.5.2", "3.5.1"])
+    current_release, old_release = created
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setattr(module, "pi_session_database_paths", lambda **_kwargs: (runtime / "pi_sessions.sqlite3",))
-    monkeypatch.setattr(
-        module,
-        "read_pi_migration_receipt",
-        lambda _path: (_ for _ in ()).throw(ValueError("receipt identity mismatch")),
-    )
 
-    out = module.service_cleanup(
-        repo_root=current,
-        releases_root=releases,
-        runtime_root=runtime,
-        keep_releases=2,
-        confirm=True,
-    )
+    def _reject_receipt(_path):
+        raise ValueError("receipt identity mismatch")
+
+    monkeypatch.setattr(module, "read_pi_migration_receipt", _reject_receipt)
+
+    out = _cleanup(module, current=current, releases=releases, runtime_root=runtime)
 
     assert out["status"] == "pi_retention_unresolved"
     assert out["changed"] is False

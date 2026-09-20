@@ -7,13 +7,35 @@ import pandas as pd
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    evaluate_opening_candidate_policy,
 )
+from src.application.sell_put_cash import (
+    enrich_sell_put_candidates_with_cash,
+    sell_put_opening_capacity_inputs,
+)
+from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+
+def _hk_candidate(**overrides) -> dict:
+    return {"symbol": "0700.HK", "strike": 450.0, "multiplier": 100, "currency": "HKD", **overrides}
+
+
+def _hk_df(**overrides) -> pd.DataFrame:
+    return pd.DataFrame([_hk_candidate(**overrides)])
+
+
+def _usd_cny_portfolio_ctx(**overrides) -> dict:
+    return {
+        "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
+        "option_ctx": {
+            "cash_secured_total_by_ccy": {"USD": 2_000.0},
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
+        },
+        **overrides,
+    }
 
 
 def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> None:
-    from src.application.sell_put_cash import sell_put_opening_capacity_inputs
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     common = {
         "symbol": "NVDA",
         "strike": 100.0,
@@ -73,10 +95,6 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
 
 
 def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing() -> None:
-    from domain.domain.engine import evaluate_opening_candidate_policy
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     candidate = {
         "symbol": "NVDA",
         "contract_symbol": "NVDA260918P00090000",
@@ -145,19 +163,7 @@ def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing(
 
 
 def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-
-    df = pd.DataFrame(
-        [
-            {
-                "symbol": "0700.HK",
-                "strike": 450.0,
-                "multiplier": 100,
-                "currency": "HKD",
-            }
-        ]
-    )
+    df = _hk_df()
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -185,19 +191,7 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
 
 
 def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_closed(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-
-    df = pd.DataFrame(
-        [
-            {
-                "symbol": "0700.HK",
-                "strike": 450.0,
-                "multiplier": 100,
-                "currency": "HKD",
-            }
-        ]
-    )
+    df = _hk_df()
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -220,18 +214,7 @@ def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_cl
 
 
 def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_currency(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-
-    df = pd.DataFrame(
-        [
-            {
-                "symbol": "0700.HK",
-                "strike": 450.0,
-                "multiplier": 500,
-            }
-        ]
-    )
+    df = pd.DataFrame([{"symbol": "0700.HK", "strike": 450.0, "multiplier": 500}])
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -253,19 +236,7 @@ def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_c
 
 
 def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_usd(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-
-    df = pd.DataFrame(
-        [
-            {
-                "symbol": "0700.HK",
-                "strike": 450.0,
-                "multiplier": 500,
-                "currency": "HKD",
-            }
-        ]
-    )
+    df = _hk_df(multiplier=500)
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -287,21 +258,12 @@ def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_
 
 
 def test_enrich_sell_put_candidates_keeps_native_cash_when_fx_is_unavailable(tmp_path: Path) -> None:
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=pd.DataFrame(
             [{"symbol": "NVDA", "strike": 100.0, "multiplier": 100, "currency": "USD"}]
         ),
         symbol="NVDA",
-        portfolio_ctx={
-            "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
-            "option_ctx": {
-                "cash_secured_total_by_ccy": {"USD": 2_000.0},
-                "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
-            },
-        },
+        portfolio_ctx=_usd_cny_portfolio_ctx(),
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )
 
@@ -312,22 +274,12 @@ def test_enrich_sell_put_candidates_keeps_native_cash_when_fx_is_unavailable(tmp
 
 
 def test_enrich_sell_put_candidates_marks_expired_fx_without_blocking_native_cash(tmp_path: Path) -> None:
-    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=pd.DataFrame(
             [{"symbol": "NVDA", "strike": 100.0, "multiplier": 100, "currency": "USD"}]
         ),
         symbol="NVDA",
-        portfolio_ctx={
-            "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
-            "option_ctx": {
-                "cash_secured_total_by_ccy": {"USD": 2_000.0},
-                "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
-            },
-            "_sell_put_fx_status": "unavailable_stale",
-        },
+        portfolio_ctx=_usd_cny_portfolio_ctx(_sell_put_fx_status="unavailable_stale"),
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )
 

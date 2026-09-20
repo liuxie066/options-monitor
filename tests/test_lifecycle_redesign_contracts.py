@@ -406,6 +406,29 @@ def _legacy_terminal_mapping_fixture(
     return repo, case_id, mapping, terminal_event_id
 
 
+def _inventory_row(inventory: dict, target_key: str) -> dict:
+    return next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == target_key
+    )
+
+
+def _migration_row(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    case_id: str,
+    explicit_mapping: dict | None = None,
+) -> dict:
+    return _inventory_row(
+        build_lifecycle_migration_inventory(
+            repo,
+            explicit_mapping=explicit_mapping,
+        ),
+        f"lifecycle:{case_id}",
+    )
+
+
 def test_source_claim_hash_ignores_push_poll_transport() -> None:
     base = {
         "account": "lx",
@@ -661,11 +684,7 @@ def test_migration_inventory_blocks_v2_without_timing_policy(
     )
 
     inventory = build_lifecycle_migration_inventory(repo)
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _inventory_row(inventory, f"lifecycle:{case_id}")
 
     assert row["mapping_status"] == "needs_review"
     assert (
@@ -762,11 +781,7 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
 
     inventory = build_lifecycle_migration_inventory(repo)
     target_key = f"lifecycle:{legacy_id}"
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == target_key
-    )
+    row = _inventory_row(inventory, target_key)
     assert row["mapping_status"] == "exact"
     canonical_case_id = row["legacy_upgrade"][
         "canonical_case"
@@ -835,11 +850,7 @@ def test_explicit_terminal_frozen_mapping_only_links_existing_facts(
         explicit_mapping=mapping,
     )
     target_key = f"lifecycle:{case_id}"
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == target_key
-    )
+    row = _inventory_row(inventory, target_key)
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
@@ -902,15 +913,7 @@ def test_explicit_terminal_mapping_fails_closed_without_terminal_event(
     )
     mapping["rows"][0]["terminal_event_ids"] = []
 
-    inventory = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
 
     assert row["mapping_status"] == "needs_review"
     assert "explicit_terminal_event_missing" in (
@@ -931,15 +934,7 @@ def test_explicit_terminal_mapping_accepts_case_adopted_event(
         )
     )
 
-    inventory = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
 
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
@@ -956,15 +951,7 @@ def test_explicit_terminal_mapping_requires_exact_multiplier_exception(
             case_multiplier=200,
         )
     )
-    inventory = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    blocked = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    blocked = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
     assert blocked["mapping_status"] == "needs_review"
     assert "explicit_case_contract_mismatch" in (
         blocked["review_reason_codes"]
@@ -979,15 +966,7 @@ def test_explicit_terminal_mapping_requires_exact_multiplier_exception(
             ),
         }
     }
-    accepted = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    row = next(
-        item
-        for item in accepted["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
@@ -1006,15 +985,7 @@ def test_explicit_assignment_mapping_rejects_cross_account_and_window(
         mapping["rows"][0]["settlement_window"]["start_ms"] + 1
     )
 
-    inventory = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
 
     assert row["mapping_status"] == "needs_review"
     assert "explicit_broker_source_identity_mismatch" in (
@@ -1035,15 +1006,7 @@ def test_explicit_assignment_mapping_rejects_wrong_settlement_price(
         )
     )
 
-    inventory = build_lifecycle_migration_inventory(
-        repo,
-        explicit_mapping=mapping,
-    )
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == f"lifecycle:{case_id}"
-    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
 
     assert row["mapping_status"] == "needs_review"
     assert "explicit_stock_settlement_economics_mismatch" in (
@@ -1239,11 +1202,7 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         explicit_mapping=mapping,
     )
     target_key = f"lifecycle:{legacy_case_id}"
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == target_key
-    )
+    row = _inventory_row(inventory, target_key)
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
@@ -1510,11 +1469,7 @@ def test_historical_split_normal_close_seeds_one_final_slot(
 
     inventory = build_lifecycle_migration_inventory(repo)
     target_key = "close:futu:lx:1001:split-close-1"
-    row = next(
-        item
-        for item in inventory["rows"]
-        if item["target_key"] == target_key
-    )
+    row = _inventory_row(inventory, target_key)
     assert row["mapping_status"] == "exact"
     assert row["split_event_count"] == 2
     assert (

@@ -15,6 +15,7 @@ from domain.domain.performance.models import (
     quantize_money,
 )
 from src.application.ledger import api as ledger_api
+from src.application.payload_helpers import optional_text as _optional_id
 
 
 @dataclass(frozen=True)
@@ -291,11 +292,6 @@ def _trade_event_from_application_payload(payload: dict[str, Any]) -> TradeEvent
         lot_id=_optional_id(payload.get("lot_id")),
         raw_payload=raw_payload,
     )
-
-
-def _optional_id(value: Any) -> str | None:
-    raw = str(value or "").strip()
-    return raw or None
 
 
 def _diagnostic_metadata(payload: dict[str, Any]) -> dict[str, Any]:

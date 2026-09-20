@@ -11,8 +11,8 @@ from src.application.agent_tool_contracts import AgentToolError, build_response,
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
 from src.application.assistant.operation_lifecycle import (
-    build_cancelled_operation_response,
     build_previewed_operation_response,
+    cancel_pending_operation_or_raise,
     confirm_previewed_operation_or_raise,
     resolve_pending_operation_or_raise,
 )
@@ -483,21 +483,14 @@ def _pending_expiry_batch_operation_ids(
 
 
 def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+    return cancel_pending_operation_or_raise(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=True,
-        action="取消",
-    )
-    text = f"交易记录已取消，未写入账本。\ncommand_id: {operation_id}"
-    return build_cancelled_operation_response(
+        resolve=_resolve_manual_trade_operation,
         tool_name="inbound.manual_trade",
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        response_text=text,
+        subject="交易记录",
+        cancel_suffix="未写入账本",
     )
 
 

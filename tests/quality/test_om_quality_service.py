@@ -73,6 +73,87 @@ def _empty_current_quality() -> dict:
     }
 
 
+def _account_config(*accounts: str) -> dict:
+    """The futu account settings the service resolves for each configured account."""
+    return {
+        "accounts": list(accounts),
+        "account_settings": {
+            account: {
+                "type": "futu",
+                "futu": {
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                    "account_id": "123456",
+                    "trd_env": "REAL",
+                },
+            }
+            for account in accounts
+        },
+    }
+
+
+def _stub_single_market_config(monkeypatch, config_path: Path, cfg: dict) -> None:
+    """Stub the single-market config seams; `path.write_text('{}')` stays with the caller."""
+    monkeypatch.setattr(service_module, "load_runtime_config", lambda **_kwargs: (config_path, cfg))
+    monkeypatch.setattr(service_module, "infer_runtime_config_market", lambda **_kwargs: "US")
+
+
+def _runtime(
+    ledger_path: Path,
+    *,
+    config_key: str = "us",
+    trade_intake: dict | None = None,
+) -> dict:
+    """The `runtime_status` data payload the service reads for one market."""
+    return {
+        "config": {"config_key": config_key},
+        "summary": {"ok": True},
+        "ledger_store": {"sqlite_path": str(ledger_path)},
+        "trade_intake": trade_intake or {"sources": []},
+        "service_profile": {"loaded": True},
+    }
+
+
+def _runtime_status_for(runtime: dict):
+    """A `runtime_status_fn` that always returns `runtime` as the data payload."""
+
+    def _runtime_status(*_args) -> dict:
+        return {"ok": True, "data": runtime}
+
+    return _runtime_status
+
+
+def _runtime_status_by_config_key(ledger_path: Path):
+    """A `runtime_status_fn` that echoes the requested config_key back into the runtime payload."""
+
+    def _runtime_status(_tool, payload) -> dict:
+        return {"ok": True, "data": _runtime(ledger_path, config_key=payload["config_key"])}
+
+    return _runtime_status
+
+
+def _service(
+    *,
+    artifact: QualityArtifactRepository,
+    control: QualityControlStateRepository,
+    runtime_status_fn,
+    opend: _OpenD | None = None,
+    now=None,
+    instance_id: str = "test-instance",
+    **kwargs,
+) -> OMQualityService:  # type: ignore[no-untyped-def]
+    """Build the service with the shared adapter/clock defaults; `**kwargs` reach the constructor."""
+    return OMQualityService(
+        artifact_repository=artifact,
+        control_repository=control,
+        opend_adapter=opend or _OpenD(),
+        runtime_status_fn=runtime_status_fn,
+        now_fn=now or (lambda: datetime(2026, 7, 13, 10, tzinfo=timezone.utc)),
+        instance_id=instance_id,
+        **kwargs,
+    )
+
+
 def _trusted_empty_current_projection() -> dict:
     return {
         "status": "trusted",
@@ -127,22 +208,7 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
     SQLiteOptionPositionsRepository(ledger_path)
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
-    cfg = {
-        "accounts": ["lx"],
-        "account_settings": {
-            "lx": {
-                "type": "futu",
-                "futu": {
-                    "host": "127.0.0.1",
-                    "port": 11111,
-                    "account_id": "123456",
-                    "trd_env": "REAL",
-                },
-            }
-        },
-    }
-    monkeypatch.setattr(service_module, "load_runtime_config", lambda **_kwargs: (config_path, cfg))
-    monkeypatch.setattr(service_module, "infer_runtime_config_market", lambda **_kwargs: "US")
+    _stub_single_market_config(monkeypatch, config_path, _account_config("lx"))
     current_reads: list[str] = []
 
     def _current_projection(_repo, *, account: str, now_ms: int) -> dict:
@@ -172,11 +238,9 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
         },
     )
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    runtime = {
-        "config": {"config_key": "us"},
-        "summary": {"ok": True},
-        "ledger_store": {"sqlite_path": str(ledger_path)},
-        "trade_intake": {
+    runtime = _runtime(
+        ledger_path,
+        trade_intake={
             "sources": [
                 {
                     "id": "lx",
@@ -194,13 +258,12 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
                 }
             ],
         },
-        "service_profile": {"loaded": True},
-    }
+    )
     artifact = QualityArtifactRepository(tmp_path / "status.v1.json")
-    service = OMQualityService(
-        artifact_repository=artifact,
-        control_repository=QualityControlStateRepository(tmp_path / "control.v1.json"),
-        opend_adapter=_OpenD(
+    service = _service(
+        artifact=artifact,
+        control=QualityControlStateRepository(tmp_path / "control.v1.json"),
+        opend=_OpenD(
             complete=complete,
             environment="REAL" if complete else "UNKNOWN",
             error_code=None if complete else "OPEND_TEST_INCOMPLETE",
@@ -211,9 +274,8 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
                 "sha256:8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"
             ),
         ),
-        runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
-        now_fn=lambda: now,
-        instance_id="test-instance",
+        runtime_status_fn=_runtime_status_for(runtime),
+        now=lambda: now,
     )
     payload = service.refresh(config_keys=["us"])
     assert artifact.read() == payload
@@ -371,50 +433,13 @@ def test_service_uses_account_coherent_lifecycle_read_for_position_coverage(
     )
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
-    cfg = {
-        "accounts": ["lx"],
-        "account_settings": {
-            "lx": {
-                "type": "futu",
-                "futu": {
-                    "host": "127.0.0.1",
-                    "port": 11111,
-                    "account_id": "123456",
-                    "trd_env": "REAL",
-                },
-            }
-        },
-    }
-    monkeypatch.setattr(
-        service_module,
-        "load_runtime_config",
-        lambda **_kwargs: (config_path, cfg),
-    )
-    monkeypatch.setattr(
-        service_module,
-        "infer_runtime_config_market",
-        lambda **_kwargs: "US",
-    )
-    runtime = {
-        "config": {"config_key": "us"},
-        "summary": {"ok": True},
-        "ledger_store": {"sqlite_path": str(ledger_path)},
-        "trade_intake": {
-            "sources": [],
-        },
-        "service_profile": {"loaded": True},
-    }
-    payload = OMQualityService(
-        artifact_repository=QualityArtifactRepository(
-            tmp_path / "status.v1.json"
-        ),
-        control_repository=QualityControlStateRepository(
-            tmp_path / "control.v1.json"
-        ),
-        opend_adapter=_OpenD(),
-        runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
-        now_fn=lambda: now,
-        instance_id="test-instance",
+    _stub_single_market_config(monkeypatch, config_path, _account_config("lx"))
+    runtime = _runtime(ledger_path)
+    payload = _service(
+        artifact=QualityArtifactRepository(tmp_path / "status.v1.json"),
+        control=QualityControlStateRepository(tmp_path / "control.v1.json"),
+        runtime_status_fn=_runtime_status_for(runtime),
+        now=lambda: now,
     ).refresh(config_keys=["us"], day_end_strict=True)
 
     position = next(
@@ -437,48 +462,18 @@ def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(
     SQLiteOptionPositionsRepository(ledger_path)
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
-    cfg = {
-        "accounts": ["lx"],
-        "account_settings": {
-            "lx": {
-                "type": "futu",
-                "futu": {
-                    "host": "127.0.0.1",
-                    "port": 11111,
-                    "account_id": "123456",
-                    "trd_env": "REAL",
-                },
-            }
-        },
-    }
-    monkeypatch.setattr(
-        service_module,
-        "load_runtime_config",
-        lambda **_kwargs: (config_path, cfg),
-    )
-    monkeypatch.setattr(
-        service_module,
-        "infer_runtime_config_market",
-        lambda **_kwargs: "US",
-    )
+    _stub_single_market_config(monkeypatch, config_path, _account_config("lx"))
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    runtime = {
-        "config": {"config_key": "us"},
-        "summary": {"ok": True},
-        "ledger_store": {"sqlite_path": str(ledger_path)},
-        "trade_intake": {"sources": []},
-        "service_profile": {"loaded": True},
-    }
+    runtime = _runtime(ledger_path)
     artifact = QualityArtifactRepository(tmp_path / "status.v1.json")
     control = QualityControlStateRepository(tmp_path / "control.v1.json")
     opend = _OpenD()
-    service = OMQualityService(
-        artifact_repository=artifact,
-        control_repository=control,
-        opend_adapter=opend,
-        runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
-        now_fn=lambda: now,
-        instance_id="test-instance",
+    service = _service(
+        artifact=artifact,
+        control=control,
+        opend=opend,
+        runtime_status_fn=_runtime_status_for(runtime),
+        now=lambda: now,
         ledger_probe_path=ledger_path,
     )
 
@@ -613,20 +608,7 @@ def test_single_market_day_end_refresh_preserves_other_market(
     ledger_path = tmp_path / "option_positions.sqlite3"
     SQLiteOptionPositionsRepository(ledger_path)
     configs = {}
-    cfg = {
-        "accounts": ["lx"],
-        "account_settings": {
-            "lx": {
-                "type": "futu",
-                "futu": {
-                    "host": "127.0.0.1",
-                    "port": 11111,
-                    "account_id": "123456",
-                    "trd_env": "REAL",
-                },
-            }
-        },
-    }
+    cfg = _account_config("lx")
     for key in ("us", "hk"):
         path = tmp_path / f"config.{key}.json"
         path.write_text("{}", encoding="utf-8")
@@ -663,29 +645,13 @@ def test_single_market_day_end_refresh_preserves_other_market(
         },
     )
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-
-    def runtime_status(_tool, payload):
-        return {
-            "ok": True,
-            "data": {
-                "config": {"config_key": payload["config_key"]},
-                "summary": {"ok": True},
-                "ledger_store": {"sqlite_path": str(ledger_path)},
-                "trade_intake": {
-                    "sources": [],
-                },
-                "service_profile": {"loaded": True},
-            },
-        }
-
     opend = _OpenD()
-    service = OMQualityService(
-        artifact_repository=QualityArtifactRepository(tmp_path / "status.v1.json"),
-        control_repository=QualityControlStateRepository(tmp_path / "control.v1.json"),
-        opend_adapter=opend,
-        runtime_status_fn=runtime_status,
-        now_fn=lambda: now,
-        instance_id="test-instance",
+    service = _service(
+        artifact=QualityArtifactRepository(tmp_path / "status.v1.json"),
+        control=QualityControlStateRepository(tmp_path / "control.v1.json"),
+        opend=opend,
+        runtime_status_fn=_runtime_status_by_config_key(ledger_path),
+        now=lambda: now,
         ledger_probe_path=ledger_path,
     )
     baseline = service.refresh(config_keys=["us", "hk"])
@@ -786,24 +752,10 @@ def test_active_cutover_refresh_uses_current_projection_without_history_reads(
     )
     monkeypatch.setattr(service_module, "build_lifecycle_datasets", forbidden)
 
-    def runtime_status(_tool, payload):
-        return {
-            "ok": True,
-            "data": {
-                "config": {"config_key": payload["config_key"]},
-                "summary": {"ok": True},
-                "ledger_store": {"sqlite_path": str(ledger_path)},
-                "trade_intake": {"sources": []},
-                "service_profile": {"loaded": True},
-            },
-        }
-
-    service = OMQualityService(
-        artifact_repository=QualityArtifactRepository(tmp_path / "status.json"),
-        control_repository=QualityControlStateRepository(tmp_path / "control.json"),
-        opend_adapter=_OpenD(),
-        runtime_status_fn=runtime_status,
-        now_fn=lambda: datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+    service = _service(
+        artifact=QualityArtifactRepository(tmp_path / "status.json"),
+        control=QualityControlStateRepository(tmp_path / "control.json"),
+        runtime_status_fn=_runtime_status_by_config_key(ledger_path),
         ledger_probe_path=tmp_path / "missing-probe.sqlite3",
         cutover_receipt_path=tmp_path / "cutover.json",
     )
@@ -873,27 +825,13 @@ def test_integrity_refresh_keeps_full_replay_in_separate_artifact(
 
     monkeypatch.setattr(service_module, "build_ledger_datasets", counted_replay)
 
-    def runtime_status(_tool, _payload):
-        return {
-            "ok": True,
-            "data": {
-                "config": {"config_key": "us"},
-                "summary": {"ok": True},
-                "ledger_store": {"sqlite_path": str(ledger_path)},
-                "trade_intake": {"sources": []},
-                "service_profile": {"loaded": True},
-            },
-        }
-
     main = QualityArtifactRepository(tmp_path / "status.json")
     integrity = QualityArtifactRepository(tmp_path / "integrity.json")
-    service = OMQualityService(
-        artifact_repository=main,
+    service = _service(
+        artifact=main,
         integrity_artifact_repository=integrity,
-        control_repository=QualityControlStateRepository(tmp_path / "control.json"),
-        opend_adapter=_OpenD(),
-        runtime_status_fn=runtime_status,
-        now_fn=lambda: datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+        control=QualityControlStateRepository(tmp_path / "control.json"),
+        runtime_status_fn=_runtime_status_for(_runtime(ledger_path)),
         ledger_probe_path=ledger_path,
     )
     payload = service.refresh_integrity(config_keys=["us"])

@@ -1278,39 +1278,40 @@ def project_assigned_stock_lifecycle(
             if source_option_lot is not None
             else ""
         )
-        binding_error = None
-        if contracts is None or multiplier is None:
-            binding_error = "assignment/exercise contracts or multiplier is invalid"
-        elif shares_opened != contracts * multiplier:
-            binding_error = "assignment/exercise stock settlement quantity mismatch"
-        elif allocation is None or allocation_contracts != contracts:
-            binding_error = "assignment/exercise option allocation is incomplete"
-        elif str(allocation.get("close_type") or "").strip().lower() != lifecycle_close_type:
-            binding_error = "assignment/exercise option allocation type conflicts with terminal event"
-        elif source_option_lot_id is None or source_option_lot is None:
-            binding_error = "assignment/exercise option-lot binding is not unique"
-        elif (
-            not allocation_open_event_id
-            or allocation_open_event_id != source_option_open_event_id
-        ):
-            binding_error = "assignment/exercise option allocation open-event binding conflicts with final lot"
-        elif explicit_option_lot_id and explicit_option_lot_id != source_option_lot_id:
-            binding_error = "assignment/exercise option-lot binding conflicts with allocation"
-        elif (
-            normalize_account(source_option_lot.get("account")) != account
-            or normalize_broker(source_option_lot.get("broker")) != broker
-            or norm_symbol(source_option_lot.get("symbol") or "") != symbol
-            or normalize_currency(source_option_lot.get("currency")) != (
-                normalize_currency(stock.get("currency")) or currency
-            )
-            or normalize_option_type(source_option_lot.get("option_type")) != option_type
-            or str(source_option_lot.get("position_side") or "").strip().lower()
-            != position_side
-            or source_option_opened_at is None
-            or source_option_opened_at <= 0
-            or source_option_opened_at > settlement_at
-        ):
-            binding_error = "assignment/exercise final option lot is inconsistent"
+        def _binding_error() -> str | None:
+            """Return the first failing settlement-binding check, or None when all pass."""
+            if contracts is None or multiplier is None:
+                return "assignment/exercise contracts or multiplier is invalid"
+            if shares_opened != contracts * multiplier:
+                return "assignment/exercise stock settlement quantity mismatch"
+            if allocation is None or allocation_contracts != contracts:
+                return "assignment/exercise option allocation is incomplete"
+            if str(allocation.get("close_type") or "").strip().lower() != lifecycle_close_type:
+                return "assignment/exercise option allocation type conflicts with terminal event"
+            if source_option_lot_id is None or source_option_lot is None:
+                return "assignment/exercise option-lot binding is not unique"
+            if not allocation_open_event_id or allocation_open_event_id != source_option_open_event_id:
+                return "assignment/exercise option allocation open-event binding conflicts with final lot"
+            if explicit_option_lot_id and explicit_option_lot_id != source_option_lot_id:
+                return "assignment/exercise option-lot binding conflicts with allocation"
+            if (
+                normalize_account(source_option_lot.get("account")) != account
+                or normalize_broker(source_option_lot.get("broker")) != broker
+                or norm_symbol(source_option_lot.get("symbol") or "") != symbol
+                or normalize_currency(source_option_lot.get("currency")) != (
+                    normalize_currency(stock.get("currency")) or currency
+                )
+                or normalize_option_type(source_option_lot.get("option_type")) != option_type
+                or str(source_option_lot.get("position_side") or "").strip().lower()
+                != position_side
+                or source_option_opened_at is None
+                or source_option_opened_at <= 0
+                or source_option_opened_at > settlement_at
+            ):
+                return "assignment/exercise final option lot is inconsistent"
+            return None
+
+        binding_error = _binding_error()
         if binding_error:
             review_rows.append(
                 _assigned_stock_review_row(

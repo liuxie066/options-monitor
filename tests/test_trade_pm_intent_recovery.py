@@ -9,15 +9,9 @@ import pytest
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades import auto_intake
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
-from src.application.trades.inbox import (
-    claim_trade_payload_refresh_intent,
-    enqueue_trade_payload,
-    list_retryable_trade_payloads,
-    list_unclaimed_trade_payload_refresh_intents,
-    mark_trade_payload_handled,
-    read_trade_payload,
-    record_trade_payload_refresh_intent,
-)
+from src.application.trades.inbox import (claim_trade_payload_refresh_intent, enqueue_trade_payload,
+    list_retryable_trade_payloads, list_unclaimed_trade_payload_refresh_intents, mark_trade_payload_handled,
+    read_trade_payload, record_trade_payload_refresh_intent,)
 
 
 class ProcessInterrupted(BaseException):
@@ -26,29 +20,23 @@ class ProcessInterrupted(BaseException):
 
 def _inbox(tmp_path):
     return resolve_execution_inbox_path(
-        SimpleNamespace(db_path=tmp_path / "ledger.sqlite3"), tmp_path / "legacy-uncreated.sqlite3",
-    )
+        SimpleNamespace(db_path=tmp_path / "ledger.sqlite3"), tmp_path / "legacy-uncreated.sqlite3",)
 
 
 def _stock(execution_id="stock-1", *, physical="123", account="lx"):
-    return {
-        "schema_version": "trade_execution.v1", "acc_id": physical,
+    return {"schema_version": "trade_execution.v1", "acc_id": physical,
         "broker_account_ref": {"broker_id": "futu", "external_account_id": physical,
             "environment": "REAL", "broker_account_id": f"futu:REAL:{physical}", "account_label": account},
         "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
         "external_id_namespace": "futu.deal", "external_execution_id": execution_id,
-        "side": "buy", "quantity": "1", "price": "100", "currency": "USD",
-        "occurred_at_utc": "2026-09-07T02:30:00Z",
-    }
+        "side": "buy", "quantity": "1", "price": "100", "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z",}
 
 
 def _core(tmp_path, payload, *, source="push"):
-    return auto_intake._process_payload(
-        payload, repo=SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"),
+    return auto_intake._process_payload(payload, repo=SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"),
         state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
         account_mapping={"123": "lx", "456": "sy"}, futu_account_ids=["123", "456"],
-        apply_changes=True, host="127.0.0.1", port=11111, source=source, allow_external_lookup=False,
-    )
+        apply_changes=True, host="127.0.0.1", port=11111, source=source, allow_external_lookup=False,)
 
 
 def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=True):
@@ -79,8 +67,7 @@ def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=Tru
         cfg_path=tmp_path / "config.json", runtime_root=tmp_path, runtime_root_source="test",
         intake_cfg={"mode": "apply" if apply_changes else "dry-run", "enabled": True},
         apply_changes=apply_changes, receipt_callback=lambda context: {},
-        process_lock=threading.RLock(), stop_event=stop,
-    )
+        process_lock=threading.RLock(), stop_event=stop,)
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "timeout", "interrupted"])
@@ -282,8 +269,7 @@ def test_resumed_unclaimed_work_keeps_processing_and_verification_owners(tmp_pat
     from src.application.trades.deal_identity import broker_deal_key_from_payload
     from src.application.trades.inbox import (
         begin_trade_receipt_attempt, claim_trade_payload, finish_trade_receipt_attempt,
-        list_trade_receipt_recovery_rows, mark_trade_payload_retryable, resume_trade_payload,
-    )
+        list_trade_receipt_recovery_rows, mark_trade_payload_retryable, resume_trade_payload,)
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     path = _inbox(tmp_path)

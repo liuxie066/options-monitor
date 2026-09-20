@@ -52,6 +52,36 @@ def _candidate(**overrides):
     return row
 
 
+def _global_nvda_context() -> dict:
+    return {
+        "_global_portfolio_ctx": {
+            "cash_by_currency": {"CNY": 800_000.0},
+            "stocks_by_symbol": {
+                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
+            },
+        },
+        "_global_option_ctx": {
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
+            "cash_secured_total_cny": 50_000.0,
+        },
+    }
+
+
+def _filter_underwriting(df, *, symbol="NVDA", cfg=None, ctx=None, converter=None):  # type: ignore[no-untyped-def]
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    return enrich_and_filter_sell_put_underwriting(
+        df_labeled=df,
+        symbol=symbol,
+        sell_put_cfg={"strategy": "insurance_underwriting"} if cfg is None else cfg,
+        portfolio_ctx=ctx,
+        exchange_rate_converter=(
+            CurrencyConverter(ExchangeRates(usd_per_cny=0.14)) if converter is None else converter
+        ),
+    )
+
+
 def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_gate() -> None:
     from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
@@ -104,21 +134,7 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
         portfolio_ctx={
             "cash_by_currency": {"CNY": 1.0},
             "stocks_by_symbol": {},
-            "_global_portfolio_ctx": {
-                "cash_by_currency": {"CNY": 800_000.0},
-                "stocks_by_symbol": {
-                    "NVDA": {
-                        "symbol": "NVDA",
-                        "shares": 10,
-                        "market_value_cny": 50_000.0,
-                        "currency": "USD",
-                    }
-                },
-            },
-            "_global_option_ctx": {
-                "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
-                "cash_secured_total_cny": 50_000.0,
-            },
+            **_global_nvda_context(),
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
     )
@@ -157,18 +173,9 @@ def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() 
 
 
 def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame([_candidate(**_earnings_evidence(event_date="2026-06-13"))])
 
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-    )
+    filtered = _filter_underwriting(df)
 
     assert filtered.empty
 
@@ -275,47 +282,25 @@ def test_sell_put_underwriting_requires_complete_earnings_coverage() -> None:
 
 
 def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     df = pd.DataFrame([_candidate(net_income_cny=None)])
 
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-    )
+    filtered = _filter_underwriting(df, converter=CurrencyConverter(ExchangeRates()))
 
     assert filtered.empty
 
 
 def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_concentration(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    df = pd.DataFrame([_candidate(spot=102.0, implied_volatility=0.70, term_matched_rv=0.50, dte=60)])
 
-    df = pd.DataFrame(
-        [
-            _candidate(
-                spot=102.0,
-                implied_volatility=0.70,
-                term_matched_rv=0.50,
-                dte=60,
-            )
-        ]
-    )
-
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_put_cfg={
+    filtered = _filter_underwriting(
+        df,
+        cfg={
             "strategy": "insurance_underwriting",
             "max_strike": 110.0,
             "concentration": {"max_single_trade_nav_pct": 0.0001},
         },
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
     )
 
     assert len(filtered) == 1
@@ -325,34 +310,9 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
 
 
 def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentration(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    portfolio_ctx = _global_nvda_context()
 
-    portfolio_ctx = {
-        "_global_portfolio_ctx": {
-            "cash_by_currency": {"CNY": 800_000.0},
-            "stocks_by_symbol": {
-                "NVDA": {
-                    "symbol": "NVDA",
-                    "shares": 10,
-                    "market_value_cny": 50_000.0,
-                    "currency": "USD",
-                }
-            },
-        },
-        "_global_option_ctx": {
-            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
-            "cash_secured_total_cny": 50_000.0,
-        },
-    }
-
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=pd.DataFrame([_candidate()]),
-        symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=portfolio_ctx,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-    )
+    filtered = _filter_underwriting(pd.DataFrame([_candidate()]), ctx=portfolio_ctx)
 
     assert len(filtered) == 1
     row = filtered.iloc[0]
@@ -366,10 +326,7 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
 
 def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(tmp_path: Path) -> None:
     from domain.domain.engine import rank_candidate_rows
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    converter = CurrencyConverter(ExchangeRates(usd_per_cny=0.14))
     portfolio_ctx = {
         "_global_portfolio_ctx": {
             "cash_by_currency": {"CNY": 500_000.0},
@@ -385,20 +342,8 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
     }
     rows: list[dict] = []
     for symbol in ("NVDA", "AAPL"):
-        filtered = enrich_and_filter_sell_put_underwriting(
-            df_labeled=pd.DataFrame(
-                [
-                    _candidate(
-                        symbol=symbol,
-                        contract_symbol=f"{symbol}_PUT",
-                    )
-                ]
-            ),
-            symbol=symbol,
-            sell_put_cfg={"strategy": "insurance_underwriting"},
-            portfolio_ctx=portfolio_ctx,
-            exchange_rate_converter=converter,
-        )
+        quote = _candidate(symbol=symbol, contract_symbol=f"{symbol}_PUT")
+        filtered = _filter_underwriting(pd.DataFrame([quote]), symbol=symbol, ctx=portfolio_ctx)
         rows.extend(filtered.to_dict("records"))
 
     ranked = rank_candidate_rows(rows, mode="put")
@@ -408,9 +353,6 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
 
 
 def test_sell_put_underwriting_ranking_prefers_period_return_then_discount(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame(
         [
             _candidate(contract_symbol="NEAR", strike=105.0, net_income=210.0, net_income_cny=1470.0),
@@ -419,12 +361,9 @@ def test_sell_put_underwriting_ranking_prefers_period_return_then_discount(tmp_p
         ]
     )
 
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting", "max_strike": 110.0, "min_net_income": 1000.0},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    filtered = _filter_underwriting(
+        df,
+        cfg={"strategy": "insurance_underwriting", "max_strike": 110.0, "min_net_income": 1000.0},
     )
 
     assert list(filtered["contract_symbol"]) == ["RICH", "FAR", "NEAR"]

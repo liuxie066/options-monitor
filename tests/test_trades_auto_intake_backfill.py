@@ -52,11 +52,17 @@ def _healthy_lifecycle_discovery(monkeypatch) -> None:
             "skipped_targeted_lot_ids": [],
         }
 
-    monkeypatch.setattr(
-        backfill_module,
-        "discover_lifecycle_cases",
-        _discover,
-    )
+    monkeypatch.setattr(backfill_module, "discover_lifecycle_cases", _discover)
+
+
+def _applied_open_result(payload: dict[str, Any], account: str = "lx") -> dict[str, Any]:
+    return {
+        "status": "applied",
+        "action": "open",
+        "reason": "applied_open",
+        "deal_id": payload["deal_id"],
+        "account": account,
+    }
 
 
 def _backfill_kwargs(tmp_path: Path) -> dict[str, Any]:
@@ -199,13 +205,7 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
                 "source": kwargs.get("source"),
             }
         )
-        return {
-            "status": "applied",
-            "action": "open",
-            "reason": "applied_open",
-            "deal_id": payload["deal_id"],
-            "account": "lx",
-        }
+        return _applied_open_result(payload)
 
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
@@ -470,11 +470,7 @@ def test_backfill_lifecycle_discovery_is_scoped_to_single_mapped_account(
             "skipped_targeted_lot_ids": [],
         }
 
-    monkeypatch.setattr(
-        backfill_module,
-        "discover_lifecycle_cases",
-        _discover,
-    )
+    monkeypatch.setattr(backfill_module, "discover_lifecycle_cases", _discover)
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
         history_deals_fn=lambda **_kwargs: ([], {}),
@@ -534,11 +530,7 @@ def test_backfill_lifecycle_discovery_scopes_legacy_source_per_account(
             "skipped_targeted_lot_ids": [f"lot-{account}"],
         }
 
-    monkeypatch.setattr(
-        backfill_module,
-        "discover_lifecycle_cases",
-        _discover,
-    )
+    monkeypatch.setattr(backfill_module, "discover_lifecycle_cases", _discover)
     kwargs = _backfill_kwargs(tmp_path)
     kwargs["account_mapping"] = {
         "REAL_2": "sy",
@@ -671,10 +663,8 @@ def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pi
     )
     fee_targets: list[tuple[str, str, str, str]] = []
     out = run_history_backfill(
-        **kwargs,
-        history_deals_fn=_history_deals_fn,
-        process_payload_fn=_process_payload_fn,
-        enqueue_fee_target_fn=fee_targets.append,
+        **kwargs, history_deals_fn=_history_deals_fn,
+        process_payload_fn=_process_payload_fn, enqueue_fee_target_fn=fee_targets.append,
     )
 
     assert out["applied_count"] == 0
@@ -781,21 +771,11 @@ def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path)
 
     def _process_payload_fn(payload: dict[str, Any], **kwargs):
         processed.append({"payload": payload, "source": kwargs.get("source")})
-        return {
-            "status": "applied",
-            "action": "open",
-            "reason": "applied_open",
-            "deal_id": payload["deal_id"],
-            "account": "lx",
-        }
+        return _applied_open_result(payload)
 
     kwargs = _backfill_kwargs(tmp_path)
     kwargs["state_path"] = state_path
-    out = run_history_backfill(
-        **kwargs,
-        history_deals_fn=_history_deals_fn,
-        process_payload_fn=_process_payload_fn,
-    )
+    out = run_history_backfill(**kwargs, history_deals_fn=_history_deals_fn, process_payload_fn=_process_payload_fn)
 
     assert out["applied_count"] == 1
     assert out["skipped_duplicate_count"] == 0
@@ -816,11 +796,7 @@ def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(
     kwargs = _backfill_kwargs(tmp_path)
     kwargs["repo"] = _FakeRepo([{"event_id": "deal-1", "account": "lx",
                                  "raw_payload": {"source_deal_id": "deal-1", "futu_account_id": "REAL_1"}}])
-    out = run_history_backfill(
-        **kwargs,
-        history_deals_fn=_history_deals_fn,
-        process_payload_fn=_process_payload_fn,
-    )
+    out = run_history_backfill(**kwargs, history_deals_fn=_history_deals_fn, process_payload_fn=_process_payload_fn)
 
     assert out["applied_count"] == 0
     assert out["skipped_duplicate_count"] == 1
@@ -877,11 +853,7 @@ def test_backfill_does_not_dedupe_same_deal_id_across_accounts(
             }
         ]
     )
-    out = run_history_backfill(
-        **kwargs,
-        history_deals_fn=_history_deals_fn,
-        process_payload_fn=_process_payload_fn,
-    )
+    out = run_history_backfill(**kwargs, history_deals_fn=_history_deals_fn, process_payload_fn=_process_payload_fn)
 
     assert out["applied_count"] == 1
     assert out["skipped_duplicate_count"] == 0
@@ -904,13 +876,7 @@ def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
 
     def _process_payload_fn(payload: dict[str, Any], **_kwargs):
         processed.append(str(payload["deal_id"]))
-        return {
-            "status": "applied",
-            "action": "open",
-            "reason": "applied_open",
-            "deal_id": payload["deal_id"],
-            "account": "lx",
-        }
+        return _applied_open_result(payload)
 
     kwargs = _backfill_kwargs(tmp_path)
     kwargs["repo"] = _FakeRepo(
@@ -926,11 +892,7 @@ def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
         ]
     )
 
-    out = run_history_backfill(
-        **kwargs,
-        history_deals_fn=_history_deals_fn,
-        process_payload_fn=_process_payload_fn,
-    )
+    out = run_history_backfill(**kwargs, history_deals_fn=_history_deals_fn, process_payload_fn=_process_payload_fn)
 
     assert out["applied_count"] == 1
     assert processed == [opening_deal_id]
@@ -1124,13 +1086,7 @@ def test_history_backfill_fee_target_enqueue_failure_redacts_exception_message(
             [{"deal_id": "deal-1", "order_id": "order-1"}],
             {},
         ),
-        process_payload_fn=lambda payload, **_kwargs: {
-            "status": "applied",
-            "action": "open",
-            "reason": "applied_open",
-            "deal_id": payload["deal_id"],
-            "account": "lx",
-        },
+        process_payload_fn=lambda payload, **_kwargs: _applied_open_result(payload),
         enqueue_fee_target_fn=lambda _target: (_ for _ in ()).throw(
             RuntimeError("secret-order-id=/private/path")
         ),

@@ -12,6 +12,16 @@ from src.application.trades.account_mapping import (
 from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 
 
+def _raises_message(fn, cfg: dict) -> str:
+    with pytest.raises(ValueError) as caught:
+        fn(cfg)
+    return str(caught.value)
+
+
+def _intake_cfg(**trade_intake) -> dict:
+    return {"accounts": ["lx"], "trade_intake": trade_intake}
+
+
 def test_resolve_futu_account_mapping_accepts_known_accounts() -> None:
     cfg = {
         "accounts": ["lx", "sy"],
@@ -37,10 +47,7 @@ def test_resolve_futu_account_mapping_rejects_unknown_internal_account() -> None
         "trade_intake": {"account_mapping": {"futu": {"REAL_1": "sy"}}},
     }
 
-    with pytest.raises(ValueError) as _caught:
-        resolve_futu_account_mapping(cfg)
-    exc = _caught.value
-    assert "not a futu account" in str(exc)
+    assert "not a futu account" in _raises_message(resolve_futu_account_mapping, cfg)
 
 
 def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> None:
@@ -52,10 +59,7 @@ def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> Non
         "trade_intake": {"account_mapping": {"futu": {"REAL_1": "ext1"}}},
     }
 
-    with pytest.raises(ValueError) as _caught:
-        resolve_futu_account_mapping(cfg)
-    exc = _caught.value
-    assert "not a futu account" in str(exc)
+    assert "not a futu account" in _raises_message(resolve_futu_account_mapping, cfg)
 
 
 def test_resolve_trade_intake_config_uses_defaults() -> None:
@@ -87,17 +91,10 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
 
 
 def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
-    cfg = {
-        "accounts": ["lx"],
-        "trade_intake": {
-            "status_path": "tmp/status.json",
-            "receipt": {
-                "enabled": False,
-                "notify_unresolved": False,
-                "notify_duplicate": True,
-            },
-        },
-    }
+    cfg = _intake_cfg(
+        status_path="tmp/status.json",
+        receipt={"enabled": False, "notify_unresolved": False, "notify_duplicate": True},
+    )
 
     out = resolve_trade_intake_config(cfg)
 
@@ -109,12 +106,7 @@ def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
 
 
 def test_resolve_trade_intake_config_accepts_settlement_kill_switch() -> None:
-    cfg = {
-        "accounts": ["lx"],
-        "trade_intake": {
-            "settlement_observation": {"enabled": False}
-        },
-    }
+    cfg = _intake_cfg(settlement_observation={"enabled": False})
 
     out = resolve_trade_intake_config(cfg)
 
@@ -132,35 +124,19 @@ def test_resolve_trade_intake_config_rejects_invalid_settlement_config(
     value: object,
 ) -> None:
     with pytest.raises(ValueError, match="settlement_observation"):
-        resolve_trade_intake_config(
-            {
-                "accounts": ["lx"],
-                "trade_intake": {"settlement_observation": value},
-            }
-        )
+        resolve_trade_intake_config(_intake_cfg(settlement_observation=value))
 
 
 def test_resolve_trade_intake_config_rejects_non_boolean_enabled() -> None:
-    cfg = {"accounts": ["lx"], "trade_intake": {"enabled": "false"}}
+    cfg = _intake_cfg(enabled="false")
 
-    with pytest.raises(ValueError) as _caught:
-        resolve_trade_intake_config(cfg)
-    exc = _caught.value
-    assert "trade_intake.enabled must be a boolean" in str(exc)
+    assert "trade_intake.enabled must be a boolean" in _raises_message(resolve_trade_intake_config, cfg)
 
 
 def test_resolve_trade_intake_config_accepts_backfill_overrides() -> None:
-    cfg = {
-        "accounts": ["lx"],
-        "trade_intake": {
-            "backfill": {
-                "enabled": False,
-                "startup_check": False,
-                "interval_sec": 120,
-                "lookback_hours": 12,
-            }
-        },
-    }
+    cfg = _intake_cfg(
+        backfill={"enabled": False, "startup_check": False, "interval_sec": 120, "lookback_hours": 12}
+    )
 
     out = resolve_trade_intake_config(cfg)
 
@@ -173,21 +149,15 @@ def test_resolve_trade_intake_config_accepts_backfill_overrides() -> None:
 
 
 def test_resolve_trade_intake_config_rejects_non_boolean_receipt_flag() -> None:
-    cfg = {"accounts": ["lx"], "trade_intake": {"receipt": {"enabled": "yes"}}}
+    cfg = _intake_cfg(receipt={"enabled": "yes"})
 
-    with pytest.raises(ValueError) as _caught:
-        resolve_trade_intake_config(cfg)
-    exc = _caught.value
-    assert "trade_intake.receipt.enabled must be a boolean" in str(exc)
+    assert "trade_intake.receipt.enabled must be a boolean" in _raises_message(resolve_trade_intake_config, cfg)
 
 
 def test_resolve_trade_intake_config_rejects_invalid_backfill_flag() -> None:
-    cfg = {"accounts": ["lx"], "trade_intake": {"backfill": {"enabled": "yes"}}}
+    cfg = _intake_cfg(backfill={"enabled": "yes"})
 
-    with pytest.raises(ValueError) as _caught:
-        resolve_trade_intake_config(cfg)
-    exc = _caught.value
-    assert "trade_intake.backfill.enabled must be a boolean" in str(exc)
+    assert "trade_intake.backfill.enabled must be a boolean" in _raises_message(resolve_trade_intake_config, cfg)
 
 
 def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() -> None:

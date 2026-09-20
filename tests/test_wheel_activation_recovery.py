@@ -151,8 +151,26 @@ def _changed_doc(root: Path, symbol: str) -> dict[str, Any]:
     return doc
 
 
+def _stage(root: Path, *, audit_id: str, symbol: str, targets=None):
+    """Stage a pending journal whose after-doc appends ``symbol`` to the us market."""
+    return _stage_journal(
+        root,
+        after_doc=_changed_doc(root, symbol),
+        audit_id=audit_id,
+        targets=targets,
+    )
+
+
 def _sqlite_path(root: Path) -> Path:
     return root / "output_shared" / "state" / "option_positions.sqlite3"
+
+
+def _windows(root: Path) -> list[dict[str, Any]]:
+    return read_wheel_activation_windows_read_only(
+        _sqlite_path(root),
+        market="us",
+        account="lx",
+    )["windows"]
 
 
 def test_agent_rolls_forward_pending_journal_before_rejecting_stale_preview(
@@ -161,11 +179,7 @@ def test_agent_rolls_forward_pending_journal_before_rejecting_stale_preview(
 ) -> None:
     root = _deployment(tmp_path, monkeypatch)
     preview = _agent_call(root)
-    manifest, after_bytes, targets = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="wheel-roll-forward",
-    )
+    manifest, after_bytes, targets = _stage(root, audit_id="wheel-roll-forward", symbol="AMD")
     (root / "config.yaml").write_bytes(after_bytes)
 
     with pytest.raises(AgentToolError) as exc:
@@ -198,11 +212,7 @@ def test_agent_rolls_back_pending_journal_before_rejecting_stale_preview(
         market: (root / f"config.{market}.json").read_bytes()
         for market in ("us", "hk")
     }
-    manifest, _, targets = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "FUTU"),
-        audit_id="wheel-roll-back",
-    )
+    manifest, _, targets = _stage(root, audit_id="wheel-roll-back", symbol="FUTU")
     for target in targets:
         if not target.get("source"):
             Path(target["path"]).write_bytes(target["payload"])
@@ -227,11 +237,7 @@ def test_agent_reports_partial_recovery_effects_without_writing_window(
 ) -> None:
     root = _deployment(tmp_path, monkeypatch)
     preview = _agent_call(root)
-    manifest, after_bytes, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="wheel-partial-recovery",
-    )
+    manifest, after_bytes, _ = _stage(root, audit_id="wheel-partial-recovery", symbol="AMD")
     (root / "config.yaml").write_bytes(after_bytes)
     failed_target = root / "config.hk.json"
     before_failed = failed_target.read_bytes()
@@ -266,11 +272,7 @@ def test_agent_preserves_recovery_effects_when_source_readback_fails(
 ) -> None:
     root = _deployment(tmp_path, monkeypatch)
     preview = _agent_call(root)
-    manifest, after_bytes, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="wheel-source-readback-failure",
-    )
+    manifest, after_bytes, _ = _stage(root, audit_id="wheel-source-readback-failure", symbol="AMD")
     (root / "config.yaml").write_bytes(after_bytes)
     original_source_sha = publishing.config_source_sha256
     reads = 0
@@ -306,16 +308,8 @@ def test_agent_preserves_completed_recovery_when_later_manifest_read_fails(
 ) -> None:
     root = _deployment(tmp_path, monkeypatch)
     preview = _agent_call(root)
-    first_manifest, _, first_targets = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="a-wheel-first-recovery",
-    )
-    second_manifest, _, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "FUTU"),
-        audit_id="b-wheel-read-failure",
-    )
+    first_manifest, _, first_targets = _stage(root, audit_id="a-wheel-first-recovery", symbol="AMD")
+    second_manifest, _, _ = _stage(root, audit_id="b-wheel-read-failure", symbol="FUTU")
     first_target = Path(first_targets[0]["path"])
     first_before = first_target.read_bytes()
     first_target.write_bytes(first_targets[0]["payload"])
@@ -359,18 +353,9 @@ def test_agent_rejects_pending_target_owner_preflight_before_recovery_or_window(
     extra_target = root / "recovery-only.json"
     extra_target.write_text('{"old":true}\n', encoding="utf-8")
     before_extra = extra_target.read_bytes()
-    manifest, _, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="wheel-owner-mismatch",
-        targets=[
-            {
-                "role": "runtime_extra",
-                "path": extra_target,
-                "payload": b'{"new":true}\n',
-                "source": False,
-            }
-        ],
+    manifest, _, _ = _stage(
+        root, audit_id="wheel-owner-mismatch", symbol="AMD",
+        targets=[{"role": "runtime_extra", "path": extra_target, "payload": b'{"new":true}\n', "source": False}],
     )
     original_preflight = workflows._activation_owner_preflight
     calls: list[list[Path]] = []
@@ -407,29 +392,13 @@ def test_public_activation_rejects_missing_existing_target_before_any_recovery(
     missing_target = root / "missing-recovery.json"
     earlier_target.write_bytes(b'{"old":"earlier"}\n')
     missing_target.write_bytes(b'{"old":"missing"}\n')
-    earlier_manifest, _, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "AMD"),
-        audit_id="a-wheel-earlier-recovery",
-        targets=[
-            {
-                "role": "earlier",
-                "path": earlier_target,
-                "payload": b'{"new":"earlier"}\n',
-            }
-        ],
+    earlier_manifest, _, _ = _stage(
+        root, audit_id="a-wheel-earlier-recovery", symbol="AMD",
+        targets=[{"role": "earlier", "path": earlier_target, "payload": b'{"new":"earlier"}\n'}],
     )
-    missing_manifest, _, _ = _stage_journal(
-        root,
-        after_doc=_changed_doc(root, "FUTU"),
-        audit_id="b-wheel-missing-target",
-        targets=[
-            {
-                "role": "missing",
-                "path": missing_target,
-                "payload": b'{"new":"missing"}\n',
-            }
-        ],
+    missing_manifest, _, _ = _stage(
+        root, audit_id="b-wheel-missing-target", symbol="FUTU",
+        targets=[{"role": "missing", "path": missing_target, "payload": b'{"new":"missing"}\n'}],
     )
     earlier_target.write_bytes(b'{"partially-committed":"earlier"}\n')
     watched = {
@@ -522,11 +491,7 @@ def test_same_request_recovers_pending_journal_after_durable_window_commit(
     assert replay["recovered_transactions"][0]["mode"] == "roll_forward"
     assert replay["recovered_transactions"][0]["cleanup"] is True
     assert not pending[0].exists()
-    windows = read_wheel_activation_windows_read_only(
-        _sqlite_path(root),
-        market="us",
-        account="lx",
-    )["windows"]
+    windows = _windows(root)
     assert len(windows) == 1
 
 
@@ -627,7 +592,7 @@ def test_public_activation_preserves_preparation_audit_and_retries_same_window(
     assert replay["ready"] is True
     assert replay["window_receipt"]["write_applied"] is False
     assert replay["window_receipt"]["expected_config_descriptor"] == first_window
-    assert len(read_wheel_activation_windows_read_only(_sqlite_path(root), market="us", account="lx")["windows"]) == 1
+    assert len(_windows(root)) == 1
 
 
 def _process_agent_apply(payload: dict[str, Any], start: Any, output: Any) -> None:
@@ -690,11 +655,7 @@ def test_two_agent_processes_serialize_activation_and_only_one_window_wins(
     assert [item[0] for item in results].count("error") == 1
     error = next(item for item in results if item[0] == "error")
     assert "generation conflict" in error[2]
-    windows = read_wheel_activation_windows_read_only(
-        _sqlite_path(root),
-        market="us",
-        account="lx",
-    )["windows"]
+    windows = _windows(root)
     assert len(windows) == 1
     status = position_tools.WHEEL_ACTIVATION_TOOL.call(
         {

@@ -18,6 +18,10 @@ def _today_local() -> date:
     return datetime.now(_local_tz()).date()
 
 
+def _local_day_start(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time(), tzinfo=_local_tz())
+
+
 def _perception_audit_row(
     *,
     run_id: str,
@@ -62,6 +66,26 @@ def _write_shared_audit(base: Path, rows: list[dict[str, Any]]) -> None:
     )
 
 
+def _write_delivered(
+    base: Path,
+    *,
+    run_id: str,
+    event_at_utc: datetime,
+    **overrides: Any,
+) -> None:
+    _write_shared_audit(
+        base,
+        [
+            _perception_audit_row(
+                run_id=run_id,
+                event_at_utc=event_at_utc,
+                accounts=["lx"],
+                **overrides,
+            )
+        ],
+    )
+
+
 def _filler_rows(count: int, *, base_time: datetime) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index in range(count):
@@ -89,6 +113,17 @@ def _run_tool(payload: dict[str, Any]) -> dict[str, Any]:
     return run_tool("candidate_filter_explain", payload)
 
 
+_QUERY_ARGS: dict[str, Any] = {
+    "account": "lx",
+    "symbol": "NVDA",
+    "run_selector": "latest_notification",
+}
+
+
+def _query(base: Path, **overrides: Any) -> dict[str, Any]:
+    return _run_tool({"runtime_root": str(base), **_QUERY_ARGS, **overrides})
+
+
 def _seal_run(base: Path, run_id: str, *, account: str = "lx") -> None:
     seal_opening_candidate_fixture(
         base,
@@ -108,22 +143,10 @@ def _seal_run(base: Path, run_id: str, *, account: str = "lx") -> None:
 def test_latest_notification_resolves_delivered_run(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-notified")
     today = _today_local()
-    event_time = datetime.combine(
-        today, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=1)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-notified", event_at_utc=event_time, accounts=["lx"])],
-    )
+    event_time = _local_day_start(today).astimezone(timezone.utc) + timedelta(hours=1)
+    _write_delivered(tmp_path, run_id="run-notified", event_at_utc=event_time)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["ok"] is True
     resolution = out["meta"]["source_files"][0]["run_resolution"]
@@ -138,9 +161,7 @@ def test_latest_notification_picks_most_recent_delivered_event(tmp_path: Path) -
     _seal_run(tmp_path, "run-early")
     _seal_run(tmp_path, "run-late")
     today = _today_local()
-    base_time = datetime.combine(today, datetime.min.time(), tzinfo=_local_tz()).astimezone(
-        timezone.utc
-    )
+    base_time = _local_day_start(today).astimezone(timezone.utc)
     _write_shared_audit(
         tmp_path,
         [
@@ -153,14 +174,7 @@ def test_latest_notification_picks_most_recent_delivered_event(tmp_path: Path) -
         ],
     )
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "run-late"
 
@@ -168,9 +182,7 @@ def test_latest_notification_picks_most_recent_delivered_event(tmp_path: Path) -
 def test_latest_notification_scans_beyond_public_preview_window(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-buried")
     today = _today_local()
-    base_time = datetime.combine(today, datetime.min.time(), tzinfo=_local_tz()).astimezone(
-        timezone.utc
-    )
+    base_time = _local_day_start(today).astimezone(timezone.utc)
     filler = _filler_rows(120, base_time=base_time + timedelta(hours=2))
     delivered = _perception_audit_row(
         run_id="run-buried",
@@ -179,14 +191,7 @@ def test_latest_notification_scans_beyond_public_preview_window(tmp_path: Path) 
     )
     _write_shared_audit(tmp_path, [delivered, *filler])
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["ok"] is True
     assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "run-buried"
@@ -196,9 +201,7 @@ def test_latest_notification_ignores_no_send_completed_event(tmp_path: Path) -> 
     _seal_run(tmp_path, "run-nosend")
     _seal_run(tmp_path, "run-sent")
     today = _today_local()
-    base_time = datetime.combine(today, datetime.min.time(), tzinfo=_local_tz()).astimezone(
-        timezone.utc
-    )
+    base_time = _local_day_start(today).astimezone(timezone.utc)
     _write_shared_audit(
         tmp_path,
         [
@@ -214,14 +217,7 @@ def test_latest_notification_ignores_no_send_completed_event(tmp_path: Path) -> 
         ],
     )
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "run-sent"
 
@@ -229,9 +225,7 @@ def test_latest_notification_ignores_no_send_completed_event(tmp_path: Path) -> 
 def test_latest_notification_skips_event_where_account_send_failed(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-lx-failed")
     today = _today_local()
-    event_time = datetime.combine(
-        today, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=1)
+    event_time = _local_day_start(today).astimezone(timezone.utc) + timedelta(hours=1)
     _write_shared_audit(
         tmp_path,
         [
@@ -245,14 +239,7 @@ def test_latest_notification_skips_event_where_account_send_failed(tmp_path: Pat
         ],
     )
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
@@ -263,23 +250,10 @@ def test_latest_notification_no_events_for_date_fails_closed(tmp_path: Path) -> 
     _seal_run(tmp_path, "run-yesterday")
     today = _today_local()
     yesterday = today - timedelta(days=1)
-    event_time = datetime.combine(
-        yesterday, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=12)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-yesterday", event_at_utc=event_time, accounts=["lx"])],
-    )
+    event_time = _local_day_start(yesterday).astimezone(timezone.utc) + timedelta(hours=12)
+    _write_delivered(tmp_path, run_id="run-yesterday", event_at_utc=event_time)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": today.isoformat(),
-        }
-    )
+    out = _query(tmp_path, notification_date=today.isoformat())
 
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
@@ -290,23 +264,10 @@ def test_latest_notification_explicit_date_resolves_previous_day(tmp_path: Path)
     _seal_run(tmp_path, "run-prev-day")
     today = _today_local()
     yesterday = today - timedelta(days=1)
-    event_time = datetime.combine(
-        yesterday, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=12)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-prev-day", event_at_utc=event_time, accounts=["lx"])],
-    )
+    event_time = _local_day_start(yesterday).astimezone(timezone.utc) + timedelta(hours=12)
+    _write_delivered(tmp_path, run_id="run-prev-day", event_at_utc=event_time)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": yesterday.isoformat(),
-        }
-    )
+    out = _query(tmp_path, notification_date=yesterday.isoformat())
 
     assert out["ok"] is True
     resolution = out["meta"]["source_files"][0]["run_resolution"]
@@ -318,23 +279,10 @@ def test_explicit_run_id_conflicts_with_run_selector(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-explicit")
     _seal_run(tmp_path, "run-notified")
     today = _today_local()
-    event_time = datetime.combine(
-        today, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=1)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-notified", event_at_utc=event_time, accounts=["lx"])],
-    )
+    event_time = _local_day_start(today).astimezone(timezone.utc) + timedelta(hours=1)
+    _write_delivered(tmp_path, run_id="run-notified", event_at_utc=event_time)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_id": "run-explicit",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path, run_id="run-explicit")
 
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
@@ -366,14 +314,7 @@ def test_notification_date_without_latest_notification_rejected(tmp_path: Path) 
 
 
 def test_invalid_notification_date_rejected() -> None:
-    out = _run_tool(
-        {
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": "13/08/2026",
-        }
-    )
+    out = _run_tool({**_QUERY_ARGS, "notification_date": "13/08/2026"})
 
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
@@ -383,15 +324,7 @@ def test_bot_error_stays_in_safe_vocabulary(tmp_path: Path) -> None:
     from src.application.bot.contracts import BOT_SAFE_ERROR_CODES
 
     _seal_run(tmp_path, "run-only")
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": "2020-01-01",
-        }
-    )
+    out = _query(tmp_path, notification_date="2020-01-01")
 
     assert out["ok"] is False
     assert out["error"]["code"] in BOT_SAFE_ERROR_CODES
@@ -400,24 +333,11 @@ def test_bot_error_stays_in_safe_vocabulary(tmp_path: Path) -> None:
 def test_cross_utc_midnight_event_maps_to_local_date(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-midnight")
     today = _today_local()
-    local_early = datetime.combine(today, datetime.min.time(), tzinfo=_local_tz()) + timedelta(
-        minutes=30
-    )
+    local_early = _local_day_start(today) + timedelta(minutes=30)
     event_time_utc = local_early.astimezone(timezone.utc)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-midnight", event_at_utc=event_time_utc, accounts=["lx"])],
-    )
+    _write_delivered(tmp_path, run_id="run-midnight", event_at_utc=event_time_utc)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": today.isoformat(),
-        }
-    )
+    out = _query(tmp_path, notification_date=today.isoformat())
 
     assert out["ok"] is True
     assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "run-midnight"
@@ -429,9 +349,7 @@ def test_truncated_audit_window_is_distinguishable_from_no_notification(tmp_path
     )
 
     today = _today_local()
-    base_time = datetime.combine(today, datetime.min.time(), tzinfo=_local_tz()).astimezone(
-        timezone.utc
-    )
+    base_time = _local_day_start(today).astimezone(timezone.utc)
     # 目标 delivered 事件最旧，前面压着超过扫描上限的更新事件。
     _seal_run(tmp_path, "run-too-old")
     old = _perception_audit_row(
@@ -450,14 +368,7 @@ def test_truncated_audit_window_is_distinguishable_from_no_notification(tmp_path
     assert result["total_count"] == 1
     assert result["truncated"] is True
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
     # 默认窗口 5000 覆盖本夹具，仍能解析；截断路径由上面的 helper 断言与
     # impl 中 reason=audit_window_truncated 分支共同覆盖。
     assert out["ok"] is True
@@ -476,15 +387,7 @@ def test_truncated_window_reports_distinct_reason(tmp_path: Path, monkeypatch) -
         candidate_filter_impl, "iter_notification_perception_events", _truncated_iter
     )
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-            "notification_date": today.isoformat(),
-        }
-    )
+    out = _query(tmp_path, notification_date=today.isoformat())
 
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
@@ -494,22 +397,10 @@ def test_truncated_window_reports_distinct_reason(tmp_path: Path, monkeypatch) -
 def test_notification_run_with_missing_snapshot_reports_resolved_run_id(tmp_path: Path) -> None:
     # 通知事件存在，但对应 run 目录已被清理：错误必须带已解析的 run_id。
     today = _today_local()
-    event_time = datetime.combine(
-        today, datetime.min.time(), tzinfo=_local_tz()
-    ).astimezone(timezone.utc) + timedelta(hours=1)
-    _write_shared_audit(
-        tmp_path,
-        [_perception_audit_row(run_id="run-purged", event_at_utc=event_time, accounts=["lx"])],
-    )
+    event_time = _local_day_start(today).astimezone(timezone.utc) + timedelta(hours=1)
+    _write_delivered(tmp_path, run_id="run-purged", event_at_utc=event_time)
 
-    out = _run_tool(
-        {
-            "runtime_root": str(tmp_path),
-            "account": "lx",
-            "symbol": "NVDA",
-            "run_selector": "latest_notification",
-        }
-    )
+    out = _query(tmp_path)
 
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
@@ -520,7 +411,7 @@ def test_notification_run_with_missing_snapshot_reports_resolved_run_id(tmp_path
 def _report_row(*, attempt: str, source: str, hour: int, conversation: str | None = None):
     from src.application.conversation_scope import conversation_reference
 
-    event_time = datetime.combine(_today_local(), datetime.min.time(), tzinfo=_local_tz()) + timedelta(hours=hour)
+    event_time = _local_day_start(_today_local()) + timedelta(hours=hour)
     row = _perception_audit_row(run_id=attempt, event_at_utc=event_time.astimezone(timezone.utc), accounts=["lx"])
     row["extra"]["report_refs"][0]["source_run_id"] = source
     if conversation:
@@ -529,8 +420,7 @@ def _report_row(*, attempt: str, source: str, hour: int, conversation: str | Non
 
 
 def _report_query(base: Path, **kwargs):
-    return _run_tool({"runtime_root": str(base), "account": "lx", "symbol": "NVDA",
-                      "run_selector": "latest_notification", "notification_date": _today_local().isoformat(), **kwargs})
+    return _query(base, notification_date=_today_local().isoformat(), **kwargs)
 
 
 def test_delivered_report_uses_revision_zero_source_not_retry_attempt(tmp_path: Path):

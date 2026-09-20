@@ -29,6 +29,23 @@ def _dependencies() -> list[dict]:
     ]
 
 
+def _scope(*, direction: str = "call", candidate_count: int = 1) -> dict:
+    return {"symbol": "NVDA", "direction": direction, "status": "completed", "candidate_count": candidate_count}
+
+
+def _seal(base: Path, run_id: str = "run-1", **overrides) -> dict:
+    return seal_wheel_candidate_snapshot(
+        base=base,
+        run_id=run_id,
+        account="lx",
+        market="us",
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(),
+        **overrides,
+    )
+
+
 def _candidate() -> dict:
     return {
         "candidate_id": "wheel-candidate-1",
@@ -67,14 +84,8 @@ def _batch(*, final: bool = True) -> dict:
 
 
 def test_wheel_candidate_snapshot_seals_one_account_run_owner(tmp_path: Path) -> None:
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
+    payload = _seal(
+        tmp_path,
         scope_results=[
             {
                 "symbol": "NVDA",
@@ -97,15 +108,9 @@ def test_wheel_candidate_snapshot_rejects_final_candidate_not_from_raw_top(tmp_p
     batch = _batch()
     batch["final_candidate"] = {**_candidate(), "candidate_id": "other", "final_candidate_id": "other"}
     with pytest.raises(WheelCandidateSnapshotError, match="allocation"):
-        seal_wheel_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scope_results=[{"symbol": "NVDA", "direction": "call", "status": "completed", "candidate_count": 1}],
+        _seal(
+            tmp_path,
+            scope_results=[_scope()],
             batches=[batch],
         )
 
@@ -117,15 +122,9 @@ def test_wheel_candidate_snapshot_rejects_positive_grant_without_final_candidate
     batch["granted_contracts"] = 1
 
     with pytest.raises(WheelCandidateSnapshotError, match="grant requires final candidate"):
-        seal_wheel_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scope_results=[{"symbol": "NVDA", "direction": "call", "status": "completed", "candidate_count": 1}],
+        _seal(
+            tmp_path,
+            scope_results=[_scope()],
             batches=[batch],
         )
 
@@ -136,15 +135,9 @@ def test_wheel_candidate_snapshot_accepts_rejected_candidate_with_zero_grant(
     batch = _batch(final=False)
     batch["reason_code"] = "wheel_capacity_grant_candidate_rejected"
 
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[{"symbol": "NVDA", "direction": "call", "status": "completed", "candidate_count": 1}],
+    payload = _seal(
+        tmp_path,
+        scope_results=[_scope()],
         batches=[batch],
     )
 
@@ -162,18 +155,9 @@ def test_wheel_candidate_snapshot_allows_same_symbol_across_directions(
         "wheel_branch_id": "branch-put-1",
         "direction": "put",
     }
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[
-            {"symbol": "NVDA", "direction": "call", "status": "completed", "candidate_count": 0},
-            {"symbol": "NVDA", "direction": "put", "status": "completed", "candidate_count": 0},
-        ],
+    payload = _seal(
+        tmp_path,
+        scope_results=[_scope(candidate_count=0), _scope(direction="put", candidate_count=0)],
         batches=[call_batch, put_batch],
     )
 
@@ -186,17 +170,10 @@ def test_wheel_candidate_snapshot_allows_same_symbol_across_directions(
 def test_wheel_candidate_snapshot_loader_adapts_legacy_file_location(
     tmp_path: Path,
 ) -> None:
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
+    payload = _seal(
+        tmp_path,
         run_id="run-v2",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[
-            {"symbol": "NVDA", "direction": "call", "status": "completed", "candidate_count": 0}
-        ],
+        scope_results=[_scope(candidate_count=0)],
         batches=[_batch(final=False)],
     )
     legacy = dict(payload)
@@ -252,22 +229,10 @@ def test_wheel_candidate_snapshot_loader_adapts_legacy_file_location(
 
 
 def test_wheel_candidate_snapshot_rejects_mixed_v1_v2_files(tmp_path: Path) -> None:
-    seal_wheel_candidate_snapshot(
-        base=tmp_path,
+    _seal(
+        tmp_path,
         run_id="run-mixed",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[
-            {
-                "symbol": "NVDA",
-                "direction": "call",
-                "status": "completed",
-                "candidate_count": 0,
-            }
-        ],
+        scope_results=[_scope(candidate_count=0)],
         batches=[_batch(final=False)],
         capacity_allocations=[],
         sealed_at="2026-09-09T00:00:00Z",
@@ -312,22 +277,10 @@ def test_wheel_candidate_snapshot_v2_binds_put_cash_allocation(
         "cash_reservation_amount": 9_900,
         "cash_reservation_currency": "USD",
     }
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
+    payload = _seal(
+        tmp_path,
         run_id="run-put",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[
-            {
-                "symbol": "NVDA",
-                "direction": "put",
-                "status": "completed",
-                "candidate_count": 1,
-            }
-        ],
+        scope_results=[_scope(direction="put")],
         batches=[
             {
                 "account": "lx",
@@ -359,22 +312,10 @@ def test_wheel_candidate_snapshot_v2_preserves_ordinary_cc_allocation(
         "symbol": "NVDA",
         "granted_contracts": 1,
     }
-    payload = seal_wheel_candidate_snapshot(
-        base=tmp_path,
+    payload = _seal(
+        tmp_path,
         run_id="run-ordinary-cc",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scope_results=[
-            {
-                "symbol": "NVDA",
-                "direction": "call",
-                "status": "completed",
-                "candidate_count": 0,
-            }
-        ],
+        scope_results=[_scope(candidate_count=0)],
         batches=[_batch(final=False)],
         capacity_allocations=[ordinary],
     )

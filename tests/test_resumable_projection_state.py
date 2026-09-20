@@ -49,15 +49,21 @@ def _event(
     event_time_ms: int,
     *,
     key: ContractKey,
-    contracts: int,
-    price: float,
+    contracts: int = 1,
+    price: float = 1,
     lot_id: str | None = None,
     target_lot_id: str | None = None,
+    target_event_id: str | None = None,
     fees: float = 0.0,
     patch: dict[str, object] | None = None,
     raw_payload: dict[str, object] | None = None,
     position_side: str = "short",
 ) -> TradeEvent:
+    """Build one trade event; the defaults are the values this module repeats most.
+
+    A call site spells out only the fields that differ from the single-contract
+    event at price 1 this file builds over and over.
+    """
     payload = dict(raw_payload or {})
     if patch is not None:
         payload["patch"] = dict(patch)
@@ -77,6 +83,7 @@ def _event(
         fees=fees,
         lot_id=lot_id,
         target_lot_id=target_lot_id,
+        target_event_id=target_event_id,
         raw_payload=payload,
     )
 
@@ -99,10 +106,7 @@ def _sequence() -> list[TradeEvent]:
             price=2.5,
             fees=1.03,
             lot_id="lot-lx",
-            raw_payload={
-                "source_type": "manual_trade_event",
-                "strategy": "sell_put",
-            },
+            raw_payload={"source_type": "manual_trade_event", "strategy": "sell_put"},
         ),
         _event(
             "open-sy",
@@ -114,10 +118,7 @@ def _sequence() -> list[TradeEvent]:
             fees=0.44,
             lot_id="lot-sy",
             position_side="long",
-            raw_payload={
-                "strategy": "combo_yield",
-                "leg_role": "enhancement_call",
-            },
+            raw_payload={"strategy": "combo_yield", "leg_role": "enhancement_call"},
         ),
         _event(
             "close-lx-1",
@@ -138,11 +139,7 @@ def _sequence() -> list[TradeEvent]:
             contracts=0,
             price=0,
             target_lot_id="lot-lx",
-            patch={
-                "strategy": "yield_enhancement",
-                "leg_role": "funding_put",
-                "note": "resumed",
-            },
+            patch={"strategy": "yield_enhancement", "leg_role": "funding_put", "note": "resumed"},
         ),
         _event(
             "close-sy",
@@ -155,16 +152,7 @@ def _sequence() -> list[TradeEvent]:
             target_lot_id="lot-sy",
             position_side="long",
         ),
-        _event(
-            "close-lx-2",
-            "close",
-            6_000,
-            key=lx_put,
-            contracts=1,
-            price=1.0,
-            fees=0.1,
-            target_lot_id="lot-lx",
-        ),
+        _event("close-lx-2", "close", 6_000, key=lx_put, fees=0.1, target_lot_id="lot-lx"),
     ]
 
 
@@ -182,26 +170,9 @@ def _records_by_id(records: object) -> dict[str, dict[str, object]]:
 def test_resumable_state_round_trip_is_canonical_active_only_and_bounded() -> None:
     key = _key()
     events = [
-        _event(
-            "open",
-            "open",
-            1_000,
-            key=key,
-            contracts=50,
-            price=2.5,
-            fees=1.03,
-            lot_id="lot-a",
-        ),
+        _event("open", "open", 1_000, key=key, contracts=50, price=2.5, fees=1.03, lot_id="lot-a"),
         *[
-            _event(
-                f"close-{index:02d}",
-                "close",
-                2_000 + index,
-                key=key,
-                contracts=1,
-                price=1.5,
-                target_lot_id="lot-a",
-            )
+            _event(f"close-{index:02d}", "close", 2_000 + index, key=key, price=1.5, target_lot_id="lot-a")
             for index in range(25)
         ],
     ]
@@ -236,24 +207,8 @@ def test_resumable_state_round_trip_is_canonical_active_only_and_bounded() -> No
 
     one_closed = project_resumable_trade_events(
         [
-            _event(
-                "open-one",
-                "open",
-                1,
-                key=key,
-                contracts=1,
-                price=1,
-                lot_id="lot-one",
-            ),
-            _event(
-                "close-one",
-                "close",
-                2,
-                key=key,
-                contracts=1,
-                price=0,
-                target_lot_id="lot-one",
-            ),
+            _event("open-one", "open", 1, key=key, lot_id="lot-one"),
+            _event("close-one", "close", 2, key=key, price=0, target_lot_id="lot-one"),
         ],
         entry_mode="full",
     )
@@ -262,24 +217,8 @@ def test_resumable_state_round_trip_is_canonical_active_only_and_bounded() -> No
         lot_id = f"lot-{index:03d}"
         many_closed_events.extend(
             [
-                _event(
-                    f"open-{index:03d}",
-                    "open",
-                    10 + index * 2,
-                    key=key,
-                    contracts=1,
-                    price=1,
-                    lot_id=lot_id,
-                ),
-                _event(
-                    f"close-{index:03d}",
-                    "close",
-                    11 + index * 2,
-                    key=key,
-                    contracts=1,
-                    price=0,
-                    target_lot_id=lot_id,
-                ),
+                _event(f"open-{index:03d}", "open", 10 + index * 2, key=key, lot_id=lot_id),
+                _event(f"close-{index:03d}", "close", 11 + index * 2, key=key, price=0, target_lot_id=lot_id),
             ]
         )
     many_closed = project_resumable_trade_events(
@@ -301,17 +240,12 @@ def test_resumable_state_rejects_impossible_balances_and_trims_open_payload() ->
                 1,
                 key=key,
                 contracts=3,
-                price=1,
                 fees=0.25,
                 lot_id="lot-a",
                 raw_payload={
                     "fields": {"opaque": "x" * 50_000},
                     "strategy": "sell_put",
-                    "fee_provenance": {
-                        "basis": "actual",
-                        "amount": 0.25,
-                        "source": "test",
-                    },
+                    "fee_provenance": {"basis": "actual", "amount": 0.25, "source": "test"},
                 },
             )
         ],
@@ -395,11 +329,7 @@ def test_resume_preserves_fee_snapshot_and_skips_verification_history() -> None:
             price=2,
             lot_id="lot-a",
             raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": 0,
-                    "source": "broker",
-                },
+                "fee_provenance": {"basis": "actual", "amount": 0, "source": "broker"},
                 "strategy_snapshot": {
                     "strategy": "sell_put",
                     "leg_role": "funding_put",
@@ -408,50 +338,23 @@ def test_resume_preserves_fee_snapshot_and_skips_verification_history() -> None:
                 },
             },
         ),
-        TradeEvent(
-            event_id="verify",
-            event_type="verification",
-            event_time_ms=2,
-            contract_key=key,
-            contracts=0,
-            price=0,
-            currency="USD",
-            source="test",
-            raw_payload={"opaque": "x" * 50_000},
-        ),
+        _event("verify", "verification", 2, key=key, contracts=0, price=0, raw_payload={"opaque": "x" * 50_000}),
         _event(
             "partial",
             "close",
             3,
             key=key,
-            contracts=1,
-            price=1,
-            fees=0,
             target_lot_id="lot-a",
-            raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": 0,
-                    "source": "broker",
-                }
-            },
+            raw_payload={"fee_provenance": {"basis": "actual", "amount": 0, "source": "broker"}},
         ),
         _event(
             "final",
             "close",
             4,
             key=key,
-            contracts=1,
             price=0.5,
-            fees=0,
             target_lot_id="lot-a",
-            raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": 0,
-                    "source": "broker",
-                }
-            },
+            raw_payload={"fee_provenance": {"basis": "actual", "amount": 0, "source": "broker"}},
         ),
     ]
     full = project_resumable_trade_events(events, entry_mode="full")
@@ -561,13 +464,7 @@ def test_expiry_conflict_resume_matches_full_for_partial_and_final_close(
         },
     )
     closed = _event(
-        "close-expiry-conflict",
-        "close",
-        2,
-        key=key,
-        contracts=close_contracts,
-        price=1,
-        target_lot_id="lot-expiry-conflict",
+        "close-expiry-conflict", "close", 2, key=key, contracts=close_contracts, target_lot_id="lot-expiry-conflict"
     )
     full = project_resumable_trade_events([opened, closed], entry_mode="full")
     seed = project_resumable_trade_events([opened], entry_mode="full")
@@ -741,30 +638,13 @@ def test_full_publisher_preserves_open_order_and_legacy_close_adjust_precedence(
     key = _key()
     second_key = _key(strike=105)
     events = [
-        _event(
-            "open-z",
-            "open",
-            1,
-            key=key,
-            contracts=3,
-            price=2,
-            lot_id="lot-z",
-        ),
-        _event(
-            "open-a",
-            "open",
-            2,
-            key=second_key,
-            contracts=1,
-            price=1,
-            lot_id="lot-a",
-        ),
+        _event("open-z", "open", 1, key=key, contracts=3, price=2, lot_id="lot-z"),
+        _event("open-a", "open", 2, key=second_key, lot_id="lot-a"),
         _event(
             "expire-partial",
             "expire_close",
             3,
             key=key,
-            contracts=1,
             price=0,
             target_lot_id="lot-z",
             raw_payload={
@@ -773,15 +653,7 @@ def test_full_publisher_preserves_open_order_and_legacy_close_adjust_precedence(
                 "auto_close_grace_days": 1,
             },
         ),
-        _event(
-            "normal-partial",
-            "close",
-            4,
-            key=key,
-            contracts=1,
-            price=0.5,
-            target_lot_id="lot-z",
-        ),
+        _event("normal-partial", "close", 4, key=key, price=0.5, target_lot_id="lot-z"),
         _event(
             "adjust-after-close",
             "adjust",
@@ -832,24 +704,9 @@ def test_snapshot_baseline_fields_and_adjust_without_real_close_match_oracle() -
         },
     )
     adjust = _event(
-        "adjust",
-        "adjust",
-        2,
-        key=key,
-        contracts=0,
-        price=0,
-        target_lot_id="lot-a",
-        patch={"strategy": "sell_put"},
+        "adjust", "adjust", 2, key=key, contracts=0, price=0, target_lot_id="lot-a", patch={"strategy": "sell_put"}
     )
-    close = _event(
-        "close",
-        "close",
-        3,
-        key=key,
-        contracts=1,
-        price=1,
-        target_lot_id="lot-a",
-    )
+    close = _event("close", "close", 3, key=key, target_lot_id="lot-a")
     expected_after_adjust = project_stored_trade_events_to_position_lots(
         [open_event, adjust]
     )
@@ -888,24 +745,8 @@ def test_snapshot_baseline_fields_and_adjust_without_real_close_match_oracle() -
 def test_full_publisher_retains_finalized_row_for_later_full_only_adjust() -> None:
     key = _key()
     events = [
-        _event(
-            "open",
-            "open",
-            1,
-            key=key,
-            contracts=1,
-            price=1,
-            lot_id="lot-a",
-        ),
-        _event(
-            "close",
-            "close",
-            2,
-            key=key,
-            contracts=1,
-            price=0,
-            target_lot_id="lot-a",
-        ),
+        _event("open", "open", 1, key=key, lot_id="lot-a"),
+        _event("close", "close", 2, key=key, price=0, target_lot_id="lot-a"),
         _event(
             "adjust-closed",
             "adjust",
@@ -930,35 +771,10 @@ def test_full_publisher_retains_finalized_row_for_later_full_only_adjust() -> No
 def test_final_close_emits_exact_row_then_evicts_and_later_target_forces_full() -> None:
     key = _key()
     prefix_events = [
-        _event(
-            "open",
-            "open",
-            1,
-            key=key,
-            contracts=3,
-            price=2,
-            fees=1,
-            lot_id="lot-a",
-        ),
-        _event(
-            "partial",
-            "close",
-            2,
-            key=key,
-            contracts=1,
-            price=1,
-            target_lot_id="lot-a",
-        ),
+        _event("open", "open", 1, key=key, contracts=3, price=2, fees=1, lot_id="lot-a"),
+        _event("partial", "close", 2, key=key, target_lot_id="lot-a"),
     ]
-    final_close = _event(
-        "final",
-        "close",
-        3,
-        key=key,
-        contracts=2,
-        price=0.5,
-        target_lot_id="lot-a",
-    )
+    final_close = _event("final", "close", 3, key=key, contracts=2, price=0.5, target_lot_id="lot-a")
     prefix = project_stored_trade_events_to_resumable_position_lots(
         prefix_events,
         entry_mode="full",
@@ -991,15 +807,7 @@ def test_final_close_emits_exact_row_then_evicts_and_later_target_forces_full() 
 
     later = project_resumable_trade_events(
         [
-            _event(
-                "late-close",
-                "close",
-                4,
-                key=key,
-                contracts=1,
-                price=0,
-                target_lot_id="lot-a",
-            )
+            _event("late-close", "close", 4, key=key, price=0, target_lot_id="lot-a")
         ],
         initial_state=resumed.domain_state,
         entry_mode="tail",
@@ -1012,30 +820,14 @@ def test_tail_diagnostic_is_never_checkpoint_eligible() -> None:
     key = _key()
     prefix = project_resumable_trade_events(
         [
-            _event(
-                "open",
-                "open",
-                1,
-                key=key,
-                contracts=1,
-                price=1,
-                lot_id="lot-a",
-            )
+            _event("open", "open", 1, key=key, lot_id="lot-a")
         ],
         entry_mode="full",
     )
     assert prefix.state is not None
     invalid = project_resumable_trade_events(
         [
-            _event(
-                "oversized",
-                "close",
-                2,
-                key=key,
-                contracts=2,
-                price=0,
-                target_lot_id="lot-a",
-            )
+            _event("oversized", "close", 2, key=key, contracts=2, price=0, target_lot_id="lot-a")
         ],
         initial_state=prefix.state,
         entry_mode="tail",
@@ -1052,15 +844,7 @@ def test_resumable_publication_state_mismatch_forces_full() -> None:
     key = _key()
     prefix = project_stored_trade_events_to_resumable_position_lots(
         [
-            _event(
-                "open",
-                "open",
-                1,
-                key=key,
-                contracts=1,
-                price=1,
-                lot_id="lot-a",
-            )
+            _event("open", "open", 1, key=key, lot_id="lot-a")
         ],
         entry_mode="full",
     )
@@ -1101,8 +885,6 @@ def test_publication_state_is_canonical_and_does_not_alias_results() -> None:
                 "open",
                 1,
                 key=_key(),
-                contracts=1,
-                price=1,
                 lot_id="lot-a",
             )
         ],
@@ -1124,30 +906,12 @@ def test_tail_control_events_force_full(event_type: str) -> None:
     key = _key()
     prefix = project_resumable_trade_events(
         [
-            _event(
-                "open",
-                "open",
-                1,
-                key=key,
-                contracts=1,
-                price=1,
-                lot_id="lot-a",
-            )
+            _event("open", "open", 1, key=key, lot_id="lot-a")
         ],
         entry_mode="full",
     )
     assert prefix.state is not None
-    control = TradeEvent(
-        event_id=event_type,
-        event_type=event_type,
-        event_time_ms=2,
-        contract_key=key,
-        contracts=0,
-        price=0,
-        currency="USD",
-        source="test",
-        target_event_id="open",
-    )
+    control = _event(event_type, event_type, 2, key=key, contracts=0, price=0, target_event_id="open")
     result = project_resumable_trade_events(
         [control],
         initial_state=prefix.state,
@@ -1166,7 +930,6 @@ def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
             1,
             key=key,
             contracts=2,
-            price=1,
             lot_id="lot-a",
             position_side="long",
             raw_payload={"strategy": "combo_yield", "leg_role": "call"},
@@ -1181,17 +944,7 @@ def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
             target_lot_id="lot-a",
             patch={"strategy": "wrong", "leg_role": "wrong"},
         ),
-        TradeEvent(
-            event_id="void-adjust",
-            event_type="void",
-            event_time_ms=3,
-            contract_key=key,
-            contracts=0,
-            price=0,
-            currency="USD",
-            source="test",
-            target_event_id="adjust-voided",
-        ),
+        _event("void-adjust", "void", 3, key=key, contracts=0, price=0, target_event_id="adjust-voided"),
         _event(
             "clear-strategy",
             "adjust",

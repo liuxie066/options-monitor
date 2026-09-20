@@ -31,6 +31,27 @@ def _make_dirs(root: Path) -> tuple[Path, Path]:
     return required, state_dir
 
 
+def _ensure(**overrides: object):
+    """`ensure_required_data` with the literals these call sites share.
+
+    The supplied keywords are the callee's own defaults (host, port, source) or
+    the values every call site passed (py, base, timeout_sec). Callers state
+    everything else explicitly.
+    """
+    import src.application.required_data_steps as mod
+
+    kwargs: dict[str, object] = {
+        "py": "python3",
+        "base": BASE,
+        "timeout_sec": 5,
+        "fetch_source": "opend",
+        "fetch_host": "127.0.0.1",
+        "fetch_port": 11111,
+    }
+    kwargs.update(overrides)
+    return mod.ensure_required_data(**kwargs)  # type: ignore[arg-type]
+
+
 def _typed_success_empty_payload(symbol: str) -> dict[str, object]:
     return {
         "symbol": symbol,
@@ -439,20 +460,14 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
     called: list[object] = []
     try:
         mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or _typed_success_empty_payload(symbol))  # type: ignore[assignment]
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=2,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
         )
     finally:
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
@@ -486,20 +501,14 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
     called: list[object] = []
     try:
         mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or _typed_success_empty_payload("AAPL"))  # type: ignore[assignment]
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=2,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             min_dte=5,
         )
     finally:
@@ -521,20 +530,15 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
     called: list[object] = []
     try:
         mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or _typed_success_empty_payload("AAPL"))  # type: ignore[assignment]
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol="AAPL",
             required_data_dir=required,
             limit_expirations=2,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
             fetch_source="futu",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
         )
     finally:
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
@@ -571,19 +575,14 @@ def test_manual_fetch_without_run_id_saves_without_publishing_quote_authority(
         lambda **kwargs: receipt_reads.append(kwargs),
     )
 
-    result = mod.ensure_required_data(
-        py="python3",
+    result = _ensure(
         base=tmp_path,
         symbol=symbol,
         required_data_dir=required,
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        timeout_sec=5,
         is_scheduled=True,
-        fetch_source="opend",
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         min_dte=10,
         max_dte=60,
         fetch_plan=None,
@@ -629,19 +628,14 @@ def test_planned_cached_data_without_run_id_never_adopts_receipt(
         lambda **kwargs: receipt_reads.append(kwargs),
     )
 
-    result = mod.ensure_required_data(
-        py="python3",
+    result = _ensure(
         base=tmp_path,
         symbol=symbol,
         required_data_dir=required,
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        timeout_sec=5,
         is_scheduled=True,
-        fetch_source="opend",
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         fetch_plan=_nvda_put_fetch_plan(
             expirations=[expiration],
         ),
@@ -680,19 +674,14 @@ def test_planned_fresh_data_without_run_id_never_adopts_or_signs_receipt(
         lambda **kwargs: receipt_reads.append(kwargs),
     )
 
-    result = mod.ensure_required_data(
-        py="python3",
+    result = _ensure(
         base=tmp_path,
         symbol=symbol,
         required_data_dir=required,
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        timeout_sec=5,
         is_scheduled=True,
-        fetch_source="opend",
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         fetch_plan=_nvda_put_fetch_plan(
             expirations=[expiration],
         ),
@@ -741,19 +730,14 @@ def test_manual_fetch_with_run_id_fails_before_cache_or_provider(
     )
 
     with pytest.raises(SourceReceiptError, match="fetch plan"):
-        mod.ensure_required_data(
-            py="python3",
+        _ensure(
             base=tmp_path,
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=True,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=None,
             source_producer_run_id="run-manual-must-fail",
         )
@@ -796,20 +780,14 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
     try:
         mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         pathlib.Path.read_text = _guard_read_text  # type: ignore[assignment]
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=2,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
         )
     finally:
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
@@ -848,20 +826,14 @@ def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp
 
         mod.execute_required_data_opend = _fake_execute_required_data_opend  # type: ignore[assignment]
         with pytest.raises(RuntimeError) as _caught:
-            mod.ensure_required_data(
-                py="python3",
-                base=BASE,
+            _ensure(
                 symbol=symbol,
                 required_data_dir=required,
                 limit_expirations=2,
                 want_put=True,
                 want_call=False,
-                timeout_sec=5,
                 is_scheduled=False,
                 state_dir=state_dir,
-                fetch_source="opend",
-                fetch_host="127.0.0.1",
-                fetch_port=11111,
             )
         exc = _caught.value
         assert "snapshot rate limited" in str(exc)
@@ -1014,19 +986,14 @@ def test_ensure_required_data_rejects_direct_contract_coverage_gap(
         SourceReceiptError,
         match=r"^invalid_row_identity:",
     ):
-        mod.ensure_required_data(
-            py="python3",
+        _ensure(
             base=tmp_path,
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=True,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=plan,
             source_producer_run_id="run-coverage-gap",
         )
@@ -1086,19 +1053,14 @@ def test_fresh_candidate_missing_dte_preserves_existing_required_data_bytes(
         SourceReceiptError,
         match="rows would be dropped during persistence",
     ):
-        mod.ensure_required_data(
-            py="python3",
+        _ensure(
             base=tmp_path,
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=True,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=_nvda_put_fetch_plan(
                 expirations=["2026-09-18"],
             ),
@@ -1425,19 +1387,14 @@ def test_single_symbol_facade_preserves_complete_and_partial_overlap_evidence(
 
     monkeypatch.setattr(steps, "execute_required_data_opend", execute)
     required, _state_dir = _make_dirs(tmp_path)
-    evidence = steps.ensure_required_data(
-        py="python3",
+    evidence = _ensure(
         base=tmp_path,
         symbol="NVDA",
         required_data_dir=required,
         limit_expirations=2,
         want_put=True,
         want_call=True,
-        timeout_sec=5,
         is_scheduled=True,
-        fetch_source="opend",
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         fetch_plan=fetch_plan,
         source_producer_run_id=f"run-single-symbol-{expected_requests}",
     )
@@ -1528,19 +1485,14 @@ def test_multi_spec_rejects_invalid_child_time_without_publishing_receipt(
     )
 
     with pytest.raises(SourceReceiptError, match=error_match):
-        mod.ensure_required_data(
-            py="python3",
+        _ensure(
             base=tmp_path,
             symbol="NVDA",
             required_data_dir=required,
             limit_expirations=2,
             want_put=True,
             want_call=True,
-            timeout_sec=5,
             is_scheduled=True,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=_nvda_split_side_fetch_plan(),
             source_producer_run_id=f"run-child-time-{invalid_time_kind}",
         )
@@ -1579,15 +1531,12 @@ def test_ensure_required_data_rejects_partial_payload_with_usable_rows(
             },
         }
         with pytest.raises(RuntimeError, match="one expiration unavailable"):
-            mod.ensure_required_data(
-                py="python3",
-                base=BASE,
+            _ensure(
                 symbol=symbol,
                 required_data_dir=required,
                 limit_expirations=2,
                 want_put=True,
                 want_call=False,
-                timeout_sec=5,
                 is_scheduled=False,
                 state_dir=state_dir,
             )
@@ -1772,20 +1721,14 @@ def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=False,
             want_call=True,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=fetch_plan,
             report_dir=root / "reports",
             opend_fetch_config={
@@ -1885,20 +1828,14 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=False,
             want_call=True,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=fetch_plan,
             report_dir=root / "reports",
         )
@@ -1993,20 +1930,14 @@ def test_ensure_required_data_fetches_combo_yield_call_side_when_local_cache_has
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
             want_put=True,
             want_call=True,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=fetch_plan,
             report_dir=root / "reports",
         )
@@ -2092,20 +2023,14 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        mod.ensure_required_data(
-            py="python3",
-            base=BASE,
+        _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=2,
             want_put=False,
             want_call=True,
-            timeout_sec=5,
             is_scheduled=False,
             state_dir=state_dir,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=fetch_plan,
             report_dir=root / "reports",
         )
@@ -2306,7 +2231,7 @@ def test_tcom_shared_required_data_is_account_order_invariant(
     for account in account_order:
         plan = _build_tcom_put_plan(required_data_dir=shared_required, account=account)
         plans[account] = _plan_semantics(plan)
-        steps.ensure_required_data(
+        _ensure(
             py="python3.12",
             base=tmp_path,
             symbol="TCOM",
@@ -2314,11 +2239,7 @@ def test_tcom_shared_required_data_is_account_order_invariant(
             limit_expirations=10,
             want_put=True,
             want_call=False,
-            timeout_sec=5,
             is_scheduled=True,
-            fetch_source="opend",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             fetch_plan=plan,
             report_dir=tmp_path / "reports" / account,
         )

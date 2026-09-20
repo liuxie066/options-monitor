@@ -34,12 +34,16 @@ def _input(**overrides: object) -> CloseAdviceInput:
         "fee_calc_status": "schedule_estimate",
         "fee_calc_basis": "test_schedule",
     }
-    values.update(overrides)
-    return CloseAdviceInput(**values)  # type: ignore[arg-type]
+    return CloseAdviceInput(**{**values, **overrides})  # type: ignore[arg-type]
+
+
+def _row(**overrides: object) -> dict:
+    """Strict-policy row for one case, on top of the `_input` defaults."""
+    return evaluate_close_advice(_input(**overrides))
 
 
 def test_strict_policy_closes_only_when_every_gate_passes() -> None:
-    row = evaluate_close_advice(_input())
+    row = _row()
 
     assert row["policy_version"] == STRICT_CLOSE_POLICY_VERSION
     assert row["recommendation_state"] == RECOMMENDATION_CLOSE
@@ -52,16 +56,9 @@ def test_strict_policy_closes_only_when_every_gate_passes() -> None:
 
 
 def test_strict_policy_thresholds_are_inclusive() -> None:
-    row = evaluate_close_advice(
-        _input(
-            premium=1.01,
-            bid=0.085,
-            ask=0.09,
-            estimated_open_fee=1.0,
-            estimated_close_fee=1.0,
-            dte=14,
-            original_dte=28,
-        )
+    row = _row(
+        premium=1.01, bid=0.085, ask=0.09,
+        estimated_open_fee=1.0, estimated_close_fee=1.0, dte=14, original_dte=28,
     )
 
     assert row["opening_net_credit"] == 100.0
@@ -86,18 +83,14 @@ def test_each_failed_economic_gate_holds_instead_of_creating_another_action() ->
     }
 
     for expected_flag, overrides in scenarios.items():
-        row = evaluate_close_advice(_input(**overrides))
+        row = _row(**overrides)
         assert row["recommendation_state"] == RECOMMENDATION_HOLD
         assert expected_flag in row["decision_basis"]
 
 
 def test_call_must_be_otm_under_the_same_strict_policy() -> None:
-    close = evaluate_close_advice(
-        _input(option_type="call", spot=80.0)
-    )
-    hold = evaluate_close_advice(
-        _input(option_type="call", spot=120.0)
-    )
+    close = _row(option_type="call", spot=80.0)
+    hold = _row(option_type="call", spot=120.0)
 
     assert close["recommendation_state"] == RECOMMENDATION_CLOSE
     assert hold["recommendation_state"] == RECOMMENDATION_HOLD
@@ -113,7 +106,7 @@ def test_incomplete_quote_fee_or_open_date_is_not_evaluable() -> None:
         ({"original_dte": None}, "missing_original_dte"),
         ({"dte": 61}, "inconsistent_position_dates"),
     ):
-        row = evaluate_close_advice(_input(**overrides))
+        row = _row(**overrides)
         assert row["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
         assert expected_flag in row["data_quality_flags"]
 
@@ -132,7 +125,7 @@ def test_boolean_numeric_evidence_is_not_evaluable() -> None:
         ("estimated_open_fee", "fee_evidence_unavailable"),
         ("estimated_close_fee", "fee_evidence_unavailable"),
     ):
-        row = evaluate_close_advice(_input(**{field: True}))
+        row = _row(**{field: True})
         assert row["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
         assert expected_flag in row["data_quality_flags"]
 
@@ -143,14 +136,14 @@ def test_missing_position_identity_is_not_evaluable() -> None:
         ({"position_lot_id": None}, "missing_position_lot_id"),
         ({"symbol": ""}, "missing_symbol"),
     ):
-        row = evaluate_close_advice(_input(**overrides))
+        row = _row(**overrides)
         assert row["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
         assert expected_flag in row["data_quality_flags"]
 
 
 def test_notification_selection_uses_only_close_state() -> None:
-    close = evaluate_close_advice(_input(symbol="NVDA"))
-    hold = evaluate_close_advice(_input(symbol="AMD", dte=13))
+    close = _row(symbol="NVDA")
+    hold = _row(symbol="AMD", dte=13)
     close["evaluation_status"] = "priced"
     hold["evaluation_status"] = "priced"
 
@@ -163,7 +156,7 @@ def test_notification_selection_uses_only_close_state() -> None:
 
 
 def test_notification_selection_rejects_unversioned_or_legacy_close_rows() -> None:
-    strict = evaluate_close_advice(_input(symbol="STRICT"))
+    strict = _row(symbol="STRICT")
     unversioned = {**strict, "symbol": "UNVERSIONED"}
     unversioned.pop("policy_version")
     legacy = {
@@ -181,7 +174,7 @@ def test_notification_selection_rejects_unversioned_or_legacy_close_rows() -> No
 
 
 def test_notification_selection_rejects_close_without_complete_evidence() -> None:
-    strict = evaluate_close_advice(_input(symbol="STRICT"))
+    strict = _row(symbol="STRICT")
     missing = {**strict, "symbol": "MISSING"}
     missing.pop("decision_evidence_status")
     inconsistent = {

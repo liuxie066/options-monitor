@@ -86,6 +86,31 @@ def _lifecycle_batch_payload(
     }
 
 
+def _receipt_decision(**overrides: object) -> dict:
+    """``decide_trade_intake_receipt`` with the kwargs every case in this module shares."""
+    base: dict[str, object] = {
+        "receipt_config": {},
+        "apply_changes": True,
+        "state": {},
+        "deal_id": "deal-1",
+    }
+    base.update(overrides)
+    return decide_trade_intake_receipt(**base)
+
+
+def _send_receipt(tmp_path: Path, **overrides: object) -> dict:
+    """``send_trade_intake_receipt`` with the kwargs every sending case here shares."""
+    base: dict[str, object] = {
+        "base": tmp_path,
+        "receipt_config": {},
+        "apply_changes": True,
+        "state": {},
+        "normalize_fn": lambda send_result: send_result,
+    }
+    base.update(overrides)
+    return send_trade_intake_receipt(**base)
+
+
 def test_lifecycle_batch_single_member_preserves_existing_message() -> None:
     member = _lifecycle_batch_member(1)
 
@@ -320,34 +345,20 @@ def test_lifecycle_classifier_retries_real_wechat_business_rejection() -> None:
 
 
 def test_receipt_decision_defaults_send_applied() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
-        state={},
-        deal_id="deal-1",
-        result={"status": "applied", "reason": "applied_open"},
-    )
+    out = _receipt_decision(result={"status": "applied", "reason": "applied_open"})
 
     assert out == {"should_send": True, "reason": "applied"}
 
 
 def test_receipt_decision_defaults_send_unresolved_and_failed() -> None:
     for status in ("unresolved", "failed"):
-        out = decide_trade_intake_receipt(
-            receipt_config={},
-            apply_changes=True,
-            state={},
-            deal_id="deal-1",
-            result={"status": status, "reason": status},
-        )
+        out = _receipt_decision(result={"status": status, "reason": status})
 
         assert out == {"should_send": True, "reason": status}
 
 
 def test_receipt_decision_skips_repeated_confirmed_unresolved() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
+    out = _receipt_decision(
         state={
             "unresolved_deal_ids": {
                 "deal-1": {
@@ -356,7 +367,6 @@ def test_receipt_decision_skips_repeated_confirmed_unresolved() -> None:
                 }
             }
         },
-        deal_id="deal-1",
         result={"status": "unresolved", "reason": "waiting_settlement_evidence"},
     )
 
@@ -364,9 +374,7 @@ def test_receipt_decision_skips_repeated_confirmed_unresolved() -> None:
 
 
 def test_receipt_decision_retries_unconfirmed_unresolved() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
+    out = _receipt_decision(
         state={
             "unresolved_deal_ids": {
                 "deal-1": {
@@ -375,7 +383,6 @@ def test_receipt_decision_retries_unconfirmed_unresolved() -> None:
                 }
             }
         },
-        deal_id="deal-1",
         result={"status": "unresolved", "reason": "waiting_settlement_evidence"},
     )
 
@@ -383,21 +390,13 @@ def test_receipt_decision_retries_unconfirmed_unresolved() -> None:
 
 
 def test_receipt_decision_skips_dry_run() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=False,
-        state={},
-        deal_id="deal-1",
-        result={"status": "dry_run", "reason": "preview_open"},
-    )
+    out = _receipt_decision(apply_changes=False, result={"status": "dry_run", "reason": "preview_open"})
 
     assert out == {"should_send": False, "reason": "skipped_dry_run"}
 
 
 def test_receipt_decision_skips_confirmed_duplicate_by_default() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
+    out = _receipt_decision(
         state={
             "processed_deal_ids": {
                 "deal-1": {
@@ -406,7 +405,6 @@ def test_receipt_decision_skips_confirmed_duplicate_by_default() -> None:
                 }
             }
         },
-        deal_id="deal-1",
         result={"status": "skipped", "reason": "duplicate_deal_id"},
     )
 
@@ -414,9 +412,7 @@ def test_receipt_decision_skips_confirmed_duplicate_by_default() -> None:
 
 
 def test_receipt_decision_retries_explicit_failed_duplicate() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
+    out = _receipt_decision(
         state={
             "processed_deal_ids": {
                 "deal-1": {
@@ -425,7 +421,6 @@ def test_receipt_decision_retries_explicit_failed_duplicate() -> None:
                 }
             }
         },
-        deal_id="deal-1",
         result={"status": "skipped", "reason": "duplicate_deal_id"},
     )
 
@@ -462,17 +457,14 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
             "returncode": 0,
         }
 
-    first = send_trade_intake_receipt(
-        base=tmp_path,
+    first = _send_receipt(
+        tmp_path,
         config={
             "notifications": {
                 "provider": "wechat_clawbot",
                 "target": "wechat:ops",
             }
         },
-        receipt_config={},
-        apply_changes=True,
-        state={},
         deal=deal,
         result={
             "status": "applied",
@@ -483,20 +475,17 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
         },
         payload={},
         send_fn=_send,
-        normalize_fn=lambda send_result: send_result,
     )
     assert first["status"] == "unconfirmed"
 
-    duplicate = send_trade_intake_receipt(
-        base=tmp_path,
+    duplicate = _send_receipt(
+        tmp_path,
         config={
             "notifications": {
                 "provider": "wechat_clawbot",
                 "target": "wechat:ops",
             }
         },
-        receipt_config={},
-        apply_changes=True,
         state={
             "processed_deal_ids": {
                 "futu:lx:REAL_1:deal-1": {
@@ -514,7 +503,6 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
         },
         payload={},
         send_fn=_send,
-        normalize_fn=lambda send_result: send_result,
     )
 
     assert duplicate["status"] == "skipped"
@@ -523,13 +511,7 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
 
 
 def test_receipt_decision_skips_non_option_deal() -> None:
-    out = decide_trade_intake_receipt(
-        receipt_config={},
-        apply_changes=True,
-        state={},
-        deal_id="deal-stock-1",
-        result={"status": "skipped", "reason": "not_option_deal"},
-    )
+    out = _receipt_decision(deal_id="deal-stock-1", result={"status": "skipped", "reason": "not_option_deal"})
 
     assert out == {"should_send": False, "reason": "skipped_not_option_deal"}
 
@@ -572,17 +554,13 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
         calls.append(dict(kwargs))
         return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-1", "returncode": 0}
 
-    out = send_trade_intake_receipt(
-        base=tmp_path,
+    out = _send_receipt(
+        tmp_path,
         config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
-        receipt_config={},
-        apply_changes=True,
-        state={},
         deal=deal,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx", "action": "open"},
         payload={},
         send_fn=_send,
-        normalize_fn=lambda send_result: send_result,
     )
 
     assert out["status"] == "sent"
@@ -606,17 +584,13 @@ def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path:
         calls.append(dict(kwargs))
         return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-1", "returncode": 0}
 
-    out = send_trade_intake_receipt(
-        base=tmp_path,
+    out = _send_receipt(
+        tmp_path,
         config={"notifications": {"provider": "feishu_app"}},
-        receipt_config={},
-        apply_changes=True,
-        state={},
         deal=None,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx", "action": "open"},
         payload={"deal_id": "deal-1"},
         send_fn=_send,
-        normalize_fn=lambda send_result: send_result,
     )
 
     assert out["status"] == "sent"
@@ -781,12 +755,9 @@ def test_build_trade_intake_receipt_message_reports_auto_combo_adoption() -> Non
 
 def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
-    out = send_trade_intake_receipt(
-        base=tmp_path,
+    out = _send_receipt(
+        tmp_path,
         config={"notifications": {"provider": "feishu_app"}},
-        receipt_config={},
-        apply_changes=True,
-        state={},
         deal=None,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"},
         payload={"deal_id": "deal-1"},
@@ -796,7 +767,6 @@ def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_p
             "returncode": 1,
             "error_code": "FEISHU_POST_TOO_LARGE",
         },
-        normalize_fn=lambda send_result: send_result,
     )
 
     assert out["status"] == "failed"
