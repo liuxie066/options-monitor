@@ -671,6 +671,31 @@
     "exempt_hits": [
       {
         "columns": [
+          "expiration"
+        ],
+        "digest": "sha256:517f4420fb3f43a1",
+        "kind": "ddl",
+        "module": "src/application/ledger/lot_identity_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
+          "expiration",
+          "record_id"
+        ],
+        "digest": "sha256:6a3a1de4bf26e87d",
+        "kind": "write",
+        "module": "src/application/ledger/lot_identity_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
           "record_id"
         ],
         "digest": "sha256:8d8200c3c3fc78d7",
@@ -687,16 +712,16 @@
   "tests": {
     "by_kind": {
       "ddl": 13,
-      "index_name": 7,
-      "read": 26,
-      "write": 35
+      "index_name": 9,
+      "read": 27,
+      "write": 36
     },
     "by_module": {
       "tests/perf_position_projection_s1.py": 2,
       "tests/quality/test_retired_column_sql_registry.py": 1,
       "tests/test_ledger_current_decision_projection.py": 2,
       "tests/test_ledger_sqlite_workflows.py": 12,
-      "tests/test_lot_identity_migration.py": 13,
+      "tests/test_lot_identity_migration.py": 17,
       "tests/test_lot_parity_probe.py": 11,
       "tests/test_position_lot_payload_shape.py": 2,
       "tests/test_position_projection_migration.py": 3,
@@ -708,7 +733,7 @@
       "tests/test_trades_state_reconcile.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:7df12914973b4a6c",
-    "statements": 67
+    "digest": "sha256:533e9318a3e1bc78",
+    "statements": 68
   }
 }
