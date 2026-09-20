@@ -150,9 +150,24 @@ def test_an_all_that_cannot_be_followed_is_reported_not_read_as_empty(source: st
         guardrails_check.declared_public_names(source)
 
 
-def test_definition_behind_a_guard_is_still_declared() -> None:
-    source = "if sys.version_info >= (3, 12):\n    def modern():\n        pass\n"
+@pytest.mark.parametrize(
+    "source",
+    [
+        "if sys.version_info >= (3, 12):\n    def modern():\n        pass\n",
+        "try:\n    def modern():\n        pass\nexcept Exception:\n    pass\n",
+        "try:\n    def modern():\n        pass\nexcept* ValueError:\n    pass\n",
+        "match FLAG:\n    case 1:\n        def modern():\n            pass\n",
+        "for _ in ():\n    def modern():\n        pass\n",
+        "while False:\n    def modern():\n        pass\n",
+        "with contextlib.suppress(Exception):\n    def modern():\n        pass\n",
+    ],
+)
+def test_definition_behind_a_guard_is_still_declared(source: str) -> None:
+    """Every container a module may legally use has to be walked.
 
+    A definition inside a container the reading does not enter is a name this
+    check never protects, and nothing else would report it.
+    """
     assert guardrails_check.declared_public_names(source) == frozenset({"modern"})
 
 

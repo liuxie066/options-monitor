@@ -602,7 +602,17 @@ def _module_all_value(tree: ast.Module) -> ast.expr | None:
     return None
 
 
-_MODULE_SCOPE_CONTROL = (ast.If, ast.Try, ast.For, ast.While, ast.With, ast.AsyncWith, ast.AsyncFor)
+_MODULE_SCOPE_CONTROL = (
+    ast.If,
+    ast.Try,
+    ast.TryStar,
+    ast.Match,
+    ast.For,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.AsyncFor,
+)
 
 
 def _module_scope_statements(tree: ast.Module):
@@ -611,17 +621,25 @@ def _module_scope_statements(tree: ast.Module):
     A name bound under ``if``/``try`` is still bound in the module namespace, so
     reading only the direct children of the module body made a guarded definition
     look like a removal.
+
+    The set of statements to descend into has to be complete: every container the
+    walk does not enter is a place a definition can hide, and a definition the
+    reading never sees is a name this check does not protect.
     """
     stack = list(reversed(tree.body))
     while stack:
         node = stack.pop()
         yield node
         if isinstance(node, _MODULE_SCOPE_CONTROL):
-            stack.extend(reversed(node.body))
+            # ``Match`` is the one container here without a ``body``; read each
+            # attribute a container may use instead of assuming which it has.
+            stack.extend(reversed(getattr(node, "body", [])))
             stack.extend(reversed(getattr(node, "orelse", [])))
             stack.extend(reversed(getattr(node, "finalbody", [])))
             for handler in getattr(node, "handlers", []):
                 stack.extend(reversed(handler.body))
+            for case in getattr(node, "cases", []):
+                stack.extend(reversed(case.body))
 
 
 def _assignment_targets(node: ast.stmt) -> list[ast.expr]:
