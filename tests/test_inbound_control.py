@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2324,6 +2325,9 @@ def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch:
     monkeypatch.setattr(upgrade_operations.sys, "platform", "linux")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
     monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    # The worker inherits the effective PYTHONPATH with the repository root
+    # prepended, so pin the ambient value instead of inheriting the shell's.
+    monkeypatch.setenv("PYTHONPATH", "/parent/site-packages")
     monkeypatch.setattr(upgrade_operations.shutil, "which", lambda name: "/bin/systemd-run" if name == "systemd-run" else "/usr/bin/sudo" if name == "sudo" else None)
 
     def _fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
@@ -2340,7 +2344,7 @@ def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch:
     assert "--setenv" in first
     assert f"OM_ENV_FILE={env_file}" in first
     assert f"OM_RUNTIME_ROOT={runtime}" in first
-    assert f"PYTHONPATH={root}" in first
+    assert f"PYTHONPATH={root}{os.pathsep}/parent/site-packages" in first
     assert "secret-from-file" not in " ".join(first)
 
 

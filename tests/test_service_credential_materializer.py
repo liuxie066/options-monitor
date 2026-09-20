@@ -140,7 +140,7 @@ def test_materializer_rejects_symlinked_encrypted_source(tmp_path: Path) -> None
     helper = _load_helper()
     credential_id = "om-feishu-bot-app-secret"
     store = tmp_path / "credstore.encrypted"
-    store.mkdir()
+    store.mkdir(mode=0o755)
     outside = tmp_path / "outside"
     outside.write_text("encrypted-fixture", encoding="utf-8")
     (store / credential_id).symlink_to(outside)
@@ -177,8 +177,11 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
 def test_materializer_cleanup_refuses_unexpected_entries(tmp_path: Path) -> None:
     helper = _load_helper()
     runtime_root = tmp_path / "run" / "credentials"
+    runtime_root.mkdir(parents=True, mode=0o700)
+    runtime_root.chmod(0o700)
     target = runtime_root / "options-monitor-trade-intake.service"
-    target.mkdir(parents=True)
+    target.mkdir(mode=0o700)
+    target.chmod(0o700)
     unexpected = target / "not-a-registered-credential"
     unexpected.write_text("must-remain", encoding="utf-8")
 
