@@ -2487,7 +2487,13 @@ def main(argv: list[str] | None = None) -> int:
             f"matched={int(summary.get('matched', 0))} "
             f"missing_in_position_lots={int(summary.get('missing_in_position_lots', 0))} "
             f"extra_in_position_lots={int(summary.get('extra_in_position_lots', 0))} "
-            f"field_mismatch={int(summary.get('field_mismatch', 0))}"
+            f"field_mismatch={int(summary.get('field_mismatch', 0))} "
+            # A3's two verdicts print here too: this line is the whole human side
+            # of the production enforcement channel, and a red run whose reason is
+            # absent from it reads as an unexplained failure.
+            f"column_differs_unexplained={int(summary.get('column_differs_unexplained', 0))} "
+            f"count_mismatch={int(summary.get('count_mismatch', 0))} "
+            f"duplicate_lot_id={int(summary.get('duplicate_lot_id', 0))}"
         )
         if probe_error is not None:
             print(f"lot parity probe could not run: {probe_error}", file=sys.stderr)

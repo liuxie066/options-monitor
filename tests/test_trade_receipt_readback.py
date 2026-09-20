@@ -11,6 +11,17 @@ from src.application.ledger.position_projection_runtime import run_position_proj
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
+def _published_shape(lots: list[dict]) -> list[dict]:
+    """The three keys the receipt evidence publishes, out of a repo lot record.
+
+    ``list_position_lots`` carries more than the receipt surface does: A3 gave it
+    the five derived columns and the ``rowid`` for the comparison face, while the
+    evidence surface's shape is a pinned published contract (asserted below).
+    Comparing the shared facts is the invariant these tests are about.
+    """
+    return [{key: lot[key] for key in ("record_id", "lot_id", "fields")} for lot in lots]
+
+
 def _event(event_id: str) -> TradeEvent:
     return TradeEvent(
         event_id=event_id, event_type="open", event_time_ms=1_000, contracts=1, price=2.5, currency="USD",
@@ -48,7 +59,7 @@ def test_receipt_readback_returns_application_events_and_published_lots(tmp_path
     assert event["symbol"] == "NVDA"
     assert event["position_effect"] == "open"
     assert event["raw_payload"]["broker_deal_id"] == "deal-1"
-    assert evidence["position_lots"] == repo.list_position_lots()
+    assert evidence["position_lots"] == _published_shape(repo.list_position_lots())
     assert len(evidence["position_lots"]) == 1
     lot = evidence["position_lots"][0]
     assert set(lot) == {"record_id", "lot_id", "fields"}
@@ -69,7 +80,7 @@ def test_receipt_readback_agrees_with_the_published_lots_on_a_divergent_carrier(
 
     evidence = open_trade_reconciliation_evidence_repo(database).read_trade_receipt_evidence()
 
-    assert evidence["position_lots"] == repo.list_position_lots()
+    assert evidence["position_lots"] == _published_shape(repo.list_position_lots())
     assert [lot["record_id"] for lot in evidence["position_lots"]] == ["lot-deal-1"]
     assert [lot["lot_id"] for lot in evidence["position_lots"]] == ["carrier-deal-1"]
 

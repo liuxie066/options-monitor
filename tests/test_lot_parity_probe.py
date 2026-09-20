@@ -1951,9 +1951,13 @@ def test_verify_projection_exits_non_zero_when_the_probe_is_red(
     payload = json.loads(capsys.readouterr().out)
     assert payload["lot_parity_probe"]["green"] is False
     assert payload["lot_parity_probe"]["b_columns_difference_count"] == 1
-    # ``ok`` is deliberately unchanged: folding the probe into it would move the
-    # checkpoint write and the ``--mode auto`` fast path.
-    assert payload["ok"] is True
+    # A3 taught the verifier the face the probe has always read, so a column-only
+    # drift now lands in ``ok`` too: one fact, two verdicts, both red. That is the
+    # intended reading of §8 -- a store whose columns disagree with its payloads is
+    # not certified green -- and the checkpoint write and ``--mode auto`` fast path
+    # follow ``ok`` deliberately.
+    assert payload["ok"] is False
+    assert payload["summary"]["column_differs_unexplained"] == 1
     # A red run still carries the detail: the counts say how much, the samples
     # say what.
     samples = payload["lot_parity_probe"]["samples"]
@@ -1982,7 +1986,10 @@ def test_verify_projection_text_run_enforces_a_red_probe(
 
     captured = capsys.readouterr()
     assert "[DONE] verified trade_events projection against position_lots" in captured.out
-    assert "matched=1" in captured.out
+    # §5's ``matched`` is all three faces equal, so a column-only drift leaves it
+    # at zero while the payloads agree -- and ``summary`` says which face moved.
+    assert "matched=0" in captured.out
+    assert "column_differs_unexplained=1" in captured.out
     probe_line = next(
         line for line in captured.out.splitlines() if "lot parity probe (tier-1)" in line
     )
@@ -2016,11 +2023,13 @@ def test_verify_projection_red_run_leaves_the_existing_fields_alone(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``ok``/``summary``/``checkpoint_reused``/``report_id`` keep their meaning.
+    """The report's fields keep their meaning across a red column face.
 
-    Read off the same store before and after a face-B diff that the probe sees and
-    the existing verifier does not: a red probe must not move any of the four
-    fields the receipts' known readers depend on.
+    Read off the same store before and after a face-B diff. Before A3 that diff
+    was visible only to the probe; the verifier reads the same face now, so ``ok``
+    is the field that moves -- for the reason §8 gives it. What must not move is
+    the rest of the shape: the run reports its own id and mode, the checkpoint is
+    not reused across a changed store, and the summary still counts the lots.
     """
     import src.interfaces.cli.option_positions as cli_mod
 
@@ -2033,8 +2042,10 @@ def test_verify_projection_red_run_leaves_the_existing_fields_alone(
     assert cli_mod.main() == 1
     red = json.loads(capsys.readouterr().out)
 
-    assert red["ok"] == green["ok"] is True
-    assert red["summary"] == green["summary"]
+    assert green["ok"] is True
+    assert green["summary"] == {"matched": 1}
+    assert red["ok"] is False
+    assert red["summary"] == {"column_differs_unexplained": 1}
     assert red["checkpoint_reused"] == green["checkpoint_reused"] is False
     assert red["mode_used"] == green["mode_used"]
     assert red["report_id"].startswith("projection-verify-")
