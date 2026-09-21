@@ -1,4 +1,5 @@
 from dataclasses import replace
+from decimal import Decimal
 from functools import partial
 
 import pytest
@@ -130,25 +131,17 @@ def test_conflicting_multiplier_alias_is_rejected_before_cache_and_comparison(tm
     assert result["reason"] == "execution_admission_failed"
 
 
-def test_fractional_stock_size_is_refused_by_name_at_the_ledger_boundary():
-    """Admission accepts a fractional stock size; a ``TradeEvent`` cannot carry it.
-
-    ``test_valid_fractional_stock_refresh_keeps_once_semantics`` pins the intake
-    side: ``quantity="0.5"`` is legitimate and must keep routing to PM refresh, so
-    the drop cannot be fixed by rejecting fractional sizes during normalization.
-    ``TradeEvent.contracts`` is an int (§7.3 keeps a *stock* size a Decimal, but the
-    event field is whole units), so the size has no representation there. It must
-    fail by name rather than collapse to ``0``, which is indistinguishable from "no
-    quantity" and would surface as a misleading ``contracts must be > 0`` — or, for
-    the event types that skip that rule, as a silently stored ``0``.
-    """
+def test_fractional_stock_size_is_preserved_at_the_ledger_boundary():
+    """The admitted stock quantity survives conversion to the ledger event."""
 
     deal = _normalize(_stock())
     assert deal.contracts is None
     assert deal.execution_input["quantity"] == "0.5"
 
-    with pytest.raises(ValueError, match="trade_execution_quantity_not_representable:0.5"):
-        _trade_event_from_normalized_deal(deal)
+    event = _trade_event_from_normalized_deal(deal)
+    assert event.contracts == Decimal("0.5")
+    assert isinstance(event.contracts, Decimal)
+    assert event.to_dict()["contracts"] == "0.5"
 
 
 @pytest.mark.parametrize("quantity", ["1.2.3", "abc.def"])
@@ -169,10 +162,7 @@ def test_malformed_stock_size_is_not_reported_as_unrepresentable(quantity):
 
 @pytest.mark.parametrize("quantity,expected", [("2", 2), ("2.00", 2), ("3.0", 3)])
 def test_integral_stock_size_written_with_a_decimal_point_is_not_fractional(quantity, expected):
-    """Pins that trailing zeros do not make a size fractional (``canonical_decimal``
-    strips them). This exercises ``normalize_optional_int`` rather than the guard —
-    an integral size never reaches the guard, which is gated on ``contracts is None``.
-    """
+    """Trailing zeros preserve the same stock quantity at the event boundary."""
 
     deal = _normalize({**_stock(), "quantity": quantity})
     assert _trade_event_from_normalized_deal(deal).contracts == expected

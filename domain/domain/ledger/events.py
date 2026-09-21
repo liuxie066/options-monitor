@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 from domain.domain.ledger.identity import ContractKey, position_key_for
-from domain.domain.money import canonical_decimal_text, coerce_decimal
+from domain.domain.money import canonical_decimal_text, coerce_decimal, to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
     derive_position_side,
@@ -54,7 +54,7 @@ class TradeEvent:
     event_type: str
     event_time_ms: int
     contract_key: ContractKey
-    contracts: int
+    contracts: int | Decimal
     price: Decimal
     currency: str
     source: str
@@ -71,7 +71,6 @@ class TradeEvent:
         object.__setattr__(self, "event_id", str(self.event_id or "").strip())
         object.__setattr__(self, "event_type", str(self.event_type or "").strip().lower())
         object.__setattr__(self, "event_time_ms", int(self.event_time_ms or 0))
-        object.__setattr__(self, "contracts", int(self.contracts or 0))
         object.__setattr__(self, "price", coerce_decimal(self.price))
         object.__setattr__(self, "currency", normalize_currency(self.currency))
         object.__setattr__(self, "source", str(self.source or "").strip())
@@ -82,6 +81,10 @@ class TradeEvent:
         object.__setattr__(self, "raw_payload", dict(self.raw_payload or {}))
         asset_type = normalize_asset_type(self.asset_type) or self.contract_key.asset_type or "option"
         object.__setattr__(self, "asset_type", asset_type)
+        quantity = to_decimal(0 if self.contracts in (None, "") else self.contracts, field_name="contracts")
+        if asset_type != "stock" and quantity != quantity.to_integral_value():
+            raise ValueError("option contracts must be a whole number")
+        object.__setattr__(self, "contracts", quantity if asset_type == "stock" else int(quantity))
         if asset_type == "stock":
             object.__setattr__(self, "multiplier", 0)
         else:
@@ -203,7 +206,8 @@ class TradeEvent:
             "event_type": self.event_type,
             "event_time_ms": self.event_time_ms,
             "contract_key": self.contract_key.to_dict(),
-            "contracts": self.contracts,
+            # Preserve the historical JSON key; stock quantities use decimal text.
+            "contracts": canonical_decimal_text(self.contracts) if self.asset_type == "stock" else self.contracts,
             "price": _canonical_decimal_text_or_raw(self.price),
             "currency": self.currency,
             "source": self.source,

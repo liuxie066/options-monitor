@@ -1936,25 +1936,6 @@ def _canonical_close_events_for_storage(
         )
     return out
 
-def _quantity_is_fractional(value: Any) -> bool:
-    """Was a quantity present *and* carrying a fractional part?
-
-    ``NormalizedTradeDeal.contracts`` is an ``int``, and ``normalize_optional_int``
-    answers ``None`` both for an absent quantity and for a present-but-fractional
-    one. Collapsing that ``None`` to ``0`` here would make an unrepresentable size
-    indistinguishable from no size at all, so ``_trade_event_from_normalized_deal``
-    refuses instead of writing a silently different number.
-    """
-
-    if value in (None, ""):
-        return False
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return False
-    return number != number.to_integral_value()
-
-
 def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     trade_side = normalize_trade_side(getattr(deal, "side", None)) or ""
     position_effect = normalize_position_effect(getattr(deal, "position_effect", None)) or ""
@@ -2032,22 +2013,14 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         asset_type=asset_type,
     )
     raw_contracts = getattr(deal, "contracts", None)
-    if raw_contracts is None:
-        # ``contracts`` is an int, but a stock size is a Decimal (§7.3): a fractional
-        # quantity reaches here already dropped rather than truncated. Name it, so it
-        # cannot masquerade as "no quantity" and surface as a misleading
-        # ``contracts must be > 0`` (or, for event types that skip that rule, as a
-        # silently stored ``0``).
-        execution_input = getattr(deal, "execution_input", None)
-        quantity = execution_input.get("quantity") if isinstance(execution_input, Mapping) else None
-        if _quantity_is_fractional(quantity):
-            raise ValueError(f"trade_execution_quantity_not_representable:{quantity}")
+    if asset_type == "stock" and isinstance(_execution_payload, Mapping):
+        raw_contracts = _execution_payload.get("quantity")
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
         event_time_ms=event_time_ms,
         contract_key=contract_key,
-        contracts=int(raw_contracts or 0),
+        contracts=raw_contracts,
         price=float(getattr(deal, "price", 0.0) or 0.0),
         currency=normalize_currency(getattr(deal, "currency", None)),
         source="opend_push",

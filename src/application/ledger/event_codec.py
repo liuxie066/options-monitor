@@ -195,7 +195,7 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
             event_type=event_type,
             event_time_ms=int(payload.get("event_time_ms") or 0),
             contract_key=contract_key,
-            contracts=int(payload.get("contracts") or 0),
+            contracts=payload.get("contracts"),
             price=payload.get("price"),
             currency=str(payload.get("currency") or ""),
             source=str(payload.get("source") or ""),

@@ -314,7 +314,7 @@ def project_resumable_trade_events(
         )
 
     active_lots = tuple(
-        replace(accumulator.lots_by_id[lot_id], close_event_ids=())
+        accumulator.lots_by_id[lot_id]
         for lot_id in sorted(accumulator.lots_by_id)
         if lot_open_quantity(accumulator.lots_by_id[lot_id]) > 0
     )

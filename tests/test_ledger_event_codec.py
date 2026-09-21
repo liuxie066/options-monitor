@@ -138,6 +138,36 @@ def test_sqlite_event_money_round_trip_preserves_decimal_precision(tmp_path: Pat
     assert decoded.fees == event.fees
 
 
+def test_stock_quantity_survives_sqlite_and_legacy_integer_events(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "quantity.sqlite3")
+    for index, quantity in enumerate((Decimal("2.500000000000000001"), 3)):
+        event = _canonical_event(event_id=f"stock-{index}", lot_id=f"stock-lot-{index}", contract_key=_stock_contract_key(),
+                                 asset_type="stock", contracts=quantity, raw_payload={"side": "buy"})
+        assert repo.upsert_trade_event(event)
+        assert not repo.upsert_trade_event(event)
+        stored = next(row for row in repo.list_trade_events() if row["event_id"] == event.event_id)
+        decoded, diagnostics = stored_trade_event_to_ledger_event(stored)
+        assert not diagnostics
+        assert decoded.contracts == Decimal(str(quantity))
+        assert isinstance(decoded.contracts, Decimal)
+    legacy = event.to_dict()
+    legacy["contracts"] = 3
+    assert not repo.upsert_trade_event(legacy)
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+    run_position_projection_forced_full(repo, [])
+    lots = {row["lot_id"]: row["fields"] for row in repo.list_position_lots()}
+    assert lots["stock-lot-0"]["shares_open"] == "2.500000000000000001"
+    assert lots["stock-lot-1"]["shares_open"] == "3"
+
+
+def test_fractional_option_quantity_is_rejected_without_truncation() -> None:
+    with pytest.raises(ValueError, match="whole number"):
+        _canonical_event(contracts=Decimal("1.5"))
+    event, diagnostics = stored_trade_event_to_ledger_event({**_canonical_event().to_dict(), "contracts": "1.5"})
+    assert event is None
+    assert diagnostics
+
+
 def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
     canonical_open = _canonical_event(contracts=2).to_dict()
     legacy_close = _legacy_event(

@@ -309,7 +309,7 @@ def lot_is_stock(lot: PositionLot) -> bool:
     return lot.asset_type == "stock"
 
 
-def lot_open_quantity(lot: PositionLot) -> float | Decimal:
+def lot_open_quantity(lot: PositionLot) -> int | Decimal:
     """Open quantity in the lot's native unit (contracts or shares).
 
     §7.3: option quantity stays an exact int count of contracts; stock quantity
@@ -317,7 +317,7 @@ def lot_open_quantity(lot: PositionLot) -> float | Decimal:
     """
     if lot_is_stock(lot):
         return lot.shares_open or Decimal("0")
-    return float(lot.contracts_open)
+    return lot.contracts_open
 
 
 def _realized_pnl_delta(

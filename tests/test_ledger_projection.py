@@ -428,6 +428,32 @@ def test_projection_projects_stock_lot_with_shares_lifecycle() -> None:
     assert isinstance(lot.shares_opened, Decimal)
 
 
+def test_fractional_stock_full_and_serialized_tail_replay_agree() -> None:
+    from domain.domain.ledger.projection import project_resumable_trade_events
+    from domain.domain.ledger.projection_state import ResumableProjectionState
+
+    events = [
+        _stock_event(event_id="fraction-open", event_type="open", contract_key=_stock_key(),
+                     contracts=Decimal("2.5"), event_time_ms=1000, lot_id="fraction-lot", price=Decimal("10")),
+        _stock_event(event_id="fraction-close", event_type="close", contract_key=_stock_key(),
+                     contracts=Decimal("0.75"), event_time_ms=2000, target_lot_id="fraction-lot", price=Decimal("12")),
+    ]
+    full = project_resumable_trade_events(events, entry_mode="full")
+    prefix = project_resumable_trade_events(events[:1], entry_mode="full")
+    state = ResumableProjectionState.from_dict(prefix.state.to_dict())
+    tail = project_resumable_trade_events(events[1:], initial_state=state, entry_mode="tail")
+    assert not full.diagnostics
+    assert not tail.diagnostics
+    full = full.to_projection_result()
+    tail = tail.to_projection_result()
+    assert [lot.to_dict() for lot in full.lots] == [lot.to_dict() for lot in tail.lots]
+    lot = full.lots[0]
+    assert lot.shares_opened == Decimal("2.5")
+    assert lot.shares_open == Decimal("1.75")
+    assert lot.shares_closed == Decimal("0.75")
+    assert lot.realized_pnl == Decimal("1.5")
+
+
 def test_projection_stock_full_close_finalizes_and_realizes_pnl() -> None:
     key = _stock_key()
     result = project_trade_events(
