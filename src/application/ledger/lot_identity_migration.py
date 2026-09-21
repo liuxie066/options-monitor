@@ -858,7 +858,13 @@ def _scan_lot_payloads(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         identity,
         "fields_json",
     ]
-    for name in ("account", "source_event_id", "expiration", "strike", "multiplier"):
+    for name in (
+        "account",
+        "source_event_id",
+        "expiration",
+        "strike",
+        "multiplier",
+    ):
         selected.append(name if name in columns else f"NULL AS {name}")
     order = f" ORDER BY {key_column}" if key_column else ""
     rows: list[dict[str, Any]] = []
@@ -1174,23 +1180,32 @@ def _resolve_asset_types_from_replay(
         return resolved, resolution, {"status": "unavailable", "mismatch_count": 0}
 
     families = _event_layer_strategy_families(conn)
-    normalized = []
+    comparable = []
     try:
-        for row in resolved:
+        for original, row in zip(rows, resolved, strict=True):
             lot_id = str(row["lot_id"] or row["record_id"] or "").strip()
-            aligned = _aligned_lot_payload(
-                row["fields"],
-                row,
-                _family_for_row(row, families),
+            fields = original["fields"] or {}
+            if isinstance(fields, Mapping) and isinstance(
+                fields.get("contract_key"), Mapping
+            ):
+                fields = _aligned_lot_payload(
+                    row["fields"],
+                    row,
+                    _family_for_row(row, families),
+                )
+                if not _non_empty(fields.get("open_event_id")):
+                    fields["open_event_id"] = row["source_event_id"]
+                contract = fields.setdefault("contract_key", {})
+                canonical_contract = replayed[lot_id].get("contract_key", {})
+                for key in ("option_type", "expiration_ymd"):
+                    if key not in contract and canonical_contract.get(key) in (None, ""):
+                        contract[key] = canonical_contract.get(key)
+            comparable.append(
+                {
+                    "record_id": lot_id,
+                    "fields": fields,
+                }
             )
-            aligned["open_event_id"] = row["source_event_id"]
-            contract = aligned.setdefault("contract_key", {})
-            canonical_contract = replayed[lot_id].get("contract_key", {})
-            contract["asset_type"] = replayed[lot_id]["asset_type"]
-            for key in ("option_type", "expiration_ymd"):
-                if key not in contract and canonical_contract.get(key) in (None, ""):
-                    contract[key] = canonical_contract.get(key)
-            normalized.append({"record_id": lot_id, "fields": aligned})
     except RuntimeError:
         return resolved, resolution, {"status": "unavailable", "mismatch_count": 0}
     comparison = compare_projection_lots(
@@ -1198,7 +1213,7 @@ def _resolve_asset_types_from_replay(
             {"lot_id": lot_id, "fields": fields}
             for lot_id, fields in replayed.items()
         ],
-        current_lots=normalized,
+        current_lots=comparable,
         diagnostics=[],
     )
     mismatches = sum(

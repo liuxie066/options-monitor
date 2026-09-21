@@ -114,10 +114,12 @@ def _restore_legacy_flat_keys(path: Path) -> None:
                     "expiration": _legacy_expiration_ms(
                         contract_key.get("expiration_ymd")
                     ),
+                    "expiration_ymd": contract_key.get("expiration_ymd"),
                     "strike": contract_key.get("strike"),
                     "contracts": fields.get("contracts_opened"),
                     "premium": fields.get("premium_open"),
                     "opened_at": fields.get("opened_at_ms"),
+                    "source_event_id": fields.get("open_event_id"),
                 }
             )
             if str(fields.get("status") or "").strip().lower() == "close":
@@ -143,6 +145,25 @@ def _restore_legacy_flat_keys(path: Path) -> None:
                 ),
             )
         conn.commit()
+
+
+def _strip_converged_shape(fields: dict) -> None:
+    """Leave the flat payload vocabulary present in the frozen legacy store."""
+
+    for key in (
+        "asset_type",
+        "contract_key",
+        "open_event_id",
+        "lot_id",
+        "last_event_id",
+        "close_event_ids",
+        "realized_pnl",
+        "contracts_opened",
+        "premium_open",
+        "opened_at_ms",
+        "position_side",
+    ):
+        fields.pop(key, None)
 
 
 def _lot_option_type(fields: dict) -> str:
@@ -1984,12 +2005,8 @@ def test_legacy_payload_without_asset_type_uses_replay_for_mixed_lots(
     path = _legacy_store(tmp_path)
     _restore_legacy_flat_keys(path)
 
-    def strip_converged_shape(fields: dict) -> None:
-        for key in ("asset_type", "contract_key", "open_event_id"):
-            fields.pop(key, None)
-
     for record_id in _stored_rows(path):
-        _edit_lot_fields(path, record_id, strip_converged_shape)
+        _edit_lot_fields(path, record_id, _strip_converged_shape)
 
     inventory = module.build_lot_identity_migration_inventory(path)
     assert inventory["asset_type_resolution"] == {
@@ -2067,6 +2084,31 @@ def test_apply_refuses_fresh_manifest_when_stored_business_fact_differs(
     assert path.read_bytes() == before
 
 
+def test_apply_refuses_fresh_manifest_when_legacy_stock_fact_differs(
+    tmp_path: Path,
+    repointed_build: None,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _restore_legacy_flat_keys(path)
+    target = next(
+        record_id
+        for record_id, row in _stored_rows(path).items()
+        if row["fields"].get("asset_type") == "stock"
+    )
+
+    def drift_legacy_stock(fields: dict) -> None:
+        fields["shares_open"] = str(Decimal(str(fields["shares_open"])) + 1)
+        _strip_converged_shape(fields)
+
+    _edit_lot_fields(path, target, drift_legacy_stock)
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="fresh replay differs"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
 def test_apply_refuses_fresh_manifest_when_new_shape_business_field_is_missing(
     tmp_path: Path,
     repointed_build: None,
@@ -2080,6 +2122,33 @@ def test_apply_refuses_fresh_manifest_when_new_shape_business_field_is_missing(
     inventory = module.build_lot_identity_migration_inventory(path)
     before = path.read_bytes()
 
+    with pytest.raises(RuntimeError, match="fresh replay differs"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("conflict", ["open_event_id", "contract_asset_type"])
+def test_apply_refuses_new_shape_identity_conflict_without_writes(
+    tmp_path: Path,
+    repointed_build: None,
+    conflict: str,
+) -> None:
+    path = _legacy_store(tmp_path)
+
+    def introduce_conflict(fields: dict) -> None:
+        if conflict == "open_event_id":
+            fields["open_event_id"] = "wrong-event"
+        else:
+            contract = fields["contract_key"]
+            contract["asset_type"] = (
+                "stock" if contract["asset_type"] == "option" else "option"
+            )
+
+    _edit_lot_fields(path, "lot_manual-open-d2ffdb6be1d71922", introduce_conflict)
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    assert "projection_replay_mismatch" in inventory["readiness_reasons"]
     with pytest.raises(RuntimeError, match="fresh replay differs"):
         module.apply_lot_identity_migration(path, inventory)
     assert path.read_bytes() == before
@@ -2497,7 +2566,10 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
 
 @pytest.mark.parametrize('mutation, reason', [
     ("UPDATE position_lots SET expiration = expiration + 1 WHERE expiration IS NOT NULL", 'round trip'),
-    ("UPDATE position_lots SET source_event_id = 'different-event'", 'fresh replay differs'),
+    (
+        "UPDATE position_lots SET source_event_id = 'different-event'",
+        'source_event_id disagrees',
+    ),
     ("UPDATE position_lots SET strike = NULL WHERE expiration IS NOT NULL", 'requires expiration and strike'),
 ])
 def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_build: None, mutation: str, reason: str) -> None:

@@ -543,6 +543,21 @@ def test_cross_shape_comparison_keeps_business_fact_drift_red(
     }
 
 
+@pytest.mark.parametrize(
+    "fact",
+    ["shares_opened", "shares_open", "shares_closed", "cost_basis_total"],
+)
+def test_cross_shape_comparison_keeps_stock_fact_drift_red(fact: str) -> None:
+    stored = {fact: "10"}
+    projected = {"contract_key": {}, fact: "11"}
+
+    detail = compare_payload_face(stored_fields=stored, projected_fields=projected)
+
+    assert detail["value_differences"] == [
+        {"key": fact, "stored": "1E+1", "projected": "11"}
+    ]
+
+
 def test_same_shape_comparison_keeps_fee_derived_realized_pnl_strict(tmp_path: Path) -> None:
     sqlite_path, _config = _build_green_store(tmp_path)
     _mutate_fields(sqlite_path, lambda fields: fields.__setitem__("realized_pnl", "1.000000"))
