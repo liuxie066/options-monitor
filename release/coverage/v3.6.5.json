@@ -1,0 +1,80 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.5",
+  "base": {
+    "tag": "v3.6.4",
+    "commit": "52ac39a74d97a5b84d6dd5688103dfa696654841"
+  },
+  "reviewed_head": "1bebd1921dfc7e0639e83ece129d40bd9374d92e",
+  "commits": [
+    {
+      "sha": "71beea96795a0fc740943f21cdeb84b67e6f67b1",
+      "subject": "feat(ledger): finalize lot identity schema"
+    },
+    {
+      "sha": "98f1526471c6ae2a7721b9111cab83a6209e1608",
+      "subject": "fix(ledger): keep schema guard read-only"
+    },
+    {
+      "sha": "ef43dafed8caf23874002e487de0dfdb77af4cd4",
+      "subject": "chore(quality): refresh retired column registry"
+    },
+    {
+      "sha": "1bebd1921dfc7e0639e83ece129d40bd9374d92e",
+      "subject": "Merge pull request #338 from liuxie066/codex/lot-identity-r2"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Finalized position-lot storage on canonical `lot_id`, rejecting ordinary writes to unmigrated stores while retaining legacy access only in explicit migration and audit paths and closing the production migration window.",
+      "commits": [
+        "71beea96795a0fc740943f21cdeb84b67e6f67b1",
+        "98f1526471c6ae2a7721b9111cab83a6209e1608"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made `lot-identity-migration apply --dry-run` a read-only preview and preserved the historical Wheel `stock_lot_id` payload contract after the final schema cutover.",
+      "commits": [
+        "71beea96795a0fc740943f21cdeb84b67e6f67b1"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ef43dafed8caf23874002e487de0dfdb77af4cd4",
+      "reason": "Generated retired-column registry synchronization for the active-WAL regression test; no additional runtime behavior beyond the mapped schema-guard change."
+    },
+    {
+      "commit": "1bebd1921dfc7e0639e83ece129d40bd9374d92e",
+      "reason": "Merge commit for PR #338; user-visible behavior is covered by the mapped source commits and release notes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "71beea96795a0fc740943f21cdeb84b67e6f67b1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/338"
+      ]
+    },
+    {
+      "commit": "98f1526471c6ae2a7721b9111cab83a6209e1608",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/338"
+      ]
+    },
+    {
+      "commit": "ef43dafed8caf23874002e487de0dfdb77af4cd4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/338"
+      ]
+    },
+    {
+      "commit": "1bebd1921dfc7e0639e83ece129d40bd9374d92e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/338"
+      ]
+    }
+  ]
+}
