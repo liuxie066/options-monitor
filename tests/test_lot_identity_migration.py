@@ -231,6 +231,41 @@ def _run_apply(path: Path, **kwargs: object) -> dict[str, object]:
     return module.apply_lot_identity_migration(path, inventory, **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _lot_identity_window_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Carry the window token the machinery tests run behind.
+
+    ``apply`` refuses to run while ``LOT_IDENTITY_WINDOW_ENABLEMENT`` is unset;
+    the rest of this module exercises the migration machinery itself, so it
+    runs armed. The unarmed refusal is pinned by
+    ``test_apply_refuses_while_the_window_is_not_enabled``, which clears the
+    token again.
+    """
+
+    monkeypatch.setattr(module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
+
+
+def test_apply_refuses_while_the_window_is_not_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No window token on the build: refuse before opening the store.
+
+    The manifest checks all pass on this store — the refusal must not depend
+    on them, and must not so much as open a connection: the file keeps the
+    exact bytes it had.
+    """
+
+    monkeypatch.setattr(module, "LOT_IDENTITY_WINDOW_ENABLEMENT", None)
+    path = _legacy_store(tmp_path)
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="not enabled on this build"):
+        module.apply_lot_identity_migration(path, inventory)
+
+    assert path.read_bytes() == before
+
+
 # --- the shape pin -----------------------------------------------------------
 
 

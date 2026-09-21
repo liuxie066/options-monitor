@@ -309,6 +309,16 @@ _NOTE_KV_RECONSTRUCTION = (
 _DEFERRED_COLUMN_REBUILD_REASON = "column_contract_precedes_rebuild"
 _DEFERRED_LOT_SHAPE_REASON = "read_side_compatibility_window_open"
 
+#: ``apply`` refuses to run until the D1–D4 window batch is explicitly enabled.
+#: The batch is a controlled-window operation: it writes the store even when the
+#: manifest checks pass, so "the operator passed --apply --yes" is not
+#: authorization enough between the release that lands this guard and the
+#: window itself. Arming is a reviewed commit that sets this to the window's
+#: authorization token. ``None`` — the value every such intermediate build
+#: carries — means "not enabled", and the refusal fires before any connection
+#: to the store is opened.
+LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = None
+
 #: The inventory keys that move when the *writer* open path adds the identity
 #: carrier to a store that predates it (``repository_projection_schema``'s
 #: ``_ensure_position_projection_schema``, reached from ``repository_core``'s
@@ -1121,6 +1131,14 @@ def apply_lot_identity_migration(
 ) -> dict[str, Any]:
     """Run the gated part of D1–D4 and itemize the part this batch may not run."""
 
+    if not LOT_IDENTITY_WINDOW_ENABLEMENT:
+        raise RuntimeError(
+            "lot-identity apply is not enabled on this build: the D1-D4 window "
+            "batch runs only inside an authorized migration window. Arming it is "
+            "a reviewed commit that sets "
+            "lot_identity_migration.LOT_IDENTITY_WINDOW_ENABLEMENT to that "
+            "window's authorization token; this build carries none."
+        )
     supplied = _validate_manifest(manifest, schema=INVENTORY_SCHEMA)
     path = _store_path(sqlite_path)
     implementation, _timing = _loaded_implementation()
