@@ -114,6 +114,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from domain.domain.money import canonical_decimal_text, quantize_money
 from src.application.ledger.event_codec import trade_event_application_payload
 from src.application.ledger.publisher import (
     project_stored_trade_events_to_position_lots,
@@ -462,8 +463,12 @@ def _cross_shape_payload(fields: dict[str, Any]) -> dict[str, Any]:
         value = normalized.get(key)
         if key in _NUMERIC_FACTS and value not in (None, ""):
             try:
-                value = str(Decimal(str(value)).normalize())
-            except InvalidOperation:
+                value = (
+                    canonical_decimal_text(quantize_money(value))
+                    if key == "premium"
+                    else str(Decimal(str(value)).normalize())
+                )
+            except (InvalidOperation, ValueError):
                 pass
         out[key] = value
     return out
