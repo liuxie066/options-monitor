@@ -321,17 +321,17 @@ class RepositoryCoreMixin:
         if not self.db_path.is_file():
             return
         from .lot_parity_probe import (
-            _CANNOT_OPEN_MARKER,
             _connect_read_only,
             _has_wal_sidecars,
         )
 
-        try:
-            conn = _connect_read_only(self.db_path, immutable=False)
-        except sqlite3.OperationalError as exc:
-            if _CANNOT_OPEN_MARKER not in str(exc) or _has_wal_sidecars(self.db_path):
-                raise
-            conn = _connect_read_only(self.db_path, immutable=True)
+        recovery_artifacts_exist = _has_wal_sidecars(self.db_path) or Path(
+            f"{self.db_path}-journal"
+        ).exists()
+        conn = _connect_read_only(
+            self.db_path,
+            immutable=not recovery_artifacts_exist,
+        )
         try:
             tables = {
                 str(row[0])

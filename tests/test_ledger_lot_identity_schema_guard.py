@@ -24,6 +24,32 @@ def test_final_wal_copy_without_sidecars_reopens(tmp_path: Path) -> None:
     assert reopened.count_position_lots() == 0
 
 
+def test_active_wal_schema_is_not_hidden_by_the_settled_copy_read_mode(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "active.sqlite3"
+    with sqlite3.connect(path) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "CREATE TABLE position_lots "
+            "(record_id TEXT PRIMARY KEY, fields_json TEXT NOT NULL)"
+        )
+        writer.commit()
+        assert Path(f"{path}-wal").exists()
+        with sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True) as stale:
+            tables = {
+                str(row[0])
+                for row in stale.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        assert "position_lots" not in tables
+
+        with pytest.raises(RuntimeError, match="legacy schema"):
+            SQLiteOptionPositionsRepository(path, initialize=False)
+
+
 @pytest.mark.parametrize(
     "position_lots_ddl",
     [
