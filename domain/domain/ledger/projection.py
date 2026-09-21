@@ -1258,8 +1258,8 @@ def _apply_close_event(
                 message="close event contracts exceed target lot contracts_open",
                 details={
                     "target_lot_id": target_lot_id,
-                    "contracts_requested": event.contracts,
-                    "contracts_open": lot_open_quantity(lot),
+                    "contracts_requested": str(event.contracts) if lot_is_stock(lot) else event.contracts,
+                    "contracts_open": str(lot_open_quantity(lot)) if lot_is_stock(lot) else lot_open_quantity(lot),
                 },
             )
         )

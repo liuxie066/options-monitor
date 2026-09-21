@@ -330,7 +330,7 @@ def validate_trade_event(event: TradeEvent) -> list[LedgerDiagnostic]:
                 severity="error",
                 code="contracts_must_be_positive",
                 message="contracts must be > 0",
-                details={"contracts": event.contracts},
+                details={"contracts": str(event.contracts) if event.asset_type == "stock" else event.contracts},
             )
         )
     if event.event_type in TARGET_LOT_EVENT_TYPES and not event.target_lot_id:

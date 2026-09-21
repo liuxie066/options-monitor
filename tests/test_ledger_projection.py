@@ -509,3 +509,18 @@ def test_projection_stock_rejects_oversized_close_without_partial_mutation() -> 
     assert lots["lot_stock"].status == "open"
     assert lots["lot_stock"].shares_open == 100.0
     assert lots["lot_stock"].shares_closed == 0.0
+
+
+def test_stock_quantity_failure_diagnostics_are_json_serializable() -> None:
+    import json
+
+    opened = _stock_event(event_id="stock-open", event_type="open", contract_key=_stock_key(),
+                         contracts=Decimal("0.5"), event_time_ms=1000, lot_id="stock-lot")
+    for quantity, code in ((Decimal("-0.1"), "contracts_must_be_positive"),
+                           (Decimal("0.75"), "close_contracts_exceed_open")):
+        closed = _stock_event(event_id="stock-close", event_type="close", contract_key=_stock_key(),
+                             contracts=quantity, event_time_ms=2000, target_lot_id="stock-lot")
+        result = project_trade_events([opened, closed])
+        diagnostic = next(item for item in result.diagnostics if item.code == code)
+        assert json.loads(json.dumps(diagnostic.to_dict()))["code"] == code
+        assert result.lots[0].shares_open == Decimal("0.5")
