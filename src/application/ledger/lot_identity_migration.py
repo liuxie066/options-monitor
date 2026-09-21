@@ -342,7 +342,7 @@ _DEFERRED_REPOINT_REASON = "live_sql_repointing_precedes_rebuild"
 #: authorization token. ``None`` — the value every such intermediate build
 #: carries — means "not enabled", and the refusal fires before any connection
 #: to the store is opened.
-LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = None
+LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = "liuxie-incus-2026-09-22-final-shape"
 
 #: The two columns the rebuild retires: D1's derived ``expiration`` mirror and
 #: D2's legacy identity name. §9.5 M2 makes their removal *one* rebuild.
