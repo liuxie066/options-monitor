@@ -91,6 +91,7 @@ from src.application.ledger.order_fee_semantics import (
     futu_order_namespace_issue,
     is_unexecuted_expire_close,
     option_contract_identity,
+    order_fee_currency_matches,
     zero_option_fee_lifecycle_reason,
 )
 from src.application.ledger.queries import (
@@ -328,6 +329,7 @@ __all__ = [
     "is_unexecuted_expire_close",
     "option_contract_identity",
     "zero_option_fee_lifecycle_reason",
+    "order_fee_currency_matches",
     "futu_order_namespace_issue",
     "broker_external_event_key",
     "reconcile_normalized_execution_order_identity",

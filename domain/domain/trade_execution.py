@@ -767,30 +767,43 @@ def _finite_decimal(value: Any) -> Decimal | None:
     return number if number.is_finite() else None
 
 
-def ledger_event_economic_fingerprint(event: dict[str, Any]) -> tuple[Any, ...]:
-    """Compare allocated event economics independently of the per-lot quantity."""
+def _stored_event_economic_fields(event: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility read boundary for flat and nested historical ledger rows."""
     key = event.get("contract_key") if isinstance(event.get("contract_key"), dict) else {}
     raw = event.get("raw_payload") if isinstance(event.get("raw_payload"), dict) else {}
-    position_side = event.get("position_side") or key.get("position_side")
-    if not position_side:
-        # §9.2 step 3: contract keys no longer carry the position side (only
-        # legacy persisted rows still do), so derive it from the trade side.
-        position_side = derive_position_side(
-            event.get("event_type"), event.get("side") or raw.get("side")
-        )
+    side = event.get("side") or raw.get("side")
+    return {
+        **event,
+        "broker": event.get("broker") or key.get("broker"),
+        "account": event.get("account") or key.get("account") or raw.get("internal_account"),
+        "symbol": event.get("symbol") or key.get("underlying_symbol"),
+        "option_type": event.get("option_type") or key.get("option_type"),
+        "position_side": event.get("position_side") or key.get("position_side")
+        or derive_position_side(event.get("event_type"), side),
+        "side": side,
+        "strike": event.get("strike", key.get("strike")),
+        "expiration_ymd": event.get("expiration_ymd") or key.get("expiration_ymd"),
+        "multiplier": event.get("multiplier", raw.get("multiplier")),
+        "currency": event.get("currency") or raw.get("currency"),
+    }
+
+
+def ledger_event_economic_fingerprint(event: dict[str, Any]) -> tuple[Any, ...]:
+    """Compare allocated event economics independently of the per-lot quantity."""
+    fields = _stored_event_economic_fields(event)
     return (
-        str(event.get("event_type") or "").lower(),
-        str(event.get("broker") or key.get("broker") or "").lower(),
-        str(event.get("account") or key.get("account") or raw.get("internal_account") or "").lower(),
-        str(event.get("symbol") or key.get("underlying_symbol") or "").upper(),
-        str(event.get("option_type") or key.get("option_type") or "").lower(),
-        str(position_side or "").lower(),
-        str(event.get("side") or raw.get("side") or "").lower(),
-        _finite_decimal(event.get("strike", key.get("strike"))),
-        str(event.get("expiration_ymd") or key.get("expiration_ymd") or ""),
-        _positive_int(event.get("multiplier", raw.get("multiplier"))),
-        _finite_decimal(event.get("price")),
-        str(event.get("currency") or raw.get("currency") or "").upper(),
+        str(fields.get("event_type") or "").lower(),
+        str(fields.get("broker") or "").lower(),
+        str(fields.get("account") or "").lower(),
+        str(fields.get("symbol") or "").upper(),
+        str(fields.get("option_type") or "").lower(),
+        str(fields.get("position_side") or "").lower(),
+        str(fields.get("side") or "").lower(),
+        _finite_decimal(fields.get("strike")),
+        str(fields.get("expiration_ymd") or ""),
+        _positive_int(fields.get("multiplier")),
+        _finite_decimal(fields.get("price")),
+        str(fields.get("currency") or "").upper(),
     )
 
 
@@ -805,11 +818,7 @@ def _source_economics_match_event(event: dict[str, Any]) -> bool:
     raw = event.get("raw_payload") or {}
     if not _declared_execution_quantities(event):
         return False
-    key = event.get("contract_key") or {}
-    actual = {**key, "symbol": key.get("underlying_symbol"), **event}
-    actual["side"] = event.get("side") or raw.get("side")
-    actual["multiplier"] = event.get("multiplier", raw.get("multiplier"))
-    actual["currency"] = event.get("currency") or raw.get("currency")
+    actual = _stored_event_economic_fields(event)
     effect = str(event.get("event_type") or "").lower()
     if effect in {"expire_close", "assignment", "exercise"}:
         effect = "close"
@@ -936,3 +945,50 @@ def _normalized_values(values: Iterable[Any]) -> set[str]:
         for text in [str(value or "").strip()]
         if text
     }
+
+
+def require_same_execution(stored: dict[str, Any], incoming: dict[str, Any]) -> None:
+    if execution_identity_from_input(stored) != execution_identity_from_input(incoming):
+        raise ValueError("trade_execution_identity_conflict")
+    before = execution_economic_content(stored)
+    after = execution_economic_content(incoming)
+    require_same_execution_content(before, after)
+
+
+def require_same_execution_content(before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
+    if before["errors"] or after["errors"]:
+        raise ValueError("legacy_execution_evidence_required")
+    if before["economic"] != after["economic"] or conflicting_execution_associations(before, after):
+        raise ValueError("trade_execution_economic_conflict")
+
+
+def execution_application_conflicts(
+    execution_id: str, content: Mapping[str, Any], events: Iterable[Mapping[str, Any]],
+    *, allow_legacy_identity: bool = False,
+) -> list[str]:
+    """Arbitrate durable application associations without repository access."""
+    incoming = content.get("associations") or {}
+    conflicts: set[str] = set()
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        raw = event if event.get("stock_event_id") else event.get("raw_payload") or {}
+        if not isinstance(raw, Mapping):
+            continue
+        execution = raw.get("execution_input") or {}
+        stored_id = execution_identity_from_input(execution)
+        if stored_id != execution_id and not (allow_legacy_identity and not stored_id):
+            continue
+        effect = str(event.get("event_type") or "").lower()
+        if effect in {"close", "expire_close", "assignment", "exercise", "sale"}:
+            effect = "close"
+        if effect in {"open", "close"} and incoming.get("position_effect") not in (None, effect):
+            conflicts.add("position_effect")
+        associations = {
+            "external_order_id": raw.get("order_id") or execution.get("external_order_id"),
+            "external_order_namespace": raw.get("external_order_namespace") or execution.get("external_order_namespace"),
+        }
+        conflicts.update(conflicting_execution_associations(
+            {"associations": associations}, content,
+        ))
+    return sorted(conflicts)

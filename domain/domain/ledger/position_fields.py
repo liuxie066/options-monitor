@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import math
 from typing import Any
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -196,10 +197,7 @@ def _required_positive_int(value: Any, field_name: str) -> int:
 
 
 def _short_call_locked_shares(multiplier: float, contracts: int) -> int:
-    raw_locked = Decimal(str(multiplier)) * Decimal(int(contracts))
-    if raw_locked != raw_locked.to_integral_value():
-        raise ValueError("underlying_share_locked requires integer contracts * multiplier")
-    return int(raw_locked)
+    return contract_share_quantity(contracts, multiplier)
 
 
 def parse_note_kv(note: str, key: str) -> str:
@@ -227,7 +225,7 @@ def merge_note(note: str | None, kv: dict[str, str]) -> str:
 
 
 def calc_cash_secured(strike: float, multiplier: float, contracts: int | float) -> float:
-    return float(strike) * float(multiplier) * int(float(contracts))
+    return float(strike) * contract_share_quantity(contracts, multiplier)
 
 
 def _contract_key(fields: dict[str, Any]) -> dict[str, Any]:

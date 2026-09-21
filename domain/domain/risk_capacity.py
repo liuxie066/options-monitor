@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Callable, Mapping, Sequence
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
@@ -352,7 +353,10 @@ def compute_short_call_locked_shares(
     multiplier_v = _to_float(multiplier)
     if multiplier_v is None or multiplier_v <= 0:
         return None
-    return max(0, int(multiplier_v * open_contracts))
+    try:
+        return contract_share_quantity(open_contracts, multiplier_v)
+    except ValueError:
+        return None
 
 
 def revalidate_opening_share_coverage(
@@ -489,7 +493,10 @@ def compute_short_put_cash_secured(
         if strike_v is None or multiplier_v is None or multiplier_v <= 0:
             return None
         basis_contracts = total_contracts if total_contracts > 0 else open_contracts
-        cash_secured = strike_v * multiplier_v * float(basis_contracts)
+        try:
+            cash_secured = strike_v * contract_share_quantity(basis_contracts, multiplier_v)
+        except ValueError:
+            return None
 
     if total_contracts > 0 and open_contracts < total_contracts:
         cash_secured = float(cash_secured) / float(total_contracts) * float(open_contracts)
@@ -577,7 +584,7 @@ def allocate_opening_share_capacity(
         result = {
             **row,
             "requested_contracts": max(0, requested),
-            "requested_shares": max(0, requested * multiplier),
+            "requested_shares": contract_share_quantity(requested, multiplier) if multiplier > 0 else 0,
             "granted_contracts": 0,
             "granted_shares": 0,
             "capacity_before": None,
@@ -617,11 +624,11 @@ def allocate_opening_share_capacity(
             remaining[key] = eligible - occupied - reserved
         before = remaining[key]
         granted = min(requested, before // multiplier)
-        after = before - granted * multiplier
+        after = before - contract_share_quantity(granted, multiplier)
         remaining[key] = after
         result.update(
             granted_contracts=granted,
-            granted_shares=granted * multiplier,
+            granted_shares=contract_share_quantity(granted, multiplier),
             capacity_before=before,
             capacity_after=after,
             allocation_status=("allocated" if granted else "blocked"),
@@ -666,7 +673,7 @@ def withdraw_opening_share_capacity_grants(
         claim_id = str(row.get("claim_id") or "").strip()
         granted = 0 if claim_id in rejected else int(row.get("granted_contracts") or 0)
         multiplier = int(row.get("multiplier") or 0)
-        granted_shares = granted * multiplier
+        granted_shares = contract_share_quantity(granted, multiplier)
         after = before - granted_shares
         if min(before, granted, multiplier, granted_shares, after) < 0:
             raise ValueError("opening share capacity withdrawal is invalid")
@@ -710,7 +717,10 @@ def _cash_claim_reservation(
             or 1
         )
         if None not in {strike, multiplier, contracts}:
-            amount = float(strike) * float(multiplier) * float(contracts)
+            try:
+                amount = float(strike) * contract_share_quantity(contracts, multiplier)
+            except ValueError:
+                return None
     if not currency or amount is None or amount <= 0:
         return None
     return currency, amount
@@ -943,7 +953,10 @@ def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> lis
             pool_key = (account, capacity_scope, symbol.lower())
             pool = share_pools.get(pool_key)
             multiplier = _to_float(row.get("multiplier"))
-            required = multiplier * contracts if multiplier is not None and multiplier > 0 else None
+            try:
+                required = contract_share_quantity(contracts, multiplier)
+            except (TypeError, ValueError):
+                required = None
             unit = "shares"
         result.update(capacity_before=pool, capacity_required=required, capacity_unit=unit)
         if pool is None:

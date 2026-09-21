@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.fees import FeeBasis, fee_fact_for_event
 from domain.domain.ledger.identity import ContractKey, position_key_for
@@ -330,11 +331,11 @@ def _realized_pnl_delta(
     actual_fee_amount: Decimal | None,
 ) -> Decimal:
     contracts = int(event.contracts)
-    multiplier = to_decimal(lot.multiplier, field_name="multiplier")
+    shares = contract_share_quantity(contracts, lot.multiplier)
     if lot.position_side == "short":
-        gross = (lot.premium_open - event.price) * contracts * multiplier
+        gross = (lot.premium_open - event.price) * shares
     else:
-        gross = (event.price - lot.premium_open) * contracts * multiplier
+        gross = (event.price - lot.premium_open) * shares
     return gross - to_decimal(actual_fee_amount, field_name="actual_fee_amount")
 
 

@@ -7,6 +7,7 @@ from itertools import product
 from typing import Any, Iterable
 
 from domain.domain.money import quantize_money
+from domain.domain.trade_contract_identity import contract_share_quantity
 
 
 TERMINAL_TYPES = frozenset({"close", "assignment", "exercise", "expire_close"})
@@ -91,7 +92,7 @@ def allocate_stock_settlement(
         multiplier = _decimal_value(
             target.get("multiplier"), field=f"multiplier for {lot_id}", nonnegative=True
         )
-        shares = Decimal(contracts) * multiplier
+        shares = contract_share_quantity(contracts, multiplier)
         if shares <= 0 or shares != int(shares):
             raise ValueError(f"allocated shares for {lot_id} must be a positive integer")
         normalized.append((lot_id, int(shares)))

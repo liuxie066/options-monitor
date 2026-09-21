@@ -7,14 +7,13 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import (
-    ContractKey,
     OptionEconomicAllocation,
     PositionLot,
     TradeEvent,
     fee_fact_for_event,
     fee_fact_from_persisted_evidence,
 )
-from domain.domain.ledger.events import validate_trade_event
+from domain.domain.ledger.events import persisted_stock_settlement, validate_trade_event
 from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.ledger.position_fields import (
     LEGACY_POSITION_LOT_PATCH_FIELDS,
@@ -30,7 +29,9 @@ from domain.domain.option_position_identity import (
     normalize_currency,
     normalize_option_type,
 )
-from domain.domain.trade_contract_identity import normalize_trade_side
+from domain.domain.trade_contract_identity import (
+    normalize_trade_side, contract_share_quantity, stock_settlement_side,
+)
 from domain.domain.performance.models import (
     FeeComponent,
     OptionInstrumentKey,
@@ -201,20 +202,8 @@ def _event_close_type(event: dict[str, Any]) -> str:
 def _event_stock_settlement(event: dict[str, Any]) -> dict[str, Any]:
     payload = _event_payload(event)
     raw = payload.get("stock_settlement")
-    return raw if isinstance(raw, dict) else {}
+    return persisted_stock_settlement(raw)
 
-
-def _settlement_stock_side(
-    close_type: str,
-    option_type: str,
-    position_side: str,
-) -> str | None:
-    return {
-        ("assignment", "put", "short"): "buy",
-        ("assignment", "call", "short"): "sell",
-        ("exercise", "call", "long"): "buy",
-        ("exercise", "put", "long"): "sell",
-    }.get((close_type, option_type, position_side))
 
 def _voided_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
@@ -234,27 +223,10 @@ def _valid_void_target_event_id(event: dict[str, Any]) -> str | None:
     if not isinstance(raw_contract_key, dict) or event.get("event_time_ms") in (None, ""):
         return None
     try:
-        decoded = TradeEvent(
-            event_id=str(event.get("event_id") or "").strip(),
-            event_type="void",
-            event_time_ms=int(event.get("event_time_ms") or 0),
-            contract_key=ContractKey.from_values(
-                broker=raw_contract_key.get("broker"),
-                account=raw_contract_key.get("account"),
-                underlying_symbol=raw_contract_key.get("underlying_symbol") or raw_contract_key.get("symbol"),
-                option_type=raw_contract_key.get("option_type"),
-                strike=raw_contract_key.get("strike"),
-                expiration_ymd=raw_contract_key.get("expiration_ymd") or raw_contract_key.get("expiration"),
-            ),
-            contracts=int(event.get("contracts") or 0),
-            price=float(event.get("price") or 0.0),
-            currency=str(event.get("currency") or ""),
-            source=str(event.get("source") or event.get("source_name") or ""),
-            multiplier=float(event.get("multiplier") or 0.0),
-            fees=float(event.get("fees") or 0.0),
-            target_event_id=target,
-            raw_payload=dict(event.get("raw_payload") or {}),
-        )
+        decoded = TradeEvent.from_dict({
+            **event,
+            "multiplier": event.get("multiplier") or 0,
+        })
     except Exception:
         return None
     if any(item.severity == "error" for item in validate_trade_event(decoded)):
@@ -644,7 +616,9 @@ def _attribute_covered_calls(
         opened_at = int(call.get("opened_at") or 0)
         contracts = int(call.get("contracts") or 0)
         multiplier = int(call.get("multiplier") or 0)
-        required_shares = contracts * multiplier
+        if contracts < 0 or multiplier <= 0:
+            continue
+        required_shares = contract_share_quantity(contracts, multiplier)
         if opened_at <= 0 or required_shares <= 0:
             continue
         realized_rows = realized_by_open.get(open_id, [])
@@ -746,12 +720,12 @@ def _attribute_covered_calls(
             )
             continue
         intervals = [
-            (closed_at, quantity * multiplier)
+            (closed_at, contract_share_quantity(quantity, multiplier))
             for closed_at, quantity in sorted(closed_contracts_by_time.items())
             if closed_at > opened_at
         ]
         if remaining > 0:
-            intervals.append((as_of_ms + 1, remaining * multiplier))
+            intervals.append((as_of_ms + 1, contract_share_quantity(remaining, multiplier)))
         lot = candidates[0]
         lot_id = str(lot.get("stock_lot_id") or "")
         staged_reservations = {lot_id: list(reservations.get(lot_id, []))}
@@ -1085,9 +1059,9 @@ def assigned_stock_position_lot_row(
         )
         return row
     open_value = (
-        float(lot.premium_open) * float(lot.multiplier) * int(lot.contracts_open)
+        float(lot.premium_open) * contract_share_quantity(lot.contracts_open, lot.multiplier)
     )
-    mark_value = float(fact.price) * float(lot.multiplier) * int(lot.contracts_open)
+    mark_value = float(fact.price) * contract_share_quantity(lot.contracts_open, lot.multiplier)
     gross = (
         open_value - mark_value
         if lot.position_side == "short"
@@ -1164,7 +1138,7 @@ def project_assigned_stock_lifecycle(
         option_type = normalize_option_type(event.get("option_type")) or "-"
         position_side = _event_position_side(event) or str(event.get("position_side") or "").strip().lower()
         currency = normalize_currency(event.get("currency")) or "USD"
-        expected_stock_side = _settlement_stock_side(
+        expected_stock_side = stock_settlement_side(
             lifecycle_close_type,
             option_type,
             position_side,
@@ -1189,9 +1163,9 @@ def project_assigned_stock_lifecycle(
             )
             continue
         stock = _event_stock_settlement(event)
-        stock_side = normalize_trade_side(stock.get("side") or stock.get("stock_side")) if stock else ""
-        raw_shares = stock.get("shares") if stock.get("shares") not in (None, "") else stock.get("stock_qty")
-        raw_price = stock.get("price") if stock.get("price") not in (None, "") else stock.get("stock_price")
+        stock_side = normalize_trade_side(stock.get("side")) if stock else ""
+        raw_shares = stock.get("shares")
+        raw_price = stock.get("price")
         shares_opened = _positive_integer(raw_shares)
         assignment_price_number = _nonnegative_decimal(raw_price)
         assignment_price = (
@@ -1199,11 +1173,7 @@ def project_assigned_stock_lifecycle(
             if assignment_price_number is not None
             else None
         )
-        raw_stock_fee = (
-            stock.get("fees")
-            if stock.get("fees") is not None
-            else stock.get("fee")
-        )
+        raw_stock_fee = stock.get("fees")
         raw_settlement_at = (
             stock.get("event_time_ms")
             if stock.get("event_time_ms") is not None
@@ -1282,7 +1252,7 @@ def project_assigned_stock_lifecycle(
             """Return the first failing settlement-binding check, or None when all pass."""
             if contracts is None or multiplier is None:
                 return "assignment/exercise contracts or multiplier is invalid"
-            if shares_opened != contracts * multiplier:
+            if shares_opened != contract_share_quantity(contracts, multiplier):
                 return "assignment/exercise stock settlement quantity mismatch"
             if allocation is None or allocation_contracts != contracts:
                 return "assignment/exercise option allocation is incomplete"
@@ -1447,7 +1417,7 @@ def project_assigned_stock_lifecycle(
         # ``stock_cost_basis_total`` is authority and is stored as decimal text.
         assignment_fees_decimal = _money_decimal(assignment_stock_fee.get("amount"))
         assignment_notional_decimal = _money_decimal(
-            to_decimal(assignment_price, field_name="assignment_price") * shares_opened
+            assignment_price_number * shares_opened
         )
         assignment_fees = float(assignment_fees_decimal)
         assignment_notional = float(assignment_notional_decimal)
@@ -1770,11 +1740,14 @@ def project_assigned_stock_lifecycle(
         assigned_contracts = int(lot.get("_assigned_contracts") or 0)
         put_strike = safe_float((open_event or {}).get("strike"))
         put_multiplier = safe_float((open_event or {}).get("multiplier"))
-        put_capital_days = (
-            round(put_strike * put_multiplier * assigned_contracts * put_days, 6)
-            if put_days is not None and put_strike is not None and put_multiplier is not None and assigned_contracts > 0
-            else None
-        )
+        try:
+            put_capital_days = (
+                round(put_strike * contract_share_quantity(assigned_contracts, put_multiplier) * put_days, 6)
+                if put_days is not None and put_strike is not None and put_multiplier is not None and assigned_contracts > 0
+                else None
+            )
+        except (TypeError, ValueError):
+            put_capital_days = None
 
         stock_capital_days = 0.0
         stock_capital_known = assigned_at_ms is not None and inventory_end_at_ms is not None

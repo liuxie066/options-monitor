@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.option_position_identity import normalize_account
 
 
@@ -140,6 +141,13 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
     elif open_fee < 0 or close_fee < 0:
         flags.append("invalid_fee_estimate")
 
+    shares = None
+    if contracts_open is not None and contracts_open > 0 and multiplier is not None and multiplier > 0:
+        try:
+            shares = contract_share_quantity(inp.contracts_open, inp.multiplier)
+        except ValueError:
+            flags.append("invalid_contract_units")
+
     if flags:
         return _result(
             inp,
@@ -148,6 +156,7 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
             flags=flags,
         )
 
+    assert shares is not None
     assert premium is not None
     assert bid is not None
     assert ask is not None
@@ -162,10 +171,10 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
 
     mid = (bid + ask) / 2.0
     spread_ratio = (ask - bid) / mid if mid > 0 else None
-    opening_gross_credit = premium * multiplier * contracts_open
+    opening_gross_credit = premium * shares
     opening_net_credit = opening_gross_credit - open_fee
-    all_in_close_cost = ask * multiplier * contracts_open + close_fee
-    strike_notional = strike * multiplier * contracts_open
+    all_in_close_cost = ask * shares + close_fee
+    strike_notional = strike * shares
     if opening_net_credit <= 0 or strike_notional <= 0 or spread_ratio is None:
         return _result(
             inp,

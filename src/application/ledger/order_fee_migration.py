@@ -18,6 +18,7 @@ from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.ledger.fees import FeeBasis, FeeComponent
 from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_broker
+from domain.domain.trade_contract_identity import stock_settlement_unit_issues
 from domain.domain.performance.cash_conversion import (
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
     MAX_BOOKING_RATE_DISTANCE_MS,
@@ -33,7 +34,7 @@ from src.application.ledger.current_decision_projection import (
 )
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
 from src.application.ledger.lot_resolver import contract_key_from_lot_fields, lot_contract_value
-from src.application.ledger.order_fee_semantics import futu_order_namespace_issue, zero_option_fee_lifecycle_reason
+from src.application.ledger.order_fee_semantics import futu_order_namespace_issue, option_fee_input_identity, order_fee_currency_matches, zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
@@ -153,13 +154,19 @@ def stock_settlement_fee_context(event: TradeEvent) -> dict[str, Any] | None:
             or raw.get("futu_account_id") and stock.get("futu_account_id")
             and str(raw["futu_account_id"]).strip() != str(stock["futu_account_id"]).strip()):
         issue = "stock_settlement_account_conflict"
-    try:
-        shares = to_decimal(stock.get("shares"), field_name="shares")
-        if shares <= 0 or shares != shares.to_integral_value() or shares != event.contracts * event.multiplier:
-            raise ValueError("inconsistent shares")
-        result["shares"] = int(shares)
-    except (TypeError, ValueError):
-        issue = "stock_settlement_quantity_invalid"
+    unit_issues = stock_settlement_unit_issues(
+        terminal_type=event.event_type, option_type=event.contract_key.option_type,
+        position_side=event.position_side, stock_side=str(stock.get("side") or "").lower(),
+        contracts=event.contracts, multiplier=event.multiplier, shares=stock.get("shares"),
+    )
+    if unit_issues:
+        issue = (
+            "stock_settlement_quantity_invalid"
+            if any("quantity" in reason for reason in unit_issues)
+            else unit_issues[0]
+        )
+    else:
+        result["shares"] = int(to_decimal(stock.get("shares"), field_name="shares"))
     if stock.get("currency") and str(stock["currency"]).strip().upper() != event.currency:
         issue = "stock_settlement_currency_conflict"
     result["fee_identity_issue"] = issue
@@ -468,7 +475,7 @@ def _build_units(
             )
             continue
         currencies = {stock_settlement_fee_context(item)["currency"] if settlement_group else _event_currency(item) for item in rows}
-        if currencies != {observation.currency}:
+        if not order_fee_currency_matches(currencies, observation.currency):
             unresolved.append(_order_issue(observation, "order_currency_mismatch"))
             continue
         if settlement_group:
@@ -823,10 +830,7 @@ def _estimated_option_changes(
     first = ordered[0]
     comparable = {
         (
-            item.currency,
-            item.price,
-            item.multiplier,
-            item.position_side,
+            option_fee_input_identity(item),
             item.event_type,
         )
         for item in ordered

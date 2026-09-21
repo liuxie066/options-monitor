@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from domain.domain.expiration_dates import expiration_timestamp_to_ymd
+from domain.domain.money import to_decimal
 from domain.domain.option_position_identity import normalize_option_type, normalize_side
 from domain.domain.symbol_identity import canonical_symbol
 
@@ -248,3 +249,43 @@ def contract_key(
         normalize_contract_expiration(expiration, fallback_raw=expiration_fallback_raw) or "",
         contract_strike_key(strike),
     )
+
+
+def contract_share_quantity(contracts: Any, multiplier: Any) -> int:
+    """Convert canonical option units without truncation or multiplier defaults."""
+    count = to_decimal(contracts, field_name="contracts")
+    unit = to_decimal(multiplier, field_name="multiplier")
+    if count < 0 or count != count.to_integral_value():
+        raise ValueError("contracts must be a nonnegative integer")
+    if unit <= 0 or unit != unit.to_integral_value():
+        raise ValueError("multiplier must be a positive integer")
+    return int(count) * int(unit)
+
+
+def stock_settlement_unit_issues(
+    *, terminal_type: str, option_type: str, position_side: str,
+    stock_side: str, contracts: Any, multiplier: Any, shares: Any,
+) -> tuple[str, ...]:
+    """Check the shared option-to-stock direction and quantity contract."""
+    issues = []
+    expected_side = stock_settlement_side(terminal_type, option_type, position_side)
+    if expected_side is None or stock_side != expected_side:
+        issues.append("stock_settlement_side_mismatch")
+    try:
+        actual = to_decimal(shares, field_name="shares")
+        expected = contract_share_quantity(contracts, multiplier)
+    except (TypeError, ValueError):
+        issues.append("stock_settlement_quantity_invalid")
+    else:
+        if actual <= 0 or actual != expected:
+            issues.append("stock_settlement_quantity_mismatch")
+    return tuple(issues)
+
+
+def stock_settlement_side(terminal_type: str, option_type: str, position_side: str) -> str | None:
+    return {
+        ("assignment", "put", "short"): "buy",
+        ("assignment", "call", "short"): "sell",
+        ("exercise", "call", "long"): "buy",
+        ("exercise", "put", "long"): "sell",
+    }.get((terminal_type, option_type, position_side))

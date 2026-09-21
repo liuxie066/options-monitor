@@ -17,6 +17,7 @@ from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import FeeBasis, FeeComponent, quantize_money, to_decimal
 from src.application.ledger.api import (
     enrich_order_fees,
+    order_fee_currency_matches,
     stock_settlement_fee_context,
     futu_order_namespace_issue,
     zero_option_fee_lifecycle_reason,
@@ -565,7 +566,7 @@ def _select_candidates(
         if quantity <= 0:
             issues.append({**_redacted(base), "reason": "ledger_quantity_invalid"})
             continue
-        if len(currencies) != 1 or next(iter(currencies)) not in {"CNY", "HKD", "USD"}:
+        if not order_fee_currency_matches(currencies):
             issues.append({**_redacted(base), "reason": "order_currency_mismatch"})
             continue
         candidates.append(
@@ -602,7 +603,7 @@ def _admission_problem(item: Mapping[str, Any], terminal: Any) -> str | None:
     provider_currency = str(terminal.get("currency") or "").strip().upper()
     if provider_currency not in {"CNY", "HKD", "USD"}:
         return "order_currency_missing"
-    if provider_currency != str(item.get("currency") or ""):
+    if not order_fee_currency_matches({str(item.get("currency") or "")}, provider_currency):
         return "order_currency_mismatch"
     try:
         dealt_qty = to_decimal(terminal.get("dealt_qty"), field_name="dealt_qty")

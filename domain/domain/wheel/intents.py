@@ -10,7 +10,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.ledger.events import persisted_stock_settlement
 from domain.domain.trade_execution import futu_order_namespace_issue
+from domain.domain.trade_contract_identity import contract_share_quantity
 
 from ._common import (
     WHEEL_EVENT_SCHEMA_V1,
@@ -124,7 +126,7 @@ def _stock_settlement(event: Mapping[str, Any]) -> dict[str, Any]:
     payload = event.get("raw_payload")
     payload = payload if isinstance(payload, Mapping) else {}
     stock = payload.get("stock_settlement")
-    return dict(stock) if isinstance(stock, Mapping) else {}
+    return persisted_stock_settlement(stock)
 
 def wheel_started_event_from_assignment(
     terminal_event: Any,
@@ -154,11 +156,11 @@ def wheel_started_event_from_assignment(
     contracts = _positive_int(event.get("contracts"), "assignment contracts")
     try:
         multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
-        shares = int(stock.get("shares") or stock.get("stock_qty") or 0)
-        price = float(stock.get("price") if stock.get("price") is not None else stock.get("stock_price"))
+        shares = int(stock.get("shares") or 0)
+        price = float(stock.get("price"))
     except (TypeError, ValueError):
         raise ValueError("Wheel start assignment settlement is incomplete") from None
-    if multiplier <= 0 or shares != contracts * multiplier or price < 0:
+    if multiplier <= 0 or shares != contract_share_quantity(contracts, multiplier) or price < 0:
         raise ValueError("Wheel start assignment settlement quantity or price is invalid")
     occurred_at_ms = _positive_int(
         stock.get("event_time_ms") or event.get("event_time_ms"),
@@ -217,12 +219,12 @@ def wheel_called_away_event_from_call_assignment(
     contracts = _positive_int(event.get("contracts"), "assignment contracts")
     try:
         multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
-        shares = int(stock.get("shares") or stock.get("stock_qty") or 0)
+        shares = int(stock.get("shares") or 0)
         before = int((stock_lot_before or {}).get("shares_remaining"))
         after = int((stock_lot_after or {}).get("shares_remaining"))
     except (TypeError, ValueError):
         raise ValueError("Wheel Call assignment stock-lot evidence is incomplete") from None
-    if multiplier <= 0 or shares != contracts * multiplier:
+    if multiplier <= 0 or shares != contract_share_quantity(contracts, multiplier):
         raise ValueError("Wheel Call assignment settlement quantity is invalid")
     if (
         str((stock_lot_before or {}).get("stock_lot_id") or "") != lot_id
@@ -331,7 +333,7 @@ def _coverage_capacity(
         shares_available = int(coverage_fact.get("shares_available_for_cover"))
     except (TypeError, ValueError):
         raise ValueError("Wheel Call available shares are invalid") from None
-    if shares_available < contracts * multiplier:
+    if shares_available < contract_share_quantity(contracts, multiplier):
         raise ValueError("Wheel Call coverage is insufficient")
 
 def build_wheel_intent_capacity_binding(
@@ -399,7 +401,7 @@ def build_wheel_intent_capacity_binding(
             "wheel_branch_id": branch_id,
             "batch_generation_hash": generation_hash,
             "capacity_identity_hash": capacity_identity_hash,
-            "reserved_amount": contracts * multiplier,
+            "reserved_amount": contract_share_quantity(contracts, multiplier),
             "reservation_unit": "shares",
             "currency": None,
         }
@@ -418,7 +420,7 @@ def build_wheel_intent_capacity_binding(
         or final_candidate.get("currency"),
         "cash_reservation_currency",
     ).upper()
-    reserved_amount = round(strike * multiplier * contracts, 6)
+    reserved_amount = round(strike * contract_share_quantity(contracts, multiplier), 6)
     fact_currency = str(
         capacity_fact.get("cash_reservation_currency")
         or capacity_fact.get("currency")
@@ -491,7 +493,7 @@ def _plan_intent_create(
             raise ValueError("Wheel Call candidate symbol mismatch")
         if str(final_candidate.get("stock_lot_id") or "").strip() != intent_owner_id:
             raise ValueError("Wheel Call candidate stock batch mismatch")
-        if int(source.get("shares_remaining") or 0) < contracts * multiplier:
+        if int(source.get("shares_remaining") or 0) < contract_share_quantity(contracts, multiplier):
             raise ValueError("Wheel batch shares are insufficient")
     else:
         strike = _finite_float(final_candidate.get("strike"))
@@ -844,7 +846,7 @@ def _plan_intent_consume(
     if direction == "put":
         consumed_payload["capacity_identity_hash"] = intent_payload.get("capacity_identity_hash")
         consumed_payload["cash_reservation_amount"] = round(
-            float(intent_payload.get("strike") or 0) * multiplier * contracts,
+            float(intent_payload.get("strike") or 0) * contract_share_quantity(contracts, multiplier),
             6,
         )
         consumed_payload["cash_reservation_currency"] = intent_payload.get(

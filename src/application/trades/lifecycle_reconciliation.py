@@ -21,7 +21,7 @@ from domain.domain.lifecycle_allocation import (
 )
 from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
-from domain.domain.trade_contract_identity import derive_trade_side
+from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
     LifecycleAttemptAuditEnvelope,
@@ -1396,27 +1396,11 @@ def _validate_evidence_for_case(
                     "stock_settlement_futu_account_mismatch"
                 )
         stock_side = _stock_side(stock.get("side"))
-        expected_side = {
-            ("assignment", "put", "short"): "buy",
-            ("assignment", "call", "short"): "sell",
-            ("exercise", "call", "long"): "buy",
-            ("exercise", "put", "long"): "sell",
-        }.get((terminal_type, option_type, position_side))
-        if not expected_side or stock_side != expected_side:
-            reasons.add("stock_settlement_side_mismatch")
-        try:
-            shares = Decimal(str(stock.get("shares")))
-            multiplier = Decimal(str(lifecycle_case.get("multiplier") or 100))
-            expected_shares = multiplier * int(evidence["contracts"])
-        except (InvalidOperation, TypeError, ValueError):
-            reasons.add("stock_settlement_quantity_invalid")
-        else:
-            if (
-                not shares.is_finite()
-                or shares <= 0
-                or shares != expected_shares
-            ):
-                reasons.add("stock_settlement_quantity_mismatch")
+        reasons.update(stock_settlement_unit_issues(
+            terminal_type=terminal_type, option_type=option_type, position_side=position_side,
+            stock_side=stock_side, contracts=evidence["contracts"],
+            multiplier=lifecycle_case.get("multiplier"), shares=stock.get("shares"),
+        ))
         stock_symbol = canonical_symbol(stock.get("symbol"))
         if stock_symbol and stock_symbol != canonical_symbol(
             lifecycle_case.get("symbol")

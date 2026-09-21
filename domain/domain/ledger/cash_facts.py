@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from domain.domain.ledger.economics import fee_fact_for_event, fee_fact_from_persisted_evidence
-from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent
+from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, persisted_stock_settlement
 from domain.domain.ledger.fees import FeeBasis, FeeComponent
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_currency
@@ -197,12 +197,13 @@ def _stock_settlement_cash_facts(event: TradeEvent) -> list[TradeCashFact]:
             )
             for kind in ("stock_settlement_cash_gross", "stock_settlement_fee_cash")
         ]
+    raw = persisted_stock_settlement(raw)
     currency = _currency_or_none(raw.get("currency") or event.currency)
     common["currency"] = currency
     try:
-        shares = to_decimal(raw.get("shares", raw.get("stock_qty")), field_name="stock settlement shares")
-        price = to_decimal(raw.get("price", raw.get("stock_price")), field_name="stock settlement price")
-        side = str(raw.get("side") or raw.get("stock_side") or "").strip().lower()
+        shares = to_decimal(raw.get("shares"), field_name="stock settlement shares")
+        price = to_decimal(raw.get("price"), field_name="stock settlement price")
+        side = str(raw.get("side") or "").strip().lower()
         if shares != shares.to_integral_value() or shares <= 0 or price < 0 or side not in {"buy", "sell"}:
             raise ValueError("stock settlement values are invalid")
         principal = quantize_money(price * shares)
@@ -215,7 +216,7 @@ def _stock_settlement_cash_facts(event: TradeEvent) -> list[TradeCashFact]:
         event_id=f"{event.event_id}:stock_settlement",
         component=FeeComponent.STOCK_SETTLEMENT,
         provenance=raw.get("fee_provenance"),
-        compatibility_amount=raw.get("fees", raw.get("fee", 0)),
+        compatibility_amount=raw.get("fees", 0),
     )
     fee_amount = -fee.amount if fee.basis == FeeBasis.ACTUAL and fee.amount is not None and currency else None
     fee_reason = None if fee_amount is not None else fee.reason or "stock settlement fee is unavailable"

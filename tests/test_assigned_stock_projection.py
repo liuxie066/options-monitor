@@ -692,3 +692,17 @@ def test_failed_partial_call_allocation_does_not_publish_earlier_interval() -> N
     assert {row["open_event_id"] for row in report["covered_call_allocations"]} == {"call-b"}
     assert report["assigned_stock_lots"][0]["covered_call_pnl"] == 50
     assert [row["event_id"] for row in report["assigned_stock_review_rows"] if row["status"] == "covered_call_unallocated"] == ["call-a"]
+
+
+def test_assignment_cost_uses_decimal_settlement_price_before_rounding() -> None:
+    report = _base_projection(assignment_payload={
+        "close_type": "assignment",
+        "fee_provenance": {"basis": "actual", "source": "test"},
+        "stock_settlement": {
+            "side": "buy", "shares": 100, "price": "100.00000000499999999",
+            "fees": 0, "fee_provenance": {"basis": "actual", "source": "test"},
+        },
+    })
+    lot = report["assigned_stock_lots"][0]
+    assert lot["stock_cost_basis_total"] == "10000"
+    assert assigned_stock_lot_to_position_lot(lot).cost_basis_total == Decimal("10000")

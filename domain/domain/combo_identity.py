@@ -189,10 +189,10 @@ def build_combo_identity_intent(*, first_leg: dict[str, Any], second_leg: dict[s
         raise ValueError("combo identity intent requires one Funding Put and one Participation Call")
     put_leg = legs[put_indexes[0]]
     call_leg = legs[call_indexes[0]]
-    groups = {_text(item.get("strategy_group_id") or item.get("group_id")) for item in legs}
+    groups = {_text(item.get("strategy_group_id")) for item in legs}
     accounts = {_text(item.get("account"), lower=True) for item in legs}
     symbols = {_text(item.get("symbol"), upper=True) for item in legs}
-    contracts = {_positive_contracts(item.get("contracts") or item.get("contracts_open")) for item in legs}
+    contracts = {_positive_contracts(item.get("contracts")) for item in legs}
     if "" in groups or len(groups) != 1:
         raise ValueError("combo identity intent requires one explicit strategy_group_id")
     if "" in accounts or len(accounts) != 1:
