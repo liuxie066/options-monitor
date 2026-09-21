@@ -47,6 +47,7 @@ from src.application.ledger.lot_parity_probe import (
     WRITER_RAISES_KEY,
     assert_report_path_outside_runtime_state,
     compare_column_face,
+    compare_payload_face,
     derive_stored_row_columns,
     main as probe_main,
     run_lot_parity_probe,
@@ -493,6 +494,26 @@ def test_probe_accepts_v351_flat_payload_and_still_detects_fact_drift(tmp_path: 
     assert _faces(report)["a_payload"]["items"][0]["value_differences"] == [
         {"key": "premium", "stored": "9.99", "projected": "1.23"}
     ]
+
+
+@pytest.mark.parametrize(
+    ("legacy_premium", "canonical_premium"),
+    [
+        (1.8399999999999999, "1.84"),
+        (1.5699999999999998, "1.57"),
+        (1.6099999999999999, "1.61"),
+    ],
+)
+def test_cross_shape_comparison_uses_the_money_contract(
+    legacy_premium: float, canonical_premium: str,
+) -> None:
+    stored = {"premium": legacy_premium}
+    projected = {"contract_key": {}, "premium_open": canonical_premium}
+
+    assert compare_payload_face(stored_fields=stored, projected_fields=projected)["differs"] is False
+
+    stored["premium"] = float(canonical_premium) + 0.01
+    assert compare_payload_face(stored_fields=stored, projected_fields=projected)["differs"] is True
 
 
 @pytest.mark.parametrize(
