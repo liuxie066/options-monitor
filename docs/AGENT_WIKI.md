@@ -602,7 +602,7 @@ identity. Always name the group.
 ./om option-positions --data-config <data.json> lot-identity-migration inventory
 ./om option-positions --data-config <data.json> lot-identity-migration verify
 ./om option-positions --data-config <data.json> lot-identity-migration apply \
-  --manifest <inventory.json> --apply --confirm
+  --manifest <inventory.json>
 ```
 
 `inventory` and `verify` open the store read-only. `inventory` reports the
@@ -622,15 +622,13 @@ the cases an operator must not conflate:
 - `dropped_payload_keys_would_lose_facts` — a non-empty payload key (or a
   `note` KV pair) has no surviving home; `blocking_keys` names them.
 
-`apply` requires the exact frozen manifest and refuses when the store moved on
-since the inventory was taken. One transition is expected rather than a
-divergence: a writer's first open of a store that predates the identity carrier
-adds it, which changes the inventory fingerprint while the store identity stays
-the same. The refusal names that drift; re-run `inventory` against the store as
-it now is (it happens once per store) rather than reaching for a wider manifest.
-`apply` runs only the safe half of the recipe — the identity backfill and the
-`position_id` cleanup — and itemizes the D1/D2/D3 destructive steps as
-`deferred` with their reason. Executing them is not authorized by this document.
+The production migration window is closed. `apply` without `--apply` is a
+read-only preview of the exact frozen manifest; it reports whether that manifest
+would have passed the migration gates. `--apply` is disabled in ordinary builds.
+Repositories now require the final `lot_id` schema and refuse legacy or partial
+`position_lots` / `wheel_events` before an ordinary open can mutate the store.
+Historical `trade_events` remain readable through their compatibility decoder;
+that event compatibility is not permission to reopen legacy database shapes.
 
 #### Option Performance And Portfolio Bridges
 

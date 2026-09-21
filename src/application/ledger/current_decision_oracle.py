@@ -324,7 +324,7 @@ _DECISION_MIGRATION_REQUIRED_TABLES = (
 )
 
 _DECISION_MIGRATION_REQUIRED_INDEXES = (
-    "idx_position_lots_account_record",
+    "idx_position_lots_account_lot",
     "idx_assigned_stock_events_account_time",
     "idx_trade_lifecycle_cases_account_status",
     "idx_trade_lifecycle_case_targets_account_lot",

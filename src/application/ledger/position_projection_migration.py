@@ -41,6 +41,7 @@ from src.application.ledger.repository import (
     _ensure_position_projection_schema,
     _position_lot_contract_scalars,
 )
+from src.application.ledger.repository_schema import initialize_ledger_connection
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.ledger.sqlite_row_codec import FINAL_POSITION_LOT_COLUMNS, position_lots_reads_face_b, position_lots_use_lot_id
 
@@ -68,6 +69,7 @@ from src.application.ledger.repository_trade_schema import (
 )
 from src.application.source_identity import source_commit_sha
 from src.infrastructure.private_storage import (
+    connect_private_sqlite,
     private_path,
     secure_sqlite_artifacts,
 )
@@ -168,8 +170,13 @@ def _repository(path: Path) -> SQLiteOptionPositionsRepository:
 def _write_connection(path: Path) -> Iterator[sqlite3.Connection]:
     repo = _repository(path)
     with repo._writer_lock():
-        conn = repo._connect()
+        conn = connect_private_sqlite(path)
         try:
+            initialize_ledger_connection(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            if str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower() != "wal":
+                raise RuntimeError("SQLite WAL mode is required for the option ledger")
+            conn.execute("PRAGMA synchronous=NORMAL")
             yield conn
         finally:
             try:

@@ -175,6 +175,53 @@ def test_projection_migration_writes_require_apply_and_confirmation(
     }
 
 
+def test_lot_identity_apply_defaults_to_read_only_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "inventory.json"
+    manifest.write_text('{"schema_version":"test"}\n', encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "preview_lot_identity_migration_apply",
+        lambda path, payload: {
+            "dry_run": True,
+            "write_applied": False,
+            "path": str(path),
+            "input_schema": payload["schema_version"],
+        },
+    )
+
+    assert cli_mod.main(
+        _om_cli_args(
+            data_config,
+            "lot-identity-migration",
+            "apply",
+            "--manifest",
+            manifest,
+            "--dry-run",
+        )
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "dry_run": True,
+        "write_applied": False,
+        "path": str(sqlite_path),
+        "input_schema": "test",
+    }
+
+
 @pytest.mark.parametrize(
     ("command", "function_name"),
     (

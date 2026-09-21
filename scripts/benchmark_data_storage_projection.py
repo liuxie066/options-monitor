@@ -1123,7 +1123,7 @@ def _phase_3a_lot_fingerprint(db_path: Path) -> dict[str, Any]:
     payload_bytes = 0
     with sqlite3.connect(db_path) as conn:
         cursor = conn.execute(
-            "SELECT record_id,fields_json FROM position_lots ORDER BY record_id"
+            "SELECT lot_id,fields_json FROM position_lots ORDER BY lot_id"
         )
         for record_id, fields_json in cursor:
             payload = _canonical_json_bytes([str(record_id), str(fields_json)])
@@ -1565,8 +1565,7 @@ def _phase_3a_index_migration(base: Mapping[str, Any]) -> dict[str, Any]:
         try:
             for index in (
                 "idx_trade_events_account_time",
-                "idx_position_lots_account_expiration",
-                "idx_position_lots_account_record",
+                "idx_position_lots_account_lot",
             ):
                 conn.execute(f"DROP INDEX IF EXISTS {index}")
             conn.commit()

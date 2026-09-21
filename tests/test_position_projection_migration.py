@@ -61,10 +61,10 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
               updated_at_ms INTEGER NOT NULL
             );
             CREATE TABLE position_lots (
-              record_id TEXT PRIMARY KEY,
+              lot_id TEXT NOT NULL PRIMARY KEY,
+              account TEXT,
               fields_json TEXT NOT NULL,
               source_event_id TEXT,
-              expiration INTEGER,
               strike REAL,
               multiplier REAL,
               updated_at_ms INTEGER NOT NULL
@@ -169,8 +169,8 @@ def test_migration_write_connection_fails_closed_when_wal_is_unavailable(
 
     path = _legacy_store(tmp_path)
     connection = Connection()
-    monkeypatch.setattr(repository_core, "connect_private_sqlite", lambda _path: connection)
-    monkeypatch.setattr(repository_core, "initialize_ledger_connection", lambda _conn: None)
+    monkeypatch.setattr(module, "connect_private_sqlite", lambda _path: connection)
+    monkeypatch.setattr(module, "initialize_ledger_connection", lambda _conn: None)
 
     with pytest.raises(RuntimeError, match="SQLite WAL mode is required"):
         with module._write_connection(path):
@@ -442,12 +442,12 @@ def test_verify_detects_lot_drift(tmp_path: Path) -> None:
     path = _migrated(tmp_path)
     with sqlite3.connect(path) as conn:
         row = conn.execute(
-            "SELECT fields_json FROM position_lots WHERE record_id='lot-1'"
+            "SELECT fields_json FROM position_lots WHERE lot_id='lot-1'"
         ).fetchone()
         fields = json.loads(row[0])
         fields["contracts_open"] = 99
         conn.execute(
-            "UPDATE position_lots SET fields_json=? WHERE record_id='lot-1'",
+            "UPDATE position_lots SET fields_json=? WHERE lot_id='lot-1'",
             (json.dumps(fields, ensure_ascii=False, sort_keys=True),),
         )
 
@@ -573,13 +573,13 @@ def test_status_reports_generation_mismatch_and_fails_closed(tmp_path: Path) -> 
     assert "source_generation_mismatch:lx" in status["reasons"]
 
 
-def test_status_reports_unmigrated_store_without_querying_missing_columns(
+def test_status_reports_unmigrated_projection_store_without_querying_rows(
     tmp_path: Path,
 ) -> None:
     status = module.position_projection_migration_status(_legacy_store(tmp_path))
 
     assert status["readiness"] == "not_ready"
-    assert "position_lots_account_column_missing" in status["reasons"]
+    assert status["reasons"] == ["source_state_missing", "trusted_checkpoint_missing"]
     assert status["fingerprint_scope"] == {"rows": 0, "fields_json_bytes": 0}
 
 

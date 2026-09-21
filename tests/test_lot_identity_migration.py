@@ -218,16 +218,36 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
     )
 
     with closing(sqlite3.connect(path)) as conn, conn:
-        conn.execute("UPDATE position_lots SET lot_id = NULL")
+        conn.execute("ALTER TABLE position_lots RENAME COLUMN lot_id TO record_id")
+        conn.execute("ALTER TABLE position_lots ADD COLUMN lot_id TEXT")
+        conn.execute("ALTER TABLE position_lots ADD COLUMN expiration INTEGER")
+        conn.execute("ALTER TABLE wheel_events RENAME COLUMN lot_id TO stock_lot_id")
+        conn.execute("DROP INDEX idx_position_lots_account_lot")
+        conn.execute(
+            "CREATE INDEX idx_position_lots_account_record "
+            "ON position_lots(account, record_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_position_lots_account_expiration "
+            "ON position_lots(account, expiration, record_id)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_position_lots_lot_id ON position_lots(lot_id)"
+        )
         for lot_id, raw in conn.execute(
             "SELECT record_id, fields_json FROM position_lots"
         ).fetchall():
             fields = json.loads(raw)
             fields["position_id"] = f"LEGACY-{lot_id}"
+            expiration = _legacy_expiration_ms(
+                (fields.get("contract_key") or {}).get("expiration_ymd")
+            )
             conn.execute(
-                "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+                "UPDATE position_lots SET fields_json = ?, expiration = ? "
+                "WHERE record_id = ?",
                 (
                     json.dumps(fields, ensure_ascii=False, sort_keys=True, allow_nan=False),
+                    expiration,
                     lot_id,
                 ),
             )
@@ -239,14 +259,18 @@ def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
     """Rig one lot's ``fields_json`` the way a degraded store carries it."""
 
     with closing(sqlite3.connect(path)) as conn, conn:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")
+        }
+        identity = "record_id" if "record_id" in columns else "lot_id"
         raw = conn.execute(
-            "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
+            f"SELECT {identity}, fields_json FROM position_lots WHERE {identity} = ?",
             (record_id,),
         ).fetchone()
         fields = json.loads(raw[1])
         mutate(fields)
         conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+            f"UPDATE position_lots SET fields_json = ? WHERE {identity} = ?",
             (json.dumps(fields, ensure_ascii=False, sort_keys=True), raw[0]),
         )
         conn.commit()
@@ -315,6 +339,36 @@ def test_apply_refuses_while_the_window_is_not_enabled(
         module.apply_lot_identity_migration(path, inventory)
 
     assert path.read_bytes() == before
+
+
+def test_apply_preview_treats_backfill_as_work_not_a_blocker(tmp_path: Path) -> None:
+    path = _legacy_store(tmp_path)
+    inventory = module.build_lot_identity_migration_inventory(path)
+
+    preview = module.preview_lot_identity_migration_apply(path, inventory)
+
+    assert inventory["readiness_reasons"] == ["lot_id_backfill_pending"]
+    assert preview["migration_ready"] is True
+    assert preview["would_apply"] is True
+    assert preview["blocking_reasons"] == []
+
+
+def test_apply_preview_blocks_a_payload_fact_with_no_carrier(tmp_path: Path) -> None:
+    path = _legacy_store(tmp_path)
+    _edit_lot_fields(
+        path,
+        _put_lot_record_id(path),
+        lambda fields: fields.update({"strategy": "wheel"}),
+    )
+    inventory = module.build_lot_identity_migration_inventory(path)
+
+    preview = module.preview_lot_identity_migration_apply(path, inventory)
+
+    assert preview["migration_ready"] is False
+    assert preview["would_apply"] is False
+    assert preview["blocking_reasons"] == [
+        "dropped_payload_keys_would_lose_facts"
+    ]
 
 
 @pytest.fixture
@@ -584,9 +638,7 @@ def test_a_family_key_the_open_event_carries_is_reconstructible(tmp_path: Path) 
 
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        record_id = str(
-            conn.execute("SELECT record_id FROM position_lots").fetchone()["record_id"]
-        )
+        record_id = str(conn.execute("SELECT lot_id FROM position_lots").fetchone()["lot_id"])
     _edit_lot_fields(
         path,
         record_id,
@@ -685,9 +737,13 @@ def test_yield_mode_is_reconstructed_from_an_adjust_event(tmp_path: Path) -> Non
     lot_id = _put_lot_record_id(path)
     mode = "income_upside_enhancement"
     _edit_lot_fields(path, lot_id, lambda fields: fields.update({"yield_enhancement_mode": mode}))
-    repo = SQLiteOptionPositionsRepository(path)
-    repo.upsert_trade_event(
-        TradeEvent(
+    from src.application.ledger.position_projection_migration import (
+        _repository,
+        _write_connection,
+    )
+
+    repo = _repository(path)
+    event = TradeEvent(
             event_id="adjust-yield-mode",
             event_type="adjust",
             event_time_ms=4_000,
@@ -701,8 +757,10 @@ def test_yield_mode_is_reconstructed_from_an_adjust_event(tmp_path: Path) -> Non
             source="test",
             target_lot_id=lot_id,
             raw_payload={"target_lot_id": lot_id, "patch": {"yield_enhancement_mode": mode}},
-        )
     )
+    with _write_connection(path) as conn:
+        repo.upsert_trade_event(event, conn=conn)
+        conn.commit()
 
     classification = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
     assert classification["reconstructible"]["yield_enhancement_mode"]["rows_non_empty"] == 1
@@ -1211,17 +1269,7 @@ def test_apply_refuses_a_stale_or_foreign_manifest(tmp_path: Path) -> None:
     assert all(row["lot_id"] is None for row in _stored_rows(path).values())
 
 
-def test_open_path_schema_transition_needs_a_fresh_inventory(tmp_path: Path) -> None:
-    """The one drift this migration causes itself, named rather than mislabelled.
-
-    ``_ensure_position_projection_schema`` runs from the ordinary writer open
-    path, so the first writer to touch a pre-carrier store adds ``lot_id`` and
-    its index — which is exactly the state ``inventory`` reports as
-    ``not_ready`` on purpose. That moves the fingerprint while ``store_identity``
-    stays equal, so an inventory taken before that first open is refused. Blaming
-    "another store" would send the operator after the wrong problem; the refusal
-    has to say what moved, and re-inventorying has to be the whole recovery.
-    """
+def test_open_path_refuses_pre_carrier_store_without_mutating_it(tmp_path: Path) -> None:
 
     path = _legacy_store(tmp_path)
     with sqlite3.connect(path) as conn:
@@ -1231,21 +1279,15 @@ def test_open_path_schema_transition_needs_a_fresh_inventory(tmp_path: Path) -> 
 
     frozen = module.build_lot_identity_migration_inventory(path)
     assert "lot_id_column_missing" in frozen["readiness_reasons"]
+    before = path.read_bytes()
 
-    # An ordinary writer open that writes no data at all.
-    SQLiteOptionPositionsRepository(path)
+    with pytest.raises(RuntimeError, match="legacy schema"):
+        SQLiteOptionPositionsRepository(path)
+    assert path.read_bytes() == before
 
-    with pytest.raises(ValueError, match="is stale: the store changed") as error:
-        module.apply_lot_identity_migration(path, frozen)
-    assert "column_contract" in str(error.value)
-    assert "re-run inventory" in str(error.value)
-    assert all(row["lot_id"] is None for row in _stored_rows(path).values())
-
-    # Re-inventorying the store as it now is, is the whole recovery — and it does
-    # not take a second writer open, because the transition is once per store.
-    result = _run_apply(path)
+    result = module.apply_lot_identity_migration(path, frozen)
     assert {step["step"]: step["status"] for step in result["steps"]} == {
-        "ensure_lot_id_column": "already_present",
+        "ensure_lot_id_column": "applied",
         "backfill_lot_id": "applied",
         "strip_position_id_from_fields_json": "applied",
         "switch_primary_key_to_lot_id_and_drop_record_id": "deferred",
@@ -1391,45 +1433,19 @@ def test_quantity_unit_declares_a_carrier_only_where_one_exists() -> None:
     assert module._lot_shape_keys("Stock") == module.LOT_SHAPE_KEYS_COMMON
 
 
-def test_both_lot_readers_agree_on_a_null_identity(tmp_path: Path) -> None:
-    """``str(None)`` is the string "None" — a fabricated identity, not an absent one.
-
-    Two readers emit the same row: ``position_lot_row_to_record`` on the write
-    path and ``read_only_evidence._read_position_lots`` on the read-only evidence
-    surface. ``record_id`` is a TEXT primary key, which SQLite permits to be NULL,
-    and the post-rebuild shape reaches the same state by having no such column at
-    all. A reader that fabricates ``"None"`` makes one row carry two different
-    identities depending on who asks, and ``lot_id`` inherits the fallback, so it
-    diverges in the same way.
-    """
+def test_final_lot_identity_rejects_null(tmp_path: Path) -> None:
 
     path = tmp_path / "null-identity.sqlite3"
     SQLiteOptionPositionsRepository(path)
     with sqlite3.connect(path) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute(
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            conn.execute(
             """
-            INSERT INTO position_lots (record_id, account, fields_json, updated_at_ms)
+            INSERT INTO position_lots (lot_id, account, fields_json, updated_at_ms)
             VALUES (NULL, 'lx', ?, 1)
             """,
-            (json.dumps({"account": "lx"}),),
-        )
-        conn.commit()
-        row = conn.execute(
-            """
-            SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-            FROM position_lots
-            """
-        ).fetchone()
-
-    codec_record = position_lot_row_to_record(row)
-    [evidence_lot] = open_trade_reconciliation_evidence_repo(path).list_position_lots()
-
-    assert codec_record["record_id"] == ""
-    assert evidence_lot["record_id"] == ""
-    # Both keys, because ``lot_id`` is the fallback for the same NULL.
-    assert codec_record["lot_id"] == ""
-    assert evidence_lot["lot_id"] == ""
+                (json.dumps({"contract_key": {"account": "lx"}}),),
+            )
 
 
 def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> None:
@@ -1657,7 +1673,7 @@ def test_the_closed_gates_receipt_carries_the_pinned_key_set(
         assert row["fields"]["contract_key"]["account"]
         assert row["fields"]["contract_key"]["underlying_symbol"]
     assert _primary_key(path) == "record_id"
-    assert _columns(path) == [
+    assert set(_columns(path)) == {
         "record_id",
         "account",
         "fields_json",
@@ -1667,7 +1683,7 @@ def test_the_closed_gates_receipt_carries_the_pinned_key_set(
         "multiplier",
         "updated_at_ms",
         "lot_id",
-    ]
+    }
 
 
 # --- D1/D2: the rebuild -------------------------------------------------------
@@ -2396,9 +2412,8 @@ def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, statu
     assert report["projection"]["mismatch_count"] == 1
 
 
-@pytest.mark.parametrize("rebuilt", [False, True], ids=["legacy", "rebuilt"])
 def test_r1_rebuilt_store_reopens_and_preserves_projection(
-    tmp_path: Path, repointed_build: None, rebuilt: bool,
+    tmp_path: Path, repointed_build: None,
 ) -> None:
     from src.application.ledger.repository_common import PositionLotRecord
     from src.application.ledger.sqlite_row_codec import position_lots_use_lot_id
@@ -2406,6 +2421,7 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
     path = _legacy_store(tmp_path)
     from domain.domain.wheel.events import build_wheel_event
 
+    _run_apply(path)
     wheel_repo = SQLiteOptionPositionsRepository(path)
     wheel_events = [build_wheel_event(
         event_id=f"wheel-rename-{index}", account="lx",
@@ -2429,12 +2445,6 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
     wheel_events.append(extra)
     with pytest.raises(ValueError, match="manifest is stale.*wheel_identity"):
         module.apply_lot_identity_migration(path, stale_manifest)
-    if rebuilt:
-        receipt = _run_apply(path)
-        assert receipt["wheel_identity_rename"]["read_back"] == "equal"
-        assert receipt["wheel_identity_rename"]["rows"] == 3
-    else:
-        run_position_projection_forced_full(SQLiteOptionPositionsRepository(path), [])
     # Recreate through the ordinary open path, not just the migration's
     # translated trigger SQL, so both R1 DDL branches are exercised.
     with sqlite3.connect(path) as conn:
@@ -2461,8 +2471,8 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
     from src.application.ledger.lot_parity_probe import run_lot_parity_probe
     parity = run_lot_parity_probe(sqlite_path=path)
     assert parity["green"] is True
-    assert parity.get("retired_columns", []) == (["expiration"] if rebuilt else [])
-    assert ("expiration" not in parity["derived_columns"]) is rebuilt
+    assert parity.get("retired_columns", []) == ["expiration"]
+    assert "expiration" not in parity["derived_columns"]
     records = repo.list_position_lots()
     evidence_repo = open_trade_reconciliation_evidence_repo(path)
     assert {row["lot_id"]: row["fields"] for row in evidence_repo.list_position_lots()} == {
@@ -2534,10 +2544,10 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
     assert decision["readiness"] == "ready", decision
     assert decision["repair"]["missing_indexes"] == []
     with sqlite3.connect(path) as conn:
-        assert position_lots_use_lot_id(conn) is rebuilt
+        assert position_lots_use_lot_id(conn) is True
     SQLiteOptionPositionsRepository(path)
-    assert ('record_id' not in _columns(path)) is rebuilt
-    assert ('expiration' not in _columns(path)) is rebuilt
+    assert 'record_id' not in _columns(path)
+    assert 'expiration' not in _columns(path)
 
     # The batch-adjust public write path must keep group collision protection
     # after the storage identity changes, both for payload and event carriers.
@@ -2593,7 +2603,7 @@ def test_r1_partial_final_shape_is_not_healed_on_open(tmp_path: Path, repointed_
         for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'position_lots'").fetchall():
             conn.execute(f'DROP TRIGGER "{name}"')
         conn.execute('ALTER TABLE position_lots DROP COLUMN multiplier')
-    with pytest.raises(ValueError, match='unsupported or partial shape'):
+    with pytest.raises(RuntimeError, match='unsupported or partial lot-identity schema'):
         SQLiteOptionPositionsRepository(path)
     assert 'multiplier' not in _columns(path)
     assert 'expiration' not in _columns(path)

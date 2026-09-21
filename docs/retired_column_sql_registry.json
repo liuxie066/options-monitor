@@ -1,7 +1,8 @@
 {
   "exempt_modules": [
     "src/application/ledger/lot_identity_migration.py",
-    "src/application/ledger/lot_parity_probe.py"
+    "src/application/ledger/lot_parity_probe.py",
+    "src/application/ledger/position_projection_migration.py"
   ],
   "retired_columns": {
     "position_lots": [
@@ -13,607 +14,17 @@
     ]
   },
   "scripts": {
-    "by_kind": {
-      "index_name": 3,
-      "read": 2
-    },
-    "by_module": {
-      "scripts/benchmark_current_decision_projection_slice2.py": 2,
-      "scripts/benchmark_data_storage_projection.py": 3
-    },
-    "digest": "sha256:29850d7acea22d37",
-    "statements": 5
+    "by_kind": {},
+    "by_module": {},
+    "digest": "sha256:4f53cda18c2baa0c",
+    "statements": 0
   },
   "src": {
-    "by_kind": {
-      "ddl": 10,
-      "index_name": 15,
-      "read": 17,
-      "schema_helper": 1,
-      "write": 6
-    },
-    "by_module": {
-      "src/application/ledger/current_decision_migration.py": 1,
-      "src/application/ledger/current_decision_oracle.py": 1,
-      "src/application/ledger/manual_trades.py": 1,
-      "src/application/ledger/position_projection_migration.py": 7,
-      "src/application/ledger/read_only_evidence.py": 1,
-      "src/application/ledger/repository_assigned_stock.py": 1,
-      "src/application/ledger/repository_core.py": 5,
-      "src/application/ledger/repository_projection.py": 8,
-      "src/application/ledger/repository_projection_schema.py": 7,
-      "src/application/ledger/repository_projection_tail.py": 16,
-      "src/application/ledger/sqlite_row_codec.py": 1
-    },
-    "detail": [
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/current_decision_migration.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/current_decision_oracle.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:9808a49757695702",
-        "kind": "read",
-        "module": "src/application/ledger/manual_trades.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:2533bf5b4afc0c98",
-        "kind": "index_name",
-        "module": "src/application/ledger/position_projection_migration.py",
-        "occurrences": 2,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/position_projection_migration.py",
-        "occurrences": 2,
-        "tables": []
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:08a18e936798b71b",
-        "kind": "read",
-        "module": "src/application/ledger/position_projection_migration.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:3f82fe90a41f58b1",
-        "kind": "read",
-        "module": "src/application/ledger/position_projection_migration.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:fde0f8e8075836b8",
-        "kind": "read",
-        "module": "src/application/ledger/position_projection_migration.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:112aa4a949f4e07e",
-        "kind": "read",
-        "module": "src/application/ledger/read_only_evidence.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "stock_lot_id"
-        ],
-        "digest": "sha256:aa32ce63d24f0c0f",
-        "kind": "write",
-        "module": "src/application/ledger/repository_assigned_stock.py",
-        "occurrences": 1,
-        "tables": [
-          "wheel_events"
-        ]
-      },
-      {
-        "columns": [
-          "stock_lot_id"
-        ],
-        "digest": "sha256:4318f3c4c19eb537",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_core.py",
-        "occurrences": 1,
-        "tables": [
-          "wheel_events"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:53a9f1cd00b07bf7",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_core.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:77c5cf64f84cc313",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_core.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:481b578c7f1b9f72",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_core.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:5570ac5c24e3838a",
-        "kind": "schema_helper",
-        "module": "src/application/ledger/repository_core.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:600ec5dd6f9829f9",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:e127ac6364f59574",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:2533bf5b4afc0c98",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:c4de6ba3dd25d0a7",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:fde0f8e8075836b8",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:85efd73292ea5dd6",
-        "kind": "write",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:bcbd848f39b3c9d4",
-        "kind": "write",
-        "module": "src/application/ledger/repository_projection.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:1db55addc09d05cf",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:a90268930d130e48",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:b3ee5f2c21a78fdc",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:eb62e146516f2a69",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:fea50e0a430d6900",
-        "kind": "ddl",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:2533bf5b4afc0c98",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": []
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:2533bf5b4afc0c98",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 2,
-        "tables": []
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:4705ae2499089b72",
-        "kind": "index_name",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 2,
-        "tables": []
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:0316be086ed9cbdb",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:0a21b814f917372f",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:1f77b6a43fa94ed3",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 2,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:2fbeb0c7d711b58f",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:6ecfabfa6adbce9b",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:906c26f8d69d736f",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:92f8e71eef34664e",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:ccf7e57f7a709379",
-        "kind": "read",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:2993be41278daa7a",
-        "kind": "write",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:bf3da6241e607360",
-        "kind": "write",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:c6b8c0f17fdfee97",
-        "kind": "write",
-        "module": "src/application/ledger/repository_projection_tail.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:24a86222a7c0b3cb",
-        "kind": "read",
-        "module": "src/application/ledger/sqlite_row_codec.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      }
-    ],
-    "digest": "sha256:3ed84e28bc32d09e",
-    "dynamic_sql": [
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:2e17af0755d5ce73",
-        "kind": "dynamic",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:d3f2b9942a10355b",
-        "kind": "dynamic",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
-          "expiration",
-          "record_id"
-        ],
-        "digest": "sha256:e55d96210a4ee8d6",
-        "kind": "dynamic",
-        "module": "src/application/ledger/repository_projection_schema.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      }
-    ],
+    "by_kind": {},
+    "by_module": {},
+    "detail": [],
+    "digest": "sha256:4f53cda18c2baa0c",
+    "dynamic_sql": [],
     "exempt_dynamic": [],
     "exempt_hits": [
       {
@@ -696,36 +107,88 @@
         "tables": [
           "position_lots"
         ]
+      },
+      {
+        "columns": [
+          "expiration"
+        ],
+        "digest": "sha256:2533bf5b4afc0c98",
+        "kind": "index_name",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 2,
+        "tables": []
+      },
+      {
+        "columns": [
+          "record_id"
+        ],
+        "digest": "sha256:4705ae2499089b72",
+        "kind": "index_name",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 2,
+        "tables": []
+      },
+      {
+        "columns": [
+          "expiration",
+          "record_id"
+        ],
+        "digest": "sha256:08a18e936798b71b",
+        "kind": "read",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
+          "expiration",
+          "record_id"
+        ],
+        "digest": "sha256:3f82fe90a41f58b1",
+        "kind": "read",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
+          "record_id"
+        ],
+        "digest": "sha256:fde0f8e8075836b8",
+        "kind": "read",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
       }
     ],
-    "statements": 44
+    "statements": 0
   },
   "tests": {
     "by_kind": {
-      "ddl": 13,
-      "index_name": 7,
-      "read": 28,
-      "write": 40
+      "ddl": 15,
+      "read": 10,
+      "write": 17
     },
     "by_module": {
       "tests/perf_position_projection_s1.py": 2,
       "tests/quality/test_retired_column_sql_registry.py": 1,
-      "tests/test_ledger_current_decision_projection.py": 2,
-      "tests/test_ledger_sqlite_workflows.py": 12,
+      "tests/test_ledger_lot_identity_schema_guard.py": 1,
+      "tests/test_ledger_sqlite_workflows.py": 2,
       "tests/test_lot_identity_migration.py": 19,
-      "tests/test_lot_parity_probe.py": 11,
-      "tests/test_position_lot_payload_shape.py": 2,
-      "tests/test_position_projection_migration.py": 3,
-      "tests/test_position_projection_publication.py": 22,
-      "tests/test_position_projection_runtime.py": 4,
-      "tests/test_projection_verify.py": 1,
+      "tests/test_lot_parity_probe.py": 10,
+      "tests/test_position_lot_payload_shape.py": 1,
+      "tests/test_position_projection_publication.py": 1,
       "tests/test_research_storage_baseline.py": 1,
-      "tests/test_trade_event_pagination.py": 1,
-      "tests/test_trade_receipt_readback.py": 3,
-      "tests/test_trades_state_reconcile.py": 1,
+      "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:7b8b1de0ce6cd7d2",
-    "statements": 71
+    "digest": "sha256:3c921bba2a0309b7",
+    "statements": 38
   }
 }

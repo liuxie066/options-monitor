@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Improvements
+- Finalized position-lot storage on canonical `lot_id`, rejecting ordinary writes to unmigrated stores while retaining legacy access only in explicit migration and audit paths and closing the production migration window.
+
+### Bug Fixes
+- Made `lot-identity-migration apply --dry-run` a read-only preview and preserved the historical Wheel `stock_lot_id` payload contract after the final schema cutover.
+
 ## 3.6.4 - 2026-09-22
 
 ### Bug Fixes

@@ -39,7 +39,9 @@ def _rows(reader: Any, conn: sqlite3.Connection, account: str) -> dict[str, Any]
     events = reader._read_trade_events(conn, strict=True)
     lots = reader._read_position_lots(conn, strict=True)
     wheels = [normalize_wheel_event({
-        **dict(row), "payload": json.loads(row["payload_json"]),
+        **dict(row),
+        "stock_lot_id": row["lot_id"],
+        "payload": json.loads(row["payload_json"]),
     }) for row in conn.execute("SELECT * FROM wheel_events ORDER BY occurred_at_ms, event_id")]
     stocks = reader._read_json_query_from_conn(
         conn, "SELECT event_json FROM assigned_stock_events ORDER BY trade_time_ms, stock_event_id",

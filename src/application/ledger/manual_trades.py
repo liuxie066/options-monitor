@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_use_lot_id
-
 import hashlib
 import json
 from typing import Any, Sequence
@@ -881,18 +879,13 @@ def persist_manual_adjust_events(
             if str(item.get("strategy_group_id") or "").strip()
         }
         if desired_group_ids:
-            final_shape = position_lots_use_lot_id(conn)
             collision = conn.execute(
                 """SELECT lot_id FROM position_lots
                 WHERE json_extract(fields_json, '$.strategy_group_id') IN (SELECT value FROM json_each(?))
-                  AND lot_id NOT IN (SELECT value FROM json_each(?)) ORDER BY lot_id LIMIT 1"""
-                if final_shape else
-                """SELECT record_id FROM position_lots
-                WHERE json_extract(fields_json, '$.strategy_group_id') IN (SELECT value FROM json_each(?))
-                  AND record_id NOT IN (SELECT value FROM json_each(?)) ORDER BY record_id LIMIT 1""",
+                  AND lot_id NOT IN (SELECT value FROM json_each(?)) ORDER BY lot_id LIMIT 1""",
                 (json.dumps(sorted(desired_group_ids)), json.dumps(sorted(seen_lot_ids))),
             ).fetchone()
-            if collision is not None and final_shape:
+            if collision is not None:
                 collision = {"record_id": collision["lot_id"]}
             if collision is None:
                 # The family's home is the event layer (§2 RECONSTRUCTIBLE), so a

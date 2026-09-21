@@ -137,7 +137,6 @@ from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import (
     POSITION_LOTS_COLUMN_CLASSIFICATION,
-    _ensure_position_projection_schema,
 )
 # The note KV fallback lives in the infrastructure codec; the repository layer
 # reads it through the same helper (``repository_common``'s ``:64``).
@@ -335,15 +334,9 @@ _NOTE_KV_RECONSTRUCTION = (
 #: by the window's R1/R2 split.
 _DEFERRED_REPOINT_REASON = "live_sql_repointing_precedes_rebuild"
 
-#: ``apply`` refuses to run until the D1–D4 window batch is explicitly enabled.
-#: The batch is a controlled-window operation: it writes the store even when the
-#: manifest checks pass, so "the operator passed --apply --yes" is not
-#: authorization enough between the release that lands this guard and the
-#: window itself. Arming is a reviewed commit that sets this to the window's
-#: authorization token. ``None`` — the value every such intermediate build
-#: carries — means "not enabled", and the refusal fires before any connection
-#: to the store is opened.
-LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = "liuxie-incus-2026-09-22-final-shape"
+#: The one-off D1-D4 production window is complete. Ordinary builds keep the
+#: write path disabled; inventory, verification, and dry-run remain read-only.
+LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = None
 
 #: The two columns the rebuild retires: D1's derived ``expiration`` mirror and
 #: D2's legacy identity name. §9.5 M2 makes their removal *one* rebuild.
@@ -414,85 +407,6 @@ RETIRED_COLUMN_REGISTRY_PATH = (
     Path(__file__).resolve().parents[3] / "docs" / "retired_column_sql_registry.json"
 )
 
-# R1 only: exact old-shape statements selected by position_lots_use_lot_id.
-# The core CREATE TABLE is a no-op on an existing table (IF NOT EXISTS).
-# Quality checks bind every entry to the two-shape repository regression in
-# test_r1_rebuilt_store_reopens_and_preserves_projection. They also reject
-# stale entries; --write of the generated registry cannot extend this set.
-# R2 removes these entries together with their old-shape branches after B7.
-R1_POSITION_SQL_EXCEPTIONS: dict[str, frozenset[tuple[str, str, int]]] = {
-    "src/application/ledger/current_decision_migration.py": frozenset({
-        ("index_name", "sha256:4705ae2499089b72", 1),
-    }),
-    "src/application/ledger/current_decision_oracle.py": frozenset({
-        ("index_name", "sha256:4705ae2499089b72", 1),
-    }),
-    "src/application/ledger/manual_trades.py": frozenset({
-        ("read", "sha256:9808a49757695702", 1),
-    }),
-    "src/application/ledger/repository_assigned_stock.py": frozenset({
-        ("write", "sha256:aa32ce63d24f0c0f", 1),
-    }),
-    "src/application/ledger/repository_projection_schema.py": frozenset({
-        ("ddl", "sha256:1db55addc09d05cf", 1),
-        ("ddl", "sha256:a90268930d130e48", 1),
-        ("ddl", "sha256:b3ee5f2c21a78fdc", 1),
-        ("ddl", "sha256:eb62e146516f2a69", 1),
-        ("ddl", "sha256:fea50e0a430d6900", 1),
-        ("index_name", "sha256:2533bf5b4afc0c98", 1),
-        ("index_name", "sha256:4705ae2499089b72", 1),
-        ("dynamic", "sha256:2e17af0755d5ce73", 1),
-        ("dynamic", "sha256:d3f2b9942a10355b", 1),
-        ("dynamic", "sha256:e55d96210a4ee8d6", 1),
-    }),
-    "src/application/ledger/position_projection_migration.py": frozenset({
-        ("index_name", "sha256:2533bf5b4afc0c98", 2),
-        ("index_name", "sha256:4705ae2499089b72", 2),
-        ("read", "sha256:08a18e936798b71b", 1),
-        ("read", "sha256:3f82fe90a41f58b1", 1),
-        ("read", "sha256:fde0f8e8075836b8", 1),
-    }),
-    "src/application/ledger/read_only_evidence.py": frozenset({
-        ("read", "sha256:112aa4a949f4e07e", 1),
-    }),
-    "src/application/ledger/repository_core.py": frozenset({
-        ("ddl", "sha256:4318f3c4c19eb537", 1),
-        ("ddl", "sha256:53a9f1cd00b07bf7", 1),
-        ("ddl", "sha256:77c5cf64f84cc313", 1),
-        ("index_name", "sha256:481b578c7f1b9f72", 1),
-        ("schema_helper", "sha256:5570ac5c24e3838a", 1),
-    }),
-    "src/application/ledger/repository_projection.py": frozenset({
-        ("ddl", "sha256:600ec5dd6f9829f9", 1),
-        ("ddl", "sha256:e127ac6364f59574", 1),
-        ("index_name", "sha256:2533bf5b4afc0c98", 1),
-        ("index_name", "sha256:4705ae2499089b72", 1),
-        ("read", "sha256:c4de6ba3dd25d0a7", 1),
-        ("read", "sha256:fde0f8e8075836b8", 1),
-        ("write", "sha256:85efd73292ea5dd6", 1),
-        ("write", "sha256:bcbd848f39b3c9d4", 1),
-    }),
-    "src/application/ledger/repository_projection_tail.py": frozenset({
-        ("index_name", "sha256:2533bf5b4afc0c98", 2),
-        ("index_name", "sha256:4705ae2499089b72", 2),
-        ("read", "sha256:0316be086ed9cbdb", 1),
-        ("read", "sha256:0a21b814f917372f", 1),
-        ("read", "sha256:1f77b6a43fa94ed3", 2),
-        ("read", "sha256:2fbeb0c7d711b58f", 1),
-        ("read", "sha256:6ecfabfa6adbce9b", 1),
-        ("read", "sha256:906c26f8d69d736f", 1),
-        ("read", "sha256:92f8e71eef34664e", 1),
-        ("read", "sha256:ccf7e57f7a709379", 1),
-        ("write", "sha256:2993be41278daa7a", 1),
-        ("write", "sha256:bf3da6241e607360", 1),
-        ("write", "sha256:c6b8c0f17fdfee97", 1),
-    }),
-    "src/application/ledger/sqlite_row_codec.py": frozenset({
-        ("read", "sha256:24a86222a7c0b3cb", 1),
-    }),
-}
-
-
 def _live_sql_naming_retired_columns() -> tuple[str, ...]:
     """Which live statements of this build still name a retired column.
 
@@ -502,9 +416,8 @@ def _live_sql_naming_retired_columns() -> tuple[str, ...]:
     lists one" are the same fact, checked on every PR and every production
     upgrade. The rebuild's question — "can this build read the rebuilt shape
     back?" — is a statement-level property of the SQL, and the registry answers
-    it per statement, excluding only the exact R1 old-shape exceptions tested
-    on both shapes; the column contract deliberately cannot, because on
-    window day it is still dual-shape.
+    it per statement. The column contract deliberately cannot answer that
+    question because the migration window may still be dual-shape.
 
     Returns one ``"module (kind)"`` descriptor per live statement in the
     ledger's order; empty means the destructive half may run. An unreadable or
@@ -519,10 +432,7 @@ def _live_sql_naming_retired_columns() -> tuple[str, ...]:
         if not isinstance(detail, list) or not isinstance(dynamic, list):
             raise ValueError("statement inventories must be lists")
         return tuple(
-            f"{hit['module']} ({hit['kind']})"
-            for hit in detail + dynamic
-            if (hit["kind"], hit.get("digest"), hit.get("occurrences"))
-            not in R1_POSITION_SQL_EXCEPTIONS.get(hit["module"], ())
+            f"{hit['module']} ({hit['kind']})" for hit in detail + dynamic
         )
     except (OSError, ValueError, KeyError, TypeError):
         return (f"<registry unreadable: {RETIRED_COLUMN_REGISTRY_PATH.name}>",)
@@ -1244,6 +1154,62 @@ def build_lot_identity_migration_inventory(sqlite_path: str | Path) -> dict[str,
     )
 
 
+def preview_lot_identity_migration_apply(
+    sqlite_path: str | Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    supplied = _validate_manifest(manifest, schema=INVENTORY_SCHEMA)
+    current = _validate_manifest(
+        build_lot_identity_migration_inventory(sqlite_path),
+        schema=INVENTORY_SCHEMA,
+    )
+    checks = {
+        "store_identity": supplied.get("store_identity") == current.get("store_identity"),
+        "inventory_fingerprint": supplied.get("inventory_fingerprint")
+        == current.get("inventory_fingerprint"),
+    }
+    reasons = set(current.get("readiness_reasons") or [])
+    blocking_reasons = [
+        reason
+        for reason in (
+            "base_tables_missing",
+            "record_id_column_missing",
+            "lot_asset_type_unresolved",
+        )
+        if reason in reasons
+    ]
+    contract = current.get("column_contract", {}).get("position_lots", {})
+    if "column_contract_open" in reasons and (
+        contract.get("unclassified")
+        or set(contract.get("missing") or ()) - {"lot_id"}
+    ):
+        blocking_reasons.append("column_contract_open")
+    if not _live_sql_naming_retired_columns() and "projection_replay_mismatch" in reasons:
+        blocking_reasons.append("projection_replay_mismatch")
+    dropped = dict(current.get("dropped_key_classification") or {})
+    if dropped.get("lost"):
+        blocking_reasons.append("dropped_payload_keys_would_lose_facts")
+    manifest_matches = all(checks.values())
+    migration_ready = not blocking_reasons
+    apply_enabled = bool(LOT_IDENTITY_WINDOW_ENABLEMENT)
+    return {
+        "schema_version": "lot_identity_migration_apply_preview.v1",
+        "operation": "apply_preview",
+        "dry_run": True,
+        "write_applied": False,
+        "apply_enabled": apply_enabled,
+        "manifest_matches": manifest_matches,
+        "migration_ready": migration_ready,
+        "would_apply": manifest_matches and migration_ready and apply_enabled,
+        "ok": manifest_matches and migration_ready and apply_enabled,
+        "checks": checks,
+        "readiness": current.get("readiness"),
+        "blocking_reasons": blocking_reasons,
+        "pending": current.get("pending"),
+        "dropped_key_classification": dropped,
+    }
+
+
 def verify_lot_identity_migration(sqlite_path: str | Path) -> dict[str, Any]:
     """Read-only content-side verification, with checkpoint reuse forbidden.
 
@@ -1424,6 +1390,15 @@ def _backfill_lot_id(conn: sqlite3.Connection) -> int:
         "UPDATE position_lots SET lot_id = record_id WHERE lot_id IS NULL"
     ).rowcount
     return int(updated or 0)
+
+
+def _ensure_lot_identity_carrier_schema(conn: sqlite3.Connection) -> None:
+    if "lot_id" not in set(_column_names(conn, "position_lots")):
+        conn.execute("ALTER TABLE position_lots ADD COLUMN lot_id TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_lots_lot_id "
+        "ON position_lots(lot_id)"
+    )
 
 
 def _place_carried(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
@@ -2065,7 +2040,7 @@ def apply_lot_identity_migration(
             lot_id_present_before = current["pending"]["d2_lot_id_column"][
                 "column_present"
             ]
-            _ensure_position_projection_schema(conn)
+            _ensure_lot_identity_carrier_schema(conn)
             _fail(failure_hook, "after_schema")
 
             backfilled = _backfill_lot_id(conn)
@@ -2311,5 +2286,6 @@ __all__ = [
     "VERIFY_SCHEMA",
     "apply_lot_identity_migration",
     "build_lot_identity_migration_inventory",
+    "preview_lot_identity_migration_apply",
     "verify_lot_identity_migration",
 ]

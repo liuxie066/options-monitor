@@ -161,6 +161,7 @@ from src.application.ledger.lot_resolver import (
 from src.application.ledger.lot_identity_migration import (
     apply_lot_identity_migration,
     build_lot_identity_migration_inventory,
+    preview_lot_identity_migration_apply,
     verify_lot_identity_migration,
 )
 from src.application.ledger.position_projection_migration import (
@@ -359,6 +360,7 @@ __all__ = [
     "apply_lot_identity_migration",
     "build_position_projection_migration_inventory",
     "build_lot_identity_migration_inventory",
+    "preview_lot_identity_migration_apply",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
     "deactivate_position_projection_checkpoints",

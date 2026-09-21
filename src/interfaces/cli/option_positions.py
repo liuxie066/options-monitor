@@ -40,6 +40,7 @@ from src.application.ledger.api import (
     list_position_rows,
     list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
+    preview_lot_identity_migration_apply,
     position_projection_migration_status,
     record_trade_event_void,
     reconcile_combo_pair_inferences,
@@ -1094,10 +1095,17 @@ def main(argv: list[str] | None = None) -> int:
         args, "lot_identity_migration_cmd", None
     ) == "apply":
         write_control_key = "lot-identity-migration:apply"
-        write_controls[write_control_key] = _high_risk_write_control(
-            args,
-            command_name="option-positions lot-identity-migration apply",
-        )
+        if any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes")):
+            write_controls[write_control_key] = _high_risk_write_control(
+                args,
+                command_name="option-positions lot-identity-migration apply",
+            )
+        else:
+            write_controls[write_control_key] = _resolve_write_control(
+                args,
+                command_name="option-positions lot-identity-migration apply",
+                high_risk=True,
+            )
     elif args.cmd == "lifecycle" and (
         getattr(args, "lifecycle_cmd", None)
         in {
@@ -1212,10 +1220,11 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "verify":
             payload = verify_lot_identity_migration(sqlite_path)
         elif command == "apply":
-            payload = apply_lot_identity_migration(
-                sqlite_path,
-                _load_json_object(_resolve_path_under(args.manifest, base=base)),
-            )
+            manifest = _load_json_object(_resolve_path_under(args.manifest, base=base))
+            if write_controls["lot-identity-migration:apply"]["write_requested"]:
+                payload = apply_lot_identity_migration(sqlite_path, manifest)
+            else:
+                payload = preview_lot_identity_migration_apply(sqlite_path, manifest)
         else:  # pragma: no cover - argparse owns the command set
             raise SystemExit(f"unsupported lot identity migration command: {command}")
         print(json.dumps(payload, ensure_ascii=False, indent=2))

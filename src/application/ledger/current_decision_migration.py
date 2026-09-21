@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_use_lot_id
-
 from contextlib import ExitStack
 
 from .current_decision_common import (
@@ -188,9 +186,6 @@ def _migration_state_summary(
         "SELECT * FROM position_projection_source_state WHERE singleton_id=1"
     ).fetchone()
     required_indexes = set(_DECISION_MIGRATION_REQUIRED_INDEXES)
-    if position_lots_use_lot_id(conn):
-        required_indexes.discard("idx_position_lots_account_record")
-        required_indexes.add("idx_position_lots_account_lot")
     missing_indexes = sorted(required_indexes - indexes)
     missing_triggers = sorted(set(_DECISION_MIGRATION_REQUIRED_TRIGGERS) - triggers)
     assigned_mismatch = sum(

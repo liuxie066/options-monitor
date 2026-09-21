@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_use_lot_id
-
 import json
 import sqlite3
 from contextlib import closing
@@ -112,11 +110,8 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
     ) -> list[dict[str, Any]]:
         if not self._table_exists(conn, "position_lots"):
             return []
-        # Preserve both identity spellings without adding columns on a read-only connection.
-        final_shape = position_lots_use_lot_id(conn)
         rows = conn.execute(
-            "SELECT * FROM position_lots ORDER BY updated_at_ms DESC, lot_id DESC" if final_shape else
-            "SELECT * FROM position_lots ORDER BY updated_at_ms DESC, record_id DESC"
+            "SELECT * FROM position_lots ORDER BY updated_at_ms DESC, lot_id DESC"
         ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -131,13 +126,11 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
                     raise ValueError("stored ledger position lot JSON value must be an object")
                 else:
                     continue
-            lot_id = str(row["lot_id" if final_shape else "record_id"] or "")
-            # Same identity compatibility as the shared codec; fields remain raw.
-            raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
+            lot_id = str(row["lot_id"] or "")
             out.append(
                 {
                     "record_id": lot_id,
-                    "lot_id": str(raw_lot_id).strip() if raw_lot_id not in (None, "") else lot_id,
+                    "lot_id": lot_id,
                     "fields": fields,
                 }
             )
