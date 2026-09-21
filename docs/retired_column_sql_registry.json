@@ -171,14 +171,14 @@
   },
   "tests": {
     "by_kind": {
-      "ddl": 15,
+      "ddl": 16,
       "read": 10,
       "write": 17
     },
     "by_module": {
       "tests/perf_position_projection_s1.py": 2,
       "tests/quality/test_retired_column_sql_registry.py": 1,
-      "tests/test_ledger_lot_identity_schema_guard.py": 1,
+      "tests/test_ledger_lot_identity_schema_guard.py": 2,
       "tests/test_ledger_sqlite_workflows.py": 2,
       "tests/test_lot_identity_migration.py": 19,
       "tests/test_lot_parity_probe.py": 10,
@@ -188,7 +188,7 @@
       "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:3c921bba2a0309b7",
+    "digest": "sha256:d99c77f5ff7c522d",
     "statements": 38
   }
 }
