@@ -142,7 +142,7 @@ def test_stock_quantity_survives_sqlite_and_legacy_integer_events(tmp_path: Path
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "quantity.sqlite3")
     for index, quantity in enumerate((Decimal("2.500000000000000001"), 3)):
         event = _canonical_event(event_id=f"stock-{index}", lot_id=f"stock-lot-{index}", contract_key=_stock_contract_key(),
-                                 asset_type="stock", contracts=quantity, raw_payload={"side": "buy"})
+                                 asset_type="stock", contracts=quantity, fees=Decimal(index), raw_payload={"side": "buy"})
         assert repo.upsert_trade_event(event)
         assert not repo.upsert_trade_event(event)
         stored = next(row for row in repo.list_trade_events() if row["event_id"] == event.event_id)
@@ -158,6 +158,9 @@ def test_stock_quantity_survives_sqlite_and_legacy_integer_events(tmp_path: Path
     lots = {row["lot_id"]: row["fields"] for row in repo.list_position_lots()}
     assert lots["stock-lot-0"]["shares_open"] == "2.500000000000000001"
     assert lots["stock-lot-1"]["shares_open"] == "3"
+    assert lots["stock-lot-0"]["cost_basis_total"] is None
+    assert lots["stock-lot-0"]["realized_pnl"] is None
+    assert lots["stock-lot-1"]["cost_basis_total"] == "4"
 
 
 def test_fractional_option_quantity_is_rejected_without_truncation() -> None:

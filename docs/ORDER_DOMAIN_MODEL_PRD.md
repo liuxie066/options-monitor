@@ -66,7 +66,7 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 
 - `asset_type ∈ {stock, option}` 是资产判别；`quantity_unit ∈ {share, contract}` 由 `asset_type` 派生。
 - 期权特有字段：`option_type`/`strike`(Decimal)/`expiration_ymd`/`multiplier`(int)/`deliverable`(可空)。
-- 股票特有字段：`cost_basis_total`(Decimal，含费总额)；每股成本 `cost_basis_per_share = cost_basis_total / shares_opened` 为派生值，不存储。
+- 股票特有字段：`cost_basis_total`(Decimal，可空，含费总额)；每股成本 `cost_basis_per_share = cost_basis_total / shares_opened` 为派生值，不存储。
 - 数量三态按单位命名：期权 `contracts_opened/open/closed`，股票 `shares_opened/open/closed`。
 - 金额/价格统一 Decimal（JSON 用十进制字符串）；时间统一 epoch 毫秒 int（`*_ms`）；到期日统一 `expiration_ymd`（`YYYY-MM-DD`）。
 
@@ -96,7 +96,7 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 
 > 证明方法引用已核查的现有测试/入口；新增文件、函数与测试接口设计留给 Devflow。
 
-> 2026-09-21 整合范围：下表是产品验收目标，不把历史实现方案或已有测试通过视为目标已达成。当前窗口准备支持新旧 SQLite 形状；实际生产迁移及 R2 收紧仍须独立授权和生产对照证据。A4 的金额 codec 已移除中间 float 转换；后续数量修复让股票事件保留 Decimal、期权拒绝小数合约，保留历史 `contracts` JSON 键并以十进制字符串保存股票数量。SQLite 往返、旧整数事件幂等、全量/增量重放由回归验证，股票 intake 的 PM 刷新路由不变。A4 尚未整体完成：普通股票开仓费用是否进入 `cost_basis_total` 仍需与含费目标核对，不以行权股票的实现代替验证。
+> 2026-09-21 整合范围：下表是产品验收目标，不把历史实现方案或已有测试通过视为目标已达成。当前窗口准备支持新旧 SQLite 形状；实际生产迁移及 R2 收紧仍须独立授权和生产对照证据。A4 的金额 codec 已移除中间 float 转换；后续数量修复让股票事件保留 Decimal、期权拒绝小数合约，保留历史 `contracts` JSON 键并以十进制字符串保存股票数量。SQLite 往返、旧整数事件幂等、全量/增量重放由回归验证，股票 intake 的 PM 刷新路由不变。普通股票开仓成本纳入已确认费用：实际零费用也必须有证据；缺失或估算费用使成本及依赖它的已实现收益为 null，持仓数量继续发布。缺失平仓费用使已实现收益为 null；费用确认后通过重放恢复数值，checkpoint 保留未知值。本轮已确认继续核对并落实 A7 五家族收敛；此前窗口准备的较窄范围不代表整个 PRD 验收完成。
 
 | ID | 验收目标 | 输入 / 条件 | 通过判据 | 证明方法 | 环境 | 模拟边界 | 前置条件 | 证据状态 |
 |---|---|---|---|---|---|---|---|---|
