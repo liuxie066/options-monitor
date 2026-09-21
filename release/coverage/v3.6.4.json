@@ -1,0 +1,59 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.4",
+  "base": {
+    "tag": "v3.6.3",
+    "commit": "0efb43ed0b0f46acd1917e89ad34e98b43f8ab3d"
+  },
+  "reviewed_head": "7597ed080ce524ac77280254a5a49a9ecad60fea",
+  "commits": [
+    {
+      "sha": "b6b8f916aa11eaba72f089c4404c708f3bd84b29",
+      "subject": "fix(ledger): preserve facts in lot identity migration"
+    },
+    {
+      "sha": "2f174ae50e51f4d4570e9f35ef5d09d7922d6eb0",
+      "subject": "fix(ledger): validate legacy lot replay before rebuild"
+    },
+    {
+      "sha": "7597ed080ce524ac77280254a5a49a9ecad60fea",
+      "subject": "Merge pull request #336 from liuxie066/codex/r1-canonical-asset-type"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Validated legacy flat and canonical position-lot payloads against fresh ledger replay before rebuilding identity, preserving stock economics and rejecting conflicting event or asset identities without writes.",
+      "commits": [
+        "b6b8f916aa11eaba72f089c4404c708f3bd84b29",
+        "2f174ae50e51f4d4570e9f35ef5d09d7922d6eb0"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "7597ed080ce524ac77280254a5a49a9ecad60fea",
+      "reason": "Merge commit for PR #336; the user-visible behavior is covered by its two source commits and the mapped Bug Fixes note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "b6b8f916aa11eaba72f089c4404c708f3bd84b29",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/336"
+      ]
+    },
+    {
+      "commit": "2f174ae50e51f4d4570e9f35ef5d09d7922d6eb0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/336"
+      ]
+    },
+    {
+      "commit": "7597ed080ce524ac77280254a5a49a9ecad60fea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/336"
+      ]
+    }
+  ]
+}
