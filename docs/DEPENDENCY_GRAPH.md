@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1051 (`src`: 529, `domain`: 87, `scripts`: 13, `tests`: 422)
-- Internal import edges: 7060 total, 3161 production/script edges excluding tests
+- Internal import edges: 7065 total, 3162 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|492| domain
+  application -->|493| domain
   application -->|4| domain_services
   application -->|157| infrastructure
   application -->|45| storage
@@ -46,8 +46,8 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2957| application
-  tests -->|373| domain
+  tests -->|2960| application
+  tests -->|374| domain
   tests -->|2| domain_services
   tests -->|211| infrastructure
   tests -->|234| interfaces
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 492 |
+| application | domain | 493 |
 | application | infrastructure | 157 |
 | interfaces | application | 154 |
 | application | storage | 45 |
@@ -79,8 +79,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2957 |
-| tests | domain | 373 |
+| tests | application | 2960 |
+| tests | domain | 374 |
 | tests | interfaces | 234 |
 | tests | infrastructure | 211 |
 | tests | scripts | 28 |
@@ -96,7 +96,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain | 220 |
 | src.interfaces | src.application | 122 |
 | src.application | src.infrastructure | 108 |
-| src.application.ledger | domain.domain | 101 |
+| src.application.ledger | domain.domain | 102 |
 | src.application.ledger | domain.domain.ledger | 54 |
 | src.application.trades | domain.domain | 38 |
 | src.application | domain.storage | 34 |

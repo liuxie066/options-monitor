@@ -81,3 +81,5 @@ Run it locally:
 ```
 
 Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change reruns `--write` in the same commit and the diff is the review. Repointing statements away from the retired columns is the slice 3 work itself; the registry going empty (outside the exemptions) is its completion signal.
+
+The migration reads the same ledger at run time: `lot_identity_migration.apply` runs the destructive half of D1–D4 exactly while the installed build has no live statement naming a retired column — the window's repointed release — and otherwise defers it, naming the offending statements in the receipt. The column contract cannot answer that question on window day, because that release deliberately keeps both shapes readable.
