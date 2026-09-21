@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.6.2 - 2026-09-21
+
+### Bug Fixes
+- Compared legacy floating-point option premiums with replayed decimal premiums using the canonical money precision, while continuing to reject real premium changes.
+
 ## 3.6.1 - 2026-09-21
 
 ### Bug Fixes

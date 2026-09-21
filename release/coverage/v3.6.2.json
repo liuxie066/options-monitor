@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.2",
+  "base": {
+    "tag": "v3.6.1",
+    "commit": "5c7f9824efbf6aa718dcaec890c37bf070900620"
+  },
+  "reviewed_head": "df2ce1aa4497bd50dc1cf294ef582454e5708f21",
+  "commits": [
+    {
+      "sha": "2aa87c9403fe203028bf8bacc33a123075a9e24c",
+      "subject": "fix(ledger): compare legacy premiums by money contract"
+    },
+    {
+      "sha": "df2ce1aa4497bd50dc1cf294ef582454e5708f21",
+      "subject": "Merge pull request #332 from liuxie066/codex/r1-money-parity-fix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Compared legacy floating-point option premiums with replayed decimal premiums using the canonical money precision, while continuing to reject real premium changes.",
+      "commits": [
+        "2aa87c9403fe203028bf8bacc33a123075a9e24c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "df2ce1aa4497bd50dc1cf294ef582454e5708f21",
+      "reason": "Merge-only commit for PR #332; the user-visible change is covered by its content commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "2aa87c9403fe203028bf8bacc33a123075a9e24c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/332"
+      ]
+    },
+    {
+      "commit": "df2ce1aa4497bd50dc1cf294ef582454e5708f21",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/332"
+      ]
+    }
+  ]
+}
