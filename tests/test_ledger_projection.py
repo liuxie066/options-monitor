@@ -394,7 +394,8 @@ def _stock_event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         asset_type="stock",
-        raw_payload={"side": derive_trade_side(event_type, "long") or ""},
+        raw_payload={"side": derive_trade_side(event_type, "long") or "",
+                     "fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}},
     )
 
 
@@ -524,3 +525,37 @@ def test_stock_quantity_failure_diagnostics_are_json_serializable() -> None:
         diagnostic = next(item for item in result.diagnostics if item.code == code)
         assert json.loads(json.dumps(diagnostic.to_dict()))["code"] == code
         assert result.lots[0].shares_open == Decimal("0.5")
+
+
+def test_stock_unknown_cost_survives_checkpoint_and_resolves_on_replay() -> None:
+    from dataclasses import replace
+    import json
+    from domain.domain.ledger.projection import project_resumable_trade_events
+    from domain.domain.ledger.projection_state import ResumableProjectionState
+
+    opened = _stock_event(event_id="fee-open", event_type="open", contract_key=_stock_key(),
+                         contracts=Decimal("2.5"), event_time_ms=1000, lot_id="fee-lot", price=10)
+    closed = _stock_event(event_id="fee-close", event_type="close", contract_key=_stock_key(),
+                         contracts=Decimal("0.5"), event_time_ms=2000, target_lot_id="fee-lot", price=12)
+    for provenance in ({}, {"basis": "missing"}, {"basis": "estimated", "amount": "1"}):
+        unknown = replace(opened, raw_payload={"side": "buy", "fee_provenance": provenance})
+        prefix = project_resumable_trade_events([unknown], entry_mode="full")
+        state = ResumableProjectionState.from_json_bytes(prefix.state.to_json_bytes())
+        tail = project_resumable_trade_events([closed], initial_state=state, entry_mode="tail")
+        full = project_resumable_trade_events([unknown, closed], entry_mode="full")
+        assert not full.diagnostics and not tail.diagnostics
+        assert full.to_projection_result().to_dict() == tail.to_projection_result().to_dict()
+        lot = tail.to_projection_result().lots[0]
+        assert lot.shares_open == Decimal("2")
+        assert lot.cost_basis_total is None and lot.realized_pnl is None
+        payload = json.loads(json.dumps(lot.to_dict()))
+        assert payload["cost_basis_total"] is None and payload["realized_pnl"] is None
+
+    confirmed = replace(opened, fees=Decimal("1"), raw_payload={"side": "buy", "fee_provenance": {
+        "basis": "actual", "amount": "1", "source": "broker"}})
+    lot = project_trade_events([confirmed, closed]).lots[0]
+    assert lot.cost_basis_total == Decimal("26")
+    assert lot.realized_pnl == Decimal("0.8")
+    missing_close = replace(closed, raw_payload={"side": "sell"})
+    lot = project_trade_events([confirmed, missing_close]).lots[0]
+    assert lot.cost_basis_total == Decimal("26") and lot.realized_pnl is None

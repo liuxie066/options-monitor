@@ -529,7 +529,8 @@ def _stock_event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         asset_type="stock",
-        raw_payload={"side": derive_trade_side(event_type, "long") or ""},
+        raw_payload={"side": derive_trade_side(event_type, "long") or "",
+                     "fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}},
     )
 
 

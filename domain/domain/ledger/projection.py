@@ -1327,9 +1327,9 @@ def _apply_close_event(
                 )
     lot_fee = fee_fact_for_event(event)
     actual_fee_amount = (
-        float(lot_fee.amount)
+        lot_fee.amount
         if lot_fee.basis.value == "actual" and lot_fee.amount is not None
-        else 0.0
+        else (None if lot_is_stock(lot) else Decimal("0"))
     )
     # The close ids are retained so ``close_event_ids`` is a real pointer to the
     # events that closed this lot, produced by the same transition for every

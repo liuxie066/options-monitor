@@ -272,7 +272,7 @@ class ResumableLotState:
     premium_open: Decimal
     multiplier: int
     currency: str
-    realized_pnl: Decimal
+    realized_pnl: Decimal | None
     last_event_id: str
     last_close_event_id: str | None
     open_event: TradeEvent
@@ -321,7 +321,7 @@ class ResumableLotState:
                 field_name="shares_closed",
                 nonnegative=True,
             )
-            cost_basis_total = _finite_decimal(
+            cost_basis_total = None if self.cost_basis_total is None else _finite_decimal(
                 self.cost_basis_total,
                 field_name="cost_basis_total",
                 nonnegative=True,
@@ -372,7 +372,7 @@ class ResumableLotState:
             shares_closed = None
             cost_basis_total = None
 
-        realized_pnl = _finite_decimal(
+        realized_pnl = None if self.contract_key.asset_type == "stock" and self.realized_pnl is None else _finite_decimal(
             self.realized_pnl,
             field_name="realized_pnl",
         )
@@ -509,7 +509,7 @@ class ResumableLotState:
             "premium_open": _decimal_text(self.premium_open, field_name="premium_open"),
             "multiplier": self.multiplier,
             "currency": self.currency,
-            "realized_pnl": _decimal_text(self.realized_pnl, field_name="realized_pnl"),
+            "realized_pnl": None if self.realized_pnl is None else _decimal_text(self.realized_pnl, field_name="realized_pnl"),
             "last_event_id": self.last_event_id,
             "last_close_event_id": self.last_close_event_id,
             "close_event_ids": list(self.close_event_ids),
@@ -526,7 +526,7 @@ class ResumableLotState:
             result["shares_closed"] = _decimal_text(
                 self.shares_closed, field_name="shares_closed"
             )
-            result["cost_basis_total"] = _decimal_text(
+            result["cost_basis_total"] = None if self.cost_basis_total is None else _decimal_text(
                 self.cost_basis_total, field_name="cost_basis_total"
             )
         return result
@@ -553,7 +553,7 @@ class ResumableLotState:
             premium_open=_parse_decimal(payload["premium_open"], field_name="premium_open"),
             multiplier=payload["multiplier"],
             currency=str(payload["currency"]),
-            realized_pnl=_parse_decimal(payload["realized_pnl"], field_name="realized_pnl"),
+            realized_pnl=_parse_optional_decimal(payload["realized_pnl"], field_name="realized_pnl"),
             last_event_id=payload["last_event_id"],
             last_close_event_id=payload["last_close_event_id"],
             open_event=TradeEvent.from_dict(open_event),

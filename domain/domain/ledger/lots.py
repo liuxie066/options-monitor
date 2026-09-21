@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from domain.domain.ledger.events import TradeEvent
+from domain.domain.ledger.fees import FeeBasis, fee_fact_for_event
 from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.ledger.position_fields import PositionLotPatch, decode_position_lot_patch
 from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
@@ -26,7 +27,7 @@ class PositionLot:
     premium_open: Decimal
     multiplier: int
     currency: str
-    realized_pnl: Decimal
+    realized_pnl: Decimal | None
     last_event_id: str
     close_event_ids: tuple[str, ...] = ()
     asset_type: str = "option"
@@ -46,7 +47,8 @@ class PositionLot:
         object.__setattr__(
             self,
             "realized_pnl",
-            to_decimal(self.realized_pnl or 0, field_name="realized_pnl"),
+            None if self.asset_type == "stock" and self.realized_pnl is None
+            else to_decimal(self.realized_pnl, field_name="realized_pnl"),
         )
         for name in ("shares_opened", "shares_open", "shares_closed", "cost_basis_total"):
             value = getattr(self, name)
@@ -63,6 +65,9 @@ class PositionLot:
         position_side = derive_position_side("open", event.side) or ""
         if event.asset_type == "stock":
             quantity = to_decimal(event.contracts, field_name="contracts")
+            fee = fee_fact_for_event(event)
+            cost = (event.price * quantity + fee.amount
+                    if fee.basis == FeeBasis.ACTUAL and fee.amount is not None else None)
             return cls(
                 lot_id=lot_id,
                 open_event_id=event.event_id,
@@ -76,14 +81,14 @@ class PositionLot:
                 premium_open=Decimal("0"),
                 multiplier=0,
                 currency=event.currency,
-                realized_pnl=Decimal("0"),
+                realized_pnl=Decimal("0") if cost is not None else None,
                 last_event_id=event.event_id,
                 close_event_ids=(),
                 asset_type="stock",
                 shares_opened=quantity,
                 shares_open=quantity,
                 shares_closed=Decimal("0"),
-                cost_basis_total=to_decimal(event.price, field_name="price") * quantity,
+                cost_basis_total=cost,
             )
         return cls(
             lot_id=lot_id,
@@ -167,7 +172,7 @@ class PositionLot:
         self,
         event: TradeEvent,
         *,
-        actual_fee_amount: float,
+        actual_fee_amount: Decimal | None,
         retain_close_event_ids: bool = True,
     ) -> "PositionLot":
         if lot_is_stock(self):
@@ -179,12 +184,10 @@ class PositionLot:
                 shares_open=next_open,
                 shares_closed=next_closed,
                 status="close" if next_open <= 0 else "open",
-                realized_pnl=self.realized_pnl
-                + _stock_realized_pnl_delta(
-                    self,
-                    event,
-                    actual_fee_amount=actual_fee_amount,
-                ),
+                realized_pnl=(self.realized_pnl + _stock_realized_pnl_delta(
+                    self, event, actual_fee_amount=actual_fee_amount,
+                ) if self.realized_pnl is not None and self.cost_basis_total is not None
+                    and actual_fee_amount is not None else None),
                 last_event_id=event.event_id,
                 close_event_ids=(
                     (*self.close_event_ids, event.event_id)
@@ -271,7 +274,7 @@ class PositionLot:
             "premium_open": _money_text(self.premium_open),
             "multiplier": self.multiplier,
             "currency": self.currency,
-            "realized_pnl": _money_text(self.realized_pnl),
+            "realized_pnl": _optional_money_text(self.realized_pnl),
             "last_event_id": self.last_event_id,
             "close_event_ids": list(self.close_event_ids),
             "asset_type": self.asset_type,
@@ -324,7 +327,7 @@ def _realized_pnl_delta(
     lot: PositionLot,
     event: TradeEvent,
     *,
-    actual_fee_amount: float,
+    actual_fee_amount: Decimal | None,
 ) -> Decimal:
     contracts = int(event.contracts)
     multiplier = to_decimal(lot.multiplier, field_name="multiplier")
@@ -339,11 +342,13 @@ def _stock_realized_pnl_delta(
     lot: PositionLot,
     event: TradeEvent,
     *,
-    actual_fee_amount: float,
+    actual_fee_amount: Decimal | None,
 ) -> Decimal:
     shares = to_decimal(event.contracts, field_name="contracts")
     shares_opened = lot.shares_opened or Decimal("0")
-    cost_basis_total = lot.cost_basis_total or Decimal("0")
+    cost_basis_total = lot.cost_basis_total
+    if cost_basis_total is None or actual_fee_amount is None:
+        raise ValueError("stock realized PnL requires confirmed cost and closing fees")
     cost_per_share = (
         cost_basis_total / shares_opened if shares_opened > 0 else Decimal("0")
     )

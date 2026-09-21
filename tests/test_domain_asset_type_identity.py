@@ -34,6 +34,7 @@ def _trade_event(asset_type: str = "option", quantity_unit: str | None = None, *
         "source": "api",
         "asset_type": asset_type,
         "quantity_unit": quantity_unit,
+        "raw_payload": {"fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}},
     }
     return TradeEvent(**{**values, **overrides})
 
