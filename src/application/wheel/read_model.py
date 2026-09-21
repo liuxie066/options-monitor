@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
     attach_lot_strategy_metadata,
@@ -62,11 +63,13 @@ def _legacy_call_batch(branch: Mapping[str, Any]) -> dict[str, Any]:
     batch.setdefault("batch_generation_hash", batch.get("branch_generation_hash"))
     batch.setdefault("active_call_lot_ids", list(batch.get("active_option_lot_ids") or []))
     batch.setdefault("unresolved_call_lot_ids", [])
-    batch.setdefault(
-        "active_intent_reserved_shares",
-        int(batch.get("active_intent_reserved_contracts") or 0)
-        * int(batch.get("multiplier") or 0),
-    )
+    if "active_intent_reserved_shares" not in batch:
+        try:
+            batch["active_intent_reserved_shares"] = contract_share_quantity(
+                batch.get("active_intent_reserved_contracts") or 0, batch.get("multiplier"),
+            )
+        except ValueError:
+            batch["active_intent_reserved_shares"] = None
     return batch
 
 

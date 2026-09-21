@@ -217,3 +217,17 @@ def test_snapshot_hash_changes_when_alternatives_change() -> None:
     assert unique["input_snapshot_hash"] != same_pair["input_snapshot_hash"]
     assert unique["status"] == PROPOSAL_READY
     assert same_pair["status"] == AMBIGUOUS
+
+
+def test_combo_rejects_invalid_canonical_fields_instead_of_using_legacy_aliases():
+    for patch, expected in (
+        ({"contracts_opened": 0, "contracts": 1}, "combo_lot_contracts_invalid"),
+        ({"position_side": "", "side": "short"}, "combo_lot_position_side_invalid"),
+        ({"expiration_ymd": "", "expiration": "2026-08-21"}, "combo_lot_expiration_invalid"),
+        ({"trade_time_ms": 0, "opened_at_ms": BASE_TIME_MS}, "combo_lot_trade_time_invalid"),
+        ({"multiplier": "100.5"}, "combo_lot_multiplier_invalid"),
+    ):
+        put, call = _pair()
+        result = match_post_trade_combo_pairs(lots=[{**put, **patch}, call])
+        assert not result["inferences"]
+        assert any(expected in item["reason_codes"] for item in result["excluded_lots"])

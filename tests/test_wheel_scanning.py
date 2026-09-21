@@ -847,3 +847,26 @@ def test_wheel_calculation_reasons_preserve_scan_outcomes(
             assert metric["status"] == "missing"
         else:
             assert metric == "NON_STANDARD"
+
+
+def test_unknown_wheel_reservation_blocks_scan_and_transaction_coverage():
+    from domain.domain.risk_capacity import revalidate_opening_share_coverage
+
+    for reserved in (None, "100.5", -1, 0):
+        batch = {"account": "lx", "symbol": "NVDA", "lifecycle_status": "active",
+                 "active_intent_reserved_shares": reserved}
+        fact = build_shared_coverage_facts(
+            account="lx",
+            portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 200, "can_sell_qty": 200}}},
+            option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
+            wheel_read_model={"batches": [batch]},
+        )[0]
+        rechecked = revalidate_opening_share_coverage(
+            {"account": "lx", "symbol": "NVDA", "status": "available",
+             "shares_eligible": 200, "shares_locked": 0, "shares_reserved": 0},
+            [], [batch], account="lx", symbol="NVDA",
+        )
+        for result in (fact, rechecked):
+            assert result["status"] == ("available" if reserved == 0 else "unavailable")
+            if reserved != 0:
+                assert result["reason"] == "wheel_intent_reserved_shares_invalid"

@@ -4,6 +4,8 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
+from domain.domain.trade_contract_identity import contract_share_quantity
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.cash_facts import (
     assignment_principal_anchor,
@@ -60,11 +62,13 @@ def _wheel_batches_from_rows(
             "active_call_lot_ids",
             list(batch.get("active_option_lot_ids") or []),
         )
-        batch.setdefault(
-            "active_intent_reserved_shares",
-            int(batch.get("active_intent_reserved_contracts") or 0)
-            * int(batch.get("multiplier") or 0),
-        )
+        if "active_intent_reserved_shares" not in batch:
+            try:
+                batch["active_intent_reserved_shares"] = contract_share_quantity(
+                    batch.get("active_intent_reserved_contracts") or 0, batch.get("multiplier"),
+                )
+            except ValueError:
+                batch["active_intent_reserved_shares"] = None
         batches.append(batch)
     return batches
 
@@ -461,7 +465,7 @@ def plan_wheel_assignment_companion(
         return None, reason
     contracts = int(getattr(event, "contracts", 0) or 0)
     settlement_shares = stock.get("shares")
-    if isinstance(settlement_shares, bool) or contracts <= 0 or settlement_shares != contracts * multiplier:
+    if isinstance(settlement_shares, bool) or contracts <= 0 or settlement_shares != contract_share_quantity(contracts, multiplier):
         reason = "assignment_quantity_inconsistent"
         return None, reason
     lot_id = (
@@ -676,15 +680,14 @@ def prepare_wheel_intent_open_event(
             intent_payload = (
                 intent_payload if isinstance(intent_payload, Mapping) else intent
             )
-            intent_coverage = {
-                **current_coverage,
-                "shares_available_for_cover": int(
-                    current_coverage.get("shares_available_for_cover") or 0
-                )
-                + int(intent.get("remaining_contracts") or 0)
-                * int(intent_payload.get("multiplier") or 0),
-            }
             try:
+                intent_coverage = {
+                    **current_coverage,
+                    "shares_available_for_cover": int(
+                        current_coverage.get("shares_available_for_cover") or 0
+                    )
+                    + contract_share_quantity(intent.get("remaining_contracts"), intent_payload.get("multiplier")),
+                }
                 plan = plan_wheel_call_intent_consume(
                     batch,
                     intent,

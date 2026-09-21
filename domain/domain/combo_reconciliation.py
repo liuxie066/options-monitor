@@ -288,14 +288,14 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
     symbol = _text(item.get("symbol"), upper=True)
     option_type = _text(item.get("option_type"), lower=True)
     position_side = _text(
-        item.get("position_side") or item.get("side"), lower=True
+        item.get("position_side"), lower=True
     )
     currency = _text(item.get("currency"), upper=True)
     expiration_ymd = _text(
-        item.get("expiration_ymd") or item.get("expiration")
+        item.get("expiration_ymd")
     )
     strategy = _text(
-        item.get("strategy") or item.get("strategy_type"), lower=True
+        item.get("strategy"), lower=True
     )
     strategy_group_id = _text(item.get("strategy_group_id"))
     leg_role = _text(item.get("leg_role"), lower=True)
@@ -324,21 +324,21 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
     if not _is_ymd(expiration_ymd):
         reasons.add("combo_lot_expiration_invalid")
     contracts_opened = _positive_int(
-        item.get("contracts_opened") or item.get("contracts")
+        item.get("contracts_opened")
     )
     contracts_open = _positive_int(item.get("contracts_open"))
     if contracts_opened is None or contracts_open is None:
         reasons.add("combo_lot_contracts_invalid")
     elif contracts_opened != contracts_open:
         reasons.add("combo_lot_not_fully_open")
-    multiplier = _positive_decimal(item.get("multiplier"))
+    multiplier = _positive_int(item.get("multiplier"))
     strike = _positive_decimal(item.get("strike"))
     if multiplier is None:
         reasons.add("combo_lot_multiplier_invalid")
     if strike is None:
         reasons.add("combo_lot_strike_invalid")
     trade_time_ms = _positive_int(
-        item.get("trade_time_ms") or item.get("opened_at_ms")
+        item.get("trade_time_ms")
     )
     if trade_time_ms is None:
         reasons.add("combo_lot_trade_time_invalid")
@@ -384,7 +384,7 @@ def _normalize_exposure(raw: Mapping[str, Any]) -> _Exposure | None:
     account = _text(item.get("account"), lower=True)
     market = _text(item.get("market"), upper=True)
     currency = _text(item.get("currency"), upper=True)
-    multiplier = _positive_decimal(item.get("multiplier"))
+    multiplier = _positive_int(item.get("multiplier"))
     generated_at_ms = _positive_int(item.get("generated_at_ms"))
     valid_until_ms = _positive_int(item.get("valid_until_ms"))
     put_contract_key = _normalize_contract_key(
@@ -684,12 +684,12 @@ def _normalize_contract_key(
         return None
     item = dict(raw)
     symbol = _text(
-        item.get("underlying_symbol") or item.get("symbol") or item.get("underlying"),
+        item.get("underlying_symbol"),
         upper=True,
     )
     option_type = _text(item.get("option_type"), lower=True) or expected_type
     expiration_ymd = _text(
-        item.get("expiration_ymd") or item.get("expiration")
+        item.get("expiration_ymd")
     )
     strike = _positive_decimal(item.get("strike"))
     if (

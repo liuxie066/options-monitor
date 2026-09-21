@@ -8,6 +8,7 @@ from domain.domain.ledger.economics import fee_fact_for_event, fee_fact_from_per
 from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, persisted_stock_settlement
 from domain.domain.ledger.fees import FeeBasis, FeeComponent
 from domain.domain.money import quantize_money, to_decimal
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.option_position_identity import normalize_currency
 
 
@@ -171,7 +172,7 @@ def _option_amount(event: TradeEvent) -> tuple[Decimal | None, str | None]:
         multiplier = to_decimal(event.multiplier, field_name="multiplier")
         if price < 0 or multiplier <= 0:
             raise ValueError("price must be non-negative and multiplier must be positive")
-        gross = quantize_money(price * multiplier * Decimal(event.contracts))
+        gross = quantize_money(price * contract_share_quantity(event.contracts, multiplier))
     except (TypeError, ValueError) as exc:
         return None, f"option cash unavailable: {exc}"
     positive = (event.position_side == "short") == (event.event_type == "open")

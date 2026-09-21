@@ -20,7 +20,8 @@ from domain.domain.lifecycle_allocation import (
     allocate_stock_settlement,
     validate_stock_settlement_allocation_group,
 )
-from domain.domain.trade_contract_identity import normalize_trade_side
+from domain.domain.trade_contract_identity import normalize_trade_side, contract_share_quantity, stock_settlement_side
+from domain.domain.money import to_decimal
 from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
     build_manual_repair_preview,
@@ -1076,17 +1077,14 @@ def _validate_lifecycle_stock_settlement(
         expected_position_side = "short" if normalized_lifecycle_type == "assignment" else "long"
         if position_side != expected_position_side:
             raise ValueError(f"manual {normalized_lifecycle_type} currently supports {expected_position_side} option lots only")
-        if normalized_lifecycle_type == "assignment":
-            expected = "buy" if option_type == "put" else "sell" if option_type == "call" else ""
-        else:
-            expected = "buy" if option_type == "call" else "sell" if option_type == "put" else ""
+        expected = stock_settlement_side(normalized_lifecycle_type, option_type, position_side)
         if not expected:
             raise ValueError(f"manual {normalized_lifecycle_type} requires put/call option_type")
         if expected_stock_side and expected_stock_side != expected:
             raise ValueError(f"manual {normalized_lifecycle_type} target lots require one settlement stock side")
         expected_stock_side = expected
-        multiplier = effective_multiplier(fields) or 100
-        expected_qty += int(match.contracts_to_close) * int(multiplier)
+        multiplier = effective_multiplier(fields)
+        expected_qty += contract_share_quantity(match.contracts_to_close, multiplier)
         raw_strike = (
             contract_key.get("strike")
             if contract_key.get("strike") is not None
@@ -1099,7 +1097,7 @@ def _validate_lifecycle_stock_settlement(
             raise ValueError(f"manual {normalized_lifecycle_type} target lots require one strike")
     if normalized_stock_side != expected_stock_side:
         raise ValueError(f"manual {normalized_lifecycle_type} stock side must be {expected_stock_side} for target lots")
-    if int(stock_qty) != int(expected_qty):
+    if to_decimal(stock_qty, field_name="stock_qty") != expected_qty:
         raise ValueError(f"manual {normalized_lifecycle_type} stock qty must equal settled shares: expected {expected_qty}")
     if strike is not None:
         tolerance = max(0.01, abs(float(strike)) * 0.001)

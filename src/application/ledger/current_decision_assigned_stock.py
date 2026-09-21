@@ -29,7 +29,7 @@ from .current_decision_lifecycle import (
     _ASSIGNED_REVIEW_KEYS,
 )
 
-from domain.domain.trade_contract_identity import derive_position_side
+from domain.domain.trade_contract_identity import derive_position_side, contract_share_quantity, stock_settlement_side
 
 from .lot_resolver import contract_key_from_lot_fields, lot_contract_value
 
@@ -582,12 +582,7 @@ def _settlement_transition(
     position_side = _text(
         item["position_side"], field="position_side", lower=True
     )
-    side = {
-        ("assignment", "put", "short"): "buy",
-        ("assignment", "call", "short"): "sell",
-        ("exercise", "call", "long"): "buy",
-        ("exercise", "put", "long"): "sell",
-    }.get((terminal_type, option_type, position_side))
+    side = stock_settlement_side(terminal_type, option_type, position_side)
     if side != expected_side:
         raise CurrentDecisionProjectionError(
             "assigned-stock settlement option binding is invalid"
@@ -604,7 +599,7 @@ def _settlement_transition(
     contracts = _integer(item["contracts"], field="contracts", minimum=1)
     multiplier = _integer(item["multiplier"], field="multiplier", minimum=1)
     shares = _integer(stock_row["shares"], field="shares", minimum=1)
-    if shares != contracts * multiplier:
+    if shares != contract_share_quantity(contracts, multiplier):
         raise CurrentDecisionProjectionError(
             "assigned-stock settlement quantity mismatch"
         )
@@ -961,8 +956,12 @@ def update_assigned_stock_fact(
             )
         if any(
             shares
-            > int(active_open_events[open_event_id].get("contracts_open") or 0)
-            * int(active_open_events[open_event_id].get("multiplier") or 0)
+            > contract_share_quantity(
+                _integer(active_open_events[open_event_id].get("contracts_open"),
+                         field="contracts_open", minimum=1),
+                _integer(active_open_events[open_event_id].get("multiplier"),
+                         field="multiplier", minimum=1),
+            )
             for open_event_id, shares in shares_by_open_event.items()
         ):
             raise CurrentDecisionProjectionError(

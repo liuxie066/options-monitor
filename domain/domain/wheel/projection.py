@@ -17,6 +17,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.trade_contract_identity import contract_share_quantity
 
 from ._common import (
     WHEEL_EVENT_SCHEMA_V1,
@@ -285,10 +286,9 @@ def _intent_contracts(payload: Mapping[str, Any]) -> int | None:
         if value in (None, ""):
             continue
         try:
-            number = int(value)
+            return _positive_int(value, "intent contracts")
         except (TypeError, ValueError):
             return None
-        return number if number > 0 else None
     return None
 
 
@@ -811,8 +811,7 @@ def project_wheel_linkage_candidates(
                     "cash_reservation_amount": float(
                         contract_key.get("strike") or 0
                     )
-                    * multiplier
-                    * contracts,
+                    * contract_share_quantity(contracts, multiplier),
                     "cash_reservation_currency": str(
                         fields.get("currency") or branch.get("currency") or ""
                     ).strip().upper(),
@@ -982,7 +981,7 @@ def project_wheel_lifecycles(
             if _contracts_open(fields) <= 0:
                 continue
             try:
-                locked_shares += _contracts_open(fields) * int(float(fields.get("multiplier") or 0))
+                locked_shares += contract_share_quantity(_contracts_open(fields), fields.get("multiplier"))
             except (TypeError, ValueError):
                 reasons.add("wheel_call_multiplier_invalid")
         if shares_remaining is not None and locked_shares > shares_remaining:
@@ -1042,6 +1041,14 @@ def project_wheel_lifecycles(
             }:
                 reasons.add("assigned_stock_projection_conflict")
 
+        try:
+            reserved_shares = sum(
+                contract_share_quantity(item.get("remaining_contracts"), (item.get("payload") or {}).get("multiplier"))
+                for item in intent_summaries if item.get("status") == "active"
+            )
+        except (TypeError, ValueError):
+            reserved_shares = None
+            reasons.add("wheel_intent_units_invalid")
         conflict_codes = {
             reason
             for reason in reasons
@@ -1148,12 +1155,7 @@ def project_wheel_lifecycles(
             "active_call_lot_ids": active_call_lot_ids,
             "unresolved_call_lot_ids": unresolved_call_lot_ids,
             "active_intent_ids": active_intent_ids,
-            "active_intent_reserved_shares": sum(
-                int(item.get("remaining_contracts") or 0)
-                * int((item.get("payload") or {}).get("multiplier") or 0)
-                for item in intent_summaries
-                if item.get("status") == "active"
-            ),
+            "active_intent_reserved_shares": reserved_shares,
             "candidate": None,
         }
         result["projection_hash"] = canonical_sha256(
@@ -1530,7 +1532,7 @@ def project_wheel_branches(
                         "capacity_identity_hash": capacity_hash,
                         "currency": currency,
                         "cash_reservation_amount": round(
-                            strike * int(intent_multiplier) * remaining,
+                            strike * contract_share_quantity(remaining, intent_multiplier),
                             6,
                         ),
                         "remaining_contracts": remaining,
