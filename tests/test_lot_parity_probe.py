@@ -116,6 +116,36 @@ def _stored_fields(sqlite_path: Path) -> dict[str, object]:
     return json.loads(str(row[0]))
 
 
+def _replace_with_v351_legacy_payload(sqlite_path: Path) -> None:
+    """Persist the flat payload emitted by the v3.5.15 publisher."""
+    fields = _stored_fields(sqlite_path)
+    contract = fields["contract_key"]
+    assert isinstance(contract, dict)
+    legacy = {
+        "broker": contract["broker"],
+        "account": contract["account"],
+        "symbol": contract["underlying_symbol"],
+        "option_type": contract["option_type"],
+        "side": fields["position_side"],
+        "contracts": fields["contracts_opened"],
+        "contracts_open": fields["contracts_open"],
+        "contracts_closed": fields["contracts_closed"],
+        "currency": fields["currency"],
+        "status": fields["status"],
+        "strike": contract["strike"],
+        "expiration_ymd": contract["expiration_ymd"],
+        "multiplier": fields["multiplier"],
+        "premium": float(fields["premium_open"]),
+        "opened_at": fields["opened_at_ms"],
+        "last_action_at": fields["opened_at_ms"],
+        "position_id": "TSLA-20260619-100-PUT-SHORT-1",
+        "position_key": fields["position_key"],
+        "source_event_id": fields["open_event_id"],
+        "cash_secured_amount": 10_000.0,
+    }
+    _mutate_fields(sqlite_path, lambda current: (current.clear(), current.update(legacy)))
+
+
 def _settle_store(sqlite_path: Path) -> None:
     """Leave the store as a ``.backup`` copy: contents in the file, no sidecars.
 
@@ -449,6 +479,59 @@ def test_probe_reports_replay_diagnostics_beside_green_without_changing_it(
 
 
 # --- face A: payload ---------------------------------------------------------
+
+
+def test_probe_accepts_v351_flat_payload_and_still_detects_fact_drift(tmp_path: Path) -> None:
+    sqlite_path, _config = _build_green_store(tmp_path)
+    _replace_with_v351_legacy_payload(sqlite_path)
+
+    assert run_lot_parity_probe(sqlite_path=sqlite_path)["green"] is True
+
+    _mutate_fields(sqlite_path, lambda fields: fields.__setitem__("premium", 9.99))
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+    assert report["green"] is False
+    assert _faces(report)["a_payload"]["items"][0]["value_differences"] == [
+        {"key": "premium", "stored": "9.99", "projected": "1.23"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("legacy_key", "bad_value", "fact"),
+    [
+        ("account", "sy", "account"),
+        ("source_event_id", "wrong-event", "source_event_id"),
+        ("side", "long", "side"),
+        ("contracts", 2, "contracts"),
+    ],
+)
+def test_cross_shape_comparison_keeps_business_fact_drift_red(
+    tmp_path: Path, legacy_key: str, bad_value: object, fact: str,
+) -> None:
+    sqlite_path, _config = _build_green_store(tmp_path)
+    _replace_with_v351_legacy_payload(sqlite_path)
+    if legacy_key == "account":
+        _drop_account_guards(sqlite_path)
+    _mutate_fields(sqlite_path, lambda fields: fields.__setitem__(legacy_key, bad_value))
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    assert report["green"] is False
+    assert fact in {
+        item["key"]
+        for item in _faces(report)["a_payload"]["items"][0]["value_differences"]
+    }
+
+
+def test_same_shape_comparison_keeps_fee_derived_realized_pnl_strict(tmp_path: Path) -> None:
+    sqlite_path, _config = _build_green_store(tmp_path)
+    _mutate_fields(sqlite_path, lambda fields: fields.__setitem__("realized_pnl", "1.000000"))
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    assert report["green"] is False
+    assert _faces(report)["a_payload"]["items"][0]["value_differences"] == [
+        {"key": "realized_pnl", "stored": "1.000000", "projected": "0"}
+    ]
 
 
 def test_probe_face_a_reports_a_key_set_difference(tmp_path: Path) -> None:

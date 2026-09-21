@@ -1743,6 +1743,60 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
     assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in second_calls)
     assert not any(command[1:4] == ["-m", "pip", "install"] for command in second_calls)
 
+
+def test_service_upgrade_rebuilds_cache_with_relocated_pip_shebang(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    cache_root = tmp_path / "_cache"
+    first = tmp_path / "release-a"
+    second = tmp_path / "release-b"
+    _write_runtime_target_with_server_deps(first)
+    _write_runtime_target_with_server_deps(second)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    first_out = _ensure_release_runtime(
+        target_dir=first, cache_root=cache_root, run_cmd=_run_cmd, operations=[]
+    )
+    shared = Path(first_out["shared_venv_path"])
+    pip = shared / "bin" / "pip"
+    pip.write_text("#!/removed/tmp/venv/bin/python3\n", encoding="utf-8")
+    pip.chmod(0o755)
+    call_count = len(calls)
+
+    second_out = _ensure_release_runtime(
+        target_dir=second, cache_root=cache_root, run_cmd=_run_cmd, operations=[]
+    )
+
+    assert second_out["venv_reused"] is False
+    assert any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls[call_count:])
+
+
+def test_service_upgrade_relocates_generated_venv_entrypoints(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _relocate_venv_scripts
+
+    built_at = tmp_path / ".hash.tmp.1"
+    final = tmp_path / "hash"
+    script = built_at / "bin" / "pip"
+    script.parent.mkdir(parents=True)
+    script.write_text(f"#!{built_at}/bin/python3\nprint('pip')\n", encoding="utf-8")
+    built_at.rename(final)
+
+    _relocate_venv_scripts(venv_dir=final, built_at=built_at)
+
+    assert (final / "bin" / "pip").read_text(encoding="utf-8").splitlines()[0] == (
+        f"#!{final}/bin/python3"
+    )
+
 def test_service_upgrade_dependency_hash_changes_with_dependency_files(tmp_path: Path) -> None:
     from src.application.service_upgrade import _dependency_hash
 

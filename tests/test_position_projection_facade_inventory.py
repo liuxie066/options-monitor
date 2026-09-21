@@ -247,6 +247,11 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "project_stored_trade_events_to_position_lots",
             ): 1,
             (
+                "src/application/ledger/lot_identity_migration.py",
+                "_fresh_replay_payloads",
+                "project_stored_trade_events_to_position_lots",
+            ): 1,
+            (
                 # Slice 1's read-only parity probe: the same full-projection
                 # entry as the instruments above, on its own mode=ro connection.
                 "src/application/ledger/lot_parity_probe.py",
