@@ -289,7 +289,9 @@ def _check(document: dict[str, object], registry: dict[str, object]) -> list[str
         for key in ("statements", "digest", "by_kind", "by_module"):
             if new.get(key) != old.get(key):
                 diffs.append(f"{scope}.{key}: registry={old.get(key)!r} tree={new.get(key)!r}")
-    return diffs
+    # Detail, dynamic SQL and exemptions are part of the pin, even when the
+    # aggregate statement counts and digests are unchanged.
+    return diffs or ["registry content differs from the tree"]
 
 
 def main(argv: list[str] | None = None) -> int:

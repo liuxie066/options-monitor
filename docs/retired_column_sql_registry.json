@@ -713,15 +713,15 @@
     "by_kind": {
       "ddl": 13,
       "index_name": 9,
-      "read": 27,
-      "write": 36
+      "read": 28,
+      "write": 37
     },
     "by_module": {
       "tests/perf_position_projection_s1.py": 2,
       "tests/quality/test_retired_column_sql_registry.py": 1,
       "tests/test_ledger_current_decision_projection.py": 2,
       "tests/test_ledger_sqlite_workflows.py": 12,
-      "tests/test_lot_identity_migration.py": 17,
+      "tests/test_lot_identity_migration.py": 19,
       "tests/test_lot_parity_probe.py": 11,
       "tests/test_position_lot_payload_shape.py": 2,
       "tests/test_position_projection_migration.py": 3,
@@ -733,7 +733,7 @@
       "tests/test_trades_state_reconcile.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:533e9318a3e1bc78",
-    "statements": 68
+    "digest": "sha256:2cddae24f905c0c5",
+    "statements": 69
   }
 }
