@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.6.3 - 2026-09-22
+
+### Improvements
+- Armed the reviewed liuxie-incus lot-identity migration window while retaining the existing manifest, SQL-registry, transaction, integrity, and explicit confirmation gates.
+
 ## 3.6.2 - 2026-09-21
 
 ### Bug Fixes
