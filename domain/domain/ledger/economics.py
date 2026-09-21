@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.fees import (
     FeeBasis, FeeComponent, FeeFact, fee_component_for_event,
@@ -135,9 +136,9 @@ def build_option_economic_allocation(
     multiplier = to_decimal(lot.multiplier, field_name="multiplier")
     open_price = to_decimal(lot.premium_open, field_name="open_price")
     close_price = to_decimal(close_event.price, field_name="close_price")
-    quantity = Decimal(contracts)
-    gross_open_abs = quantize_money(open_price * multiplier * quantity)
-    gross_close_abs = quantize_money(close_price * multiplier * quantity)
+    quantity = contract_share_quantity(contracts, lot.multiplier)
+    gross_open_abs = quantize_money(open_price * quantity)
+    gross_close_abs = quantize_money(close_price * quantity)
     if lot.position_side == "short":
         open_amount = gross_open_abs
         close_amount = -gross_close_abs

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+from domain.domain.trade_contract_identity import stock_settlement_unit_issues
 from domain.domain.ledger.identity import position_key_for
 from domain.domain.option_position_identity import normalize_side
 
@@ -1181,9 +1182,9 @@ def _validate_broker_settlement_pair_for_write(
         stock_price = Decimal(str(stock.get("price")))
         shares = Decimal(str(stock.get("shares")))
         multiplier = Decimal(
-            str(lifecycle_case.get("multiplier") or 100)
+            str(lifecycle_case.get("multiplier"))
         )
-        contracts = int(evidence.get("contracts") or 0)
+        contracts = evidence.get("contracts")
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError(
             "stock_settlement_economic_fields_invalid"
@@ -1194,15 +1195,6 @@ def _validate_broker_settlement_pair_for_write(
         or stock_price != strike
     ):
         raise ValueError("stock_settlement_price_mismatch")
-    if (
-        contracts <= 0
-        or not shares.is_finite()
-        or not multiplier.is_finite()
-        or multiplier <= 0
-        or shares != multiplier * contracts
-    ):
-        raise ValueError("stock_settlement_quantity_mismatch")
-
     terminal_type = str(
         evidence.get("terminal_type")
         or evidence.get("evidence_type")
@@ -1214,15 +1206,13 @@ def _validate_broker_settlement_pair_for_write(
     position_side = str(
         lifecycle_case.get("position_side") or ""
     ).strip().lower()
-    expected_side = {
-        ("assignment", "put", "short"): "buy",
-        ("assignment", "call", "short"): "sell",
-        ("exercise", "call", "long"): "buy",
-        ("exercise", "put", "long"): "sell",
-    }.get((terminal_type, option_type, position_side))
-    actual_side = str(stock.get("side") or "").strip().lower()
-    if expected_side is None or actual_side != expected_side:
-        raise ValueError("stock_settlement_side_mismatch")
+    issues = stock_settlement_unit_issues(
+        terminal_type=terminal_type, option_type=option_type, position_side=position_side,
+        stock_side=str(stock.get("side") or "").strip().lower(),
+        contracts=contracts, multiplier=multiplier, shares=shares,
+    )
+    if issues:
+        raise ValueError(issues[0])
 
     try:
         settlement_time_ms = int(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable, Mapping, Sequence
 
 from domain.domain.ledger import TradeEvent
 from domain.domain.trade_execution import futu_order_namespace_issue as futu_order_namespace_issue
@@ -51,4 +51,62 @@ def zero_option_fee_lifecycle_reason(event: TradeEvent) -> str | None:
         return "assignment_without_option_trade"
     if is_unexecuted_expire_close(event):
         return "expired_without_executed_order"
+    return None
+
+
+def option_fee_input_identity(event: TradeEvent) -> tuple[Any, ...]:
+    """Economic inputs shared by source-deal fee allocation and estimation."""
+    return (event.currency, event.price, event.multiplier, event.position_side)
+
+
+def order_fee_currency_matches(currencies: Iterable[str], expected: str | None = None) -> bool:
+    values = set(currencies)
+    return (
+        len(values) == 1
+        and values <= {"CNY", "HKD", "USD"}
+        and (expected is None or values == {expected})
+    )
+
+
+def source_deal_fee_group_problem(events: Sequence[TradeEvent]) -> str | None:
+    rows = list(events)
+    comparable = {
+        (
+            event.contract_key.broker,
+            event.contract_key.account,
+            option_fee_input_identity(event),
+        )
+        for event in rows
+    }
+    if len(comparable) != 1 or any(event.contracts <= 0 for event in rows):
+        return "source_deal_fee_inputs_conflict"
+    expected: set[int] = set()
+    for event in rows:
+        payload = event.raw_payload or {}
+        completion = payload.get("broker_deal_completion")
+        resolution = payload.get("close_target_resolution")
+        raw_expected = (
+            (completion or {}).get("expected_contracts")
+            if isinstance(completion, Mapping)
+            else None
+        )
+        if raw_expected in (None, "") and isinstance(resolution, Mapping):
+            selector = resolution.get("selector")
+            raw_expected = (
+                selector.get("contracts_to_close")
+                if isinstance(selector, Mapping)
+                else None
+            )
+        if raw_expected in (None, ""):
+            raw_expected = (resolution or {}).get("contracts_to_close") if isinstance(resolution, Mapping) else None
+        try:
+            if raw_expected not in (None, ""):
+                expected.add(int(raw_expected))
+        except (TypeError, ValueError):
+            return "source_deal_fee_inputs_conflict"
+    allocated = sum(event.contracts for event in rows)
+    if not expected:
+        return "source_deal_fee_contracts_unavailable"
+    if len(expected) > 1 or expected != {allocated}:
+        return "source_deal_fee_contracts_conflict"
     return None

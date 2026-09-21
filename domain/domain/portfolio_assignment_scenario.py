@@ -6,6 +6,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping, Sequence
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
     FUTU_US_FEE_SCHEDULE_URL,
@@ -550,7 +551,7 @@ def project_assignment_scenario(
             assignment_cash_complete = False
         if spot_cny is None:
             distribution_incomplete = True
-        shares = contracts * multiplier
+        shares = contract_share_quantity(contracts, multiplier)
         principal_native = strike * shares
         principal_cny = principal_native * exchange_rate if exchange_rate is not None else None
         stock_delta = Decimal(shares if option_type == "put" else -shares)

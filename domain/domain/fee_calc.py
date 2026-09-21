@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_CEILING
 from math import isfinite
 from typing import Any
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.option_position_identity import normalize_currency
 
 
@@ -57,7 +58,7 @@ def calc_futu_us_option_fee(
     if unit_multiplier <= 0:
         raise ValueError("multiplier must be > 0")
 
-    transaction_amount = price * unit_multiplier * qty
+    transaction_amount = price * contract_share_quantity(contracts, multiplier)
     commission_per_contract = 0.65 if price > 0.1 else 0.15
     commission = max(commission_per_contract * qty, 1.99)
     platform_fee = FUTU_US_FIXED_PLATFORM_FEE * qty
@@ -88,7 +89,7 @@ def calc_futu_hk_option_fee(
     if unit_multiplier <= 0:
         raise ValueError("multiplier must be > 0")
 
-    transaction_amount = price * unit_multiplier * qty
+    transaction_amount = price * contract_share_quantity(contracts, multiplier)
     commission = max(transaction_amount * 0.002, 3.0)
     platform_fee = 15.0
     system_fee = 0.0 if Decimal(str(price)) == Decimal("0.01") else 3.0 * qty

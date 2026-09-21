@@ -1058,3 +1058,57 @@ def test_public_replay_requires_canonical_proof_to_reuse_other_account_events(tm
             assert (result.status, result.reason) == ("unresolved", "trade_execution_identity_conflict")
             assert result.operations == []
     assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+
+
+@pytest.mark.parametrize("terminal,option,position,side", [
+    ("assignment", "put", "short", "buy"),
+    ("assignment", "call", "short", "sell"),
+    ("exercise", "call", "long", "buy"),
+    ("exercise", "put", "long", "sell"),
+])
+def test_shared_stock_settlement_units(terminal, option, position, side):
+    from domain.domain.trade_contract_identity import stock_settlement_unit_issues
+    inputs = dict(terminal_type=terminal, option_type=option, position_side=position,
+                  stock_side=side, contracts="2", multiplier="100", shares="200")
+    assert stock_settlement_unit_issues(**inputs) == ()
+    assert stock_settlement_unit_issues(**{**inputs, "shares": "199"}) == (
+        "stock_settlement_quantity_mismatch",)
+    assert stock_settlement_unit_issues(**{**inputs, "stock_side": "unknown"}) == (
+        "stock_settlement_side_mismatch",)
+    assert stock_settlement_unit_issues(**{**inputs, "multiplier": None}) == (
+        "stock_settlement_quantity_invalid",)
+
+
+def test_contract_share_quantity_is_exact_and_refuses_unit_coercion():
+    from domain.domain.trade_contract_identity import contract_share_quantity
+    count = 12345678901234567890123456789
+    assert contract_share_quantity(count, 100) == count * 100
+    assert contract_share_quantity(0, 100) == 0
+    for contracts, multiplier in (("1.5", 100), (-1, 100), (1, "100.5"),
+                                  (1, None), (1, 0), (True, 100), (1, "NaN")):
+        with pytest.raises(ValueError):
+            contract_share_quantity(contracts, multiplier)
+
+
+def test_persisted_settlement_aliases_keep_canonical_zero_and_event_bytes():
+    from domain.domain.ledger.events import persisted_stock_settlement
+
+    legacy = {"stock_side": "buy", "stock_qty": 100, "stock_price": "3.25", "fee": 2}
+    assert persisted_stock_settlement(legacy) == {
+        **legacy, "side": "buy", "shares": 100, "price": "3.25", "fees": 2,
+    }
+    assert "shares" not in legacy
+    current = {**legacy, "shares": 0, "price": 0, "fees": 0}
+    assert persisted_stock_settlement(current)["shares"] == 0
+    assert persisted_stock_settlement(current)["price"] == 0
+    assert persisted_stock_settlement(current)["fees"] == 0
+
+
+def test_order_fee_currency_arbitration_rejects_mixed_missing_and_conflicting_evidence():
+    from src.application.ledger.api import order_fee_currency_matches
+
+    assert order_fee_currency_matches(["USD", "USD"], "USD")
+    assert not order_fee_currency_matches([])
+    assert not order_fee_currency_matches([""])
+    assert not order_fee_currency_matches(["USD", "HKD"])
+    assert not order_fee_currency_matches(["USD"], "HKD")

@@ -189,7 +189,7 @@ class TradeEvent:
             contracts=payload.get("contracts"),
             price=payload.get("price"),
             currency=payload.get("currency"),
-            source=payload.get("source"),
+            source=payload.get("source") or payload.get("source_name"),
             multiplier=payload.get("multiplier", 100),
             fees=payload.get("fees", 0.0),
             target_lot_id=payload.get("target_lot_id"),
@@ -354,3 +354,14 @@ def validate_trade_event(event: TradeEvent) -> list[LedgerDiagnostic]:
             )
         )
     return diagnostics
+
+
+def persisted_stock_settlement(raw: Any) -> dict[str, Any]:
+    """Read historical settlement aliases without changing persisted event bytes."""
+    if not isinstance(raw, Mapping):
+        return {}
+    result = dict(raw)
+    for field, alias in (("side", "stock_side"), ("shares", "stock_qty"), ("price", "stock_price"), ("fees", "fee")):
+        if result.get(field) in (None, "") and alias in result:
+            result[field] = result[alias]
+    return result

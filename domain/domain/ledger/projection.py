@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.ledger.events import (
     CLOSE_EVENT_TYPES,
     LedgerDiagnostic,
@@ -493,11 +494,11 @@ def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]
         locked_shares = 0.0
         if position_side == "short" and contract_key.option_type == "put":
             cash_secured = sum(
-                item.contracts_open * float(contract_key.strike) * item.multiplier
+                float(contract_key.strike) * contract_share_quantity(item.contracts_open, item.multiplier)
                 for item in ordered
             )
         if position_side == "short" and contract_key.option_type == "call":
-            locked_shares = sum(item.contracts_open * item.multiplier for item in ordered)
+            locked_shares = sum(contract_share_quantity(item.contracts_open, item.multiplier) for item in ordered)
         diagnostics = ("multiple_lots",) if len(ordered) > 1 else ()
         views.append(
             RiskPositionView(

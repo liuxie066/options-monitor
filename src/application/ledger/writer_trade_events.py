@@ -82,7 +82,7 @@ from .writer_lifecycle_support import (
     _combo_leg_from_projected_record,
     _existing_combo_adoption_leg,
 )
-from .order_fee_semantics import zero_option_fee_lifecycle_reason
+from .order_fee_semantics import option_fee_input_identity, source_deal_fee_group_problem as _source_deal_group_problem, zero_option_fee_lifecycle_reason
 from .external_event_key import (
     applied_execution_association_conflicts,
     broker_deal_completion_payload,
@@ -632,52 +632,6 @@ def _freeze_source_deal_fee_group(
         )
     return _freeze_formula_fee_group(events, frozen_at_ms=frozen_at_ms)
 
-def _source_deal_group_problem(events: Sequence[TradeEvent]) -> str | None:
-    rows = list(events)
-    comparable = {
-        (
-            event.contract_key.broker,
-            event.contract_key.account,
-            event.currency,
-            event.position_side,
-            event.price,
-            event.multiplier,
-        )
-        for event in rows
-    }
-    if len(comparable) != 1 or any(event.contracts <= 0 for event in rows):
-        return "source_deal_fee_inputs_conflict"
-    expected: set[int] = set()
-    for event in rows:
-        payload = event.raw_payload or {}
-        completion = payload.get("broker_deal_completion")
-        resolution = payload.get("close_target_resolution")
-        raw_expected = (
-            (completion or {}).get("expected_contracts")
-            if isinstance(completion, Mapping)
-            else None
-        )
-        if raw_expected in (None, "") and isinstance(resolution, Mapping):
-            selector = resolution.get("selector")
-            raw_expected = (
-                selector.get("contracts_to_close")
-                if isinstance(selector, Mapping)
-                else None
-            )
-        if raw_expected in (None, ""):
-            raw_expected = (resolution or {}).get("contracts_to_close") if isinstance(resolution, Mapping) else None
-        try:
-            if raw_expected not in (None, ""):
-                expected.add(int(raw_expected))
-        except (TypeError, ValueError):
-            return "source_deal_fee_inputs_conflict"
-    allocated = sum(event.contracts for event in rows)
-    if not expected:
-        return "source_deal_fee_contracts_unavailable"
-    if len(expected) > 1 or expected != {allocated}:
-        return "source_deal_fee_contracts_conflict"
-    return None
-
 def _allocate_actual_fee_group(
     events: Sequence[TradeEvent],
     *,
@@ -717,7 +671,7 @@ def _freeze_formula_fee_group(
         ]
     first = rows[0]
     comparable = {
-        (event.currency, event.price, event.multiplier, event.position_side)
+        option_fee_input_identity(event)
         for event in rows
     }
     if len(comparable) != 1:

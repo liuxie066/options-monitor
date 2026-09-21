@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
+from domain.domain.trade_contract_identity import contract_share_quantity
 
 
 CANDIDATE_ENGINE_SCHEMA_VERSION = "1.0"
@@ -531,6 +532,7 @@ def calculate_opening_candidate_metrics(
     ask = evidence["ask"]
     price_tick = evidence["price_tick"]
     multiplier = evidence["multiplier"]
+    shares_per_contract = contract_share_quantity(1, multiplier)
     dte = evidence["dte"]
     strike = evidence["strike"]
     spot = evidence["spot"]
@@ -566,7 +568,7 @@ def calculate_opening_candidate_metrics(
             metric_value=raw.get("currency"),
             threshold="supported versioned fee schedule",
         ) from exc
-    gross_premium = sell_limit * multiplier
+    gross_premium = sell_limit * shares_per_contract
     net_premium = gross_premium - fee_estimate.amount
     if net_premium <= 0:
         raise CandidateCalculationError(
@@ -605,7 +607,7 @@ def calculate_opening_candidate_metrics(
         out["net_income_cny"] = round(net_premium_cny, 6)
 
     if mode_norm == "put":
-        assignment_notional = strike * multiplier
+        assignment_notional = strike * shares_per_contract
         net_cash_basis = assignment_notional - net_premium
         if net_cash_basis <= 0:
             raise CandidateCalculationError(
@@ -633,7 +635,7 @@ def calculate_opening_candidate_metrics(
         )
         return out
 
-    current_market_value = spot * multiplier
+    current_market_value = spot * shares_per_contract
     period_return = net_premium / current_market_value
     out.update(
         {
@@ -649,8 +651,8 @@ def calculate_opening_candidate_metrics(
     if avg_cost_value is not None and avg_cost_value > 0:
         out["strike_above_cost_pct"] = round((strike - avg_cost_value) / avg_cost_value, 10)
         out["if_exercised_total_return"] = round(
-            (((strike - avg_cost_value) * multiplier) + net_premium)
-            / (avg_cost_value * multiplier),
+            (((strike - avg_cost_value) * shares_per_contract) + net_premium)
+            / (avg_cost_value * shares_per_contract),
             10,
         )
     return out

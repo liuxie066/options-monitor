@@ -14,7 +14,7 @@ from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.trade_execution import (
     DEAL_ID_FIELDS,
     canonical_trade_execution_content,
-    conflicting_execution_associations,
+    require_same_execution_content,
     execution_economic_content,
     execution_source_identity_conflicts,
     ledger_execution_event_set_is_complete,
@@ -132,10 +132,7 @@ def completed_ledger_execution_events(
         raise ValueError("trade_execution_applied_association_conflict")
     for event in candidates:
         stored = canonical_trade_execution_content(dict(event.get("raw_payload") or {}))
-        if stored.get("errors") or incoming.get("errors"):
-            raise ValueError("legacy_execution_evidence_required")
-        if stored["economic"] != incoming["economic"] or conflicting_execution_associations(stored, incoming):
-            raise ValueError("trade_execution_economic_conflict")
+        require_same_execution_content(stored, incoming)
     if not _completed_ledger_identities(candidates, identity_fn=lambda _event: {execution_id}):
         raise ValueError("trade_execution_split_incomplete")
     for event in candidates:

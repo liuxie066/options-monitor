@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from domain.domain.trade_execution import (
-    conflicting_execution_associations,
-    execution_economic_content,
+    execution_application_conflicts,
+    require_same_execution as require_same_execution,
     execution_identity_from_input,
 )
 
@@ -48,17 +48,6 @@ def broker_deal_completion_payload(
     }
 
 
-def require_same_execution(stored: dict[str, Any], incoming: dict[str, Any]) -> None:
-    if execution_identity_from_input(stored) != execution_identity_from_input(incoming):
-        raise ValueError("trade_execution_identity_conflict")
-    before = execution_economic_content(stored)
-    after = execution_economic_content(incoming)
-    if before["errors"] or after["errors"]:
-        raise ValueError("legacy_execution_evidence_required")
-    if before["economic"] != after["economic"] or conflicting_execution_associations(before, after):
-        raise ValueError("trade_execution_economic_conflict")
-
-
 def applied_execution_association_conflicts(
     repo: Any,
     execution_id: str,
@@ -76,31 +65,9 @@ def applied_execution_association_conflicts(
                 rows.extend(result)
     else:
         rows = list(applied_events)
-    incoming = content.get("associations") or {}
-    conflicts: set[str] = set()
-    for event in rows:
-        if not isinstance(event, Mapping):
-            continue
-        raw = event if event.get("stock_event_id") else event.get("raw_payload") or {}
-        if not isinstance(raw, Mapping):
-            continue
-        execution = raw.get("execution_input") or {}
-        stored_id = execution_identity_from_input(execution)
-        if stored_id != execution_id and not (applied_events is not None and not stored_id):
-            continue
-        effect = str(event.get("event_type") or "").lower()
-        if effect in {"close", "expire_close", "assignment", "exercise", "sale"}:
-            effect = "close"
-        if effect in {"open", "close"} and incoming.get("position_effect") not in (None, effect):
-            conflicts.add("position_effect")
-        associations = {
-            "external_order_id": raw.get("order_id") or execution.get("external_order_id"),
-            "external_order_namespace": raw.get("external_order_namespace") or execution.get("external_order_namespace"),
-        }
-        conflicts.update(conflicting_execution_associations(
-            {"associations": associations}, content,
-        ))
-    return sorted(conflicts)
+    return execution_application_conflicts(
+        execution_id, content, rows, allow_legacy_identity=applied_events is not None,
+    )
 
 
 def ensure_execution_writer_guard(conn: Any) -> None:
