@@ -324,7 +324,7 @@ class ResumableLotState:
             cost_basis_total = None if self.cost_basis_total is None else _finite_decimal(
                 self.cost_basis_total,
                 field_name="cost_basis_total",
-                nonnegative=True,
+                nonnegative=self.open_event.position_side != "short",
             )
             if shares_closed > shares_opened:
                 raise ValueError("shares_closed must be <= shares_opened")

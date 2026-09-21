@@ -67,7 +67,7 @@ class PositionLot:
         if event.asset_type == "stock":
             quantity = to_decimal(event.contracts, field_name="contracts")
             fee = fee_fact_for_event(event)
-            cost = (event.price * quantity + fee.amount
+            cost = (event.price * quantity + (-fee.amount if position_side == "short" else fee.amount)
                     if fee.basis == FeeBasis.ACTUAL and fee.amount is not None else None)
             return cls(
                 lot_id=lot_id,
@@ -354,11 +354,9 @@ def _stock_realized_pnl_delta(
         cost_basis_total / shares_opened if shares_opened > 0 else Decimal("0")
     )
     proceeds = event.price * shares
-    return (
-        proceeds
-        - cost_per_share * shares
-        - to_decimal(actual_fee_amount, field_name="actual_fee_amount")
-    )
+    basis = cost_per_share * shares
+    gross = basis - proceeds if lot.position_side == "short" else proceeds - basis
+    return gross - to_decimal(actual_fee_amount, field_name="actual_fee_amount")
 
 
 def _patch_value(patch: PositionLotPatch, key: str, fallback: Any) -> Any:
