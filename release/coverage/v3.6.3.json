@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.3",
+  "base": {
+    "tag": "v3.6.2",
+    "commit": "20548e69205f10d5b778d0241d7416f1632bad24"
+  },
+  "reviewed_head": "22d4f55828c8db4fcd4597f3e422186cc6fbefa7",
+  "commits": [
+    {
+      "sha": "edbc77dddba0f11f6ce7a015fddd9cbe5210cc9d",
+      "subject": "chore(ledger): arm authorized lot identity window"
+    },
+    {
+      "sha": "22d4f55828c8db4fcd4597f3e422186cc6fbefa7",
+      "subject": "Merge pull request #334 from liuxie066/codex/lot-identity-window-enablement"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Armed the reviewed liuxie-incus lot-identity migration window while retaining the existing manifest, SQL-registry, transaction, integrity, and explicit confirmation gates.",
+      "commits": [
+        "edbc77dddba0f11f6ce7a015fddd9cbe5210cc9d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "22d4f55828c8db4fcd4597f3e422186cc6fbefa7",
+      "reason": "Merge-only commit for PR #334; the user-visible change is covered by its content commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "edbc77dddba0f11f6ce7a015fddd9cbe5210cc9d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/334"
+      ]
+    },
+    {
+      "commit": "22d4f55828c8db4fcd4597f3e422186cc6fbefa7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/334"
+      ]
+    }
+  ]
+}
