@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.6.5 - 2026-09-22
+
 ### Improvements
 - Finalized position-lot storage on canonical `lot_id`, rejecting ordinary writes to unmigrated stores while retaining legacy access only in explicit migration and audit paths and closing the production migration window.
 
