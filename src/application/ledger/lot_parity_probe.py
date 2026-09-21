@@ -430,9 +430,14 @@ _CROSS_SHAPE_FACTS = (
     "broker", "account", "symbol", "option_type", "side", "status", "currency",
     "contracts", "contracts_open", "contracts_closed", "strike", "expiration_ymd",
     "multiplier", "premium", "opened_at", "source_event_id", "position_key",
+    "shares_opened", "shares_open", "shares_closed", "cost_basis_total",
 )
 _NUMERIC_FACTS = frozenset(
-    {"contracts", "contracts_open", "contracts_closed", "strike", "multiplier", "premium", "opened_at"}
+    {
+        "contracts", "contracts_open", "contracts_closed", "strike", "multiplier",
+        "premium", "opened_at", "shares_opened", "shares_open", "shares_closed",
+        "cost_basis_total",
+    }
 )
 
 
@@ -443,7 +448,11 @@ def _cross_shape_payload(fields: dict[str, Any]) -> dict[str, Any]:
         "broker": contract.get("broker") or fields.get("broker"),
         "account": contract.get("account") or fields.get("account"),
         "symbol": contract.get("underlying_symbol") or fields.get("symbol"),
-        "option_type": contract.get("option_type") or fields.get("option_type"),
+        "option_type": (
+            contract.get("option_type")
+            if "option_type" in contract
+            else fields.get("option_type")
+        ),
         "side": fields.get("position_side") or fields.get("side"),
         "status": fields.get("status"),
         "currency": fields.get("currency"),
@@ -451,12 +460,20 @@ def _cross_shape_payload(fields: dict[str, Any]) -> dict[str, Any]:
         "contracts_open": fields.get("contracts_open"),
         "contracts_closed": fields.get("contracts_closed"),
         "strike": contract.get("strike") if contract.get("strike") not in (None, "") else fields.get("strike"),
-        "expiration_ymd": contract.get("expiration_ymd") or fields.get("expiration_ymd"),
+        "expiration_ymd": (
+            contract.get("expiration_ymd")
+            if "expiration_ymd" in contract
+            else fields.get("expiration_ymd")
+        ),
         "multiplier": fields.get("multiplier"),
         "premium": fields.get("premium_open", fields.get("premium")),
         "opened_at": fields.get("opened_at_ms", fields.get("opened_at")),
         "source_event_id": fields.get("open_event_id") or fields.get("source_event_id"),
         "position_key": fields.get("position_key"),
+        "shares_opened": fields.get("shares_opened"),
+        "shares_open": fields.get("shares_open"),
+        "shares_closed": fields.get("shares_closed"),
+        "cost_basis_total": fields.get("cost_basis_total"),
     }
     out: dict[str, Any] = {}
     for key in _CROSS_SHAPE_FACTS:

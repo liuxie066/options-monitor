@@ -61,10 +61,11 @@ the code and are corrected here rather than silently implemented around:
    so the one registry gate opens the column rebuild and the payload rewrite
    together. When it opens, a fresh full replay supplies the exact canonical
    ``PositionLot.to_dict()`` payload for every lot. Before any rebuild, the
-   batch requires a replay without errors, exact lot-id set equality, and no
-   key that ``_drop_disposition`` calls ``lost``. The classifier is therefore
-   the rewrite's loss gate, while the canonical event replay is the write
-   source; the old row is never used to synthesize a partial v2 payload.
+   batch requires a replay without errors, full agreement with the stored
+   business payloads, and no key that ``_drop_disposition`` calls ``lost``.
+   The classifier is therefore the rewrite's loss gate, while the canonical
+   event replay is the write source; the old row is never used to synthesize a
+   partial v2 payload.
 4. **The checkpoint shortcut is weaker than "shape-only", but stronger than
    nothing.** §13.3 slice 3 asks that ``verify`` not take
    ``projection_verify``'s reuse shortcut. The shortcut is real — ``--mode
@@ -857,7 +858,13 @@ def _scan_lot_payloads(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         identity,
         "fields_json",
     ]
-    for name in ("account", "expiration", "strike", "multiplier"):
+    for name in (
+        "account",
+        "source_event_id",
+        "expiration",
+        "strike",
+        "multiplier",
+    ):
         selected.append(name if name in columns else f"NULL AS {name}")
     order = f" ORDER BY {key_column}" if key_column else ""
     rows: list[dict[str, Any]] = []
@@ -875,6 +882,7 @@ def _scan_lot_payloads(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "fields_json": row["fields_json"],
                 "fields": _parse_fields(row["fields_json"]),
                 "account": row["account"],
+                "source_event_id": row["source_event_id"],
                 "expiration": row["expiration"],
                 "strike": row["strike"],
                 "multiplier": row["multiplier"],
@@ -1063,6 +1071,7 @@ def _inventory_from_conn(
     implementation: str,
 ) -> dict[str, Any]:
     rows = _scan_lot_payloads(conn)
+    rows, asset_type_resolution, replay_match = _resolve_asset_types_from_replay(conn, rows)
     lot_columns = _column_names(conn, "position_lots")
     final_shape = set(lot_columns) == FINAL_POSITION_LOT_COLUMNS and position_lots_use_lot_id(conn)
     expected = set(POSITION_LOTS_COLUMN_CLASSIFICATION) - ({"record_id", "expiration"} if final_shape else set())
@@ -1087,6 +1096,10 @@ def _inventory_from_conn(
         # D2's rebuild already ran: the store is past this batch's entry state,
         # and the legacy-id backfill has no source column left to read.
         reasons.append("record_id_column_missing")
+    if asset_type_resolution["status"] != "resolved":
+        reasons.append("lot_asset_type_unresolved")
+    if replay_match["status"] == "mismatch":
+        reasons.append("projection_replay_mismatch")
 
     stable = {
         "store_identity": _store_identity(path),
@@ -1105,6 +1118,8 @@ def _inventory_from_conn(
         "wheel_identity": _wheel_identity_inventory(conn),
         "column_contract": columns,
         "pending": pending,
+        "asset_type_resolution": asset_type_resolution,
+        "projection_replay_match": replay_match,
         "contract_scalar_carriers": _scalar_carrier_distribution(rows),
         "lot_shape_keys": {
             "common": sorted(LOT_SHAPE_KEYS_COMMON),
@@ -1119,6 +1134,94 @@ def _inventory_from_conn(
         "inventory_fingerprint": _sha256(stable),
         "readiness": "ready" if not reasons else "not_ready",
         "readiness_reasons": reasons,
+    }
+
+
+def _resolve_asset_types_from_replay(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Use the canonical event replay to classify legacy payload shapes."""
+
+    try:
+        replayed = _fresh_replay_payloads(conn)
+    except RuntimeError:
+        return (
+            rows,
+            {"status": "unresolved", "resolved_rows": 0, "blocked_rows": len(rows)},
+            {"status": "unavailable", "mismatch_count": 0},
+        )
+
+    resolved: list[dict[str, Any]] = []
+    blocked: list[str] = []
+    for row in rows:
+        lot_id = str(row["lot_id"] or row["record_id"] or "").strip()
+        fields = row["fields"]
+        canonical = replayed.get(lot_id, {}).get("asset_type")
+        stored = fields.get("asset_type") if isinstance(fields, Mapping) else None
+        if (
+            not isinstance(fields, Mapping)
+            or canonical not in {"option", "stock"}
+            or not (stored is None or stored == "" or stored == canonical)
+        ):
+            blocked.append(lot_id)
+            resolved.append(row)
+            continue
+        copied = dict(row)
+        copied["fields"] = {**fields, "asset_type": canonical}
+        resolved.append(copied)
+    resolution = {
+        "status": "resolved" if not blocked else "unresolved",
+        "resolved_rows": len(rows) - len(blocked),
+        "blocked_rows": len(blocked),
+        "sample_blocked_lot_ids": blocked[:5],
+    }
+    if blocked:
+        return resolved, resolution, {"status": "unavailable", "mismatch_count": 0}
+
+    families = _event_layer_strategy_families(conn)
+    comparable = []
+    try:
+        for original, row in zip(rows, resolved, strict=True):
+            lot_id = str(row["lot_id"] or row["record_id"] or "").strip()
+            fields = original["fields"] or {}
+            if isinstance(fields, Mapping) and isinstance(
+                fields.get("contract_key"), Mapping
+            ):
+                fields = _aligned_lot_payload(
+                    row["fields"],
+                    row,
+                    _family_for_row(row, families),
+                )
+                if not _non_empty(fields.get("open_event_id")):
+                    fields["open_event_id"] = row["source_event_id"]
+                contract = fields.setdefault("contract_key", {})
+                canonical_contract = replayed[lot_id].get("contract_key", {})
+                for key in ("option_type", "expiration_ymd"):
+                    if key not in contract and canonical_contract.get(key) in (None, ""):
+                        contract[key] = canonical_contract.get(key)
+            comparable.append(
+                {
+                    "record_id": lot_id,
+                    "fields": fields,
+                }
+            )
+    except RuntimeError:
+        return resolved, resolution, {"status": "unavailable", "mismatch_count": 0}
+    comparison = compare_projection_lots(
+        projected_lots=[
+            {"lot_id": lot_id, "fields": fields}
+            for lot_id, fields in replayed.items()
+        ],
+        current_lots=comparable,
+        diagnostics=[],
+    )
+    mismatches = sum(
+        item.get("status") != "matched" for item in comparison["items"]
+    )
+    return resolved, resolution, {
+        "status": "matched" if not mismatches else "mismatch",
+        "mismatch_count": mismatches,
     }
 
 
@@ -1755,11 +1858,18 @@ def _insert_rebuild_rows(
     return inserted
 
 
-def _assert_retirement_preserves_facts(conn: sqlite3.Connection) -> None:
+def _assert_retirement_preserves_facts(
+    conn: sqlite3.Connection,
+    replayed_payloads: Mapping[str, Mapping[str, Any]],
+) -> None:
     from domain.domain.ledger.position_fields import parse_exp_to_ms
 
     for row in conn.execute("SELECT * FROM position_lots"):
-        fields = _parse_fields(row["fields_json"])
+        legacy_fields = _parse_fields(row["fields_json"])
+        lot_id = str(row["lot_id"] or row["record_id"] or "").strip()
+        fields = replayed_payloads.get(lot_id)
+        if fields is None:
+            raise RuntimeError(f"fresh replay omitted position lot: {lot_id}")
         contract = fields.get("contract_key") or {}
         asset_type = fields.get("asset_type")
         if asset_type not in {"option", "stock"}:
@@ -1768,7 +1878,7 @@ def _assert_retirement_preserves_facts(conn: sqlite3.Connection) -> None:
             raise RuntimeError("retirement account disagrees with contract_key")
         if not row["source_event_id"] or row["source_event_id"] != fields.get("open_event_id"):
             raise RuntimeError("retirement source_event_id disagrees with open_event_id")
-        legacy_source = fields.get("source_event_id")
+        legacy_source = legacy_fields.get("source_event_id")
         if legacy_source not in (None, "", fields.get("open_event_id")):
             raise RuntimeError("retirement payload source_event_id disagrees with open_event_id")
         if asset_type == "option":
@@ -1784,6 +1894,7 @@ def _assert_retirement_preserves_facts(conn: sqlite3.Connection) -> None:
 def _rebuild_position_lots(
     conn: sqlite3.Connection,
     *,
+    replayed_payloads: Mapping[str, Mapping[str, Any]],
     failure_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """§12.3's checked rebuild: D1's dropped column and D2's renamed key in one.
@@ -1811,7 +1922,7 @@ def _rebuild_position_lots(
             "rows": int(conn.execute("SELECT count(*) FROM position_lots").fetchone()[0]),
         }
 
-    _assert_retirement_preserves_facts(conn)
+    _assert_retirement_preserves_facts(conn, replayed_payloads)
     retained = [
         "lot_id",
         *(name for name in columns if name != "lot_id" and name not in set(RETIRED_LOT_COLUMNS)),
@@ -1968,6 +2079,12 @@ def apply_lot_identity_migration(
             deferred_by = _live_sql_naming_retired_columns()
             replayed_payloads: dict[str, dict[str, Any]] | None = None
             if not deferred_by:
+                if "lot_asset_type_unresolved" in current["readiness_reasons"]:
+                    raise RuntimeError(
+                        "lot asset_type is missing, unknown, or conflicts with fresh replay"
+                    )
+                if "projection_replay_mismatch" in current["readiness_reasons"]:
+                    raise RuntimeError("fresh replay differs from stored position lots")
                 lost = current["dropped_key_classification"]["lost"]
                 if lost:
                     key = sorted(lost)[0]
@@ -1983,7 +2100,11 @@ def apply_lot_identity_migration(
             # report below is the *item* order (D1–D4 design order), not this
             # execution order.
             rebuild = (
-                _rebuild_position_lots(conn, failure_hook=failure_hook)
+                _rebuild_position_lots(
+                    conn,
+                    replayed_payloads=replayed_payloads or {},
+                    failure_hook=failure_hook,
+                )
                 if not deferred_by
                 else None
             )

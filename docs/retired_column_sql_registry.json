@@ -618,6 +618,18 @@
     "exempt_hits": [
       {
         "columns": [
+          "expiration"
+        ],
+        "digest": "sha256:6a9e2dc31a15c922",
+        "kind": "ddl",
+        "module": "src/application/ledger/lot_identity_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
           "stock_lot_id"
         ],
         "digest": "sha256:eb089deb895e0e95",
@@ -626,18 +638,6 @@
         "occurrences": 1,
         "tables": [
           "wheel_events"
-        ]
-      },
-      {
-        "columns": [
-          "expiration"
-        ],
-        "digest": "sha256:fbfb976a4317ef6f",
-        "kind": "ddl",
-        "module": "src/application/ledger/lot_identity_migration.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
         ]
       },
       {
