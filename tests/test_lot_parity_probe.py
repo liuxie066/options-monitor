@@ -2261,3 +2261,21 @@ def test_probe_sets_query_only_on_its_own_connection(
 
     assert report["green"] is True
     assert "PRAGMA query_only=ON" in statements
+
+
+def test_probe_blocks_empty_identity_on_both_sides(tmp_path, monkeypatch):
+    module = _probe_module()
+    sqlite_path, _ = _build_green_store(tmp_path)
+    read = module.read_stored_position_lots
+    project = module._projected_lot_row
+
+    def empty_stored(conn):
+        return [dict(row, lot_id="") for row in read(conn)]
+
+    monkeypatch.setattr(module, "read_stored_position_lots", empty_stored)
+    monkeypatch.setattr(module, "_projected_lot_row", lambda lot: dict(project(lot), lot_id=""))
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+    assert report["green"] is False
+    assert report["faces"]["c_rows"]["empty_identity_count"] == 2
+    assert {item["status"] for item in report["faces"]["c_rows"]["items"]} == {"empty_lot_id"}
+    assert report["c_attribution"]["other"] == 1

@@ -350,3 +350,18 @@ def test_the_codec_needs_all_five_columns_before_it_attaches_them() -> None:
 
     assert "columns" not in record
     assert record["rowid"] == 3
+
+
+@pytest.mark.parametrize("identity", ["", "   ", None])
+def test_empty_identity_blocks_even_when_both_faces_agree(identity):
+    comparison = _compare([_store_lot(identity)], [{"lot_id": identity, "fields": _fields(lot_id=identity)}])
+    assert comparison["green"] is False
+    assert comparison["summary"]["empty_lot_id"] == 2
+    assert comparison["store_rowids"] is None
+
+
+def test_rowid_movement_requires_two_snapshots():
+    comparison = _compare([_store_lot()], [_replay_lot()])
+    assert comparison["green"] is True
+    assert comparison["verdicts"]["rowid_moved"] is None
+    assert comparison["store_rowids"] == {"lot_a": 7}

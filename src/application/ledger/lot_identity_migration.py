@@ -95,6 +95,7 @@ the code and are corrected here rather than silently implemented around:
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import json
 from pathlib import Path
 import re
@@ -428,7 +429,10 @@ def _live_sql_naming_retired_columns() -> tuple[str, ...]:
     try:
         registry = json.loads(RETIRED_COLUMN_REGISTRY_PATH.read_text(encoding="utf-8"))
         detail = registry["src"]["detail"]
-        return tuple(f"{hit['module']} ({hit['kind']})" for hit in detail)
+        dynamic = registry["src"]["dynamic_sql"]
+        if not isinstance(detail, list) or not isinstance(dynamic, list):
+            raise ValueError("statement inventories must be lists")
+        return tuple(f"{hit['module']} ({hit['kind']})" for hit in detail + dynamic)
     except (OSError, ValueError, KeyError, TypeError):
         return (f"<registry unreadable: {RETIRED_COLUMN_REGISTRY_PATH.name}>",)
 
@@ -679,6 +683,19 @@ def _drop_disposition(
 ) -> tuple[str, str]:
     """Classify one non-empty dropped key as carried / reconstructible / lost."""
 
+    path = CARRIER_TARGETS.get(key)
+    carried = _carried_value(key, fields) if path else None
+    if path and carried is not None:
+        existing: Any = fields
+        for part in path:
+            if not isinstance(existing, Mapping):
+                if _non_empty(existing):
+                    return "lost", "carrier_value_conflict"
+                break
+            existing = existing.get(part)
+        else:
+            if _non_empty(existing) and json.dumps(existing, sort_keys=True) != json.dumps(carried, sort_keys=True):
+                return "lost", "carrier_value_conflict"
     if key == "note":
         reason = _note_disposition(value, fields, surviving_columns)
         if reason:
@@ -1253,7 +1270,7 @@ def _aligned_lot_payload(
     """
 
     target_keys = _lot_shape_keys(fields.get("asset_type"))
-    aligned = {key: value for key, value in fields.items() if key in target_keys}
+    aligned = deepcopy({key: value for key, value in fields.items() if key in target_keys})
     for key, value in fields.items():
         if key in target_keys or not _non_empty(value):
             continue
@@ -1439,7 +1456,7 @@ def _rebuild_column_defs(conn: sqlite3.Connection, retained: list[str]) -> list[
     for name in retained:
         definition = declared[name]
         if name == "lot_id":
-            definition = f"{definition} PRIMARY KEY"
+            definition = f"{definition} NOT NULL PRIMARY KEY CHECK (length(trim(lot_id)) > 0)"
         defs.append(definition)
     return defs
 

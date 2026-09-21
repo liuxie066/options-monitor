@@ -2493,7 +2493,8 @@ def main(argv: list[str] | None = None) -> int:
             # absent from it reads as an unexplained failure.
             f"column_differs_unexplained={int(summary.get('column_differs_unexplained', 0))} "
             f"count_mismatch={int(summary.get('count_mismatch', 0))} "
-            f"duplicate_lot_id={int(summary.get('duplicate_lot_id', 0))}"
+            f"duplicate_lot_id={int(summary.get('duplicate_lot_id', 0))} "
+            f"empty_lot_id={int(summary.get('empty_lot_id', 0))}"
         )
         if probe_error is not None:
             print(f"lot parity probe could not run: {probe_error}", file=sys.stderr)

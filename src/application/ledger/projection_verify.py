@@ -350,6 +350,10 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
         items.append(
             {"status": "duplicate_lot_id", "record_id": lot_id, "side": "projection", "occurrences": occurrences}
         )
+    for side, lots in (("position_lots", current), ("projection", projected)):
+        empty_count = sum(not lot["record_id"] for lot in lots)
+        if empty_count:
+            items.append({"status": "empty_lot_id", "side": side, "occurrences": empty_count})
     if len(projected) != len(current):
         items.append(
             {
@@ -364,7 +368,8 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
         status = str(item.get("status") or "")
         summary[status] = int(summary.get(status) or 0) + 1
 
-    verdicts = {term: 0 for term in V5_VERDICT_TERMS}
+    verdicts: dict[str, Any] = {term: 0 for term in V5_VERDICT_TERMS}
+    verdicts["rowid_moved"] = None
     verdicts["both"] = both_faces
     verdicts["column_differs_known_dirty"] = len(known_dirty)
     for item in items:
@@ -395,14 +400,15 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
             if columns_read
             else "the store read carried no face-B columns (a narrower SELECT or a hand-built lot dict)",
         },
-        "store_rowids": {str(lot.get("record_id") or ""): lot.get("rowid") for lot in current} if rowids_read else None,
+        "store_rowids": {str(lot.get("record_id") or ""): lot.get("rowid") for lot in current}
+        if rowids_read and not current_duplicates and all(lot["record_id"] for lot in current) else None,
         "known_dirty": known_dirty,
         "excluded_payload_keys": list(EXCLUDED_PAYLOAD_KEYS),
         "notes": [
             "face A compares raw stored fields_json against the replay payload with neither side healed",
             "face B compares each stored derived column against the value re-derived from the stored payload (§6 rule 1)",
             "derived_column_differences is §6 rule 2: the replay's derived columns against the store's",
-            "rowid_moved stays 0 here: §3 compares the pre-rewrite store against the post-rewrite store, two snapshots (A4)",
+            "rowid_moved is null (not compared): A4 compares pre/post-rewrite store_rowids snapshots",
             "column_differs_known_dirty counts known_dirty and is 0 until COLUMN_DIRTY_ALLOWLIST admits a measured entry (§7)",
         ],
     }

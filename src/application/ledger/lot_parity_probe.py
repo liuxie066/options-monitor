@@ -671,7 +671,7 @@ def _index_by_identity(
     index: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
     for row in rows:
-        identity = str(row["lot_id"])
+        identity = str(row["lot_id"] or "").strip()
         counts[identity] = counts.get(identity, 0) + 1
         index.setdefault(identity, row)
     duplicates = sorted(
@@ -787,6 +787,11 @@ def run_lot_parity_probe(
     a_differing_lot_count = len(a_items)
 
     c_items: list[dict[str, Any]] = []
+    for side, rows in (("store", stored_rows), ("projection", projected_rows)):
+        empty_count = sum(not str(row["lot_id"] or "").strip() for row in rows)
+        if empty_count:
+            c_items.append({"status": "empty_lot_id", "side": side, "lot_id": "", "occurrences": empty_count})
+    c_empty_count = len(c_items)
     for lot_id in extra_ids:
         c_items.append(
             {
@@ -857,6 +862,7 @@ def run_lot_parity_probe(
     # as a second, independent failure.
     differing_lot_ids = (
         set(extra_ids) | set(missing_ids) | differing_aligned_ids | duplicate_ids
+        | ({""} if c_empty_count else set())
     )
     other_ids = sorted(differing_lot_ids - set(extra_ids))
     for lot_id in other_ids:
@@ -925,7 +931,7 @@ def run_lot_parity_probe(
     # counting it as a third difference made one differing row print
     # ``c_rows=2``. It stays in the report as the boolean comparator-spec §5
     # names; it is not a third difference.
-    c_difference_count = c_set_difference_count + c_duplicate_count
+    c_difference_count = c_set_difference_count + c_duplicate_count + c_empty_count
     difference_count = a_difference_count + b_difference_count + c_difference_count
 
     return {
@@ -985,6 +991,7 @@ def run_lot_parity_probe(
                 "lot_id_set_difference_count": c_set_difference_count,
                 "count_mismatch": count_mismatch,
                 "duplicate_identity_count": c_duplicate_count,
+                "empty_identity_count": c_empty_count,
                 "extra_in_store_count": len(extra_ids),
                 "missing_in_store_count": len(missing_ids),
                 "items": c_items[:limit],

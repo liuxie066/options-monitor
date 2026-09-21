@@ -2063,3 +2063,62 @@ def test_the_ms_expiration_mirror_is_carried_by_one_shared_rule() -> None:
     assert module._carried_value(
         "expiration", {"expiration_ymd": "2026-06-19", "expiration": 1}
     ) is None  # the ymd wrote that target already
+
+
+def test_rebuild_gate_blocks_dynamic_sql_and_malformed_inventory(tmp_path, monkeypatch):
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH", path)
+    hit = {"module": "src/live.py", "kind": "dynamic"}
+    for src in (
+        {"detail": [], "dynamic_sql": [hit]},
+        {"detail": {}, "dynamic_sql": []},
+        {"detail": [], "dynamic_sql": {}},
+        {"detail": []},
+    ):
+        path.write_text(json.dumps({"src": src}), encoding="utf-8")
+        assert module._live_sql_naming_retired_columns()
+    path.write_text(json.dumps({"src": {"detail": [], "dynamic_sql": []}}), encoding="utf-8")
+    assert module._live_sql_naming_retired_columns() == ()
+
+
+def test_carrier_conflict_blocks_inventory_and_apply(tmp_path, repointed_build):
+    path = _legacy_store(tmp_path)
+    with sqlite3.connect(path) as conn:
+        raw = conn.execute(
+            "SELECT fields_json FROM position_lots WHERE record_id = ?", ("lot_assign-1",)
+        ).fetchone()
+        fields = json.loads(raw[0])
+        fields["strike"] = "200"
+        fields["contract_key"]["strike"] = "100"
+        conn.execute(
+            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+            (json.dumps(fields), "lot_assign-1"),
+        )
+    before = path.read_bytes()
+    inventory = module.build_lot_identity_migration_inventory(path)
+    assert inventory["dropped_key_classification"]["lost"]["strike"]["reason"] == "carrier_value_conflict"
+    with pytest.raises(RuntimeError, match="carrier_value_conflict"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
+def test_alignment_preserves_existing_nested_payload():
+    fields = {"asset_type": "option", "account": "lx", "contract_key": {"strike": "100"}}
+    aligned = module._aligned_lot_payload(fields, {}, {})
+    assert aligned["contract_key"] == {"strike": "100", "account": "lx"}
+    assert fields["contract_key"] == {"strike": "100"}
+    fields["contract_key"] = "invalid-but-present"
+    with pytest.raises(RuntimeError, match="carrier_value_conflict"):
+        module._aligned_lot_payload(fields, {}, {})
+
+
+def test_rebuilt_identity_rejects_null_empty_and_duplicates(tmp_path, repointed_build):
+    path = _legacy_store(tmp_path)
+    _run_apply(path)
+    with sqlite3.connect(path) as conn:
+        identity, = conn.execute("SELECT lot_id FROM position_lots LIMIT 1").fetchone()
+        for invalid in (None, "", "   "):
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("UPDATE position_lots SET lot_id = ? WHERE lot_id = ?", (invalid, identity))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE position_lots SET lot_id = ?", (identity,))
