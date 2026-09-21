@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 3.6.0 - 2026-09-21
+
+### New Features
+- Added R1-compatible old/new SQLite order-lot storage support with read-only lot-identity inventory and verification surfaces plus a guarded migration path that remains disabled outside a separately authorized production window.
+
+### Improvements
+- Unified canonical order, execution, and position identity across ledger, Wheel, trade intake and reconciliation, assistant, and quality consumers.
+- Centralized stock settlement quantities and directions, execution arbitration, retired-column SQL checks, and public-surface gates while simplifying duplicate internal models without changing the R1 compatibility contract.
+
+### Bug Fixes
+- Preserved exact decimal stock quantities instead of truncating fractional shares, while continuing to reject fractional option contracts and replaying legacy integer events consistently.
+- Derived stock cost basis and realized economics only from confirmed fee evidence, returning unknown values when fees are missing or estimated and recovering exact values after replay once fees become authoritative.
+- Rejected unknown reservation states and corrected stock settlement direction and quantity handling so canonical ledger projections cannot accept ambiguous or contradictory execution facts.
+
 ## 3.5.15 - 2026-09-18
 
 ### Bug Fixes
