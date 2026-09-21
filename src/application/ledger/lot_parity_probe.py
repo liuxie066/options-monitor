@@ -100,6 +100,8 @@ Pure comparison logic plus a thin module CLI::
 
 from __future__ import annotations
 
+from .sqlite_row_codec import position_lots_use_lot_id
+
 import argparse
 import json
 import sqlite3
@@ -335,7 +337,9 @@ def read_stored_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if not _table_exists(conn, "position_lots"):
         raise ValueError("position lot parity probe requires a position_lots table")
     columns = _table_columns(conn, "position_lots")
-    missing_columns = sorted(set(DERIVED_COLUMNS) - columns)
+    final_shape = "expiration" not in columns and position_lots_use_lot_id(conn)
+    compared_columns = tuple(name for name in DERIVED_COLUMNS if not (final_shape and name == "expiration"))
+    missing_columns = sorted(set(compared_columns) - columns)
     if missing_columns:
         # Loud, not silent: a store without the columns face B compares would
         # otherwise look like a store with nothing to compare.
@@ -349,22 +353,13 @@ def read_stored_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "position_lots has neither lot_id nor record_id: the probe cannot "
             "identify its rows"
         )
-    carrier = "lot_id" if "lot_id" in columns else "NULL AS lot_id"
-    record_carrier = "record_id" if "record_id" in columns else "NULL AS record_id"
-    # The guard above guarantees one of the two is present, and ``lot_id`` wins
-    # when both are: the same precedence the two existing read surfaces use.
-    order_key = identity_columns[0]
     rows = conn.execute(
-        f"""
-        SELECT {record_carrier}, {carrier}, fields_json, account, expiration, strike,
-               multiplier, source_event_id
-        FROM position_lots
-        ORDER BY {order_key} ASC
-        """
+        "SELECT * FROM position_lots ORDER BY lot_id" if "lot_id" in columns else
+        "SELECT * FROM position_lots ORDER BY record_id"
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
-        record_id = str(row["record_id"] or "")
+        record_id = str(row["record_id"] or "") if "record_id" in columns else ""
         raw_carrier = row["lot_id"] if "lot_id" in row.keys() else None
         lot_id = str(raw_carrier).strip() if raw_carrier not in (None, "") else record_id
         out.append(
@@ -373,7 +368,8 @@ def read_stored_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "lot_id": lot_id,
                 "fields": _decode_fields_json(row["fields_json"], lot_id=lot_id),
                 "columns": {
-                    column: row[column] for column in DERIVED_COLUMNS
+                    **{column: row[column] for column in compared_columns},
+                    **({"retired_columns": ["expiration"]} if final_shape else {}),
                 },
             }
         )
@@ -611,7 +607,13 @@ def compare_column_face(
     writer_error = str(derived_columns.get(WRITER_RAISES_KEY) or "")
     refused_columns = tuple(derived_columns.get(WRITER_RAISES_COLUMNS_KEY) or ())
     differences: list[dict[str, Any]] = []
+    retired = stored_columns.get("retired_columns", [])
+    if retired and (retired != ["expiration"] or "expiration" in stored_columns
+                    or not (set(DERIVED_COLUMNS) - {"expiration"}) <= stored_columns.keys()):
+        raise ValueError("invalid retired-column evidence")
     for column in DERIVED_COLUMNS:
+        if column in retired:
+            continue
         if writer_error and column in refused_columns:
             # One difference per root cause: the writer refuses the whole
             # payload, so the columns its message names are reported once — as
@@ -747,6 +749,7 @@ def run_lot_parity_probe(
     with _read_only_connection(path) as (conn, connection_mode):
         stored_rows = read_stored_position_lots(conn)
         events, ledger_event_ids = read_stored_events(conn)
+        retired_columns = ["expiration"] if "expiration" not in _table_columns(conn, "position_lots") else []
 
     projection = project_stored_trade_events_to_position_lots(events)
     projected_rows = [_projected_lot_row(lot) for lot in projection.lots]
@@ -943,7 +946,8 @@ def run_lot_parity_probe(
         "connection_mode": connection_mode,
         "sample_limit": limit,
         "excluded_payload_keys": list(EXCLUDED_PAYLOAD_KEYS),
-        "derived_columns": list(DERIVED_COLUMNS),
+        "derived_columns": [name for name in DERIVED_COLUMNS if name not in retired_columns],
+        "retired_columns": retired_columns,
         "green_criterion": GREEN_CRITERION,
         "notes": [
             "face A compares raw stored fields_json against the replay payload with neither side healed",

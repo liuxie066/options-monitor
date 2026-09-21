@@ -395,6 +395,7 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
         "green": _blocking_count(summary) == 0 and columns_read,
         "store_face": {
             "columns_read": columns_read,
+            "retired_columns": sorted({name for lot in current for name in lot.get("columns", {}).get("retired_columns", [])}),
             "rowids_read": rowids_read,
             "reason": None
             if columns_read

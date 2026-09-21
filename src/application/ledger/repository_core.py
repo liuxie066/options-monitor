@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_row_codec import position_lots_use_lot_id, wheel_events_use_lot_id
 from .repository_wheel_policy import ensure_wheel_policy_bindings
 from .repository_trade_schema import EXECUTION_IDENTITY_INDEXES, _execution_identity_index_sql
 from .repository_schema import (
@@ -90,13 +91,22 @@ def _create_wheel_events_v2_guards(conn: sqlite3.Connection) -> None:
         ON wheel_events(account, wheel_branch_id, occurred_at_ms, event_id)
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
-        ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
-        WHERE stock_lot_id IS NOT NULL
-        """
-    )
+    if wheel_events_use_lot_id(conn):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
+            ON wheel_events(account, lot_id, occurred_at_ms, event_id)
+            WHERE lot_id IS NOT NULL
+            """
+        )
+    else:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
+            ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
+            WHERE stock_lot_id IS NOT NULL
+            """
+        )
     conn.execute(
         """
         CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_update
@@ -126,7 +136,8 @@ def _wheel_events_schema_is_v2(conn: sqlite3.Connection) -> bool:
         return False
     if int(columns["wheel_branch_id"]["notnull"] or 0) != 1:
         return False
-    if int(columns["stock_lot_id"]["notnull"] or 0) != 0:
+    identity_column = "lot_id" if wheel_events_use_lot_id(conn) else "stock_lot_id"
+    if int(columns[identity_column]["notnull"] or 0) != 0:
         return False
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wheel_events'"
@@ -141,7 +152,7 @@ def _normalized_wheel_row(
     *,
     columns: set[str],
 ) -> dict[str, Any]:
-    lot_id = row["stock_lot_id"]
+    lot_id = row["lot_id"] if "lot_id" in columns else row["stock_lot_id"]
     event_schema_version = (
         str(row["event_schema_version"] or "").strip()
         if "event_schema_version" in columns
@@ -526,15 +537,16 @@ class RepositoryCoreMixin:
                 )
                 """
             )
-            _add_column_if_missing(conn, "position_lots", "expiration", "INTEGER")
-            _add_column_if_missing(conn, "position_lots", "strike", "REAL")
-            _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
-            _create_index_if_table_empty(
-                conn,
-                index_name="idx_position_lots_expiration",
-                table="position_lots",
-                create_sql=("CREATE INDEX idx_position_lots_expiration ON position_lots(expiration, record_id)"),
-            )
+            if not position_lots_use_lot_id(conn):
+                _add_column_if_missing(conn, "position_lots", "strike", "REAL")
+                _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
+                _add_column_if_missing(conn, "position_lots", "expiration", "INTEGER")
+                _create_index_if_table_empty(
+                    conn,
+                    index_name="idx_position_lots_expiration",
+                    table="position_lots",
+                    create_sql=("CREATE INDEX idx_position_lots_expiration ON position_lots(expiration, record_id)"),
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assigned_stock_events (

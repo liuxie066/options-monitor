@@ -11,6 +11,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from scripts.retired_column_scan import (
     EXEMPT_MODULES,
     REGISTRY_PATH,
@@ -70,10 +72,44 @@ def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> Non
     monkeypatch.setattr(scanner, "scan", lambda: document)
     for key in ("detail", "dynamic_sql", "exempt_hits", "exempt_dynamic"):
         stale = deepcopy(document)
-        stale["src"][key] = []
+        stale["src"][key] = [] if document["src"][key] else [{"unexpected": "metadata drift"}]
         assert stale != document, key
         path.write_text(json.dumps(stale), encoding="utf-8")
         assert scanner.main(["--check"]) == 1, key
         assert "registry is stale" in capsys.readouterr().err
     path.write_text(json.dumps(document), encoding="utf-8")
     assert scanner.main(["--check"]) == 0
+
+
+def test_r1_exceptions_are_exact_live_statements(tmp_path, monkeypatch) -> None:
+    from src.application.ledger import lot_identity_migration as migration
+
+    registry = scan()["src"]
+    live = registry["detail"] + registry["dynamic_sql"]
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(migration, "RETIRED_COLUMN_REGISTRY_PATH", path)
+    for module, signatures in migration.R1_POSITION_SQL_EXCEPTIONS.items():
+        for kind, digest, occurrences in signatures:
+            matches = [hit for hit in live if (
+                hit["module"], hit["kind"], hit["digest"], hit["occurrences"]
+            ) == (module, kind, digest, occurrences)]
+            assert len(matches) == 1, (module, kind, digest, occurrences)
+            hit = matches[0]
+            # Each exception is independently usable; changing any component
+            # must close it, even when --write has accepted the new registry.
+            for changed in (None, {"module": "src/unreviewed.py"}, {"kind": "unreviewed"},
+                            {"digest": "sha256:unreviewed"}, {"occurrences": occurrences + 1}):
+                candidate = hit if changed is None else {**hit, **changed}
+                path.write_text(json.dumps({"src": {"detail": [candidate], "dynamic_sql": []}}))
+                assert bool(migration._live_sql_naming_retired_columns()) is (changed is not None)
+
+
+@pytest.mark.parametrize("rebuilt", [False, True], ids=["legacy", "rebuilt"])
+def test_r1_exception_shape_regression(tmp_path, monkeypatch, rebuilt) -> None:
+    from tests import test_lot_identity_migration as regression
+
+    # Exercise real SQL gate and repository owners. Only the window token is
+    # enabled for the isolated fixture; the shipped token remains absent.
+    monkeypatch.setattr(regression.module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
+    assert regression.module._live_sql_naming_retired_columns() == ()
+    regression.test_r1_rebuilt_store_reopens_and_preserves_projection(tmp_path, None, rebuilt)

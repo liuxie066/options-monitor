@@ -42,7 +42,7 @@ from src.application.ledger.repository import (
     _position_lot_contract_scalars,
 )
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
-from src.application.ledger.sqlite_row_codec import position_lots_reads_face_b
+from src.application.ledger.sqlite_row_codec import FINAL_POSITION_LOT_COLUMNS, position_lots_reads_face_b, position_lots_use_lot_id
 
 
 def _lot_account(fields: Any) -> str:
@@ -275,15 +275,16 @@ def _account_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
     lot_null = lot_conflict = lot_invalid = scalar_null = scalar_conflict = 0
     if _table_exists(conn, "position_lots"):
         columns = set(_column_names(conn, "position_lots"))
-        selected = ["record_id", "fields_json"]
-        for name in ("account", "expiration", "strike", "multiplier"):
-            selected.append(name if name in columns else f"NULL AS {name}")
+        final_shape = "record_id" not in columns and position_lots_use_lot_id(conn)
         for row in conn.execute(
-            f"SELECT {','.join(selected)} FROM position_lots ORDER BY record_id"
+            "SELECT * FROM position_lots ORDER BY lot_id" if final_shape else
+            "SELECT * FROM position_lots ORDER BY record_id"
         ):
+            # Historical stores may predate the normalized scalar columns.
+            row = dict(row)
             fields = _json_object(row["fields_json"])
             canonical = _lot_account(fields).strip()
-            stored = str(row["account"] or "").strip()
+            stored = str(row.get("account") or "").strip()
             if fields is None or not canonical or canonical != canonical.lower():
                 lot_invalid += 1
             else:
@@ -296,8 +297,13 @@ def _account_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
                 continue
             expiration, strike_value, multiplier_value = _position_lot_contract_scalars(fields)
             expected = (expiration, strike_value, multiplier_value)
-            actual = (row["expiration"], row["strike"], row["multiplier"])
-            if str(fields.get("option_type") or "").lower() in {"put", "call"} and any(
+            actual = (row["strike"], row["multiplier"]) if final_shape else (
+                row.get("expiration"), row.get("strike"), row.get("multiplier")
+            )
+            if final_shape:
+                expected = expected[1:]
+            contract = fields.get("contract_key") or {}
+            if str(contract.get("option_type") or fields.get("option_type") or "").lower() in {"put", "call"} and any(
                 item is None for item in actual
             ):
                 scalar_null += 1
@@ -335,6 +341,8 @@ def _column_contract(conn: sqlite3.Connection) -> dict[str, dict[str, list[str]]
         ("position_lots", POSITION_LOTS_COLUMN_CLASSIFICATION),
     ):
         actual = set(_column_names(conn, table))
+        if table == "position_lots" and actual == FINAL_POSITION_LOT_COLUMNS and position_lots_use_lot_id(conn):
+            expected = {name: kind for name, kind in expected.items() if name in actual}
         result[table] = {
             "missing": sorted(set(expected) - actual),
             "unclassified": sorted(actual - set(expected)),
@@ -432,6 +440,9 @@ def _inventory_from_conn(
         reasons.append("normalized_columns_incomplete")
     execution_tables = [table for table in EXECUTION_IDENTITY_INDEXES if _table_exists(conn, table)]
     required_indexes = {*REQUIRED_INDEXES, *(EXECUTION_IDENTITY_INDEXES[table][0] for table in execution_tables)}
+    if "record_id" not in _column_names(conn, "position_lots") and position_lots_use_lot_id(conn):
+        required_indexes -= {"idx_position_lots_account_expiration", "idx_position_lots_account_record"}
+        required_indexes.add("idx_position_lots_account_lot")
     missing_indexes = sorted(required_indexes - indexes)
     if any(
         EXECUTION_IDENTITY_INDEXES[table][0] in indexes and not _execution_identity_index_ready(conn, table)
@@ -666,7 +677,8 @@ FROM position_lots ORDER BY record_id
 
 
 def _load_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    sql = _MIGRATION_LOTS_FACE_B_SQL if position_lots_reads_face_b(conn) else _MIGRATION_LOTS_SQL
+    sql = ("SELECT *, rowid FROM position_lots ORDER BY lot_id" if position_lots_use_lot_id(conn) else
+           (_MIGRATION_LOTS_FACE_B_SQL if position_lots_reads_face_b(conn) else _MIGRATION_LOTS_SQL))
     return [position_lot_row_to_record(row) for row in conn.execute(sql)]
 
 

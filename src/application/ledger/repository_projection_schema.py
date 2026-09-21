@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_row_codec import FINAL_POSITION_LOT_COLUMNS, position_lots_use_lot_id
 from .repository_common import (
     POSITION_LOTS_COLUMN_CLASSIFICATION,
     POSITION_PROJECTION_SCHEMA,
@@ -28,6 +29,8 @@ def _position_projection_column_contract(
         ("position_lots", POSITION_LOTS_COLUMN_CLASSIFICATION),
     ):
         actual = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if table == "position_lots" and actual == FINAL_POSITION_LOT_COLUMNS and position_lots_use_lot_id(conn):
+            expected = {name: kind for name, kind in expected.items() if name in actual}
         out[table] = {
             "missing": tuple(sorted(set(expected) - actual)),
             "unclassified": tuple(sorted(actual - set(expected))),
@@ -323,20 +326,24 @@ def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
         table="trade_events",
         create_sql=("CREATE INDEX idx_trade_events_account_time ON trade_events(account, trade_time_ms, event_id)"),
     )
-    _create_index_if_table_empty(
-        conn,
-        index_name="idx_position_lots_account_expiration",
-        table="position_lots",
-        create_sql=(
-            "CREATE INDEX idx_position_lots_account_expiration ON position_lots(account, expiration, record_id)"
-        ),
-    )
-    _create_index_if_table_empty(
-        conn,
-        index_name="idx_position_lots_account_record",
-        table="position_lots",
-        create_sql=("CREATE INDEX idx_position_lots_account_record ON position_lots(account, record_id)"),
-    )
+    final_shape = position_lots_use_lot_id(conn)
+    if final_shape:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_position_lots_account_lot ON position_lots(account, lot_id)")
+    else:
+        _create_index_if_table_empty(
+            conn,
+            index_name="idx_position_lots_account_expiration",
+            table="position_lots",
+            create_sql=(
+                "CREATE INDEX idx_position_lots_account_expiration ON position_lots(account, expiration, record_id)"
+            ),
+        )
+        _create_index_if_table_empty(
+            conn,
+            index_name="idx_position_lots_account_record",
+            table="position_lots",
+            create_sql=("CREATE INDEX idx_position_lots_account_record ON position_lots(account, record_id)"),
+        )
 
     conn.execute(
         f"""
@@ -696,79 +703,149 @@ def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    lot_changed = " OR ".join(
-        (
-            "OLD.record_id IS NOT NEW.record_id",
-            "OLD.account IS NOT NEW.account",
-            "OLD.fields_json IS NOT NEW.fields_json",
-            "OLD.source_event_id IS NOT NEW.source_event_id",
-            "OLD.expiration IS NOT NEW.expiration",
-            "OLD.strike IS NOT NEW.strike",
-            "OLD.multiplier IS NOT NEW.multiplier",
+    if final_shape:
+        lot_changed = (
+            "OLD.lot_id IS NOT NEW.lot_id OR OLD.account IS NOT NEW.account OR "
+            "OLD.fields_json IS NOT NEW.fields_json OR OLD.source_event_id IS NOT NEW.source_event_id OR "
+            "OLD.strike IS NOT NEW.strike OR OLD.multiplier IS NOT NEW.multiplier"
         )
-    )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_same
-        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
-          expiration, strike, multiplier ON position_lots
-        WHEN ({lot_changed})
-          AND {effective_old_lot_account} = {effective_new_lot_account}
-        BEGIN
-          INSERT INTO position_projection_heads (
-            account, lots_generation, projector_schema, status, updated_at_ms
-          ) VALUES (
-            {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
-            'uninitialized', NEW.updated_at_ms
-          )
-          ON CONFLICT(account) DO UPDATE SET
-            lots_generation = lots_generation + 1,
-            updated_at_ms = excluded.updated_at_ms;
-        END
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_old
-        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
-          expiration, strike, multiplier ON position_lots
-        WHEN ({lot_changed})
-          AND {effective_old_lot_account} != {effective_new_lot_account}
-          AND {effective_old_lot_account} != ''
-          AND {effective_old_lot_account} = lower({effective_old_lot_account})
-        BEGIN
-          INSERT INTO position_projection_heads (
-            account, lots_generation, projector_schema, status, updated_at_ms
-          ) VALUES (
-            {effective_old_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
-            'uninitialized', NEW.updated_at_ms
-          )
-          ON CONFLICT(account) DO UPDATE SET
-            lots_generation = lots_generation + 1,
-            updated_at_ms = excluded.updated_at_ms;
-        END
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_new
-        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
-          expiration, strike, multiplier ON position_lots
-        WHEN ({lot_changed})
-          AND {effective_old_lot_account} != {effective_new_lot_account}
-        BEGIN
-          INSERT INTO position_projection_heads (
-            account, lots_generation, projector_schema, status, updated_at_ms
-          ) VALUES (
-            {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
-            'uninitialized', NEW.updated_at_ms
-          )
-          ON CONFLICT(account) DO UPDATE SET
-            lots_generation = lots_generation + 1,
-            updated_at_ms = excluded.updated_at_ms;
-        END
-        """
-    )
+    else:
+        lot_changed = (
+            "OLD.record_id IS NOT NEW.record_id OR OLD.account IS NOT NEW.account OR "
+            "OLD.fields_json IS NOT NEW.fields_json OR OLD.source_event_id IS NOT NEW.source_event_id OR "
+            "OLD.expiration IS NOT NEW.expiration OR OLD.strike IS NOT NEW.strike OR "
+            "OLD.multiplier IS NOT NEW.multiplier"
+        )
+    if final_shape:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_same
+            AFTER UPDATE OF lot_id, account, fields_json, source_event_id,
+              strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} = {effective_new_lot_account}
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
+    else:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_same
+            AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+              expiration, strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} = {effective_new_lot_account}
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
+    if final_shape:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_old
+            AFTER UPDATE OF lot_id, account, fields_json, source_event_id,
+              strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} != {effective_new_lot_account}
+              AND {effective_old_lot_account} != ''
+              AND {effective_old_lot_account} = lower({effective_old_lot_account})
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_old_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
+    else:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_old
+            AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+              expiration, strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} != {effective_new_lot_account}
+              AND {effective_old_lot_account} != ''
+              AND {effective_old_lot_account} = lower({effective_old_lot_account})
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_old_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
+    if final_shape:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_new
+            AFTER UPDATE OF lot_id, account, fields_json, source_event_id,
+              strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} != {effective_new_lot_account}
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
+    else:
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_new
+            AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+              expiration, strike, multiplier ON position_lots
+            WHEN ({lot_changed})
+              AND {effective_old_lot_account} != {effective_new_lot_account}
+            BEGIN
+              INSERT INTO position_projection_heads (
+                account, lots_generation, projector_schema, status, updated_at_ms
+              ) VALUES (
+                {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+                'uninitialized', NEW.updated_at_ms
+              )
+              ON CONFLICT(account) DO UPDATE SET
+                lots_generation = lots_generation + 1,
+                updated_at_ms = excluded.updated_at_ms;
+            END
+            """
+        )
     conn.execute(
         """
         UPDATE position_projection_source_state

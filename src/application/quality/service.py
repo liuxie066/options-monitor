@@ -1255,9 +1255,9 @@ class OMQualityService:
             try:
                 rows = connection.execute(
                     """
-                    SELECT record_id, updated_at_ms
+                    SELECT *, rowid
                     FROM position_lots
-                    ORDER BY record_id
+                    ORDER BY rowid
                     """
                 ).fetchall()
             finally:

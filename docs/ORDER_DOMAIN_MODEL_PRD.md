@@ -96,6 +96,8 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 
 > 证明方法引用已核查的现有测试/入口；新增文件、函数与测试接口设计留给 Devflow。
 
+> 2026-09-21 整合范围：下表是产品验收目标，不把历史实现方案或已有测试通过视为目标已达成。当前窗口准备支持新旧 SQLite 形状；实际生产迁移及 R2 收紧仍须独立授权和生产对照证据。A4 已发现事件解码经 float 丢失金额精度，并补充 SQLite Decimal 往返回归；股票小数数量在事件层仍受整数限制，按用户裁决拆为窗口兼容交付之后的后续修复，A4 尚未整体完成。普通股票开仓费用是否进入 `cost_basis_total` 也需与含费目标核对，不以行权股票的实现代替验证。
+
 | ID | 验收目标 | 输入 / 条件 | 通过判据 | 证明方法 | 环境 | 模拟边界 | 前置条件 | 证据状态 |
 |---|---|---|---|---|---|---|---|---|
 | A1 | 资产判别统一（S1） | 期权、股票成交各一 | `TradeEvent`/`PositionLot` 均含 `asset_type ∈ {stock,option}`，股票 lot 不再用 `contracts`/`premium` 字段 | 读 `domain/domain/ledger/events.py`/`lots.py` 字段定义；跑 `tests/test_ledger_projection.py`、`test_assigned_stock_projection.py` | 本地 venv | 字段结构可静态断言；投影行为需真实事件样本或 fixture | `tests/fixtures` 现有样例 | planned |

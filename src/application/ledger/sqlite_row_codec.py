@@ -17,6 +17,30 @@ from domain.domain.ledger.position_fingerprint import (
 DERIVED_COLUMN_NAMES = ("account", "expiration", "strike", "multiplier", "source_event_id")
 
 
+# R1 accepts a complete rebuilt table, never an accidentally missing old column.
+FINAL_POSITION_LOT_COLUMNS = frozenset({
+    "lot_id", "account", "fields_json", "source_event_id", "strike",
+    "multiplier", "updated_at_ms",
+})
+
+
+def wheel_events_use_lot_id(conn: sqlite3.Connection) -> bool:
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(wheel_events)")}
+    if len(columns & {"stock_lot_id", "lot_id"}) != 1:
+        raise ValueError("wheel_events requires exactly one lot identity column")
+    return "lot_id" in columns
+
+
+def position_lots_use_lot_id(conn: sqlite3.Connection) -> bool:
+    columns = {str(row[1]): row for row in conn.execute("PRAGMA table_info(position_lots)")}
+    if "record_id" in columns:
+        return False
+    if (set(columns) != FINAL_POSITION_LOT_COLUMNS
+            or not columns["lot_id"][3] or columns["lot_id"][5] != 1):
+        raise ValueError("position_lots has an unsupported or partial shape")
+    return True
+
+
 def position_lots_reads_face_b(conn: sqlite3.Connection) -> bool:
     """Whether this ``position_lots`` carries all five derived columns.
 
@@ -45,7 +69,7 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     # ``or ""`` rather than a bare ``str()``: a NULL record_id would otherwise
     # become the string "None", a fabricated identity that differs from the ""
     # the read-only evidence surface emits for the same row.
-    stored_record_id = str(row["record_id"] or "")
+    stored_record_id = str(row["record_id"] or "") if "record_id" in row.keys() else str(row["lot_id"] or "")
     # Both identity keys are emitted so consumers can converge on lot_id without
     # a coupled rename. Two row shapes legitimately fall back to record_id: a
     # legacy row whose carrier is still NULL, and a narrower SELECT that predates
@@ -76,8 +100,10 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
         for column in ("account", "expiration", "strike", "multiplier", "source_event_id")
         if column in row.keys()
     }
-    if len(columns) == len(DERIVED_COLUMN_NAMES):
+    if len(columns) == len(DERIVED_COLUMN_NAMES) or FINAL_POSITION_LOT_COLUMNS <= set(row.keys()):
         record["columns"] = columns
+        if "expiration" not in columns:
+            record["columns"]["retired_columns"] = ["expiration"]
     # ``rowid`` is not a column of the lot and not part of any face today: §3
     # compares it across the rewrite (pre store vs post store), which is a
     # two-snapshot job. It rides along so the read that will serve as the "pre"
@@ -115,30 +141,12 @@ def read_current_decision_projection_inputs_from_conn(
         "SELECT * FROM current_decision_projections WHERE account = ?",
         (account_value,),
     ).fetchone()
-    # This reader is reached both from the write path (where ``_init_db`` has
-    # already ensured the carrier) and from the read-only evidence surface, which
-    # by construction cannot add a column and must still serve a store that
-    # predates it. Selecting ``lot_id`` unconditionally made the second case
-    # raise ``no such column``, which the current-decision runtime converts into
-    # a blanket ``data_unavailable``. Same probe idiom as
-    # ``read_only_evidence._read_position_lots``.
-    lot_columns = {
-        str(item["name"])
-        for item in conn.execute("PRAGMA table_info(position_lots)").fetchall()
-    }
-    carrier = "lot_id" if "lot_id" in lot_columns else "NULL AS lot_id"
-    lots = [
-        position_lot_row_to_record(row)
-        for row in conn.execute(
-            f"""
-            SELECT record_id, {carrier}, fields_json, expiration, strike, multiplier
-            FROM position_lots
-            WHERE account = ?
-            ORDER BY record_id ASC
-            """,
-            (account_value,),
-        )
-    ]
+    # Read both stored shapes, including legacy tables without the lot_id carrier.
+    if position_lots_use_lot_id(conn):
+        sql = "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id"
+    else:
+        sql = "SELECT * FROM position_lots WHERE account = ? ORDER BY record_id"
+    lots = [position_lot_row_to_record(row) for row in conn.execute(sql, (account_value,))]
     identities = []
     if include_identities:
         for row in conn.execute(

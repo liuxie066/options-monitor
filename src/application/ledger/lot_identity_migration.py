@@ -44,9 +44,11 @@ the code and are corrected here rather than silently implemented around:
    statement-level property of its SQL: ``apply`` therefore reads the pinned
    retired-column registry (``docs/retired_column_sql_registry.json``, the
    ledger the repo-wide guardrail and its quality test pin against the tree)
-   and defers the destructive half exactly while any live statement — read,
+   and defers the destructive half while any unreviewed live statement — read,
    write or DDL, since an open path that re-adds a retired column pushes the
-   rebuilt store back to the old shape — still names a retired column. The
+   rebuilt store back to the old shape — still names a retired column. R1's
+   exact old-shape exceptions require both-shape regression evidence; they are
+   removed with those branches in R2. The
    deferred report names the statements that made it defer. §9.5 M2 also fixes
    the granularity — D1's
    ``drop_expiration`` and D2-step-2's
@@ -93,6 +95,8 @@ the code and are corrected here rather than silently implemented around:
 """
 
 from __future__ import annotations
+
+from .sqlite_row_codec import FINAL_POSITION_LOT_COLUMNS, position_lots_use_lot_id, wheel_events_use_lot_id
 
 from collections import Counter
 from copy import deepcopy
@@ -407,6 +411,84 @@ RETIRED_COLUMN_REGISTRY_PATH = (
     Path(__file__).resolve().parents[3] / "docs" / "retired_column_sql_registry.json"
 )
 
+# R1 only: exact old-shape statements selected by position_lots_use_lot_id.
+# The core CREATE TABLE is a no-op on an existing table (IF NOT EXISTS).
+# Quality checks bind every entry to the two-shape repository regression in
+# test_r1_rebuilt_store_reopens_and_preserves_projection. They also reject
+# stale entries; --write of the generated registry cannot extend this set.
+# R2 removes these entries together with their old-shape branches after B7.
+R1_POSITION_SQL_EXCEPTIONS: dict[str, frozenset[tuple[str, str, int]]] = {
+    "src/application/ledger/current_decision_migration.py": frozenset({
+        ("index_name", "sha256:4705ae2499089b72", 1),
+    }),
+    "src/application/ledger/current_decision_oracle.py": frozenset({
+        ("index_name", "sha256:4705ae2499089b72", 1),
+    }),
+    "src/application/ledger/manual_trades.py": frozenset({
+        ("read", "sha256:9808a49757695702", 1),
+    }),
+    "src/application/ledger/repository_assigned_stock.py": frozenset({
+        ("write", "sha256:aa32ce63d24f0c0f", 1),
+    }),
+    "src/application/ledger/repository_projection_schema.py": frozenset({
+        ("ddl", "sha256:1db55addc09d05cf", 1),
+        ("ddl", "sha256:a90268930d130e48", 1),
+        ("ddl", "sha256:b3ee5f2c21a78fdc", 1),
+        ("ddl", "sha256:eb62e146516f2a69", 1),
+        ("ddl", "sha256:fea50e0a430d6900", 1),
+        ("index_name", "sha256:2533bf5b4afc0c98", 1),
+        ("index_name", "sha256:4705ae2499089b72", 1),
+        ("dynamic", "sha256:2e17af0755d5ce73", 1),
+        ("dynamic", "sha256:d3f2b9942a10355b", 1),
+        ("dynamic", "sha256:e55d96210a4ee8d6", 1),
+    }),
+    "src/application/ledger/position_projection_migration.py": frozenset({
+        ("index_name", "sha256:2533bf5b4afc0c98", 2),
+        ("index_name", "sha256:4705ae2499089b72", 2),
+        ("read", "sha256:08a18e936798b71b", 1),
+        ("read", "sha256:3f82fe90a41f58b1", 1),
+        ("read", "sha256:fde0f8e8075836b8", 1),
+    }),
+    "src/application/ledger/read_only_evidence.py": frozenset({
+        ("read", "sha256:112aa4a949f4e07e", 1),
+    }),
+    "src/application/ledger/repository_core.py": frozenset({
+        ("ddl", "sha256:4318f3c4c19eb537", 1),
+        ("ddl", "sha256:53a9f1cd00b07bf7", 1),
+        ("ddl", "sha256:77c5cf64f84cc313", 1),
+        ("index_name", "sha256:481b578c7f1b9f72", 1),
+        ("schema_helper", "sha256:5570ac5c24e3838a", 1),
+    }),
+    "src/application/ledger/repository_projection.py": frozenset({
+        ("ddl", "sha256:600ec5dd6f9829f9", 1),
+        ("ddl", "sha256:e127ac6364f59574", 1),
+        ("index_name", "sha256:2533bf5b4afc0c98", 1),
+        ("index_name", "sha256:4705ae2499089b72", 1),
+        ("read", "sha256:c4de6ba3dd25d0a7", 1),
+        ("read", "sha256:fde0f8e8075836b8", 1),
+        ("write", "sha256:85efd73292ea5dd6", 1),
+        ("write", "sha256:bcbd848f39b3c9d4", 1),
+    }),
+    "src/application/ledger/repository_projection_tail.py": frozenset({
+        ("index_name", "sha256:2533bf5b4afc0c98", 2),
+        ("index_name", "sha256:4705ae2499089b72", 2),
+        ("read", "sha256:0316be086ed9cbdb", 1),
+        ("read", "sha256:0a21b814f917372f", 1),
+        ("read", "sha256:1f77b6a43fa94ed3", 2),
+        ("read", "sha256:2fbeb0c7d711b58f", 1),
+        ("read", "sha256:6ecfabfa6adbce9b", 1),
+        ("read", "sha256:906c26f8d69d736f", 1),
+        ("read", "sha256:92f8e71eef34664e", 1),
+        ("read", "sha256:ccf7e57f7a709379", 1),
+        ("write", "sha256:2993be41278daa7a", 1),
+        ("write", "sha256:bf3da6241e607360", 1),
+        ("write", "sha256:c6b8c0f17fdfee97", 1),
+    }),
+    "src/application/ledger/sqlite_row_codec.py": frozenset({
+        ("read", "sha256:24a86222a7c0b3cb", 1),
+    }),
+}
+
 
 def _live_sql_naming_retired_columns() -> tuple[str, ...]:
     """Which live statements of this build still name a retired column.
@@ -417,7 +499,8 @@ def _live_sql_naming_retired_columns() -> tuple[str, ...]:
     lists one" are the same fact, checked on every PR and every production
     upgrade. The rebuild's question — "can this build read the rebuilt shape
     back?" — is a statement-level property of the SQL, and the registry answers
-    it per statement; the column contract deliberately cannot, because on
+    it per statement, excluding only the exact R1 old-shape exceptions tested
+    on both shapes; the column contract deliberately cannot, because on
     window day it is still dual-shape.
 
     Returns one ``"module (kind)"`` descriptor per live statement in the
@@ -432,7 +515,12 @@ def _live_sql_naming_retired_columns() -> tuple[str, ...]:
         dynamic = registry["src"]["dynamic_sql"]
         if not isinstance(detail, list) or not isinstance(dynamic, list):
             raise ValueError("statement inventories must be lists")
-        return tuple(f"{hit['module']} ({hit['kind']})" for hit in detail + dynamic)
+        return tuple(
+            f"{hit['module']} ({hit['kind']})"
+            for hit in detail + dynamic
+            if (hit["kind"], hit.get("digest"), hit.get("occurrences"))
+            not in R1_POSITION_SQL_EXCEPTIONS.get(hit["module"], ())
+        )
     except (OSError, ValueError, KeyError, TypeError):
         return (f"<registry unreadable: {RETIRED_COLUMN_REGISTRY_PATH.name}>",)
 
@@ -971,10 +1059,12 @@ def _inventory_from_conn(
 ) -> dict[str, Any]:
     rows = _scan_lot_payloads(conn)
     lot_columns = _column_names(conn, "position_lots")
+    final_shape = set(lot_columns) == FINAL_POSITION_LOT_COLUMNS and position_lots_use_lot_id(conn)
+    expected = set(POSITION_LOTS_COLUMN_CLASSIFICATION) - ({"record_id", "expiration"} if final_shape else set())
     columns = {
         "position_lots": {
-            "missing": sorted(set(POSITION_LOTS_COLUMN_CLASSIFICATION) - set(lot_columns)),
-            "unclassified": sorted(set(lot_columns) - set(POSITION_LOTS_COLUMN_CLASSIFICATION)),
+            "missing": sorted(expected - set(lot_columns)),
+            "unclassified": sorted(set(lot_columns) - expected),
         }
     }
     reasons: list[str] = []
@@ -988,7 +1078,7 @@ def _inventory_from_conn(
         reasons.append("lot_id_column_missing")
     elif carrier["rows_null"]:
         reasons.append("lot_id_backfill_pending")
-    if not pending["d2_record_id_column"]["column_present"]:
+    if not final_shape and not pending["d2_record_id_column"]["column_present"]:
         # D2's rebuild already ran: the store is past this batch's entry state,
         # and the legacy-id backfill has no source column left to read.
         reasons.append("record_id_column_missing")
@@ -1007,6 +1097,7 @@ def _inventory_from_conn(
                 else 0
             ),
         },
+        "wheel_identity": _wheel_identity_inventory(conn),
         "column_contract": columns,
         "pending": pending,
         "contract_scalar_carriers": _scalar_carrier_distribution(rows),
@@ -1523,6 +1614,10 @@ def _new_shape_index_sql(sql: str) -> str | None:
         if re.search(rf"\b{retired}\b", tail):
             return None
     columns = [item.strip() for item in match.group("columns").split(",")]
+    if match.group("name") in {"idx_position_lots_account_expiration", "idx_position_lots_account_record"}:
+        if columns not in (["account", "expiration", "record_id"], ["account", "record_id"]):
+            raise RuntimeError("position_lots account index has an unexpected definition")
+        return "CREATE INDEX idx_position_lots_account_lot ON position_lots(account, lot_id)"
     kept = [item for item in columns if _column_def_name(item) not in RETIRED_LOT_COLUMNS]
     if not kept:
         return None
@@ -1626,6 +1721,32 @@ def _insert_rebuild_rows(
     return inserted
 
 
+def _assert_retirement_preserves_facts(conn: sqlite3.Connection) -> None:
+    from domain.domain.ledger.position_fields import parse_exp_to_ms
+
+    for row in conn.execute("SELECT * FROM position_lots"):
+        fields = _parse_fields(row["fields_json"])
+        contract = fields.get("contract_key") or {}
+        asset_type = fields.get("asset_type")
+        if asset_type not in {"option", "stock"}:
+            raise RuntimeError("retirement requires an explicit option or stock asset_type")
+        if not row["account"] or row["account"] != contract.get("account"):
+            raise RuntimeError("retirement account disagrees with contract_key")
+        if not row["source_event_id"] or row["source_event_id"] != fields.get("open_event_id"):
+            raise RuntimeError("retirement source_event_id disagrees with open_event_id")
+        legacy_source = fields.get("source_event_id")
+        if legacy_source not in (None, "", fields.get("open_event_id")):
+            raise RuntimeError("retirement payload source_event_id disagrees with open_event_id")
+        if asset_type == "option":
+            original = row["expiration"]
+            if original is None or row["strike"] is None:
+                raise RuntimeError("retirement option requires expiration and strike")
+            # Dropping milliseconds is only safe when the date round trip is exact.
+            ymd = expiration_timestamp_to_ymd(original)
+            if parse_exp_to_ms(ymd) != original or parse_exp_to_ms(contract.get("expiration_ymd")) != original:
+                raise RuntimeError("retirement expiration millisecond round trip differs")
+
+
 def _rebuild_position_lots(
     conn: sqlite3.Connection,
     *,
@@ -1656,6 +1777,7 @@ def _rebuild_position_lots(
             "rows": int(conn.execute("SELECT count(*) FROM position_lots").fetchone()[0]),
         }
 
+    _assert_retirement_preserves_facts(conn)
     retained = [
         "lot_id",
         *(name for name in columns if name != "lot_id" and name not in set(RETIRED_LOT_COLUMNS)),
@@ -1716,6 +1838,33 @@ def _rebuild_position_lots(
         "foreign_key_check": "ok",
         "read_back": "equal",
     }
+
+
+def _wheel_identity_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
+    if not _table_exists(conn, "wheel_events"):
+        return {"status": "absent", "rows": 0}
+    uses_lot_id = wheel_events_use_lot_id(conn)
+    rows = [tuple(row) for row in conn.execute("SELECT rowid, * FROM wheel_events ORDER BY event_id")]
+    return {
+        "status": "lot_id" if uses_lot_id else "stock_lot_id",
+        "rows": len(rows),
+        "content_fingerprint": _sha256(rows),
+    }
+
+
+def _rename_wheel_lot_identity(conn: sqlite3.Connection) -> dict[str, Any]:
+    before = _wheel_identity_inventory(conn)
+    if before["status"] != "stock_lot_id":
+        return {**before, "renamed": False}
+    # SQLite rewrites dependent indexes and checks. Event bytes, historical
+    # hash keys, rowids and append-only triggers must survive unchanged.
+    conn.execute("ALTER TABLE wheel_events RENAME COLUMN stock_lot_id TO lot_id")
+    after = _wheel_identity_inventory(conn)
+    if after != {**before, "status": "lot_id"}:
+        raise RuntimeError("wheel identity rename changed stored event facts")
+    if conn.execute("PRAGMA foreign_key_check(wheel_events)").fetchall():
+        raise RuntimeError("wheel identity rename failed foreign_key_check")
+    return {**after, "renamed": True, "read_back": "equal"}
 
 
 def apply_lot_identity_migration(
@@ -1796,6 +1945,9 @@ def apply_lot_identity_migration(
             )
             if rebuild is not None:
                 _fail(failure_hook, "after_rebuild")
+            wheel_rename = _rename_wheel_lot_identity(conn) if not deferred_by else None
+            if wheel_rename is not None:
+                _fail(failure_hook, "after_wheel_identity_rename")
             rewrite = _rewrite_lot_payloads(conn, align_to_lot_shape=not deferred_by)
             _fail(failure_hook, "after_position_id_strip")
 
@@ -1847,6 +1999,7 @@ def apply_lot_identity_migration(
             ("switch_primary_key_to_lot_id_and_drop_record_id", rebuilt),
             ("drop_expiration_column", rebuilt),
             ("rewrite_fields_json_to_lot_shape", rewrite["rewritten_rows"]),
+            ("rename_wheel_stock_lot_id", int(bool(wheel_rename and wheel_rename["renamed"]))),
         ]
     steps_changed = [name for name, count in changed if count]
     # The three destructive steps are the same three entries in both states —
@@ -1910,7 +2063,7 @@ def apply_lot_identity_migration(
         # carries ``rebuild_gate`` instead, because there the question an
         # operator asks is which statements held the rebuild back, not what a
         # rebuild that did not run returned.
-        rebuild_report = {"rebuild": rebuild}
+        rebuild_report = {"rebuild": rebuild, "wheel_identity_rename": wheel_rename}
     result = {
         "schema_version": APPLY_SCHEMA,
         "generated_at_utc": _now_iso(),
