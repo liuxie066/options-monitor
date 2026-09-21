@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_row_codec import position_lots_reads_face_b
 from .repository_schema import (
     Any,
     POSITION_PROJECTION_SCHEMA,
@@ -19,6 +20,24 @@ from .repository_schema import (
     position_lot_row_to_record,
     sqlite3,
 )
+
+#: The face-B read: the five derived columns (``comparator-spec.md`` §4) plus
+#: ``rowid`` for §3's pre/post snapshot. Served only to stores that carry them.
+_POSITION_LOTS_FACE_B_SQL = """
+SELECT record_id, lot_id, fields_json, account, source_event_id,
+       expiration, strike, multiplier, rowid
+FROM position_lots
+ORDER BY record_id DESC
+"""
+
+#: The read this method has always made, for stores that predate those columns:
+#: no column face, and therefore no rowid baseline either.
+_POSITION_LOTS_SQL = """
+SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
+FROM position_lots
+ORDER BY record_id DESC
+"""
+
 
 class PositionProjectionTailRepositoryMixin:
     def replace_position_lots(
@@ -792,13 +811,16 @@ class PositionProjectionTailRepositoryMixin:
         return [position_lot_row_to_record(row) for row in rows]
 
     def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        # This read is the store side of ``projection_verify``'s comparison
+        # (``comparator-spec.md`` §1/§3), so where the store has them it fetches
+        # the five derived columns and the rowid. A store that predates those
+        # columns gets the statement it has always been served, and the codec's
+        # key-presence guard reports the missing face instead of guessing. The
+        # sibling SELECTs in this file stay narrow: no comparison consumes them,
+        # and the repointing batch owns the whole family.
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
-                """
-                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-                FROM position_lots
-                ORDER BY record_id DESC
-                """
+                _POSITION_LOTS_FACE_B_SQL if position_lots_reads_face_b(active_conn) else _POSITION_LOTS_SQL
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
 

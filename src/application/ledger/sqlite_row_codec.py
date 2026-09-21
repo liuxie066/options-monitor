@@ -9,6 +9,27 @@ from domain.domain.ledger.position_fingerprint import (
 )
 
 
+#: The five columns the writer derives from a lot payload (``comparator-spec.md``
+#: §4). Restated rather than imported: the probe's copy
+#: (``lot_parity_probe.DERIVED_COLUMNS``) sits behind ``repository_common``, which
+#: imports *this* module, so importing it here would close a cycle. The two tuples
+#: are bound to each other by ``tests/test_projection_verify.py``.
+DERIVED_COLUMN_NAMES = ("account", "expiration", "strike", "multiplier", "source_event_id")
+
+
+def position_lots_reads_face_b(conn: sqlite3.Connection) -> bool:
+    """Whether this ``position_lots`` carries all five derived columns.
+
+    Not every store does: the rebuild and migration paths work on shapes that
+    predate ``account``/``source_event_id``, and a SELECT naming a missing column
+    fails before the key-presence guard below can say "this read carried no
+    columns". Readers therefore pick their statement from this answer, and the
+    caller sees ``store_face.columns_read == False`` instead of a guess.
+    """
+    present = {str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")}
+    return set(DERIVED_COLUMN_NAMES) <= present
+
+
 def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     # No column heal. ``comparator-spec.md`` §2 rules that both sides of the
     # parity comparison are normalized to one convention and that the columns are
@@ -39,11 +60,33 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     # position fingerprint both read ``record_id`` from the column.
     raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
     lot_id = str(raw_lot_id).strip() if raw_lot_id not in (None, "") else stored_record_id
-    return {
+    record = {
         "record_id": stored_record_id,
         "lot_id": lot_id,
         "fields": fields,
     }
+    # Face B travels with the record: the five derived columns, so a comparison
+    # can put each stored column next to the value re-derived from the stored
+    # payload (``comparator-spec.md`` §1/§4, ``projection_verify``). Emitted only
+    # when the read carried *all* five -- a narrower SELECT would otherwise look
+    # like a store that agreed on whichever columns it happened to fetch, and the
+    # column-face report has no other way to tell the two apart.
+    columns = {
+        column: row[column]
+        for column in ("account", "expiration", "strike", "multiplier", "source_event_id")
+        if column in row.keys()
+    }
+    if len(columns) == len(DERIVED_COLUMN_NAMES):
+        record["columns"] = columns
+    # ``rowid`` is not a column of the lot and not part of any face today: §3
+    # compares it across the rewrite (pre store vs post store), which is a
+    # two-snapshot job. It rides along so the read that will serve as the "pre"
+    # snapshot carries it. Neither key changes ``position_lots_fingerprint`` /
+    # ``ordered_position_lots_fingerprint``: ``position_fingerprint._record_parts``
+    # reads only ``record_id`` and ``fields``.
+    if "rowid" in row.keys():
+        record["rowid"] = row["rowid"]
+    return record
 
 
 def read_current_decision_projection_inputs_from_conn(

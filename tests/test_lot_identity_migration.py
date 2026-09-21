@@ -830,6 +830,10 @@ def test_verify_does_not_blame_the_lots_for_events_it_cannot_read(
     assert report["projection"]["summary"] == {
         "projection_error": len(rows),
         "extra_in_position_lots": report["projection"]["position_lot_count"],
+        # §9.3: the two counts were always reported and never compared until A3.
+        # Nothing projected against N stored rows is a count mismatch as well as N
+        # extra rows, and the report says both instead of letting the reader infer.
+        "count_mismatch": 1,
     }
     # The lot-level count is not hidden, it is attributed: every stored lot is
     # flagged extra *because* nothing was projected, so it equals the lot count

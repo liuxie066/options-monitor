@@ -28,19 +28,19 @@
     "by_kind": {
       "ddl": 10,
       "index_name": 10,
-      "read": 14,
+      "read": 16,
       "schema_helper": 1,
       "write": 6
     },
     "by_module": {
       "src/application/ledger/current_decision_oracle.py": 2,
       "src/application/ledger/manual_trades.py": 1,
-      "src/application/ledger/position_projection_migration.py": 3,
+      "src/application/ledger/position_projection_migration.py": 4,
       "src/application/ledger/repository_assigned_stock.py": 1,
       "src/application/ledger/repository_core.py": 5,
       "src/application/ledger/repository_projection.py": 8,
       "src/application/ledger/repository_projection_schema.py": 7,
-      "src/application/ledger/repository_projection_tail.py": 13,
+      "src/application/ledger/repository_projection_tail.py": 14,
       "src/application/quality/service.py": 1
     },
     "detail": [
@@ -98,6 +98,19 @@
         "module": "src/application/ledger/position_projection_migration.py",
         "occurrences": 1,
         "tables": []
+      },
+      {
+        "columns": [
+          "expiration",
+          "record_id"
+        ],
+        "digest": "sha256:08a18e936798b71b",
+        "kind": "read",
+        "module": "src/application/ledger/position_projection_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
       },
       {
         "columns": [
@@ -439,6 +452,19 @@
           "expiration",
           "record_id"
         ],
+        "digest": "sha256:6ecfabfa6adbce9b",
+        "kind": "read",
+        "module": "src/application/ledger/repository_projection_tail.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [
+          "expiration",
+          "record_id"
+        ],
         "digest": "sha256:79ab933dba04e3ad",
         "kind": "read",
         "module": "src/application/ledger/repository_projection_tail.py",
@@ -537,7 +563,7 @@
         ]
       }
     ],
-    "digest": "sha256:ec535ac2a621b242",
+    "digest": "sha256:8f0beaccd95072d7",
     "dynamic_sql": [
       {
         "columns": [
@@ -707,14 +733,14 @@
         ]
       }
     ],
-    "statements": 41
+    "statements": 43
   },
   "tests": {
     "by_kind": {
       "ddl": 13,
       "index_name": 9,
       "read": 28,
-      "write": 37
+      "write": 38
     },
     "by_module": {
       "tests/perf_position_projection_s1.py": 2,
@@ -727,13 +753,14 @@
       "tests/test_position_projection_migration.py": 3,
       "tests/test_position_projection_publication.py": 22,
       "tests/test_position_projection_runtime.py": 4,
+      "tests/test_projection_verify.py": 1,
       "tests/test_research_storage_baseline.py": 1,
       "tests/test_trade_event_pagination.py": 1,
       "tests/test_trade_receipt_readback.py": 3,
       "tests/test_trades_state_reconcile.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:2cddae24f905c0c5",
-    "statements": 69
+    "digest": "sha256:361e960c9377c661",
+    "statements": 70
   }
 }

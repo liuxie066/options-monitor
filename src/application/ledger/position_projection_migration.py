@@ -42,6 +42,7 @@ from src.application.ledger.repository import (
     _position_lot_contract_scalars,
 )
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
+from src.application.ledger.sqlite_row_codec import position_lots_reads_face_b
 
 
 def _lot_account(fields: Any) -> str:
@@ -649,16 +650,24 @@ def _events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+#: The face-B read of the migration's own parity check (``comparator-spec.md``
+#: §1/§3), and the narrower one for stores that predate those columns -- the
+#: migration's own inputs are pre-migration stores, so both shapes are real.
+_MIGRATION_LOTS_FACE_B_SQL = """
+SELECT record_id, lot_id, fields_json, account, source_event_id,
+       expiration, strike, multiplier, rowid
+FROM position_lots ORDER BY record_id
+"""
+
+_MIGRATION_LOTS_SQL = """
+SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
+FROM position_lots ORDER BY record_id
+"""
+
+
 def _load_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    return [
-        position_lot_row_to_record(row)
-        for row in conn.execute(
-            """
-            SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-            FROM position_lots ORDER BY record_id
-            """
-        )
-    ]
+    sql = _MIGRATION_LOTS_FACE_B_SQL if position_lots_reads_face_b(conn) else _MIGRATION_LOTS_SQL
+    return [position_lot_row_to_record(row) for row in conn.execute(sql)]
 
 
 def _source_commit(root: Path | None = None) -> str | None:
