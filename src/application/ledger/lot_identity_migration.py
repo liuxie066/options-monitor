@@ -1125,7 +1125,7 @@ def verify_lot_identity_migration(sqlite_path: str | Path) -> dict[str, Any]:
     reasons: list[str] = list(inventory["readiness_reasons"])
     if projection_errors:
         reasons.append("trade_events_not_replayable")
-    elif lot_mismatches:
+    elif replay_mismatches:
         reasons.append("projection_replay_mismatch")
     if lost_keys:
         reasons.append("dropped_payload_keys_would_lose_facts")
