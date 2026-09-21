@@ -26,7 +26,8 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, contract_share_quantity, stock_settlement_side
+from domain.domain.money import to_decimal
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
 from src.application.ledger.lot_resolver import (
@@ -889,17 +890,14 @@ def _stock_evidence_matches_lifecycle_lot(
         return False
     option_type = _lot_option_type(fields)
     position_side = _lot_position_side(fields)
-    if position_side == "short":
-        expected_side = "buy" if option_type == "put" else "sell" if option_type == "call" else ""
-    elif position_side == "long":
-        expected_side = "buy" if option_type == "call" else "sell" if option_type == "put" else ""
-    else:
-        expected_side = ""
+    expected_side = stock_settlement_side(
+        "assignment" if position_side == "short" else "exercise", option_type, position_side,
+    )
     if str(evidence.get("side") or "").strip().lower() != expected_side:
         return False
     try:
-        expected_qty = int(contracts_to_close) * int(effective_multiplier(fields) or 100)
-        actual_qty = abs(int(evidence.get("stock_qty") or 0))
+        expected_qty = contract_share_quantity(contracts_to_close, effective_multiplier(fields))
+        actual_qty = abs(to_decimal(evidence.get("stock_qty"), field_name="stock_qty"))
     except Exception:
         return False
     if expected_qty <= 0 or actual_qty != expected_qty:

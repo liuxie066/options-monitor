@@ -778,3 +778,38 @@ def test_wheel_put_candidate_fails_closed_and_ranks_remainder_first() -> None:
     assert unavailable["wheel_candidate_status"] == "data_unavailable"
     assert "spot_unavailable" in unavailable["reason_codes"]
     assert tuple(higher["sort_tuple"]) < tuple(lower["sort_tuple"])
+
+
+def test_wheel_assignment_requires_exact_event_units_without_lot_fallback():
+    from domain.domain.wheel import wheel_started_event_from_assignment
+
+    event = {**_assignment_trade(), "contracts": 1, "raw_payload": {
+        "stock_settlement": {"side": "buy", "shares": 100, "price": 10},
+    }}
+    lot = {"fields": {"contract_key": {"option_type": "put"}, "position_side": "short", "multiplier": 100}}
+    assert wheel_started_event_from_assignment(event, lot, recorded_at_ms=3000)
+    for patch in (
+        {"multiplier": "100.5"},
+        {"multiplier": None},
+        {"raw_payload": {"stock_settlement": {"side": "buy", "shares": 100.5, "price": 10}}},
+        {"raw_payload": {"stock_settlement": {"side": "buy", "shares": 0, "stock_qty": 100, "price": 10}}},
+    ):
+        with pytest.raises(ValueError):
+            wheel_started_event_from_assignment({**event, **patch}, lot, recorded_at_ms=3000)
+
+
+def test_wheel_invalid_intent_units_are_unknown_and_block_the_batch():
+    intent = build_wheel_event(
+        event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
+        event_type="wheel_call_intent_created", occurred_at_ms=2100, recorded_at_ms=2101,
+        intent_id="intent-invalid-units",
+        payload={"contracts": 1, "multiplier": "100.5", "expires_at_ms": 9000},
+    )
+    batch = project_wheel_lifecycles(
+        [_started_event(), intent], [_assignment_trade()], [], _assigned_stock(), 3000,
+    )[0]
+    assert batch["integrity_status"] == "conflict"
+    assert batch["phase"] is None
+    assert batch["active_intent_reserved_shares"] is None
+    assert "wheel_intent_units_invalid" in batch["reason_codes"]

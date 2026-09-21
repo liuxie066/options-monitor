@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.cash_secured_utils import normalize_cash_secured_total_by_ccy
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.risk_capacity import (
@@ -447,14 +448,20 @@ def build_shared_coverage_facts(
     locked_by_symbol = locked_by_symbol if isinstance(locked_by_symbol, Mapping) else {}
     locked_unavailable = option_context.get("locked_shares_unavailable_by_symbol")
     locked_unavailable = locked_unavailable if isinstance(locked_unavailable, Mapping) else {}
-    reserved: dict[str, int] = {}
+    reserved: dict[str, int | None] = {}
     for batch in wheel_read_model.get("batches") or []:
         if not isinstance(batch, Mapping) or batch.get("lifecycle_status") != "active":
             continue
         symbol = str(batch.get("symbol") or "").strip().upper()
-        reserved[symbol] = reserved.get(symbol, 0) + int(
-            batch.get("active_intent_reserved_shares") or 0
-        )
+        prior = reserved.get(symbol, 0)
+        if prior is None:
+            continue
+        try:
+            reserved[symbol] = prior + contract_share_quantity(
+                batch.get("active_intent_reserved_shares", 0), 1,
+            )
+        except ValueError:
+            reserved[symbol] = None
     facts: list[dict[str, Any]] = []
     for symbol in sorted(set(stocks) | set(locked_by_symbol) | set(reserved)):
         stock = stocks.get(symbol)
@@ -466,6 +473,8 @@ def build_shared_coverage_facts(
             shares_total = int(stock.get("shares"))
             shares_can_sell = int(stock.get("can_sell_qty"))
             shares_locked = int(locked_by_symbol.get(symbol, 0))
+            if reserved.get(symbol, 0) is None:
+                raise ValueError("wheel_intent_reserved_shares_invalid")
             shares_reserved = int(reserved.get(symbol, 0))
             if min(shares_total, shares_can_sell, shares_locked, shares_reserved) < 0:
                 raise ValueError("holding_invalid")

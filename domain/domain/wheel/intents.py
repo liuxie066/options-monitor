@@ -155,8 +155,8 @@ def wheel_started_event_from_assignment(
         raise ValueError("Wheel start requires buy-side Short Put assignment settlement")
     contracts = _positive_int(event.get("contracts"), "assignment contracts")
     try:
-        multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
-        shares = int(stock.get("shares") or 0)
+        multiplier = _positive_int(event.get("multiplier"), "assignment multiplier")
+        shares = _positive_int(stock.get("shares"), "settlement shares")
         price = float(stock.get("price"))
     except (TypeError, ValueError):
         raise ValueError("Wheel start assignment settlement is incomplete") from None
@@ -218,8 +218,8 @@ def wheel_called_away_event_from_call_assignment(
         raise ValueError("Wheel Call assignment requires sell-side stock settlement")
     contracts = _positive_int(event.get("contracts"), "assignment contracts")
     try:
-        multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
-        shares = int(stock.get("shares") or 0)
+        multiplier = _positive_int(event.get("multiplier"), "assignment multiplier")
+        shares = _positive_int(stock.get("shares"), "settlement shares")
         before = int((stock_lot_before or {}).get("shares_remaining"))
         after = int((stock_lot_after or {}).get("shares_remaining"))
     except (TypeError, ValueError):
@@ -473,7 +473,7 @@ def _plan_intent_create(
     symbol = _required_text(source.get("symbol"), "symbol").upper()
     intent_owner_id = _required_text(source.get(identity_field), identity_field)
     candidate_id = _required_text(
-        final_candidate.get("final_candidate_id") or final_candidate.get("candidate_id"),
+        final_candidate.get("final_candidate_id"),
         "final_candidate_id",
     )
     contracts = _positive_int(final_candidate.get("granted_contracts"), "granted_contracts")
@@ -482,7 +482,7 @@ def _plan_intent_create(
     if direction == "call":
         strike = float(final_candidate.get("strike") or 0)
         expiration_ymd = _required_text(
-            final_candidate.get("expiration_ymd") or final_candidate.get("expiration"),
+            final_candidate.get("expiration_ymd"),
             "expiration_ymd",
         )
         if strike <= 0:
@@ -500,7 +500,7 @@ def _plan_intent_create(
         if strike is None or strike <= 0:
             raise ValueError("Wheel Put candidate strike must be positive")
         expiration_ymd = _required_text(
-            final_candidate.get("expiration_ymd") or final_candidate.get("expiration"),
+            final_candidate.get("expiration_ymd"),
             "expiration_ymd",
         )
         binding = build_wheel_intent_capacity_binding(source, final_candidate, capacity_fact)

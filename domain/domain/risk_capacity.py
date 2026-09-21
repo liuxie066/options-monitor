@@ -423,13 +423,16 @@ def revalidate_opening_share_coverage(
                 "reason": "short_call_locked_shares_basis_missing",
             }
         locked += shares
-    reserved = sum(
-        int(batch.get("active_intent_reserved_shares") or 0)
-        for batch in wheel_batches
-        if str(batch.get("account") or "").strip().lower() == account_value
-        and str(batch.get("symbol") or "").strip().upper() == symbol_value
-        and str(batch.get("lifecycle_status") or "") == "active"
-    )
+    try:
+        reserved = sum(
+            contract_share_quantity(batch.get("active_intent_reserved_shares", 0), 1)
+            for batch in wheel_batches
+            if str(batch.get("account") or "").strip().lower() == account_value
+            and str(batch.get("symbol") or "").strip().upper() == symbol_value
+            and str(batch.get("lifecycle_status") or "") == "active"
+        )
+    except ValueError:
+        return {**fact, "status": "unavailable", "reason": "wheel_intent_reserved_shares_invalid"}
     try:
         prior_locked = int(fact.get("shares_locked") or 0)
         prior_reserved = int(fact.get("shares_reserved") or 0)

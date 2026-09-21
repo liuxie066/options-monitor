@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1052 (`src`: 529, `domain`: 87, `scripts`: 13, `tests`: 423)
-- Internal import edges: 7128 total, 3192 production/script edges excluding tests
+- Internal import edges: 7137 total, 3199 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|496| domain
+  application -->|501| domain
   application -->|4| domain_services
   application -->|157| infrastructure
   application -->|45| storage
@@ -47,7 +47,7 @@ flowchart LR
   scripts -->|2| infrastructure
   storage -->|1| domain
   tests -->|2980| application
-  tests -->|385| domain
+  tests -->|387| domain
   tests -->|2| domain_services
   tests -->|211| infrastructure
   tests -->|234| interfaces
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 496 |
+| application | domain | 501 |
 | application | infrastructure | 157 |
 | interfaces | application | 154 |
 | application | storage | 45 |
@@ -80,7 +80,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | tests | application | 2980 |
-| tests | domain | 385 |
+| tests | domain | 387 |
 | tests | interfaces | 234 |
 | tests | infrastructure | 211 |
 | tests | scripts | 28 |
@@ -93,10 +93,10 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 220 |
+| src.application | domain.domain | 222 |
 | src.interfaces | src.application | 122 |
 | src.application | src.infrastructure | 108 |
-| src.application.ledger | domain.domain | 104 |
+| src.application.ledger | domain.domain | 107 |
 | src.application.ledger | domain.domain.ledger | 55 |
 | src.application.trades | domain.domain | 38 |
 | src.application | domain.storage | 34 |
@@ -109,7 +109,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain.engine | 25 |
 | src.application.positions | src.application | 25 |
 | src.application.multi_tick | src.application | 24 |
-| domain.domain.ledger | domain.domain | 23 |
+| domain.domain.ledger | domain.domain | 24 |
 | src.application | src.application.settings | 19 |
 | domain.domain | domain.domain.ledger | 19 |
 | src.application.ledger | src.application | 18 |
@@ -185,10 +185,10 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.api | 70 |
 | src.application.agent_tool_config | 67 |
 | src.infrastructure.io_utils | 54 |
+| domain.domain.trade_contract_identity | 51 |
 | src.application.account_config | 49 |
 | domain.domain.ledger.position_fields | 49 |
 | domain.domain.option_position_identity | 48 |
-| domain.domain.trade_contract_identity | 46 |
 | domain.domain.decision_state_fingerprint | 43 |
 | src.application.settings | 27 |
 | domain.domain.ledger | 27 |
