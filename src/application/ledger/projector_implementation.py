@@ -124,7 +124,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "7c0d931eb0fc661a342ccc418170cfa761ea4d19910d89898a50e43fa2329be1"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "045724514558a42846a650f9a386c3658c1dea966e6f3ea6e3cf9acb8c3a256a"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):

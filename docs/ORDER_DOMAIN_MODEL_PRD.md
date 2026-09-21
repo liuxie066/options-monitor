@@ -66,7 +66,7 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 
 - `asset_type ∈ {stock, option}` 是资产判别；`quantity_unit ∈ {share, contract}` 由 `asset_type` 派生。
 - 期权特有字段：`option_type`/`strike`(Decimal)/`expiration_ymd`/`multiplier`(int)/`deliverable`(可空)。
-- 股票特有字段：`cost_basis_total`(Decimal，可空，含费总额)；每股成本 `cost_basis_per_share = cost_basis_total / shares_opened` 为派生值，不存储。
+- 股票特有字段：`cost_basis_total`(Decimal，可空，含费总额)；每股成本 `cost_basis_per_share = cost_basis_total / shares_opened` 为派生值，不存储。 多头按买入金额加已确认开仓费，空头按卖出金额减已确认开仓费形成平仓收益基准；空头费用超过卖出金额时该基准可以为负。平仓收益按持仓方向计算，并扣已确认平仓费；费用未知时成本及依赖它的收益为 null。
 - 数量三态按单位命名：期权 `contracts_opened/open/closed`，股票 `shares_opened/open/closed`。
 - 金额/价格统一 Decimal（JSON 用十进制字符串）；时间统一 epoch 毫秒 int（`*_ms`）；到期日统一 `expiration_ymd`（`YYYY-MM-DD`）。
 

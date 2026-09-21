@@ -559,3 +559,57 @@ def test_stock_unknown_cost_survives_checkpoint_and_resolves_on_replay() -> None
     missing_close = replace(closed, raw_payload={"side": "sell"})
     lot = project_trade_events([confirmed, missing_close]).lots[0]
     assert lot.cost_basis_total == Decimal("26") and lot.realized_pnl is None
+
+
+def test_stock_long_and_short_fee_basis_full_and_tail_replay():
+    from dataclasses import replace
+    from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+    from domain.domain.ledger.projection import project_resumable_trade_events
+    from domain.domain.ledger.projection_state import ResumableProjectionState
+
+    for side, quantity, price, fee, closing_quantity, closing_price, closing_fee, basis, pnl in (
+        ("long", "6", "10", "3", "3", "12", "2", "63", "2.5"),
+        ("short", "6", "10", "3", "3", "8", "2", "57", "2.5"),
+        ("short", "6", "10", "3", "3", "12", "2", "57", "-9.5"),
+        ("short", "0.1", "1", "1", "0.05", "1", "0.1", "-0.9", "-0.6"),
+    ):
+        events = []
+        for kind, qty, px, amount, at in (
+            ("open", quantity, price, fee, 1000),
+            ("close", closing_quantity, closing_price, closing_fee, 2000),
+        ):
+            event = _stock_event(event_id=kind, event_type=kind, contract_key=_stock_key(),
+                contracts=Decimal(qty), price=Decimal(px), event_time_ms=at,
+                lot_id="stock" if kind == "open" else None,
+                target_lot_id="stock" if kind == "close" else None)
+            events.append(replace(event, fees=Decimal(amount), raw_payload={
+                "side": derive_trade_side(kind, side),
+                "fee_provenance": {"basis": "actual", "amount": amount, "source": "test"},
+            }))
+        prefix = project_resumable_trade_events(events[:1], entry_mode="full")
+        state = ResumableProjectionState.from_dict(prefix.state.to_dict())
+        tail = project_resumable_trade_events(events[1:], initial_state=state, entry_mode="tail")
+        full = project_resumable_trade_events(events, entry_mode="full")
+        assert not full.diagnostics and not tail.diagnostics
+        full = full.to_projection_result()
+        tail = tail.to_projection_result()
+        assert [lot.to_dict() for lot in full.lots] == [lot.to_dict() for lot in tail.lots]
+        assert full.lots[0].cost_basis_total == Decimal(basis)
+        assert full.lots[0].realized_pnl == Decimal(pnl)
+        published = project_stored_trade_events_to_position_lots([event.to_dict() for event in events])
+        assert not published.diagnostics
+        assert published.lots[0].fields["cost_basis_total"] == basis
+        assert published.lots[0].fields["realized_pnl"] == pnl
+
+
+def test_stock_quantity_invariant_rejects_sub_float_drift_with_json_diagnostic():
+    import json
+    from dataclasses import replace
+    from domain.domain.ledger.invariants import check_position_lot_invariants
+
+    result = project_trade_events([_stock_event(event_id="open", event_type="open",
+        contract_key=_stock_key(), contracts=Decimal("1"), event_time_ms=1000, lot_id="stock")])
+    broken = replace(result.lots[0], shares_open=Decimal("0.99999999999999999999"))
+    diagnostics = check_position_lot_invariants([broken])
+    assert [item.code for item in diagnostics] == ["shares_balance_mismatch"]
+    assert json.loads(json.dumps(diagnostics[0].to_dict()))["details"]["shares_open"] == "0.99999999999999999999"

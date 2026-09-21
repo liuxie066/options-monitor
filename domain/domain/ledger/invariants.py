@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+from decimal import Decimal
 
 from domain.domain.ledger.events import LedgerDiagnostic
 from domain.domain.ledger.lots import PositionLot, lot_is_stock
@@ -97,9 +97,9 @@ def _option_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
 
 def _stock_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
     diagnostics: list[LedgerDiagnostic] = []
-    shares_open = float(lot.shares_open or 0.0)
-    shares_closed = float(lot.shares_closed or 0.0)
-    shares_opened = float(lot.shares_opened or 0.0)
+    shares_open = lot.shares_open or Decimal("0")
+    shares_closed = lot.shares_closed or Decimal("0")
+    shares_opened = lot.shares_opened or Decimal("0")
     if shares_open < 0:
         diagnostics.append(
             LedgerDiagnostic(
@@ -107,7 +107,7 @@ def _stock_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
                 severity="error",
                 code="negative_shares_open",
                 message="shares_open must be >= 0",
-                details={"lot_id": lot.lot_id, "shares_open": shares_open},
+                details={"lot_id": lot.lot_id, "shares_open": str(shares_open)},
             )
         )
     if shares_closed < 0:
@@ -117,7 +117,7 @@ def _stock_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
                 severity="error",
                 code="negative_shares_closed",
                 message="shares_closed must be >= 0",
-                details={"lot_id": lot.lot_id, "shares_closed": shares_closed},
+                details={"lot_id": lot.lot_id, "shares_closed": str(shares_closed)},
             )
         )
     if shares_closed > shares_opened:
@@ -129,17 +129,12 @@ def _stock_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
                 message="shares_closed must be <= shares_opened",
                 details={
                     "lot_id": lot.lot_id,
-                    "shares_closed": shares_closed,
-                    "shares_opened": shares_opened,
+                    "shares_closed": str(shares_closed),
+                    "shares_opened": str(shares_opened),
                 },
             )
         )
-    if not math.isclose(
-        shares_open + shares_closed,
-        shares_opened,
-        rel_tol=1e-9,
-        abs_tol=1e-9,
-    ):
+    if shares_open + shares_closed != shares_opened:
         diagnostics.append(
             LedgerDiagnostic(
                 event_id=lot.last_event_id,
@@ -148,9 +143,9 @@ def _stock_lot_invariants(lot: PositionLot) -> list[LedgerDiagnostic]:
                 message="shares_open + shares_closed must equal shares_opened",
                 details={
                     "lot_id": lot.lot_id,
-                    "shares_open": shares_open,
-                    "shares_closed": shares_closed,
-                    "shares_opened": shares_opened,
+                    "shares_open": str(shares_open),
+                    "shares_closed": str(shares_closed),
+                    "shares_opened": str(shares_opened),
                 },
             )
         )
