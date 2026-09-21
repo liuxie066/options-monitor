@@ -58,3 +58,22 @@ def test_check_mode_round_trips() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> None:
+    from copy import deepcopy
+    from scripts import retired_column_scan as scanner
+
+    document = scan()
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(scanner, "REGISTRY_PATH", path)
+    monkeypatch.setattr(scanner, "scan", lambda: document)
+    for key in ("detail", "dynamic_sql", "exempt_hits", "exempt_dynamic"):
+        stale = deepcopy(document)
+        stale["src"][key] = []
+        assert stale != document, key
+        path.write_text(json.dumps(stale), encoding="utf-8")
+        assert scanner.main(["--check"]) == 1, key
+        assert "registry is stale" in capsys.readouterr().err
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert scanner.main(["--check"]) == 0
