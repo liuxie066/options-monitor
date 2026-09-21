@@ -2118,3 +2118,17 @@ def test_rebuilt_identity_rejects_null_empty_and_duplicates(tmp_path, repointed_
                 conn.execute("UPDATE position_lots SET lot_id = ? WHERE lot_id = ?", (invalid, identity))
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE position_lots SET lot_id = ?", (identity,))
+
+
+@pytest.mark.parametrize("status", ["duplicate_lot_id", "empty_lot_id", "count_mismatch"])
+def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, status):
+    # Exercise the report boundary independently of the comparator: the latter
+    # may add blocking statuses without extending the legacy lot-only counters.
+    monkeypatch.setattr(
+        module, "compare_projection_lots",
+        lambda **kwargs: {"summary": {status: 1}, "items": [{"status": status}]},
+    )
+    report = module.verify_lot_identity_migration(_legacy_store(tmp_path))
+    assert report["ok"] is False
+    assert "projection_replay_mismatch" in report["readiness_reasons"]
+    assert report["projection"]["mismatch_count"] == 1
