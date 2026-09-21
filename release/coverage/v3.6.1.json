@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.1",
+  "base": {
+    "tag": "v3.6.0",
+    "commit": "fd356d39e61676dc5e50e65bf46a56957048d641"
+  },
+  "reviewed_head": "5c4c5eeddfaa24d1c905d4c1afcb2a8dfc2fc056",
+  "commits": [
+    {
+      "sha": "0cf813ec4939a26274a57f034733f0b0dc8005ea",
+      "subject": "fix(ledger): make R1 migration preserve canonical facts"
+    },
+    {
+      "sha": "5c4c5eeddfaa24d1c905d4c1afcb2a8dfc2fc056",
+      "subject": "Merge pull request #330 from liuxie066/codex/r1-production-fix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Compared legacy and nested position-lot payloads through shared business facts during the R1 window, preserved legacy yield-enhancement metadata through event replay, and repaired relocated virtual-environment script paths after atomic upgrades.",
+      "commits": [
+        "0cf813ec4939a26274a57f034733f0b0dc8005ea"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "5c4c5eeddfaa24d1c905d4c1afcb2a8dfc2fc056",
+      "reason": "Merge-only commit for PR #330; the user-visible change is covered by its content commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "0cf813ec4939a26274a57f034733f0b0dc8005ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/330"
+      ]
+    },
+    {
+      "commit": "5c4c5eeddfaa24d1c905d4c1afcb2a8dfc2fc056",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/330"
+      ]
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.6.1 - 2026-09-21
+
 ### Bug Fixes
 - Compared legacy and nested position-lot payloads through shared business facts during the R1 window, preserved legacy yield-enhancement metadata through event replay, and repaired relocated virtual-environment script paths after atomic upgrades.
 
