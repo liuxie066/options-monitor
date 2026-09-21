@@ -1874,7 +1874,29 @@ def _shared_venv_marker(venv_dir: Path) -> Path:
 
 def _shared_venv_valid(venv_dir: Path) -> bool:
     python = _venv_python(venv_dir)
-    return _shared_venv_marker(venv_dir).exists() and python.exists() and os.access(python, os.X_OK)
+    if not (_shared_venv_marker(venv_dir).exists() and python.exists() and os.access(python, os.X_OK)):
+        return False
+    for script in (venv_dir / "bin").glob("pip*"):
+        if not script.is_file():
+            continue
+        first_line = script.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        if not first_line or not first_line[0].startswith("#!"):
+            continue
+        interpreter = Path(first_line[0][2:])
+        if interpreter.parent != venv_dir / "bin" or not interpreter.exists():
+            return False
+    return True
+
+
+def _relocate_venv_scripts(*, venv_dir: Path, built_at: Path) -> None:
+    old = f"#!{built_at}/bin/".encode()
+    new = f"#!{venv_dir}/bin/".encode()
+    for script in (venv_dir / "bin").iterdir():
+        if script.is_symlink() or not script.is_file():
+            continue
+        payload = script.read_bytes()
+        if payload.startswith(old):
+            script.write_bytes(new + payload[len(old):])
 
 
 def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
@@ -2018,7 +2040,10 @@ def _ensure_release_runtime(
 
         if not runtime_prepare["venv_reused"]:
             _shared_venv_marker(build_venv).write_text(utc_now_iso() + "\n", encoding="utf-8")
+            # Virtualenv entry-point shebangs are absolute, so the atomic cache
+            # rename must relocate them before the cache is declared reusable.
             build_venv.rename(shared_venv)
+            _relocate_venv_scripts(venv_dir=shared_venv, built_at=build_venv)
             _link_release_venv(target_dir=target_dir, shared_venv=shared_venv)
 
         if not release_python.exists() or not os.access(release_python, os.X_OK):
@@ -2055,6 +2080,7 @@ def _ensure_release_runtime(
             runtime_prepare["pi_runtime"] = exc.details
         if not runtime_prepare["venv_reused"]:
             shutil.rmtree(build_venv, ignore_errors=True)
+            shutil.rmtree(shared_venv, ignore_errors=True)
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         raise RuntimePrepareError(str(exc), runtime_prepare=runtime_prepare) from exc

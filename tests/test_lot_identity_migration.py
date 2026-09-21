@@ -605,12 +605,85 @@ def test_the_measured_family_is_exactly_the_strategy_patch_family() -> None:
 
     from domain.domain.ledger.position_fields import POSITION_LOT_STRATEGY_PATCH_FIELDS
 
-    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) == set(
-        POSITION_LOT_STRATEGY_PATCH_FIELDS
-    )
+    assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) == {
+        *POSITION_LOT_STRATEGY_PATCH_FIELDS,
+        "yield_enhancement_mode",
+    }
     assert set(module.EVENT_LAYER_MEASURED_DROPPED_KEYS) <= set(
         module.RECONSTRUCTIBLE_DROPPED_KEYS
     )
+
+
+def test_yield_mode_requires_the_same_open_event_fact(tmp_path: Path) -> None:
+    path = _legacy_store(tmp_path)
+    lot_id = _put_lot_record_id(path)
+    mode = "vol_convexity_enhancement"
+    _edit_lot_fields(path, lot_id, lambda fields: fields.update({"yield_enhancement_mode": mode}))
+    absent = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
+    assert absent["lost"]["yield_enhancement_mode"]["reason"] == "event_layer_carrier_absent"
+    event_id = _stored_rows(path)[lot_id]["source_event_id"]
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'trade_events'"
+        ):
+            conn.execute(f"DROP TRIGGER {row['name']}")
+        raw = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?", (event_id,)
+        ).fetchone()["event_json"]
+        event = json.loads(raw)
+        event["raw_payload"]["yield_enhancement_mode"] = mode
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (json.dumps(event, ensure_ascii=False, sort_keys=True), event_id),
+        )
+        conn.commit()
+
+    classification = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
+    assert classification["reconstructible"]["yield_enhancement_mode"]["rows_non_empty"] == 1
+
+    with sqlite3.connect(path) as conn:
+        raw = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?", (event_id,)
+        ).fetchone()[0]
+        event = json.loads(raw)
+        event["raw_payload"]["yield_enhancement_mode"] = "income_upside_enhancement"
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (json.dumps(event, ensure_ascii=False, sort_keys=True), event_id),
+        )
+        conn.commit()
+    conflict = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
+    assert conflict["lost"]["yield_enhancement_mode"]["reason"] == "event_layer_carrier_conflict"
+
+
+def test_yield_mode_is_reconstructed_from_an_adjust_event(tmp_path: Path) -> None:
+    path = _legacy_store(tmp_path)
+    lot_id = _put_lot_record_id(path)
+    mode = "income_upside_enhancement"
+    _edit_lot_fields(path, lot_id, lambda fields: fields.update({"yield_enhancement_mode": mode}))
+    repo = SQLiteOptionPositionsRepository(path)
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id="adjust-yield-mode",
+            event_type="adjust",
+            event_time_ms=4_000,
+            contract_key=ContractKey.from_values(
+                broker="富途", account="lx", underlying_symbol="NVDA",
+                option_type="put", strike=100.0, expiration_ymd="2026-06-19",
+            ),
+            contracts=0,
+            price=Decimal("0"),
+            currency="USD",
+            source="test",
+            target_lot_id=lot_id,
+            raw_payload={"target_lot_id": lot_id, "patch": {"yield_enhancement_mode": mode}},
+        )
+    )
+
+    classification = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
+    assert classification["reconstructible"]["yield_enhancement_mode"]["rows_non_empty"] == 1
 
 
 def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) -> None:
@@ -1468,6 +1541,17 @@ def test_repointing_the_sql_is_what_enables_the_destructive_steps(
     assert result["rebuild"]["rebuilt"] is True
     assert "record_id" not in _columns(path)
     assert _primary_key(path) == "lot_id"
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        projection = module.project_stored_trade_events_to_position_lots(
+            module._events(module._load_event_rows(conn))
+        )
+        expected = {item.lot_id: module._canonical_fields_json(item.fields) for item in projection.lots}
+        actual = {
+            str(row["lot_id"]): str(row["fields_json"])
+            for row in conn.execute("SELECT lot_id, fields_json FROM position_lots")
+        }
+    assert actual == expected
 
 
 def test_the_closed_gates_receipt_carries_the_pinned_key_set(

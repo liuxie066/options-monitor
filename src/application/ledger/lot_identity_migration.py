@@ -59,12 +59,12 @@ the code and are corrected here rather than silently implemented around:
    兼容读窗口，否则存量行读不出" — and the read side leaves that window in the
    same release that repoints the SQL above (the payload readers move with it),
    so the one registry gate opens the column rebuild and the payload rewrite
-   together. When it opens, the rewrite aligns each row to
-   ``PositionLot.to_dict()``'s key set and materializes every carried key at
-   the target ``CARRIED_DROPPED_KEYS`` declares for it; a key
-   ``_drop_disposition`` calls ``lost`` aborts the whole ``apply`` instead of
-   disappearing. The classifier is therefore the rewrite's gate, not a
-   parallel vocabulary beside it.
+   together. When it opens, a fresh full replay supplies the exact canonical
+   ``PositionLot.to_dict()`` payload for every lot. Before any rebuild, the
+   batch requires a replay without errors, exact lot-id set equality, and no
+   key that ``_drop_disposition`` calls ``lost``. The classifier is therefore
+   the rewrite's loss gate, while the canonical event replay is the write
+   source; the old row is never used to synthesize a partial v2 payload.
 4. **The checkpoint shortcut is weaker than "shape-only", but stronger than
    nothing.** §13.3 slice 3 asks that ``verify`` not take
    ``projection_verify``'s reuse shortcut. The shortcut is real — ``--mode
@@ -243,6 +243,7 @@ RECONSTRUCTIBLE_DROPPED_KEYS = {
     "strategy_group_id": "the open event payload's strategy metadata",
     "source_stock_lot_id": "the open event payload's strategy metadata",
     "source_wheel_branch_id": "the open event payload's strategy metadata",
+    "yield_enhancement_mode": "the open or adjust event payload's legacy strategy metadata",
     # The close patch (``publisher._close_fields``) writes each of these straight
     # off the closing trade event — ``event.event_id``/``event.price``/
     # ``event.event_time_ms`` and the event payload's own ``close_type`` and
@@ -275,6 +276,7 @@ EVENT_LAYER_MEASURED_DROPPED_KEYS = frozenset(
         "source_stock_lot_id",
         "source_wheel_branch_id",
         "strategy_snapshot",
+        "yield_enhancement_mode",
     }
 )
 
@@ -812,7 +814,10 @@ def _drop_disposition(
         # is actually there. An import event that never carried it, or a
         # payload-only row with no open event at all, leaves the fact with no
         # carrier — a loss the gate has to report instead of certifying.
-        if _non_empty(event_metadata.get(key)):
+        event_value = event_metadata.get(key)
+        if _non_empty(event_value) and json.dumps(event_value, sort_keys=True) != json.dumps(value, sort_keys=True):
+            return "lost", "event_layer_carrier_conflict"
+        if _non_empty(event_value):
             return "reconstructible", derivation or "the open event payload's strategy metadata"
         return "lost", "event_layer_carrier_absent"
     if derivation:
@@ -1387,6 +1392,7 @@ def _rewrite_lot_payloads(
     conn: sqlite3.Connection,
     *,
     align_to_lot_shape: bool,
+    replayed_payloads: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, int]:
     """D3 and D4 in one traversal over ``position_lots``.
 
@@ -1439,9 +1445,15 @@ def _rewrite_lot_payloads(
         if has_position_id:
             position_id_rows += 1
         if align_to_lot_shape:
-            aligned = _aligned_lot_payload(
-                fields, row, _family_for_row({key_column: row["row_key"]}, families)
-            )
+            if replayed_payloads is not None:
+                lot_id = str(row["row_key"])
+                if lot_id not in replayed_payloads:
+                    raise RuntimeError(f"fresh replay omitted position lot: {lot_id}")
+                aligned = deepcopy(dict(replayed_payloads[lot_id]))
+            else:
+                aligned = _aligned_lot_payload(
+                    fields, row, _family_for_row({key_column: row["row_key"]}, families)
+                )
         elif has_position_id:
             aligned = {key: value for key, value in fields.items() if key != "position_id"}
         else:
@@ -1459,6 +1471,28 @@ def _rewrite_lot_payloads(
         "position_id_rows": position_id_rows,
         "rewritten_rows": rewritten,
     }
+
+
+def _fresh_replay_payloads(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    events = _events(_load_event_rows(conn)) if _table_exists(conn, "trade_events") else []
+    projection = project_stored_trade_events_to_position_lots(events)
+    errors = [
+        item for item in projection.diagnostics
+        if str(getattr(item, "severity", "") or "").lower() == "error"
+    ]
+    if errors:
+        raise RuntimeError(f"fresh replay reported {len(errors)} projection error(s)")
+    payloads: dict[str, dict[str, Any]] = {}
+    for item in projection.lots:
+        lot_id = str(item.lot_id or "").strip()
+        if not lot_id or lot_id in payloads:
+            raise RuntimeError(f"fresh replay produced invalid lot identity: {lot_id!r}")
+        payloads[lot_id] = deepcopy(item.fields)
+    rows = _scan_lot_payloads(conn)
+    stored_ids = [str(row["lot_id"] or row["record_id"] or "").strip() for row in rows]
+    if len(set(stored_ids)) != len(stored_ids) or set(stored_ids) != set(payloads):
+        raise RuntimeError("fresh replay lot identities differ from position_lots")
+    return payloads
 
 
 # --- D1/D2: one rebuild ------------------------------------------------------
@@ -1932,6 +1966,16 @@ def apply_lot_identity_migration(
             # statements — not the contract — are what say the rebuilt shape
             # can be read back.
             deferred_by = _live_sql_naming_retired_columns()
+            replayed_payloads: dict[str, dict[str, Any]] | None = None
+            if not deferred_by:
+                lost = current["dropped_key_classification"]["lost"]
+                if lost:
+                    key = sorted(lost)[0]
+                    raise RuntimeError(
+                        "lot payload rewrite would lose a fact: "
+                        f"key {key!r} has no carrier ({lost[key]['reason']})"
+                    )
+                replayed_payloads = _fresh_replay_payloads(conn)
             # The rebuild goes first, and the payload rewrite follows it: the
             # rebuilt table's account guards read the account at the target
             # shape's path (``contract_key.account``), so they can only be
@@ -1948,7 +1992,11 @@ def apply_lot_identity_migration(
             wheel_rename = _rename_wheel_lot_identity(conn) if not deferred_by else None
             if wheel_rename is not None:
                 _fail(failure_hook, "after_wheel_identity_rename")
-            rewrite = _rewrite_lot_payloads(conn, align_to_lot_shape=not deferred_by)
+            rewrite = _rewrite_lot_payloads(
+                conn,
+                align_to_lot_shape=not deferred_by,
+                replayed_payloads=replayed_payloads,
+            )
             _fail(failure_hook, "after_position_id_strip")
 
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]

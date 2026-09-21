@@ -406,7 +406,7 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
         "known_dirty": known_dirty,
         "excluded_payload_keys": list(EXCLUDED_PAYLOAD_KEYS),
         "notes": [
-            "face A compares raw stored fields_json against the replay payload with neither side healed",
+            "face A is raw and strict within one payload shape; v3.5-flat versus v2-nested compares their shared business facts",
             "face B compares each stored derived column against the value re-derived from the stored payload (§6 rule 1)",
             "derived_column_differences is §6 rule 2: the replay's derived columns against the store's",
             "rowid_moved is null (not compared): A4 compares pre/post-rewrite store_rowids snapshots",

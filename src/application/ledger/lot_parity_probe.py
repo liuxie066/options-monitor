@@ -7,8 +7,11 @@ It answers one question: **does the replay reproduce the stored rows?**
 Three faces are compared, and only these three:
 
 * **Face A (payload)** — the stored ``fields_json`` object against the ``fields``
-  the replay produced. **Neither side is healed**: the stored side is read as
-  raw JSON, so ``position_lot_row_to_record`` is deliberately *not* applied.
+  the replay produced. Same-shape payloads are compared raw. During R1, a
+  v3.5 flat payload and a v2 nested replay compare the shared business facts
+  through their two published spellings; migration inventory separately proves
+  that no old-only fact is discarded. The stored side is still read as raw JSON,
+  so ``position_lot_row_to_record`` is deliberately *not* applied.
   (That codec used to heal ``expiration``/``strike``/``multiplier`` back into the
   decoded payload; slice 2 deleted the heal, which is the comparator-spec §2
   convention "两侧都不 heal, 列单独进 B 面比" made real. This reader never went
@@ -106,6 +109,7 @@ import argparse
 import json
 import sqlite3
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -421,12 +425,64 @@ def _comparable_keys(fields: dict[str, Any]) -> list[str]:
     return sorted(key for key in fields if key not in EXCLUDED_PAYLOAD_KEYS)
 
 
+_CROSS_SHAPE_FACTS = (
+    "broker", "account", "symbol", "option_type", "side", "status", "currency",
+    "contracts", "contracts_open", "contracts_closed", "strike", "expiration_ymd",
+    "multiplier", "premium", "opened_at", "source_event_id", "position_key",
+)
+_NUMERIC_FACTS = frozenset(
+    {"contracts", "contracts_open", "contracts_closed", "strike", "multiplier", "premium", "opened_at"}
+)
+
+
+def _cross_shape_payload(fields: dict[str, Any]) -> dict[str, Any]:
+    contract = fields.get("contract_key")
+    contract = contract if isinstance(contract, dict) else {}
+    normalized = {
+        "broker": contract.get("broker") or fields.get("broker"),
+        "account": contract.get("account") or fields.get("account"),
+        "symbol": contract.get("underlying_symbol") or fields.get("symbol"),
+        "option_type": contract.get("option_type") or fields.get("option_type"),
+        "side": fields.get("position_side") or fields.get("side"),
+        "status": fields.get("status"),
+        "currency": fields.get("currency"),
+        "contracts": fields.get("contracts_opened", fields.get("contracts")),
+        "contracts_open": fields.get("contracts_open"),
+        "contracts_closed": fields.get("contracts_closed"),
+        "strike": contract.get("strike") if contract.get("strike") not in (None, "") else fields.get("strike"),
+        "expiration_ymd": contract.get("expiration_ymd") or fields.get("expiration_ymd"),
+        "multiplier": fields.get("multiplier"),
+        "premium": fields.get("premium_open", fields.get("premium")),
+        "opened_at": fields.get("opened_at_ms", fields.get("opened_at")),
+        "source_event_id": fields.get("open_event_id") or fields.get("source_event_id"),
+        "position_key": fields.get("position_key"),
+    }
+    out: dict[str, Any] = {}
+    for key in _CROSS_SHAPE_FACTS:
+        value = normalized.get(key)
+        if key in _NUMERIC_FACTS and value not in (None, ""):
+            try:
+                value = str(Decimal(str(value)).normalize())
+            except InvalidOperation:
+                pass
+        out[key] = value
+    return out
+
+
 def compare_payload_face(
     *,
     stored_fields: dict[str, Any],
     projected_fields: dict[str, Any],
 ) -> dict[str, Any]:
-    """Face A: key set and values, with neither side healed."""
+    """Face A: strict within a shape, shared business facts across R1 shapes."""
+    # R1 changes the persisted representation, not these business facts. During
+    # the migration window a v3.5 flat row and its v2 replay therefore compare
+    # through the two published field mappings; same-shape rows remain byte-strict.
+    if isinstance(stored_fields.get("contract_key"), dict) != isinstance(
+        projected_fields.get("contract_key"), dict
+    ):
+        stored_fields = _cross_shape_payload(stored_fields)
+        projected_fields = _cross_shape_payload(projected_fields)
     stored_keys = set(_comparable_keys(stored_fields))
     projected_keys = set(_comparable_keys(projected_fields))
     only_in_store = sorted(stored_keys - projected_keys)
@@ -481,26 +537,23 @@ def _contract_key(fields: dict[str, Any]) -> dict[str, Any]:
 
 
 def _missing_option_contract_fields(fields: dict[str, Any]) -> list[str]:
-    """``repository_common._validate_position_lot_fields``, restated.
+    """The writer guard for either payload shape in the R1 read window.
 
     The writer's **first** guard on a payload (``repository_common.py:216``,
     before the two ``account`` rules), so its refusal is the one the writer would
     hit first and the one this derivation has to carry.
 
-    Read it as the writer wrote it: only ``put``/``call`` payloads are validated
-    at all (anything else — a stock payload, a missing ``option_type`` — returns
-    early and is left to the ``account`` guards), the absence test is against
-    ``contract_key.expiration_ymd`` (the column's source), and ``strike`` is read
-    from ``contract_key`` through ``safe_float`` with no note fallback.
+    Only ``put``/``call`` payloads are validated; R1 accepts the v2 contract
+    carrier first and the v3.5 flat carrier second. Notes never heal a fact.
     """
     contract_key = _contract_key(fields)
-    option_type = str(contract_key.get("option_type") or "").strip().lower()
+    option_type = str(contract_key.get("option_type") or fields.get("option_type") or "").strip().lower()
     if option_type not in {"put", "call"}:
         return []
     missing: list[str] = []
-    if contract_key.get("expiration_ymd") in (None, ""):
+    if contract_key.get("expiration_ymd") in (None, "") and fields.get("expiration_ymd") in (None, "") and fields.get("expiration") in (None, ""):
         missing.append("expiration")
-    if _safe_float(contract_key.get("strike")) is None:
+    if _safe_float(contract_key.get("strike")) is None and _safe_float(fields.get("strike")) is None:
         missing.append("strike")
     return missing
 
@@ -539,11 +592,10 @@ def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
     """Re-derive the five columns from a payload the way the writer does.
 
     ``account`` and ``source_event_id`` are the two expressions that do **not**
-    follow an imported helper: the writer reads them from ``fields``
-    (``repository_common._position_lot_storage_values``) and this copy has to
-    name the same two keys — ``contract_key.account`` and ``open_event_id``
-    (``source_event_id``'s name converged onto ``open_event_id``). The other
-    three come from the imported ``_position_lot_contract_scalars``. A payload the
+    follow an imported helper. R1 reads their v2 carriers first
+    (``contract_key.account`` / ``open_event_id``) and their v3.5 flat carriers
+    second. The other three come from the imported
+    ``_position_lot_contract_scalars``. A payload the
     *writer* refuses — the option contract first (``_validate_position_lot_fields``),
     then ``account`` (``repository_common.py``:217-221), the one derived column
     comparator-spec §4 calls "缺了就响" — has no columns to derive at all.
@@ -572,11 +624,14 @@ def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
     the sense in which "the writer refuses it" is modelled completely here.
     """
     expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
-    source_event_id = (
-        str(fields.get("open_event_id")) if fields.get("open_event_id") else None
-    )
+    if expiration_ms is None and fields.get("expiration_ymd") not in (None, ""):
+        expiration_ms = _position_lot_contract_scalars(
+            {**fields, "contract_key": {"expiration_ymd": fields["expiration_ymd"]}}
+        )[0]
+    source_event = fields.get("open_event_id") or fields.get("source_event_id")
+    source_event_id = str(source_event) if source_event else None
     contract_key = _contract_key(fields)
-    account = str(contract_key.get("account") or "").strip()
+    account = str(contract_key.get("account") or fields.get("account") or "").strip()
     writer_error, writer_columns = _writer_refusal(fields=fields, account=account)
     return {
         "account": account or None,
@@ -950,7 +1005,7 @@ def run_lot_parity_probe(
         "retired_columns": retired_columns,
         "green_criterion": GREEN_CRITERION,
         "notes": [
-            "face A compares raw stored fields_json against the replay payload with neither side healed",
+            "face A is raw and strict within one payload shape; v3.5-flat versus v2-nested compares their shared business facts",
             "face B compares each stored derived column against the value re-derived from the stored payload",
             "updated_at_ms is excluded from every face: it is a wall clock, not a fact",
             "green is exactly this: " + GREEN_CRITERION
