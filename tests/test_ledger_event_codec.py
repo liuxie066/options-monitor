@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
@@ -117,6 +118,24 @@ def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_
     assert listed[0]["trade_time_ms"] == 1000
     assert listed[0]["position_effect"] == "open"
     assert listed[0]["side"] == "sell"
+
+
+def test_sqlite_event_money_round_trip_preserves_decimal_precision(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    event = _canonical_event(
+        price=Decimal("123.1234567890123456789"),
+        fees=Decimal("0.1234567890123456789"),
+    )
+    assert repo.upsert_trade_event(event) is True
+    assert repo.upsert_trade_event(event) is False
+    with repo._connect() as conn:
+        stored = json.loads(conn.execute("SELECT event_json FROM trade_events").fetchone()[0])
+    assert stored["price"] == str(event.price)
+    assert stored["fees"] == str(event.fees)
+    decoded, diagnostics = stored_trade_event_to_ledger_event(stored)
+    assert diagnostics == []
+    assert decoded.price == event.price
+    assert decoded.fees == event.fees
 
 
 def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:

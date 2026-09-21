@@ -253,7 +253,7 @@ def _run_apply(path: Path, **kwargs: object) -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-def _lot_identity_window_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def _lot_identity_window_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Carry the window token the machinery tests run behind.
 
     ``apply`` refuses to run while ``LOT_IDENTITY_WINDOW_ENABLEMENT`` is unset;
@@ -264,6 +264,14 @@ def _lot_identity_window_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr(module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
+    # Explicit pre-R1 registry for deferred cases; repointed_build uses the
+    # real registry and exact exceptions instead of bypassing the SQL gate.
+    registry = tmp_path / "unrepointed-registry.json"
+    registry.write_text(json.dumps({"src": {
+        "detail": [{"module": "src/unrepointed.py", "kind": "read"}],
+        "dynamic_sql": [],
+    }}))
+    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH", registry)
 
 
 def test_apply_refuses_while_the_window_is_not_enabled(
@@ -289,16 +297,10 @@ def test_apply_refuses_while_the_window_is_not_enabled(
 
 @pytest.fixture
 def repointed_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An R1 build: its live SQL no longer names any retired column.
-
-    On window day the release that runs ``apply`` is the one whose statements
-    have been repointed, and the gate reads the pinned registry to prove it.
-    This tree is pre-R1 — its ledger names live statements — so the window's
-    own answer is supplied here; the real read is pinned by
-    ``test_apply_defers_the_destructive_half_until_the_sql_is_repointed``.
-    """
-
-    monkeypatch.setattr(module, "_live_sql_naming_retired_columns", lambda: ())
+    """Use the real R1 registry and exact exceptions without bypassing the gate."""
+    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH",
+                        Path(module.__file__).resolve().parents[3] / "docs/retired_column_sql_registry.json")
+    assert module._live_sql_naming_retired_columns() == ()
 
 
 def _table_info(path: Path, table: str = "position_lots") -> list[sqlite3.Row]:
@@ -1411,9 +1413,7 @@ def test_the_destructive_steps_are_deferred_while_the_sql_names_them(
     """
 
     path = _legacy_store(tmp_path)
-    # This tree is pre-R1, so its own ledger still lists live statements and
-    # that — not the column contract, which the window release deliberately
-    # keeps dual-shape — is what the gate reads.
+    # The fixture supplies an unreviewed statement to exercise the closed gate.
     live = module._live_sql_naming_retired_columns()
     assert live
 
@@ -1620,18 +1620,13 @@ def test_the_rebuild_leaves_the_store_on_the_contracted_shape(
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA foreign_key_check(position_lots)").fetchall() == []
-        # The contract check the publish path runs reads the pre-window shape on
-        # this tree, so the rebuilt store shows up as exactly the retired
-        # columns missing and nothing unclassified: the rebuilt store *is* the
-        # contract minus them. A2's repointing batch is what relaxes this check
-        # to accept both shapes (R1 stays dual-shape by design), and it owns
-        # this assertion from there.
+        # R1 accepts the exact rebuilt shape as well as the complete legacy shape.
         from src.application.ledger.repository_projection_schema import (
             _position_projection_column_contract,
         )
 
         contract = _position_projection_column_contract(conn)["position_lots"]
-        assert set(contract["missing"]) == set(module.RETIRED_LOT_COLUMNS)
+        assert contract["missing"] == ()
         assert contract["unclassified"] == ()
 
 
@@ -1677,15 +1672,14 @@ def test_the_rebuild_recreates_the_stores_own_guards_on_the_new_shape(
     # ``CREATE UNIQUE INDEX IF NOT EXISTS`` on every open, so a rebuilt store
     # that dropped it would churn its schema cookie on the next open.
     assert "UNIQUE" in _object_sql(path, "index")["idx_position_lots_lot_id"]
-    # An index whose column list was only ``(expiration, record_id)`` has no
-    # shape left; the account lookup index keeps its name and loses the retired
-    # column, and its duplicate (``(account, record_id)``) collapses into it.
+    # R1's account lookup uses the surviving identity; both old account indexes
+    # converge on one (account, lot_id) index.
     assert set(_object_sql(path, "index")) == {
         "idx_position_lots_lot_id",
-        "idx_position_lots_account_expiration",
+        "idx_position_lots_account_lot",
     }
-    assert _object_sql(path, "index")["idx_position_lots_account_expiration"].endswith(
-        "ON position_lots(account)"
+    assert _object_sql(path, "index")["idx_position_lots_account_lot"].endswith(
+        "ON position_lots(account, lot_id)"
     )
 
 
@@ -1760,6 +1754,7 @@ def test_the_recreated_guards_accept_the_new_shape_and_reject_a_conflict(
         "after_rebuild_rename",
         "after_rebuild_guards",
         "after_rebuild",
+        "after_wheel_identity_rename",
     ],
 )
 def test_a_failure_at_any_rebuild_check_leaves_the_store_byte_identical(
@@ -2136,3 +2131,203 @@ def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, statu
     assert report["ok"] is False
     assert "projection_replay_mismatch" in report["readiness_reasons"]
     assert report["projection"]["mismatch_count"] == 1
+
+
+@pytest.mark.parametrize("rebuilt", [False, True], ids=["legacy", "rebuilt"])
+def test_r1_rebuilt_store_reopens_and_preserves_projection(
+    tmp_path: Path, repointed_build: None, rebuilt: bool,
+) -> None:
+    from src.application.ledger.repository_common import PositionLotRecord
+    from src.application.ledger.sqlite_row_codec import position_lots_use_lot_id
+
+    path = _legacy_store(tmp_path)
+    from domain.domain.wheel.events import build_wheel_event
+
+    wheel_repo = SQLiteOptionPositionsRepository(path)
+    wheel_events = [build_wheel_event(
+        event_id=f"wheel-rename-{index}", account="lx",
+        wheel_branch_id=f"branch-{index}", lot_id=lot_id,
+        event_type="wheel_branch_created", occurred_at_ms=2000,
+        recorded_at_ms=2001, payload={"direction": "put"},
+    ) for index, lot_id in enumerate((None, "independent-lot"))]
+    with wheel_repo._writer_connection(begin_immediate=True) as conn:
+        for event in wheel_events:
+            assert wheel_repo.append_wheel_event_once(event, conn=conn)
+    stale_manifest = module.build_lot_identity_migration_inventory(path)
+    # An append changes the facts protected by the manifest, even though the
+    # position table and schema cookie did not change.
+    extra = build_wheel_event(
+        event_id="wheel-new-after-inventory", account="lx", wheel_branch_id="late-branch",
+        lot_id=None, event_type="wheel_branch_created", occurred_at_ms=2500,
+        recorded_at_ms=2501, payload={"direction": "put"},
+    )
+    with wheel_repo._writer_connection(begin_immediate=True) as conn:
+        assert wheel_repo.append_wheel_event_once(extra, conn=conn)
+    wheel_events.append(extra)
+    with pytest.raises(ValueError, match="manifest is stale.*wheel_identity"):
+        module.apply_lot_identity_migration(path, stale_manifest)
+    if rebuilt:
+        receipt = _run_apply(path)
+        assert receipt["wheel_identity_rename"]["read_back"] == "equal"
+        assert receipt["wheel_identity_rename"]["rows"] == 3
+    else:
+        run_position_projection_forced_full(SQLiteOptionPositionsRepository(path), [])
+    # Recreate through the ordinary open path, not just the migration's
+    # translated trigger SQL, so both R1 DDL branches are exercised.
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER trg_position_lots_generation_update_same")
+        conn.execute("DROP TRIGGER trg_position_lots_generation_update_old")
+        conn.execute("DROP TRIGGER trg_position_lots_generation_update_new")
+    repo = SQLiteOptionPositionsRepository(path)
+    assert repo.list_wheel_events(account="lx") == wheel_events
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for event in wheel_events:
+            assert not repo.append_wheel_event_once(event, conn=conn)
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute("UPDATE wheel_events SET recorded_at_ms = recorded_at_ms + 1")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute("DELETE FROM wheel_events")
+        later = build_wheel_event(
+            event_id="wheel-after-reopen", account="sy", wheel_branch_id="other-branch",
+            lot_id="other-lot", event_type="wheel_branch_created",
+            occurred_at_ms=3000, recorded_at_ms=3001, payload={"direction": "put"},
+        )
+        assert repo.append_wheel_event_once(later, conn=conn)
+    assert repo.list_wheel_events(account="sy") == [later]
+    assert module.verify_lot_identity_migration(path)["ok"] is True
+    from src.application.ledger.lot_parity_probe import run_lot_parity_probe
+    parity = run_lot_parity_probe(sqlite_path=path)
+    assert parity["green"] is True
+    assert parity.get("retired_columns", []) == (["expiration"] if rebuilt else [])
+    assert ("expiration" not in parity["derived_columns"]) is rebuilt
+    records = repo.list_position_lots()
+    evidence_repo = open_trade_reconciliation_evidence_repo(path)
+    assert {row["lot_id"]: row["fields"] for row in evidence_repo.list_position_lots()} == {
+        row["lot_id"]: row["fields"] for row in records
+    }
+    desired = [PositionLotRecord(lot_id=row['lot_id'], fields=row['fields']) for row in records]
+    assert repo.replace_position_lots(desired) == len(desired)
+    assert repo.position_projection_indexes_ready()
+    assert all(not item['missing'] and not item['unclassified'] for item in repo.position_projection_column_contract().values())
+    assert repo.list_position_lots() == records
+    assert repo.get_position_lot_fields(desired[0].lot_id) == desired[0].fields
+    assert len(repo.get_position_lots_by_ids([desired[0].lot_id])) == 1
+    assert repo.backfill_position_lot_contract_columns() == 0
+    assert repo.backfill_position_projection_accounts() == {
+        "trade_events_updated": 0, "position_lots_updated": 0,
+    }
+    assert repo.build_position_projection_indexes() == ()
+    assert repo.position_projection_normalized_columns_ready()
+    for account in ("lx", "sy"):
+        owned = [row for row in records if row["fields"]["contract_key"]["account"] == account]
+        snapshot = repo.position_projection_account_snapshot(account, include_records=True)
+        assert snapshot.lot_count == len(owned)
+        assert {row["lot_id"] for row in snapshot.records} == {row["lot_id"] for row in owned}
+        assert {row["lot_id"] for row in repo.list_active_position_lots(account=account)} == {
+            row["lot_id"] for row in owned if row["fields"]["status"] == "open"
+        }
+        inputs = evidence_repo.read_current_decision_projection_inputs(account)
+        assert {row["lot_id"] for row in inputs["lots"]} == {row["lot_id"] for row in owned}
+    from src.application.ledger.position_projection_migration import build_position_projection_migration_inventory
+    inventory = build_position_projection_migration_inventory(path)
+    assert "normalized_columns_incomplete" not in inventory["readiness_reasons"]
+    assert "required_indexes_missing" not in inventory["readiness_reasons"]
+    repo.replace_position_lots(desired[1:])
+    repo.apply_position_lot_diff(desired[:1], remove_missing=False)
+    assert len(repo.list_position_lots()) == len(desired)
+    changed_fields = {**desired[0].fields, "note": "R1 update regression"}
+    account = changed_fields["contract_key"]["account"]
+    before = repo.read_position_projection_account_metadata(account)["head"]["lots_generation"]
+    changed = repo.apply_position_lot_diff(
+        [PositionLotRecord(lot_id=desired[0].lot_id, fields=changed_fields)], remove_missing=False,
+    )
+    assert changed.changed == 1
+    assert repo.get_position_lot_fields(desired[0].lot_id) == changed_fields
+    assert repo.read_position_projection_account_metadata(account)["head"]["lots_generation"] == before + 1
+    moved_account = "sy" if account == "lx" else "lx"
+    generations = {
+        owner: repo.read_position_projection_account_metadata(owner)["head"]["lots_generation"]
+        for owner in (account, moved_account)
+    }
+    moved_fields = {
+        **changed_fields,
+        "contract_key": {**changed_fields["contract_key"], "account": moved_account},
+    }
+    repo.apply_position_lot_diff(
+        [PositionLotRecord(lot_id=desired[0].lot_id, fields=moved_fields)], remove_missing=False,
+    )
+    for owner, generation in generations.items():
+        assert repo.read_position_projection_account_metadata(owner)["head"]["lots_generation"] == generation + 1
+    run_position_projection_forced_full(repo, [])
+    assert module.verify_lot_identity_migration(path)["ok"] is True
+    from src.application.ledger.position_projection_publication import read_current_position_projection
+    for account in ("lx", "sy"):
+        assert read_current_position_projection(repo, account=account)["status"] == "trusted"
+    from src.application.ledger.position_projection_migration import verify_position_projection_migration
+    verified = verify_position_projection_migration(path)
+    assert verified["full_oracle_parity"]["status"] == "pass", verified
+    from src.application.ledger.current_decision_migration import build_current_decision_projection_migration_inventory
+    decision = build_current_decision_projection_migration_inventory(path)
+    assert decision["readiness"] == "ready", decision
+    assert decision["repair"]["missing_indexes"] == []
+    with sqlite3.connect(path) as conn:
+        assert position_lots_use_lot_id(conn) is rebuilt
+    SQLiteOptionPositionsRepository(path)
+    assert ('record_id' not in _columns(path)) is rebuilt
+    assert ('expiration' not in _columns(path)) is rebuilt
+
+    # The batch-adjust public write path must keep group collision protection
+    # after the storage identity changes, both for payload and event carriers.
+    from src.application.ledger.manual_trades import persist_manual_adjust_events
+    target = next(row for row in repo.list_position_lots()
+                  if row["fields"]["asset_type"] == "option" and row["fields"]["status"] == "open")
+    other = next(row for row in repo.list_position_lots() if row["lot_id"] != target["lot_id"])
+    repo.apply_position_lot_diff([
+        PositionLotRecord(lot_id=other["lot_id"], fields={**other["fields"], "strategy_group_id": "r1-occupied"}),
+    ], remove_missing=False)
+    before_events = repo.list_trade_events()
+    with pytest.raises(ValueError, match="already assigned to another position lot"):
+        persist_manual_adjust_events(repo, [{
+            "record_id": target["lot_id"], "fields": target["fields"],
+            "strategy_group_id": "r1-occupied", "as_of_ms": 6000,
+        }])
+    assert repo.list_trade_events() == before_events
+    run_position_projection_forced_full(repo, [])
+    adjusted = persist_manual_adjust_events(repo, [{
+        "record_id": target["lot_id"], "fields": repo.get_position_lot_fields(target["lot_id"]),
+        "strategy_group_id": "r1-new-group", "as_of_ms": 7000,
+    }])
+    assert len(adjusted) == 1 and adjusted[0].created
+    assert module.verify_lot_identity_migration(path)["ok"] is True
+
+
+@pytest.mark.parametrize('mutation, reason', [
+    ("UPDATE position_lots SET expiration = expiration + 1 WHERE expiration IS NOT NULL", 'round trip'),
+    ("UPDATE position_lots SET source_event_id = 'different-event'", 'open_event_id'),
+    ("UPDATE position_lots SET strike = NULL WHERE expiration IS NOT NULL", 'requires expiration and strike'),
+])
+def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_build: None, mutation: str, reason: str) -> None:
+    path = _legacy_store(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(mutation)
+    before = _columns(path)
+    with pytest.raises(RuntimeError, match=reason):
+        _run_apply(path)
+    assert _columns(path) == before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = ?", (module.REBUILD_TEMP_TABLE,)).fetchone()[0] == 0
+
+
+def test_r1_partial_final_shape_is_not_healed_on_open(tmp_path: Path, repointed_build: None) -> None:
+    path = _legacy_store(tmp_path)
+    _run_apply(path)
+    with sqlite3.connect(path) as conn:
+        # No trigger references this metadata column; its absence is still corruption.
+        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'position_lots'").fetchall():
+            conn.execute(f'DROP TRIGGER "{name}"')
+        conn.execute('ALTER TABLE position_lots DROP COLUMN multiplier')
+    with pytest.raises(ValueError, match='unsupported or partial shape'):
+        SQLiteOptionPositionsRepository(path)
+    assert 'multiplier' not in _columns(path)
+    assert 'expiration' not in _columns(path)

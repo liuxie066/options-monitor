@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from pathlib import Path
+from .sqlite_row_codec import wheel_events_use_lot_id
 
 from .repository_wheel_policy import (
     WheelPolicyRepositoryMixin, effective_wheel_window, read_wheel_policy_bindings,
@@ -288,14 +289,24 @@ class AssignedStockRepositoryMixin(WheelPolicyRepositoryMixin):
                     f"wheel event conflict for event_id={payload['event_id']}"
                 )
             return False
-        conn.execute(
+        if wheel_events_use_lot_id(conn):
+            sql = """
+            INSERT INTO wheel_events (
+              event_id, event_schema_version, account, wheel_branch_id,
+              lot_id, event_type, occurred_at_ms, recorded_at_ms,
+              intent_id, source_trade_event_id, payload_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
+        else:
+            sql = """
             INSERT INTO wheel_events (
               event_id, event_schema_version, account, wheel_branch_id,
               stock_lot_id, event_type, occurred_at_ms, recorded_at_ms,
               intent_id, source_trade_event_id, payload_json, payload_hash
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            """
+        conn.execute(
+            sql,
             (
                 payload["event_id"],
                 payload["event_schema_version"],
@@ -344,7 +355,8 @@ class AssignedStockRepositoryMixin(WheelPolicyRepositoryMixin):
                     "event_schema_version": row["event_schema_version"],
                     "account": row["account"],
                     "wheel_branch_id": row["wheel_branch_id"],
-                    "stock_lot_id": row["stock_lot_id"],
+                    # Historical event/hash keys stay stable across the SQL rename.
+                    "stock_lot_id": row["lot_id"] if "lot_id" in row.keys() else row["stock_lot_id"],
                     "event_type": row["event_type"],
                     "occurred_at_ms": row["occurred_at_ms"],
                     "recorded_at_ms": row["recorded_at_ms"],

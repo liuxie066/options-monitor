@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .sqlite_row_codec import position_lots_use_lot_id
+
 from .repository_trade_schema import (
     EXECUTION_IDENTITY_INDEXES,
     _execution_identity_index_ready,
@@ -26,8 +28,9 @@ class PositionProjectionRepositoryMixin:
 
     def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> int:
         updated = 0
+        final_shape = position_lots_use_lot_id(conn)
         rows = conn.execute(
-            """
+            "SELECT * FROM position_lots" if final_shape else """
             SELECT record_id, fields_json, expiration, strike, multiplier
             FROM position_lots
             """
@@ -38,7 +41,7 @@ class PositionProjectionRepositoryMixin:
                 fields = {}
             expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
             if (
-                row["expiration"] == expiration_ms
+                (final_shape or row["expiration"] == expiration_ms)
                 and (
                     (row["strike"] is None and strike is None)
                     or (row["strike"] is not None and strike is not None and abs(float(row["strike"]) - float(strike)) < 1e-9)
@@ -54,12 +57,12 @@ class PositionProjectionRepositoryMixin:
             ):
                 continue
             conn.execute(
-                """
+                "UPDATE position_lots SET strike = ?, multiplier = ? WHERE lot_id = ?" if final_shape else """
                 UPDATE position_lots
                 SET expiration = ?, strike = ?, multiplier = ?
                 WHERE record_id = ?
                 """,
-                (
+                (strike, multiplier, str(row["lot_id"])) if final_shape else (
                     int(expiration_ms) if expiration_ms is not None else None,
                     float(strike) if strike is not None else None,
                     float(multiplier) if multiplier is not None else None,
@@ -97,14 +100,17 @@ class PositionProjectionRepositoryMixin:
                 if not stored:
                     event_updates.append((account, str(row["event_id"])))
 
+            final_shape = position_lots_use_lot_id(active_conn)
             lot_updates: list[tuple[str, str]] = []
             for row in active_conn.execute(
-                "SELECT record_id, account, fields_json FROM position_lots ORDER BY record_id"
+                "SELECT * FROM position_lots ORDER BY lot_id" if final_shape else
+                "SELECT * FROM position_lots ORDER BY record_id"
             ):
+                identity = row["lot_id" if final_shape else "record_id"]
                 try:
                     fields = json.loads(str(row["fields_json"] or "{}"))
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"position lot JSON is invalid: record_id={row['record_id']}") from exc
+                    raise ValueError(f"position lot JSON is invalid: record_id={identity}") from exc
                 contract_key = fields.get("contract_key") if isinstance(fields, dict) else None
                 contract_key = contract_key if isinstance(contract_key, dict) else {}
                 # The converged payload carries the account under ``contract_key``
@@ -117,18 +123,19 @@ class PositionProjectionRepositoryMixin:
                     else (fields.get("account") if isinstance(fields, dict) else "")
                 ).strip()
                 if not account or account != account.lower():
-                    raise ValueError(f"position lot account cannot be normalized: record_id={row['record_id']}")
+                    raise ValueError(f"position lot account cannot be normalized: record_id={identity}")
                 stored = str(row["account"] or "").strip()
                 if stored and stored != account:
-                    raise ValueError(f"position lot account conflicts with JSON: record_id={row['record_id']}")
+                    raise ValueError(f"position lot account conflicts with JSON: record_id={identity}")
                 if not stored:
-                    lot_updates.append((account, str(row["record_id"])))
+                    lot_updates.append((account, str(identity)))
 
             active_conn.executemany(
                 "UPDATE trade_events SET account = ? WHERE event_id = ?",
                 event_updates,
             )
             active_conn.executemany(
+                "UPDATE position_lots SET account = ? WHERE lot_id = ?" if final_shape else
                 "UPDATE position_lots SET account = ? WHERE record_id = ?",
                 lot_updates,
             )
@@ -181,6 +188,11 @@ class PositionProjectionRepositoryMixin:
             ),
         )
         with self._writer_lock(), self._optional_conn(conn) as active_conn:
+            if position_lots_use_lot_id(active_conn):
+                definitions = definitions[:2] + ((
+                    "idx_position_lots_account_lot",
+                    "CREATE INDEX IF NOT EXISTS idx_position_lots_account_lot ON position_lots(account, lot_id)",
+                ),)
             execution_tables = [
                 table for table in EXECUTION_IDENTITY_INDEXES
                 if self._table_exists(table, conn=active_conn)

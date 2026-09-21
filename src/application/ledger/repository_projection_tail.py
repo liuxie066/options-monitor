@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_reads_face_b
+from .sqlite_row_codec import position_lots_reads_face_b, position_lots_use_lot_id
 from .repository_schema import (
     Any,
     POSITION_PROJECTION_SCHEMA,
@@ -74,9 +74,10 @@ class PositionProjectionTailRepositoryMixin:
         touched_accounts: set[str] = set()
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
+            final_shape = position_lots_use_lot_id(active_conn)
             if remove_missing:
                 current_rows = active_conn.execute(
-                    """
+                    "SELECT * FROM position_lots ORDER BY lot_id" if final_shape else """
                     SELECT record_id, account, fields_json, source_event_id,
                            expiration, strike, multiplier
                     FROM position_lots
@@ -87,16 +88,11 @@ class PositionProjectionTailRepositoryMixin:
             else:
                 record_ids = tuple(desired)
                 if record_ids:
-                    placeholders = ",".join("?" for _item in record_ids)
                     current_rows = active_conn.execute(
-                        f"""
-                        SELECT record_id, account, fields_json, source_event_id,
-                               expiration, strike, multiplier
-                        FROM position_lots
-                        WHERE record_id IN ({placeholders})
-                        ORDER BY record_id ASC
-                        """,
-                        record_ids,
+                        "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id"
+                        if final_shape else
+                        "SELECT * FROM position_lots WHERE record_id IN (SELECT value FROM json_each(?)) ORDER BY record_id",
+                        (json.dumps(record_ids),),
                     ).fetchall()
                 else:
                     current_rows = []
@@ -109,7 +105,7 @@ class PositionProjectionTailRepositoryMixin:
                 ).fetchall()
                 all_accounts.update(str(row["account"]) for row in head_rows)
                 prior_lot_count = sum(int(row["lot_count"] or 0) for row in head_rows)
-            current_by_id = {str(row["record_id"]): row for row in current_rows}
+            current_by_id = {str(row["lot_id" if final_shape else "record_id"]): row for row in current_rows}
 
             for record_id, row in current_by_id.items():
                 old_account = str(row["account"] or "").strip()
@@ -121,6 +117,7 @@ class PositionProjectionTailRepositoryMixin:
                 if record_id in desired or not remove_missing:
                     continue
                 active_conn.execute(
+                    "DELETE FROM position_lots WHERE lot_id = ?" if final_shape else
                     "DELETE FROM position_lots WHERE record_id = ?",
                     (record_id,),
                 )
@@ -148,13 +145,15 @@ class PositionProjectionTailRepositoryMixin:
                 current = current_by_id.get(record_id)
                 if current is None:
                     active_conn.execute(
-                        """
+                        """INSERT INTO position_lots (
+                            lot_id, account, fields_json, source_event_id, strike, multiplier, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""" if final_shape else """
                         INSERT INTO position_lots (
                           record_id, account, fields_json, source_event_id,
                           expiration, strike, multiplier, lot_id, updated_at_ms
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (*values, lot_id, ts),
+                        (*values[:4], strike, multiplier, ts) if final_shape else (*values, lot_id, ts),
                     )
                     added += 1
                     touched_accounts.add(account)
@@ -168,7 +167,7 @@ class PositionProjectionTailRepositoryMixin:
                 )
                 public_changed = current_fields_json != fields_json or current["source_event_id"] != source_event_id
                 scalar_conflict = any(
-                    current[column] is not None and not _storage_scalar_matches(current[column], desired_value)
+                    column in current.keys() and current[column] is not None and not _storage_scalar_matches(current[column], desired_value)
                     for column, desired_value in (
                         ("expiration", expiration_ms),
                         ("strike", strike),
@@ -186,14 +185,15 @@ class PositionProjectionTailRepositoryMixin:
                     current["account"] or (old_fields.get("account") if isinstance(old_fields, dict) else "") or ""
                 ).strip()
                 active_conn.execute(
-                    """
+                    """UPDATE position_lots SET account = ?, fields_json = ?, source_event_id = ?,
+                        strike = ?, multiplier = ?, updated_at_ms = ? WHERE lot_id = ?""" if final_shape else """
                     UPDATE position_lots
                     SET account = ?, fields_json = ?, source_event_id = ?,
                         expiration = ?, strike = ?, multiplier = ?, lot_id = ?,
                         updated_at_ms = ?
                     WHERE record_id = ?
                     """,
-                    (
+                    (account, fields_json, source_event_id, strike, multiplier, ts, lot_id) if final_shape else (
                         account,
                         fields_json,
                         source_event_id,
@@ -253,6 +253,9 @@ class PositionProjectionTailRepositoryMixin:
             "idx_position_lots_account_record",
         }
         with self._optional_conn(conn) as active_conn:
+            if position_lots_use_lot_id(active_conn):
+                required -= {"idx_position_lots_account_expiration", "idx_position_lots_account_record"}
+                required.add("idx_position_lots_account_lot")
             present = {
                 str(row["name"])
                 for row in active_conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
@@ -282,7 +285,15 @@ class PositionProjectionTailRepositoryMixin:
                 """
             ).fetchone()
             lot_problem = active_conn.execute(
-                """
+                """SELECT 1 FROM position_lots
+                WHERE account IS NULL OR account = '' OR account != lower(account)
+                   OR account IS NOT json_extract(fields_json, '$.contract_key.account')
+                   OR source_event_id IS NULL OR source_event_id = ''
+                   OR source_event_id IS NOT json_extract(fields_json, '$.open_event_id')
+                   OR (json_extract(fields_json, '$.asset_type') = 'option' AND (
+                       json_extract(fields_json, '$.contract_key.expiration_ymd') IS NULL
+                       OR strike IS NULL OR multiplier IS NULL))
+                LIMIT 1""" if position_lots_use_lot_id(active_conn) else """
                 SELECT 1
                 FROM position_lots
                 WHERE account IS NULL
@@ -334,7 +345,8 @@ class PositionProjectionTailRepositoryMixin:
             raise ValueError("position projection account must be lowercase")
         with self._optional_conn(conn) as active_conn:
             cursor = active_conn.execute(
-                """
+                "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id"
+                if position_lots_use_lot_id(active_conn) else """
                 SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE account = ?
@@ -777,7 +789,10 @@ class PositionProjectionTailRepositoryMixin:
             raise ValueError("position projection account is required")
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
-                """
+                """SELECT * FROM position_lots WHERE account = ?
+                  AND json_extract(fields_json, '$.status') = 'open'
+                  ORDER BY json_extract(fields_json, '$.contract_key.expiration_ymd'), lot_id"""
+                if position_lots_use_lot_id(active_conn) else """
                 SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE account = ?
@@ -797,16 +812,12 @@ class PositionProjectionTailRepositoryMixin:
         normalized = tuple(dict.fromkeys(str(item or "").strip() for item in lot_ids))
         if not normalized or any(not item for item in normalized):
             return []
-        placeholders = ",".join("?" for _item in normalized)
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
-                f"""
-                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-                FROM position_lots
-                WHERE record_id IN ({placeholders})
-                ORDER BY record_id ASC
-                """,
-                normalized,
+                "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id"
+                if position_lots_use_lot_id(active_conn) else
+                "SELECT * FROM position_lots WHERE record_id IN (SELECT value FROM json_each(?)) ORDER BY record_id",
+                (json.dumps(normalized),),
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
 
@@ -820,7 +831,9 @@ class PositionProjectionTailRepositoryMixin:
         # and the repointing batch owns the whole family.
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
-                _POSITION_LOTS_FACE_B_SQL if position_lots_reads_face_b(active_conn) else _POSITION_LOTS_SQL
+                "SELECT *, rowid FROM position_lots ORDER BY lot_id DESC"
+                if position_lots_use_lot_id(active_conn) else
+                (_POSITION_LOTS_FACE_B_SQL if position_lots_reads_face_b(active_conn) else _POSITION_LOTS_SQL)
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
 
@@ -832,7 +845,7 @@ class PositionProjectionTailRepositoryMixin:
     ) -> dict[str, Any]:
         with self._optional_conn(conn) as active_conn:
             row = active_conn.execute(
-                """
+                "SELECT * FROM position_lots WHERE lot_id = ?" if position_lots_use_lot_id(active_conn) else """
                 SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE record_id = ?

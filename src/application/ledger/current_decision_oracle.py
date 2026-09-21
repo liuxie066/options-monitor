@@ -362,8 +362,7 @@ _DECISION_MIGRATION_AUTHORITY_QUERIES = (
     ),
     (
         "position_lots",
-        "SELECT record_id,account,fields_json,source_event_id,expiration,strike,"
-        "multiplier,updated_at_ms FROM position_lots ORDER BY record_id",
+        "SELECT * FROM position_lots ORDER BY rowid",
     ),
     (
         "position_projection_source_state",
