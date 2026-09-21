@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.6.4 - 2026-09-22
+
+### Bug Fixes
+- Validated legacy flat and canonical position-lot payloads against fresh ledger replay before rebuilding identity, preserving stock economics and rejecting conflicting event or asset identities without writes.
+
 ## 3.6.3 - 2026-09-22
 
 ### Improvements
