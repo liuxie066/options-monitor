@@ -218,6 +218,18 @@ def _drop_trade_event_guards(sqlite_path: Path) -> None:
     _drop_table_triggers(sqlite_path, "trade_events")
 
 
+def _degrade_lot_table(sqlite_path: Path, *, with_carrier: bool = False) -> None:
+    """Build the historical identity shape only for the read-only probe tests."""
+
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute("ALTER TABLE position_lots RENAME COLUMN lot_id TO record_id")
+        conn.execute("ALTER TABLE position_lots ADD COLUMN expiration INTEGER")
+        conn.execute("UPDATE position_lots SET expiration = 1781827200000")
+        if with_carrier:
+            conn.execute("ALTER TABLE position_lots ADD COLUMN lot_id TEXT")
+            conn.execute("UPDATE position_lots SET lot_id = record_id")
+
+
 def _ledger_event_id(sqlite_path: Path) -> str:
     conn = sqlite3.connect(sqlite_path)
     try:
@@ -246,14 +258,16 @@ def _mutate_fields(
 ) -> None:
     conn = sqlite3.connect(sqlite_path)
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(position_lots)")}
+        identity = "lot_id" if "lot_id" in columns else "record_id"
         row = conn.execute(
-            "SELECT record_id, fields_json FROM position_lots"
+            f"SELECT {identity}, fields_json FROM position_lots"
         ).fetchone()
         assert row is not None
         fields = json.loads(str(row[1]))
         mutate(fields)
         conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+            f"UPDATE position_lots SET fields_json = ? WHERE {identity} = ?",
             (json.dumps(fields, ensure_ascii=False, sort_keys=True), row[0]),
         )
         conn.commit()
@@ -281,15 +295,14 @@ def _insert_stored_row(
             (
                 """
                 INSERT INTO position_lots (
-                    record_id, account, fields_json, source_event_id,
-                    expiration, strike, multiplier, updated_at_ms, lot_id
-                ) VALUES (?, 'lx', ?, ?, NULL, NULL, NULL, 1, ?)
+                    lot_id, account, fields_json, source_event_id,
+                    strike, multiplier, updated_at_ms
+                ) VALUES (?, 'lx', ?, ?, NULL, NULL, 1)
                 """,
                 (
                     record_id,
                     json.dumps(fields, ensure_ascii=False, sort_keys=True),
                     source_event_id,
-                    record_id,
                 ),
             )
         ],
@@ -1047,6 +1060,7 @@ def test_probe_face_b_counts_a_two_column_refusal_per_column(tmp_path: Path) -> 
     the writer refused as clean.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
+    _degrade_lot_table(sqlite_path, with_carrier=True)
     fields = _nested(_stored_fields(sqlite_path))
     fields["contract_key"].pop("strike", None)
     fields["contract_key"].pop("expiration_ymd", None)
@@ -1172,6 +1186,7 @@ def test_probe_face_c_detects_a_duplicate_identity(tmp_path: Path) -> None:
     the same string through ``record_id``.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
+    _degrade_lot_table(sqlite_path, with_carrier=True)
     _tamper(
         sqlite_path,
         [
@@ -1364,6 +1379,7 @@ def test_probe_c_attribution_counts_are_a_partition_of_the_differing_lots(
     be inflated by a repeated row.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
+    _degrade_lot_table(sqlite_path, with_carrier=True)
     ledger_event_id = _ledger_event_id(sqlite_path)
     _tamper(
         sqlite_path,
@@ -1428,6 +1444,7 @@ def test_probe_attributes_a_duplicate_identity_that_is_on_both_sides(
     the index is still there to stop it.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
+    _degrade_lot_table(sqlite_path, with_carrier=True)
     lot_id = _stored_lot_id(sqlite_path)
     fields = _stored_fields(sqlite_path)
     conn = sqlite3.connect(sqlite_path)
@@ -1522,10 +1539,11 @@ def test_probe_survives_the_record_id_rename(tmp_path: Path) -> None:
     of it — at the one step that has to prove "replay == stored" still holds.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    _tamper(
-        sqlite_path,
-        [("ALTER TABLE position_lots RENAME COLUMN record_id TO record_id_legacy", ())],
-    )
+    with sqlite3.connect(sqlite_path) as conn:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")
+        }
+    assert "lot_id" in columns and "record_id" not in columns
 
     report = run_lot_parity_probe(sqlite_path=sqlite_path)
 
@@ -1544,13 +1562,7 @@ def test_probe_reads_a_store_that_only_has_record_id(tmp_path: Path) -> None:
     exercised by hand.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    _tamper(
-        sqlite_path,
-        [
-            ("DROP INDEX IF EXISTS idx_position_lots_lot_id", ()),
-            ("ALTER TABLE position_lots DROP COLUMN lot_id", ()),
-        ],
-    )
+    _degrade_lot_table(sqlite_path)
     conn = sqlite3.connect(sqlite_path)
     try:
         columns = {
@@ -1576,7 +1588,9 @@ def _store_snapshot(sqlite_path: Path) -> dict[str, object]:
         schema = conn.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
         ).fetchall()
-        lots = conn.execute("SELECT * FROM position_lots ORDER BY record_id").fetchall()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(position_lots)")}
+        identity = "lot_id" if "lot_id" in columns else "record_id"
+        lots = conn.execute(f"SELECT * FROM position_lots ORDER BY {identity}").fetchall()
         events = conn.execute(
             "SELECT event_id, event_json, trade_time_ms FROM trade_events ORDER BY event_id"
         ).fetchall()
@@ -2235,16 +2249,12 @@ def test_verify_projection_isolates_a_probe_that_cannot_run(
     import src.interfaces.cli.option_positions as cli_mod
 
     sqlite_path, data_config = _build_green_store(tmp_path)
-    _tamper(
-        sqlite_path,
-        [
-            (
-                "ALTER TABLE position_lots RENAME COLUMN source_event_id TO source_event_id_legacy",
-                (),
-            )
-        ],
-    )
     _mount_cli(monkeypatch, sqlite_path, data_config)
+    monkeypatch.setattr(
+        cli_mod,
+        "run_lot_parity_probe",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("missing source_event_id")),
+    )
 
     assert cli_mod.main() == 2
 
@@ -2267,16 +2277,12 @@ def test_verify_projection_text_run_reports_a_probe_that_cannot_run(
     import src.interfaces.cli.option_positions as cli_mod
 
     sqlite_path, data_config = _build_green_store(tmp_path)
-    _tamper(
-        sqlite_path,
-        [
-            (
-                "ALTER TABLE position_lots RENAME COLUMN source_event_id TO source_event_id_legacy",
-                (),
-            )
-        ],
-    )
     _mount_cli(monkeypatch, sqlite_path, data_config, fmt=None)
+    monkeypatch.setattr(
+        cli_mod,
+        "run_lot_parity_probe",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("missing source_event_id")),
+    )
 
     assert cli_mod.main() == 2
 

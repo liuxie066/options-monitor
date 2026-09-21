@@ -96,7 +96,9 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 
 > 证明方法引用已核查的现有测试/入口；新增文件、函数与测试接口设计留给 Devflow。
 
-> 2026-09-21 整合范围：下表是产品验收目标，不把历史实现方案或已有测试通过视为目标已达成。当前窗口准备支持新旧 SQLite 形状；实际生产迁移及 R2 收紧仍须独立授权和生产对照证据。A4 的金额 codec 已移除中间 float 转换；后续数量修复让股票事件保留 Decimal、期权拒绝小数合约，保留历史 `contracts` JSON 键并以十进制字符串保存股票数量。SQLite 往返、旧整数事件幂等、全量/增量重放由回归验证，股票 intake 的 PM 刷新路由不变。普通股票开仓成本纳入已确认费用：实际零费用也必须有证据；缺失或估算费用使成本及依赖它的已实现收益为 null，持仓数量继续发布。缺失平仓费用使已实现收益为 null；费用确认后通过重放恢复数值，checkpoint 保留未知值。本轮已确认继续核对并落实 A7 五家族收敛；此前窗口准备的较窄范围不代表整个 PRD 验收完成。
+> 2026-09-22 状态：D1–D4 生产迁移已在 R1 窗口完成，证据目录为 `<deploy-home>/migration-evidence/lot-identity-20260921T191339Z`；required follow-up rebuild 后 head generation 一致。R2 已完成源码实现与本地定向验证，尚未发布或升级：它删除普通运行路径的双形状 SQL，普通开库只接受最终 `lot_id` 结构并关闭迁移写窗口。历史 `trade_events` 的兼容读继续保留，不等同于兼容旧数据库结构。
+
+> 已裁决的数据语义不变：金额 codec 不经过中间 float；股票数量以十进制字符串保留、期权拒绝小数合约、历史 `contracts` JSON 键继续兼容。股票开仓成本只纳入已确认费用，实际零费用也要有证据；费用缺失或估算时，成本及依赖它的已实现收益为 null，数量仍发布；平仓费用缺失时已实现收益同样为 null，费用确认后通过重放恢复。
 
 | ID | 验收目标 | 输入 / 条件 | 通过判据 | 证明方法 | 环境 | 模拟边界 | 前置条件 | 证据状态 |
 |---|---|---|---|---|---|---|---|---|
@@ -107,10 +109,10 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 | A5 | 订单归组不变（S2） | 一笔多成交订单 + 订单级费用 | `order_fee_sync` 仍按 `order_id` 归组摊派，结果与迁移前一致 | 跑 `tests/test_order_fee_sync.py`、`test_order_fee_settlement.py`、`test_order_fee_namespace.py` | 本地 venv | 费用归组逻辑可纯函数化 | 订单/成交/费用 fixture | planned |
 | A6 | 旧记录层退役（S4） | 投影与读模型路径 | 读模型以 `PositionLot.to_dict()` 为准，`PositionLotFields`/`OpenPositionCommand` 不再作为权威 | 读 `src/application/ledger/read_model.py`；跑 `tests/test_ledger_module_facades.py`、`test_position_projection_facade_inventory.py` | 本地 venv | 读模型字段映射回归 | 同上 | planned |
 | A7 | 跨界校验收敛（S6） | 设计文档 §10.3 的 5 家族约 37 行号引用 | ①`contracts × multiplier` 收敛为单一换算函数；<br>②`stock_settlement` 的 `expected_side` 映射 + `shares==multiplier×contracts` 不变式收敛为单一校验器；<br>③执行身份/经济冲突仲裁收敛为单一仲裁器；<br>④无 `get(a) or get(b)` 双名回退残留（兼容读集中到归一化层）；<br>⑤费用/币种仲裁收敛到费用语义层 | 读设计文档 §10.3 落点文件（`lifecycle_allocation.py`/`writer_lifecycle_support.py`/`deal_identity.py`/`trade_execution.py` 等）；grep 校验无业务层散落乘法与双名回退；跑相关回归测试 | 本地 venv | 静态收敛断言 + 回归；跨界换算需 assignment 定向用例 | 同上 | planned |
-| A8 | 列退役不产生「不可用」库（D1/D2） | 一个旧形状 store，含非空 `position_lots` | 重建后列合同判定闭合，无 `column_contract_open`，head 不落 `untrusted` | 在旧形状 fixture 上开库，读列分类合同（`repository_common.py:99-108`）与 head 状态（`repository_projection_tail.py:438`） | 本地 venv | 需构造旧形状 store；无真实生产副本时用 fixture 重建 | 设计文档 §12.3 的重建配方落地 | planned |
-| A9 | 重建的原子性与校验（D1/D2） | 重建中途注入失败 | 行数、读回等值、`foreign_key_check` 任一不通过则整体回滚，旧表原样保留 | 照 `repository_core.py:191-255` 的四道校验复跑（参照 `tests/test_wheel_strategy.py:444`） | 本地 venv | 失败点可注入；生产形态不可注入 | 同上 | planned |
-| A10 | payload 重写可回滚（D3/D4） | 一次遍历重写全部 `position_lots.fields_json` | 重写后读模型输出与重写前等价，且可用窗口内 `.backup` 副本逐行比对 | 演练窗口流程：`.backup` → 重写 → 逐行比对 → `integrity_check` | 本地 venv + 受控窗口 | 需生产规模 store；演练窗口属生产操作，需单独授权 | §7.1 第 2 条 | planned |
-| A11 | 迁移形态与门控（全批次） | 一次升级重启 | 改写 payload 的动作不由开库路径隐式触发；结构动作按裁定形态执行 | 读 `service_upgrade.py:2527` 起的步骤与所用形态的实现 | 本地 venv | 形态已定（B，操作者门控），不是产品待决项 | 设计文档 §9.5 M1/M5 | planned |
+| A8 | 列退役不产生「不可用」库（D1/D2） | 一个旧形状 store，含非空 `position_lots` | 重建后列合同闭合，无 `column_contract_open`，head 不落 `untrusted`；R2 普通开库只接受最终结构 | 生产证据目录的迁移与 required follow-up rebuild 读回；`tests/test_lot_identity_migration.py`、`tests/test_ledger_lot_identity_schema_guard.py` | 本地 venv + 生产迁移读回 | 旧形状只通过受控迁移入口 | 设计文档 §12.3 | R1 production verified; R2 local verified |
+| A9 | 重建的原子性与校验（D1/D2） | 重建中途注入失败 | 行数、读回等值、`foreign_key_check` 任一不通过则整体回滚，旧表原样保留 | 生产证据目录的校验读回；`tests/test_lot_identity_migration.py` 的失败注入与原样读回用例 | 本地 venv + 生产迁移读回 | 生产形态不可注入 | 同上 | R1 production verified; R2 local verified |
+| A10 | payload 重写可回滚（D3/D4） | 一次遍历重写全部 `position_lots.fields_json` | 重写后读模型输出等价；窗口 `.backup` 副本可逐行比对，`integrity_check=ok`，哈希与幂等读回成立 | 生产证据目录的 backup、逐行/哈希、完整性与幂等证据；`tests/test_lot_identity_migration.py` | 本地 venv + 受控窗口 | 写窗口已关闭 | §7.1 第 2 条 | R1 production verified; R2 local verified |
+| A11 | 迁移形态与门控（全批次） | 升级与普通开库 | 数据改写仅由受控命令触发；R2 普通开库对旧/部分结构只读拒绝 | 生产证据目录；`tests/test_option_positions_cli.py`、`tests/test_ledger_lot_identity_schema_guard.py` | 本地 venv + 生产升级读回 | `apply` 只保留只读 preview，写入口禁用 | 设计文档 §9.5 M1/M5 | R1 production verified; R2 local verified |
 
 ## 7. 存量数据处理
 
@@ -157,9 +159,9 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 - 根目标：全库一个权威的订单/成交/持仓字段定义。
 - `prd_doc`：本文（已随 #311 合入 main）。
 - `design_doc`：`docs/ORDER_DOMAIN_MODEL_DESIGN.md`（已存在，技术实现参考；本文是需求真源）。
-- 交付状态：**代码语义收敛批次已完成并合入 main**（PR #311 → 合并提交 `540b37a5`，2026-09-18）；**列退役批次（D1–D4）已落需求（§7.1、§6 的 A8–A11）、设计（设计文档 §12）与执行决策（设计文档 §9.5 M1–M6），尚未实施**。
-- 已获准：落需求、编写设计文档、需求收口（本文）；未经授权：迁移实施、生产迁移窗口、生产写入、commit/push、发布、升级、部署。
-- 执行决策已收口于设计文档 §9.5：形态一律 B（M1）、D2 拆两步（M2）、⑥ 非前置且落库并入同一窗口（M3）、`record_id` 与 `stock_lot_id` 同一身份已查实（M4）、提供 `inventory`/`verify`/`apply`（M5）、落地顺序（M6）。**上述决策尚未实施，实施需另行授权。**
+- 交付状态：代码语义收敛批次已合入 main；列退役 D1–D4 已完成 R1 生产迁移与读回（`<deploy-home>/migration-evidence/lot-identity-20260921T191339Z`，含 required follow-up rebuild 后 head generation 一致证据）。R2 已实现并通过本地定向验证，尚未发布或升级。
+- `inventory` / `verify` / `apply` 默认 preview 保留为只读历史诊断；普通构建的 `--apply` 不可用。
+- 历史事件兼容读继续保留；旧 `position_lots` / `wheel_events` 结构必须由历史受控迁移处理，普通 repository 不修复、不改写。
 - 实现细节与验收测试的落点：§12.3 的重建配方、§12.4 的逐项落点、§9.5 M6 的落地顺序。
 
 ## 附录：prdflow-gate 记录

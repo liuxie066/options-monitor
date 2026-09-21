@@ -124,8 +124,8 @@ def _legacy_s1_store(tmp_path: Path) -> Path:
               updated_at_ms INTEGER NOT NULL
             );
             CREATE TABLE position_lots (
-              record_id TEXT PRIMARY KEY, account TEXT, fields_json TEXT NOT NULL,
-              source_event_id TEXT, expiration INTEGER, strike REAL,
+              lot_id TEXT NOT NULL PRIMARY KEY, account TEXT, fields_json TEXT NOT NULL,
+              source_event_id TEXT, strike REAL,
               multiplier REAL, updated_at_ms INTEGER NOT NULL
             );
             CREATE TABLE position_projection_source_state (
@@ -405,16 +405,14 @@ def test_fast_path_avoids_global_readiness_and_all_checkpoint_payload_reads(
     assert result.mode_used == "fast_tail"
 
 
-def test_normalized_columns_guard_reads_contract_key_first_with_flat_fallback(
+def test_normalized_columns_guard_requires_final_lot_payload(
     tmp_path: Path,
 ) -> None:
     """The publish readiness guard keeps reading the converged payload.
 
-    Nested-first with the flat fallback for ``account``/``option_type``: a
-    converged row whose contract columns are populated is ready; the same row
-    with a missing column is not (a flat-only read fails open on converged
-    rows -- ``NULL IN ('put', 'call')`` is NULL); a legacy flat row does not
-    trip the guard through the fallback.
+    A converged option row needs its top-level asset discriminator and
+    normalized scalar columns. SQLite's three-valued logic must not let a
+    missing ``asset_type`` bypass the option checks.
     """
 
     def _converged_fields() -> str:
@@ -431,13 +429,15 @@ def test_normalized_columns_guard_reads_contract_key_first_with_flat_fallback(
                 },
                 "position_side": "short",
                 "status": "open",
+                "open_event_id": "evt",
+                "asset_type": "option",
             },
             ensure_ascii=False,
         )
 
     def _insert(
         conn: sqlite3.Connection,
-        record_id: str,
+        lot_id: str,
         fields: str,
         *,
         columns: bool,
@@ -445,14 +445,13 @@ def test_normalized_columns_guard_reads_contract_key_first_with_flat_fallback(
         conn.execute(
             """
             INSERT INTO position_lots (
-              record_id, fields_json, source_event_id, updated_at_ms,
-              account, expiration, strike, multiplier
-            ) VALUES (?, ?, 'evt', 1000, 'lx', ?, ?, ?)
+              lot_id, fields_json, source_event_id, updated_at_ms,
+              account, strike, multiplier
+            ) VALUES (?, ?, 'evt', 1000, 'lx', ?, ?)
             """,
             (
-                record_id,
+                lot_id,
                 fields,
-                1781827200000 if columns else None,
                 100.0 if columns else None,
                 100.0 if columns else None,
             ),
@@ -468,22 +467,16 @@ def test_normalized_columns_guard_reads_contract_key_first_with_flat_fallback(
     assert repo.position_projection_normalized_columns_ready() is False
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("DELETE FROM position_lots WHERE record_id = 'lot_nested_missing_columns'")
+        conn.execute("DELETE FROM position_lots WHERE lot_id = 'lot_nested_missing_columns'")
+        fields = json.loads(_converged_fields())
+        fields.pop("asset_type")
         _insert(
             conn,
-            "lot_flat_ok",
-            json.dumps(
-                {
-                    "account": "lx",
-                    "option_type": "put",
-                    "strike": 100.0,
-                    "expiration": 1781827200000,
-                    "note": "multiplier=100",
-                }
-            ),
+            "lot_missing_asset_type",
+            json.dumps(fields),
             columns=True,
         )
-    assert repo.position_projection_normalized_columns_ready() is True
+    assert repo.position_projection_normalized_columns_ready() is False
 
 
 def test_runtime_uses_process_frozen_implementation_without_source_reads(
@@ -1062,7 +1055,7 @@ def test_idempotent_retry_does_not_skip_stale_head_recovery(tmp_path: Path) -> N
     _enable(repo)
     with repo._connect() as conn:  # type: ignore[attr-defined]
         conn.execute(
-            "UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-a'"
+            "UPDATE position_lots SET strike = strike + 1 WHERE lot_id = 'lot-a'"
         )
         conn.commit()
 

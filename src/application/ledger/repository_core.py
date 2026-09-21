@@ -15,12 +15,10 @@ from .repository_schema import (
     _ensure_notification_delivery_batches_v1,
     _ensure_notification_outbox_v2,
     _ensure_position_projection_schema,
-    _json_object,
     connect_private_sqlite,
     contextmanager,
     exclusive_private_file_lock,
     initialize_ledger_connection,
-    normalize_wheel_event,
     private_path,
     secure_sqlite_artifacts,
     sqlite3,
@@ -62,7 +60,7 @@ def _create_wheel_events_v2_table(conn: sqlite3.Connection, table: str) -> None:
             AND account = lower(account)
           ),
           wheel_branch_id TEXT NOT NULL CHECK(wheel_branch_id != ''),
-          stock_lot_id TEXT CHECK(stock_lot_id IS NULL OR stock_lot_id != ''),
+          lot_id TEXT CHECK(lot_id IS NULL OR lot_id != ''),
           event_type TEXT NOT NULL CHECK(event_type IN (
             {event_types}
           )),
@@ -91,22 +89,13 @@ def _create_wheel_events_v2_guards(conn: sqlite3.Connection) -> None:
         ON wheel_events(account, wheel_branch_id, occurred_at_ms, event_id)
         """
     )
-    if wheel_events_use_lot_id(conn):
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
-            ON wheel_events(account, lot_id, occurred_at_ms, event_id)
-            WHERE lot_id IS NOT NULL
-            """
-        )
-    else:
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
-            ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
-            WHERE stock_lot_id IS NOT NULL
-            """
-        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
+        ON wheel_events(account, lot_id, occurred_at_ms, event_id)
+        WHERE lot_id IS NOT NULL
+        """
+    )
     conn.execute(
         """
         CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_update
@@ -136,8 +125,7 @@ def _wheel_events_schema_is_v2(conn: sqlite3.Connection) -> bool:
         return False
     if int(columns["wheel_branch_id"]["notnull"] or 0) != 1:
         return False
-    identity_column = "lot_id" if wheel_events_use_lot_id(conn) else "stock_lot_id"
-    if int(columns[identity_column]["notnull"] or 0) != 0:
+    if "lot_id" not in columns or int(columns["lot_id"]["notnull"] or 0) != 0:
         return False
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wheel_events'"
@@ -145,58 +133,6 @@ def _wheel_events_schema_is_v2(conn: sqlite3.Connection) -> bool:
     sql = str(row["sql"] or "") if row is not None else ""
     required_tokens = ("wheel_event.v1", "wheel_event.v2", *_WHEEL_EVENT_TYPES_V2)
     return all(token in sql for token in required_tokens)
-
-
-def _normalized_wheel_row(
-    row: sqlite3.Row,
-    *,
-    columns: set[str],
-) -> dict[str, Any]:
-    lot_id = row["lot_id"] if "lot_id" in columns else row["stock_lot_id"]
-    event_schema_version = (
-        str(row["event_schema_version"] or "").strip()
-        if "event_schema_version" in columns
-        else "wheel_event.v1"
-    )
-    wheel_branch_id = (
-        str(row["wheel_branch_id"] or "").strip()
-        if "wheel_branch_id" in columns
-        else str(lot_id or "").strip()
-    )
-    stored = {
-        "event_id": row["event_id"],
-        "event_schema_version": event_schema_version,
-        "account": row["account"],
-        "wheel_branch_id": wheel_branch_id,
-        "stock_lot_id": lot_id,
-        "event_type": row["event_type"],
-        "occurred_at_ms": row["occurred_at_ms"],
-        "recorded_at_ms": row["recorded_at_ms"],
-        "intent_id": row["intent_id"],
-        "source_trade_event_id": row["source_trade_event_id"],
-        "payload": _json_object(row["payload_json"]),
-        "payload_hash": row["payload_hash"],
-    }
-    normalized = normalize_wheel_event(stored)
-    preserved_fields = (
-        "event_id",
-        "event_schema_version",
-        "account",
-        "wheel_branch_id",
-        "stock_lot_id",
-        "event_type",
-        "occurred_at_ms",
-        "recorded_at_ms",
-        "intent_id",
-        "source_trade_event_id",
-        "payload",
-        "payload_hash",
-    )
-    if any(normalized.get(field) != stored[field] for field in preserved_fields):
-        raise RuntimeError(
-            f"wheel event migration validation failed for event_id={stored['event_id']}"
-        )
-    return normalized
 
 
 def _ensure_wheel_events_v2(conn: sqlite3.Connection) -> None:
@@ -210,60 +146,10 @@ def _ensure_wheel_events_v2(conn: sqlite3.Connection) -> None:
     if _wheel_events_schema_is_v2(conn):
         _create_wheel_events_v2_guards(conn)
         return
-
-    columns = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(wheel_events)").fetchall()
-    }
-    rows = conn.execute("SELECT * FROM wheel_events ORDER BY event_id ASC").fetchall()
-    normalized_rows = [_normalized_wheel_row(row, columns=columns) for row in rows]
-    replacement = "wheel_events_v2_migration"
-    conn.execute(f"DROP TABLE IF EXISTS {replacement}")
-    _create_wheel_events_v2_table(conn, replacement)
-    for source_row, normalized in zip(rows, normalized_rows, strict=True):
-        conn.execute(
-            f"""
-            INSERT INTO {replacement} (
-              event_id, event_schema_version, account, wheel_branch_id,
-              stock_lot_id, event_type, occurred_at_ms, recorded_at_ms,
-              intent_id, source_trade_event_id, payload_json, payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                normalized["event_id"],
-                normalized["event_schema_version"],
-                normalized["account"],
-                normalized["wheel_branch_id"],
-                normalized["stock_lot_id"],
-                normalized["event_type"],
-                normalized["occurred_at_ms"],
-                normalized["recorded_at_ms"],
-                normalized["intent_id"],
-                normalized["source_trade_event_id"],
-                source_row["payload_json"],
-                normalized["payload_hash"],
-            ),
-        )
-    migrated_rows = conn.execute(
-        f"SELECT * FROM {replacement} ORDER BY event_id ASC"
-    ).fetchall()
-    if len(migrated_rows) != len(rows):
-        raise RuntimeError("wheel event migration row count mismatch")
-    for source_row, migrated_row in zip(rows, migrated_rows, strict=True):
-        source_event = _normalized_wheel_row(source_row, columns=columns)
-        migrated_event = _normalized_wheel_row(
-            migrated_row,
-            columns=set(migrated_row.keys()),
-        )
-        if source_event != migrated_event:
-            raise RuntimeError(
-                f"wheel event migration readback mismatch for event_id={source_event['event_id']}"
-            )
-    if conn.execute(f"PRAGMA foreign_key_check({replacement})").fetchall():
-        raise RuntimeError("wheel event migration foreign key check failed")
-    conn.execute("DROP TABLE wheel_events")
-    conn.execute(f"ALTER TABLE {replacement} RENAME TO wheel_events")
-    _create_wheel_events_v2_guards(conn)
+    raise RuntimeError(
+        "wheel_events has a legacy or partial schema; run the controlled "
+        "lot-identity migration before ordinary repository access"
+    )
 
 
 def _ensure_wheel_activation_windows(conn: sqlite3.Connection) -> None:
@@ -423,12 +309,57 @@ class RepositoryCoreMixin:
         self.data_config_path: Path | None = None
         self.bootstrap_status = "not_started"
         self.bootstrap_message: str | None = None
+        self._assert_final_lot_identity_shape()
         if initialize:
             self._init_db()
         elif not self.db_path.is_file():
             raise ValueError("existing ledger database is required")
 
+    def _assert_final_lot_identity_shape(self) -> None:
+        """Refuse legacy stores before an ordinary open can mutate SQLite state."""
+
+        if not self.db_path.is_file():
+            return
+        from .lot_parity_probe import (
+            _connect_read_only,
+            _has_wal_sidecars,
+        )
+
+        recovery_artifacts_exist = _has_wal_sidecars(self.db_path) or Path(
+            f"{self.db_path}-journal"
+        ).exists()
+        conn = _connect_read_only(
+            self.db_path,
+            immutable=not recovery_artifacts_exist,
+        )
+        try:
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "position_lots" in tables and not position_lots_use_lot_id(conn):
+                raise RuntimeError(
+                    "position_lots has a legacy schema; run `om option-positions "
+                    "lot-identity-migration inventory`, `verify`, and the controlled "
+                    "apply before ordinary repository access"
+                )
+            if "wheel_events" in tables and (
+                not wheel_events_use_lot_id(conn) or not _wheel_events_schema_is_v2(conn)
+            ):
+                raise RuntimeError(
+                    "wheel_events has a legacy schema; run the controlled lot-identity "
+                    "migration before ordinary repository access"
+                )
+        except ValueError as exc:
+            raise RuntimeError(
+                "ledger has an unsupported or partial lot-identity schema; run the "
+                "lot-identity inventory and verify commands before ordinary access"
+            ) from exc
+        finally:
+            conn.close()
+
     def _connect(self) -> sqlite3.Connection:
+        self._assert_final_lot_identity_shape()
         conn = connect_private_sqlite(self.db_path)
         try:
             initialize_ledger_connection(conn)
@@ -526,27 +457,16 @@ class RepositoryCoreMixin:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS position_lots (
-                  record_id TEXT PRIMARY KEY,
+                  lot_id TEXT NOT NULL PRIMARY KEY,
                   account TEXT,
                   fields_json TEXT NOT NULL,
                   source_event_id TEXT,
-                  expiration INTEGER,
                   strike REAL,
                   multiplier REAL,
                   updated_at_ms INTEGER NOT NULL
                 )
                 """
             )
-            if not position_lots_use_lot_id(conn):
-                _add_column_if_missing(conn, "position_lots", "strike", "REAL")
-                _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
-                _add_column_if_missing(conn, "position_lots", "expiration", "INTEGER")
-                _create_index_if_table_empty(
-                    conn,
-                    index_name="idx_position_lots_expiration",
-                    table="position_lots",
-                    create_sql=("CREATE INDEX idx_position_lots_expiration ON position_lots(expiration, record_id)"),
-                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assigned_stock_events (

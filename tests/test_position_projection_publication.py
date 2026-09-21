@@ -317,19 +317,19 @@ def test_event_and_lot_guards_reject_legacy_or_conflicting_writes(tmp_path: Path
         conn.execute(
             """
             INSERT INTO position_lots (
-              record_id, fields_json, expiration, strike, multiplier, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              lot_id, fields_json, strike, multiplier, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?)
             """,
-            (lot.lot_id, fields_json, 1781827200000, 100, 100, 1),
+            (lot.lot_id, fields_json, 100, 100, 1),
         )
         with pytest.raises(sqlite3.IntegrityError, match="conflicts"):
             conn.execute(
                 """
                 INSERT INTO position_lots (
-                  record_id, account, fields_json, expiration, strike, multiplier, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                  lot_id, account, fields_json, strike, multiplier, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                ("lot-conflict", "sy", fields_json, 1781827200000, 100, 100, 2),
+                ("lot-conflict", "sy", fields_json, 100, 100, 2),
             )
         conn.commit()
 
@@ -343,8 +343,8 @@ def test_lot_diff_has_zero_dml_for_unchanged_rows_and_tracks_account_move(tmp_pa
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
         timestamps = {
-            str(row["record_id"]): int(row["updated_at_ms"])
-            for row in conn.execute("SELECT record_id, updated_at_ms FROM position_lots")
+            str(row["lot_id"]): int(row["updated_at_ms"])
+            for row in conn.execute("SELECT lot_id, updated_at_ms FROM position_lots")
         }
     second = repo.apply_position_lot_diff(initial)
     assert (second.added, second.changed, second.removed, second.unchanged) == (0, 0, 0, 2)
@@ -352,8 +352,8 @@ def test_lot_diff_has_zero_dml_for_unchanged_rows_and_tracks_account_move(tmp_pa
     assert _generations(repo)[1] == before
     with repo._connect() as conn:  # type: ignore[attr-defined]
         assert timestamps == {
-            str(row["record_id"]): int(row["updated_at_ms"])
-            for row in conn.execute("SELECT record_id, updated_at_ms FROM position_lots")
+            str(row["lot_id"]): int(row["updated_at_ms"])
+            for row in conn.execute("SELECT lot_id, updated_at_ms FROM position_lots")
         }
 
     moved = repo.apply_position_lot_diff([_lot("lot-a", account="sy"), initial[1]])
@@ -368,7 +368,7 @@ def test_lot_trigger_metadata_update_and_cross_account_replace(tmp_path: Path) -
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.apply_position_lot_diff([_lot("lot-a")])
     before = _generations(repo)[1]
-    _exec(repo, "UPDATE position_lots SET updated_at_ms = updated_at_ms + 1 WHERE record_id = 'lot-a'")
+    _exec(repo, "UPDATE position_lots SET updated_at_ms = updated_at_ms + 1 WHERE lot_id = 'lot-a'")
     assert _generations(repo)[1] == before
 
     replacement = _lot("lot-a", account="sy")
@@ -377,15 +377,14 @@ def test_lot_trigger_metadata_update_and_cross_account_replace(tmp_path: Path) -
         conn.execute(
             """
             REPLACE INTO position_lots (
-              record_id, account, fields_json, source_event_id,
-              expiration, strike, multiplier, updated_at_ms
-            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+              lot_id, account, fields_json, source_event_id,
+              strike, multiplier, updated_at_ms
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?)
             """,
             (
                 replacement.lot_id,
                 "sy",
                 fields_json,
-                1781827200000,
                 100,
                 100,
                 2,
@@ -461,16 +460,15 @@ def test_direct_mutation_and_schema_change_fail_closed(tmp_path: Path) -> None:
     publish_full_position_projection(repo, [_lot("lot-lx")])
     assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
 
-    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
+    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE lot_id = 'lot-lx'")
     changed = read_current_position_projection(repo, account="lx")
     assert changed["status"] == "data_unavailable"
     assert changed["reason"] == "lots_generation_mismatch"
 
     publish_full_position_projection(repo, [_lot("lot-lx")])
     _exec(repo, "ALTER TABLE position_lots ADD COLUMN future_semantic TEXT")
-    schema_changed = read_current_position_projection(repo, account="lx")
-    assert schema_changed["status"] == "data_unavailable"
-    assert schema_changed["reason"] == "sqlite_schema_cookie_mismatch"
+    with pytest.raises(RuntimeError, match="unsupported or partial lot-identity schema"):
+        read_current_position_projection(repo, account="lx")
 
 
 def test_untrusted_read_rejects_before_scanning_account_lots(
@@ -480,7 +478,7 @@ def test_untrusted_read_rejects_before_scanning_account_lots(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.upsert_trade_event(_event("event-lx"))
     publish_full_position_projection(repo, [_lot("lot-lx")])
-    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE record_id = 'lot-lx'")
+    _exec(repo, "UPDATE position_lots SET strike = strike + 1 WHERE lot_id = 'lot-lx'")
 
     def _unexpected_snapshot(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("stale metadata must reject before reading lot rows")
@@ -495,13 +493,13 @@ def test_full_publication_repairs_non_null_scalar_drift(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     repo.upsert_trade_event(_event("event-lx"))
     publish_full_position_projection(repo, [_lot("lot-lx")])
-    _exec(repo, "UPDATE position_lots SET strike = 999 WHERE record_id = 'lot-lx'")
+    _exec(repo, "UPDATE position_lots SET strike = 999 WHERE lot_id = 'lot-lx'")
 
     repaired = publish_full_position_projection(repo, [_lot("lot-lx")])
     assert repaired.changed == 1
     assert repaired.heads_trusted is True
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        row = conn.execute("SELECT strike FROM position_lots WHERE record_id = 'lot-lx'").fetchone()
+        row = conn.execute("SELECT strike FROM position_lots WHERE lot_id = 'lot-lx'").fetchone()
     assert row is not None
     assert row["strike"] == 100
 
@@ -532,21 +530,21 @@ def test_account_queries_use_normalized_indexes(tmp_path: Path) -> None:
             ("lx",),
         ).fetchall()
         lot_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT record_id FROM position_lots WHERE account = ? ORDER BY expiration, record_id",
+            "EXPLAIN QUERY PLAN SELECT lot_id FROM position_lots WHERE account = ? ORDER BY lot_id",
             ("lx",),
         ).fetchall()
         fingerprint_plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT record_id FROM position_lots WHERE account = ? ORDER BY record_id",
+            "EXPLAIN QUERY PLAN SELECT lot_id FROM position_lots WHERE account = ? ORDER BY lot_id",
             ("lx",),
         ).fetchall()
     assert "idx_trade_events_account_time" in " ".join(str(row["detail"]) for row in event_plan)
-    assert "idx_position_lots_account_expiration" in " ".join(str(row["detail"]) for row in lot_plan)
+    assert "idx_position_lots_account_lot" in " ".join(str(row["detail"]) for row in lot_plan)
     fingerprint_details = " ".join(str(row["detail"]) for row in fingerprint_plan)
-    assert "idx_position_lots_account_record" in fingerprint_details
+    assert "idx_position_lots_account_lot" in fingerprint_details
     assert "TEMP B-TREE" not in fingerprint_details
 
 
-def test_populated_store_adds_columns_without_backfill_or_normalized_index(tmp_path: Path) -> None:
+def test_populated_legacy_store_is_rejected_without_mutation(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite3"
     fields = _lot("lot-legacy").fields
     with sqlite3.connect(db_path) as conn:
@@ -570,38 +568,10 @@ def test_populated_store_adds_columns_without_backfill_or_normalized_index(tmp_p
         )
         conn.commit()
 
-    repo = SQLiteOptionPositionsRepository(db_path)
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        row = conn.execute(
-            "SELECT account, expiration, strike, multiplier, updated_at_ms FROM position_lots"
-        ).fetchone()
-        indexes = {str(item["name"]) for item in conn.execute("PRAGMA index_list(position_lots)").fetchall()}
-    assert row is not None
-    assert tuple(row) == (None, None, None, None, 123)
-    assert "idx_position_lots_account_expiration" not in indexes
-    assert "idx_position_lots_account_record" not in indexes
-    assert "idx_position_lots_expiration" not in indexes
-
-    publication = publish_full_position_projection(repo, [_lot("lot-legacy")])
-    assert publication.position_lot_count == 1
-    assert publication.heads_trusted is False
-    assert publication.trust_reason == "normalized_indexes_missing"
-    unavailable = read_current_position_projection(repo, account="lx")
-    assert unavailable["status"] == "data_unavailable"
-    assert unavailable["reason"] == "head_not_trusted"
-
-    assert repo.backfill_position_projection_accounts() == {
-        "trade_events_updated": 0,
-        "position_lots_updated": 1,
-    }
-    assert repo.backfill_position_lot_contract_columns() == 1
-    assert repo.build_position_projection_indexes() == (
-        "idx_position_lots_account_expiration",
-        "idx_position_lots_account_record",
-    )
-    migrated = publish_full_position_projection(repo, [_lot("lot-legacy")])
-    assert migrated.heads_trusted is True
-    assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match="legacy schema"):
+        SQLiteOptionPositionsRepository(db_path)
+    assert db_path.read_bytes() == before
 
 
 def test_projector_implementation_manifest_digest_and_root_contract() -> None:
@@ -688,4 +658,4 @@ def test_full_writer_sources_use_shared_publication_and_no_full_delete() -> None
         root / "src/application/ledger/repository_projection_tail.py"
     ).read_text(encoding="utf-8")
     assert 'execute("DELETE FROM position_lots")' not in repository_source
-    assert "DELETE FROM position_lots WHERE record_id = ?" in repository_source
+    assert "DELETE FROM position_lots WHERE lot_id = ?" in repository_source

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_use_lot_id
-
 from .repository_trade_schema import (
     EXECUTION_IDENTITY_INDEXES,
     _execution_identity_index_ready,
@@ -28,21 +26,14 @@ class PositionProjectionRepositoryMixin:
 
     def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> int:
         updated = 0
-        final_shape = position_lots_use_lot_id(conn)
-        rows = conn.execute(
-            "SELECT * FROM position_lots" if final_shape else """
-            SELECT record_id, fields_json, expiration, strike, multiplier
-            FROM position_lots
-            """
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM position_lots").fetchall()
         for row in rows:
             fields = json.loads(str(row["fields_json"]) or "{}")
             if not isinstance(fields, dict):
                 fields = {}
-            expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
+            _expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
             if (
-                (final_shape or row["expiration"] == expiration_ms)
-                and (
+                (
                     (row["strike"] is None and strike is None)
                     or (row["strike"] is not None and strike is not None and abs(float(row["strike"]) - float(strike)) < 1e-9)
                 )
@@ -57,17 +48,8 @@ class PositionProjectionRepositoryMixin:
             ):
                 continue
             conn.execute(
-                "UPDATE position_lots SET strike = ?, multiplier = ? WHERE lot_id = ?" if final_shape else """
-                UPDATE position_lots
-                SET expiration = ?, strike = ?, multiplier = ?
-                WHERE record_id = ?
-                """,
-                (strike, multiplier, str(row["lot_id"])) if final_shape else (
-                    int(expiration_ms) if expiration_ms is not None else None,
-                    float(strike) if strike is not None else None,
-                    float(multiplier) if multiplier is not None else None,
-                    str(row["record_id"]),
-                ),
+                "UPDATE position_lots SET strike = ?, multiplier = ? WHERE lot_id = ?",
+                (strike, multiplier, str(row["lot_id"])),
             )
             updated += 1
         return updated
@@ -100,13 +82,9 @@ class PositionProjectionRepositoryMixin:
                 if not stored:
                     event_updates.append((account, str(row["event_id"])))
 
-            final_shape = position_lots_use_lot_id(active_conn)
             lot_updates: list[tuple[str, str]] = []
-            for row in active_conn.execute(
-                "SELECT * FROM position_lots ORDER BY lot_id" if final_shape else
-                "SELECT * FROM position_lots ORDER BY record_id"
-            ):
-                identity = row["lot_id" if final_shape else "record_id"]
+            for row in active_conn.execute("SELECT * FROM position_lots ORDER BY lot_id"):
+                identity = row["lot_id"]
                 try:
                     fields = json.loads(str(row["fields_json"] or "{}"))
                 except json.JSONDecodeError as exc:
@@ -135,8 +113,7 @@ class PositionProjectionRepositoryMixin:
                 event_updates,
             )
             active_conn.executemany(
-                "UPDATE position_lots SET account = ? WHERE lot_id = ?" if final_shape else
-                "UPDATE position_lots SET account = ? WHERE record_id = ?",
+                "UPDATE position_lots SET account = ? WHERE lot_id = ?",
                 lot_updates,
             )
         return {
@@ -178,21 +155,11 @@ class PositionProjectionRepositoryMixin:
                 "ON trade_events(account, trade_time_ms, event_id)",
             ),
             (
-                "idx_position_lots_account_expiration",
-                "CREATE INDEX IF NOT EXISTS idx_position_lots_account_expiration "
-                "ON position_lots(account, expiration, record_id)",
-            ),
-            (
-                "idx_position_lots_account_record",
-                "CREATE INDEX IF NOT EXISTS idx_position_lots_account_record ON position_lots(account, record_id)",
+                "idx_position_lots_account_lot",
+                "CREATE INDEX IF NOT EXISTS idx_position_lots_account_lot ON position_lots(account, lot_id)",
             ),
         )
         with self._writer_lock(), self._optional_conn(conn) as active_conn:
-            if position_lots_use_lot_id(active_conn):
-                definitions = definitions[:2] + ((
-                    "idx_position_lots_account_lot",
-                    "CREATE INDEX IF NOT EXISTS idx_position_lots_account_lot ON position_lots(account, lot_id)",
-                ),)
             execution_tables = [
                 table for table in EXECUTION_IDENTITY_INDEXES
                 if self._table_exists(table, conn=active_conn)

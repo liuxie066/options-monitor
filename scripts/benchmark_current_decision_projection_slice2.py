@@ -826,9 +826,9 @@ def _read_probe(repo: Any, account: str) -> dict[str, Any]:
 def _schema_probe(repo: Any, account: str) -> dict[str, Any]:
     queries = {
         "position_lots": (
-            "SELECT record_id FROM position_lots WHERE account=? ORDER BY record_id",
+            "SELECT lot_id FROM position_lots WHERE account=? ORDER BY lot_id",
             (account,),
-            "idx_position_lots_account_record",
+            "idx_position_lots_account_lot",
         ),
         "assigned_stock": (
             "SELECT event_json FROM assigned_stock_events WHERE account=? "

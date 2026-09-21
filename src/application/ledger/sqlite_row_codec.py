@@ -141,12 +141,13 @@ def read_current_decision_projection_inputs_from_conn(
         "SELECT * FROM current_decision_projections WHERE account = ?",
         (account_value,),
     ).fetchone()
-    # Read both stored shapes, including legacy tables without the lot_id carrier.
-    if position_lots_use_lot_id(conn):
-        sql = "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id"
-    else:
-        sql = "SELECT * FROM position_lots WHERE account = ? ORDER BY record_id"
-    lots = [position_lot_row_to_record(row) for row in conn.execute(sql, (account_value,))]
+    lots = [
+        position_lot_row_to_record(row)
+        for row in conn.execute(
+            "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id",
+            (account_value,),
+        )
+    ]
     identities = []
     if include_identities:
         for row in conn.execute(

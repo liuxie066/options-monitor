@@ -372,7 +372,7 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
     ]
 
 
-def test_repository_migrates_wheel_event_v1_without_changing_hash_or_facts(
+def test_repository_rejects_wheel_event_v1_without_changing_facts(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "ledger.sqlite3"
@@ -432,29 +432,10 @@ def test_repository_migrates_wheel_event_v1_without_changing_hash_or_facts(
         )
         conn.commit()
 
-    migrated = SQLiteOptionPositionsRepository(db_path)
-
-    assert migrated.list_wheel_events(account="lx") == [event]
-    with migrated._connect() as conn:
-        columns = {
-            row["name"]: row for row in conn.execute("PRAGMA table_info(wheel_events)")
-        }
-        stored = conn.execute(
-            "SELECT * FROM wheel_events WHERE event_id = ?", (event["event_id"],)
-        ).fetchone()
-        table_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wheel_events'"
-        ).fetchone()["sql"]
-        violations = conn.execute("PRAGMA foreign_key_check(wheel_events)").fetchall()
-
-    assert columns["stock_lot_id"]["notnull"] == 0
-    assert columns["wheel_branch_id"]["notnull"] == 1
-    assert stored["event_schema_version"] == WHEEL_EVENT_SCHEMA_V1
-    assert stored["wheel_branch_id"] == event["stock_lot_id"]
-    assert stored["payload_json"] == payload_json
-    assert stored["payload_hash"] == event["payload_hash"]
-    assert all(event_type in table_sql for event_type in WHEEL_EVENT_TYPES)
-    assert violations == []
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match="wheel_events has a legacy schema"):
+        SQLiteOptionPositionsRepository(db_path)
+    assert db_path.read_bytes() == before
 
 
 def test_repository_appends_nullable_stock_wheel_event_v2_and_rejects_tamper(
@@ -525,7 +506,7 @@ def test_repository_rejects_wheel_v1_migration_when_hash_does_not_recompute(
         )
         conn.commit()
 
-    with pytest.raises(ValueError, match="payload hash mismatch"):
+    with pytest.raises(RuntimeError, match="wheel_events has a legacy schema"):
         SQLiteOptionPositionsRepository(db_path)
 
     with sqlite3.connect(db_path) as conn:

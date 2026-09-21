@@ -61,6 +61,7 @@ RETIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 EXEMPT_MODULES: tuple[str, ...] = (
     "src/application/ledger/lot_identity_migration.py",
     "src/application/ledger/lot_parity_probe.py",
+    "src/application/ledger/position_projection_migration.py",
 )
 
 _SCOPES = ("src", "scripts", "tests")

@@ -155,10 +155,10 @@ def _legacy_store(path: Path, events: tuple[TradeEvent, ...]) -> None:
               updated_at_ms INTEGER NOT NULL
             );
             CREATE TABLE position_lots (
-              record_id TEXT PRIMARY KEY,
+              lot_id TEXT NOT NULL PRIMARY KEY,
+              account TEXT,
               fields_json TEXT NOT NULL,
               source_event_id TEXT,
-              expiration INTEGER,
               strike REAL,
               multiplier REAL,
               updated_at_ms INTEGER NOT NULL
@@ -1050,9 +1050,9 @@ def test_open_leaves_no_partial_schema_when_the_publish_failure_takes_the_transa
         # A later-stage index name taken by a table, so the statements after the
         # failure are not all no-ops: the open still fails, and what it fails with is
         # the partial schema the failure already committed.
-        conn.execute("DROP INDEX idx_position_lots_account_record")
+        conn.execute("DROP INDEX idx_position_lots_account_lot")
         conn.execute(
-            "CREATE TABLE idx_position_lots_account_record (placeholder INTEGER)"
+            "CREATE TABLE idx_position_lots_account_lot (placeholder INTEGER)"
         )
     before = _schema_objects(db_path)
 

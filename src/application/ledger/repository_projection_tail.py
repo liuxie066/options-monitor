@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_row_codec import position_lots_reads_face_b, position_lots_use_lot_id
 from .repository_schema import (
     Any,
     POSITION_PROJECTION_SCHEMA,
@@ -20,24 +19,6 @@ from .repository_schema import (
     position_lot_row_to_record,
     sqlite3,
 )
-
-#: The face-B read: the five derived columns (``comparator-spec.md`` §4) plus
-#: ``rowid`` for §3's pre/post snapshot. Served only to stores that carry them.
-_POSITION_LOTS_FACE_B_SQL = """
-SELECT record_id, lot_id, fields_json, account, source_event_id,
-       expiration, strike, multiplier, rowid
-FROM position_lots
-ORDER BY record_id DESC
-"""
-
-#: The read this method has always made, for stores that predate those columns:
-#: no column face, and therefore no rowid baseline either.
-_POSITION_LOTS_SQL = """
-SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-FROM position_lots
-ORDER BY record_id DESC
-"""
-
 
 class PositionProjectionTailRepositoryMixin:
     def replace_position_lots(
@@ -74,24 +55,16 @@ class PositionProjectionTailRepositoryMixin:
         touched_accounts: set[str] = set()
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
-            final_shape = position_lots_use_lot_id(active_conn)
             if remove_missing:
                 current_rows = active_conn.execute(
-                    "SELECT * FROM position_lots ORDER BY lot_id" if final_shape else """
-                    SELECT record_id, account, fields_json, source_event_id,
-                           expiration, strike, multiplier
-                    FROM position_lots
-                    ORDER BY record_id ASC
-                    """
+                    "SELECT * FROM position_lots ORDER BY lot_id"
                 ).fetchall()
                 prior_lot_count = len(current_rows)
             else:
                 record_ids = tuple(desired)
                 if record_ids:
                     current_rows = active_conn.execute(
-                        "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id"
-                        if final_shape else
-                        "SELECT * FROM position_lots WHERE record_id IN (SELECT value FROM json_each(?)) ORDER BY record_id",
+                        "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id",
                         (json.dumps(record_ids),),
                     ).fetchall()
                 else:
@@ -105,7 +78,7 @@ class PositionProjectionTailRepositoryMixin:
                 ).fetchall()
                 all_accounts.update(str(row["account"]) for row in head_rows)
                 prior_lot_count = sum(int(row["lot_count"] or 0) for row in head_rows)
-            current_by_id = {str(row["lot_id" if final_shape else "record_id"]): row for row in current_rows}
+            current_by_id = {str(row["lot_id"]): row for row in current_rows}
 
             for record_id, row in current_by_id.items():
                 old_account = str(row["account"] or "").strip()
@@ -116,29 +89,19 @@ class PositionProjectionTailRepositoryMixin:
                     all_accounts.add(old_account)
                 if record_id in desired or not remove_missing:
                     continue
-                active_conn.execute(
-                    "DELETE FROM position_lots WHERE lot_id = ?" if final_shape else
-                    "DELETE FROM position_lots WHERE record_id = ?",
-                    (record_id,),
-                )
+                active_conn.execute("DELETE FROM position_lots WHERE lot_id = ?", (record_id,))
                 removed += 1
                 if old_account:
                     touched_accounts.add(old_account)
 
-            # The loop key is ``values[0]``, the one identity slot
-            # ``_position_lot_storage_values`` returns. The dual-write convention
-            # that used to write the same value into a second, trailing slot is
-            # retired, so there is no second slot to unpack and no chance of the
-            # lookup retargeting onto another row. Both identity columns still
-            # receive that one value (see the INSERT/UPDATE below); the
-            # ``record_id`` column itself retires in the DDL step.
+            # ``values[0]`` is the canonical lot identity.
             for record_id, values in desired.items():
                 (
                     lot_id,
                     account,
                     fields_json,
                     source_event_id,
-                    expiration_ms,
+                    _expiration_ms,
                     strike,
                     multiplier,
                 ) = values
@@ -147,13 +110,8 @@ class PositionProjectionTailRepositoryMixin:
                     active_conn.execute(
                         """INSERT INTO position_lots (
                             lot_id, account, fields_json, source_event_id, strike, multiplier, updated_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""" if final_shape else """
-                        INSERT INTO position_lots (
-                          record_id, account, fields_json, source_event_id,
-                          expiration, strike, multiplier, lot_id, updated_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (*values[:4], strike, multiplier, ts) if final_shape else (*values, lot_id, ts),
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (*values[:4], strike, multiplier, ts),
                     )
                     added += 1
                     touched_accounts.add(account)
@@ -168,11 +126,7 @@ class PositionProjectionTailRepositoryMixin:
                 public_changed = current_fields_json != fields_json or current["source_event_id"] != source_event_id
                 scalar_conflict = any(
                     column in current.keys() and current[column] is not None and not _storage_scalar_matches(current[column], desired_value)
-                    for column, desired_value in (
-                        ("expiration", expiration_ms),
-                        ("strike", strike),
-                        ("multiplier", multiplier),
-                    )
+                    for column, desired_value in (("strike", strike), ("multiplier", multiplier))
                 )
                 if not public_changed and not scalar_conflict:
                     # Explicit migration owns historical sidecar backfill. Existing
@@ -186,24 +140,8 @@ class PositionProjectionTailRepositoryMixin:
                 ).strip()
                 active_conn.execute(
                     """UPDATE position_lots SET account = ?, fields_json = ?, source_event_id = ?,
-                        strike = ?, multiplier = ?, updated_at_ms = ? WHERE lot_id = ?""" if final_shape else """
-                    UPDATE position_lots
-                    SET account = ?, fields_json = ?, source_event_id = ?,
-                        expiration = ?, strike = ?, multiplier = ?, lot_id = ?,
-                        updated_at_ms = ?
-                    WHERE record_id = ?
-                    """,
-                    (account, fields_json, source_event_id, strike, multiplier, ts, lot_id) if final_shape else (
-                        account,
-                        fields_json,
-                        source_event_id,
-                        expiration_ms,
-                        strike,
-                        multiplier,
-                        lot_id,
-                        ts,
-                        record_id,
-                    ),
+                        strike = ?, multiplier = ?, updated_at_ms = ? WHERE lot_id = ?""",
+                    (account, fields_json, source_event_id, strike, multiplier, ts, lot_id),
                 )
                 changed += 1
                 touched_accounts.add(account)
@@ -249,13 +187,9 @@ class PositionProjectionTailRepositoryMixin:
         required = {
             "idx_trade_events_trade_time",
             "idx_trade_events_account_time",
-            "idx_position_lots_account_expiration",
-            "idx_position_lots_account_record",
+            "idx_position_lots_account_lot",
         }
         with self._optional_conn(conn) as active_conn:
-            if position_lots_use_lot_id(active_conn):
-                required -= {"idx_position_lots_account_expiration", "idx_position_lots_account_record"}
-                required.add("idx_position_lots_account_lot")
             present = {
                 str(row["name"])
                 for row in active_conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
@@ -290,32 +224,12 @@ class PositionProjectionTailRepositoryMixin:
                    OR account IS NOT json_extract(fields_json, '$.contract_key.account')
                    OR source_event_id IS NULL OR source_event_id = ''
                    OR source_event_id IS NOT json_extract(fields_json, '$.open_event_id')
+                   OR json_extract(fields_json, '$.asset_type') IS NULL
+                   OR json_extract(fields_json, '$.asset_type') NOT IN ('option', 'stock')
                    OR (json_extract(fields_json, '$.asset_type') = 'option' AND (
                        json_extract(fields_json, '$.contract_key.expiration_ymd') IS NULL
                        OR strike IS NULL OR multiplier IS NULL))
-                LIMIT 1""" if position_lots_use_lot_id(active_conn) else """
-                SELECT 1
-                FROM position_lots
-                WHERE account IS NULL
-                   OR account = ''
-                   OR account != lower(account)
-                   OR account != coalesce(
-                        nullif(trim(CAST(json_extract(
-                          fields_json, '$.contract_key.account'
-                        ) AS TEXT)), ''),
-                        trim(CAST(json_extract(fields_json, '$.account') AS TEXT))
-                      )
-                   OR (
-                        coalesce(
-                          nullif(trim(CAST(json_extract(
-                            fields_json, '$.contract_key.option_type'
-                          ) AS TEXT)), ''),
-                          trim(CAST(json_extract(fields_json, '$.option_type') AS TEXT))
-                        ) IN ('put', 'call')
-                        AND (expiration IS NULL OR strike IS NULL OR multiplier IS NULL)
-                   )
-                LIMIT 1
-                """
+                LIMIT 1"""
             ).fetchone()
         return event_problem is None and lot_problem is None
 
@@ -345,13 +259,7 @@ class PositionProjectionTailRepositoryMixin:
             raise ValueError("position projection account must be lowercase")
         with self._optional_conn(conn) as active_conn:
             cursor = active_conn.execute(
-                "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id"
-                if position_lots_use_lot_id(active_conn) else """
-                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-                FROM position_lots
-                WHERE account = ?
-                ORDER BY record_id ASC
-                """,
+                "SELECT * FROM position_lots WHERE account = ? ORDER BY lot_id",
                 (account_value,),
             )
             retained: list[dict[str, Any]] = []
@@ -791,14 +699,7 @@ class PositionProjectionTailRepositoryMixin:
             rows = active_conn.execute(
                 """SELECT * FROM position_lots WHERE account = ?
                   AND json_extract(fields_json, '$.status') = 'open'
-                  ORDER BY json_extract(fields_json, '$.contract_key.expiration_ymd'), lot_id"""
-                if position_lots_use_lot_id(active_conn) else """
-                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-                FROM position_lots
-                WHERE account = ?
-                  AND json_extract(fields_json, '$.status') = 'open'
-                ORDER BY expiration ASC, record_id ASC
-                """,
+                  ORDER BY json_extract(fields_json, '$.contract_key.expiration_ymd'), lot_id""",
                 (account_value,),
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
@@ -814,9 +715,7 @@ class PositionProjectionTailRepositoryMixin:
             return []
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
-                "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id"
-                if position_lots_use_lot_id(active_conn) else
-                "SELECT * FROM position_lots WHERE record_id IN (SELECT value FROM json_each(?)) ORDER BY record_id",
+                "SELECT * FROM position_lots WHERE lot_id IN (SELECT value FROM json_each(?)) ORDER BY lot_id",
                 (json.dumps(normalized),),
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
@@ -832,8 +731,6 @@ class PositionProjectionTailRepositoryMixin:
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
                 "SELECT *, rowid FROM position_lots ORDER BY lot_id DESC"
-                if position_lots_use_lot_id(active_conn) else
-                (_POSITION_LOTS_FACE_B_SQL if position_lots_reads_face_b(active_conn) else _POSITION_LOTS_SQL)
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
 
@@ -845,11 +742,7 @@ class PositionProjectionTailRepositoryMixin:
     ) -> dict[str, Any]:
         with self._optional_conn(conn) as active_conn:
             row = active_conn.execute(
-                "SELECT * FROM position_lots WHERE lot_id = ?" if position_lots_use_lot_id(active_conn) else """
-                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
-                FROM position_lots
-                WHERE record_id = ?
-                """,
+                "SELECT * FROM position_lots WHERE lot_id = ?",
                 (str(lot_id),),
             ).fetchone()
         if row is None:

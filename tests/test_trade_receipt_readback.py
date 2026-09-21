@@ -36,7 +36,10 @@ def _event(event_id: str) -> TradeEvent:
 def _minimal_database(path: Path) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE trade_events (event_id TEXT, event_json TEXT, trade_time_ms INTEGER)")
-        conn.execute("CREATE TABLE position_lots (record_id TEXT, fields_json TEXT, updated_at_ms INTEGER)")
+        conn.execute(
+            "CREATE TABLE position_lots (lot_id TEXT, account TEXT, fields_json TEXT, "
+            "source_event_id TEXT, strike REAL, multiplier REAL, updated_at_ms INTEGER)"
+        )
 
 
 def test_receipt_readback_absence_requires_initialized_ledger(tmp_path: Path) -> None:
@@ -66,23 +69,16 @@ def test_receipt_readback_returns_application_events_and_published_lots(tmp_path
     assert lot["fields"]["open_event_id"] == "deal-1"
 
 
-def test_receipt_readback_agrees_with_the_published_lots_on_a_divergent_carrier(tmp_path: Path) -> None:
+def test_receipt_readback_agrees_with_the_published_lot_identity(tmp_path: Path) -> None:
     database = tmp_path / "ledger.sqlite3"
     repo = SQLiteOptionPositionsRepository(database)
     run_position_projection_forced_full(repo, [_event("deal-1")])
-
-    # The write path dual-writes both identities from one source, so the two
-    # columns agree in the fixture above and the surfaces cannot disagree there.
-    # Diverge them by hand: this is the shape the D2 rebuild produces once the
-    # carrier becomes independently authoritative.
-    with sqlite3.connect(database) as conn:
-        conn.execute("UPDATE position_lots SET lot_id = 'carrier-deal-1' WHERE record_id = 'lot-deal-1'")
 
     evidence = open_trade_reconciliation_evidence_repo(database).read_trade_receipt_evidence()
 
     assert evidence["position_lots"] == _published_shape(repo.list_position_lots())
     assert [lot["record_id"] for lot in evidence["position_lots"]] == ["lot-deal-1"]
-    assert [lot["lot_id"] for lot in evidence["position_lots"]] == ["carrier-deal-1"]
+    assert [lot["lot_id"] for lot in evidence["position_lots"]] == ["lot-deal-1"]
 
 
 def test_receipt_readback_uses_one_query_only_snapshot_during_concurrent_commit(tmp_path: Path, monkeypatch) -> None:
@@ -130,7 +126,13 @@ def test_receipt_readback_invalid_json_fails_closed(tmp_path: Path, table: str, 
     database = tmp_path / "ledger.sqlite3"
     _minimal_database(database)
     with sqlite3.connect(database) as conn:
-        conn.execute(f"INSERT INTO {table} VALUES (?, ?, ?)", ("row-1", payload, 1))
+        if table == "trade_events":
+            conn.execute("INSERT INTO trade_events VALUES (?, ?, ?)", ("row-1", payload, 1))
+        else:
+            conn.execute(
+                "INSERT INTO position_lots VALUES (?, NULL, ?, NULL, NULL, NULL, ?)",
+                ("row-1", payload, 1),
+            )
     with pytest.raises(ValueError):
         open_trade_reconciliation_evidence_repo(database).read_trade_receipt_evidence()
 

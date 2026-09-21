@@ -486,10 +486,10 @@ def test_the_codec_round_trip_does_not_reinject_the_retired_flat_scalars(
     assert decoded["contract_key"]["expiration_ymd"] == "2026-06-19"
     assert decoded["contract_key"]["strike"] == "100"
     with sqlite3.connect(tmp_path / "option_positions.sqlite3") as conn:
-        columns = conn.execute(
-            "SELECT expiration, strike, multiplier FROM position_lots"
-        ).fetchone()
-    assert columns == (parse_exp_to_ms("2026-06-19"), 100.0, 100.0)
+        columns = conn.execute("SELECT strike, multiplier FROM position_lots").fetchone()
+        names = {row[1] for row in conn.execute("PRAGMA table_info(position_lots)")}
+    assert columns == (100.0, 100.0)
+    assert "expiration" not in names
 
 
 def test_the_ymd_to_ms_round_trip_is_faithful() -> None:

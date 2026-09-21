@@ -944,8 +944,8 @@ def test_load_option_positions_repo_does_not_validate_position_lots_without_trad
     with repo._connect() as conn:  # type: ignore[attr-defined]
         conn.execute(
             """
-            INSERT INTO position_lots (record_id, fields_json, updated_at_ms)
-            VALUES (?, ?, ?)
+            INSERT INTO position_lots (lot_id, account, fields_json, updated_at_ms)
+            VALUES (?, 'lx', ?, ?)
             """,
             ("lot_bad_option", json.dumps(bad_fields, ensure_ascii=False, sort_keys=True), 1000),
         )
@@ -1037,11 +1037,10 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     assert fields["multiplier"] == 100
     with repo._connect() as conn:  # type: ignore[attr-defined]
         row = conn.execute(
-            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
+            "SELECT strike, multiplier FROM position_lots WHERE lot_id = ?",
             (lots[0]["record_id"],),
         ).fetchone()
     assert row is not None
-    assert row["expiration"] == 1777420800000
     assert row["strike"] == 480.0
     assert row["multiplier"] == 100.0
 
@@ -1155,7 +1154,7 @@ def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path
     assert {item["raw_payload"]["source_deal_id"] for item in events} == {"same-deal-id"}
 
 
-def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill(tmp_path: Path) -> None:
+def test_sqlite_repo_rejects_legacy_position_lot_shape_without_mutation(tmp_path: Path) -> None:
     """The columns are added empty, then filled by an explicit backfill.
 
     A legacy flat payload migrates through the nested-first-plus-flat-fallback
@@ -1211,34 +1210,10 @@ def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill
         )
         conn.commit()
 
-    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
-    lot = repo.list_position_lots()[0]
-    assert lot["fields"]["expiration"] == 1781827200000
-    assert lot["fields"]["strike"] == 100.0
-    assert "multiplier" not in lot["fields"]
-
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()}
-        row = conn.execute(
-            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
-            ("lot_legacy_1",),
-        ).fetchone()
-    assert {"expiration", "strike", "multiplier"} <= cols
-    assert row is not None
-    assert row["expiration"] is None
-    assert row["strike"] is None
-    assert row["multiplier"] is None
-
-    assert repo.backfill_position_lot_contract_columns() == 1
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        migrated = conn.execute(
-            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
-            ("lot_legacy_1",),
-        ).fetchone()
-    assert migrated is not None
-    assert migrated["expiration"] == 1781827200000
-    assert migrated["strike"] == 100.0
-    assert migrated["multiplier"] is None
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match="legacy schema"):
+        ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    assert db_path.read_bytes() == before
 
 
 def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> None:
@@ -1284,9 +1259,12 @@ def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> N
         conn.execute(
             """
             CREATE TABLE position_lots (
-              record_id TEXT PRIMARY KEY,
+              lot_id TEXT NOT NULL PRIMARY KEY,
+              account TEXT,
               fields_json TEXT NOT NULL,
               source_event_id TEXT,
+              strike REAL,
+              multiplier REAL,
               updated_at_ms INTEGER NOT NULL
             )
             """
@@ -1297,8 +1275,8 @@ def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> N
         with pytest.raises(sqlite3.IntegrityError, match="position lot account is required"):
             conn.execute(
                 """
-                INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
-                VALUES ('lot_new_1', ?, 'evt-open-1', 1000)
+                INSERT INTO position_lots (lot_id, account, fields_json, source_event_id, updated_at_ms)
+                VALUES ('lot_new_1', 'lx', ?, 'evt-open-1', 1000)
                 """,
                 (converged_fields,),
             )
@@ -1314,8 +1292,8 @@ def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> N
         assert "$.contract_key.account" in body
         conn.execute(
             """
-            INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
-            VALUES ('lot_new_1', ?, 'evt-open-1', 1000)
+            INSERT INTO position_lots (lot_id, account, fields_json, source_event_id, updated_at_ms)
+            VALUES ('lot_new_1', 'lx', ?, 'evt-open-1', 1000)
             """,
             (converged_fields,),
         )
@@ -1328,7 +1306,7 @@ def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> N
         )
         assert "$.contract_key.account" in update_body
         conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = 'lot_new_1'",
+            "UPDATE position_lots SET fields_json = ? WHERE lot_id = 'lot_new_1'",
             (converged_fields,),
         )
     # The replacement fires once: a second reopen of the converged store must
@@ -1389,7 +1367,7 @@ def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_p
             UPDATE position_lots
             SET fields_json = json_set(fields_json, '$.source_event_id', 'legacy-drifted-open-event'),
                 source_event_id = 'legacy-drifted-open-event'
-            WHERE record_id = 'rec_lx_seed'
+            WHERE lot_id = 'rec_lx_seed'
             """
         )
         conn.commit()
@@ -3356,7 +3334,7 @@ def test_apply_position_lot_diff_updates_the_row_its_loop_key_names(tmp_path: Pa
 
     assert (diff.added, diff.changed, diff.removed) == (0, 1, 1)
     with sqlite3.connect(database) as conn:
-        rows = conn.execute("SELECT record_id, fields_json FROM position_lots ORDER BY record_id ASC").fetchall()
+        rows = conn.execute("SELECT lot_id, fields_json FROM position_lots ORDER BY lot_id ASC").fetchall()
     assert [row[0] for row in rows] == ["lot-a"]
     assert json.loads(rows[0][1])["contracts_open"] == 2
 

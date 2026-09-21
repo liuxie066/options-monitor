@@ -308,18 +308,23 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
             conn.execute(
                 """
                 INSERT INTO position_lots (
-                    record_id, fields_json, updated_at_ms
-                ) VALUES (?, ?, ?)
+                    lot_id, account, fields_json, source_event_id,
+                    strike, multiplier, updated_at_ms
+                ) VALUES (?, 'lx', ?, ?, 100, 100, ?)
                 """,
                 (
                     "lot-futu",
                     json.dumps(
                         {
-                            "account": "lx",
-                            "contracts": 1,
-                            "original_contracts": 1,
+                            "lot_id": "lot-futu",
+                            "open_event_id": source_key,
+                            "contract_key": {"account": "lx"},
+                            "contracts_opened": 1,
+                            "contracts_open": 1,
+                            "asset_type": "option",
                         }
                     ),
+                    source_key,
                     1_700_000_000_000,
                 ),
             )

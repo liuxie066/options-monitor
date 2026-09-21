@@ -103,17 +103,15 @@ def test_the_store_read_carries_the_face_b_columns_and_the_rowid(tmp_path: Path)
         conn.execute(
             """
             INSERT INTO position_lots
-                (record_id, lot_id, fields_json, account, source_event_id,
-                 expiration, strike, multiplier, updated_at_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (lot_id, fields_json, account, source_event_id,
+                 strike, multiplier, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "lot_a",
                 "lot_a",
                 '{"contract_key": {"account": "us"}}',
                 "us",
                 "evt_1",
-                1777420800000,
                 100.0,
                 100.0,
                 1,
@@ -125,7 +123,7 @@ def test_the_store_read_carries_the_face_b_columns_and_the_rowid(tmp_path: Path)
 
     assert record["columns"]["account"] == "us"
     assert record["columns"]["source_event_id"] == "evt_1"
-    assert record["columns"]["expiration"] == 1777420800000
+    assert record["columns"]["retired_columns"] == ["expiration"]
     assert record["rowid"] == 1
 
 
