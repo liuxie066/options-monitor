@@ -9,6 +9,7 @@ publisher actually produces.
 
 from __future__ import annotations
 
+from contextlib import closing
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -95,7 +96,7 @@ def _restore_legacy_flat_keys(path: Path) -> None:
     ``position_id`` injection models, one vocabulary further back.
     """
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
             "SELECT record_id, fields_json FROM position_lots"
@@ -195,7 +196,7 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
         stock_side="buy", stock_qty=100, stock_price=100.0, as_of_ms=3000,
     )
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("UPDATE position_lots SET lot_id = NULL")
         for lot_id, raw in conn.execute(
             "SELECT record_id, fields_json FROM position_lots"
@@ -216,7 +217,7 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
 def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
     """Rig one lot's ``fields_json`` the way a degraded store carries it."""
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         raw = conn.execute(
             "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
             (record_id,),
@@ -231,7 +232,7 @@ def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
 
 
 def _stored_rows(path: Path) -> dict[str, object]:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         return {
             str(row["record_id"]): {
@@ -1443,6 +1444,7 @@ def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> N
     assert inventory["readiness_reasons"] == [
         "column_contract_open",
         "record_id_column_missing",
+        "lot_asset_type_unresolved",
     ]
     assert inventory["pending"]["d2_record_id_column"]["column_present"] is False
     assert inventory["dropped_key_classification"]["lost"] == {}
@@ -1975,6 +1977,114 @@ def test_the_rebuild_is_idempotent_and_second_run_writes_nothing(
     assert _rebuilt_rows(path) == rows
 
 
+def test_legacy_payload_without_asset_type_uses_replay_for_mixed_lots(
+    tmp_path: Path,
+    repointed_build: None,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _restore_legacy_flat_keys(path)
+
+    def strip_converged_shape(fields: dict) -> None:
+        for key in ("asset_type", "contract_key", "open_event_id"):
+            fields.pop(key, None)
+
+    for record_id in _stored_rows(path):
+        _edit_lot_fields(path, record_id, strip_converged_shape)
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+    assert inventory["asset_type_resolution"] == {
+        "status": "resolved",
+        "resolved_rows": 4,
+        "blocked_rows": 0,
+        "sample_blocked_lot_ids": [],
+    }
+
+    _run_apply(path)
+
+    asset_types = [row["fields"]["asset_type"] for row in _rebuilt_rows(path).values()]
+    assert asset_types.count("option") == asset_types.count("stock") == 2
+    assert module.verify_lot_identity_migration(path)["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "asset_type",
+    ["unknown", "conflict", pytest.param(["option"], id="non-scalar")],
+)
+def test_asset_type_unknown_or_conflicting_with_replay_blocks_without_writes(
+    tmp_path: Path,
+    repointed_build: None,
+    asset_type: object,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _edit_lot_fields(
+        path,
+        "lot_assign-1",
+        lambda fields: fields.__setitem__(
+            "asset_type",
+            (
+                "stock" if fields.get("asset_type") == "option" else "option"
+            )
+            if asset_type == "conflict"
+            else asset_type,
+        ),
+    )
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    assert "lot_asset_type_unresolved" in inventory["readiness_reasons"]
+    with pytest.raises(RuntimeError, match="asset_type"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
+def test_apply_refuses_fresh_manifest_when_stored_business_fact_differs(
+    tmp_path: Path,
+    repointed_build: None,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _restore_legacy_flat_keys(path)
+    target = next(
+        record_id
+        for record_id, row in _stored_rows(path).items()
+        if _lot_option_type(row["fields"]) == "call"
+    )
+
+    def drift_legacy_premium(fields: dict) -> None:
+        fields["premium"] = float(fields["premium"]) + 0.01
+        for key in ("asset_type", "contract_key", "open_event_id", "premium_open"):
+            fields.pop(key, None)
+
+    _edit_lot_fields(
+        path,
+        target,
+        drift_legacy_premium,
+    )
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="fresh replay differs"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
+def test_apply_refuses_fresh_manifest_when_new_shape_business_field_is_missing(
+    tmp_path: Path,
+    repointed_build: None,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _edit_lot_fields(
+        path,
+        "lot_manual-open-d2ffdb6be1d71922",
+        lambda fields: fields.pop("premium_open"),
+    )
+    inventory = module.build_lot_identity_migration_inventory(path)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="fresh replay differs"):
+        module.apply_lot_identity_migration(path, inventory)
+    assert path.read_bytes() == before
+
+
 # --- D3/D4: the payload rewrite ----------------------------------------------
 
 
@@ -2387,7 +2497,7 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
 
 @pytest.mark.parametrize('mutation, reason', [
     ("UPDATE position_lots SET expiration = expiration + 1 WHERE expiration IS NOT NULL", 'round trip'),
-    ("UPDATE position_lots SET source_event_id = 'different-event'", 'open_event_id'),
+    ("UPDATE position_lots SET source_event_id = 'different-event'", 'fresh replay differs'),
     ("UPDATE position_lots SET strike = NULL WHERE expiration IS NOT NULL", 'requires expiration and strike'),
 ])
 def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_build: None, mutation: str, reason: str) -> None:
