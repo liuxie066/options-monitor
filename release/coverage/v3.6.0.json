@@ -1,0 +1,1460 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.0",
+  "base": {
+    "tag": "v3.5.15",
+    "commit": "9cc61cd140e89359f3e0d8f412ff81be219c207d"
+  },
+  "reviewed_head": "44c6916a00bc0247ceb1bd6a08ecdee455d700e2",
+  "commits": [
+    {
+      "sha": "dc8b7078d328ec71aa18c3da5e065982702f644f",
+      "subject": "feat(domain): land the order domain model unification"
+    },
+    {
+      "sha": "2fc73f9baa8de890496975f846329e024a4a6b54",
+      "subject": "test(ledger): pin the pagination publish path and correct stale prose"
+    },
+    {
+      "sha": "34ccf7fdf1ca2b7e9aebf89b1c9e65cf034db455",
+      "subject": "chore(merge): merge main into worktree-domain-model-impl"
+    },
+    {
+      "sha": "540b37a5867bb3fab34401b1f30159a5ebd06a12",
+      "subject": "Merge pull request #311 from liuxie066/worktree-domain-model-impl"
+    },
+    {
+      "sha": "0e524e60d2819d734463e82bf3f5a3f08ca00dda",
+      "subject": "feat(ledger): land the lot-identity migration gate and close its review findings"
+    },
+    {
+      "sha": "8e8df984237f21a0a8b34a304dc83691ead9ab0a",
+      "subject": "Merge pull request #312 from liuxie066/worktree-domain-model-impl"
+    },
+    {
+      "sha": "62caf0867e1ffd9b85833e1c61e42e48660d790b",
+      "subject": "refactor(domain): converge lot identity declarations onto lot_id"
+    },
+    {
+      "sha": "cc09643fc57dbb4220e3d6fb9d96c0556d1e621c",
+      "subject": "fix(ledger): keep the stored record_id key out of the converged carrier"
+    },
+    {
+      "sha": "a88a74676ac3604535c1b89c3fa7dc4443902c00",
+      "subject": "Merge pull request #314 from liuxie066/slice2-rename-and-fixes"
+    },
+    {
+      "sha": "b056dc965e4c5aea63743821ff85cbba154728b3",
+      "subject": "chore(gateflow): accept plan for order-unification"
+    },
+    {
+      "sha": "29041e1bcb028169433a0847d14f117a4b6cebb2",
+      "subject": "chore(gateflow): accept order-unification slice-1"
+    },
+    {
+      "sha": "6502466e3533c83ffe50c49a7d880eac0680f8a4",
+      "subject": "fix(ledger): close the parity-probe review rounds and audit its claims"
+    },
+    {
+      "sha": "fae122d3b67514639be83807d97c147e989079ae",
+      "subject": "refactor(cleanup): retire unreferenced helpers, modules, and their tests"
+    },
+    {
+      "sha": "33fc4db0090535b105b0868b064c2cce65834c37",
+      "subject": "refactor(tests): consolidate inbound and agent-plugin fixture scaffolding"
+    },
+    {
+      "sha": "3ee9a331104accec4d75a61aa817484335f267a1",
+      "subject": "refactor(scripts): extract shared benchmark support and retire dead instruments"
+    },
+    {
+      "sha": "e693af3a6bef9951a8542dc24c1dbfaa9584206f",
+      "subject": "refactor(tests): consolidate service-deploy and option-positions CLI scaffolding"
+    },
+    {
+      "sha": "3c768dc7ccc34c901d1a148c01ff1d1a273758ae",
+      "subject": "refactor(tests): consolidate trades resolver, reconcile, and lifecycle scaffolding"
+    },
+    {
+      "sha": "4e1603ce0ec806a7ce7d3b45ef353c27ebce3924",
+      "subject": "refactor(tests): consolidate required-data and pipeline scaffolding"
+    },
+    {
+      "sha": "2efb167ba8bc75ee8abf722f581dd1cbbca96d2e",
+      "subject": "refactor(tests): consolidate settlement-observation and config scaffolding"
+    },
+    {
+      "sha": "0fc1ae30a440ecf15affe4d94f73e057586f2b80",
+      "subject": "refactor(tests): consolidate brief-renderer, quality, and wechat scaffolding"
+    },
+    {
+      "sha": "a2e98a156fe2599a9c3b899b0819b08abbf46759",
+      "subject": "refactor(tests): consolidate ledger workflow fixture scaffolding"
+    },
+    {
+      "sha": "3531913c8ad88ef402c38960887fd81e18d22396",
+      "subject": "refactor(tests): consolidate mid-size ledger, trades, and bot scaffolding"
+    },
+    {
+      "sha": "3930fd46104fa5f38d5e8f139f03b4e0f0b35975",
+      "subject": "refactor(domain): split the wheel policy module into a cohesive package"
+    },
+    {
+      "sha": "df923f4b25122c2f39cd109564c73324b57f4a51",
+      "subject": "refactor(tests): consolidate brief-repository, feishu-ws, and positions scaffolding"
+    },
+    {
+      "sha": "c2a6f52a4f2710c76fe9beb0b1ad53ed8dc2fb17",
+      "subject": "refactor(tests): consolidate portfolio-context, diagnostics, and memory scaffolding"
+    },
+    {
+      "sha": "6fa81d979d33fb58ecf599ba086e1c2f61ab3965",
+      "subject": "refactor(tests): consolidate release, snapshot-manifest, and account-run scaffolding"
+    },
+    {
+      "sha": "fe1340d71d289b3ba083b880ebf67f1431514ecf",
+      "subject": "refactor(tests): consolidate prepared-option-positions context scaffolding"
+    },
+    {
+      "sha": "d3fc17923b990c8067b65aa282e8545234707fb2",
+      "subject": "refactor(tests): consolidate opend-position-adapter and option-performance scaffolding"
+    },
+    {
+      "sha": "3b7e6401ced3a51ccd09eb51e7adbbf9dfb745bf",
+      "subject": "refactor(tests): consolidate symbol-monitoring, required-data and migration scaffolding"
+    },
+    {
+      "sha": "fd5159cdb5db6b6978ad7159f5688ca62e4b05b2",
+      "subject": "refactor(tests): consolidate CLI, tick-barrier and readiness scaffolding"
+    },
+    {
+      "sha": "e04ce0a2139f625f5d6a52e59d813fad9b7dce76",
+      "subject": "refactor(tests): consolidate close-advice, projection-runtime and notification scaffolding"
+    },
+    {
+      "sha": "da7c826ecbbad307675bd2e9773863f5a6b897b8",
+      "subject": "refactor(src): unify byte-identical private helpers onto shared modules"
+    },
+    {
+      "sha": "a887b4218a7dc40e36be75c79665e6b15ac74f0a",
+      "subject": "docs(guardrails): regenerate the dependency graph and record the new suite baseline"
+    },
+    {
+      "sha": "099e99067d9cb743a5642dac57260f19591da473",
+      "subject": "chore(merge): merge main into the simplification sweep"
+    },
+    {
+      "sha": "3eb7c0ddd944f95b252322ad10c0b29af335359e",
+      "subject": "docs(guardrails): state the retired-case count against the merged tree"
+    },
+    {
+      "sha": "75b3030e96f5acb82bc9f273fd1ffb9b8df642f4",
+      "subject": "refactor(brief): table-drive the homogeneous change-type counting branches"
+    },
+    {
+      "sha": "7972c4a4921779e1f70f24d700abdb99f91f034a",
+      "subject": "refactor(tests): consolidate watchdog-alert and portfolio-tool scaffolding"
+    },
+    {
+      "sha": "ea5dae3c80a2f96b098e45f2017b466ea9c9b98c",
+      "subject": "refactor(tests): consolidate migration, combo-yield and cancellation scaffolding"
+    },
+    {
+      "sha": "f9b22d28bd27b58d8b9e4b084e4a8648e6ade869",
+      "subject": "refactor(tests): consolidate snapshot, projection and codec scaffolding"
+    },
+    {
+      "sha": "ecb3df851655f7b6169c090ac9e6524b75c7c7d3",
+      "subject": "refactor(tests): consolidate tool-boundary, install and bitable scaffolding"
+    },
+    {
+      "sha": "fdf25660b948c62528de9f81292a2aeba1879e7d",
+      "subject": "refactor(tests): consolidate runtime-contract and entrypoint scaffolding"
+    },
+    {
+      "sha": "092ed22764e3139e8a4fca20bf9347f81a057861",
+      "subject": "refactor(assistant): share the operation lifecycle across the tool families"
+    },
+    {
+      "sha": "ac3f95251525d43bbd71ea253b667cde5b01d0c0",
+      "subject": "refactor(dispatch): flatten six deep if/elif ladders"
+    },
+    {
+      "sha": "b746761cf04b00fd5cb3efe46e6ce5edc1653a06",
+      "subject": "refactor(src): share six cross-module helper families"
+    },
+    {
+      "sha": "e33a2cd0733abd2b36609ae5f92f7b5406179768",
+      "subject": "refactor(cleanup): retire four helpers the merge left unreferenced"
+    },
+    {
+      "sha": "9d49e21968e0779766318699961eb8d5910aec3c",
+      "subject": "refactor(tests): consolidate lifecycle-audit and push-listener scaffolding"
+    },
+    {
+      "sha": "d5e88e359b3acf7ceda9534ff3a43376760deb09",
+      "subject": "refactor(tests): consolidate quote-receipt and contract-identity scaffolding"
+    },
+    {
+      "sha": "9b8ad46980cb71013326c41c2397308f63142486",
+      "subject": "refactor(dispatch): flatten three more ladders and refuse five"
+    },
+    {
+      "sha": "740e8a8c7d7121d366c379d6b66be6d2a7934bfc",
+      "subject": "refactor(tests): consolidate wheel, ledger-maintenance and output-integrity scaffolding"
+    },
+    {
+      "sha": "3e08e5d3c71edada3712e87296c89d4c10a517a7",
+      "subject": "docs(graph): regenerate the dependency graph after the dispatch refactor"
+    },
+    {
+      "sha": "9b83ca836176165886eca76b36eebd7879adff0e",
+      "subject": "refactor(tests): consolidate coverage, brief-domain and gateway scaffolding"
+    },
+    {
+      "sha": "010d7b851f90f51b498964106d7609e4d1bad7cc",
+      "subject": "refactor(tests): consolidate wheel-agent, chain-cache and portfolio-context scaffolding"
+    },
+    {
+      "sha": "6bf62ce8397a4edd41c5bb4232e0ea70c594754c",
+      "subject": "docs(graph): regenerate the dependency graph after the test consolidation"
+    },
+    {
+      "sha": "a3f16269e4f7a44dc2e0d4e2f17ee871846be708",
+      "subject": "refactor(tests): consolidate config-validation and risk-capacity scaffolding"
+    },
+    {
+      "sha": "4abb2fe90c2e7695366d7ca87c84ccc347368276",
+      "subject": "refactor(tests): consolidate liquidity-filter and context-builder scaffolding"
+    },
+    {
+      "sha": "a95bc81ab9b4749a06f595ce6d45f5f0b1a808c3",
+      "subject": "refactor(tests): consolidate combo-reconciliation and watchlist scaffolding"
+    },
+    {
+      "sha": "95f0618b7ae18be6bf99402e9f8341ba3d25a238",
+      "subject": "docs(graph): regenerate the dependency graph after the latest test consolidation"
+    },
+    {
+      "sha": "5f76d43e51a77da931356297ae51096465affb15",
+      "subject": "refactor(tests): consolidate candidate-filter and notify-markdown scaffolding"
+    },
+    {
+      "sha": "36b9a3e8b1490e4dc01ca6450930f4ad38a122b2",
+      "subject": "refactor(tests): consolidate quote-evidence and performance scaffolding"
+    },
+    {
+      "sha": "f5e6dd48e39299390e6a1cb9a2cfeeff56e5031d",
+      "subject": "docs(graph): regenerate the dependency graph after the final test consolidation"
+    },
+    {
+      "sha": "7709a63fbdfba324c3e979af7cbc25d703d02a1b",
+      "subject": "refactor(tests): consolidate sell-call, cc-lp and scheduler scaffolding"
+    },
+    {
+      "sha": "1d9780a726965364210ab87ee92cfba8861f8a01",
+      "subject": "refactor(tests): consolidate wheel-readiness and normalizer scaffolding"
+    },
+    {
+      "sha": "680d47774133d3aac32ef2b267d71b01b9910358",
+      "subject": "refactor(tests): consolidate tick-domain and sell-call-resolution scaffolding"
+    },
+    {
+      "sha": "8eab35b8d46f4eabf283713cee75f88a682996b8",
+      "subject": "refactor(tests): consolidate candidate-contract and volatility scaffolding"
+    },
+    {
+      "sha": "6ec0e59e7ff209d293ff000a158349affd01c061",
+      "subject": "refactor(tests): consolidate ledger-economics and fee-calc scaffolding"
+    },
+    {
+      "sha": "62ec694317b879b933e7b59fb04ea18f922308e1",
+      "subject": "docs(graph): regenerate the dependency graph after the last consolidation wave"
+    },
+    {
+      "sha": "6f412860470f62e9f8dc5baff92d43753a1cfdb2",
+      "subject": "refactor(tests): consolidate ledger-service and strategy-policy scaffolding"
+    },
+    {
+      "sha": "6ce463077204b46cd28d14fcdf214946ca33e678",
+      "subject": "refactor(tests): consolidate close-reason and maintenance-receipt scaffolding"
+    },
+    {
+      "sha": "c06689bc98245c95dd63a3eda38575bb7edf491b",
+      "subject": "refactor(tests): consolidate combo-membership and event-risk scaffolding"
+    },
+    {
+      "sha": "04f23c2bbc43c3577ba10516ef6a3c87437b76e9",
+      "subject": "docs(graph): regenerate the dependency graph after the latest wave"
+    },
+    {
+      "sha": "691afcb0a3996689ff367c4c463706328c854925",
+      "subject": "refactor(tests): consolidate combo-reconciliation and greeks-fallback scaffolding"
+    },
+    {
+      "sha": "8e9a5fb3947b5ddf87a4f343272fb946162fd144",
+      "subject": "refactor(tests): consolidate notification, wheel-tick and facade scaffolding"
+    },
+    {
+      "sha": "2bc63ad4764e942197da418e4cd189f28a247d1e",
+      "subject": "refactor(tests): drop a cash-query helper nothing referenced"
+    },
+    {
+      "sha": "b9fa295a6f3c03c8126f6fc1990f39f23b71fd7c",
+      "subject": "docs(graph): regenerate after the import hoisting changed edge counts"
+    },
+    {
+      "sha": "b3b91106e120894c6a5d563a4752b3cf22f130e4",
+      "subject": "refactor(tests): consolidate scheduler and lifecycle scaffolding"
+    },
+    {
+      "sha": "2ebc4368671402df5517a6d1dfbe227c4fdc17dd",
+      "subject": "refactor(tests): consolidate rate-gate and finalization scaffolding"
+    },
+    {
+      "sha": "21896e8b2a9bf03e8911c21d0c10a708073d7aa8",
+      "subject": "docs(graph): regenerate after the final consolidation waves"
+    },
+    {
+      "sha": "8d77feb0e7ec8633b8dab31f09c7cbe9867d5669",
+      "subject": "refactor(tests): consolidate quality-gate and policy scaffolding"
+    },
+    {
+      "sha": "e8ae305e5b66836a5bd91b0d9685ed5211cb14b4",
+      "subject": "refactor(tests): consolidate candidate-parity and brief-CLI scaffolding"
+    },
+    {
+      "sha": "e38ffc1f617ad9f1cb5413e0e71f26247dd9aac9",
+      "subject": "docs(graph): regenerate after the closing consolidation waves"
+    },
+    {
+      "sha": "f84be748e9736241bf317954bfd0a195f37b05a7",
+      "subject": "refactor(engine): share the cross-symbol and concentration rank keys"
+    },
+    {
+      "sha": "c7fc8ed562351d3135a8c8f23807a6e02c8bed34",
+      "subject": "Merge pull request #315 from liuxie066/codex/simplification-sweep"
+    },
+    {
+      "sha": "a9e58443793e1a34a1fd891e99a9f77c31d7cb65",
+      "subject": "feat(guardrails): gate declared public names against the merge base"
+    },
+    {
+      "sha": "94837e941f127a7b0ee37abef648dbc7d3b49eef",
+      "subject": "chore(gateflow): accept order-unification slice-2"
+    },
+    {
+      "sha": "b82bc999b997682b9e1610d081125b5bb1d24829",
+      "subject": "fix(guardrails): resolve the public-surface base from a full checkout"
+    },
+    {
+      "sha": "e03175e3564af33a29e749b59fd7dfa1419f695b",
+      "subject": "fix(guardrails): fail closed where the public-surface gate read nothing"
+    },
+    {
+      "sha": "ee7fcee6f2ead79ec5348fa0d54f1072924d5848",
+      "subject": "docs(guardrails): state what the public-surface gate refuses and cannot see"
+    },
+    {
+      "sha": "d0828417b8aabf9bd85ee191692cf4c7210ec6ed",
+      "subject": "fix(guardrails): walk every module-scope container, not just if/try"
+    },
+    {
+      "sha": "94d93903df178803bfd9cf5d04c36b76ee83fba0",
+      "subject": "test(environment): stop three tests from reading the ambient umask and PYTHONPATH"
+    },
+    {
+      "sha": "debedb1a90043b4e810ee51ac278666750475693",
+      "subject": "docs(guardrails): make the regression baseline a dated observation"
+    },
+    {
+      "sha": "15dbb6bcf735a71ce68644ac975578a55072c50e",
+      "subject": "Merge pull request #316 from liuxie066/codex/public-surface-gate"
+    },
+    {
+      "sha": "0cc8b1a1a841899823e7b2716c5220165aba44e4",
+      "subject": "chore(merge): sync main into codex/truth-in-baselines"
+    },
+    {
+      "sha": "11dd937c12154893e81f2a32e684d5508dfe594d",
+      "subject": "Merge pull request #318 from liuxie066/codex/truth-in-baselines"
+    },
+    {
+      "sha": "42d74a8f2606e79e64c383df2261ed7f29f12a8f",
+      "subject": "chore(merge): merge origin/main into order-unification-impl"
+    },
+    {
+      "sha": "c0415fec3e4c7b1fb302246c0e9d4529c3458b57",
+      "subject": "fix(ledger): give the strategy family a measured carrier and honest gate"
+    },
+    {
+      "sha": "639bf579c521756da27643507cf27b4f3c51dafd",
+      "subject": "test(ledger): hold the parity-probe controls off the SQLite build's choices"
+    },
+    {
+      "sha": "65e10ae8918483fe2c7051d89c4f33bd14cfc05d",
+      "subject": "Merge pull request #317 from liuxie066/order-unification-impl"
+    },
+    {
+      "sha": "46b59252a2d9d782ae2b025f216e633a5b786f91",
+      "subject": "fix(ledger): refuse lot-identity apply outside an armed migration window"
+    },
+    {
+      "sha": "8c43931f2ca04e0f37b050d354565ab27035dfb0",
+      "subject": "feat(guardrails): pin the retired-column SQL registry"
+    },
+    {
+      "sha": "ff72e7bb6c74ec719a3f73790ed82f62d2ca6172",
+      "subject": "feat(guardrails): pin the retired-column SQL registry"
+    },
+    {
+      "sha": "1ed1eaea0c0515bd98efb4b6ea1185c794338b96",
+      "subject": "feat(ledger): gate the D1-D4 rebuild on the retired-column ledger"
+    },
+    {
+      "sha": "87288b7e30308ea32ffb91e708483aed349c2110",
+      "subject": "feat(ledger): widen the projection comparison to the column face and the rowid baseline"
+    },
+    {
+      "sha": "5f27b785e5cfdf71676331da75447a0bbb4543b5",
+      "subject": "Merge pull request #319 from liuxie066/slice3-window-prep"
+    },
+    {
+      "sha": "018b71a0b8b475d2c06556c7855e78a83b38c5c2",
+      "subject": "fix(ledger): close migration review gaps and document window checks"
+    },
+    {
+      "sha": "4d7686b26ca5e58c9fde0945890301c938da19ad",
+      "subject": "fix(guardrails): reject all retired SQL registry drift"
+    },
+    {
+      "sha": "8ae766923d1e24d97545c49189f35f054c479da9",
+      "subject": "fix(ledger): validate A1 migration gate and preserve payload facts"
+    },
+    {
+      "sha": "ec0cf20c13ab95fdf912ac9c48169250049fe6df",
+      "subject": "chore(ledger): connect A3 closeout to reviewed A1 delivery"
+    },
+    {
+      "sha": "900fb5230a630a8c5b939cb1da461855264e96f4",
+      "subject": "Merge branch 'main' into slice3-a1-registry"
+    },
+    {
+      "sha": "ff1bed9feaadab9136b6c1cf24fff10437930638",
+      "subject": "fix(ledger): propagate all parity blockers to migration readiness"
+    },
+    {
+      "sha": "6db5775cdf7e9728cc93274f6dd6dd1368a5ab2e",
+      "subject": "Merge pull request #320 from liuxie066/slice3-a1-registry"
+    },
+    {
+      "sha": "8d4a71cedfbfa460aaa0a4a60f7817e6948cc13a",
+      "subject": "chore(ledger): align reviewed A1 with merged registry baseline"
+    },
+    {
+      "sha": "74f4b24697a36aa701466a4188ef33bd63e615cb",
+      "subject": "chore(ledger): integrate final A1 readiness checks into A3"
+    },
+    {
+      "sha": "fa37d38954ae60424b105a950eed9d6671417f39",
+      "subject": "Merge pull request #321 from liuxie066/codex/order-a1-reviewed"
+    },
+    {
+      "sha": "1a10b9d079429b1211032b1b59111a682b2c55b3",
+      "subject": "chore(ledger): align A3 with merged A1 baseline"
+    },
+    {
+      "sha": "909f872f5d85b7bd7367197d4c864e82d5aab498",
+      "subject": "Merge pull request #322 from liuxie066/codex/order-unification-closeout"
+    },
+    {
+      "sha": "65ccf97a2572bd32222f8b18d867fabf99fe4018",
+      "subject": "fix(ledger): support both order-unification storage shapes"
+    },
+    {
+      "sha": "b002384e709516eaf902351d9a6e6ed4d1bae1cd",
+      "subject": "fix(ledger): preserve fractional stock quantities and replay parity"
+    },
+    {
+      "sha": "51e49d1aa1f03fb69258ecbf4699dd5c3ec7b717",
+      "subject": "fix(ledger): serialize stock quantity diagnostics"
+    },
+    {
+      "sha": "70c83443686bf6963c31e91338c7be83cdf44179",
+      "subject": "fix(ledger): preserve unknown stock costs and include confirmed fees"
+    },
+    {
+      "sha": "cd80c0e825ad6609f87ba859cb2f3fbc2239e5a2",
+      "subject": "refactor(orders): centralize settlement units and execution arbitration"
+    },
+    {
+      "sha": "861e87519e72e67b9da95b2358b5dcfd9e2525d5",
+      "subject": "fix(ledger): honor stock direction and exact quantity balances"
+    },
+    {
+      "sha": "e2d87ba368626cc9cc73541f0ae3aaf04dfe781e",
+      "subject": "refactor(orders): converge canonical consumers and block unknown reservations"
+    },
+    {
+      "sha": "11f2d10cbdcdf8274aa569b3efc8ec0be2f4e711",
+      "subject": "Merge pull request #323 from liuxie066/codex/order-r1-dual-shape"
+    },
+    {
+      "sha": "d7fde000c0a3acc8175d090e3aa7fbc3505fa6d3",
+      "subject": "Merge pull request #324 from liuxie066/codex/order-stock-decimal"
+    },
+    {
+      "sha": "7727670640db66a0a42ce76bc235e578d1ea25f3",
+      "subject": "Merge pull request #325 from liuxie066/codex/order-stock-cost-basis"
+    },
+    {
+      "sha": "592aca48f39955cd07881d854e82a0650f6d8414",
+      "subject": "Merge pull request #326 from liuxie066/codex/order-a7-convergence"
+    },
+    {
+      "sha": "732f239e34d50dde4b6411a363c105bf149e8586",
+      "subject": "Merge pull request #327 from liuxie066/codex/order-stock-invariants"
+    },
+    {
+      "sha": "44c6916a00bc0247ceb1bd6a08ecdee455d700e2",
+      "subject": "Merge pull request #328 from liuxie066/codex/order-canonical-consumers"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added R1-compatible old/new SQLite order-lot storage support with read-only lot-identity inventory and verification surfaces plus a guarded migration path that remains disabled outside a separately authorized production window.",
+      "commits": [
+        "46b59252a2d9d782ae2b025f216e633a5b786f91",
+        "5f27b785e5cfdf71676331da75447a0bbb4543b5",
+        "65ccf97a2572bd32222f8b18d867fabf99fe4018",
+        "11f2d10cbdcdf8274aa569b3efc8ec0be2f4e711"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Unified canonical order, execution, and position identity across ledger, Wheel, trade intake and reconciliation, assistant, and quality consumers.",
+      "commits": [
+        "dc8b7078d328ec71aa18c3da5e065982702f644f",
+        "2fc73f9baa8de890496975f846329e024a4a6b54",
+        "34ccf7fdf1ca2b7e9aebf89b1c9e65cf034db455",
+        "540b37a5867bb3fab34401b1f30159a5ebd06a12",
+        "0e524e60d2819d734463e82bf3f5a3f08ca00dda",
+        "8e8df984237f21a0a8b34a304dc83691ead9ab0a",
+        "62caf0867e1ffd9b85833e1c61e42e48660d790b",
+        "cc09643fc57dbb4220e3d6fb9d96c0556d1e621c",
+        "a88a74676ac3604535c1b89c3fa7dc4443902c00",
+        "b056dc965e4c5aea63743821ff85cbba154728b3",
+        "29041e1bcb028169433a0847d14f117a4b6cebb2",
+        "6502466e3533c83ffe50c49a7d880eac0680f8a4",
+        "94837e941f127a7b0ee37abef648dbc7d3b49eef",
+        "42d74a8f2606e79e64c383df2261ed7f29f12a8f",
+        "c0415fec3e4c7b1fb302246c0e9d4529c3458b57",
+        "639bf579c521756da27643507cf27b4f3c51dafd",
+        "65e10ae8918483fe2c7051d89c4f33bd14cfc05d",
+        "ff72e7bb6c74ec719a3f73790ed82f62d2ca6172",
+        "1ed1eaea0c0515bd98efb4b6ea1185c794338b96",
+        "87288b7e30308ea32ffb91e708483aed349c2110",
+        "018b71a0b8b475d2c06556c7855e78a83b38c5c2",
+        "8ae766923d1e24d97545c49189f35f054c479da9",
+        "ec0cf20c13ab95fdf912ac9c48169250049fe6df",
+        "ff1bed9feaadab9136b6c1cf24fff10437930638",
+        "8d4a71cedfbfa460aaa0a4a60f7817e6948cc13a",
+        "74f4b24697a36aa701466a4188ef33bd63e615cb",
+        "fa37d38954ae60424b105a950eed9d6671417f39",
+        "1a10b9d079429b1211032b1b59111a682b2c55b3",
+        "909f872f5d85b7bd7367197d4c864e82d5aab498",
+        "cd80c0e825ad6609f87ba859cb2f3fbc2239e5a2",
+        "e2d87ba368626cc9cc73541f0ae3aaf04dfe781e",
+        "592aca48f39955cd07881d854e82a0650f6d8414",
+        "44c6916a00bc0247ceb1bd6a08ecdee455d700e2"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Centralized stock settlement quantities and directions, execution arbitration, retired-column SQL checks, and public-surface gates while simplifying duplicate internal models without changing the R1 compatibility contract.",
+      "commits": [
+        "fae122d3b67514639be83807d97c147e989079ae",
+        "33fc4db0090535b105b0868b064c2cce65834c37",
+        "3ee9a331104accec4d75a61aa817484335f267a1",
+        "e693af3a6bef9951a8542dc24c1dbfaa9584206f",
+        "3c768dc7ccc34c901d1a148c01ff1d1a273758ae",
+        "4e1603ce0ec806a7ce7d3b45ef353c27ebce3924",
+        "2efb167ba8bc75ee8abf722f581dd1cbbca96d2e",
+        "0fc1ae30a440ecf15affe4d94f73e057586f2b80",
+        "a2e98a156fe2599a9c3b899b0819b08abbf46759",
+        "3531913c8ad88ef402c38960887fd81e18d22396",
+        "3930fd46104fa5f38d5e8f139f03b4e0f0b35975",
+        "df923f4b25122c2f39cd109564c73324b57f4a51",
+        "c2a6f52a4f2710c76fe9beb0b1ad53ed8dc2fb17",
+        "6fa81d979d33fb58ecf599ba086e1c2f61ab3965",
+        "fe1340d71d289b3ba083b880ebf67f1431514ecf",
+        "d3fc17923b990c8067b65aa282e8545234707fb2",
+        "3b7e6401ced3a51ccd09eb51e7adbbf9dfb745bf",
+        "fd5159cdb5db6b6978ad7159f5688ca62e4b05b2",
+        "e04ce0a2139f625f5d6a52e59d813fad9b7dce76",
+        "da7c826ecbbad307675bd2e9773863f5a6b897b8",
+        "a887b4218a7dc40e36be75c79665e6b15ac74f0a",
+        "099e99067d9cb743a5642dac57260f19591da473",
+        "3eb7c0ddd944f95b252322ad10c0b29af335359e",
+        "75b3030e96f5acb82bc9f273fd1ffb9b8df642f4",
+        "7972c4a4921779e1f70f24d700abdb99f91f034a",
+        "ea5dae3c80a2f96b098e45f2017b466ea9c9b98c",
+        "f9b22d28bd27b58d8b9e4b084e4a8648e6ade869",
+        "ecb3df851655f7b6169c090ac9e6524b75c7c7d3",
+        "fdf25660b948c62528de9f81292a2aeba1879e7d",
+        "092ed22764e3139e8a4fca20bf9347f81a057861",
+        "ac3f95251525d43bbd71ea253b667cde5b01d0c0",
+        "b746761cf04b00fd5cb3efe46e6ce5edc1653a06",
+        "e33a2cd0733abd2b36609ae5f92f7b5406179768",
+        "9d49e21968e0779766318699961eb8d5910aec3c",
+        "d5e88e359b3acf7ceda9534ff3a43376760deb09",
+        "9b8ad46980cb71013326c41c2397308f63142486",
+        "740e8a8c7d7121d366c379d6b66be6d2a7934bfc",
+        "3e08e5d3c71edada3712e87296c89d4c10a517a7",
+        "9b83ca836176165886eca76b36eebd7879adff0e",
+        "010d7b851f90f51b498964106d7609e4d1bad7cc",
+        "6bf62ce8397a4edd41c5bb4232e0ea70c594754c",
+        "a3f16269e4f7a44dc2e0d4e2f17ee871846be708",
+        "4abb2fe90c2e7695366d7ca87c84ccc347368276",
+        "a95bc81ab9b4749a06f595ce6d45f5f0b1a808c3",
+        "95f0618b7ae18be6bf99402e9f8341ba3d25a238",
+        "5f76d43e51a77da931356297ae51096465affb15",
+        "36b9a3e8b1490e4dc01ca6450930f4ad38a122b2",
+        "f5e6dd48e39299390e6a1cb9a2cfeeff56e5031d",
+        "7709a63fbdfba324c3e979af7cbc25d703d02a1b",
+        "1d9780a726965364210ab87ee92cfba8861f8a01",
+        "680d47774133d3aac32ef2b267d71b01b9910358",
+        "8eab35b8d46f4eabf283713cee75f88a682996b8",
+        "6ec0e59e7ff209d293ff000a158349affd01c061",
+        "62ec694317b879b933e7b59fb04ea18f922308e1",
+        "6f412860470f62e9f8dc5baff92d43753a1cfdb2",
+        "6ce463077204b46cd28d14fcdf214946ca33e678",
+        "c06689bc98245c95dd63a3eda38575bb7edf491b",
+        "04f23c2bbc43c3577ba10516ef6a3c87437b76e9",
+        "691afcb0a3996689ff367c4c463706328c854925",
+        "8e9a5fb3947b5ddf87a4f343272fb946162fd144",
+        "2bc63ad4764e942197da418e4cd189f28a247d1e",
+        "b9fa295a6f3c03c8126f6fc1990f39f23b71fd7c",
+        "b3b91106e120894c6a5d563a4752b3cf22f130e4",
+        "2ebc4368671402df5517a6d1dfbe227c4fdc17dd",
+        "21896e8b2a9bf03e8911c21d0c10a708073d7aa8",
+        "8d77feb0e7ec8633b8dab31f09c7cbe9867d5669",
+        "e8ae305e5b66836a5bd91b0d9685ed5211cb14b4",
+        "e38ffc1f617ad9f1cb5413e0e71f26247dd9aac9",
+        "f84be748e9736241bf317954bfd0a195f37b05a7",
+        "c7fc8ed562351d3135a8c8f23807a6e02c8bed34",
+        "a9e58443793e1a34a1fd891e99a9f77c31d7cb65",
+        "b82bc999b997682b9e1610d081125b5bb1d24829",
+        "e03175e3564af33a29e749b59fd7dfa1419f695b",
+        "ee7fcee6f2ead79ec5348fa0d54f1072924d5848",
+        "d0828417b8aabf9bd85ee191692cf4c7210ec6ed",
+        "94d93903df178803bfd9cf5d04c36b76ee83fba0",
+        "debedb1a90043b4e810ee51ac278666750475693",
+        "15dbb6bcf735a71ce68644ac975578a55072c50e",
+        "0cc8b1a1a841899823e7b2716c5220165aba44e4",
+        "11dd937c12154893e81f2a32e684d5508dfe594d",
+        "8c43931f2ca04e0f37b050d354565ab27035dfb0",
+        "4d7686b26ca5e58c9fde0945890301c938da19ad",
+        "900fb5230a630a8c5b939cb1da461855264e96f4",
+        "6db5775cdf7e9728cc93274f6dd6dd1368a5ab2e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved exact decimal stock quantities instead of truncating fractional shares, while continuing to reject fractional option contracts and replaying legacy integer events consistently.",
+      "commits": [
+        "b002384e709516eaf902351d9a6e6ed4d1bae1cd",
+        "51e49d1aa1f03fb69258ecbf4699dd5c3ec7b717",
+        "d7fde000c0a3acc8175d090e3aa7fbc3505fa6d3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Derived stock cost basis and realized economics only from confirmed fee evidence, returning unknown values when fees are missing or estimated and recovering exact values after replay once fees become authoritative.",
+      "commits": [
+        "70c83443686bf6963c31e91338c7be83cdf44179",
+        "7727670640db66a0a42ce76bc235e578d1ea25f3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Rejected unknown reservation states and corrected stock settlement direction and quantity handling so canonical ledger projections cannot accept ambiguous or contradictory execution facts.",
+      "commits": [
+        "861e87519e72e67b9da95b2358b5dcfd9e2525d5",
+        "732f239e34d50dde4b6411a363c105bf149e8586"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "dc8b7078d328ec71aa18c3da5e065982702f644f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/311"
+      ]
+    },
+    {
+      "commit": "2fc73f9baa8de890496975f846329e024a4a6b54",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/311"
+      ]
+    },
+    {
+      "commit": "34ccf7fdf1ca2b7e9aebf89b1c9e65cf034db455",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/311"
+      ]
+    },
+    {
+      "commit": "540b37a5867bb3fab34401b1f30159a5ebd06a12",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/311"
+      ]
+    },
+    {
+      "commit": "0e524e60d2819d734463e82bf3f5a3f08ca00dda",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/312"
+      ]
+    },
+    {
+      "commit": "8e8df984237f21a0a8b34a304dc83691ead9ab0a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/312"
+      ]
+    },
+    {
+      "commit": "62caf0867e1ffd9b85833e1c61e42e48660d790b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/314"
+      ]
+    },
+    {
+      "commit": "cc09643fc57dbb4220e3d6fb9d96c0556d1e621c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/314"
+      ]
+    },
+    {
+      "commit": "a88a74676ac3604535c1b89c3fa7dc4443902c00",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/314"
+      ]
+    },
+    {
+      "commit": "b056dc965e4c5aea63743821ff85cbba154728b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "29041e1bcb028169433a0847d14f117a4b6cebb2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "6502466e3533c83ffe50c49a7d880eac0680f8a4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "fae122d3b67514639be83807d97c147e989079ae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "33fc4db0090535b105b0868b064c2cce65834c37",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3ee9a331104accec4d75a61aa817484335f267a1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "e693af3a6bef9951a8542dc24c1dbfaa9584206f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3c768dc7ccc34c901d1a148c01ff1d1a273758ae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "4e1603ce0ec806a7ce7d3b45ef353c27ebce3924",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "2efb167ba8bc75ee8abf722f581dd1cbbca96d2e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "0fc1ae30a440ecf15affe4d94f73e057586f2b80",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "a2e98a156fe2599a9c3b899b0819b08abbf46759",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3531913c8ad88ef402c38960887fd81e18d22396",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3930fd46104fa5f38d5e8f139f03b4e0f0b35975",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "df923f4b25122c2f39cd109564c73324b57f4a51",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "c2a6f52a4f2710c76fe9beb0b1ad53ed8dc2fb17",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "6fa81d979d33fb58ecf599ba086e1c2f61ab3965",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "fe1340d71d289b3ba083b880ebf67f1431514ecf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "d3fc17923b990c8067b65aa282e8545234707fb2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3b7e6401ced3a51ccd09eb51e7adbbf9dfb745bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "fd5159cdb5db6b6978ad7159f5688ca62e4b05b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "e04ce0a2139f625f5d6a52e59d813fad9b7dce76",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "da7c826ecbbad307675bd2e9773863f5a6b897b8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "a887b4218a7dc40e36be75c79665e6b15ac74f0a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "099e99067d9cb743a5642dac57260f19591da473",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3eb7c0ddd944f95b252322ad10c0b29af335359e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "75b3030e96f5acb82bc9f273fd1ffb9b8df642f4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "7972c4a4921779e1f70f24d700abdb99f91f034a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "ea5dae3c80a2f96b098e45f2017b466ea9c9b98c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "f9b22d28bd27b58d8b9e4b084e4a8648e6ade869",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "ecb3df851655f7b6169c090ac9e6524b75c7c7d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "fdf25660b948c62528de9f81292a2aeba1879e7d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "092ed22764e3139e8a4fca20bf9347f81a057861",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "ac3f95251525d43bbd71ea253b667cde5b01d0c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "b746761cf04b00fd5cb3efe46e6ce5edc1653a06",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "e33a2cd0733abd2b36609ae5f92f7b5406179768",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "9d49e21968e0779766318699961eb8d5910aec3c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "d5e88e359b3acf7ceda9534ff3a43376760deb09",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "9b8ad46980cb71013326c41c2397308f63142486",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "740e8a8c7d7121d366c379d6b66be6d2a7934bfc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "3e08e5d3c71edada3712e87296c89d4c10a517a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "9b83ca836176165886eca76b36eebd7879adff0e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "010d7b851f90f51b498964106d7609e4d1bad7cc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "6bf62ce8397a4edd41c5bb4232e0ea70c594754c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "a3f16269e4f7a44dc2e0d4e2f17ee871846be708",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "4abb2fe90c2e7695366d7ca87c84ccc347368276",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "a95bc81ab9b4749a06f595ce6d45f5f0b1a808c3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "95f0618b7ae18be6bf99402e9f8341ba3d25a238",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "5f76d43e51a77da931356297ae51096465affb15",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "36b9a3e8b1490e4dc01ca6450930f4ad38a122b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "f5e6dd48e39299390e6a1cb9a2cfeeff56e5031d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "7709a63fbdfba324c3e979af7cbc25d703d02a1b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "1d9780a726965364210ab87ee92cfba8861f8a01",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "680d47774133d3aac32ef2b267d71b01b9910358",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "8eab35b8d46f4eabf283713cee75f88a682996b8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "6ec0e59e7ff209d293ff000a158349affd01c061",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "62ec694317b879b933e7b59fb04ea18f922308e1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "6f412860470f62e9f8dc5baff92d43753a1cfdb2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "6ce463077204b46cd28d14fcdf214946ca33e678",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "c06689bc98245c95dd63a3eda38575bb7edf491b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "04f23c2bbc43c3577ba10516ef6a3c87437b76e9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "691afcb0a3996689ff367c4c463706328c854925",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "8e9a5fb3947b5ddf87a4f343272fb946162fd144",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "2bc63ad4764e942197da418e4cd189f28a247d1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "b9fa295a6f3c03c8126f6fc1990f39f23b71fd7c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "b3b91106e120894c6a5d563a4752b3cf22f130e4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "2ebc4368671402df5517a6d1dfbe227c4fdc17dd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "21896e8b2a9bf03e8911c21d0c10a708073d7aa8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "8d77feb0e7ec8633b8dab31f09c7cbe9867d5669",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "e8ae305e5b66836a5bd91b0d9685ed5211cb14b4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "e38ffc1f617ad9f1cb5413e0e71f26247dd9aac9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "f84be748e9736241bf317954bfd0a195f37b05a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "c7fc8ed562351d3135a8c8f23807a6e02c8bed34",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/315"
+      ]
+    },
+    {
+      "commit": "a9e58443793e1a34a1fd891e99a9f77c31d7cb65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "94837e941f127a7b0ee37abef648dbc7d3b49eef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "b82bc999b997682b9e1610d081125b5bb1d24829",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "e03175e3564af33a29e749b59fd7dfa1419f695b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "ee7fcee6f2ead79ec5348fa0d54f1072924d5848",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "d0828417b8aabf9bd85ee191692cf4c7210ec6ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "94d93903df178803bfd9cf5d04c36b76ee83fba0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/318"
+      ]
+    },
+    {
+      "commit": "debedb1a90043b4e810ee51ac278666750475693",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/318"
+      ]
+    },
+    {
+      "commit": "15dbb6bcf735a71ce68644ac975578a55072c50e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/316"
+      ]
+    },
+    {
+      "commit": "0cc8b1a1a841899823e7b2716c5220165aba44e4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/318"
+      ]
+    },
+    {
+      "commit": "11dd937c12154893e81f2a32e684d5508dfe594d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/318"
+      ]
+    },
+    {
+      "commit": "42d74a8f2606e79e64c383df2261ed7f29f12a8f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "c0415fec3e4c7b1fb302246c0e9d4529c3458b57",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "639bf579c521756da27643507cf27b4f3c51dafd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "65e10ae8918483fe2c7051d89c4f33bd14cfc05d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/317"
+      ]
+    },
+    {
+      "commit": "46b59252a2d9d782ae2b025f216e633a5b786f91",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/319"
+      ]
+    },
+    {
+      "commit": "8c43931f2ca04e0f37b050d354565ab27035dfb0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/320"
+      ]
+    },
+    {
+      "commit": "ff72e7bb6c74ec719a3f73790ed82f62d2ca6172",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "1ed1eaea0c0515bd98efb4b6ea1185c794338b96",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "87288b7e30308ea32ffb91e708483aed349c2110",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "5f27b785e5cfdf71676331da75447a0bbb4543b5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/319"
+      ]
+    },
+    {
+      "commit": "018b71a0b8b475d2c06556c7855e78a83b38c5c2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "4d7686b26ca5e58c9fde0945890301c938da19ad",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/320"
+      ]
+    },
+    {
+      "commit": "8ae766923d1e24d97545c49189f35f054c479da9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "ec0cf20c13ab95fdf912ac9c48169250049fe6df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "900fb5230a630a8c5b939cb1da461855264e96f4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/320"
+      ]
+    },
+    {
+      "commit": "ff1bed9feaadab9136b6c1cf24fff10437930638",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "6db5775cdf7e9728cc93274f6dd6dd1368a5ab2e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/320"
+      ]
+    },
+    {
+      "commit": "8d4a71cedfbfa460aaa0a4a60f7817e6948cc13a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "74f4b24697a36aa701466a4188ef33bd63e615cb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "fa37d38954ae60424b105a950eed9d6671417f39",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/321"
+      ]
+    },
+    {
+      "commit": "1a10b9d079429b1211032b1b59111a682b2c55b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "909f872f5d85b7bd7367197d4c864e82d5aab498",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/322"
+      ]
+    },
+    {
+      "commit": "65ccf97a2572bd32222f8b18d867fabf99fe4018",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/323"
+      ]
+    },
+    {
+      "commit": "b002384e709516eaf902351d9a6e6ed4d1bae1cd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/324"
+      ]
+    },
+    {
+      "commit": "51e49d1aa1f03fb69258ecbf4699dd5c3ec7b717",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/324"
+      ]
+    },
+    {
+      "commit": "70c83443686bf6963c31e91338c7be83cdf44179",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/325"
+      ]
+    },
+    {
+      "commit": "cd80c0e825ad6609f87ba859cb2f3fbc2239e5a2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/326"
+      ]
+    },
+    {
+      "commit": "861e87519e72e67b9da95b2358b5dcfd9e2525d5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/327"
+      ]
+    },
+    {
+      "commit": "e2d87ba368626cc9cc73541f0ae3aaf04dfe781e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/328"
+      ]
+    },
+    {
+      "commit": "11f2d10cbdcdf8274aa569b3efc8ec0be2f4e711",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/323"
+      ]
+    },
+    {
+      "commit": "d7fde000c0a3acc8175d090e3aa7fbc3505fa6d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/324"
+      ]
+    },
+    {
+      "commit": "7727670640db66a0a42ce76bc235e578d1ea25f3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/325"
+      ]
+    },
+    {
+      "commit": "592aca48f39955cd07881d854e82a0650f6d8414",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/326"
+      ]
+    },
+    {
+      "commit": "732f239e34d50dde4b6411a363c105bf149e8586",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/327"
+      ]
+    },
+    {
+      "commit": "44c6916a00bc0247ceb1bd6a08ecdee455d700e2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/328"
+      ]
+    }
+  ]
+}
