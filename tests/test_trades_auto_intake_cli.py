@@ -725,9 +725,12 @@ def test_disabled_settlement_observation_retries_seal_without_gateways(
     assert order == [
         "enqueue",
         "checkpoint_failed",
+        "process",
         "checkpoint",
         "runtime",
     ]
+    status = json.loads(source["status_path"].read_text())
+    assert status["last_lifecycle_intake_error"]["reason_codes"] == ["checkpoint_seal_pending"]
 
 def test_reconcile_intake_sources_defaults_to_every_account(
     monkeypatch,
@@ -872,7 +875,7 @@ def test_deal_json_apply_requires_source_match_when_multiple_sources() -> None:
         {"id": "sy", "account": "sy", "futu_account_ids": ["REAL_87654321"]},
     ]
 
-    with pytest.raises(SystemExit, match="requires payload futu_account_id/account"):
+    with pytest.raises(ValueError, match="requires payload futu_account_id/account"):
         _select_source_for_payload(
             sources,
             payload={"deal_id": "deal-no-account"},
@@ -891,7 +894,7 @@ def test_deal_json_source_selection_rejects_account_mapping_conflict() -> None:
         {"id": "sy", "account": "sy", "futu_account_ids": ["REAL_87654321"]},
     ]
 
-    with pytest.raises(SystemExit, match="account conflicts"):
+    with pytest.raises(ValueError, match="account conflicts"):
         _select_source_for_payload(
             sources,
             payload={"deal_id": "deal-conflict", "account": "lx", "futu_account_id": "REAL_87654321"},
@@ -1370,8 +1373,8 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
     assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply"]) == 2
     assert "use --confirm or --yes" in capsys.readouterr().out
     if wrong_label:
-        with pytest.raises(SystemExit, match="account conflicts"):
-            run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"])
+        assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"]) == 2
+        assert "account conflicts" in capsys.readouterr().out
         assert repo.list_trade_events() == []
         return
     assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"]) == 0
@@ -1540,3 +1543,282 @@ def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
     assert repo.list_trade_events() == []
     if failure == "exception":
         assert "result storage unavailable" in rows[0]["last_error"]
+
+
+def _run_failure_case_listener(tmp_path, monkeypatch, *, on_start=None, rows=()):
+    """One listener iteration, real isolated status/Inbox, no provider connections."""
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    stop = threading.Event()
+    callback_errors = []
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    source = _listener_source(tmp_path, "lx", 11111)
+    for key in ("state_path", "audit_path", "status_path", "inbox_path", "backfill_checkpoint_path"):
+        source[key] = tmp_path / source[key]
+
+    class Listener:
+        def __init__(self, *, on_deal, **_):
+            self.on_deal = on_deal
+
+        def start(self, **_):
+            if on_start:
+                try:
+                    on_start(self.on_deal, source, repo)
+                except BaseException as exc:
+                    callback_errors.append(exc)
+                finally:
+                    stop.set()
+
+        def check_health(self):
+            stop.set()
+
+        def close(self):
+            pass
+
+    class History:
+        def __init__(self, **_):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(auto_intake, "_reconcile_source_completion", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "recover_trade_intake_receipts", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "recover_order_fee_targets", lambda *_, **__: {
+        "targets": [], "selection_cursor": {"after": None}, "candidate_count": 0, "issues": []})
+    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", lambda *_, **__: {})
+    monkeypatch.setattr(auto_intake, "_refresh_lifecycle_delivery_status", lambda *_, **__: None)
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: False)
+    monkeypatch.setattr(auto_intake, "list_retryable_trade_payloads", lambda *_, **__: list(rows))
+    monkeypatch.setattr(auto_intake, "resolve_futu_quote_route", lambda _: SimpleNamespace(
+        ok=False, errors=("offline test",), status="unavailable"))
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json", runtime_root=tmp_path,
+        runtime_root_source="test", intake_cfg={"mode": "apply", "enabled": True}, apply_changes=True,
+        receipt_callback=lambda _: {}, process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    if callback_errors:
+        raise callback_errors[0]
+    return source, repo
+
+
+@pytest.mark.parametrize("failure", ["key", "enqueue", "audit", "status", "reporting"])
+def test_push_enqueue_failure_is_contained_and_next_push_survives(tmp_path, monkeypatch, failure):
+    original_enqueue = auto_intake.enqueue_trade_payload
+    original_key = auto_intake.broker_deal_key_from_payload
+    original_audit = auto_intake.append_trade_intake_audit
+    original_status = auto_intake._write_listener_status
+    calls = []
+    statuses = []
+    failed = False
+    payload = {"deal_id": "push-fault", "acc_id": "REAL_LX", "environment": "REAL",
+               "external_id_namespace": "futu.deal", "code": "US.NVDA", "qty": 1, "price": 1}
+
+    def on_start(callback, source, repo):
+        nonlocal failed
+        def enqueue(*args, **kwargs):
+            nonlocal failed
+            calls.append(kwargs["payload"])
+            if failure in {"enqueue", "reporting"} and not failed:
+                failed = True
+                raise OSError("enqueue fault")
+            return original_enqueue(*args, **kwargs)
+
+        def key(*args, **kwargs):
+            nonlocal failed
+            if failure == "key" and not failed:
+                failed = True
+                raise ValueError("key fault")
+            return original_key(*args, **kwargs)
+
+        def audit(path, event, **kwargs):
+            nonlocal failed
+            if failure == "reporting" or (failure == "audit" and not failed):
+                failed = True
+                raise OSError("audit fault")
+            return original_audit(path, event, **kwargs)
+
+        def status(path, state, **kwargs):
+            nonlocal failed
+            statuses.append({**state, **kwargs})
+            if failure == "reporting" or (failure == "status" and not failed):
+                failed = True
+                raise OSError("status fault")
+            return original_status(path, state, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(auto_intake, "enqueue_trade_payload", enqueue)
+            patch.setattr(auto_intake, "broker_deal_key_from_payload", key)
+            patch.setattr(auto_intake, "append_trade_intake_audit", audit)
+            patch.setattr(auto_intake, "_write_listener_status", status)
+            raw = {**payload, "_trade_intake_source_identity_errors": ["test invalid identity"]} if failure in {"audit", "status"} else payload
+            callback(raw)
+            assert len(calls) == (0 if failure == "key" else 1)
+            assert statuses[-1]["stage"] == "push_enqueue_failed"
+            assert "fault" in statuses[-1]["last_error"]
+            if failure != "reporting":
+                saved_status = json.loads(source["status_path"].read_text())
+                assert saved_status["stage"] == "push_enqueue_failed"
+                audit_rows = [json.loads(line) for line in source["audit_path"].read_text().splitlines()]
+                assert audit_rows[-1]["phase"] == "push_enqueue_failed"
+                assert audit_rows[-1]["deal_id"] == "push-fault"
+            if failure in {"audit", "status"}:
+                # Re-delivery of the same quarantined payload must remain one durable row.
+                callback(raw)
+                from src.application.trades.inbox_authority import resolve_execution_inbox_path
+                summary = auto_intake.trade_inbox_summary(resolve_execution_inbox_path(repo, source["inbox_path"]))
+                assert summary["identity_needs_review_count"] == 1
+            callback({**payload, "deal_id": "next-push"})
+            assert calls[-1]["deal_id"] == "next-push"
+
+    _run_failure_case_listener(tmp_path, monkeypatch, on_start=on_start)
+
+
+@pytest.mark.parametrize("failure", ["checkpoint", "gateway"])
+def test_intake_preparation_failure_keeps_batch_processing_and_retries(tmp_path, monkeypatch, failure):
+    order, results, seals = [], [], []
+    counts = {"checkpoint": 0, "gateway": 0}
+
+    def checkpoint(*_, **kwargs):
+        counts["checkpoint"] += 1
+        order.append("checkpoint")
+        seals.append(kwargs["reason"])
+        if failure == "checkpoint" and counts["checkpoint"] == 1:
+            raise OSError("seal unavailable")
+
+    def gateway(**_):
+        counts["gateway"] += 1
+        order.append("gateway")
+        if failure == "gateway" and counts["gateway"] == 1:
+            raise OSError("gateway unavailable")
+        return SimpleNamespace(close=lambda: None)
+
+    def process(payload, **_):
+        order.append(payload["deal_id"])
+        return {"status": "applied", "deal_id": payload["deal_id"]}
+
+    monkeypatch.setattr(auto_intake, "append_lifecycle_attempt_checkpoint_seal", checkpoint)
+    monkeypatch.setattr(auto_intake, "build_futu_gateway", gateway)
+    monkeypatch.setattr(auto_intake, "_process_payload", process)
+    monkeypatch.setattr(auto_intake, "ensure_lifecycle_timing_after_intake",
+                        lambda *_, **__: order.append("timing") or {"created": True})
+    monkeypatch.setattr(auto_intake, "_format_result_summary", lambda result: results.append(dict(result)) or "test")
+    rows = [{"inbox_id": str(i), "payload": {"deal_id": f"row-{i}"}} for i in range(2)]
+    source, _ = _run_failure_case_listener(tmp_path, monkeypatch, rows=rows)
+    assert [result["status"] for result in results] == ["applied", "applied"]
+    assert results[0]["lifecycle_timing"]["status"] == "needs_review"
+    assert results[1]["lifecycle_timing"] == {"created": True}
+    assert order == (["checkpoint", "row-0", "checkpoint", "gateway", "row-1", "timing"]
+                     if failure == "checkpoint" else
+                     ["checkpoint", "gateway", "row-0", "gateway", "row-1", "timing"])
+    assert seals == (["process_startup", "prior_seal_persist_failed"] if failure == "checkpoint" else ["process_startup"])
+    status = json.loads(source["status_path"].read_text())
+    assert status["last_lifecycle_intake_error"]["deal_id"] == "row-0"
+    assert status["last_lifecycle_intake_error"]["reason_codes"] == [
+        "checkpoint_seal_pending" if failure == "checkpoint" else "settlement_gateway_unavailable"]
+
+
+@pytest.mark.parametrize("result_status,trusted,expected_loads", [
+    ("applied", True, 0), (" APPLIED ", True, 0), ("failed", False, 0), ("failed", True, 1),
+])
+def test_inbox_fee_state_load_is_lazy(tmp_path, monkeypatch, result_status, trusted, expected_loads):
+    payload = {"deal_id": "fee-deal", "acc_id": "REAL_LX", "order_id": "fee-order"}
+    if trusted:
+        payload["_trade_intake_source"] = {"schema_version": "trade_intake_source.v1",
+                                           "account": "lx", "futu_account_id": "REAL_LX"}
+    loads, targets = [], []
+    monkeypatch.setattr(auto_intake, "append_lifecycle_attempt_checkpoint_seal", lambda *_, **__: None)
+    monkeypatch.setattr(auto_intake, "build_futu_gateway", lambda **_: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(auto_intake, "ensure_lifecycle_timing_after_intake", lambda *_, **__: None)
+    monkeypatch.setattr(auto_intake, "_process_payload", lambda *_, **__: {"status": result_status})
+    monkeypatch.setattr(auto_intake, "load_trade_intake_state", lambda path: loads.append(path) or {"marker": True})
+    monkeypatch.setattr(auto_intake, "is_durable_processed_deal", lambda state, _: state.get("marker", False))
+    original_target = auto_intake._durable_fee_target
+    def target(**kwargs):
+        value = original_target(**kwargs)
+        targets.append(value)
+        return value
+    monkeypatch.setattr(auto_intake, "_durable_fee_target", target)
+    _run_failure_case_listener(tmp_path, monkeypatch, rows=[{"inbox_id": "fee", "payload": payload}])
+    assert len(loads) == expected_loads
+    assert targets == [auto_intake.fee_target_from_trusted_payload(payload)]
+
+
+def _manual_failure_config(tmp_path, monkeypatch):
+    sources = [_listener_source(tmp_path, account, 11111 + i) for i, account in enumerate(("lx", "sy"))]
+    cfg = {"enabled": True, "mode": "apply", "state_path": Path("state.json"),
+           "audit_path": Path("audit.jsonl"), "status_path": Path("status.json"),
+           "receipt": {"enabled": False}, "backfill": {"enabled": False},
+           "account_mapping": {"REAL_LX": "lx", "REAL_SY": "sy", "OTHER_LX": "lx"},
+           "futu_account_ids": ["REAL_LX", "REAL_SY", "OTHER_LX"], "sources": sources}
+    monkeypatch.setattr(auto_intake, "load_config", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "resolve_trade_intake_config",
+                        lambda *_, **kwargs: {**cfg, "mode": kwargs.get("mode_override") or "apply"})
+    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", lambda **_: (None, object()))
+    monkeypatch.setattr(auto_intake, "_build_receipt_callback", lambda **_: lambda _: {})
+    return cfg, ["--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path)]
+
+
+@pytest.mark.parametrize("failure", ["unmatched", "ambiguous"])
+def test_execution_file_selector_rejection_is_row_local(tmp_path, monkeypatch, capsys, failure):
+    cfg, args = _manual_failure_config(tmp_path, monkeypatch)
+    if failure == "ambiguous":
+        cfg["sources"].append({**cfg["sources"][0], "id": "duplicate"})
+    def row(physical, label, deal):
+        return {"schema_version": "trade_execution.v1",
+                "broker_account_ref": {"broker_id": "futu", "external_account_id": physical,
+                    "environment": "REAL", "broker_account_id": f"futu:REAL:{physical}", "account_label": label},
+                "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
+                "external_id_namespace": "futu.deal", "external_execution_id": deal,
+                "side": "buy", "position_effect": "open", "quantity": "1", "price": "100",
+                "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z"}
+    incoming = [row("OTHER_LX" if failure == "unmatched" else "REAL_LX", "lx", "bad"),
+                row("REAL_SY", "sy", "good")]
+    path = tmp_path / "rows.jsonl"
+    path.write_text("\n".join(json.dumps(item) for item in incoming))
+    selected, processed = [], []
+    original_select = auto_intake._select_source_for_payload
+    def select(sources, **kwargs):
+        assert not kwargs["payload"]["_trade_intake_file_errors"]
+        selected.append(kwargs["require_match"])
+        return original_select(sources, **kwargs)
+    def process(payload, **kwargs):
+        processed.append((payload["external_execution_id"], kwargs["state_path"]))
+        return {"status": "applied"}
+    monkeypatch.setattr(auto_intake, "_select_source_for_payload", select)
+    monkeypatch.setattr(auto_intake, "_process_payload", process)
+    assert auto_intake.main([*args, "--execution-file", str(path), "--mode", "apply", "--confirm"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert selected == [True, True]
+    assert processed == [("good", tmp_path / "state/sy.json")]
+    assert result["result_counts"] == {"rejected": 1, "applied": 1}
+    assert [item["line_number"] for item in result["results"]] == [1, 2]
+    assert ("requires payload" if failure == "unmatched" else "multiple trade-intake sources") in result["results"][0]["reason"]
+
+
+def test_deal_json_account_conflict_returns_clean_rejection(tmp_path, monkeypatch, capsys):
+    _, args = _manual_failure_config(tmp_path, monkeypatch)
+    path = tmp_path / "deal.json"
+    path.write_text(json.dumps({"deal_id": "conflict", "account": "sy", "futu_account_id": "REAL_LX"}))
+    monkeypatch.setattr(auto_intake, "_process_payload", lambda *_, **__: pytest.fail("rejected input reached processing"))
+    assert auto_intake.main([*args, "--deal-json", str(path), "--mode", "apply", "--confirm"]) == 2
+    captured = capsys.readouterr()
+    assert "account conflicts" in captured.out
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("mode,status,expected", [
+    ("apply", "failed", False), ("apply", "applied", True), ("apply", "unresolved", False),
+    ("apply", "verification_pending", False), ("apply", "skipped", False), ("dry-run", "applied", False),
+])
+def test_deal_json_write_contract_requires_applied_result(tmp_path, monkeypatch, capsys, mode, status, expected):
+    _, args = _manual_failure_config(tmp_path, monkeypatch)
+    path = tmp_path / "deal.json"
+    path.write_text(json.dumps({"deal_id": "write-contract", "futu_account_id": "REAL_LX"}))
+    monkeypatch.setattr(auto_intake, "_process_payload", lambda *_, **__: {"status": status})
+    assert auto_intake.main([*args, "--deal-json", str(path), "--mode", mode, "--confirm"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == status
+    assert result["write_applied"] is expected
+    assert result["dry_run"] is (mode == "dry-run")
