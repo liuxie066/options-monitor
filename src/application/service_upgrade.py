@@ -2655,6 +2655,8 @@ def service_upgrade(
 
     target_dir = releases / target
     previous_dir = repo
+    pre_upgrade_profile = _load_service_profile(runtime)
+    preserved_activation_states: dict[str, dict[str, str]] = {}
     warnings = [] if repo_root_is_symlink else ["confirmed upgrade requires repo_root to be a current symlink"]
     planned = [
         f"materialize {tag} into {target_dir} from git cache {cache / 'git' / 'options-monitor.git'}"
@@ -2676,6 +2678,18 @@ def service_upgrade(
         planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
     if not confirm:
         try:
+            if preserve_activation_state and pre_upgrade_profile:
+                preserved_activation_states = (
+                    capture_preserved_timer_activation_states(
+                        repo_root=repo_link,
+                        runtime_root=runtime,
+                        profile=pre_upgrade_profile,
+                        run_cmd=run_cmd,
+                    )
+                )
+                status_base["preserved_activation_units"] = sorted(
+                    preserved_activation_states
+                )
             pi_storage_readiness = _pi_storage_readiness(
                 runtime_root=runtime,
                 repo_root=repo_link,
@@ -2737,10 +2751,30 @@ def service_upgrade(
     pi_storage_readiness: dict[str, Any] = {}
     compensation: dict[str, Any] = {}
     restarted: list[str] = []
-    pre_upgrade_profile = _load_service_profile(runtime)
-    preserved_activation_states: dict[str, dict[str, str]] = {}
     try:
         with _UpgradeLock(lock_path):
+            if preserve_activation_state and pre_upgrade_profile:
+                preserved_activation_states = (
+                    capture_preserved_timer_activation_states(
+                        repo_root=repo_link,
+                        runtime_root=runtime,
+                        profile=pre_upgrade_profile,
+                        run_cmd=run_cmd,
+                    )
+                )
+                status_base["preserved_activation_units"] = sorted(
+                    preserved_activation_states
+                )
+                operations.append(
+                    {
+                        "operation": "capture_service_activation_state",
+                        "activation_policy": activation_policy,
+                        "preserved_activation_units": sorted(
+                            preserved_activation_states
+                        ),
+                        "ok": True,
+                    }
+                )
             releases.mkdir(parents=True, exist_ok=True)
             remote_url = (
                 ""
@@ -2824,28 +2858,6 @@ def service_upgrade(
                 runtime_dir=target_dir / "agent-runtime",
                 release_dirs=(repo, target_dir),
             )
-            if preserve_activation_state and pre_upgrade_profile:
-                preserved_activation_states = (
-                    capture_preserved_timer_activation_states(
-                        repo_root=repo_link,
-                        runtime_root=runtime,
-                        profile=pre_upgrade_profile,
-                        run_cmd=run_cmd,
-                    )
-                )
-                status_base["preserved_activation_units"] = sorted(
-                    preserved_activation_states
-                )
-                operations.append(
-                    {
-                        "operation": "capture_service_activation_state",
-                        "activation_policy": activation_policy,
-                        "preserved_activation_units": sorted(
-                            preserved_activation_states
-                        ),
-                        "ok": True,
-                    }
-                )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -3132,8 +3144,22 @@ def service_rollback(
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
+    previous_profile = _load_service_profile(runtime)
+    preserved_activation_states: dict[str, dict[str, str]] = {}
     if not confirm:
         try:
+            if preserve_activation_state and previous_profile:
+                preserved_activation_states = (
+                    capture_preserved_timer_activation_states(
+                        repo_root=repo_link,
+                        runtime_root=runtime,
+                        profile=previous_profile,
+                        run_cmd=run_cmd,
+                    )
+                )
+                status_base["preserved_activation_units"] = sorted(
+                    preserved_activation_states
+                )
             pi_storage_readiness = _pi_storage_readiness(
                 runtime_root=runtime,
                 repo_root=repo_link,
@@ -3185,24 +3211,8 @@ def service_rollback(
     pi_storage_readiness: dict[str, Any] = {}
     compensation: dict[str, Any] = {}
     restarted: list[str] = []
-    previous_profile = _load_service_profile(runtime)
-    preserved_activation_states: dict[str, dict[str, str]] = {}
     try:
         with _UpgradeLock(runtime / "locks" / "upgrade.lock"):
-            runtime_config_prepare = _prepare_runtime_configs_for_release(
-                previous_dir=repo,
-                target_dir=target_dir,
-                runtime_root=runtime,
-                releases_root=releases,
-                run_cmd=run_cmd,
-                operations=operations,
-            )
-            pi_storage_readiness = _pi_storage_readiness(
-                runtime_root=runtime,
-                repo_root=repo_link,
-                runtime_dir=target_dir / "agent-runtime",
-                release_dirs=(repo, target_dir),
-            )
             if preserve_activation_state and previous_profile:
                 preserved_activation_states = (
                     capture_preserved_timer_activation_states(
@@ -3225,6 +3235,20 @@ def service_rollback(
                         "ok": True,
                     }
                 )
+            runtime_config_prepare = _prepare_runtime_configs_for_release(
+                previous_dir=repo,
+                target_dir=target_dir,
+                runtime_root=runtime,
+                releases_root=releases,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+            pi_storage_readiness = _pi_storage_readiness(
+                runtime_root=runtime,
+                repo_root=repo_link,
+                runtime_dir=target_dir / "agent-runtime",
+                release_dirs=(repo, target_dir),
+            )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(

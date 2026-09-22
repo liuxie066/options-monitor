@@ -340,21 +340,76 @@ def test_post_publication_failure_before_switch_does_not_resume_old_runtime(
             remediation=["keep Agent ingress stopped"],
         )
 
-    def _fail_activation(**_kwargs):
-        raise module.ServiceTransitionError("activation snapshot failed", status="service_activation_snapshot_failed")
+    def _fail_switch(**_kwargs):
+        raise module.ServiceTransitionError(
+            "switch failed after publication", status="switch_failed"
+        )
 
     monkeypatch.setattr(module, "_pi_storage_readiness", _readiness)
-    monkeypatch.setattr(module, "capture_preserved_timer_activation_states", _fail_activation)
-    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("failure path switched current"))
+    monkeypatch.setattr(
+        module, "capture_preserved_timer_activation_states", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_switch)
     monkeypatch.setattr(
         module, "_restart_services_from_loaded_profile", _fail_lambda("failure path started old service")
     )
 
     out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=True, restart_services=True)
 
-    assert out["status"] == "service_activation_snapshot_failed"
+    assert out["status"] == "switch_failed"
     assert out["compensation"]["status"] == "pi_storage_not_ready"
     assert "keep Agent ingress stopped" in out["remediation"]
+    assert current.resolve() == previous
+
+
+def test_activation_snapshot_failure_stops_before_runtime_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, target, runtime = _upgrade_fixture(tmp_path)
+    _stub_upgrade_preparation(monkeypatch, module, target)
+    monkeypatch.setattr(
+        module,
+        "_load_service_profile",
+        lambda _runtime: {"service_provider": "systemd"},
+    )
+
+    def _fail_activation(**_kwargs):
+        raise module.ServiceTransitionError(
+            "activation snapshot failed",
+            status="service_activation_snapshot_failed",
+        )
+
+    monkeypatch.setattr(
+        module,
+        "capture_preserved_timer_activation_states",
+        _fail_activation,
+    )
+    monkeypatch.setattr(
+        module,
+        "_ensure_release_runtime",
+        _fail_lambda("snapshot failure prepared target runtime"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_pi_storage_readiness",
+        _fail_lambda("snapshot failure published Pi state"),
+    )
+
+    out = _upgrade(
+        module,
+        current=current,
+        runtime=runtime,
+        target=target,
+        confirm=True,
+        restart_services=True,
+    )
+
+    assert out["status"] == "service_activation_snapshot_failed"
+    assert out["compensation"] == {}
+    assert out["symlink_switched"] is False
     assert current.resolve() == previous
 
 

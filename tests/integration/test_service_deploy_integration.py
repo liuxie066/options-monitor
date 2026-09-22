@@ -1641,10 +1641,12 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
         json.dumps(profile), encoding="utf-8"
     )
     drift_calls: list[dict[str, object]] = []
+    transition_events: list[str] = []
 
     def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
         drift_calls.append(dict(kwargs))
         if not kwargs.get("confirm"):
+            transition_events.append("capture")
             return {
                 "activation_states": {target: "enabled"},
                 "active_states": {target: "inactive"},
@@ -1671,10 +1673,13 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
         "_materialize_release_from_git_cache",
         lambda **_kwargs: {"status": "reused", "target_dir": str(v101)},
     )
+
+    def _ensure_release_runtime(**_kwargs):  # type: ignore[no-untyped-def]
+        transition_events.append("prepare")
+        return {"status": "ready"}
+
     monkeypatch.setattr(
-        service_upgrade_module,
-        "_ensure_release_runtime",
-        lambda **_kwargs: {"status": "ready"},
+        service_upgrade_module, "_ensure_release_runtime", _ensure_release_runtime
     )
     monkeypatch.setattr(
         service_upgrade_module, "_run_required", lambda *_args, **_kwargs: None
@@ -1730,12 +1735,69 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
     assert current.resolve() == v100.resolve()
     assert out["activation_policy"] == "preserve-existing"
     assert out["preserved_activation_units"] == [target]
+    assert transition_events[:2] == ["capture", "prepare"]
     assert len(confirmed_calls) == 2
     assert all(
         item["activation_policy"] == "preserve-existing"
         and item["preserved_activation_states"] == expected_snapshot
         for item in confirmed_calls
     )
+
+
+def test_service_upgrade_preview_reports_preserved_timer_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    current_release = releases / "1.0.0"
+    _write_upgrade_release_skeleton(current_release, "1.0.0")
+    current = install / "current"
+    current.symlink_to(current_release, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    target = "options-monitor-upgrade.timer"
+    profile = {
+        "service_provider": "systemd",
+        "services": [{"name": target}],
+    }
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile), encoding="utf-8"
+    )
+    snapshot = {
+        target: {
+            "activation_state": "disabled",
+            "active_state": "inactive",
+        }
+    }
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "service_upgrade_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "latest_version": "1.0.1",
+            "release_tag": "v1.0.1",
+        },
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "capture_preserved_timer_activation_states",
+        lambda **_kwargs: snapshot,
+    )
+
+    out = service_upgrade_module.service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        preserve_activation_state=True,
+    )
+
+    assert out["status"] == "dry_run"
+    assert out["preserved_activation_units"] == [target]
+    assert out["operations"] == []
+
 
 @pytest.mark.parametrize("auto", [False, True])
 def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
@@ -3033,10 +3095,12 @@ def test_service_rollback_preserves_paused_timer_snapshot(
         json.dumps(profile), encoding="utf-8"
     )
     drift_calls: list[dict[str, object]] = []
+    transition_events: list[str] = []
 
     def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
         drift_calls.append(dict(kwargs))
         if not kwargs.get("confirm"):
+            transition_events.append("capture")
             return {
                 "activation_states": {target: "enabled"},
                 "active_states": {target: "inactive"},
@@ -3046,10 +3110,14 @@ def test_service_rollback_preserves_paused_timer_snapshot(
             "preserved_activation_units": [target],
         }
 
+    def _prepare_runtime_configs(**_kwargs):  # type: ignore[no-untyped-def]
+        transition_events.append("prepare")
+        return {"status": "prepared"}
+
     monkeypatch.setattr(
         service_upgrade_module,
         "_prepare_runtime_configs_for_release",
-        lambda **_kwargs: {"status": "prepared"},
+        _prepare_runtime_configs,
     )
     monkeypatch.setattr(
         service_upgrade_module,
@@ -3081,6 +3149,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
     assert current.resolve() == v100.resolve()
     assert out["activation_policy"] == "preserve-existing"
     assert out["preserved_activation_units"] == [target]
+    assert transition_events[:2] == ["capture", "prepare"]
     assert len(confirmed_calls) == 1
     assert confirmed_calls[0]["activation_policy"] == "preserve-existing"
     assert confirmed_calls[0]["preserved_activation_states"] == {
@@ -3089,6 +3158,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
             "active_state": "inactive",
         }
     }
+
 
 def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_rollback, write_upgrade_status
