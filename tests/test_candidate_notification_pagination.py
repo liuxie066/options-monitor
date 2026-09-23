@@ -43,10 +43,10 @@ def test_notification_bounded_source_and_unavailable_signing(tmp_path, monkeypat
     assert response["data"]["coverage"]["status"] == "partial"
     path.write_bytes(b"x" * (1024 * 1024 + 1))
     response = execute_tool("notification_perception_read", {"runtime_root": str(tmp_path)})
-    assert response["data"]["summary"]["status"] == "failed"
+    assert response["data"]["summary"]["status"] == "partial"
     assert response["data"]["coverage"]["status"] == "unknown"
     assert response["data"]["pagination"]["matched_count"] is None
-    assert response["data"]["read_statuses"][0]["reason"] == "file_too_large"
+    assert response["data"]["read_statuses"][0]["tail_truncated"] is True
 
 
 def test_notification_actual_symlink_rejected(tmp_path):

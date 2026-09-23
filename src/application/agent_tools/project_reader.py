@@ -161,6 +161,42 @@ def read_bytes(root: Path, relative_name: str, *, deadline_monotonic: float | No
 
 
 @_query
+def read_tail_bytes(root: Path, relative_name: str, *, deadline_monotonic: float | None = None,
+                    cancelled: Callable[[], bool] | None = None) -> tuple[bytes, bool, int]:
+    """Read at most 1 MiB from a regular file's end through the same safe path walk."""
+    parts = _parts(relative_name)
+    if not parts:
+        raise ProjectReaderError("unsupported")
+    parent = _directory(root, "/".join(parts[:-1]), deadline_monotonic, cancelled)
+    descriptor = None
+    try:
+        descriptor = _io(lambda: os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=parent), deadline_monotonic, cancelled)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ProjectReaderError("unsupported")
+        if before.st_nlink != 1:
+            raise ProjectReaderError("permission_denied")
+        truncated = before.st_size > MAX_FILE_BYTES
+        os.lseek(descriptor, max(0, before.st_size - MAX_FILE_BYTES), os.SEEK_SET)
+        chunks, size = [], 0
+        while size < min(before.st_size, MAX_FILE_BYTES):
+            chunk = _io(lambda: os.read(descriptor, min(65536, MAX_FILE_BYTES - size)), deadline_monotonic, cancelled)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        after = os.fstat(descriptor)
+        if _identity(before) != _identity(after) or size != min(before.st_size, MAX_FILE_BYTES) or after.st_nlink != 1:
+            raise ProjectReaderError("source_changed")
+        _check(deadline_monotonic, cancelled)
+        return b"".join(chunks), truncated, before.st_size
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+@_query
 def list_names(root: Path, relative_name: str = "", *, deadline_monotonic: float | None = None,
                cancelled: Callable[[], bool] | None = None, max_entries: int = MAX_DIRECTORY) -> tuple[list[str], dict[str, Any]]:
     descriptor = _directory(root, relative_name, deadline_monotonic, cancelled)

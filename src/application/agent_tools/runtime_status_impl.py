@@ -396,14 +396,19 @@ def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[
 def _ledger_context_summary(context_info: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(context_info, dict):
         return {"available": False, "status": "unknown", "fail_closed": False}
+    if not context_info.get("exists"):
+        return {"available": False, "status": "not_generated", "reason": "context_artifact_missing", "fail_closed": False}
+    if context_info.get("read_error") or not context_info.get("is_file", False):
+        return {"available": False, "status": "read_failed", "reason": "context_artifact_unreadable", "fail_closed": False}
     payload = context_info.get("json")
     context: dict[str, Any] = payload if isinstance(payload, dict) else {}
     ledger_raw = context.get("ledger")
     ledger: dict[str, Any] = ledger_raw if isinstance(ledger_raw, dict) else {}
     if not ledger:
         return {
-            "available": bool(context_info.get("exists")),
+            "available": False,
             "status": "unknown",
+            "reason": "context_payload_empty_or_unreadable" if not context else "ledger_section_missing",
             "fail_closed": False,
         }
     return {

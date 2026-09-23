@@ -42,6 +42,31 @@ def test_notification_perception_read_can_read_run_scoped_audit(tmp_path: Path) 
     assert data["events"][0]["source_path"] == "output_runs/run_2/state/audit_events.jsonl"
 
 
+def test_large_shared_audit_returns_recent_evidence_with_partial_coverage(tmp_path: Path) -> None:
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    with audit.open("w", encoding="utf-8") as stream:
+        old = json.dumps(_row("old", "notification_prepared", "chat"), ensure_ascii=False)
+        for _ in range(4000):
+            stream.write(old + "\n")
+        recent = _row("recent", "notification_delivery_completed", "chat")
+        recent["event_at_utc"] = "2026-06-23T14:01:00+00:00"
+        stream.write(json.dumps(recent, ensure_ascii=False) + "\n")
+    assert audit.stat().st_size > 1024 * 1024
+
+    data = read_notification_perception_events(repo_root=tmp_path, limit=10)
+    assert data["summary"]["status"] == "partial"
+    assert data["events"][0]["run_id"] == "recent"
+    assert data["coverage"]["status"] == "partial"
+    assert data["pagination"]["matched_count"] is None
+    assert data["read_statuses"][0]["tail_truncated"] is True
+    from src.application.agent_tool_registry import get_tool_definition
+    _, warnings, _ = get_tool_definition("notification_perception_read").call(
+        {"runtime_root": str(tmp_path), "limit": 10}
+    )
+    assert warnings == ["Notification perception audit covers only the recent file tail."]
+
+
 def test_notification_perception_read_tool_is_registered_and_read_only(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.notification_perception as notification_tools
     from src.application.agent_tool_registry import get_tool_definition
