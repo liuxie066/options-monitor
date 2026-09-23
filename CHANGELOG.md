@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+## 3.6.6 - 2026-09-23
+
+### New Features
+- Unified trade strategy attribution and OM Bot confirmation for account-scoped trade intake.
+
 ### Improvements
 - Clarified evidence ownership, repository safety boundaries, and scoped validation guidance for agent workflows.
+
+### Bug Fixes
+- Isolated auto-intake failures and reconciled pending trade state without blocking unrelated accounts.
+- Preserved paused timer activation state during upgrades.
 
 ## 3.6.5 - 2026-09-22
 

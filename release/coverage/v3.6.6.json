@@ -1,0 +1,166 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.6",
+  "base": {
+    "tag": "v3.6.5",
+    "commit": "a8dae4d74fd111221ab47df7c605e2228ecd9757"
+  },
+  "reviewed_head": "7e47ea7deacaa17423c72ea75a7c159b2ebd0668",
+  "commits": [
+    {
+      "sha": "d841c0e82fa0619584f7b10a0223d8ef2b32d3f7",
+      "subject": "fix(updater): preserve paused timer state"
+    },
+    {
+      "sha": "a29bc9785e4599a8520a7eaad8d5649a25d8dbd8",
+      "subject": "docs(graph): refresh dependency graph"
+    },
+    {
+      "sha": "248d9c9334274fa70d02383850c028d81c136120",
+      "subject": "Merge pull request #340 from liuxie066/codex/fix-upgrade-preserve-activation-state"
+    },
+    {
+      "sha": "8838231f41204637b2892adbc5b7639a6f3716a3",
+      "subject": "fix(trades): harden auto intake failure isolation and reconciliation"
+    },
+    {
+      "sha": "3e7131553f2e27f7c8fa81a7b3489eabfd81ecc2",
+      "subject": "Merge pull request #341 from liuxie066/codex/auto-intake-t1-t7"
+    },
+    {
+      "sha": "341939bbe89a2d51de1747c53edc4b9232ad7ee5",
+      "subject": "feat(trades): unify strategy attribution and OM Bot confirmation"
+    },
+    {
+      "sha": "9612a72dfbe968b17fefc3afd85aa3dba9e24640",
+      "subject": "chore(trades): integrate main intake recovery fixes"
+    },
+    {
+      "sha": "7a765220df0222d73d074e6e6fe708644454976e",
+      "subject": "Merge pull request #342 from liuxie066/codex/trade-attribution"
+    },
+    {
+      "sha": "c7566387df19b2ad7abfd153bdbb13e67c7f81d3",
+      "subject": "docs(agent): refine repository guidance"
+    },
+    {
+      "sha": "7e47ea7deacaa17423c72ea75a7c159b2ebd0668",
+      "subject": "Merge pull request #343 from liuxie066/codex/agent-guidance-skill-split"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Unified trade strategy attribution and OM Bot confirmation for account-scoped trade intake.",
+      "commits": [
+        "341939bbe89a2d51de1747c53edc4b9232ad7ee5"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Clarified evidence ownership, repository safety boundaries, and scoped validation guidance for agent workflows.",
+      "commits": [
+        "c7566387df19b2ad7abfd153bdbb13e67c7f81d3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Isolated auto-intake failures and reconciled pending trade state without blocking unrelated accounts.",
+      "commits": [
+        "8838231f41204637b2892adbc5b7639a6f3716a3",
+        "9612a72dfbe968b17fefc3afd85aa3dba9e24640"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved paused timer activation state during upgrades.",
+      "commits": [
+        "d841c0e82fa0619584f7b10a0223d8ef2b32d3f7"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "a29bc9785e4599a8520a7eaad8d5649a25d8dbd8",
+      "reason": "Dependency graph refresh only; no runtime or user-facing behavior change."
+    },
+    {
+      "commit": "248d9c9334274fa70d02383850c028d81c136120",
+      "reason": "Protected-main merge; release impact is covered by the constituent upgrade fix."
+    },
+    {
+      "commit": "3e7131553f2e27f7c8fa81a7b3489eabfd81ecc2",
+      "reason": "Protected-main merge; release impact is covered by the constituent trade intake fix."
+    },
+    {
+      "commit": "7a765220df0222d73d074e6e6fe708644454976e",
+      "reason": "Protected-main merge; release impact is covered by the constituent trade attribution commits."
+    },
+    {
+      "commit": "7e47ea7deacaa17423c72ea75a7c159b2ebd0668",
+      "reason": "Protected-main merge; release impact is covered by the constituent documentation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d841c0e82fa0619584f7b10a0223d8ef2b32d3f7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/340"
+      ]
+    },
+    {
+      "commit": "a29bc9785e4599a8520a7eaad8d5649a25d8dbd8",
+      "references": [
+        "docs/DEPENDENCY_GRAPH.md"
+      ]
+    },
+    {
+      "commit": "248d9c9334274fa70d02383850c028d81c136120",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/340"
+      ]
+    },
+    {
+      "commit": "8838231f41204637b2892adbc5b7639a6f3716a3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/341"
+      ]
+    },
+    {
+      "commit": "3e7131553f2e27f7c8fa81a7b3489eabfd81ecc2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/341"
+      ]
+    },
+    {
+      "commit": "341939bbe89a2d51de1747c53edc4b9232ad7ee5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/342"
+      ]
+    },
+    {
+      "commit": "9612a72dfbe968b17fefc3afd85aa3dba9e24640",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/342"
+      ]
+    },
+    {
+      "commit": "7a765220df0222d73d074e6e6fe708644454976e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/342"
+      ]
+    },
+    {
+      "commit": "c7566387df19b2ad7abfd153bdbb13e67c7f81d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/343"
+      ]
+    },
+    {
+      "commit": "7e47ea7deacaa17423c72ea75a7c159b2ebd0668",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/343"
+      ]
+    }
+  ]
+}
