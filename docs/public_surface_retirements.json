@@ -5,6 +5,26 @@
       "module": "domain/domain/ledger/position_fields.py",
       "name": "upsert_note_kv",
       "reason": "Note-key/value upsert retired with the note-as-fact path: exp/multiplier are no longer written into note, because facts live in structured keys; merge_note is the surviving note writer."
+    },
+    {
+      "module": "domain/domain/close_advice.py",
+      "name": "STRICT_MIN_DTE",
+      "reason": "The fixed 14-day minimum was retired when Close Advice switched to remaining annualized return with a positive DTE requirement."
+    },
+    {
+      "module": "domain/domain/close_advice.py",
+      "name": "STRICT_MIN_REMAINING_TERM_RATIO",
+      "reason": "The first-half-of-contract gate was retired because opening term no longer determines the remaining yield decision."
+    },
+    {
+      "module": "domain/domain/close_advice.py",
+      "name": "STRICT_MAX_CLOSE_COST_TO_STRIKE_RATIO",
+      "reason": "The strike-notional close-cost ceiling was replaced by the Put or Call capital-basis remaining annualized return calculation."
+    },
+    {
+      "module": "domain/domain/close_advice.py",
+      "name": "STRICT_MAX_SPREAD_RATIO",
+      "reason": "The spread percentage ceiling was retired; a valid two-sided quote is now evaluated at its ask price with fees."
     }
   ]
 }

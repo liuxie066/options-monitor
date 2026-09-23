@@ -42,7 +42,7 @@ def _row(**overrides: object) -> dict:
     return evaluate_close_advice(_input(**overrides))
 
 
-def test_strict_policy_closes_only_when_every_gate_passes() -> None:
+def test_remaining_yield_policy_closes_only_when_every_gate_passes() -> None:
     row = _row()
 
     assert row["policy_version"] == STRICT_CLOSE_POLICY_VERSION
@@ -53,33 +53,48 @@ def test_strict_policy_closes_only_when_every_gate_passes() -> None:
     assert round(row["net_capture_ratio"], 6) == round(1 - 8.5 / 199.5, 6)
     assert round(row["close_cost_ratio"], 6) == 0.00085
     assert row["remaining_term_ratio"] == 0.5
+    assert row["capital_basis"] == 10000.0
+    assert row["remaining_max_annualized_return"] == 8.5 / 10000 * 365 / 30
 
 
-def test_strict_policy_thresholds_are_inclusive() -> None:
+def test_remaining_yield_thresholds_are_inclusive() -> None:
     row = _row(
-        premium=1.01, bid=0.085, ask=0.09,
-        estimated_open_fee=1.0, estimated_close_fee=1.0, dte=14, original_dte=28,
+        premium=50.0, bid=10.0, ask=10.0,
+        estimated_open_fee=0.0, estimated_close_fee=0.0,
+        dte=365, original_dte=365,
     )
 
-    assert row["opening_net_credit"] == 100.0
-    assert row["all_in_close_cost"] == 10.0
-    assert row["net_capture_ratio"] == 0.9
-    assert row["close_cost_ratio"] == 0.001
+    assert row["opening_net_credit"] == 5000.0
+    assert row["all_in_close_cost"] == 1000.0
+    assert row["net_capture_ratio"] == 0.8
+    assert row["remaining_max_annualized_return"] == 0.1
     assert row["recommendation_state"] == RECOMMENDATION_CLOSE
+
+
+def test_forward_annualized_example_holds_at_one_dollar_and_closes_at_thirty_cents() -> None:
+    common = {
+        "strike": 50.0,
+        "premium": 5.0,
+        "spot": 60.0,
+        "dte": 30,
+        "estimated_open_fee": 0.0,
+        "estimated_close_fee": 0.0,
+    }
+    hold = _row(**common, bid=1.0, ask=1.0)
+    close = _row(**common, bid=0.3, ask=0.3)
+    assert hold["net_capture_ratio"] == 0.8
+    assert round(hold["remaining_max_annualized_return"], 4) == 0.2433
+    assert hold["recommendation_state"] == RECOMMENDATION_HOLD
+    assert close["net_capture_ratio"] == 0.94
+    assert round(close["remaining_max_annualized_return"], 3) == 0.073
+    assert close["recommendation_state"] == RECOMMENDATION_CLOSE
 
 
 def test_each_failed_economic_gate_holds_instead_of_creating_another_action() -> None:
     scenarios = {
         "option_not_otm": {"spot": 90.0},
-        "net_capture_below_threshold": {"ask": 0.30, "bid": 0.29},
-        "dte_below_threshold": {"dte": 13},
-        "remaining_term_below_threshold": {"dte": 29, "original_dte": 60},
-        "close_cost_ratio_above_threshold": {
-            "strike": 50.0,
-            "ask": 0.08,
-            "bid": 0.07,
-        },
-        "spread_too_wide": {"bid": 0.04, "ask": 0.08},
+        "net_capture_below_threshold": {"ask": 0.50, "bid": 0.49},
+        "remaining_annualized_above_threshold": {"dte": 1},
     }
 
     for expected_flag, overrides in scenarios.items():
@@ -95,15 +110,24 @@ def test_call_must_be_otm_under_the_same_strict_policy() -> None:
     assert close["recommendation_state"] == RECOMMENDATION_CLOSE
     assert hold["recommendation_state"] == RECOMMENDATION_HOLD
     assert "option_not_otm" in hold["decision_basis"]
+    assert close["capital_basis"] == 8000.0
+    assert close["remaining_max_annualized_return"] == 8.5 / 8000 * 365 / 30
 
 
-def test_incomplete_quote_fee_or_open_date_is_not_evaluable() -> None:
+def test_short_dte_missing_open_date_and_wide_spread_can_close() -> None:
+    row = _row(dte=5, original_dte=None, bid=0.0, ask=0.01)
+    assert row["recommendation_state"] == RECOMMENDATION_CLOSE
+    assert row["remaining_term_ratio"] is None
+    assert row["spread_ratio"] == 2.0
+
+
+def test_incomplete_quote_fee_or_invalid_open_date_is_not_evaluable() -> None:
     for overrides, expected_flag in (
         ({"ask": None}, "missing_ask"),
         ({"fee_calc_status": "unavailable"}, "fee_evidence_unavailable"),
         ({"fee_calc_basis": None}, "fee_evidence_unavailable"),
         ({"currency": None}, "missing_currency"),
-        ({"original_dte": None}, "missing_original_dte"),
+        ({"original_dte": -1}, "invalid_original_dte"),
         ({"dte": 61}, "inconsistent_position_dates"),
     ):
         row = _row(**overrides)
@@ -117,7 +141,7 @@ def test_boolean_numeric_evidence_is_not_evaluable() -> None:
         ("bid", "missing_bid"),
         ("ask", "missing_ask"),
         ("dte", "missing_dte"),
-        ("original_dte", "missing_original_dte"),
+        ("original_dte", "invalid_original_dte"),
         ("multiplier", "missing_multiplier"),
         ("contracts_open", "missing_contracts_open"),
         ("strike", "missing_strike"),
@@ -141,9 +165,23 @@ def test_missing_position_identity_is_not_evaluable() -> None:
         assert expected_flag in row["data_quality_flags"]
 
 
+def test_overflowed_economic_result_fails_closed() -> None:
+    row = _row(premium=1e308, multiplier=1e308)
+    assert row["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
+    assert "invalid_economic_denominator" in row["data_quality_flags"]
+
+
+def test_remaining_yield_orders_close_rows_before_capture_ratio() -> None:
+    low_yield = _row(symbol="LOW", ask=0.02, bid=0.02)
+    high_capture = _row(symbol="HIGH", premium=10, ask=0.08, bid=0.07)
+    assert low_yield["net_capture_ratio"] < high_capture["net_capture_ratio"]
+    selected = select_close_advice_notification_rows([high_capture, low_yield])
+    assert [row["symbol"] for row in selected] == ["LOW", "HIGH"]
+
+
 def test_notification_selection_uses_only_close_state() -> None:
     close = _row(symbol="NVDA")
-    hold = _row(symbol="AMD", dte=13)
+    hold = _row(symbol="AMD", ask=0.50, bid=0.49)
     close["evaluation_status"] = "priced"
     hold["evaluation_status"] = "priced"
 
@@ -189,3 +227,14 @@ def test_notification_selection_rejects_close_without_complete_evidence() -> Non
     )
 
     assert [row["symbol"] for row in selected] == ["STRICT"]
+
+
+def test_notification_selection_rejects_close_without_new_metrics() -> None:
+    complete = _row(symbol="COMPLETE")
+    no_basis = {**complete, "symbol": "NO_BASIS", "capital_basis": None}
+    no_yield = {**complete, "symbol": "NO_YIELD", "remaining_max_annualized_return": None}
+    infinite_yield = {**complete, "symbol": "INFINITE", "remaining_max_annualized_return": float("inf")}
+    selected = select_close_advice_notification_rows(
+        [no_basis, no_yield, infinite_yield, complete]
+    )
+    assert [row["symbol"] for row in selected] == ["COMPLETE"]

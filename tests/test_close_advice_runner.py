@@ -316,7 +316,7 @@ def test_context_override_is_the_only_position_snapshot_evaluated(
     assert "TSLA" not in result["notification_text"]
 
 
-def test_strict_close_row_is_the_only_notified_state(
+def test_remaining_yield_close_row_is_the_only_notified_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -335,11 +335,11 @@ def test_strict_close_row_is_the_only_notified_state(
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
     assert result["rows"] == 1
     assert result["notify_rows"] == 1
-    assert row["policy_version"] == "strict_profit_capture.v1"
+    assert row["policy_version"] == "remaining_yield_capture.v1"
     assert row["recommendation_state"] == "close"
-    assert row["net_capture_ratio"] >= 0.90
-    assert row["close_cost_ratio"] <= 0.001
-    assert row["remaining_term_ratio"] >= 0.50
+    assert row["net_capture_ratio"] >= 0.80
+    assert row["capital_basis"] == 10000.0
+    assert row["remaining_max_annualized_return"] <= 0.10
     assert row["strategy_group_id"] == "combo-group-1"
     assert row["leg_role"] == "funding_put"
     assert pd.isna(row["source_stock_lot_id"])
@@ -427,7 +427,7 @@ def test_fractional_multiplier_fails_closed_instead_of_truncating_fee_basis(
     ("field", "expected_flag"),
     [
         ("multiplier", "missing_multiplier"),
-        ("opened_at", "missing_original_dte"),
+        ("opened_at", "invalid_original_dte"),
     ],
 )
 def test_boolean_position_evidence_fails_closed_before_domain_evaluation(
@@ -450,6 +450,46 @@ def test_boolean_position_evidence_fails_closed_before_domain_evaluation(
     assert row["recommendation_state"] == "not_evaluable"
     assert expected_flag in row["data_quality_flags"]
     assert result["notify_rows"] == 0
+
+
+def test_missing_open_date_still_allows_remaining_yield_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_business_date(monkeypatch)
+    position = _position()
+    position.pop("opened_at")
+    result, output_dir = _run(tmp_path, positions=[position], quotes=[_quote()])
+    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
+    assert result["notify_rows"] == 1
+    assert row["recommendation_state"] == "close"
+    assert pd.isna(row["original_dte"])
+
+
+def test_duplicate_short_lot_is_explicit_context_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_business_date(monkeypatch)
+    position = _position()
+    with pytest.raises(ValueError, match="duplicate account/lot_id"):
+        _run(tmp_path, positions=[position, dict(position)], quotes=[_quote()])
+
+
+def test_call_uses_spot_value_as_capital_proxy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_business_date(monkeypatch)
+    _, output_dir = _run(
+        tmp_path,
+        positions=[_position(option_type="call")],
+        quotes=[_quote(option_type="call", spot=80.0)],
+    )
+    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
+    assert row["capital_basis"] == 8000.0
+    assert row["remaining_max_annualized_return"] > 0
+    assert "Call 标的市值代理" in (output_dir / "close_advice.txt").read_text(encoding="utf-8")
 
 
 def test_long_options_are_outside_close_advice_scope(

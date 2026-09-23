@@ -13,6 +13,8 @@ from domain.domain.close_advice import (
     RECOMMENDATION_HOLD,
     RECOMMENDATION_NOT_EVALUABLE,
     STRICT_CLOSE_POLICY_VERSION,
+    has_complete_close_metrics,
+    sort_advice_rows,
 )
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
@@ -91,8 +93,7 @@ def close_advice_read_tool(
         used_sources.append(source)
     sources = used_sources
 
-    matched = [_public_row(row) for row in rows if _matches(row, query)]
-    matched.sort(key=_sort_key)
+    matched = sort_advice_rows([_public_row(row) for row in rows if _matches(row, query)])
     limit = max(1, min(int(query.limit or 50), 500))
     returned = matched[:limit]
 
@@ -497,7 +498,7 @@ def _invalid_report_error(
     return AgentToolError(
         code="DEPENDENCY_INVALID",
         message="平仓建议报告完整性校验失败。",
-        hint="请重新生成严格版平仓建议报告。",
+        hint="请重新生成当前策略的平仓建议报告。",
         details={
             "csv_path": mask_path(source.path),
             "reason": str(validation.get("reason") or "unknown"),
@@ -532,7 +533,7 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
         raise AgentToolError(
             code="DEPENDENCY_INVALID",
             message="平仓建议报告缺少已校验的快照。",
-            hint="请重新生成严格版平仓建议报告。",
+            hint="请重新生成当前策略的平仓建议报告。",
         )
     rows: list[dict[str, Any]] = []
     try:
@@ -801,6 +802,8 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "estimated_close_fee",
         "all_in_close_cost",
         "net_capture_ratio",
+        "capital_basis",
+        "remaining_max_annualized_return",
         "close_cost_ratio",
         "fee_calc_status",
         "fee_calc_basis",
@@ -859,6 +862,7 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         }
         and decision_basis
         and evidence_status == expected_evidence_status
+        and (recommendation != RECOMMENDATION_CLOSE or has_complete_close_metrics(row))
         and (
             (
                 recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
@@ -887,6 +891,8 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         invalid_basis = "invalid_or_missing_strict_recommendation_state"
     elif not decision_basis:
         invalid_basis = "missing_strict_decision_basis"
+    elif recommendation == RECOMMENDATION_CLOSE and not has_complete_close_metrics(row):
+        invalid_basis = "missing_current_policy_decision_metrics"
     elif (
         recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
         and evaluation_status != "priced"
@@ -945,24 +951,6 @@ def _source_payload(sources: list[_Source], *, mask_path: Callable[[Any], str | 
     }
 
 
-def _sort_key(row: dict[str, Any]) -> tuple[int, float, float, str, str, float]:
-    recommendation = _lower(row.get("recommendation_state"))
-    capture = _float_or_none(row.get("net_capture_ratio"))
-    close_cost = _float_or_none(row.get("all_in_close_cost"))
-    return (
-        {
-            RECOMMENDATION_CLOSE: 0,
-            RECOMMENDATION_HOLD: 1,
-            RECOMMENDATION_NOT_EVALUABLE: 2,
-        }.get(recommendation, 3),
-        -(capture if capture is not None else -1.0),
-        close_cost if close_cost is not None else float("inf"),
-        str(row.get("account") or ""),
-        str(row.get("symbol") or ""),
-        _float_or_none(row.get("strike")) or 0.0,
-    )
-
-
 _NUMERIC_PUBLIC_FIELDS = frozenset(
     {
         "strike",
@@ -983,6 +971,8 @@ _NUMERIC_PUBLIC_FIELDS = frozenset(
         "estimated_close_fee",
         "all_in_close_cost",
         "net_capture_ratio",
+        "capital_basis",
+        "remaining_max_annualized_return",
         "close_cost_ratio",
         "estimated_pnl_if_close_net",
     }
