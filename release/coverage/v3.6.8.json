@@ -1,0 +1,62 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.8",
+  "base": {
+    "tag": "v3.6.7",
+    "commit": "dc604be6d9261251ed22cd28c5777fdebd1107eb"
+  },
+  "reviewed_head": "4d54ad5034fd1c9bf45afec48520a5a3affb3e88",
+  "commits": [
+    {
+      "sha": "9901763b52a19f5cb320e9c1a25577ded3693d7e",
+      "subject": "fix(notifications): make OpenD alerts idempotent"
+    },
+    {
+      "sha": "a72f444928f5802d0b16950b8d11a92b9e16d241",
+      "subject": "chore(deps): refresh dependency graph"
+    },
+    {
+      "sha": "4d54ad5034fd1c9bf45afec48520a5a3affb3e88",
+      "subject": "Merge PR #348: fix OpenD alert idempotence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复 OpenD 故障通知的事件幂等，同一故障持续期间只通知一次，恢复后才允许新的同类告警。",
+      "commits": [
+        "9901763b52a19f5cb320e9c1a25577ded3693d7e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "a72f444928f5802d0b16950b8d11a92b9e16d241",
+      "reason": "刷新依赖图生成产物，确保发布门禁与当前源码一致，无独立运行时变化。"
+    },
+    {
+      "commit": "4d54ad5034fd1c9bf45afec48520a5a3affb3e88",
+      "reason": "合并已覆盖的 PR #348 变更，不产生额外代码变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9901763b52a19f5cb320e9c1a25577ded3693d7e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/348"
+      ]
+    },
+    {
+      "commit": "a72f444928f5802d0b16950b8d11a92b9e16d241",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/348"
+      ]
+    },
+    {
+      "commit": "4d54ad5034fd1c9bf45afec48520a5a3affb3e88",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/348"
+      ]
+    }
+  ]
+}
