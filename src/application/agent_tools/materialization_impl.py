@@ -17,8 +17,9 @@ from domain.domain.close_advice import (
     DECISION_EVIDENCE_COMPLETE,
     RECOMMENDATION_CLOSE,
     RECOMMENDATION_HOLD,
-    RECOMMENDATION_NOT_EVALUABLE,
     STRICT_CLOSE_POLICY_VERSION,
+    has_complete_close_metrics,
+    sort_advice_rows,
 )
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import (
@@ -349,6 +350,8 @@ def close_advice_rows_summary(
         recommendation = str(row.get("recommendation_state") or "").strip().lower()
         if recommendation not in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}:
             continue
+        if recommendation == RECOMMENDATION_CLOSE and not has_complete_close_metrics(row):
+            continue
         recommendation_counts[recommendation] = (
             recommendation_counts.get(recommendation, 0) + 1
         )
@@ -358,30 +361,19 @@ def close_advice_rows_summary(
         top_rows.append(
             {
                 "account": account or None,
+                "position_lot_id": (str(row.get("position_lot_id") or "").strip() or None),
                 "symbol": (str(row.get("symbol") or "").strip().upper() or None),
                 "option_type": (str(row.get("option_type") or "").strip().lower() or None),
                 "expiration": (str(row.get("expiration") or "").strip() or None),
                 "strike": as_float(row.get("strike")),
                 "recommendation_state": recommendation,
                 "net_capture_ratio": as_float(row.get("net_capture_ratio")),
+                "capital_basis": as_float(row.get("capital_basis")),
+                "remaining_max_annualized_return": as_float(row.get("remaining_max_annualized_return")),
                 "all_in_close_cost": as_float(row.get("all_in_close_cost")),
             }
         )
-    top_rows = sorted(
-        top_rows,
-        key=lambda item: (
-            {
-                RECOMMENDATION_CLOSE: 0,
-                RECOMMENDATION_HOLD: 1,
-                RECOMMENDATION_NOT_EVALUABLE: 2,
-            }.get(str(item.get("recommendation_state") or ""), 3),
-            -(
-                item["net_capture_ratio"]
-                if item["net_capture_ratio"] is not None
-                else -1.0
-            ),
-        ),
-    )[:5]
+    top_rows = sort_advice_rows(top_rows)[:5]
     if text_bytes is not None:
         try:
             notification_preview = text_bytes.decode("utf-8").strip()
@@ -1165,7 +1157,7 @@ def close_advice_tool(
             raise AgentToolError(
                 code="DEPENDENCY_INVALID",
                 message="平仓建议报告完整性校验失败。",
-                hint="请重新生成严格版平仓建议报告。",
+                hint="请重新生成当前策略的平仓建议报告。",
                 details={
                     "csv_path": mask_path(report_dir / "close_advice.csv"),
                     "reason": str(validation.get("reason") or "unknown"),

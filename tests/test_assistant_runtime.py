@@ -185,7 +185,7 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     assert "权利金" not in text
 
 
-def test_position_exit_renderer_uses_only_strict_close_contract() -> None:
+def test_position_exit_renderer_uses_only_current_close_contract() -> None:
     text = render_canonical_tool_result(
         renderer_key="position_exit_analysis",
         tool_result={"ok": True},
@@ -202,15 +202,15 @@ def test_position_exit_renderer_uses_only_strict_close_contract() -> None:
                     "expiration": "2026-09-18",
                     "strike": 100,
                     "currency": "USD",
-                    "policy_version": "strict_profit_capture.v1",
+                    "policy_version": "remaining_yield_capture.v1",
                     "recommendation_state": "close",
                     "evaluation_status": "priced",
                     "reason": "all_strict_close_gates_passed",
                     "net_capture_ratio": 0.95,
                     "opening_net_credit": 170,
                     "all_in_close_cost": 8.5,
-                    "close_cost_ratio": 0.0009,
-                    "remaining_term_ratio": 0.5,
+                    "capital_basis": 10000,
+                    "remaining_max_annualized_return": 0.08,
                     "spread_ratio": 0.1333,
                     "dte": 39,
                     "is_otm": True,
@@ -228,8 +228,8 @@ def test_position_exit_renderer_uses_only_strict_close_contract() -> None:
     assert "结论：建议平仓" in text
     assert "净捕获 95.00%" in text
     assert "全成本买回 USD 8.5" in text
-    assert "买回成本/行权本金 0.09%" in text
-    assert "剩余期限占比 50.00%" in text
+    assert "剩余最高年化 8.00%" in text
+    assert "Put 担保资金代理 USD 10,000" in text
     assert "DTE 39" in text
     assert "价外 是" in text
     assert "可选：" not in text

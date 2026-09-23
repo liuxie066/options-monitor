@@ -45,7 +45,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
   超时和状态目录参数不再生效；
 - account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
 - `close_advice` 只保留 `enabled`、`quote_source` 和 `max_items_per_account`
-  运行配置。止盈公式与门槛在 `strict_profit_capture.v1` 中固定，
+  运行配置。止盈公式与门槛在 `remaining_yield_capture.v1` 中固定，
   不提供可调的策略键；
 - 旧 `notify_levels`、`max_spread_ratio`、`strong_remaining_annualized_max`、
   `medium_remaining_annualized_max` 和 `quote_max_age_sec` 不再影响决策，

@@ -781,12 +781,13 @@ def _close_advice_metric_text(row: dict[str, Any]) -> str:
     close_cost = row.get("all_in_close_cost")
     if close_cost is not None:
         parts.append(f"全成本买回 {_money(close_cost, row.get('currency'))}")
-    close_cost_ratio = row.get("close_cost_ratio")
-    if close_cost_ratio is not None:
-        parts.append(f"买回成本/行权本金 {_pct(close_cost_ratio)}")
-    remaining = row.get("remaining_term_ratio")
+    remaining = row.get("remaining_max_annualized_return")
     if remaining is not None:
-        parts.append(f"剩余期限占比 {_pct(remaining)}")
+        parts.append(f"剩余最高年化 {_pct(remaining)}")
+    capital_basis = row.get("capital_basis")
+    if capital_basis is not None:
+        basis_label = "Put 担保资金代理" if str(row.get("option_type") or "").lower() == "put" else "Call 标的市值代理"
+        parts.append(f"{basis_label} {_money(capital_basis, row.get('currency'))}")
     spread = row.get("spread_ratio")
     if spread is not None:
         parts.append(f"价差 {_pct(spread)}")

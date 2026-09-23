@@ -707,11 +707,11 @@ def _render_user_view_card(
                     f"净兑现比例 {_table_cell(item.get('net_capture'))}"
                     if item.get("net_capture") not in (None, "")
                     else "",
-                    f"平仓成本占本金 {_table_cell(item.get('close_cost_ratio'))}"
-                    if item.get("close_cost_ratio") not in (None, "")
+                    f"剩余最高年化 {_table_cell(item.get('remaining_annualized'))}"
+                    if item.get("remaining_annualized") not in (None, "")
                     else "",
-                    f"剩余期限比例 {_table_cell(item.get('remaining_term_ratio'))}"
-                    if item.get("remaining_term_ratio") not in (None, "")
+                    _table_cell(item.get("capital_basis"))
+                    if item.get("capital_basis") not in (None, "")
                     else "",
                 ]
                 facts = [fact for fact in facts if fact]
@@ -1366,7 +1366,7 @@ _POSITION_ACTIONABLE_LABELS = frozenset({"建议平仓"})
 
 
 def _position_has_advice(row: Mapping[str, Any]) -> bool:
-    # 只展示严格策略已触发的平仓动作；hold 和
+    # 只展示现行策略已触发的平仓动作；hold 和
     # not_evaluable 仍保留在结构化审计数据中，但不进入普通提醒。
     if row.get("notification_eligible") is False:
         return False
@@ -1438,12 +1438,13 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
     capture = _number(metrics.get("net_capture_ratio"))
     if capture is not None:
         parts.append(f"净兑现比例 {_percent(capture)}")
-    close_cost_ratio = _number(metrics.get("close_cost_ratio"))
-    if close_cost_ratio is not None:
-        parts.append(f"全成本平仓占名义本金 {_percent(close_cost_ratio)}")
-    remaining_term = _number(metrics.get("remaining_term_ratio"))
-    if remaining_term is not None:
-        parts.append(f"剩余期限比例 {_percent(remaining_term)}")
+    annualized = _number(metrics.get("remaining_max_annualized_return"))
+    if annualized is not None:
+        parts.append(f"剩余最高年化 {_percent(annualized)}")
+    capital_basis = _number(metrics.get("capital_basis"))
+    if capital_basis is not None:
+        basis_label = "Put 担保资金代理" if _lower(row.get("option_type")) == "put" else "Call 标的市值代理"
+        parts.append(f"{basis_label} {_money(capital_basis, market=market)}")
     return [" · ".join(parts)] if parts else []
 
 
@@ -1456,15 +1457,15 @@ def _position_card_fields(row: Mapping[str, Any], *, market: str, status: str) -
             "close_ask": "—",
             "realized_if_close": "—",
             "net_capture": "—",
-            "close_cost_ratio": "—",
-            "remaining_term_ratio": "—",
+            "remaining_annualized": "—",
+            "capital_basis": "—",
         }
     metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
     close_ask = _number(metrics.get("ask"))
     realized = _number(metrics.get("estimated_pnl_if_close_net"))
     capture = _number(metrics.get("net_capture_ratio"))
-    close_cost_ratio = _number(metrics.get("close_cost_ratio"))
-    remaining_term = _number(metrics.get("remaining_term_ratio"))
+    annualized = _number(metrics.get("remaining_max_annualized_return"))
+    capital_basis = _number(metrics.get("capital_basis"))
     realized_text = "—"
     if realized is not None:
         realized_text = _money(realized, market=market)
@@ -1474,8 +1475,12 @@ def _position_card_fields(row: Mapping[str, Any], *, market: str, status: str) -
         "close_ask": _money(close_ask, market=market) if close_ask is not None else "—",
         "realized_if_close": realized_text,
         "net_capture": _percent(capture) if capture is not None else "—",
-        "close_cost_ratio": _percent(close_cost_ratio) if close_cost_ratio is not None else "—",
-        "remaining_term_ratio": _percent(remaining_term) if remaining_term is not None else "—",
+        "remaining_annualized": _percent(annualized) if annualized is not None else "—",
+        "capital_basis": (
+            f"{'Put 担保资金代理' if _lower(row.get('option_type')) == 'put' else 'Call 标的市值代理'} "
+            f"{_money(capital_basis, market=market)}"
+            if capital_basis is not None else "—"
+        ),
     }
 
 

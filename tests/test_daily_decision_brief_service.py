@@ -1616,7 +1616,7 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
                 "strike": 100,
                 "reason": "收益已锁定",
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
@@ -1624,6 +1624,8 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
                 "position_side": "short",
                 "ask": 0.54,
                 "net_capture_ratio": 0.94,
+                "capital_basis": 10000.0 if option_type == "put" else 8000.0,
+                "remaining_max_annualized_return": 0.05,
                 "all_in_close_cost": 52.0,
                 "close_cost_ratio": 0.00052,
                 "remaining_term_ratio": 0.60,
@@ -1648,6 +1650,8 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
         "ask": 0.54,
         "remaining_term_ratio": 0.60,
         "net_capture_ratio": 0.94,
+        "capital_basis": 10000.0 if option_type == "put" else 8000.0,
+        "remaining_max_annualized_return": 0.05,
         "all_in_close_cost": 52.0,
         "close_cost_ratio": 0.00052,
         "estimated_pnl_if_close_net": 474.5,
@@ -1669,7 +1673,7 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
                 "strike": strike,
                 "reason": "test",
                 "recommendation_state": state,
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": (
                     "strict_profit_capture_all_gates_passed"
                     if state == "close"
@@ -1680,6 +1684,9 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
                 ),
                 "evaluation_status": "priced",
                 "quote_status": "priced",
+                "net_capture_ratio": 0.94,
+                "capital_basis": strike * 100,
+                "remaining_max_annualized_return": 0.05,
             }
             for state, symbol, strike in (
                 ("close", "FIRST", 100),
@@ -1738,7 +1745,7 @@ def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
@@ -1866,18 +1873,20 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
                 "strike": strike,
                 "reason": "test",
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
                 "quote_status": "priced",
                 "net_capture_ratio": capture_ratio,
+                "capital_basis": strike * 100,
+                "remaining_max_annualized_return": annualized,
                 "all_in_close_cost": remaining_premium,
             }
-            for symbol, strike, capture_ratio, remaining_premium in (
-                ("SECOND", 101, 0.80, 10),
-                ("FIRST", 100, 0.95, 5),
-                ("THIRD", 102, 0.70, 20),
+            for symbol, strike, capture_ratio, remaining_premium, annualized in (
+                ("SECOND", 101, 0.80, 10, 0.03),
+                ("FIRST", 100, 0.95, 5, 0.08),
+                ("THIRD", 102, 0.85, 20, 0.09),
             )
         ]
     _write_close_report(account_dir, close_rows)
@@ -1902,14 +1911,14 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
         limits={"max_actions_per_priority": 10},
     )
 
-    assert [item["symbol"] for item in close_actions] == ["FIRST"]
+    assert [item["symbol"] for item in close_actions] == ["SECOND"]
     assert eligibility == {
-        "SECOND": False,
-        "FIRST": True,
+        "SECOND": True,
+        "FIRST": False,
         "THIRD": False,
     }
-    assert "FIRST｜CSP｜08-21 $100 Put｜建议平仓" in message
-    assert "SECOND" not in message
+    assert "SECOND｜CSP｜08-21 $101 Put｜建议平仓" in message
+    assert "FIRST" not in message
     assert "THIRD" not in message
     assert "汇总｜共 3 条，需处理 1 条。" in message
 
