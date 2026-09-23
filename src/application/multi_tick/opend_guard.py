@@ -85,18 +85,36 @@ def record_opend_recovery(base: Path, scope: str = 'project') -> int:
         return 0
     fail_st = st.get('consecutive_fail_state')
     if not isinstance(fail_st, dict):
-        return 0
+        fail_st = {}
     scope_key = str(scope or 'project')
     entry = fail_st.get(scope_key)
+    prev_count = int(entry.get('count') or 0) if isinstance(entry, dict) else 0
+    sent = st.get('last_sent_utc_by_error')
+    has_sent_latch = isinstance(sent, dict) and any(
+        str(key).startswith(f'{scope_key}::') for key in sent
+    )
+    if prev_count == 0 and not has_sent_latch:
+        return 0
     if not isinstance(entry, dict):
-        return 0
-    prev_count = int(entry.get('count') or 0)
-    if prev_count == 0:
-        return 0
+        entry = {'count': 0}
     entry['count'] = 0
     entry['last_ok_utc'] = datetime.now(timezone.utc).isoformat()
     fail_st[scope_key] = entry
     st['consecutive_fail_state'] = fail_st
+    # A successful probe closes the incident.  Clear the incident latch and
+    # burst history so a later failure is eligible for one fresh alert.
+    if isinstance(sent, dict):
+        st['last_sent_utc_by_error'] = {
+            key: value
+            for key, value in sent.items()
+            if not str(key).startswith(f'{scope_key}::')
+        }
+    recent = st.get('recent_sent')
+    if isinstance(recent, list):
+        st['recent_sent'] = [
+            item for item in recent
+            if not isinstance(item, dict) or str(item.get('scope') or 'project') != scope_key
+        ]
     write_json(p, st)
     return prev_count
 
@@ -138,7 +156,15 @@ def should_send_opend_alert(
             dt = datetime.fromisoformat(str(prev))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if (now - dt.astimezone(timezone.utc)).total_seconds() < int(cooldown_sec):
+            last_ok = None
+            fail_st = st.get('consecutive_fail_state')
+            entry = fail_st.get(str(scope or 'project')) if isinstance(fail_st, dict) else None
+            if isinstance(entry, dict) and entry.get('last_ok_utc'):
+                last_ok = datetime.fromisoformat(str(entry['last_ok_utc']))
+                if last_ok.tzinfo is None:
+                    last_ok = last_ok.replace(tzinfo=timezone.utc)
+            # One alert per incident; recovery clears this latch.
+            if last_ok is None or dt.astimezone(timezone.utc) >= last_ok.astimezone(timezone.utc):
                 return False
         except Exception:
             pass

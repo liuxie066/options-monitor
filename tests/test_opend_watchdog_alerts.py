@@ -58,6 +58,23 @@ def test_opend_alert_rate_limit(tmp_path: Path) -> None:
     assert should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
 
 
+def test_opend_alert_is_latched_until_recovery(tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    base = Path(tmp_path)
+
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is True
+    # A stale cooldown must not reopen the same incident.
+    state_path = opend_guard.opend_alert_rl_path(base)
+    state = opend_guard.read_json(state_path, {})
+    state['last_sent_utc_by_error']['project::OPEND_RATE_LIMIT'] = '2020-01-01T00:00:00+00:00'
+    opend_guard.write_json(state_path, state)
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is False
+
+    opend_guard.record_opend_recovery(base)
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is True
+
+
 def test_opend_alert_family_dedupe_and_burst_limit(tmp_path: Path) -> None:
     from src.application.multi_tick.opend_guard import should_send_opend_alert
 
