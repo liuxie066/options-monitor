@@ -165,7 +165,8 @@ Daily Brief 是普通调度通知的权威读取面。`symbols_notification.txt`
 
 1. 先确认 OpenD 进程与端口。
 2. 检查 `<runtime_root>/output_shared/state/opend_metrics.json` 是否连续失败。
-3. 恢复后手动触发一次 cron run 观察 `last_run.json`。
+3. 若失败码为 `OPEND_LOGIN_INVALID`，先确认密码变更是否本人操作；确认后由操作员更新该账户 OpenD 凭证并重新登录。若非本人操作，先核查富途账户安全。
+4. 恢复后手动触发一次 cron run 观察 `last_run.json`。
 
 ### 字段缺失 / 源不可用
 

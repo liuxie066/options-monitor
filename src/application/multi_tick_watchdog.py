@@ -184,15 +184,19 @@ def run_multi_tick_watchdog(
                     )
                     return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
 
+                alert_submitted = False
                 if allow_operational_side_effects:
-                    send_opend_alert(
+                    alert_submitted = bool(send_opend_alert(
                         base,
                         base_cfg,
                         error_code=error_code,
                         message_text=alert_message_text,
                         detail=alert_detail,
                         no_send=no_send,
-                    )
+                        skip_consecutive_gate=error_code == "OPEND_LOGIN_INVALID",
+                    ))
+                    audit_fn("notify", "send_opend_alert", status="ok" if alert_submitted else "skip",
+                             error_code=error_code, message="submitted" if alert_submitted else "not_submitted")
                     on_guard_failure(error_code, "opend_watchdog")
                     now = utc_now_fn()
                     for acct in accounts:
@@ -228,7 +232,7 @@ def run_multi_tick_watchdog(
                     "error",
                     error_code=error_code,
                     message="opend watchdog unhealthy",
-                    data=safe_data_fn({"sent": False, "reason": "opend_unhealthy"}),
+                    data=safe_data_fn({"sent": False, "reason": "opend_unhealthy", "alert_submitted": alert_submitted}),
                 )
                 audit_fn(
                     "fallback",
@@ -238,7 +242,7 @@ def run_multi_tick_watchdog(
                     fallback_used=bool(opend_plan.get("fallback_used")),
                     message=msg,
                 )
-                return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
+                return MultiTickWatchdogOutcome(should_continue=False, return_code=2)
             else:
                 # OpenD healthy: reset consecutive failure counter and send recovery notice if applicable.
                 if allow_operational_side_effects:

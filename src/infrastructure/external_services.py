@@ -11,7 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.infrastructure.futu_gateway import build_futu_gateway
-from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
+from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
 
 
 def run_command(
@@ -270,19 +270,30 @@ def run_opend_watchdog(
     retry_timeout_sec: float = 25.0,
     success_threshold: int = 2,
     required_capability: str = "both",
-) -> dict[str, Any]:
-    del vpy, base, timeout_sec
-    health = run_watchdog_check(
-        host=str(host),
-        port=int(port),
-        ensure=bool(ensure),
-        retry_enabled=bool(retry_enabled),
-        retry_interval_sec=float(retry_interval_sec),
-        retry_timeout_sec=float(retry_timeout_sec),
-        success_threshold=int(success_threshold),
-        required_capability=required_capability,
-    )
-    return health.to_payload()
+) -> subprocess.CompletedProcess[Any] | dict[str, Any]:
+    command = [
+        str(vpy), "-m", "src.infrastructure.opend_watchdog", "--json",
+        "--host", str(host), "--port", str(port),
+        "--retry-interval-sec", str(retry_interval_sec),
+        "--retry-timeout-sec", str(retry_timeout_sec),
+        "--success-threshold", str(success_threshold),
+        "--required-capability", required_capability,
+    ]
+    if ensure:
+        command.append("--ensure")
+    if retry_enabled:
+        command.append("--retry-enabled")
+    try:
+        return run_command(command, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec)
+    except subprocess.TimeoutExpired as exc:
+        output = "\n".join(
+            part.decode("utf-8", errors="replace") if isinstance(part, bytes) else str(part)
+            for part in (exc.stdout, exc.stderr) if part
+        )
+        code, message = classify_watchdog_result(None, output)
+        if code == "OPEND_LOGIN_INVALID":
+            return {"ok": False, "error_code": code, "message": message}
+        raise
 
 
 def trading_day_via_futu(

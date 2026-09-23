@@ -117,10 +117,13 @@ def _notification_perception_read_tool(
     if summary.get("status") == "failed":
         warnings.append("Notification perception audit is unreadable.")
     elif summary.get("status") == "partial":
-        warnings.append(
-            "Notification perception audit is partially corrupt; "
-            f"malformed_rows={summary.get('malformed_count', 0)}."
-        )
+        if any(item.get("tail_truncated") for item in data.get("read_statuses") or []):
+            warnings.append("Notification perception audit covers only the recent file tail.")
+        if summary.get("malformed_count"):
+            warnings.append(
+                "Notification perception audit is partially corrupt; "
+                f"malformed_rows={summary['malformed_count']}."
+            )
     return data, warnings, {
         "audit_paths": [
             mask_path(path) for path in data.get("audit_paths") or []

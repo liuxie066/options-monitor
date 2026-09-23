@@ -80,7 +80,7 @@ def read_notification_perception_events(
     )
     if unreadable_count:
         read_status = "failed"
-    elif malformed_count:
+    elif malformed_count or any(item.get("tail_truncated") for item in read_statuses):
         read_status = "partial"
     elif missing_count == len(read_statuses):
         read_status = "missing"
@@ -235,9 +235,9 @@ def _read_jsonl(
     out: list[dict[str, Any]] = []
     try:
         if bounded:
-            from src.application.agent_tools.project_reader import ProjectReaderError, _check, read_bytes
+            from src.application.agent_tools.project_reader import ProjectReaderError, _check, read_tail_bytes
             try:
-                raw = read_bytes(base, str(path.relative_to(base)),
+                raw, tail_truncated, source_size = read_tail_bytes(base, str(path.relative_to(base)),
                     deadline_monotonic=deadline_monotonic, cancelled=cancelled)
             except ProjectReaderError as exc:
                 if exc.code in {"cancelled", "time_deadline"}:
@@ -245,6 +245,8 @@ def _read_jsonl(
                 return [], {"path": display_path, "status": "missing" if exc.code == "not_found" else "unreadable",
                     "line_count": None, "parsed_count": 0, "malformed_count": 0, "reason": exc.code}
             source_hash = hashlib.sha256(raw).hexdigest()
+            if tail_truncated:
+                raw = raw.partition(b"\n")[2]
             lines = raw.decode("utf-8").splitlines()
         else:
             # Existing internal notification-run resolution keeps its original scan contract.
@@ -278,11 +280,15 @@ def _read_jsonl(
         "status": (
             "partially_corrupt"
             if malformed_count
+            else "tail_only"
+            if bounded and tail_truncated
             else "valid_empty"
             if not out
             else "ok"
         ),
         "source_hash": source_hash,
+        "tail_truncated": bool(bounded and tail_truncated),
+        "size_bytes": source_size if bounded else None,
         "line_count": nonempty_count,
         "parsed_count": len(out),
         "malformed_count": malformed_count,
