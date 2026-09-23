@@ -2068,7 +2068,7 @@ def run_close_advice(
                 symbols=symbols_to_validate,
                 expected_manifest_sha256=str(frozen_manifest_sha256),
             )
-            if unavailable_now:
+            if unavailable_now != frozen_symbol_unavailable:
                 raise RequiredDataSnapshotError(
                     "required-data symbol authority changed during Close Advice"
                 )
