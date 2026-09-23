@@ -7,7 +7,7 @@
 
 ## Repo-Specific Contract
 
-- Treat current source, config, tests, and runtime artifacts as authority; memory and file names are only hints.
+- Select evidence by question type using [Docs Index](docs/INDEX.md): implementation, effective runtime state, broker facts, and local ledger records have different owners. Preserve conflicts; memory and file names are only hints.
 - Prefer root-cause fixes at the owning boundary. If a tactical patch is unavoidable, state the tradeoff and follow-up.
 - Follow parsimony at repo boundaries: do not add entities, layers, states, tools, config keys, or workflows unless they are necessary.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
@@ -18,18 +18,18 @@
   Release, target commit, and assets are verified. Require a clean status, proof that the branch is contained in
   `origin/main`, and no active owner before removing the exact worktree and local branch. Preserve dirty, unmerged,
   patch-equivalent-only, stashed, or owner-unknown work unless separately approved.
-- Do not invoke Gateflow, planreview, or deepreview unless the user explicitly requests the named workflow or skill in the current task.
+- Do not start Gateflow, planreview, or deepreview as independent workflows unless explicitly requested. An explicitly invoked workflow authorizes its prescribed internal reviews without requiring the user to name each nested skill; preserve that workflow's stage and production authorization boundaries.
 
 ## DeepReview Profile
 
-When the user explicitly invokes deepreview, apply these repository-specific rules in addition to the skill's general workflow:
+When deepreview is explicitly requested or prescribed by an explicitly invoked workflow, apply these repository-specific rules in addition to the skill's general workflow:
 
 - Review in this order, skipping irrelevant layers: strategy rationality, OpenD/provider data consistency, then code drift, duplication, and misplaced ownership.
 - Start at the real public or runtime entry point and trace source -> normalization -> decision -> persistence/event/delivery. Documentation, filenames, cache rows, process exit, and scheduler success are not substitutes for authoritative facts.
 - Preserve canonical owners and account, sender, market, and config isolation. Flag downstream fallback, duplicate calculation, loose parsing, or compatibility code that repairs an upstream or domain contract.
 - Distinguish unavailable or partial data, stale cache, provider failure, model failure, and valid zero-result outcomes. Treat `delivery_confirmed` as stronger evidence than successful scheduling, rendering, or provider submission.
-- For writes, prove preview, explicit confirmation, idempotency, one durable effect, readback, receipt, and safe retry or replay behavior, including ambiguous external outcomes.
-- Treat tests as evidence only when they exercise the affected public facade and assert durable or externally visible behavior, including relevant failure, cancellation, stale-data, and retry paths.
+- For production or external persistent effects, prove preview, explicit authorization, idempotency, one durable effect, readback, receipt, and safe retry or replay behavior, including ambiguous external outcomes. Isolated development fixtures do not require an operator receipt.
+- Use tests that would expose the affected behavior's regression. Domain calculations and invariants may use focused unit tests; entry-point, persistence, cross-module, or external-effect changes also need relevant facade or integration evidence. Cover failure, cancellation, stale-data, and retry paths where the changed contract requires them.
 - Report material confirmed defects separately from evidence gaps and unverified leads. Do not turn strategy preferences, speculative abstractions, or style opinions into findings.
 - Keep review read-only. Do not scan providers, send notifications, trade, mutate ledgers or runtime state, or run commands with hidden writes without separate explicit authority.
 
@@ -56,38 +56,27 @@ Use the highest-level safe entry point available:
 3. `./.venv/bin/python -m src.application.<module>` only when no public facade exists.
 4. `./.venv/bin/python scripts/...` only for compatibility or operational wrappers.
 
-Unified tick chain:
-
-```bash
-./om run tick --config config.us.json --accounts lx [sy]
-```
-
-Production cron normally uses the guarded wrapper:
-
-```bash
-./om run tick-cron --market us --accounts lx sy --timeout 600
-./om run tick-cron --market hk --accounts lx sy --timeout 600
-```
-
-Legacy `scripts/send_if_needed*.py` is removed. Do not use it.
+Read [Agent Handbook](docs/AGENT_WIKI.md) only for the relevant task: tool selection (§3), ownership (§6), investigation (§8), or verification (§9). Legacy `scripts/send_if_needed*.py` is removed; do not use it.
 
 ## Safety Red Lines
 
-Ask for explicit confirmation before any command that can:
+Require explicit authorization for the action, target, and scope before commands that can:
 
 - Send real notifications through Feishu, webhook, email, or another channel.
 - Install, start, stop, or modify production services such as systemd / launchd units.
-- Modify `config.yaml`, `config.us.json`, `config.hk.json`, secrets, or production runtime config.
-- Delete `output/`, `output_runs/`, `output_shared/`, state files, caches, or runtime artifacts.
-- Write Feishu, option-position state, trade events, or broker-facing data.
+- Modify secrets, production authoring configuration, or effective runtime configuration, including live `config.yaml`, `config.us.json`, and `config.hk.json`.
+- Delete real reports, state, caches, or runtime artifacts, including `output/`, `output_runs/`, and `output_shared/`.
+- Write Feishu, real option-position state, trade events, or broker-facing data.
 
-When a dry-run or read-only surface exists, use it first.
+Existing explicit authorization remains valid within its action, target, and scope; ask again only when those change or a controlled workflow requires confirmation of a specific preview. When a dry-run or read-only surface exists, use it first; authorization does not skip preview, readback, or receipt requirements.
+
+Authorized local source/template edits and isolated test fixtures follow the development task. Before treating configuration or output as isolated, verify its path, consumers, and service bindings cannot affect a running environment or contact real services. When uncertain, keep it read-only and resolve the target before writing. Runtime JSON remains generated; edit its authoring source and use the supported build path.
 
 ## Request Defaults
 
 | User intent | Repo-specific default |
 |---|---|
-| explain / look into / check / why / how does this work | Start read-only; inspect source, docs, configs, tests, and runtime artifacts before proposing changes |
+| explain / look into / check / why / how does this work | Start read-only with the direct owner and evidence needed to answer; expand along the call chain when gaps remain. Inspect runtime only when the question concerns actual runtime behavior |
 | commit and push / 提交并推送 | Commit and push the named development change only; do not modify `VERSION`, publish a Release, or upgrade production unless explicitly requested |
 | release / 发布 | Prepare and publish the full VERSION-driven GitHub Release; production upgrade remains a separate explicit action |
 | release and upgrade / 发布并升级远端 | Publish the VERSION-driven Release, then use the controlled remote upgrade and runtime verification flow |
@@ -95,20 +84,9 @@ When a dry-run or read-only surface exists, use it first.
 
 Do not run Python scripts just to see what happens.
 
-## Fast Diagnostic Commands
+## Runtime Diagnosis
 
-```bash
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
-```
-
-Research evidence handoff for MacBook Codex:
-
-```bash
-./om research collect --config-key us --scope full --output both --no-write-outputs
-```
+Bind the host, effective config/runtime root, market, account scope, and evidence time before runtime diagnostics. Examples using `us` or `lx` are not task defaults. Do not use local state as evidence for remote production, or treat missing/stale evidence as a valid empty result. Start with existing artifacts; run readiness checks or collect additional evidence only when needed to answer the question. See [Agent Handbook §2–3](docs/AGENT_WIKI.md#2-first-five-minutes).
 
 ## Module Ownership
 
@@ -141,47 +119,13 @@ src/interfaces/       -> CLI/agent request and response adaptation
 scripts/              -> thin operational wrappers only
 ```
 
-## Common Workflows
+## Quality and Delivery
 
-```bash
-# Candidate explanations
-./om-agent run --tool candidate_filter_explain --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
-./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+Choose the smallest checks that can expose a regression in the touched behavior; expand to adjacent consumers for shared contracts and preserve required CI gates. Use [Agent Handbook §9](docs/AGENT_WIKI.md#9-verification-matrix) and the project `om-pre-push-checks` skill for delivery verification. Reuse passing evidence only while its code, tests, config, dependencies, generated inputs, base, and environment remain valid.
 
-# Cash and positions
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
+For development-instruction and documentation edits, verify meaning, references, formatting, and applicable guardrails. Runtime prompts and user-visible CLI/notification text are behavior changes and need their owning checks. Audit-only requests do not require tests merely to complete the audit; report evidence gaps.
 
-# Option-position write path: dry-run first
-./om option-positions add --account lx --symbol NVDA --option-type put --side short --contracts 1 --currency USD --strike 100 --multiplier 100 --exp 2026-06-19 --dry-run
-```
-
-## Quality Gates
-
-Use focused checks for the area touched, then add broader checks when risk warrants it.
-
-```bash
-# Agent contract
-./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
-
-# Research
-./.venv/bin/python -m pytest tests/test_research.py
-
-# Notification formatting
-./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py
-
-# Tick behavior
-./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py
-
-# Config validation
-./.venv/bin/python -m pytest tests/test_layered_config.py
-./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
-./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
-./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
-./om config build --source yaml --market hk --config-yaml configs/examples/config.yaml.example --dry-run
-```
-
-For release work, also check `VERSION`, `CHANGELOG.md`, `scripts/release_check.py`, and `.github/workflows/release-from-version.yml`.
+Follow the shared Delivery workflow for explicitly authorized delivery stages. Release-specific commands and evidence are owned by [Release Process](docs/RELEASE_PROCESS.md); publishing and upgrading remain separate boundaries.
 
 ## Style Contract
 
@@ -192,11 +136,4 @@ For release work, also check `VERSION`, `CHANGELOG.md`, `scripts/release_check.p
 - Prefer small facade-preserving changes over public command churn.
 - Update docs when a public command, tool payload, output path, or safety boundary changes.
 
----
-
-<!-- DYNAMIC SECTION: content below may change between sessions -->
-
-## Current Iteration Context
-
-_Reserved for current sprint focus, recent refactors, and known blockers._
-_See `docs/AGENT_WIKI.md` for the detailed agent handbook and `docs/SESSION_SUMMARY.md` for session handoff._
+Use `docs/SESSION_SUMMARY.md` only when a session handoff is needed; do not maintain a rolling task diary in this file.
