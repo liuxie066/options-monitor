@@ -520,7 +520,7 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert "/status" in text
     assert "/record-open" in text
     assert "/record-close" in text
-    assert "/confirm trade|symbol|upgrade|model" in text
+    assert "/confirm attribution|trade|symbol|upgrade|model" in text
 
 
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:

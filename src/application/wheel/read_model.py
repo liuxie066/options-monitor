@@ -8,6 +8,7 @@ from domain.domain.wheel import (
     attach_lot_strategy_metadata,
     lot_strategy_metadata_from_trade_events,
     project_wheel_branches,
+    project_wheel_coverage,
     project_wheel_linkage_candidates,
     project_wheel_lifecycles,
 )
@@ -252,6 +253,8 @@ def build_wheel_read_model_from_rows(
             and projection.get("lifecycle_status") == "active"
         ):
             projection["phase"] = "linkage_unresolved"
+    for projection in [*batches, *wheel_branches]:
+        projection["coverage"] = project_wheel_coverage(projection)
     return {
         "schema_version": WHEEL_READ_MODEL_SCHEMA,
         "account": account_value,

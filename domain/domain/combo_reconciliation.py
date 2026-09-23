@@ -33,6 +33,7 @@ class _Lot:
     account: str
     broker: str
     runtime_environment: str
+    broker_account_ref: tuple[str, str, str]
     market: str
     market_date: str
     symbol: str
@@ -65,6 +66,7 @@ class _Lot:
             "account": self.account,
             "broker": self.broker,
             "runtime_environment": self.runtime_environment,
+            "broker_account_ref": dict(zip(("broker_id", "external_account_id", "environment"), self.broker_account_ref)),
             "market": self.market,
             "market_date": self.market_date,
             "symbol": self.symbol,
@@ -275,14 +277,20 @@ def match_post_trade_combo_pairs(
     }
 
 
-def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
+def _normalize_lot(raw: Mapping[str, Any], *, require_fully_open: bool = True) -> tuple[_Lot | None, set[str]]:
     item = dict(raw or {})
     reasons: set[str] = set()
     lot_id = _text(item.get("record_id"))
     open_event_id = _text(item.get("open_event_id"))
     account = _text(item.get("account"), lower=True)
     broker = _text(item.get("broker"), lower=True)
-    runtime_environment = _text(item.get("runtime_environment"), lower=True)
+    ref = item.get("broker_account_ref")
+    ref = ref if isinstance(ref, Mapping) else {}
+    broker_account_ref = tuple(_text(ref.get(key)) for key in
+                               ("broker_id", "external_account_id", "environment"))
+    runtime_environment = broker_account_ref[2].lower()
+    if not all(broker_account_ref) or broker_account_ref[2] not in {"REAL", "SIMULATE"}:
+        reasons.add("combo_lot_broker_account_identity_missing")
     market = _text(item.get("market"), upper=True)
     market_date = _text(item.get("market_date"))
     symbol = _text(item.get("symbol"), upper=True)
@@ -329,7 +337,7 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
     contracts_open = _positive_int(item.get("contracts_open"))
     if contracts_opened is None or contracts_open is None:
         reasons.add("combo_lot_contracts_invalid")
-    elif contracts_opened != contracts_open:
+    elif contracts_open > contracts_opened or (require_fully_open and contracts_opened != contracts_open):
         reasons.add("combo_lot_not_fully_open")
     multiplier = _positive_int(item.get("multiplier"))
     strike = _positive_decimal(item.get("strike"))
@@ -357,6 +365,7 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
             account=account,
             broker=broker,
             runtime_environment=runtime_environment,
+            broker_account_ref=broker_account_ref,
             market=market,
             market_date=market_date,
             symbol=symbol,
@@ -430,7 +439,7 @@ def _build_edge(
     if (
         put.account != call.account
         or put.broker != call.broker
-        or put.runtime_environment != call.runtime_environment
+        or put.broker_account_ref != call.broker_account_ref
         or put.market != call.market
         or put.market_date != call.market_date
         or put.symbol != call.symbol
@@ -484,6 +493,27 @@ def _exposure_matches(exposure: _Exposure, *, put: _Lot, call: _Lot) -> bool:
         and exposure.generated_at_ms <= first_trade_ms
         and second_trade_ms <= exposure.valid_until_ms
     )
+
+
+def delivered_combo_exposures_for_lot(
+    lot: Mapping[str, Any], exposures: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Residual delivered exposure is evidence even when full-pair adoption is unavailable."""
+    normalized, _reasons = _normalize_lot(lot, require_fully_open=False)
+    if normalized is None or (normalized.option_type, normalized.position_side) not in {("put", "short"), ("call", "long")}:
+        return []
+    found = []
+    for raw in exposures:
+        exposure = _normalize_exposure(raw)
+        if exposure is None or not exposure.delivery_confirmed:
+            continue
+        contract = exposure.put_contract_key if normalized.option_type == "put" else exposure.call_contract_key
+        if (exposure.account == normalized.account and exposure.market == normalized.market
+                and exposure.currency == normalized.currency and exposure.multiplier == normalized.multiplier
+                and contract == _contract_key_tuple(normalized.contract_key)
+                and exposure.generated_at_ms <= normalized.trade_time_ms <= exposure.valid_until_ms):
+            found.append(exposure.candidate_exposure_id)
+    return sorted(set(found))
 
 
 def _proposal_payload(

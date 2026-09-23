@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import json
 import sqlite3
 from contextlib import closing
@@ -210,7 +212,7 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
             "record_id": "lot-1",
         },
     }
-    with closing(sqlite3.connect(ledger_path)) as conn:
+    with closing(connect_ledger_fixture(ledger_path)) as conn:
         with conn:
             conn.execute(
                 """
@@ -303,7 +305,7 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
         source_role="option_anchor",
         economic_payload=lifecycle_evidence,
     )
-    with closing(sqlite3.connect(ledger_path)) as conn:
+    with closing(connect_ledger_fixture(ledger_path)) as conn:
         with conn:
             conn.execute(
                 """
@@ -403,7 +405,7 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
     assert out["actionable_pending_after_reconcile_count"] == 0
     assert state_path.read_bytes() == original_state
 
-    with closing(sqlite3.connect(ledger_path)) as conn:
+    with closing(connect_ledger_fixture(ledger_path)) as conn:
         with pytest.raises(
             sqlite3.IntegrityError,
             match="lifecycle case JSON is invalid",

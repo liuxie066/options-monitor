@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import sqlite3
 from pathlib import Path
 
@@ -34,7 +36,7 @@ def _event(event_id: str) -> TradeEvent:
 
 
 def _minimal_database(path: Path) -> None:
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute("CREATE TABLE trade_events (event_id TEXT, event_json TEXT, trade_time_ms INTEGER)")
         conn.execute(
             "CREATE TABLE position_lots (lot_id TEXT, account TEXT, fields_json TEXT, "
@@ -92,7 +94,7 @@ def test_receipt_readback_uses_one_query_only_snapshot_during_concurrent_commit(
     def commit_between_reads(conn, **kwargs):
         assert conn.in_transaction
         assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
-        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        with pytest.raises(sqlite3.OperationalError, match="readonly|no such function: om_trade_attribution_writer_v1"):
             conn.execute("DELETE FROM trade_events")
         if not commits:
             run_position_projection_forced_full(writer, [_event("after")])
@@ -112,7 +114,7 @@ def test_receipt_readback_uses_one_query_only_snapshot_during_concurrent_commit(
 def test_receipt_readback_missing_required_table_fails_closed(tmp_path: Path, missing: str) -> None:
     database = tmp_path / "ledger.sqlite3"
     _minimal_database(database)
-    with sqlite3.connect(database) as conn:
+    with connect_ledger_fixture(database) as conn:
         conn.execute(f"DROP TABLE {missing}")
     before = database.read_bytes()
     with pytest.raises(sqlite3.DatabaseError, match="requires trade_events and position_lots"):
@@ -125,7 +127,7 @@ def test_receipt_readback_missing_required_table_fails_closed(tmp_path: Path, mi
 def test_receipt_readback_invalid_json_fails_closed(tmp_path: Path, table: str, payload: str | None) -> None:
     database = tmp_path / "ledger.sqlite3"
     _minimal_database(database)
-    with sqlite3.connect(database) as conn:
+    with connect_ledger_fixture(database) as conn:
         if table == "trade_events":
             conn.execute("INSERT INTO trade_events VALUES (?, ?, ?)", ("row-1", payload, 1))
         else:
@@ -140,7 +142,7 @@ def test_receipt_readback_invalid_json_fails_closed(tmp_path: Path, table: str, 
 def test_receipt_readback_invalid_canonical_event_fails_closed(tmp_path: Path) -> None:
     database = tmp_path / "ledger.sqlite3"
     _minimal_database(database)
-    with sqlite3.connect(database) as conn:
+    with connect_ledger_fixture(database) as conn:
         conn.execute("INSERT INTO trade_events VALUES ('broken', '{}', 1)")
     with pytest.raises(ValueError, match="invalid canonical trade event"):
         open_trade_reconciliation_evidence_repo(database).read_trade_receipt_evidence()
@@ -148,7 +150,7 @@ def test_receipt_readback_invalid_canonical_event_fails_closed(tmp_path: Path) -
 
 def test_receipt_readback_missing_column_fails_closed(tmp_path: Path) -> None:
     database = tmp_path / "ledger.sqlite3"
-    with sqlite3.connect(database) as conn:
+    with connect_ledger_fixture(database) as conn:
         conn.execute("CREATE TABLE trade_events (event_id TEXT)")
         conn.execute("CREATE TABLE position_lots (record_id TEXT)")
     with pytest.raises(sqlite3.DatabaseError, match="no such column"):
@@ -162,7 +164,7 @@ def test_receipt_readback_does_not_create_or_initialize_database(tmp_path: Path)
     assert not missing.parent.exists()
 
     empty = tmp_path / "empty.sqlite3"
-    sqlite3.connect(empty).close()
+    connect_ledger_fixture(empty).close()
     with pytest.raises(sqlite3.DatabaseError):
         open_trade_reconciliation_evidence_repo(empty).read_trade_receipt_evidence()
     assert empty.read_bytes() == b""

@@ -55,6 +55,7 @@ def _event(
         source="test",
         lot_id=lot_id,
         raw_payload={
+            "execution_input": {"broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL", "account_label": "lx"}},
             # §9.2 step 3: the contract key no longer carries the position side,
             # so the fixture's side travels as the trade side of this open.
             "side": derive_trade_side("open", position_side) or "",
@@ -346,7 +347,7 @@ def test_supersede_reactivates_alternative_that_expired_only_while_leg_was_claim
     )
 
 
-def test_reconcile_fails_closed_when_open_events_have_different_runtime_sources(
+def test_reconcile_same_physical_account_across_runtime_sources(
     tmp_path,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -358,8 +359,8 @@ def test_reconcile_fails_closed_when_open_events_have_different_runtime_sources(
 
     result = _reconcile(repo, effective_now_ms=BASE_TIME_MS + 3_000)
 
-    assert result["inferences"] == []
-    assert repo.list_combo_pair_inferences(account="lx") == []
+    assert len(result["inferences"]) == 1
+    assert len(repo.list_combo_pair_inferences(account="lx")) == 1
 
 
 def test_reconcile_fails_closed_when_open_event_runtime_source_is_missing(

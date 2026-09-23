@@ -40,6 +40,8 @@ _WHEEL_EVENT_TYPES_V2 = (
     "wheel_put_intent_cancelled",
     "wheel_put_intent_consumed",
     "wheel_put_linkage_rejected",
+    "wheel_attribution_conflict",
+    "wheel_attribution_conflict_resolved",
 )
 
 
@@ -148,7 +150,7 @@ def _ensure_wheel_events_v2(conn: sqlite3.Connection) -> None:
         return
     raise RuntimeError(
         "wheel_events has a legacy or partial schema; run the controlled "
-        "lot-identity migration before ordinary repository access"
+        "lot-identity or trade-intake attribution-migrate workflow before ordinary repository access"
     )
 
 
@@ -348,7 +350,7 @@ class RepositoryCoreMixin:
             ):
                 raise RuntimeError(
                     "wheel_events has a legacy schema; run the controlled lot-identity "
-                    "migration before ordinary repository access"
+                    "or trade-intake attribution-migrate workflow before ordinary repository access"
                 )
         except ValueError as exc:
             raise RuntimeError(
@@ -433,6 +435,9 @@ class RepositoryCoreMixin:
 
     def _init_db(self) -> None:
         with self._writer_connection(begin_immediate=True) as conn:
+            if not self._table_exists("trade_events", conn=conn):
+                from .repository_schema import ensure_trade_attribution_policy_schema
+                ensure_trade_attribution_policy_schema(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_events (
@@ -828,4 +833,7 @@ class RepositoryCoreMixin:
             )
             _ensure_position_projection_schema(conn)
             _ensure_current_decision_projection_schema(conn)
+            if self._table_exists("trade_attribution_policy_enablings", conn=conn):
+                from .repository_schema import ensure_trade_attribution_writer_fence
+                ensure_trade_attribution_writer_fence(conn)
             conn.commit()

@@ -774,8 +774,8 @@ def append_and_verify_wheel_intent_consumption(
         or matches[0]["integrity_status"] != "trusted"
         or lot_id not in matches[0]["active_call_lot_ids"]
         or intent is None
-        or intent["status"] not in {"active", "consumed"}
-        or (intent_event["intent_id"] in matches[0]["active_intent_ids"]) != (int(intent.get("remaining_contracts") or 0) > 0)
+        or intent["status"] not in {"active", "consumed", "expired", "cancelled"}
+        or (intent_event["intent_id"] in matches[0]["active_intent_ids"]) != (intent["status"] == "active" and int(intent.get("remaining_contracts") or 0) > 0)
     ):
         raise ValueError("Wheel Call intent projection verification failed")
 

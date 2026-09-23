@@ -57,6 +57,24 @@ def _binding_command_specs() -> tuple[AssistantCommandSpec, ...]:
 
 
 COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
+    AssistantCommandSpec(
+        intent_name="attribution_preview", tool_name="inbound.attribution", commands=("/attribute",),
+        display_name="成交归属预览", arguments=("account", "execution_key", "action", "target_id"),
+        read_only=False, risk_level="preview_write", operation_action="preview", operation_target="attribution",
+        required_information=("account", "execution_key", "action"),
+        summary="preview attribution of an already recorded execution without changing its economics",
+        examples=("/attribute lx <execution_key> ordinary",),
+    ),
+    AssistantCommandSpec(
+        intent_name="attribution_confirm", tool_name="inbound.attribution", commands=("/confirm",),
+        display_name="确认成交归属", arguments=("operation_id",), read_only=False, risk_level="confirm_write",
+        operation_action="confirm", operation_target="attribution", operation_target_aliases=("attribution", "归属"),
+    ),
+    AssistantCommandSpec(
+        intent_name="attribution_cancel", tool_name="inbound.attribution", commands=("/cancel",),
+        display_name="取消归属预览", arguments=("operation_id",), read_only=False, risk_level="confirm_write",
+        operation_action="cancel", operation_target="attribution", operation_target_aliases=("attribution", "归属"),
+    ),
     *_binding_command_specs(),
     AssistantCommandSpec(
         intent_name="model_use",

@@ -1127,6 +1127,12 @@ def _load_wheel_snapshot_family(
             continue
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
+        price_available = bool(final and (_number(final.get("sell_limit")) or 0) > 0
+            and _parse_datetime(final.get("quote_observed_at_utc")) is not None)
+        if final is not None and not price_available:
+            batch["reason_codes"] = sorted(set(batch.get("reason_codes") or []) | {"wheel_suggested_price_unavailable"})
+            data_gaps.append({"scope": "strategy", "strategy_family": "wheel", "symbol": symbol,
+                              "reason": "wheel_suggested_price_unavailable"})
         lot_id = _text(batch.get("stock_lot_id"))
         branch_id = _text(batch.get("wheel_branch_id")) or lot_id
         direction = _text(batch.get("direction") or "call").lower()
@@ -1138,12 +1144,15 @@ def _load_wheel_snapshot_family(
             "shares_remaining": int(batch.get("shares_remaining") or 0),
             "remaining_contracts": int(batch.get("remaining_contracts") or 0),
             "principal_anchor": batch.get("principal_anchor"),
-            "currency": _text(batch.get("currency")).upper(),
+            "currency": _text((final or {}).get("currency") or batch.get("currency")).upper(),
             "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
             "reason_code": _text(batch.get("reason_code")) or None,
             "reason_codes": list(batch.get("reason_codes") or []),
-            "recommended_contracts": int(batch.get("granted_contracts") or 0),
+            "recommended_contracts": int(batch.get("granted_contracts") or 0) if price_available else 0,
+            "coverage": dict(batch.get("coverage") or {}),
+            **{key: (final or {}).get(key) for key in ("sell_limit", "price_tick", "bid", "ask",
+                "quote_update_time", "quote_observed_at_utc", "multiplier", "fee_basis", "granted_contracts")},
             "expiration": _text(
                 (final or {}).get("expiration")
                 or (final or {}).get("expiration_ymd")
@@ -1166,7 +1175,7 @@ def _load_wheel_snapshot_family(
             ),
         }
         batch_views.append(view)
-        if final is None:
+        if final is None or not price_available:
             continue
         candidates.append(
             {

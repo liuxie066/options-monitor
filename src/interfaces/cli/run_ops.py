@@ -55,6 +55,13 @@ def add_run_commands(subparsers: Any) -> None:
     tick_cron.add_argument("--debug", action="store_true")
     tick_cron.add_argument("--allow-stale-config", action="store_true")
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
+    trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
+    trade_intake.add_argument("--effective-from-ms", type=int)
+    trade_intake.add_argument("--actor")
+    trade_intake.add_argument("--request-id")
+    trade_intake.add_argument("--manifest")
+    trade_intake.add_argument("--backup-path")
+    trade_intake.add_argument("--writers-stopped", action="store_true")
     trade_intake.add_argument("--config", required=True)
     trade_intake.add_argument("--data-config", default=None)
     trade_intake.add_argument("--runtime-root", default=None)
@@ -113,6 +120,14 @@ def _tick_argv(args: argparse.Namespace) -> list[str]:
 
 def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
     intake_argv: list[str] = ["--config", str(args.config)]
+    if getattr(args, "action", "listen") != "listen":
+        intake_argv.append(args.action)
+    for name in ("effective_from_ms", "actor", "request_id", "manifest", "backup_path"):
+        value = getattr(args, name, None)
+        if value is not None:
+            intake_argv.extend(["--" + name.replace("_", "-"), str(value)])
+    if getattr(args, "writers_stopped", False):
+        intake_argv.append("--writers-stopped")
     if args.data_config:
         intake_argv.extend(["--data-config", str(args.data_config)])
     if args.runtime_root:

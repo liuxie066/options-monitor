@@ -443,6 +443,7 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> Non
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
                         "phase": "ready",
+                        "multiplier": 100, "shares_remaining": 100, "remaining_contracts": 1,
                         "monitoring_gate": "enabled",
                     },
                     {
@@ -451,6 +452,7 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> Non
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
                         "phase": "ready",
+                        "multiplier": 100, "shares_remaining": 100, "remaining_contracts": 1,
                         "monitoring_gate": "enabled",
                     },
                     {
@@ -459,6 +461,7 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> Non
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
                         "phase": "ready",
+                        "multiplier": 100, "shares_remaining": 100, "remaining_contracts": 1,
                         "monitoring_gate": "disabled",
                     },
                 ]

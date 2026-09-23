@@ -57,7 +57,8 @@
       "runtime_runs",
       "runtime_logs",
       "runtime_status",
-      "receipt_read"
+      "receipt_read",
+      "trade_attribution_read"
     ]
   },
   "runtime": {

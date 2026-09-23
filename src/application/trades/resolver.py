@@ -725,6 +725,17 @@ def _infer_missing_position_effect(
                 diagnostics={**base_diagnostics, **close_diagnostics, "decision": "close_target_unresolved"},
             )
     else:
+        if not deal.trade_time_ms or any(
+            match.candidate is None
+            or not match.candidate.opened_at
+            or match.candidate.opened_at > deal.trade_time_ms
+            for match in close_target_resolution.matches
+        ):
+            return _PositionEffectInference(
+                deal=None,
+                reason="unknown_position_effect:close_history_unproven",
+                diagnostics={**base_diagnostics, "decision": "close_history_unproven"},
+            )
         inferred = replace(
             close_deal,
             raw_payload=_with_position_effect_inference_payload(
@@ -740,32 +751,6 @@ def _infer_missing_position_effect(
                 **base_diagnostics,
                 "decision": "close",
                 "close_target_resolution": close_target_resolution.to_dict(),
-            },
-        )
-
-    if deal.side == "buy" and deal.option_type == "call":
-        inferred = replace(
-            deal,
-            position_effect="open",
-            raw_payload=_with_position_effect_inference_payload(
-                deal.raw_payload,
-                inferred_effect="open",
-                reason="buy_call_without_close_target",
-            ),
-        )
-        return _PositionEffectInference(
-            deal=inferred,
-            reason="inferred_long_call_open",
-            diagnostics={
-                **base_diagnostics,
-                "decision": "open",
-                "open_reason": "buy_call_without_close_target",
-                "close_candidate_summary": close_candidate_summary,
-                "structure_mode": _combo_yield_structure_mode(deal) or None,
-                "pair_intent_id": _combo_yield_pair_intent_id(deal) or None,
-                "combination_relation_pending": not bool(
-                    _combo_yield_pair_intent_id(deal)
-                ),
             },
         )
 

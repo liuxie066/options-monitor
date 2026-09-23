@@ -418,6 +418,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
     assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
     assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
+    assert {"HK", "US"} <= set(out["position_snapshot_input"]["scope"]["markets"])
 
 
 def test_fetch_futu_portfolio_context_rejects_multiple_physical_accounts() -> None:

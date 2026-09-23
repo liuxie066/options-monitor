@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 from copy import deepcopy
 import hashlib
 import json
@@ -265,7 +267,7 @@ def _insert_invalid_legacy_void_event(
         "position_effect": "void",
         "raw_payload": {"void_target_event_id": target_event_id},
     }
-    with sqlite3.connect(str(repo.db_path)) as conn:
+    with connect_ledger_fixture(str(repo.db_path)) as conn:
         # This fixture deliberately represents a row written before the
         # pagination schema and its canonical write guards existed.
         for trigger_name in ledger_repository.TRADE_EVENT_PAGINATION_TRIGGERS:

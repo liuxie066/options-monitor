@@ -148,15 +148,14 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
     assert result.operations[0].to_payload()["fields"]["side"] == "long"
 
 
-def test_resolve_unknown_buy_call_with_companion_put_as_independent_open() -> None:
+def test_explicit_buy_call_with_companion_put_is_independent_open() -> None:
     repo = FakeRepo([_position_record("lot_pdd_short_put")])
-    deal = _long_call_deal()
+    deal = _long_call_deal(position_effect="open")
 
     result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False)
 
     assert result.status == "dry_run"
     assert result.action == "open"
-    assert result.diagnostics["position_effect_inference"]["decision"] == "open"
     fields = result.operations[0].to_payload()["fields"]
     assert fields["side"] == "long"
     assert "strategy" not in fields
@@ -177,6 +176,7 @@ def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
         ]
     )
     deal = _long_call_deal(
+        position_effect="open",
         deal_id="deal-tch-long-call",
         symbol="TCH",
         strike=520.0,
@@ -194,19 +194,13 @@ def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
     assert "strategy_group_id" not in fields
 
 
-def test_resolve_unknown_buy_call_without_companion_opens_independent_long_call() -> None:
-    deal = _long_call_deal()
-
-    result = resolve_trade_deal(deal, repo=FakeRepo(), state={}, apply_changes=False)
-
-    assert result.status == "dry_run"
-    assert result.action == "open"
-    assert result.diagnostics["position_effect_inference"]["open_reason"] == "buy_call_without_close_target"
-    fields = result.operations[0].to_payload()["fields"]
-    assert fields["side"] == "long"
-    assert "strategy" not in fields
-    assert "leg_role" not in fields
-    assert "strategy_group_id" not in fields
+def test_unknown_buy_call_without_history_does_not_create_open(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    result = resolve_trade_deal(_long_call_deal(), repo=repo, state={}, apply_changes=True)
+    assert result.status == "unresolved"
+    assert result.reason == "unknown_position_effect"
+    assert result.operations == []
+    assert repo.list_trade_events() == []
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
@@ -250,7 +244,7 @@ def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Pa
     assert lots[0]["fields"]["contracts_open"] == 2
 
 
-def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Path) -> None:
+def test_explicit_long_call_apply_preserves_independent_open(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     put_result = resolve_trade_deal(
@@ -262,7 +256,7 @@ def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Pa
     assert put_result.status == "applied"
 
     call_result = resolve_trade_deal(
-        _long_call_deal(),
+        _long_call_deal(position_effect="open"),
         repo=repo,
         state={},
         apply_changes=True,
@@ -281,7 +275,7 @@ def test_resolve_sell_put_open_after_long_call_keeps_both_lots_independent(tmp_p
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     call_result = resolve_trade_deal(
-        _long_call_deal(),
+        _long_call_deal(position_effect="open"),
         repo=repo,
         state={},
         apply_changes=True,
@@ -443,6 +437,7 @@ def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> Non
 
 def test_combo_yield_without_pair_intent_records_independent_long_call() -> None:
     deal = _long_call_deal(
+        position_effect="open",
         deal_id="deal-combo-call-unpaired",
         expiration_ymd="2026-10-16",
         raw_payload={
@@ -459,7 +454,6 @@ def test_combo_yield_without_pair_intent_records_independent_long_call() -> None
     assert fields["side"] == "long"
     assert "strategy_group_id" not in fields
     assert "strategy" not in fields
-    assert result.diagnostics["position_effect_inference"]["combination_relation_pending"] is True
     assert result.diagnostics["combo_yield_enrichment"]["decision"] == "defer_to_post_trade_reconciliation"
     assert result.diagnostics["combo_yield_enrichment"]["combination_relation_pending"] is True
 
@@ -493,6 +487,7 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
     )
     call_result = resolve_trade_deal(
         _long_call_deal(
+            position_effect="open",
             deal_id="deal-pdd-combo-call",
             expiration_ymd="2026-10-16",
             raw_payload={

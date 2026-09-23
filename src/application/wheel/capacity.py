@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.wheel import project_wheel_coverage
 from domain.domain.cash_secured_utils import normalize_cash_secured_total_by_ccy
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.risk_capacity import (
     allocate_opening_share_capacity,
+    compute_sell_put_effective_cash,
     allocate_wheel_put_cash_capacity,
     withdraw_opening_share_capacity_grants,
 )
@@ -16,6 +18,175 @@ from src.application.wheel.read_model import build_wheel_read_model_from_rows
 
 
 WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA = "wheel_put_cash_capacity_fact.v1"
+
+
+def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str) -> None:
+    try:
+        connection.send({"portfolio": fetch_futu_portfolio_context(cfg=config, account=account, include_options=True)})
+    except Exception as exc:
+        connection.send({"error": type(exc).__name__})
+    finally:
+        connection.close()
+
+
+def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, stop_event: Any = None) -> dict[str, Any]:
+    """One physical-account observation, with a cancellable ten-second I/O budget."""
+    import multiprocessing
+    import time
+
+    if stop_event is not None and stop_event.is_set():
+        return {"error": "cancelled"}
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_attribution_capacity_worker, args=(sender, config, account), daemon=True)
+    deadline = time.monotonic() + 10
+    try:
+        process.start()
+        sender.close()
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return {"error": "cancelled"}
+            if receiver.poll(min(0.1, max(0, deadline - time.monotonic()))):
+                result = receiver.recv()
+                if time.monotonic() >= deadline:
+                    return {"error": "provider_timeout"}
+                return result
+            if not process.is_alive():
+                return {"error": "provider_worker_exited"}
+        return {"error": "provider_timeout"}
+    except (EOFError, OSError):
+        return {"error": "provider_unavailable"}
+    finally:
+        sender.close()
+        receiver.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=0.5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=0.5)
+            process.close()
+
+
+def trade_attribution_capacity_check(
+    *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
+    wheel_read_model: Mapping[str, Any], observation: Mapping[str, Any], now_ms: int,
+    consumed_reservation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Check post-fill occupancy; the already booked target is never added again."""
+    from collections import defaultdict
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from domain.domain.position_snapshot import position_snapshot_scope_errors
+    from domain.domain.symbol_identity import symbol_market
+
+    reasons: set[str] = set()
+    portfolio = observation.get("portfolio") or {}
+    snapshot = portfolio.get("position_snapshot_input") or {}
+    ref = fact.get("broker_account_ref") or {}
+    market = str(symbol_market(fact["contract_key"]["underlying_symbol"]) or "").lower()
+    authority = portfolio.get("capacity_authority") or {}
+    if (observation.get("error") or authority.get("status") != "available"
+            or authority.get("logical_account") != fact["account"]
+            or authority.get("futu_account_id") != ref.get("external_account_id")
+            or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
+        reasons.add("capacity_authority_unavailable")
+    pooled_cash = fact["contract_key"]["option_type"] == "put"
+    markets = {"us", "hk"} if pooled_cash else {market}
+    for required_market in markets:
+        for asset in ("stock", "option"):
+            reasons.update(position_snapshot_scope_errors(snapshot, account_label=fact["account"],
+                environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
+                external_account_id=ref.get("external_account_id"),
+                now_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc), max_age_seconds=60))
+
+    def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
+        return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
+                Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
+                Decimal(str(multiplier)), currency)
+
+    try:
+        actual, recorded = defaultdict(int), defaultdict(int)
+        shares, call_claims, put_claims = defaultdict(int), defaultdict(int), defaultdict(Decimal)
+        for row in snapshot.get("rows") or []:
+            instrument = row["instrument_ref"]
+            if not pooled_cash and str(instrument.get("market") or "").lower() != market:
+                continue
+            quantity = Decimal(str(row["quantity"]))
+            if not quantity.is_finite() or quantity != quantity.to_integral_value() or quantity < 0:
+                raise ValueError("capacity_quantity_invalid")
+            if instrument["asset_type"] == "option":
+                actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
+            elif row["position_side"] == "long":
+                # Total observed inventory is the basis for existing obligations;
+                # can_sell_qty is not reduced by those obligations a second time.
+                shares[instrument["symbol"]] += int(quantity)
+        for item in facts:
+            if item["contracts_open"] <= 0 or (not pooled_cash and str(symbol_market(item["contract_key"]["underlying_symbol"]) or "").lower() != market):
+                continue
+            if item.get("broker_account_ref") != ref:
+                reasons.add("ledger_capacity_account_unproven")
+                continue
+            contract = item["contract_key"]
+            recorded[key(contract, item["position_side"], item["multiplier"], item["currency"])] += item["contracts_open"]
+            if item["position_side"] == "short":
+                quantity = contract_share_quantity(item["contracts_open"], item["multiplier"])
+                if contract["option_type"] == "call":
+                    call_claims[contract["underlying_symbol"]] += quantity
+                else:
+                    put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
+        if dict(actual) != dict(recorded):
+            reasons.add("broker_ledger_positions_mismatch")
+        for branch in wheel_read_model.get("wheel_branches") or []:
+            if branch.get("lifecycle_status") != "active":
+                continue
+            relevant = branch.get("direction") == "put" if pooled_cash else (
+                branch.get("direction") == "call" and branch.get("symbol") == fact["contract_key"]["underlying_symbol"])
+            if not relevant:
+                continue
+            if branch.get("integrity_status") != "trusted":
+                raise ValueError("active reservation integrity unavailable")
+            if branch.get("direction") == "call":
+                raw_reserved = branch.get("active_intent_reserved_shares", 0)
+                reserved = contract_share_quantity(raw_reserved, 1)
+                if (consumed_reservation and branch["wheel_branch_id"] == consumed_reservation["wheel_branch_id"]
+                        and consumed_reservation["intent_id"] in branch.get("active_intent_ids", [])):
+                    reserved -= contract_share_quantity(consumed_reservation["contracts"], fact["multiplier"])
+                    if reserved < 0:
+                        raise ValueError("reservation conversion exceeds remainder")
+                call_claims[branch["symbol"]] += reserved
+            else:
+                for reservation in branch.get("active_intent_reservations") or []:
+                    amount = Decimal(str(reservation["cash_reservation_amount"]))
+                    if not amount.is_finite() or amount < 0:
+                        raise ValueError("invalid cash reservation")
+                    if consumed_reservation and reservation["intent_id"] == consumed_reservation["intent_id"]:
+                        consumed = consumed_reservation["contracts"]
+                        if not 0 <= consumed <= reservation["remaining_contracts"]:
+                            raise ValueError("reservation conversion exceeds remainder")
+                        amount *= Decimal(reservation["remaining_contracts"] - consumed) / Decimal(reservation["remaining_contracts"])
+                    put_claims[reservation["currency"]] += amount
+        if fact["contract_key"]["option_type"] == "call":
+            symbol = fact["contract_key"]["underlying_symbol"]
+            if call_claims[symbol] > shares[symbol]:
+                reasons.add("account_stock_capacity_exceeded")
+        else:
+            if portfolio.get("cash_balance_reliable") is not True:
+                reasons.add("cash_capacity_unavailable")
+            native = fact["currency"]
+            required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
+            secured = {currency: float(amount) for currency, amount in put_claims.items()}
+            secured[native] = float(put_claims[native] - required)
+            available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
+                cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
+                convert_currency=_frozen_fx_converter(portfolio.get("exchange_rates") or {} if portfolio.get("exchange_rate_status") == "ready" else {}),
+                fx_status=portfolio.get("exchange_rate_status"))
+            if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
+                reasons.add("account_cash_capacity_exceeded")
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        reasons.add("capacity_basis_unavailable")
+    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
 
 
 def _normalized_fx_snapshot(fx_snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -252,6 +423,9 @@ def _frozen_fx_converter(fx_snapshot: Mapping[str, Any]) -> Any:
                 return float(amount) / float(reverse)
         except (TypeError, ValueError):
             return None
+        if source_value != "CNY" and target_value != "CNY":
+            cny = convert(amount, source_value, "CNY")
+            return convert(cny, "CNY", target_value) if cny is not None else None
         return None
 
     return convert
@@ -702,7 +876,8 @@ def finalize_wheel_capacity(
                 "batch_generation_hash": batch.get("batch_generation_hash")
                 or batch.get("batch_generation_hash"),
                 "projection_hash": batch.get("projection_hash"),
-                "shares_remaining": int(batch.get("shares_remaining") or 0),
+                "shares_remaining": batch.get("shares_remaining"),
+                "coverage": dict(batch.get("coverage") or project_wheel_coverage(batch)),
                 "phase": batch.get("phase"),
                 "reason_codes": list(batch.get("reason_codes") or []),
                 "candidate_status": source_scope.get("status"),
@@ -919,6 +1094,10 @@ def finalize_wheel_put_capacity(
                 "batch_generation_hash": branch.get("batch_generation_hash"),
                 "projection_hash": branch.get("projection_hash"),
                 "phase": branch.get("phase"),
+                "coverage": dict(branch.get("coverage") or project_wheel_coverage(branch)),
+                "remaining_contracts": branch.get("remaining_contracts"),
+                "principal_anchor": branch.get("principal_anchor"),
+                "currency": branch.get("currency"),
                 "reason_codes": list(branch.get("reason_codes") or []),
                 "candidate_status": scope.get("status"),
                 "reason_code": reason,

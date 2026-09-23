@@ -816,12 +816,31 @@ def build_trade_intake_receipt_message(
         )
     if ledger_store and not kind:
         fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
-    if (result.get("combo_reconciliation") or {}).get("ok") is False:
+    attribution = result.get("attribution_result") or {}
+    if attribution.get("status"):
+        status = attribution["status"]
+        origin = {"rule": "按规则", "intent": "按已登记意图", "manual": "经人工确认", "inherited": "沿用已记录关系"}.get(attribution.get("origin"), "已记录")
+        text = {"linked": f"{origin}关联 {str(attribution.get('strategy') or '策略').title()}",
+                "ordinary": "普通单腿" + ("（经人工确认）" if attribution.get("origin") == "manual" else "；当前没有策略匹配"),
+                "pending": "关联待核实；可通过 OM Bot 查询并请求确认预览",
+                "conflict": "归属冲突，暂停相关 Wheel 新增建议；请通过 OM Bot 查询", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
+        fields.append(("策略", text))
+        coverage = attribution.get("coverage") or {}
+        if coverage:
+            put = attribution.get("direction") == "put"
+            labels = ({"none": "尚未安排", "partial": "部分安排", "full": "全部安排"} if put else
+                      {"none": "未覆盖", "partial": "部分覆盖", "full": "已全覆盖"})
+            label = labels.get(coverage.get("status"), "待核实" if coverage.get("status") != "not_applicable" else "本阶段无剩余额度")
+            amount = f"{coverage['committed_shares']} / {coverage['target_shares']} 股，" if coverage.get("committed_shares") is not None and coverage.get("target_shares") is not None else ""
+            fields.append(("CSP 安排" if put else "CC 覆盖", amount + label))
+            if coverage.get("available_shares") is not None:
+                fields.append(("分支剩余", f"{coverage['available_shares']} 股；可开数量以账户容量检查为准"))
+    elif (result.get("combo_reconciliation") or {}).get("ok") is False:
         fields.append(("组合", "组合核对未完成；请检查组合核对服务。"))
     elif _matching_auto_combo_adoption(result):
         fields.append(("组合", "✅ 已自动归入 Combo Yield（Funding Put + Participation Call）"))
-    elif _combo_yield_relation_pending(diagnostics):
-        fields.append(("组合", "关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。"))
+    elif applied and result.get("action") == "open":
+        fields.append(("策略", "归属尚未核实；已记录成交不代表已关联 Wheel/Combo。"))
     if kind:
         cause = {
             "sqlite_transient": "数据库短暂争用，本次记录未完成",
@@ -869,14 +888,6 @@ def build_trade_intake_receipt_message(
         fields=fields,
         sections=sections,
     )
-
-
-def _combo_yield_relation_pending(diagnostics: dict[str, Any]) -> bool:
-    for key in ("combo_yield_enrichment", "position_effect_inference"):
-        item = diagnostics.get(key)
-        if isinstance(item, dict) and bool(item.get("combination_relation_pending")):
-            return True
-    return False
 
 
 def _matching_auto_combo_adoption(result: dict[str, Any]) -> bool:

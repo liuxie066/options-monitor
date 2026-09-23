@@ -244,6 +244,7 @@ from src.application.ledger.combo_membership import (
     validate_combo_group_membership,
 )
 from src.application.ledger.combo_reconciliation import (
+    combo_attribution_candidates_from_rows,
     adopt_post_trade_combo_pair,
     list_combo_pair_inferences,
     reject_post_trade_combo_pair,
@@ -303,7 +304,28 @@ from src.application.ledger.lifecycle_settlement_semantics import (
     settlement_observation_semantic,
 )
 
+from .trade_attribution import (
+    enable_trade_attribution_policy,
+    read_trade_attribution_policy,
+    ATTRIBUTION_POLICY_VERSION,
+    assert_trade_attribution_unclaimed,
+    ledger_resource_identity,
+    read_trade_attribution_facts,
+    read_trade_attribution_snapshot,
+    record_trade_ordinary_attribution,
+    record_trade_attribution_conflict,
+    trade_attribution_facts_from_events,
+)
+from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
+
 __all__ = [
+    "combo_attribution_candidates_from_rows",
+    "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
+    "ledger_resource_identity", "read_trade_attribution_facts",
+    "read_trade_attribution_snapshot",
+    "enable_trade_attribution_policy", "read_trade_attribution_policy",
+    "preview_trade_attribution_migration", "apply_trade_attribution_migration",
+    "record_trade_ordinary_attribution", "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
     "contract_key_from_lot_fields",
     "lot_contract_value",
     "recover_wheel_assignment",

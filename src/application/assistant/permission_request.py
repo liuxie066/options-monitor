@@ -81,6 +81,8 @@ def _cancel_hint(operation_type: str, operation_id: str) -> str:
 
 
 def _operation_command_family(operation_type: str) -> str:
+    if operation_type == "trade_attribution":
+        return "attribution"
     if operation_type.startswith("manual_"):
         return "trade"
     if operation_type.startswith("symbol_"):

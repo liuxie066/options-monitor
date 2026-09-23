@@ -32,6 +32,8 @@ class InboundOperationStore:
         conversation_id: str | None = None,
         created_at: str | None = None,
     ) -> dict[str, Any]:
+        if operation_type == "trade_attribution" and not str(conversation_id or "").strip():
+            raise ValueError("trade attribution requires conversation_id")
         self._ensure_schema()
         now = created_at or utc_now_iso()
         expires_at = (datetime.fromisoformat(now) + timedelta(seconds=max(1, int(ttl_seconds)))).isoformat()
@@ -88,6 +90,11 @@ class InboundOperationStore:
         existing = self.get(operation_id)
         if existing is None:
             raise RuntimeError(f"failed to save inbound operation: {operation_id}")
+        if operation_type == "trade_attribution" and any(
+            existing.get(key) != operation_for_signature.get(key)
+            for key in ("command_id", "channel", "sender_id", "conversation_id", "operation_type", "payload_hash")
+        ):
+            raise ValueError("immutable trade attribution preview identity conflicts")
         return existing
 
     def get(self, operation_id: str) -> dict[str, Any] | None:
@@ -106,6 +113,14 @@ class InboundOperationStore:
                 (normalized,),
             ).fetchone()
         return _row_to_operation(row)
+
+    def list_attribution_recovery_operations(self, *, after: str = "") -> list[dict[str, Any]]:
+        self._ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute("""SELECT * FROM inbound_pending_operations
+                WHERE operation_type = 'trade_attribution' AND status IN ('confirmed', 'running', 'failed')
+                  AND operation_id > ? ORDER BY operation_id LIMIT 100""", (after,)).fetchall()
+        return [operation for row in rows if (operation := _row_to_operation(row)) is not None]
 
     def list_pending_operations(
         self,
@@ -295,6 +310,7 @@ class InboundOperationStore:
                 SELECT *
                 FROM inbound_pending_operations
                 WHERE status IN ('confirmed', 'running')
+                  AND operation_type != 'trade_attribution'
                 """
             ).fetchall()
             for row in rows:
@@ -339,7 +355,10 @@ class InboundOperationStore:
                 updated += int(cursor.rowcount or 0)
             return updated
 
-    def mark_confirmed(self, operation_id: str, *, result: dict[str, Any] | None = None) -> bool:
+    def mark_confirmed(
+        self, operation_id: str, *, result: dict[str, Any] | None = None,
+        expected_payload_hash: str | None = None,
+    ) -> bool:
         self._ensure_schema()
         with self._connect() as conn:
             cursor = conn.execute(
@@ -350,8 +369,10 @@ class InboundOperationStore:
                     result_json = COALESCE(?, result_json)
                 WHERE operation_id = ?
                   AND status = 'previewed'
+                  AND (? IS NULL OR payload_hash = ?)
                 """,
-                (utc_now_iso(), _json(result) if result is not None else None, str(operation_id)),
+                (utc_now_iso(), _json(result) if result is not None else None, str(operation_id),
+                 expected_payload_hash, expected_payload_hash),
             )
             return cursor.rowcount == 1
 
@@ -381,6 +402,8 @@ class InboundOperationStore:
             operation = _row_to_operation(row)
             if operation is None:
                 raise ValueError(f"pending operation is not previewed: {normalized}")
+            if operation.get("operation_type") == "trade_attribution":
+                raise ValueError("trade attribution preview is immutable")
             operation.update({
                 "payload_hash": str(payload_hash),
                 "payload": payload,
@@ -433,14 +456,20 @@ class InboundOperationStore:
             )
             return cursor.rowcount == 1
 
-    def mark_cancelled(self, operation_id: str, *, result: dict[str, Any]) -> None:
-        self._set_status(operation_id, "cancelled", cancelled_at=utc_now_iso(), result_json=_json(result))
+    def mark_cancelled(
+        self, operation_id: str, *, result: dict[str, Any],
+        expected_payload_hash: str | None = None,
+    ) -> bool:
+        return self._set_status(
+            operation_id, "cancelled", cancelled_at=utc_now_iso(), result_json=_json(result),
+            expected_statuses=("previewed",), expected_payload_hash=expected_payload_hash,
+        )
 
     def mark_expired(self, operation_id: str, *, result: dict[str, Any]) -> None:
-        self._set_status(operation_id, "expired", result_json=_json(result))
+        self._set_status(operation_id, "expired", result_json=_json(result), expected_statuses=("previewed",))
 
     def mark_failed(self, operation_id: str, *, result: dict[str, Any]) -> None:
-        self._set_status(operation_id, "failed", result_json=_json(result))
+        self._set_status(operation_id, "failed", result_json=_json(result), expected_statuses=("previewed", "confirmed", "running"))
 
     def mark_terminal_with_outbox(
         self,
@@ -624,10 +653,13 @@ class InboundOperationStore:
         applied_at: str | None = None,
         cancelled_at: str | None = None,
         result_json: str | None = None,
-    ) -> None:
+        expected_statuses: tuple[str, ...] | None = None,
+        expected_payload_hash: str | None = None,
+    ) -> bool:
         self._ensure_schema()
+        status_clause = (" AND status IN (" + ",".join("?" for _ in expected_statuses) + ")") if expected_statuses else ""
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE inbound_pending_operations
                 SET status = ?,
@@ -636,7 +668,8 @@ class InboundOperationStore:
                     cancelled_at = COALESCE(?, cancelled_at),
                     result_json = COALESCE(?, result_json)
                 WHERE operation_id = ?
-                """,
+                  AND (? IS NULL OR payload_hash = ?)
+                """ + status_clause,
                 (
                     str(status),
                     confirmed_at,
@@ -644,8 +677,11 @@ class InboundOperationStore:
                     cancelled_at,
                     result_json,
                     str(operation_id),
+                    expected_payload_hash, expected_payload_hash,
+                    *(expected_statuses or ()),
                 ),
             )
+            return cursor.rowcount == 1
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_inbound_sqlite(self.path, deadline_monotonic=self.deadline_monotonic)
@@ -682,6 +718,12 @@ class InboundOperationStore:
         elif normalized_conversation:
             where.append("conversation_id = ?")
             params.append(normalized_conversation)
+        if operation_types:
+            where.append("operation_type IN (" + ",".join("?" for _ in operation_types) + ")")
+            params.extend(sorted(operation_types))
+        if normalized_sender:
+            where.append("(operation_type != 'trade_attribution' OR (conversation_id = ? AND conversation_id != ''))")
+            params.append(normalized_conversation)
         params.append(limit_value)
         with self._connect() as conn:
             rows = conn.execute(
@@ -698,8 +740,6 @@ class InboundOperationStore:
         for row in rows:
             operation = _row_to_operation(row)
             if operation is None:
-                continue
-            if operation_types and str(operation.get("operation_type") or "") not in operation_types:
                 continue
             out.append(operation)
         return out
@@ -838,6 +878,10 @@ def _validate_pending_operation(
 ) -> dict[str, Any]:
     stored_conversation = str(operation.get("conversation_id") or "").strip()
     normalized_conversation = str(conversation_id or "").strip()
+    if operation.get("operation_type") == "trade_attribution" and (
+        not normalized_conversation or stored_conversation != normalized_conversation
+    ):
+        return {"status": "forbidden"}
     if stored_conversation and normalized_conversation and stored_conversation != normalized_conversation:
         return {"status": "forbidden"}
     if str(operation.get("channel") or "") != (str(channel or "").strip().lower() or "local") or str(operation.get("sender_id") or "") != str(sender_id or "").strip():
@@ -877,6 +921,9 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
     payload_map = payload if isinstance(payload, dict) else {}
     args_raw = payload_map.get("arguments")
     args = args_raw if isinstance(args_raw, dict) else {}
+    if operation_type == "trade_attribution":
+        contract = (payload_map.get("economics") or {}).get("contract_key") or {}
+        return f"{payload_map.get('account')} {contract.get('underlying_symbol')} {_option_contract_text(contract)} → {(operation.get('preview') or {}).get('target', '待核实')}"
     if operation_type == "manual_open":
         return _manual_open_summary(args)
     if operation_type == "manual_close":

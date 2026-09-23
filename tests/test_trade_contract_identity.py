@@ -251,8 +251,10 @@ def test_public_ledger_preserves_legacy_input_without_standard_identity(tmp_path
 def test_source_effect_enrichment_checks_applied_allocation_at_ledger_facades(tmp_path, known_effect, conflicts):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     payload = {**_execution_input(effect=None, option_type="call"), "side": "buy"}
-    first = resolve_trade_deal(normalize_trade_deal(payload), repo=repo, state={}, apply_changes=True)
-    assert (first.status, first.action) == ("applied", "open")
+    # Seed a previously admitted open whose original broker evidence lacked effect.
+    # New intake no longer guesses open merely because the side is buy/call.
+    first = record_normalized_trade_event(repo, replace(normalize_trade_deal(payload), position_effect="open"))
+    assert first.created
     before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
     assert before_events[0]["raw_payload"]["execution_input"]["position_effect"] is None
     enriched = normalize_trade_deal({**payload, "position_effect": known_effect})

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import json
 import sqlite3
 from pathlib import Path
@@ -1523,7 +1525,7 @@ def test_historical_broker_close_recovers_one_consistent_account(
             },
         )
     )
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         row = conn.execute(
             "SELECT event_json FROM trade_events WHERE event_id = ?",
             ("historical-close-with-null-account",),
@@ -1577,7 +1579,7 @@ def test_historical_broker_close_keeps_account_conflict_in_review(
             },
         )
     )
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         row = conn.execute(
             "SELECT event_json FROM trade_events WHERE event_id = ?",
             ("historical-close-with-account-conflict",),
@@ -1823,7 +1825,7 @@ def test_outbox_v1_schema_upgrade_preserves_delivery_state(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "legacy.sqlite3"
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE trade_lifecycle_notification_outbox (

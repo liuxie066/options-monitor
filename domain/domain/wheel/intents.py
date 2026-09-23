@@ -7,7 +7,7 @@ below stay thin wrappers around them.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.events import persisted_stock_settlement
@@ -29,7 +29,46 @@ from .projection import (
     _trade_position_side,
     _trade_symbol,
     lot_contract_key,
+    project_wheel_intents,
 )
+
+
+def resolve_wheel_fill_intent(branch: Mapping[str, Any], fill: Mapping[str, Any],
+    wheel_events: Sequence[Mapping[str, Any]], *, now_ms: int, known_trade_event_ids: set[str]) -> dict[str, Any]:
+    """Validate at fill time, consume against today's remainder, without reviving reservations."""
+    event = _trade_event_fact(fill)
+    instant = int(event["event_time_ms"])
+    kwargs = dict(account=branch["account"], wheel_branch_id=branch["wheel_branch_id"], direction=branch["direction"],
+                  known_trade_event_ids=known_trade_event_ids)
+    historical = {item["intent_id"]: item for item in project_wheel_intents(wheel_events, as_of_ms=instant, **kwargs)}
+    current = project_wheel_intents(wheel_events, as_of_ms=now_ms, **kwargs)
+    relevant = []
+    for intent in current:
+        if int(intent.get("created_at_ms") or 0) > instant:
+            continue
+        payload = intent.get("payload") or {}
+        same_contract = (payload.get("expiration_ymd") == event.get("expiration_ymd")
+                         and _finite_float(payload.get("strike")) == _finite_float(event.get("strike")))
+        at_fill = historical.get(intent["intent_id"], {})
+        if same_contract or at_fill.get("status") == "active":
+            relevant.append((intent, at_fill))
+    if not relevant:
+        return {"intent": None, "reserved_contracts_to_consume": 0, "reason_codes": []}
+    if len(relevant) != 1:
+        return {"intent": None, "reserved_contracts_to_consume": 0, "reason_codes": ["multiple_or_invalid_wheel_intents"]}
+    current_intent, at_fill = relevant[0]
+    candidate = {**at_fill, "remaining_contracts": min(int(current_intent.get("remaining_contracts") or 0),
+                                                      int(at_fill.get("remaining_contracts") or 0))}
+    payload = candidate.get("payload") or {}
+    capacity = {"account": branch["account"], "symbol": branch["symbol"], "status": "available",
+                "shares_available_for_cover": contract_share_quantity(event["contracts"], event["multiplier"]),
+                **{key: payload.get(key) for key in ("capacity_identity_hash", "cash_reservation_currency", "cash_reservation_amount")}}
+    try:
+        _plan_intent_consume(branch, candidate, event, capacity, direction=branch["direction"], recorded_at_ms=now_ms)
+    except (TypeError, ValueError):
+        return {"intent": None, "reserved_contracts_to_consume": 0, "reason_codes": ["wheel_intent_fill_mismatch_or_consumed"]}
+    return {"intent": candidate, "reserved_contracts_to_consume": int(event["contracts"]) if current_intent["status"] == "active" else 0,
+            "reason_codes": []}
 
 
 def plan_wheel_branch_decision(
@@ -904,5 +943,4 @@ def plan_wheel_put_intent_consume(
     return _plan_intent_consume(
         branch, intent, fill, cash_capacity_fact, direction="put", recorded_at_ms=recorded_at_ms,
     )
-
 

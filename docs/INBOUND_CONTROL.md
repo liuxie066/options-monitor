@@ -140,3 +140,22 @@ Do not add:
 - a second tool registry;
 - ordinary LLM fallback without tools;
 - natural-language writes.
+
+### 已入账成交的策略归属
+
+`trade_attribution_read` 只读当前配置账户内的成交归属。自然语言选择由 Bot 的
+`request_control_preview` 交给 Control；也可输入：
+
+```text
+/attribute lx <execution_key> ordinary
+/attribute lx <execution_key> wheel <wheel_branch_id>
+/attribute lx <execution_key> combo <strategy_group_id>
+/confirm attribution <operation_id>
+/cancel attribution <operation_id>
+```
+
+`execution_key` 使用查询返回的规范成交身份，不是 broker 原始订单编号。`/pending` 只列当前对话的预览。
+确认要求同一已鉴权渠道、sender、非空 conversation、当前写权限和签名，并重新检查账本资源与账户映射。
+模型没有 confirm/apply 权限；归属操作不下单、不重复记经济成交、不重发原成交回执。
+普通单腿确认不依赖 provider 容量；Wheel/Combo 依赖当前完整竞争证据和新鲜容量。
+预览后实质变化需重新预览，重复确认按既有事实读回；取消已认领的操作不撤销账本。

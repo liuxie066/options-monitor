@@ -9,6 +9,8 @@ pre/post-rewrite comparison, which is a two-snapshot job and not this read's.
 
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import sqlite3
 from pathlib import Path
 
@@ -99,7 +101,7 @@ def test_the_store_read_carries_the_face_b_columns_and_the_rowid(tmp_path: Path)
     this pins the pair together.
     """
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    with sqlite3.connect(tmp_path / "option_positions.sqlite3") as conn:
+    with connect_ledger_fixture(tmp_path / "option_positions.sqlite3") as conn:
         conn.execute(
             """
             INSERT INTO position_lots

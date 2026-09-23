@@ -121,6 +121,15 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("wheel_branch_decided requires decision=start|end")
     if event_type == "wheel_event_voided":
         _required_text(payload.get("target_wheel_event_id"), "target_wheel_event_id")
+    if event_type in {"wheel_attribution_conflict", "wheel_attribution_conflict_resolved"}:
+        for field in ("actor", "request_id", "branch_generation_hash", "input_hash"):
+            _required_text(payload.get(field), field)
+        if event_type == "wheel_attribution_conflict_resolved":
+            _required_text(payload.get("conflict_event_id"), "conflict_event_id")
+            _required_text(payload.get("resolution_evidence_event_id"), "resolution_evidence_event_id")
+        elif (not isinstance(payload.get("execution_keys"), list) or not payload["execution_keys"]
+              or any(not isinstance(key, str) or not key.strip() for key in payload["execution_keys"])):
+            raise ValueError("wheel attribution conflict requires execution_keys")
     normalized = {
         "event_id": event_id,
         "event_schema_version": event_schema_version,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import json
 import sqlite3
 from pathlib import Path
@@ -143,7 +145,7 @@ def _continuation(
 
 
 def _legacy_store(path: Path, events: tuple[TradeEvent, ...]) -> None:
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.executescript(
             """
             CREATE TABLE trade_events (
@@ -181,7 +183,7 @@ def _legacy_store(path: Path, events: tuple[TradeEvent, ...]) -> None:
 
 
 def _ingest_sequences(db_path: Path) -> list[int]:
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         return [
             row[0]
             for row in conn.execute(
@@ -193,7 +195,7 @@ def _ingest_sequences(db_path: Path) -> list[int]:
 def _force_zero_event_time(path: Path, event_id: str) -> None:
     """Rewrite one stored row to ``event_time_ms = 0`` in both copies of the time."""
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         payload = json.loads(
             conn.execute(
                 "SELECT event_json FROM trade_events WHERE event_id = ?",
@@ -336,7 +338,7 @@ def test_legacy_rows_require_controlled_deterministic_backfill(tmp_path: Path) -
     inventory = build_position_projection_migration_inventory(path)
     applied = apply_position_projection_migration(path, inventory)
     assert applied["trade_event_pagination_rows_backfilled"] == 3
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         rows = conn.execute(
             """
             SELECT event_id, ingest_seq, market, position_effect
@@ -373,7 +375,7 @@ def test_backfill_preserves_voided_legacy_event_with_non_positive_time(
     applied = apply_position_projection_migration(path, inventory)
 
     assert applied["trade_event_pagination_rows_backfilled"] == 2
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         row = conn.execute(
             """
             SELECT trade_time_ms, ingest_seq, market, position_effect
@@ -401,7 +403,7 @@ def test_backfill_rejects_conflicting_existing_projection(tmp_path: Path) -> Non
     path = tmp_path / "legacy-conflict.sqlite3"
     _legacy_store(path, (_event("event-1", event_time_ms=10),))
     SQLiteOptionPositionsRepository(path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute(
             """
             UPDATE trade_events
@@ -531,7 +533,7 @@ def test_backfill_is_batched_and_keyset_query_uses_ordered_index(tmp_path: Path)
     assert len(selects) == 4
     assert any("(created_at_ms, event_id) >" in sql for sql in selects)
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         plan = " ".join(
             str(row[3])
             for row in conn.execute(
@@ -668,7 +670,7 @@ def _age_pagination_guards(db_path: Path) -> None:
     decimal-text strike carries.
     """
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         for name in _PAGINATION_GUARDS:
             row = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
@@ -685,7 +687,7 @@ def _age_pagination_guards(db_path: Path) -> None:
 
 
 def _pagination_guards_carry_current_definition(db_path: Path) -> bool:
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         rows = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?)",
             _PAGINATION_GUARDS,
@@ -702,7 +704,7 @@ def _duplicate_ingest_sequence(db_path: Path) -> None:
     values collide, and the definitions the open path would publish are missing.
     """
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute("DROP TRIGGER IF EXISTS trg_trade_events_ingest_seq_immutable")
         conn.execute("DROP INDEX IF EXISTS idx_trade_events_ingest_seq")
         conn.execute("UPDATE trade_events SET ingest_seq = 7")
@@ -736,7 +738,7 @@ def test_open_refreshes_a_stale_pagination_guard_definition(tmp_path: Path) -> N
     reopened.upsert_trade_event(_event("open-2", event_time_ms=2000))
 
     # Refreshing the definition must not have disturbed the stored rows.
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         stored = conn.execute(
             "SELECT event_id FROM trade_events ORDER BY event_id"
         ).fetchall()
@@ -792,7 +794,7 @@ def test_open_reseeds_a_lost_ingest_sequence_allocator(tmp_path: Path) -> None:
     for index in range(3):
         repo.upsert_trade_event(_event(f"open-{index}", event_time_ms=1000 + index))
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute("DELETE FROM trade_event_ingest_sequence")
 
     reopened = SQLiteOptionPositionsRepository(db_path)
@@ -825,7 +827,7 @@ def test_open_seeds_the_allocator_only_from_whole_non_negative_values(
     repo = SQLiteOptionPositionsRepository(db_path)
     repo.upsert_trade_event(_event("open-1", event_time_ms=1000))
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         # Every guard has to go: the projection guards refuse to let ``ingest_seq``
         # become a non-integer or a negative, and a store that still had them
         # working would never carry these values. Guards that cannot be trusted is
@@ -840,7 +842,7 @@ def test_open_seeds_the_allocator_only_from_whole_non_negative_values(
 
     SQLiteOptionPositionsRepository(db_path)
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         row = conn.execute(
             "SELECT last_value, typeof(last_value) FROM trade_event_ingest_sequence"
         ).fetchone()
@@ -848,7 +850,7 @@ def test_open_seeds_the_allocator_only_from_whole_non_negative_values(
 
 
 def _schema_objects(db_path: Path) -> set[tuple[str, str]]:
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         return {
             (str(row[0]), str(row[1]))
             for row in conn.execute("SELECT type, name FROM sqlite_master")
@@ -873,7 +875,7 @@ def test_open_survives_a_pagination_index_name_owned_by_a_table(
     for index in range(2):
         repo.upsert_trade_event(_event(f"open-{index}", event_time_ms=1000 + index))
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute("DROP INDEX idx_trade_events_ingest_seq")
         conn.execute("DROP INDEX idx_trade_events_pagination_missing")
         conn.execute("CREATE TABLE idx_trade_events_ingest_seq (shadow INTEGER)")
@@ -939,12 +941,12 @@ def test_open_repairs_an_allocator_that_lags_behind_the_stored_rows(
     for index in range(3):
         repo.upsert_trade_event(_event(f"open-{index}", event_time_ms=1000 + index))
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute("UPDATE trade_event_ingest_sequence SET last_value = 1")
 
     reopened = SQLiteOptionPositionsRepository(db_path)
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         assert conn.execute(
             "SELECT last_value FROM trade_event_ingest_sequence"
         ).fetchone() == (3,)
@@ -1043,7 +1045,7 @@ def test_open_leaves_no_partial_schema_when_the_publish_failure_takes_the_transa
 
     db_path = tmp_path / "ledger.sqlite3"
     SQLiteOptionPositionsRepository(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         conn.execute("DROP INDEX idx_trade_events_ingest_seq")
         conn.execute("DROP INDEX idx_trade_events_pagination_missing")
         conn.execute("DROP INDEX idx_trade_events_account_time")

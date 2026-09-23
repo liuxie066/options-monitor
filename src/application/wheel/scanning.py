@@ -23,6 +23,7 @@ from domain.domain.wheel import (
     build_wheel_put_rank_key,
     evaluate_wheel_call_candidate,
     evaluate_wheel_put_candidate,
+    project_wheel_coverage,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.candidate_scanning import (
@@ -287,6 +288,15 @@ def _direction_policy(wheel_config: Mapping[str, Any], direction: str) -> dict[s
     return dict(wheel_config)
 
 
+def _branch_capacity_reason(branch: Mapping[str, Any]) -> str | None:
+    coverage = branch.get("coverage") or project_wheel_coverage(branch)
+    if coverage["status"] in {"unavailable", "overallocated"}:
+        return next(iter(coverage["reason_codes"]), "coverage_quantity_unavailable")
+    if not coverage["available_shares"]:
+        return "wheel_capacity_fully_committed_or_reserved"
+    return None
+
+
 def _branch_gate_reason(branch: Mapping[str, Any]) -> str | None:
     gate = str(branch.get("monitoring_gate") or "disabled").strip().lower()
     if gate == "enabled":
@@ -346,7 +356,7 @@ def run_wheel_call_scan(
         for row in batches
         if row.get("lifecycle_status") == "active"
         and row.get("integrity_status") == "trusted"
-        and row.get("phase") == "ready"
+        and _branch_capacity_reason(row) is None
         and _branch_gate_reason(row) is None
     ]
     symbols = sorted({str(row.get("symbol") or "").strip().upper() for row in scan_batches})
@@ -425,8 +435,8 @@ def run_wheel_call_scan(
         if gate_reason is not None:
             scopes.append({**base_scope, "status": "not_applicable", "reason_code": gate_reason})
             continue
-        if raw_batch.get("phase") != "ready":
-            scopes.append({**base_scope, "status": "not_applicable", "reason_code": f"wheel_{raw_batch.get('phase') or 'not_ready'}"})
+        if _branch_capacity_reason(raw_batch) is not None:
+            scopes.append({**base_scope, "status": "not_applicable", "reason_code": _branch_capacity_reason(raw_batch)})
             continue
         if symbol in unavailable_symbols:
             scopes.append({**base_scope, "status": "unavailable", "reason_code": unavailable_symbols[symbol]})
@@ -442,7 +452,7 @@ def run_wheel_call_scan(
             multiplier = 0
             try:
                 multiplier = int(float(candidate.get("multiplier") or 0))
-                contracts = int(batch.get("shares_remaining") or 0) // multiplier
+                contracts = int((batch.get("coverage") or project_wheel_coverage(batch))["available_shares"]) // multiplier
             except (TypeError, ValueError, ZeroDivisionError):
                 contracts = 0
             grant_evaluations: dict[str, dict[str, Any]] = {}
@@ -568,7 +578,7 @@ def run_wheel_put_scan(
         for row in branches
         if row.get("lifecycle_status") == "active"
         and row.get("integrity_status") == "trusted"
-        and row.get("phase") == "ready"
+        and _branch_capacity_reason(row) is None
         and _branch_gate_reason(row) is None
     ]
     symbols = sorted(
@@ -680,12 +690,12 @@ def run_wheel_put_scan(
                 }
             )
             continue
-        if branch.get("phase") != "ready":
+        if _branch_capacity_reason(branch) is not None:
             scopes.append(
                 {
                     **base_scope,
                     "status": "not_applicable",
-                    "reason_code": f"wheel_{branch.get('phase') or 'not_ready'}",
+                    "reason_code": _branch_capacity_reason(branch),
                 }
             )
             continue
@@ -709,6 +719,8 @@ def run_wheel_put_scan(
                 multiplier = int(float(candidate.get("multiplier") or 0))
             except (TypeError, ValueError):
                 multiplier = 0
+            available = (branch.get("coverage") or project_wheel_coverage(branch))["available_shares"]
+            requested_contracts = int(available) // multiplier if multiplier > 0 and available is not None else 0
             grant_evaluations: dict[str, dict[str, Any]] = {}
             for grant in range(1, requested_contracts + 1):
                 fee = _assignment_fee_fact(

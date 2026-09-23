@@ -184,6 +184,41 @@ def test_wheel_projection_is_order_independent_and_tracks_linked_call() -> None:
     assert first["active_call_lot_ids"] == ["call-lot-1"]
 
 
+def test_durable_attribution_conflict_blocks_branch_until_explicit_resolution() -> None:
+    from domain.domain.trade_execution import execution_identity_from_input
+    execution = {"external_id_namespace": "futu.deal", "external_execution_id": "call-fill",
+                 "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}}
+    call = _call_open_trade()
+    call["raw_payload"] = {**call.get("raw_payload", {}), "execution_input": execution}
+    common = dict(account="lx", lot_id="assigned-stock-assign-put", occurred_at_ms=2500, recorded_at_ms=2500)
+    conflict = build_wheel_event(event_id="conflict", event_type="wheel_attribution_conflict", **common,
+        payload={"actor": "intake", "request_id": "conflict:1", "branch_generation_hash": "generation",
+                 "input_hash": "input", "execution_keys": [execution_identity_from_input(execution)]})
+    def project(events, evidence=()):
+        return project_wheel_lifecycles(events, [_assignment_trade(), call, *evidence],
+            [{"record_id": "call-lot-1", "fields": _call_lot_fields(status="open", contracts_open=1)}],
+            _assigned_stock(), 4000)[0]
+    blocked = project([_started_event(), conflict])
+    assert blocked["integrity_status"] != "trusted"
+    assert "strategy_attribution_conflict" in blocked["reason_codes"]
+    assert blocked["active_call_lot_ids"] == ["call-lot-1"]
+    resolution = build_wheel_event(event_id="resolved", event_type="wheel_attribution_conflict_resolved", **common,
+        payload={"actor": "operator", "request_id": "resolve:1", "branch_generation_hash": "generation",
+                 "input_hash": "input", "conflict_event_id": "conflict", "resolution_evidence_event_id": "manual-decision"})
+    assert project([resolution, conflict, _started_event()])["integrity_status"] != "trusted"
+    unrelated = {"event_id": "manual-decision", "event_type": "adjust", "event_time_ms": 2500}
+    assert project([resolution, conflict, _started_event()], [unrelated])["integrity_status"] != "trusted"
+    proof = {**unrelated, "source": "wheel_linkage", "target_lot_id": call["lot_id"], "contract_key": {"account": "lx"},
+             "raw_payload": {"actor": "operator", "attribution_request_id": "control:keep-wheel", "attribution_origin": "manual",
+                             "attribution_candidate_id": "wheel:assigned-stock-assign-put"}}
+    restored = project([resolution, conflict, _started_event()], [proof])
+    assert restored["integrity_status"] == "trusted"
+    assert blocked["batch_generation_hash"] != restored["batch_generation_hash"]
+    wrong = build_wheel_event(event_id="wrong-resolution", event_type="wheel_attribution_conflict_resolved",
+        **common, payload={**resolution["payload"], "conflict_event_id": "unknown"})
+    assert "invalid_attribution_conflict_resolution" in project([_started_event(), conflict, wrong])["reason_codes"]
+
+
 def test_wheel_projection_fails_closed_when_called_away_event_is_missing() -> None:
     closed_call = {
         "record_id": "call-lot-1",
@@ -794,3 +829,30 @@ def test_wheel_invalid_intent_units_are_unknown_and_block_the_batch():
     assert batch["phase"] is None
     assert batch["active_intent_reserved_shares"] is None
     assert "wheel_intent_units_invalid" in batch["reason_codes"]
+    from domain.domain.wheel import project_wheel_coverage
+    coverage = project_wheel_coverage(batch)
+    assert coverage["status"] == "unavailable"
+    assert coverage["reserved_shares"] is None and coverage["available_shares"] is None
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("committed,reserved,status,available", [(0,0,"none",300),(100,0,"partial",200),
+    (300,0,"full",0),(0,300,"none",0),(300,100,"overallocated",0)])
+def test_wheel_coverage_separates_actual_options_and_reservations(direction, committed, reserved, status, available):
+    from domain.domain.wheel import project_wheel_coverage
+    branch = {"direction": direction, "integrity_status": "trusted", "shares_remaining": 300,
+        "remaining_contracts": 3, "multiplier": 100, "active_option_committed_shares": committed,
+        "active_intent_reserved_shares": reserved}
+    result = project_wheel_coverage(branch)
+    assert result["status"] == status and result["available_shares"] == available
+    assert result["committed_shares"] == committed and result["reserved_shares"] == reserved
+    assert project_wheel_coverage({**branch, "multiplier": None})["status"] == "unavailable"
+    assert project_wheel_coverage({**branch, "shares_remaining": 0, "remaining_contracts": 0,
+        "active_option_committed_shares": 0, "active_intent_reserved_shares": 0})["status"] == "not_applicable"
+
+
+def test_known_overallocation_stays_visible_on_conflicted_branch():
+    from domain.domain.wheel import project_wheel_coverage
+    coverage = project_wheel_coverage({"direction": "call", "integrity_status": "conflict", "multiplier": 100,
+        "shares_remaining": 100, "active_option_committed_shares": 200, "active_intent_reserved_shares": 0})
+    assert coverage["status"] == "overallocated" and coverage["committed_shares"] == 200

@@ -174,7 +174,8 @@ def test_wheel_required_data_preserves_existing_strategy_config_matrix(
         base_config=config, candidate_config=config, account_configs={"acct_a": config},
         wheel_read_models={
             "acct_a": {"batches": [{"symbol": "NVDA", "lifecycle_status": "active", "integrity_status": "trusted",
-                                    "phase": "ready", "monitoring_gate": "enabled"}]}
+                                    "phase": "ready", "monitoring_gate": "enabled",
+                                    "shares_remaining": 100, "multiplier": 100}]}
         },
     )
 

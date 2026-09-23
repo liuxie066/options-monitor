@@ -22,6 +22,8 @@ either unlinks the sidecars or holds a connection open.
 
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 from collections.abc import Callable
 from copy import deepcopy
 import hashlib
@@ -98,7 +100,7 @@ def _probe_module() -> types.ModuleType:
 
 
 def _stored_lot_id(sqlite_path: Path) -> str:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         row = conn.execute("SELECT lot_id FROM position_lots").fetchone()
     finally:
@@ -108,7 +110,7 @@ def _stored_lot_id(sqlite_path: Path) -> str:
 
 
 def _stored_fields(sqlite_path: Path) -> dict[str, object]:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         row = conn.execute("SELECT fields_json FROM position_lots").fetchone()
     finally:
@@ -159,7 +161,7 @@ def _settle_store(sqlite_path: Path) -> None:
     the CI runner deletes them — so a settled shape inherited from that close
     would be describing the build.
     """
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.commit()
@@ -187,7 +189,7 @@ def _drop_table_triggers(sqlite_path: Path, table: str) -> None:
     on disk — and the guards sit at three separate layers per table, so dropping
     them by name would make each fixture depend on today's guard inventory.
     """
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         names = [
             str(row[0])
@@ -221,7 +223,7 @@ def _drop_trade_event_guards(sqlite_path: Path) -> None:
 def _degrade_lot_table(sqlite_path: Path, *, with_carrier: bool = False) -> None:
     """Build the historical identity shape only for the read-only probe tests."""
 
-    with sqlite3.connect(sqlite_path) as conn:
+    with connect_ledger_fixture(sqlite_path) as conn:
         conn.execute("ALTER TABLE position_lots RENAME COLUMN lot_id TO record_id")
         conn.execute("ALTER TABLE position_lots ADD COLUMN expiration INTEGER")
         conn.execute("UPDATE position_lots SET expiration = 1781827200000")
@@ -231,7 +233,7 @@ def _degrade_lot_table(sqlite_path: Path, *, with_carrier: bool = False) -> None
 
 
 def _ledger_event_id(sqlite_path: Path) -> str:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         row = conn.execute(
             "SELECT event_id FROM trade_events ORDER BY trade_time_ms ASC LIMIT 1"
@@ -243,7 +245,7 @@ def _ledger_event_id(sqlite_path: Path) -> str:
 
 
 def _tamper(sqlite_path: Path, statements: list[tuple[str, tuple[object, ...]]]) -> None:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         for sql, params in statements:
             conn.execute(sql, params)
@@ -256,7 +258,7 @@ def _mutate_fields(
     sqlite_path: Path,
     mutate: Callable[[dict[str, object]], None],
 ) -> None:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(position_lots)")}
         identity = "lot_id" if "lot_id" in columns else "record_id"
@@ -337,7 +339,7 @@ def _stage_a_crashed_writer(sqlite_path: Path, *, strike: object) -> None:
     """
     sqlite_path = Path(sqlite_path)
     journal = Path(f"{sqlite_path}-journal")
-    conn = sqlite3.connect(sqlite_path, isolation_level=None)
+    conn = connect_ledger_fixture(sqlite_path, isolation_level=None)
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
         for suffix in ("-wal", "-shm"):
@@ -377,7 +379,7 @@ def _leave_a_spent_persist_journal(sqlite_path: Path) -> None:
     the fallback" rule would turn into a false refusal.
     """
     sqlite_path = Path(sqlite_path)
-    conn = sqlite3.connect(sqlite_path, isolation_level=None)
+    conn = connect_ledger_fixture(sqlite_path, isolation_level=None)
     try:
         assert conn.execute("PRAGMA journal_mode=PERSIST").fetchone() == ("persist",)
         conn.execute("PRAGMA cache_size=1")
@@ -1447,7 +1449,7 @@ def test_probe_attributes_a_duplicate_identity_that_is_on_both_sides(
     _degrade_lot_table(sqlite_path, with_carrier=True)
     lot_id = _stored_lot_id(sqlite_path)
     fields = _stored_fields(sqlite_path)
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         stored_row = conn.execute(
             "SELECT account, source_event_id, expiration, strike, multiplier "
@@ -1539,7 +1541,7 @@ def test_probe_survives_the_record_id_rename(tmp_path: Path) -> None:
     of it — at the one step that has to prove "replay == stored" still holds.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    with sqlite3.connect(sqlite_path) as conn:
+    with connect_ledger_fixture(sqlite_path) as conn:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")
         }
@@ -1563,7 +1565,7 @@ def test_probe_reads_a_store_that_only_has_record_id(tmp_path: Path) -> None:
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _degrade_lot_table(sqlite_path)
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()
@@ -1583,7 +1585,7 @@ def test_probe_reads_a_store_that_only_has_record_id(tmp_path: Path) -> None:
 
 
 def _store_snapshot(sqlite_path: Path) -> dict[str, object]:
-    conn = sqlite3.connect(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
     try:
         schema = conn.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
@@ -1765,7 +1767,7 @@ def test_probe_refuses_a_store_a_writer_is_holding_locked(tmp_path: Path) -> Non
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     sqlite_path = Path(sqlite_path)
-    writer = sqlite3.connect(sqlite_path, isolation_level=None)
+    writer = connect_ledger_fixture(sqlite_path, isolation_level=None)
     try:
         writer.execute("PRAGMA journal_mode=DELETE")
         for suffix in ("-wal", "-shm"):
@@ -1806,7 +1808,7 @@ def test_probe_refuses_a_store_with_a_hot_journal(tmp_path: Path) -> None:
 
     # ...and the refused run left the crash for a reader that may roll back: the
     # probe must not be the thing that consumes a pending recovery.
-    assert sqlite3.connect(sqlite_path).execute(
+    assert connect_ledger_fixture(sqlite_path).execute(
         "SELECT strike FROM position_lots"
     ).fetchone() == (100.0,)
 
@@ -1869,7 +1871,7 @@ def test_probe_falls_back_only_when_the_sidecars_are_gone(
     if settled:
         _settle_store(sqlite_path)
     else:
-        holder = sqlite3.connect(sqlite_path)
+        holder = connect_ledger_fixture(sqlite_path)
         holder.execute("SELECT count(*) FROM position_lots").fetchone()
     try:
         # The fixture's own claim, so neither branch can pass for the wrong
@@ -1913,7 +1915,7 @@ def test_probe_keeps_mode_ro_when_a_writer_may_still_be_attached(tmp_path: Path)
     from this one.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    writer = sqlite3.connect(sqlite_path)
+    writer = connect_ledger_fixture(sqlite_path)
     try:
         assert writer.execute("SELECT count(*) FROM position_lots").fetchone() is not None
         assert Path(f"{sqlite_path}-shm").exists()

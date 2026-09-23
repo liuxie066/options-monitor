@@ -77,6 +77,7 @@ from .projection import (
     _trade_symbol,
     attach_lot_strategy_metadata,
     effective_wheel_events,
+    project_wheel_coverage,
     lot_contract_key,
     lot_strategy_metadata_for_lot,
     lot_strategy_metadata_from_trade_events,

@@ -9,6 +9,8 @@ publisher actually produces.
 
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 from contextlib import closing
 from decimal import Decimal
 import json
@@ -96,7 +98,7 @@ def _restore_legacy_flat_keys(path: Path) -> None:
     ``position_id`` injection models, one vocabulary further back.
     """
 
-    with closing(sqlite3.connect(path)) as conn, conn:
+    with closing(connect_ledger_fixture(path)) as conn, conn:
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
             "SELECT record_id, fields_json FROM position_lots"
@@ -217,7 +219,7 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
         stock_side="buy", stock_qty=100, stock_price=100.0, as_of_ms=3000,
     )
 
-    with closing(sqlite3.connect(path)) as conn, conn:
+    with closing(connect_ledger_fixture(path)) as conn, conn:
         conn.execute("ALTER TABLE position_lots RENAME COLUMN lot_id TO record_id")
         conn.execute("ALTER TABLE position_lots ADD COLUMN lot_id TEXT")
         conn.execute("ALTER TABLE position_lots ADD COLUMN expiration INTEGER")
@@ -258,7 +260,7 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
 def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
     """Rig one lot's ``fields_json`` the way a degraded store carries it."""
 
-    with closing(sqlite3.connect(path)) as conn, conn:
+    with closing(connect_ledger_fixture(path)) as conn, conn:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")
         }
@@ -277,7 +279,7 @@ def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
 
 
 def _stored_rows(path: Path) -> dict[str, object]:
-    with closing(sqlite3.connect(path)) as conn:
+    with closing(connect_ledger_fixture(path)) as conn:
         conn.row_factory = sqlite3.Row
         return {
             str(row["record_id"]): {
@@ -380,13 +382,13 @@ def repointed_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _table_info(path: Path, table: str = "position_lots") -> list[sqlite3.Row]:
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute(f"PRAGMA table_info({table})").fetchall()
 
 
 def _object_sql(path: Path, kind: str, table: str = "position_lots") -> dict[str, str]:
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         return {
             str(row["name"]): " ".join(str(row["sql"]).split())
@@ -412,7 +414,7 @@ def _primary_key(path: Path, table: str = "position_lots") -> str | None:
 def _rebuilt_rows(path: Path) -> dict[str, dict[str, object]]:
     """Every lot row of a store on the rebuilt shape, keyed by ``lot_id``."""
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         return {
             str(row["lot_id"]): {
@@ -636,7 +638,7 @@ def test_a_family_key_the_open_event_carries_is_reconstructible(tmp_path: Path) 
         strategy_snapshot={"strategy": "wheel", "leg_role": "short_put"},
     )
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         record_id = str(conn.execute("SELECT lot_id FROM position_lots").fetchone()["lot_id"])
     _edit_lot_fields(
@@ -697,7 +699,7 @@ def test_yield_mode_requires_the_same_open_event_fact(tmp_path: Path) -> None:
     assert absent["lost"]["yield_enhancement_mode"]["reason"] == "event_layer_carrier_absent"
     event_id = _stored_rows(path)[lot_id]["source_event_id"]
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'trade_events'"
@@ -717,7 +719,7 @@ def test_yield_mode_requires_the_same_open_event_fact(tmp_path: Path) -> None:
     classification = module.build_lot_identity_migration_inventory(path)["dropped_key_classification"]
     assert classification["reconstructible"]["yield_enhancement_mode"]["rows_non_empty"] == 1
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         raw = conn.execute(
             "SELECT event_json FROM trade_events WHERE event_id = ?", (event_id,)
         ).fetchone()[0]
@@ -786,7 +788,7 @@ def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) 
         for key, value in _stored_rows(path).items()
         if _lot_option_type(value["fields"] or {}) == "put"
     )
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         raw = conn.execute(
             "SELECT fields_json, multiplier FROM position_lots WHERE record_id = ?",
@@ -817,7 +819,7 @@ def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) 
     assert module.NOTE_KV_SURVIVING_COLUMNS == {}
 
     # Nulling the column changes nothing: the classification already ignores it.
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute(
             "UPDATE position_lots SET multiplier = NULL WHERE record_id = ?",
             (lot_id,),
@@ -955,7 +957,7 @@ def test_verify_does_not_blame_the_lots_for_events_it_cannot_read(
     """
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT event_id, event_json FROM trade_events").fetchall()
         assert rows
@@ -1039,7 +1041,7 @@ def test_verify_is_clean_on_a_strategy_tagged_store(tmp_path: Path) -> None:
         strategy_snapshot={"strategy": "wheel", "leg_role": "short_put"},
     )
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         fields = json.loads(
             conn.execute("SELECT fields_json FROM position_lots").fetchone()["fields_json"]
@@ -1191,7 +1193,7 @@ def test_end_to_end_inventory_verify_apply_verify(tmp_path: Path) -> None:
     # runnable, and the CLI is where this store is republished from.
     assert result["required_follow_up"] == ["om option-positions rebuild"]
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
     rows = _stored_rows(path)
@@ -1232,7 +1234,7 @@ def test_apply_rolls_back_everything_on_failure(tmp_path: Path) -> None:
     ]
     assert _stored_rows(path) == before
     assert all(row["lot_id"] is None for row in _stored_rows(path).values())
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
@@ -1272,7 +1274,7 @@ def test_apply_refuses_a_stale_or_foreign_manifest(tmp_path: Path) -> None:
 def test_open_path_refuses_pre_carrier_store_without_mutating_it(tmp_path: Path) -> None:
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
         conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
         conn.commit()
@@ -1346,7 +1348,7 @@ def test_apply_backfills_the_carrier_on_a_store_that_never_had_the_column(
     """§13.2 row 7's gated backfill: the column may be missing entirely."""
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
         conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
         conn.commit()
@@ -1437,7 +1439,7 @@ def test_final_lot_identity_rejects_null(tmp_path: Path) -> None:
 
     path = tmp_path / "null-identity.sqlite3"
     SQLiteOptionPositionsRepository(path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
             conn.execute(
             """
@@ -1459,7 +1461,7 @@ def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> N
     """
 
     path = tmp_path / "rebuilt.sqlite3"
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute(
             """
             CREATE TABLE position_lots (
@@ -1486,7 +1488,7 @@ def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> N
     assert inventory["pending"]["d2_record_id_column"]["column_present"] is False
     assert inventory["dropped_key_classification"]["lost"] == {}
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         # Both writers behind ``apply`` key off ``record_id``, which is not
         # there, so they must fall back to the identity column that is — a
@@ -1580,7 +1582,7 @@ def test_repointing_the_sql_is_what_enables_the_destructive_steps(
     assert result["rebuild"]["rebuilt"] is True
     assert "record_id" not in _columns(path)
     assert _primary_key(path) == "lot_id"
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         projection = module.project_stored_trade_events_to_position_lots(
             module._events(module._load_event_rows(conn))
@@ -1738,7 +1740,7 @@ def test_the_rebuild_leaves_the_store_on_the_contracted_shape(
         assert row["source_event_id"] == before[lot_id]["source_event_id"]
         assert row["account"] == before[lot_id]["account"]
 
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -1769,8 +1771,8 @@ def test_the_rebuild_recreates_the_stores_own_guards_on_the_new_shape(
     path = _legacy_store(tmp_path)
     guards_before = _object_sql(path, "trigger")
     indexes_before = _object_sql(path, "index")
-    assert len(guards_before) == 7
-    assert set(guards_before) == {
+    assert len(guards_before) == 10
+    assert {name for name in guards_before if not name.startswith("trg_attribution_writer_")} == {
         "trg_position_lots_account_insert_guard",
         "trg_position_lots_account_update_guard",
         "trg_position_lots_generation_insert",
@@ -1789,7 +1791,7 @@ def test_the_rebuild_recreates_the_stores_own_guards_on_the_new_shape(
         assert "record_id" not in sql
         assert "expiration" not in sql
         assert "'$.account'" not in sql
-    assert result["rebuild"]["triggers_recreated"] == 7
+    assert result["rebuild"]["triggers_recreated"] == 10
 
     # The identity index survives — the open path re-creates it with
     # ``CREATE UNIQUE INDEX IF NOT EXISTS`` on every open, so a rebuilt store
@@ -1820,7 +1822,7 @@ def test_the_recreated_guards_accept_the_new_shape_and_reject_a_conflict(
 
     path = _legacy_store(tmp_path)
     _run_apply(path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.row_factory = sqlite3.Row
         generation = conn.execute(
             "SELECT lots_generation FROM position_projection_heads WHERE account='lx'"
@@ -1910,7 +1912,7 @@ def test_a_failure_at_any_rebuild_check_leaves_the_store_byte_identical(
     assert _columns(path) == original_columns
     assert _stored_rows(path) == original_rows
     assert _primary_key(path) == "record_id"
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
@@ -2265,7 +2267,7 @@ def test_the_rewrite_blocks_a_note_only_fact_instead_of_dropping_it(
     """
 
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         raw = conn.execute(
             "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
             ("lot_assign-1",),
@@ -2357,7 +2359,7 @@ def test_rebuild_gate_blocks_dynamic_sql_and_malformed_inventory(tmp_path, monke
 
 def test_carrier_conflict_blocks_inventory_and_apply(tmp_path, repointed_build):
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         raw = conn.execute(
             "SELECT fields_json FROM position_lots WHERE record_id = ?", ("lot_assign-1",)
         ).fetchone()
@@ -2389,7 +2391,7 @@ def test_alignment_preserves_existing_nested_payload():
 def test_rebuilt_identity_rejects_null_empty_and_duplicates(tmp_path, repointed_build):
     path = _legacy_store(tmp_path)
     _run_apply(path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         identity, = conn.execute("SELECT lot_id FROM position_lots LIMIT 1").fetchone()
         for invalid in (None, "", "   "):
             with pytest.raises(sqlite3.IntegrityError):
@@ -2447,7 +2449,7 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
         module.apply_lot_identity_migration(path, stale_manifest)
     # Recreate through the ordinary open path, not just the migration's
     # translated trigger SQL, so both R1 DDL branches are exercised.
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute("DROP TRIGGER trg_position_lots_generation_update_same")
         conn.execute("DROP TRIGGER trg_position_lots_generation_update_old")
         conn.execute("DROP TRIGGER trg_position_lots_generation_update_new")
@@ -2543,7 +2545,7 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
     decision = build_current_decision_projection_migration_inventory(path)
     assert decision["readiness"] == "ready", decision
     assert decision["repair"]["missing_indexes"] == []
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         assert position_lots_use_lot_id(conn) is True
     SQLiteOptionPositionsRepository(path)
     assert 'record_id' not in _columns(path)
@@ -2584,13 +2586,13 @@ def test_r1_rebuilt_store_reopens_and_preserves_projection(
 ])
 def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_build: None, mutation: str, reason: str) -> None:
     path = _legacy_store(tmp_path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         conn.execute(mutation)
     before = _columns(path)
     with pytest.raises(RuntimeError, match=reason):
         _run_apply(path)
     assert _columns(path) == before
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = ?", (module.REBUILD_TEMP_TABLE,)).fetchone()[0] == 0
 
@@ -2598,7 +2600,7 @@ def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_bui
 def test_r1_partial_final_shape_is_not_healed_on_open(tmp_path: Path, repointed_build: None) -> None:
     path = _legacy_store(tmp_path)
     _run_apply(path)
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         # No trigger references this metadata column; its absence is still corruption.
         for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'position_lots'").fetchall():
             conn.execute(f'DROP TRIGGER "{name}"')

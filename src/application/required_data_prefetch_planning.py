@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.wheel import project_wheel_coverage
+
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -325,7 +327,8 @@ def merge_wheel_requirements_into_prefetch_config(
                 (
                     branch.get("lifecycle_status") != "active",
                     branch.get("integrity_status") != "trusted",
-                    branch.get("phase") != "ready",
+                    (branch.get("coverage") or project_wheel_coverage(branch))["status"] not in {"none", "partial"},
+                    not (branch.get("coverage") or project_wheel_coverage(branch))["available_shares"],
                     str(
                         branch.get("monitoring_gate")
                         or model.get("monitoring_gate")

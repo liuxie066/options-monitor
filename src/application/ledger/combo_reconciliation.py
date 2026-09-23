@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.combo_identity import build_combo_identity_intent, identity_from_intent
-from domain.domain.combo_reconciliation import match_post_trade_combo_pairs
+from domain.domain.combo_reconciliation import match_post_trade_combo_pairs, delivered_combo_exposures_for_lot
 from domain.domain.config_contract import RUNTIME_SCHEDULE_TIMEZONE_BY_MARKET
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
@@ -122,6 +122,8 @@ def adopt_post_trade_combo_pair(
     effective_now_ms: int | None = None,
     require_unique_auto_match: bool = False,
     exposures: Iterable[Mapping[str, Any]] = (),
+    conn: Any = None,
+    attribution_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate and optionally adopt one exact post-trade Combo inference atomically."""
 
@@ -173,6 +175,11 @@ def adopt_post_trade_combo_pair(
                 and current_match["selected_in_one_optimum"] is True
             ):
                 raise ValueError("combo auto adoption is no longer a unique delivered match")
+        from .trade_attribution import assert_trade_attribution_unclaimed
+        assert_trade_attribution_unclaimed(
+            sqlite_repo.list_trade_events(conn=conn),
+            [str(inference["put_record_id"]), str(inference["call_record_id"])],
+        )
         current = _validate_inference_against_current_ledger(
             sqlite_repo,
             conn=conn,
@@ -231,6 +238,7 @@ def adopt_post_trade_combo_pair(
                 leg_role="funding_put",
                 inference_id=inference_value,
                 event_time_ms=decision_ms,
+                attribution_metadata=attribution_metadata,
             ),
             _combo_adjust_event(
                 record=current["call_record"],
@@ -239,6 +247,7 @@ def adopt_post_trade_combo_pair(
                 leg_role="participation_call",
                 inference_id=inference_value,
                 event_time_ms=decision_ms,
+                attribution_metadata=attribution_metadata,
             ),
         ]
         decision_fence = capture_trade_event_decision_projection_fence(
@@ -321,6 +330,8 @@ def adopt_post_trade_combo_pair(
             "decision_projection": decision_projection,
         }
 
+    if conn is not None:
+        return _run(repo, conn)
     return with_sqlite_repo_transaction(
         repo,
         _run,
@@ -523,33 +534,15 @@ def supersede_post_trade_combo_pair(
     )
 
 
-def _reconcile_with_repo(
-    repo: Any,
-    *,
-    conn: Any,
-    account: str,
-    runtime_environment: str,
-    exposures: list[dict[str, Any]],
-    persist: bool,
-    effective_now_ms: int,
+def combo_attribution_candidates_from_rows(
+    rows: Mapping[str, Any], *, account: str, runtime_environment: str,
+    exposures: list[dict[str, Any]], effective_now_ms: int, include_claimed: bool = False,
 ) -> dict[str, Any]:
-    inference_list = getattr(repo, "list_combo_pair_inferences", None)
-    identity_list = getattr(repo, "list_strategy_group_identities", None)
-    if not callable(inference_list) or not callable(identity_list):
-        raise TypeError("option_positions repo lacks combo reconciliation read methods")
-    if persist:
-        expire = getattr(repo, "expire_combo_pair_inferences", None)
-        if not callable(expire):
-            raise TypeError("option_positions repo lacks combo inference expiry")
-        expire(
-            effective_now_ms=effective_now_ms,
-            account=account,
-            conn=conn,
-        )
-    events = repo.list_trade_events(conn=conn)
-    lots = repo.list_position_lots(conn=conn)
-    identities = identity_list(account=account, conn=conn)
-    existing = inference_list(account=account, conn=conn)
+    """Reuse the canonical matcher on the caller's complete ledger snapshot."""
+    events = list(rows.get("trade_events") or [])
+    lots = list(rows.get("stored_position_lots") or [])
+    identities = list(rows.get("account_combo_identities") or [])
+    existing = list(rows.get("account_combo_inferences") or [])
     confirmed_open_event_ids = {
         str(item.get(field) or "").strip()
         for item in existing
@@ -594,14 +587,74 @@ def _reconcile_with_repo(
         runtime_environment=runtime_environment,
         events=events,
         lots=lots,
-        confirmed_open_event_ids=confirmed_open_event_ids,
-        effective_identity_open_event_ids=effective_identity_open_event_ids,
+        confirmed_open_event_ids=set() if include_claimed else confirmed_open_event_ids,
+        effective_identity_open_event_ids=set() if include_claimed else effective_identity_open_event_ids,
+        include_claimed=include_claimed,
     )
     matched = match_post_trade_combo_pairs(
         lots=lot_facts,
         exposures=exposures,
         forbidden_inference_ids=forbidden_inference_ids,
     )
+    rejected_exposures: dict[str, set[str]] = {}
+    rejected = [item for item in existing if item.get("status") == "user_rejected"]
+    if include_claimed and rejected:
+        rejected_ids = {item["inference_id"] for item in rejected}
+        probe = match_post_trade_combo_pairs(lots=lot_facts, exposures=exposures)
+        exact_pairs = [*rejected, *(item for item in probe["inferences"] if item["inference_id"] in rejected_ids)]
+        by_lot = {item["record_id"]: item for item in lot_facts}
+        delivered = {lot_id: set(delivered_combo_exposures_for_lot(item, exposures)) for lot_id, item in by_lot.items()}
+        rejected_counterparts: dict[tuple[str, str], set[str]] = {}
+        for pair in exact_pairs:
+            for leg, opposite in (("put", "call"), ("call", "put")):
+                lot_id = pair.get(leg + "_record_id")
+                if lot_id in by_lot and by_lot[lot_id]["open_event_id"] == pair.get(leg + "_open_event_id"):
+                    for exposure in pair.get("candidate_exposure_ids") or []:
+                        rejected_counterparts.setdefault((lot_id, exposure), set()).add(pair[opposite + "_open_event_id"])
+        for (lot_id, exposure), rejected_ids in rejected_counterparts.items():
+            lot = by_lot[lot_id]
+            counterparts = {item["open_event_id"] for other_id, item in by_lot.items()
+                if item["option_type"] != lot["option_type"] and item["broker_account_ref"] == lot["broker_account_ref"]
+                and exposure in delivered[other_id]}
+            if counterparts <= rejected_ids:
+                rejected_exposures.setdefault(lot_id, set()).add(exposure)
+    return {**matched, "lot_facts": lot_facts, "reactivatable_inference_ids": reactivatable_inference_ids,
+            "rejected_exposure_ids_by_lot": {key: sorted(value) for key, value in rejected_exposures.items()}}
+
+
+def _reconcile_with_repo(
+    repo: Any,
+    *,
+    conn: Any,
+    account: str,
+    runtime_environment: str,
+    exposures: list[dict[str, Any]],
+    persist: bool,
+    effective_now_ms: int,
+) -> dict[str, Any]:
+    inference_list = getattr(repo, "list_combo_pair_inferences", None)
+    identity_list = getattr(repo, "list_strategy_group_identities", None)
+    if not callable(inference_list) or not callable(identity_list):
+        raise TypeError("option_positions repo lacks combo reconciliation read methods")
+    if persist:
+        expire = getattr(repo, "expire_combo_pair_inferences", None)
+        if not callable(expire):
+            raise TypeError("option_positions repo lacks combo inference expiry")
+        expire(
+            effective_now_ms=effective_now_ms,
+            account=account,
+            conn=conn,
+        )
+    events = repo.list_trade_events(conn=conn)
+    lots = repo.list_position_lots(conn=conn)
+    identities = identity_list(account=account, conn=conn)
+    existing = inference_list(account=account, conn=conn)
+    matched = combo_attribution_candidates_from_rows(
+        {"trade_events": events, "stored_position_lots": lots, "account_combo_identities": identities,
+         "account_combo_inferences": existing}, account=account, runtime_environment=runtime_environment,
+        exposures=exposures, effective_now_ms=effective_now_ms)
+    lot_facts = matched.pop("lot_facts")
+    reactivatable_inference_ids = matched.pop("reactivatable_inference_ids")
     inserted_count = 0
     reactivated_count = 0
     stale_expired_count = 0
@@ -657,6 +710,7 @@ def _ledger_lot_facts(
     lots: list[dict[str, Any]],
     confirmed_open_event_ids: set[str],
     effective_identity_open_event_ids: set[str],
+    include_claimed: bool = False,
 ) -> list[dict[str, Any]]:
     # The strategy family left the lot payload (``write-side-definition.md`` §2
     # RECONSTRUCTIBLE; §7 moves it to the strategy/event side). "Is this lot
@@ -713,11 +767,8 @@ def _ledger_lot_facts(
             or ""
         ).strip().lower()
         market = _market(symbol=symbol, currency=currency, broker=broker)
-        event_runtime_environment = _event_runtime_environment(
-            event,
-            expected_account=account,
-        )
-        group_binding = group_bindings.get(lot_id) or {}
+        broker_account_ref = _event_broker_account_ref(event, expected_account=account)
+        group_binding = {} if include_claimed else group_bindings.get(lot_id) or {}
         group_id = str(group_binding.get("strategy_group_id") or "").strip()
         leg_role = str(group_binding.get("leg_role") or "").strip().lower()
         strategy = str(group_binding.get("strategy") or "").strip().lower()
@@ -727,11 +778,8 @@ def _ledger_lot_facts(
                 "open_event_id": open_event_id,
                 "account": account,
                 "broker": broker,
-                "runtime_environment": (
-                    event_runtime_environment
-                    if event_runtime_environment == runtime_environment
-                    else ""
-                ),
+                "broker_account_ref": broker_account_ref,
+                "runtime_environment": str(broker_account_ref.get("environment") or "").lower(),
                 "market": market,
                 "market_date": _market_date(
                     event_time_ms=trade_time_ms,
@@ -796,41 +844,22 @@ def _lot_contract_strike(
     return float(strike) if strike is not None else None
 
 
-def _event_runtime_environment(
-    event: Mapping[str, Any],
-    *,
-    expected_account: str,
-) -> str:
-    raw_payload = event.get("raw_payload")
-    if not isinstance(raw_payload, Mapping):
-        return ""
-    raw_context = raw_payload.get("_trade_intake_source")
-    if not isinstance(raw_context, Mapping):
-        return ""
-    context = dict(raw_context)
-    if (
-        str(context.get("schema_version") or "").strip()
-        != "trade_intake_source.v1"
-        or str(context.get("transport") or "").strip().lower()
-        not in {"push", "poll"}
-        or str(context.get("account") or "").strip().lower()
-        != str(expected_account or "").strip().lower()
-    ):
-        return ""
-    required_text = (
-        "source_id",
-        "futu_account_id",
-        "opend_process",
-        "opend_host",
-        "received_at_utc",
-    )
-    if any(not str(context.get(key) or "").strip() for key in required_text):
-        return ""
-    port = context.get("opend_port")
-    if isinstance(port, bool) or not isinstance(port, int) or port <= 0:
-        return ""
-    host = str(context["opend_host"]).strip().lower()
-    return f"opend:{host}:{port}"
+def _event_broker_account_ref(
+    event: Mapping[str, Any], *, expected_account: str,
+) -> dict[str, str]:
+    raw = event.get("raw_payload") or {}
+    execution = raw.get("execution_input") or {}
+    ref = execution.get("broker_account_ref") or {}
+    if not isinstance(ref, Mapping):
+        return {}
+    if ref.get("account_label") not in (None, "", expected_account):
+        return {}
+    identity = {key: str(ref.get(key) or "").strip() for key in
+                ("broker_id", "external_account_id", "environment")}
+    if not all(identity.values()) or identity["environment"] not in {"REAL", "SIMULATE"}:
+        return {}
+    # Listener endpoints are transport metadata, never physical account identity.
+    return identity
 
 
 def _effective_identity_open_event_ids(
@@ -955,6 +984,7 @@ def _validate_inference_against_current_ledger(
             "account",
             "broker",
             "runtime_environment",
+            "broker_account_ref",
             "market",
             "market_date",
             "symbol",
@@ -1020,6 +1050,8 @@ def _combo_snapshot_values_equal(
     *,
     decimal_value: bool,
 ) -> bool:
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return left == right
     if decimal_value:
         try:
             return Decimal(str(left)) == Decimal(str(right))
@@ -1042,6 +1074,7 @@ def _combo_adjust_event(
     leg_role: str,
     inference_id: str,
     event_time_ms: int,
+    attribution_metadata: Mapping[str, Any] | None = None,
 ) -> TradeEvent:
     fields = dict(record.fields)
     lot_contract_key = contract_key_from_lot_fields(fields)
@@ -1099,6 +1132,7 @@ def _combo_adjust_event(
             ),
             "idempotency_key": event_id,
             "patch": patch.to_dict(),
+            **dict(attribution_metadata or {}),
         },
     )
 

@@ -885,3 +885,453 @@ evidence 和 supersession；不会生成 terminal event。
 bridge 和 legacy zero-price broker anchor，用于采集一份新的、独立冻结的
 settlement observation；legacy source claim 始终保留原 owner，不得释放、
 转移或复制到 v2，bridge 本身也始终不参与 allocation。
+
+## 全局交易识别与策略归属优化设计（未实现）
+
+本节是拟实施设计，不改变上文现行契约。审查基线为本地提交
+`a8dae4d74fd111221ab47df7c605e2228ecd9757`；未核验生产版本或生产配置。
+范围为 push / backfill / JSONL / Inbox 恢复到 ledger、Wheel、Combo 与通知的相关链路，
+不宣称穷尽仓库所有问题。本节为唯一技术设计 owner；过程证据保存在 Devflow scope 引用的审查记录。
+现行 Wheel 精确 intent 产品规则见 [Wheel PRD](WHEEL_STRATEGY_PRD.md) §4.4；本节提出其替代方案，
+实施时必须同步修改该产品规则，不能让两套归属规则同时生效。
+
+### 目标与边界
+
+- S1：重复、乱序和重启不重复经济事实；经济入账与策略关联可分别恢复。
+- S2：券商订单没有 OM 策略标签；账户、合约、策略与数量不串用；冲突不静默覆盖。
+- S3：覆盖 CSP 指派接股后卖 CC，以及 CC 指派卖股后卖 CSP；只转换实际结算数量。
+- S4：通知分清经济入账、归属、覆盖与送达；候选展示共享计算的建议价格与报价时间。
+- S5：沿现有 owner 改动，以三个可独立验收的行为切片完成。
+- S6：待归属成交统一经 OM Bot 查询、选择、预览确认和读回；渠道只适配身份与消息。
+
+非目标：自动下单、自动平仓、另建监听服务、通用股票账本、修改 PM 的资产主权、
+全量历史自动重归属、改掉 FIFO 平仓规则、修改候选收益门槛、改造费用或通知投递系统。
+自动启动沿用现行生命周期规则，不额外要求每笔或每轮确认。归属只接纳有效 active 分支；
+源码中 internal 分支仍可进入 pending_decision，本设计不偷偷将其自动激活。
+“当前自动启动”的生产范围未验证；如果要求所有 internal 分支也自动启动，应另行批准该生命周期变化。
+
+### 当前代码问题与证据分级
+
+| 编号 | 类型 / 影响 | 直接证据、触发条件与结论 | 设计处理 |
+|---|---|---|---|
+| F1 | 高：开平推断证据缺口 | `src/application/trades/resolver.py::_infer_missing_position_effect` 在找不到平仓目标时将 buy Call 推断为 open；没有检查历史完整性。以空 FakeRepo 和缺失 effect 的 buy Call 可复现 `preview_open`，而 sell Call / buy Put 为 unresolved。缺失历史的 buy-close 输入与真正 buy-open 无法区分；这是可证明的判定缺口，不是已证实的生产错账。 | 无明确 effect 时不以缺失本地持仓证明开仓；保留 Inbox 待核实。 |
+| F2 | 功能缺口，非旧契约 bug | `auto_intake.py::_resolve_with_wheel_intent` 仅向显式 open / sell / call 注入 Wheel intent writer；当前 §4.4 要求成交前 intent，用户普通券商操作不携带该信息，Put 也不走该入口。 | 统一成交后归属，支持双方向 active 分支；取消新 listener 对预先 intent 的依赖。 |
+| F3 | 扩展风险：两套决策顺序不同 | Wheel 在经济写入时决定，`_attach_combo_reconciliation_after_open` 在 applied open 后决定；Combo 排除带 leg_role/group 的 lot。若直接给旧 Wheel 路径加入宽匹配，先到的一腿会被抢占。尚无“当前无 intent 自动抢占”的事实，因为当前该功能不存在。 | 同一候选集合统一裁决，再进入互斥写入。 |
+| F4 | 语义风险，非投影缺陷 | `domain/domain/strategy_membership.py::resolve_option_strategy_membership` 将 short Put / short Call 默认分类为 csp / cc；字段本身不能证明已关联 Wheel，也不能证明资金或股票覆盖。 | 保留兼容分类；新增归属结果明确来源与关联对象，不用默认 strategy 判断已关联。 |
+| F5 | 自动复用边界 | `wheel/workflows.py::_validate_linkage_coverage` 仅核对 account/symbol/hash；现有 `test_manual_wheel_call_linkage_confirm_uses_narrow_adjust` 明确允许 status=insufficient、available=0 的人工归属。它是已成交归属修复，不是新开仓风控，不能据此声称人工路径有 bug，也不能直接用它证明自动关联安全。 | 自动路径单独完成全量容量验证；复用其窄 adjust 写入，不改变人工修复语义。 |
+| F6 | 用户可见功能缺口 | Wheel projection 有 active option 即 phase=option_open；`wheel/scanning.py::run_wheel_call_scan` / Put scan 仅接纳 phase=ready，因此部分覆盖的剩余额度不会继续产生候选。 | 将扫描资格改为剩余可用容量判定，保留生命周期与完整性门槛。 |
+| F7 | 用户可见功能缺口 | `daily_decision_brief_service.py::_load_wheel_snapshot_family` 未透传 sell_limit 和报价信息；renderer 展示数量、合约、净权利金，无三态覆盖和建议价。共享 candidate_engine 已计算 sell_limit。 | 透传同一候选快照字段，不在 renderer 再算价格。 |
+| F8 | 回执语义缺口 | `trades/receipt.py::build_trade_intake_receipt_message` 的 Combo pair_intent 缺失提示不能回答 Wheel 归属；recorded_and_projected 仅说明经济投影，不能说明策略关联成功。 | 分开显示入账与归属；无 Combo 证据时不默认提示缺 pair_intent。 |
+| F9 | 恢复设计缺口 | 已完成 execution 在 resolver 提前返回 ledger_recorded；backfill 也跳过已完成成交。新自动归属若只挂在首次 applied 分支，关联失败后不会被每条恢复路径重试。现有 Combo 有独立周期 reconciliation，不能误称其完全没有恢复。 | 归属恢复独立于经济重放，使用现有 listener 周期。 |
+| F10 | 高：部分候选证据仍自动采用 | `trades/combo_reconciliation.py::reconcile_account_post_trade_combos` 收集 exposures 时不检查 reason=partial/invalid_revisions，auto 仍执行 adoption。隔离 SQLite 复现：reader 返回 available=true、partial、invalid_revisions=[99] 和一条有效 exposure，仍得到 auto_adoption_count=1、persisted_groups=1。证明不完整证据仍会写归属，未声称该测试组合本身一定错误。 | A 先阻止不完整证据的自动采用；B 将完整性纳入统一裁决及 writer 准入。 |
+| F11 | 隔离契约缺口，未证实生产串配 | Combo 的 `_Lot` / snapshot 没有 physical account 字段；ledger 的 `_event_runtime_environment` 校验 futu_account_id 非空后仅返回 opend:host:port，配对使用该地址而非券商 REAL/SIM 身份。现有 canonical execution 已保存 broker_account_ref。 | B 将物理账户与交易环境贯穿候选、CAS 与 readback；端口仅用于来源诊断，旧证据无法证明身份则 pending。 |
+| F12 | 确认状态竞争缺口 | `assistant/operation_store.py::mark_cancelled` 无状态前置条件，lifecycle 随后直接报告取消成功。隔离 SQLite 复现 confirmed 被改为 cancelled；证明存储允许错误覆盖，不代表已发生生产错账。 | B 在共同 store/lifecycle 收紧取消为 previewed 条件更新，失败读回；归属操作的终态由读回决定。 |
+| F13 | 待确认查询遗漏 | `operation_store.py::_list_operations` 先 SQL LIMIT 再按 operation_types 过滤。隔离 SQLite 中一条旧 manual_open 被两条新 model_use 挤出 limit=2，按 manual_open 查询为空；可能影响裸确认的唯一 family 判断。 | B 将类型过滤移入 SQL、先过滤再 LIMIT，复用原查询与确认解析。 |
+
+已排除的误报：broker close 已有 `strict_exact_fifo`，由 `ledger/commands.py::resolve_broker_trade_close_targets`
+调用 `ledger/lot_resolver.py::resolve_fifo_close_targets`；不是随机选择，也不改成“多 lot 一律人工确认”。
+同一成交 replay、物理账户冲突、multiplier 冲突、Inbox claim 丢失和 Combo adoption CAS 已有保护，继续复用。
+源码没有表明券商原始订单携带策略标签；OM 自己保存的元数据与券商字段必须分开。
+
+### 复用清单与检索边界
+
+手工检索范围限定为 `src/application/trades/`、`src/application/ledger/`、
+`src/application/wheel/`、`domain/domain/strategy_membership.py`、`domain/domain/wheel/`、
+`domain/domain/combo_reconciliation.py`、`domain/domain/risk_capacity.py`、候选 engine 和 Daily Brief owners。
+检索词为 position_effect、wheel_linkage、strategy、adopt、capacity、pending_decision、sell_limit、receipt。
+`attribution_result|strategy_attribution_result|reconcile_trade_attribution` 在 trades 与 strategy_membership 中无命中；
+这是新增结果契约的限定范围证据，不表示整个仓库不存在所有近义概念。
+
+| 概念 / 名称 / 计算 | 裁定与 owner |
+|---|---|
+| 券商身份、execution、order、instrument、单位与货币 | 复用 `domain/domain/trade_execution.py`、`trades/deal_identity.py`、`trades/account_mapping.py`。订单 ID 仅分组；不得替代逐成交身份或将整个多腿订单视作单一策略。 |
+| 开平识别、生命周期、FIFO | 复用 `trades/resolver.py` 与 `ledger/lot_resolver.py`；修改 F1 的无证据推断，不另建分类器。 |
+| 经济事实与关联事实 | 复用 `ledger/api.py`、trade_events 的 open/close/adjust/void，以及现有 Wheel linkage / Combo adoption 写入；调整只改变归属，不产生第二笔权利金。 |
+| strategy/leg_role/group/branch/stock_lot | 复用 `domain/domain/strategy_membership.py` 的元数据和冲突规则；默认 csp/cc 保留兼容含义。 |
+| 全局候选裁决 | 新增纯函数 `resolve_trade_attribution`，落在既有 `domain/domain/strategy_membership.py`；原因：现有 reader 只解释单一已存归属，不能裁决多个策略提案。不得读取 DB/provider。 |
+| 调用与恢复 | 新增 `reconcile_trade_attribution` 于 trades 目录拟新增的 `attribution.py`，作为 auto_intake 共用 helper；这是一个具体编排模块，不建接口/插件框架或新服务。 |
+| attribution_result | 新增 v1 内嵌 JSON 结果，owner 为上述 trades helper，持久化于既有 Inbox result_json；不新增逐成交业务表或平行队列；仅启用边界需要下述单行策略启用记录。 |
+| 归属冲突持久化 | 新增 `wheel_attribution_conflict` / `wheel_attribution_conflict_resolved` 两种非经济 Wheel event，复用 events/projection、repository_core 的 wheel_events 表与 append_wheel_event_once；原因：影响扫描的阻塞不能仅存在 Inbox 缓存。扩展现有 enum/DB CHECK 的受控迁移，拒绝旧 writer 混跑。 |
+| 规则启用边界 | 新增 `trade_attribution_policy_enablings` 小表，ledger repository owner；既有 policy binding 强制 policy_hash 漂移且服务 Wheel 参数重绑，不能伪造重绑来承载通用规则上线。字段与幂等见下文。不是逐成交队列。 |
+| 归属写入互斥 | 扩展 `ledger/api.py` 与既有 ledger writer；用已有 SQLite writer lock + transaction，检查相关 lot 当前有效归属与 generation。外部模块不能导入 ledger 内部 writer。 |
+| Wheel 生命周期、额度、拒绝与 policy | 复用 `domain/domain/wheel/`、`wheel/read_model.py`、`wheel/workflows.py` 及既有 activation policy binding；不得把激活当作已经成交覆盖。 |
+| 账户覆盖 / 现金 | 复用 `wheel/capacity.py` 和 `domain/domain/risk_capacity.py`；增加已成交关联的重验入口，分别适配 opening 与 attribution，避免目标成交重复扣减。 |
+| 覆盖视图 | 新增 coverage 字段到 Wheel read model，由 `domain/domain/wheel/projection.py` 计算批次数量；账户容量由既有 capacity owner 提供，两者不混算。 |
+| 建议价格 | 复用 `domain/domain/engine/candidate_engine.py` 的 sell_limit、price_tick、bid/ask、报价时间和 fee basis；透传到 Daily Brief，不新增定价算法。 |
+| 回执与送达 | 复用 `trades/receipt.py`、现有 receipt envelope、生命周期 outbox / batch dispatcher、Daily Brief。禁止用关联成功或 provider accepted 冒充 delivery_confirmed。 |
+
+### 统一判断顺序
+
+```mermaid
+flowchart TD
+    A[通知进入共享 Inbox] --> B{身份与经济内容一致?}
+    B -- 否 --> X[保留证据 待核实]
+    B -- 是 --> C{经济事实已记录?}
+    C -- 是 --> F[读回当前事实与有效归属]
+    C -- 否 --> D{开平或结算证据足够?}
+    D -- 否 --> X
+    D -- 是 --> E[沿现有 ledger 路径记账]
+    E --> F
+    F --> G{已有明确归属或拒绝?}
+    G -- 是 --> H[保留结果 检查新增证据是否冲突]
+    G -- 否 --> I[同一快照收集 Wheel 与 Combo 候选]
+    I --> J{唯一候选且证据完整?}
+    J -- 否 --> K[单腿或待确认 不重记成交]
+    J -- 是 --> L[重验账户容量与当前归属]
+    L --> M[原子写归属并读回]
+    H --> N[分开显示入账 归属 覆盖 送达]
+    K --> N
+    M --> N
+```
+
+1. 先持久化原始通知；复用同一 broker execution identity 去重。内容冲突不 last-write-wins。
+2. 股票/ETF 保留现行 PM refresh 提示与已指派股票出售的专门识别，不在 OM 创建通用股票账。
+3. effect 明确时校验数量与目标 lot；effect 缺失时只保留已有严格、可证明的 close 分配，
+   不能用“本地没有”推断 open。若缺失历史或事件时间早于候选开仓时间，转 unresolved；
+   不自动拆成“先平后开”，该类反转成交需补明确证据或走受控修复。
+   正常 BUY Call 若来源也没有 effect，同样待核实；这是删除不安全兜底的明确行为变化，不能让 Combo 匹配反向证明 open。
+   A 必须用真实字段形状的脱敏 push/history fixture 验证 BTO/STO/普通 BUY；缺 effect 通过既有 Inbox 补证/受控修复入口处理。
+4. 经济事实成功后再判断归属。平仓使用已写入的 FIFO matches；结算使用现有生命周期证据，
+   不把持仓消失解释为指派。尚未归属的 open 已被关闭时，不自动追溯创造 Wheel 历史链，转人工核对。
+5. 所有新自动开仓关联只走一个 reconciliation；旧 pre-commit Wheel intent hook 不再在 listener 独立执行。
+   已有 intent 作为 OM 本地强证据加入候选集合，保留其有效期、精确合约及消费检查；券商无须提供策略字段。
+   独立手工 intent/linkage 命令仍保留，但也必须检查当前有效归属，不能绕过互斥。
+6. 同一 account / physical account / environment / market 范围收集候选。明确 OM 手工归属、人工拒绝和已确认组合不能被自动覆盖。
+   多个精确意图冲突、Wheel 与 Combo 同时有效、同策略多个批次均符合，都返回待确认；不按评分或执行顺序决定。
+7. 默认 csp/cc 是形态分类，不能当作人工明确归属。明确普通单腿的人工决定需写有 actor、request_id 的现有 adjust 事实，
+   在 raw payload 增加 `attribution_origin=manual` 与 `attribution_policy_version`；无该证据的旧 csp/cc 不被当作人工拒绝。
+   manual/intent 来源只能由受控 OM 命令及 ledger 事实证明；不能信任券商 raw payload 或普通文件自行声称的 origin/actor。
+
+### 自动关联规则
+
+**Wheel**：对没有逐笔 intent 的成交，采用已 active 的分支作为规则匹配对象，不增加用户确认步骤。
+要求 account/physical account/market/symbol 完全相同，成交为对应方向的 short open，branch 在成交时已存在且有效，
+现在仍 active/trusted，policy binding 当前有效，没有人工拒绝、其他明确策略或未决生命周期冲突。
+分支识别只使用历史有效阶段、标准合约身份、方向、标的与可承接份额；不以候选扫描的收益、delta 或今天的行情拒绝已发生交易。
+现有精确 intent 则必须满足其已冻结合约和时间约束；不能在 intent 不匹配或失效时降级成宽匹配。
+分支的历史有效性或身份缺证据时待核实。不得仅凭“系统曾推荐过”推断用户采纳。
+关联整笔 execution lot，不按多个 Wheel 批次贪心拆分；大于单批剩余额度则待确认，保留原成交数量。
+部分成交按各自 execution 处理，重复不再消费；已经消费的 intent 与新的批次自动关联不能双扣。
+裁决输入必须包含同一分支的全部已知未归属竞争成交，而非只看当前 cursor 行。无精确 intent 且竞争需求合计大于分支余量时，
+这些成交整体 pending，不按到达顺序或 ID 挑赢家。先成功关联后才出现的超额竞争按迟到 conflict 处理，保留原事实并阻断扫描。
+分页只限制本轮处理目标数量，不能截断某目标的竞争集合；竞争集合读取不完整就不关联。
+
+intent 的资格按成交时间检查，消费按当前账本检查。恢复时已经 expired、但成交发生在有效期内且未被当时取消的 intent，
+由原 intent owner 增加 historical-fill 消费分支：不重新激活/续期 intent，不恢复旧 reservation；重新核对未消费量和当前容量后关联及消费。
+成交前已取消、同时间无法证明先后、已有拒绝或原消费身份冲突时 pending；不能降级为无 intent 规则。
+
+**Combo**：保留账户 off/observe/confirm/auto 模式以及 exact_delivered_candidate / 唯一解的现有自动采用条件。
+候选是完整组合而非单腿。即使 mode=confirm，已有明确组合提案仍构成 Wheel 竞争依据，不能因“不自动采用 Combo”就交给 Wheel。
+同合约腿命中已送达组合候选但另一腿尚未收到时，保持待确认/等待证据。候选过期或等了几秒不等于证明用户没有做 Combo。
+只有补到完整证据、明确拒绝该组合或人工选择归属后才能解除此类竞争。
+读取组合候选记录失败是证据不可用，不能转成“没有 Combo”。`available=true` 还不够：
+`reason=partial`、`invalid_revisions` 非空、delivery state 不可读或关联 revision 未覆盖，都算证据不完整；
+需由 `read_combo_candidate_exposures` 补充显式完整性与 delivery 可用状态，不把缺失 confirmation 等同确定未送达。
+首版复用现有等量、完整两 lot adoption；Put 2 张对 Call 1+1 张等不对称拆单不自动聚合，
+返回 `combo_split_fill_unsupported`，相关完整经济 legs 保留为 Wheel 竞争证据。不得为了绕过该限制拆改 open 事件。
+当前未实现的多 execution 自动聚合由 Combo owner 列入独立后续工作；B 验收必须覆盖其明确 pending 行为。
+
+Combo 隔离键使用 canonical execution 的 broker_account_ref（broker_id、external_account_id、environment）及内部 account；
+由 ledger adapter 传入现有 domain matcher、inference snapshot、claim/CAS 和 readback，不以 opend:host:port 代替。
+旧记录缺少可证明身份时 pending，不从当前账户配置反填历史身份；同一物理账户换端口不生成第二次归属。
+mode=off 停止新 Combo 提案与自动采用，但不能抹去已确认组合、人工提案或仍适用的已送达候选竞争证据；
+此类已存证据仍进入统一只读冲突检查。不因关闭自动采用就把有明确竞争的腿交给 Wheel。
+
+**普通单腿**：在适用证据完整且没有候选时，返回 ordinary；仍保留形态分类，显示“未关联 Wheel/Combo”。
+它是当前规则结果，不是永久人工排除。后续迟到的另一腿、成交关联补全或人工操作均触发重算。
+一旦已自动关联后出现新的相冲突证据，保留原 durable 关联，标记 conflict 并暂停该批次新推荐，走受控纠正；不静默换策略。
+迟到竞争复核读取归属过滤前的经济事实与候选证据；不能复用 matcher 排除了已归属 lot 之后的结果来证明“无竞争”。
+复用 Combo 的合约/数量关系计算，新增只读 conflict-probe 分支接收全部相关 economic legs；adoption 仍排除已被占用的 lot。
+影响 Wheel 的 conflict 在同一账本事务写入 `wheel_attribution_conflict`：保存 branch ID、相关 execution/event IDs、
+竞争集合 hash、reason、规则版本；稳定 ID 来自 branch+竞争集合 hash，不含轮询时间。Wheel projection 将其投影为阻断原因，
+scanner、intent create 和自动关联共同拒绝有未解除冲突的分支，即使 Inbox 不可读也生效。
+解除必须有明确归属纠正/人工裁决后写 `wheel_attribution_conflict_resolved`，引用原 conflict event ID 与当前 generation；
+再次查询为空、候选过期或 provider 不可用都不自动解除。原 economic/attribution 事件不删除。
+规则匹配无法证明真实主观意图，这一限制在回执中用“按规则自动关联”表达，并提供现有确认/拒绝/修复入口。
+
+### 结果、事务与恢复契约
+
+`attribution_result` 拟议 schema：
+
+| 字段 | 类型与语义 |
+|---|---|
+| schema_version | 固定 `trade_attribution.v1` |
+| status | `linked` / `ordinary` / `pending` / `conflict` / `not_applicable`；技术异常用 pending + reason，不引入第二套经济 status |
+| execution_key, open_event_id, lot_id | 复用 canonical ID；生命周期与多 lot close 的结果按原 operation 列表逐项提供，不能用一个订单标签覆盖多腿 |
+| strategy, wheel_branch_id, strategy_group_id | 使用原有策略词汇，缺失为 null；linked 必须有可读回的对应关系 |
+| origin | `manual` / `intent` / `rule` / `inherited`；与策略类型分开 |
+| reason_codes, candidate_ids | 可重建决策的原因与候选 ID；不得包含 secrets 或通知 target |
+| input_hash, policy_version, evaluated_at_ms | 按规范 JSON hash 冻结影响归属的输入和规则版本；时间用已有 epoch ms |
+| ledger_event_ids | 关联/拒绝等 durable 事实引用；Inbox 缓存不能替代它们 |
+
+成功策略变更仍由现有 adjust / Combo adoption / Wheel consumption 事件承载；新增归属诊断只加 raw payload 字段，
+不另写经济 open。切换后的 listener、Combo 定时器和手工入口均通过统一归属准入；旧自动 adoption 与 pre-commit intent hook 只在旧规则路径运行，同一 execution 不双路处理。`linked` 只能在 ledger API 回读成功后发布。
+稳定请求 ID 由 canonical execution、目标 branch/group、规则版本构成；input_hash 用于 CAS，不能每次因时间变化生成新副作用 ID。
+同一请求的不可变目标身份不符为冲突；采集时间或容量快照变化不能改变已提交 effect 的幂等键。已成功的同请求先读回返回幂等，再做可能已漂移的 candidate CAS。
+`input_hash` 白名单：canonical economic content hash、有效归属/拒绝/冲突 event IDs、相关 branch/policy generations、
+当前数量与预留、候选经济身份及送达证据版本、provider 资源数量/币种/完整性。集合按 canonical ID 排序；
+排除 evaluated_at、轮询时间及纯 observed_at。observation hash 单独保存原快照与采集时间，用于审计和 freshness 检查。
+freshness 从 stale 变 fresh、pending 的缺失证据变完整是独立重试触发，不要求语义 hash 必须变化。
+
+外部查询在 ledger writer lock 和事务外执行；记录 provider source、observed_at、账户身份、完整性与快照 hash。
+新增自动关联 freshness 上限为 60 秒（内部常量，首版不增加配置项）；未来时间、缺失时间、非 available 或账户不符一律 pending。
+进入写事务后重读所有受影响 lot 的有效归属、branch generation、policy binding、拒绝、Combo claim、reservation 与 ledger 数量；
+原快照 CAS 不符则重算，不能拿旧容量继续写。取得锁后及最终写入前再次验证 provider 快照年龄不超过 60 秒、
+完整性、账户 scope 和 stop/cancel；等锁期间变旧或被取消则不提交新归属，退出锁后等待下一轮补证，不能在锁内查询。
+commit 已成功才收到取消时保留事实，下次读回补 Inbox；不撤销已提交关联。继续复用 ledger 全局锁，不引入分布式锁。
+
+账户覆盖统计所有有效 Short Call，包括未关联及普通单腿；现金统计所有已有 short Put 与预留，按币种及既有 FX 规则。
+对已经入账的目标，只计一次其占用；本次若消费 reservation，事务内将对应 reservation 转为实际占用。
+账户容量是最终实际占用与合法预留不超过可用资源，批次容量是关联后的实际合约份额不超过该分支可承接份额。
+持仓快照与账本不一致时 pending，不能假设 provider 已含目标，也不能将“可卖股数”与已锁股数重复相减；
+相关 provider 字段口径必须由现有 capacity_authority 给出，缺口由 capacity owner 拒绝自动关联。
+
+Inbox 与 ledger 是两个数据库：`trade_payload_commit_scope` 只有 writer lock，不是跨库事务。
+因此顺序为经济 ledger commit → 归属 ledger commit → Inbox result 更新 → 原有回执准备。
+任一步 crash 后，都先查 canonical execution 与有效关联，再补缓存；绝不为补关联重新写经济事实。
+同一批 Combo 的两腿 adoption 与 claim 必须在一个 ledger transaction；所有自动/手工归属入口使用同一有效归属排他检查。
+失败只影响关联，不撤销已确认的成交；混合未确认/已确认 legs 不做半组提交。
+
+恢复接入现有 `_recover_local_intake_if_due` 的分钟周期，不增加服务或队列。
+候选来自当前适用启用范围内、已入账且缺结果或 input_hash 已变化的 open，以及此前 pending/conflict；
+periodic sweep 同时核对已 linked 行是否出现新的竞争证据，不能只看 Inbox pending。
+复用 listener status 的 cursor 模式，每账户每周期最多 100 个 execution、按稳定 ID keyset 推进并在一轮结束后从头核对；
+cursor 仅优化，可丢失，重启重扫不改变结果。证据未变化时不刷写相同 pending，也不重复通知。
+每个物理账户每轮只共享一组完整容量观察，不为每条成交重新查询；每轮归属 provider I/O 总预算 10 秒，
+一次失败不在同周期重试，响应在整体预算后到达则丢弃本轮写资格，下轮再取。连接调用必须支持超时/取消，
+无法中断的 provider 路径不得放进恢复循环。归属 I/O 位于 process_lock 外，按页检查 stop，不阻塞既有 receipt 恢复。
+终态成交不必重过经济 resolver；历史 JSONL 的 dry-run/不触外部/不发通知约束继续有效，
+缺 provider evidence 时仅给归属预览，不擅自 live query 或 apply。
+
+切换边界不能借用旧 Wheel 激活/参数 rebind 时间。拟新增 ledger 小表 `trade_attribution_policy_enablings`，
+只保存每个规则版本首次启用的治理事实：broker、physical_account_id、environment、account、market、policy_version、
+effective_from_ms、created_at_ms、actor、request_id、request_hash。主键为 broker+physical_account_id+environment+account+market+policy_version；
+request_id 在该账户 scope 内唯一；表禁止 UPDATE/DELETE。相同 request+hash 幂等，不同内容冲突；effective_from 不得早于写入时刻。
+这是 B 需要的最小 schema 增量，不能使用要求 hash 改变的 Wheel policy binding 或虚构一次轮转来保存它。
+通过既有 trade-intake CLI 增加规则 enable 子命令（默认 preview，apply 走现有 ledger 写权限），一次部署切换时明确执行；
+无记录时保持旧行为/影子预览，不能启动进程时自动创建，不增加逐笔或逐轮确认。
+读取规则启用身份与当前 Wheel/Combo eligibility 分开：记录不替代账户 mode、分支 active 或有效 policy gate。
+仅处理发生时间不早于启用 effective_from 的成交；后续参数 rebind、正常轮转或重启都不推进该边界。
+切换前已持仓、缺 enabling 记录、已经关闭的历史成交只列出修复预览；本规则失败恢复可处理切换后但已变动的执行并保持安全限制。
+新旧 listener 不得同时运行不同归属策略；升级先停止 ingress/自动任务，drain 全部旧 writer（含手工持久连接），
+取得既有独占维护锁并完成备份后才运行受控 schema migration；核验迁移和新 writer 兼容性后启动，再允许 enable apply。
+不能证明旧 writer 已停止就拒绝迁移；保持原 activation 状态，失败时不启动不兼容旧版本。
+旧二进制不能在新 event/schema 已写入的账本上直接回滚运行；需受控兼容检查，不能回滚删除归属事实。部署不在本次范围。
+停用自动关联不撤销已有事实。旧结果无 attribution_result 仍可读，展示“未评估”，不冒充 ordinary。
+
+人工误归属修复继续 append-only；Combo 复用 supersede，Wheel 以目标 adjust 的 void/replacement 及消费记录重建为准，
+必须预览所有受影响后继事件。存在依赖分支时不得自动 void 单条归属；没有安全现成命令的情况停在人工修复，
+不让自动恢复反复覆盖人工决定。
+
+### Wheel 覆盖、双向轮转与候选价格
+
+覆盖状态由数量与数据完整性派生，不新增生命周期状态：
+
+- CC：S = 分支实际剩余股份；C = 已关联未平仓 Call 的合约数乘各自 multiplier。
+  S>0 时 C=0 为未覆盖，0<C<S 为部分覆盖，C=S 为全覆盖；C>S 为超额待核实。
+  S=0 不显示“全覆盖”，沿 converted/residual 等原状态；缺 multiplier/关联证据显示待核实。
+  意图预留与可用余额另列，不能把预留显示成已覆盖。
+- CSP：T = 当前分支尚待完成的接股目标股份；P = 已关联未平仓 Put 的承接股份。
+  展示“尚未安排 / 部分安排 / 全部安排”，不能称为已经接股；现金不足另显示容量阻塞。
+- 扫描保留 active、trusted、有效 policy、无 conflict 和数据有效的门槛；由未安排且未预留的额度决定是否扫描，
+  不再要求 phase 必须等于 ready。部分覆盖可继续推荐剩余额度；全覆盖、reserved-only、数据不足均不新增建议。
+  批次余股不足一张实际 multiplier 时，显示零可开张数及余股，不四舍五入。
+- 部分指派只转换 contracts × 已证明 multiplier，并用实际 stock/cash settlement 创建后续分支。
+  未指派合约仍留原阶段。CSP 接股→CC 与 CC 卖股→CSP 均沿同一现有 lifecycle owner；
+  新阶段是否 active 服从现行 activation 规则，归属服务不修改它。
+
+新增 read model coverage 对象字段为 `status`（full/partial/none/unavailable/overallocated/not_applicable）、
+`target_shares`、`committed_shares`、`reserved_shares`、`available_shares`、`reason_codes`；所有股份非负整数，未知为 null 而非 0。
+`available_shares` 仅指分支扣除 committed/reserved 后的剩余额度，不能称为账户可开数量；账户可执行数量仍由
+capacity owner 的候选 granted_contracts 给出，Put 还取决于候选 strike 与币种。账户数据未知时保留已证明的分支数量，
+另列阻塞原因，文案为“分支剩余 200 股，账户容量待核实”；普通 CC 占用造成不足时不能说“还可卖 2 张”。
+字段从 projection 与 capacity 联合封装，renderer 不自行重算。phase 保留原枚举及语义。
+
+Daily Brief 透传同一 final candidate 中 `sell_limit`、`price_tick`、`bid`、`ask`、
+`quote_update_time`、`quote_observed_at_utc`、currency、multiplier、fee basis 和 granted_contracts。
+`candidate_engine` 已按 tick 将 mid 向上取整为 sell_limit，净权利金也用此价格；不展示另算的 mid 作为建议价。
+无有效 sell_limit 或报价时间时显示“建议价格暂不可用”，停止该条 actionable 推荐，不从成交价或 last 回填。
+报价失效沿现有 candidate snapshot freshness gate，render 不实时拉行情。
+
+通知示例仅为文案结构，不是当前行情或交易建议：
+
+> 成交：已记录；策略：按规则关联 Wheel；CC 覆盖：100 / 300 股，部分覆盖；分支剩余 200 股；可开数量以账户容量检查为准。
+> 候选：卖出某到期日某行权价 Call；建议限价：取该候选 sell_limit；报价时间：取原快照；预计净权利金与上述价格同口径。
+
+初次回执可显示“成交已记录，策略关联待核实”；后续归属恢复不重发原成交回执，由下一次 Daily Brief 展示最新状态。
+已经 confirmed/accepted/unknown 的发送保持原规则；只对明确允许重试的发送失败走原恢复，不把归属重算当作补发授权。
+
+### OM Bot 统一确认入口（拟实施，不绑定渠道）
+
+用户入口统一为 OM Bot；飞书、微信及已有本地入口只是适配器。复用
+[Inbound Control](INBOUND_CONTROL.md) 的 `assistant handle → Bot 解释/请求预览 → Control 确认执行`，
+模型继续只有 pure-read 工具与 `request_control_preview`，没有 apply/confirm/write 工具。
+不新增渠道专属按钮协议、跨渠道身份合并或单独审批系统；所有已接入且鉴权有效的渠道提供同一文本流程。
+本节补齐原方案未定义的待确认归属闭环，不改变正常成交的自动关联规则。
+
+**现状与复用依据**：`assistant/capability_catalog.py` 已提供预览与 confirm/cancel 能力目录，
+`permission_response.py` 已按当前对话的唯一 pending operation 解析“确认”，
+`operation_store.py` 已保存带 TTL、签名和原子确认状态的预览。现有 trade family 是新记 open/close/assignment/expiry，
+不能把它当成已有成交的策略归属。当前未发现统一 `trade_attribution_read` 或归属确认 family。
+检索范围为 `src/application/assistant/`、`bot/`、`agent_tools/`、现有微信 adapter 和上述控制文档；
+关键词 attribution、preview、confirm、sender、scope、signature、pending、recovery。
+
+| 概念 / 改动 | owner 与复用裁定 |
+|---|---|
+| 待归属成交查询 | 拟新增一个 canonical pure-read 工具 `trade_attribution_read`，注册在现有 agent_tools/positions.py 的 TOOLS，具体查询复用 trades attribution helper 与 ledger API；同步既有 om_chat.scene.json 的工具 allowlist 和投影元数据，否则 Bot 不可达。输入 account、execution_key 可选、status、limit/cursor；输出经济记录状态、当前归属、原因、候选与证据完整性。原因：现有 /pending 只列已经生成的确认预览，不能发现尚未生成预览的待归属成交。 |
+| 用户选择和确认 | 在既有 capability_catalog/command_parser/permission_response 增加 attribution family（preview、confirm、cancel）；唯一具体 handler 放在 assistant 目录拟新增 attribution_operations.py。不新增 registry、通用审批框架或 business Scene。 |
+| 预览、签名、有效期 | 复用 InboundOperationStore、operation_signature、operation_lifecycle；新增 operation_type=trade_attribution，使用已有 payload_json/result_json，无新审批表。 |
+| 权限与渠道 | 复用 inbound sender 鉴权、operation_policy.enforce_trade_write_allowed、Bot trusted config scope；适配器只传可信身份和渲染结果。 |
+| ledger 资源身份 | 复用 ledger/position_projection_migration.py 既有 _store_identity 的 path/device/inode 口径，由 ledger owner 提供窄 API；Bot 不导入内部 migration 或另算平行身份，不增加存储表。 |
+| 写入和读回 | 复用 B 的统一 ledger 归属准入、既有 Wheel linkage / Combo adoption；ordinary 通过现有 adjust 记录明确人工排除。Bot handler 不直接写 DB，也不重复创建 open。 |
+| 状态恢复与回执 | 复用 operation_store 状态、既有 listener 恢复周期及渠道回复 owner；新增本 operation_type 的 ledger readback 恢复分支，不能照搬“超时即失败”来推断账本没有提交。 |
+
+**用户流程**：
+
+1. 原成交通知或 Daily Brief 显示“成交已记录，策略归属待确认”、账户、完整合约、成交编号及冲突原因，
+   提示“向 OM Bot 发送：查看 lx 的待归属成交”。通知不自动为每笔成交创建 pending operation。
+2. Bot 调用只读查询列出成交和可选目标。相同标的多个批次必须显示批次 ID、阶段与可承接数量；
+   部分成交显示逐 execution，订单号只分组。未知数据明确显示，不能当作无冲突。
+3. 用户说“把这笔归到 Wheel 批次 X”只触发确定性预览；不得执行写入。选择不明确先澄清，
+   不按最近聊天、短编号或“第一个”跨列表猜目标；传入的 execution/target ID 必须在当前 scope 重新解析。
+4. Control 生成预览，列出账户、完整成交身份、全部受影响 legs、当前→目标归属、仍存在的阻塞、
+   不变的成交金额/数量及 operation ID。普通未归属成交可选择唯一指定 Wheel、完整 Combo 或保持普通单腿；
+   按下表检查所选动作。不是候选的目标、该动作必要证据不足、已关闭成交、会影响后继 Wheel 分支的改归属，只返回原因与修复路径，不生成可执行预览。
+5. 用户在同一渠道、同一 sender、同一对话回复“确认”；仅所有操作 family 中唯一有效预览时适用。
+   多条预览时要求具体 operation ID。拟新增明确协议 `/confirm attribution <operation_id>` 与
+   `/cancel attribution <operation_id>`，均复用现有 parser。模型引用、转发通知、历史确认语句不能代替这次用户确认。
+6. Control 再校验并提交，ledger 读回后回复“已归属 Wheel 批次 X / Combo Y / 保持普通单腿”。
+   只有关联成功才展示成功；回执发送失败不改变账本结果，下次查询可见真实状态。
+
+| 人工选择 | 可以解决的歧义 | 仍须满足的准入 |
+|---|---|---|
+| Wheel 批次 X | 已展示的多个批次或 Wheel/Combo 意图竞争；不再要求自动规则的唯一候选 | 完整成交身份、目标分支有效性、当前归属互斥、该分支份额及账户容量；不得越过既有人工拒绝或依赖冲突。 |
+| Combo Y | 已展示的多个策略竞争 | 完整两 lot 成员与精确数量、同物理账户及环境、有效配置权限与互斥；保留既有人工 adoption 要求的 account mode=confirm/auto，off/observe 不放行，不支持拆改经济 legs。 |
+| 保持普通单腿 | 明确排除本成交的自动策略关联 | 可靠经济记录、尚未归属、当前 generation、身份权限与无后继依赖；无需实时股票/现金容量，也无需证明其他候选不存在。不清除独立风险告警或已有 linked conflict。 |
+
+只读结果返回各动作的可预览性与阻塞原因；人工选择记录所展示的竞争集合及 manual origin，
+只裁定预览中的 execution/完整成员，不顺带拒绝别的独立成交。用户选择能解决意图歧义，不能补造缺失经济事实。
+
+**明确取消语义**：取消预览只取消本次确认请求，成交仍待归属；“保持普通单腿”是独立需要确认的业务决定，
+写入带 actor/request_id 的 manual adjust，阻止自动规则重新关联。不得把关闭对话、超时或取消预览当作拒绝全部策略。
+对于已 linked 的 conflict，首版 Bot 不执行换组/void 依赖链；只展示现有关系与受控修复入口。
+可证明无需改归属、仅排除竞争的情况仍需由 B 的显式 conflict-resolution owner 提供预览/写入能力，否则保持待处理。
+
+**权限、预览与并发契约**：
+
+- 读写都绑定受信任 runtime/config scope 和配置中的 account 集合，不接受模型传入 config_path/数据库路径；
+  写入另需既有 operations_enabled、trade_write_enabled、精确 channel:sender 管理员配置及 HMAC key。
+  沿用管理员在当前配置 scope 内的账户权限，不新增“同名 sender 跨渠道等同”或逐账户 ACL。
+  权限或配置绑定不明时拒绝；不得自动开启写开关、补管理员或修改生产配置。
+- 对本 operation_type，预览及 confirm/cancel 均要求可信、规范、非空的 conversation，并精确匹配 channel/sender/conversation。
+  不沿用旧 operation 的空 conversation 兼容匹配；不能凭 operation ID、模型参数或转发内容补身份。
+  在现有 store 查询与 validation 的类型分支落实，其他 family 的历史兼容不扩大到此类型。
+- 新预览必须保存非空规范 conversation、authority_scope、account、canonical broker identity、execution/open IDs、
+  action/target IDs、完整 member IDs、当前 membership/branch generation、竞争证据语义 hash、规则版本以及拟写变更摘要，
+  全部放进既有签名覆盖的 payload；preview_json 的展示不是权威。actor 从可信身份注入，不能来自模型。
+  authority_scope 目前只是 key 或配置路径标识，不能单独证明资源相同；签名 payload 还绑定解析后的 config/runtime/ledger
+  规范路径、ledger 文件身份（本机 st_dev/st_ino）及相关 account→broker 映射摘要；确认重新解析比较。
+  同名 scope 换账本、文件被替换或映射变化必须重新预览；无关配置字段不使预览失效，不新增身份数据库。
+  复用既有 TTL（默认 600 秒）；首次 previewed 确认须重新鉴权、校验 payload hash/HMAC、TTL 与资源绑定。
+  已 claim 或终态的重复确认先验证访问身份、签名及资源绑定，再按原 request ID 读回效果；TTL 过期不抹掉已提交事实，
+  也不恢复执行许可。资源已切换则拒绝在新账本查询/执行旧请求，提示原 scope 核对，不宣称未执行。
+- 本类型预览不可原位改写；变更选项生成新预览。原子 claim 比较 previewed 状态与已校验 payload hash；
+  ledger transaction 内重验对象、成员、人工拒绝和全部写入条件。
+  预览后若所选动作依赖的归属/份额/竞争发生实质变化，终结旧请求并要求新预览，不偷偷换目标或缩减数量。
+  ordinary 只冻结经济身份、当前归属/generation 与依赖；候选及 provider 容量仅作展示，不成为其确认门。
+  纯观测时间刷新不导致选择变更；容量 freshness 仍按 B 的 60 秒及提交前取消检查。
+- 同一个 operation 的 ledger request ID 稳定，例如由 operation_id 派生，不使用每次确认消息 ID；
+  两渠道分别生成的预览可以有不同 operation ID，但对相同 execution 的写入仍受统一排他与 generation CAS 保护。
+  已存在同一人工决定则只读回；已有不同归属则拒绝旧请求。跨渠道操作不能确认对方 operation，须重新查询/预览；不合并用户身份。
+  新 effect 的原请求身份写入归属事件的现有 raw payload；Combo 保留原 inference/member 幂等键，同时保存该 Control 请求引用。
+  同一决定已由别的 operation 完成时，核对完整 execution/member/target 与 manual origin 后返回既有事件引用和 no-op；
+  恢复也支持这一精确等价读回，不能因本 operation 没有新事件就把已经成立的决定说成未完成。
+- 现有取消没有 CAS，须在共同 operation store 收紧为 previewed→cancelled 条件更新并返回是否成功，
+  lifecycle 失败后读回；本类型 confirm/cancel 还比较已验证 payload hash。首次过期或校验失败终结也只能从 previewed 更新，
+  不能用迟到的失败覆盖 confirmed/running/applied。所有调用该共同取消方法的 family 补最小回归验证。
+  已 confirmed/running 的取消不声称撤销账本；回答“正在核对结果”。已提交则读回结果，不执行补偿撤销。
+- 共享 `_list_operations` 将 operation_types 过滤移到 SQL LIMIT 之前；裸“确认”依照所有 family 的实际有效预览判断唯一性，
+  保留原批量 expiry 的显式分组规则。不能只因当前查询页缺少另一个 family 就认定唯一。
+
+**崩溃与查询闭环**：
+
+Control audit DB、Inbox 与 ledger 不组成一个事务。通用 stale 清理在共同 store 层跳过 trade_attribution，
+包括其他 family 的 list_pending/resolve_pending 所触发的全局清理，不能只在新 handler 入口保护。
+确认前崩溃无写；claim 后的超时、异常（包括可能发生在 commit 后的异常）统一走归属 owner 的效果核对，
+不调用通用 confirm_and_apply 的 catch→mark_failed 来推断未提交。
+
+效果核对和实际 apply 共用现有 ledger writer lock，通过 ledger API 暴露的锁入口使用，不新增 lease 或分布式锁。
+apply 取得锁后、写 ledger 前重新读取 operation 状态与已认领 hash；只有同一 confirmed/running 请求可继续。
+恢复取得同一锁后先按稳定 request ID 读 ledger：已提交则修复 applied/result 并补 Inbox；未提交才条件更新
+confirmed/running→failed。后到的旧执行者再次取得锁时会看到 failed，不能迟到提交。
+锁顺序固定为 ledger writer lock→短 audit DB 操作→ledger transaction；不得持 audit transaction 等待 writer lock，
+不得在锁内查询 provider。未获得锁、任一存储不可读或效果身份不一致时保留“结果待核实”，不宣称未写入。
+已提交事实可修复旧 failed 状态，但必须精确匹配原请求身份；迟到的失败/取消不得覆盖已读回成功。
+不自动以新 request ID 重试，也不因恢复而自动重新执行已失败请求；明确无效果才允许用户重新预览。
+
+同一效果核对逻辑供 Control 重复确认与既有分钟恢复使用；详情查询只报告 ledger 事实及 audit 差异，
+pure-read `trade_attribution_read` 不更新 operation/Inbox。自动恢复使用既有受控恢复授权，不冒用模型或查询权限。
+恢复不重发原成交回执，也不新增无用户请求的主动 Bot 通知；当前对话回复沿既有渠道回复流程，
+用户再次询问时从 ledger 读取状态，不以聊天历史、模型回答或消息已送达当作业务完成。
+
+只读查询使用 ledger 有效归属事实覆盖 Inbox 缓存；缓存缺失或陈旧时标未评估/待核实，不伪造待确认项。
+`/pending` 仍只表示当前对话的确认预览；成交待归属列表独立按当前授权 scope 查询，可跨有权渠道重新查看。
+用户不能仅凭知道成交编号读取其他账户的详情。
+
+本补充纳入 B 的人工裁决闭环及 C 的提示文案，不增加第四切片。验收增加：飞书/微信/本地同一 handler 文本流程；
+普通查询不写 operation、自然语言选择只建 preview、模型不可 confirm、多个 family 的裸“确认”不误执行；
+跨 sender/对话/渠道/配置 scope 拒绝、预览过期/篡改拒绝、权限撤回拒绝；预览后数量/归属变化拒绝；
+重复确认、两渠道争同一 execution、confirm/cancel 竞争；commit 前后崩溃和 failed 状态读回修复；
+ordinary 决定不被自动复活，取消预览不改变归属，未知结果不重写经济事件。
+补充反例：其他 family 的 /pending 不误终结 attribution；旧 worker 暂停时恢复判无效果后其迟到提交被拒；
+已提交超过 TTL 后重复确认仍读回成功；apply 提交后抛错不误报未执行；缺 conversation 不放行；
+同 config key 换 ledger、同路径换文件、撤销账户映射均拒绝旧预览；ordinary 在 provider 不可用时仍可裁决。
+用 fake model 从既有 om_chat Scene 实际调用查询和预览工具，证明 allowlist 可达且模型无法 confirm；
+旧 manual_open + 两条更新的 model_use 验证裸确认不会因 LIMIT 错选 family。
+验证用隔离 SQLite 和现有 inbound/Bot fixtures，不调用真实模型、broker 或发送通知。
+
+### 实现切片与验收
+
+| 切片 | 行为增量与责任边界 | 成功信号 / 依赖 | 最小验收 |
+|---|---|---|---|
+| A | 事实可靠识别与归属结果分离；resolver 修正无证据 buy Call 推断；Combo 拒绝 partial 证据自动采用；保留 FIFO；扩展 receipt 的明确状态，不开启无 intent 自动关联。 | S1、S2、S4；无依赖 | 缺历史 buy-close 不变 long open；明确 open 不受影响；partial exposure 不产生 adoption；两个 lot FIFO 数量不变；重复/冲突内容及 late order ID 不重复记账；普通 csp/cc 不冒充已归属。 |
+| B | 统一 Wheel/Combo 裁决与 ledger 排他写入；双向 active 分支、容量、独立恢复、切换边界及渠道无关的 OM Bot 人工确认闭环。主要 owners 为 trades/attribution、strategy_membership、ledger API/writers、Wheel capacity/workflows、assistant Control 与 Bot 只读工具。 | S1、S2、S3、S6；依赖 A | lx/sy 隔离；无 intent 的唯一合法 Call/Put；两轮同标的、多策略、另一腿迟到；部分成交、两 worker 争用、重复目标、不足/过期容量；每个 crash 点恢复后 economic event=1、effective membership≤1；切换前只预览；人工拒绝不复活；Bot 确认闭环及本节并发/隔离反例全部成立。 |
+| C | 覆盖数量驱动剩余扫描；Daily Brief/receipt 透传价格与覆盖；生命周期只保留实际转换份额。 | S3、S4、S5；依赖 B | CC 全/部分/无/未知/超额和零股；CSP 三态；100/300 股只推荐剩余 200 股；Put 使用现金；部分指派残余数量守恒；sell_limit tick 与净权利金一致；关联重试不额外发回执。 |
+
+所有切片仅为后续计划，尚无实现授权。所有 S1–S6 均在上表有落点。
+测试保留现有 pytest 与隔离 SQLite/FakeRepo，新增必要的 facade/integration 反例，不连接真实 OpenD/飞书。
+入口矩阵覆盖 push、backfill、JSONL、duplicate、周期恢复；归属改变前后核对经济事件金额、数量、费用不变。
+B 额外反例：两笔各 1 张竞争只余 1 张的分支，输入排列不改变同一快照裁决；Put 2 张 + Call 1+1 张；
+已 linked 后另一腿迟到且 Inbox 不可读；部分候选 revision 损坏、delivery state 不可读；成交在 intent 有效期但重启后 expired；
+旧 active window + 切换前后成交 + 重启 + 再次 rebind。C 覆盖“分支还有 200 股，但普通 CC 已占用账户股份”。
+B 还须覆盖相同内部 account/合约却不同物理账户或 REAL/SIM 不配对、同物理账户换端口恢复不重复归属、
+Combo 从 auto/confirm 改为 off 后既有明确竞争仍被保留；
+55 秒旧快照等锁 10 秒后拒绝写入；commit 前取消零副作用、commit 后取消读回同一事实；
+未停止旧 writer 时迁移被拒绝，成功顺序为 drain→备份/迁移→兼容验证→启动/enable。
+并发测试使用两个连接/独立 writer，而不是只顺序调用同函数两次；故障注入覆盖每个 durable commit 之后及 Inbox 保存之前。
+验收不能只看 status 字符串：必须 ledger readback、投影数量及副作用计数一致。
+
+### 取舍
+
+- 复用同一 intake，不新增 Wheel listener；避免重复消费和两套恢复。
+- 不以打分、最近成交或 FIFO 决定开仓策略；FIFO 仅保留原有经济平仓分配语义。
+- 不为不对称 Combo 拆单引入 lot 拆分或多成员模型；首版明确待确认。
+- 不把影子结果或历史批次直接批量采用；启用边界只需一次部署治理记录。
+- 不以 Inbox 作为跨进程扫描阻塞的权威；业务冲突必须由原 ledger/Wheel owner 持久化。
+
+### 已做验证与剩余边界
+
+基线五组相关测试：resolver open/close、wheel workflows、trades combo reconciliation、trade intake recovery，
+合计 197 passed；这是旧行为回归基线，不证明本方案已实现。
+F1 的 dry-run 反例与 F10 的隔离持久化反例已复核；F2/F6/F7/F8 为源码可确认的能力缺口；F3/F9 是新增自动归属必须解决的集成风险；F11 是源码可确认的隔离契约缺口，尚未证明生产串配。
+F12/F13 已用临时 SQLite 复现存储行为，未调用真实渠道或修改生产；补充设计的并发修正尚未实现。
+
+| 风险 / 未验证范围 | owner | 去向 |
+|---|---|---|
+| 无策略标签无法还原真实交易意图，迟到的新证据可能推翻规则判断 | 交易归属 owner | B 的 conflict 与人工纠正验收；上线前评估影子结果 |
+| 生产“自动启动”覆盖哪些 internal 阶段尚未核验 | Wheel lifecycle owner | 实施前只读核对；本方案不扩大 activation 权限 |
+| provider 股数、可卖数与现金是否包含目标成交及其他挂单必须有可验证口径 | capacity owner | B 的 provider fixture 与字段口径验证；不能证明则 pending |
+| 历史已有错误归属或被 F1 影响的记录数量未知 | ledger operations owner | 独立只读 inventory 与受控修复，不全量自动改账 |
+| 旧产品 PRD 仍要求逐笔 intent | Wheel 产品 owner | B 同步修订 §4.4；本设计未实现前保持现状 |
+| 真实渠道的 sender/conversation 形状、scope 映射与管理员配置未验证 | assistant/渠道 adapter owner | B 用脱敏入口 fixture 验证规范身份；生产写入前按现有受控流程核对，缺身份拒绝预览 |
+| 部署、真实发送和 broker 联调未执行 | 运维与通知 owner | 单独授权后的部署验收，不计入本次设计完成 |

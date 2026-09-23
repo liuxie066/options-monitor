@@ -609,6 +609,32 @@ def read_trade_payloads_for_reconciliation(
         return [_trade_reconciliation_observation(conn, row) for row in rows]
 
 
+def cache_trade_attribution_result(path: str | Path, *, execution_key: str, result: Mapping[str, Any]) -> int:
+    """Refresh only the result cache; frozen receipts and their delivery evidence stay intact."""
+    if not Path(path).exists():
+        return 0
+    if not execution_key or result.get("execution_key") != execution_key:
+        raise ValueError("attribution cache identity mismatch")
+    changed = 0
+    with closing(_connect(Path(path))) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute("SELECT * FROM trade_inbox WHERE broker_deal_key = ? AND status = 'handled' AND identity_status = 'bound'",
+                            (execution_key,)).fetchall()
+        for row in rows:
+            current = json.loads(row["result_json"] or "null")
+            if not isinstance(current, dict) or current.get("status") not in {"applied", "skipped"}:
+                continue
+            previous = current.get("attribution_result") or {}
+            if {key: value for key, value in previous.items() if key != "evaluated_at_ms"} == {
+                    key: value for key, value in result.items() if key != "evaluated_at_ms"}:
+                continue
+            current["attribution_result"] = dict(result)
+            conn.execute("UPDATE trade_inbox SET result_json = ? WHERE inbox_id = ? AND payload_version = ? AND result_json = ?",
+                         (json.dumps(current, ensure_ascii=False), row["inbox_id"], row["payload_version"], row["result_json"]))
+            changed += 1
+    return changed
+
+
 def _trade_source_evidence_observation(
     conn: sqlite3.Connection, row: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], str | None]:

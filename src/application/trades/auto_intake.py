@@ -168,6 +168,13 @@ def _wheel_intent_coverage_fact(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Auto trade intake via OpenD deal push")
+    ap.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
+    ap.add_argument("--effective-from-ms", type=int)
+    ap.add_argument("--actor")
+    ap.add_argument("--request-id")
+    ap.add_argument("--manifest")
+    ap.add_argument("--backup-path")
+    ap.add_argument("--writers-stopped", action="store_true")
     ap.add_argument("--config", required=True)
     ap.add_argument("--data-config", default=None)
     ap.add_argument("--runtime-root", default=None, help="runtime root for state, audit, status, and active ledger store")
@@ -573,7 +580,13 @@ def _process_payload(
         )
         resolve_kwargs = {**kwargs, "wheel_start_enabled": wheel_start_enabled,
                           "retry_with_new_associations": bool((claim or {}).get("new_associations"))}
-        if (apply_changes and allow_external_lookup and isinstance(config, dict)
+        from src.application.trades.attribution import trade_attribution_enabled_for_execution
+        from domain.domain.symbol_identity import symbol_market
+        new_attribution = trade_attribution_enabled_for_execution(kwargs["repo"],
+            execution=getattr(deal, "execution_input", None) or {}, account=deal_account,
+            market=str(symbol_market(getattr(deal, "symbol", "")) or "").lower(),
+            event_time_ms=int(getattr(deal, "trade_time_ms", 0) or 0))
+        if (not new_attribution and apply_changes and allow_external_lookup and isinstance(config, dict)
                 and str(getattr(deal, "position_effect", "") or "").lower() == "open"
                 and str(getattr(deal, "side", "") or "").lower() == "sell"
                 and str(getattr(deal, "option_type", "") or "").lower() == "call"):
@@ -601,6 +614,30 @@ def _process_payload(
             current = _readback_trade_receipt_result(repo=repo, deal=normalized_deal, result=current)
         if before_receipt_fn is not None:
             current = before_receipt_fn(current) or current
+        if isinstance(config, dict) and runtime_root is not None and current.get("action") == "open":
+            from src.application.trades.attribution import (trade_attribution_enabled_for_execution,
+                read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload)
+            from src.application.ledger.api import read_trade_attribution_snapshot
+            from domain.domain.symbol_identity import symbol_market
+            execution = getattr(normalized_deal, "execution_input", None) or {}
+            account = str(getattr(normalized_deal, "internal_account", "") or "")
+            market = str(symbol_market(getattr(normalized_deal, "symbol", "")) or "").lower()
+            try:
+                enabled = trade_attribution_enabled_for_execution(repo, execution=execution, account=account, market=market,
+                    event_time_ms=int(getattr(normalized_deal, "trade_time_ms", 0) or 0))
+                if enabled:
+                    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+                    instant = int(time.time() * 1000)
+                    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant)
+                    from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
+                    view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
+                        combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(config, account=account))
+                    from domain.domain.trade_execution import execution_identity_from_input
+                    matched = [row for row in view["rows"] if row["execution_key"] == execution_identity_from_input(execution)]
+                    if len(matched) == 1:
+                        current = {**current, "attribution_result": attribution_result_payload(matched[0])}
+            except Exception as exc:
+                current = {**current, "attribution_error": type(exc).__name__}
         if _lifecycle_notification_is_outbox_owned({"deal": normalized_deal, "result": current}):
             current = {**current, "receipt_notification_owner": "lifecycle_outbox"}
         if claim is not None:
@@ -847,6 +884,18 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     cfg = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=_log)
+    if args.action != "listen":
+        from src.application.trades.attribution import run_attribution_admin
+        try:
+            result = run_attribution_admin(args, config=cfg, config_path=cfg_path, runtime_root=runtime_root)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+        return 0
+    if any((args.effective_from_ms is not None, args.actor, args.request_id, args.manifest, args.backup_path, args.writers_stopped)):
+        print("attribution administration flags require attribution-enable or attribution-migrate")
+        return 2
     intake_cfg = resolve_trade_intake_config(
         cfg,
         mode_override=args.mode,
@@ -2312,9 +2361,10 @@ def _run_listener_source_loop(
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
     last_local_recovery_monotonic = None
+    attribution_operation_cursor = ""
 
     def _recover_local_intake_if_due() -> None:
-        nonlocal last_local_recovery_monotonic
+        nonlocal last_local_recovery_monotonic, attribution_operation_cursor
         now = time.monotonic()
         if (not apply_changes or stop.is_set() or (last_local_recovery_monotonic is not None
                 and now - last_local_recovery_monotonic < 60)):
@@ -2335,6 +2385,32 @@ def _run_listener_source_loop(
                     repo=repo, source=source, receipt_callback=receipt_callback, stop_event=stop)
         except Exception as exc:
             status_state["receipt_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
+        if not stop.is_set():
+            try:
+                from src.application.assistant.attribution_operations import recover_attribution_operations
+                from src.application.assistant.operation_store import InboundOperationStore
+                recovered = recover_attribution_operations(
+                    config_key=None, config_path=str(cfg_path), store=InboundOperationStore(),
+                    stop_event=stop, cursor=attribution_operation_cursor)
+                attribution_operation_cursor = recovered["next_cursor"]
+                status_state["attribution_operation_recovery"] = recovered
+            except Exception as exc:
+                status_state["attribution_operation_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
+        if not stop.is_set():
+            from src.application.trades.attribution import reconcile_trade_attribution_account
+            from src.application.futu_quote_routing import runtime_config_market
+            cursors = status_state.setdefault("attribution_cursors", {})
+            for attribution_account in sorted(set(account_mapping.values())):
+                if stop.is_set():
+                    break
+                try:
+                    recovered = reconcile_trade_attribution_account(repo, config=cfg, account=attribution_account,
+                        market=runtime_config_market(cfg).lower(), runtime_root=runtime_root, inbox_path=inbox_path,
+                        combo_mode=combo_mode, cursor=cursors.get(attribution_account, ""), stop_event=stop)
+                    cursors[attribution_account] = recovered["next_cursor"]
+                    status_state.setdefault("attribution_recovery", {})[attribution_account] = recovered
+                except Exception as exc:
+                    status_state.setdefault("attribution_recovery", {})[attribution_account] = {"error": type(exc).__name__}
         _write_listener_status(status_path, status_state, status=str(status_state.get("status") or "starting"),
                                stage="receipt_recovery")
 
