@@ -21,6 +21,7 @@ def _tick(tmp_path: Path, run_cmd, *, market: str = "hk", **overrides):
     return run_tick_cron(
         market=market,
         lock_path=str(tmp_path / "tick.lock"),
+        runtime_root=tmp_path,
         run_cmd=run_cmd,
         environ={},
         **overrides,
@@ -140,7 +141,13 @@ def test_run_tick_cron_reports_timeout(tmp_path, capsys) -> None:
     rc = _tick(tmp_path, _timeout, preflight_config_fn=None)
 
     assert rc == 124
-    assert capsys.readouterr().err.strip() == "EXEC_TIMEOUT_RC_124"
+    assert capsys.readouterr().err.strip() == "<3>EXEC_TIMEOUT_RC_124"
+    events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
+    assert len(events) == 1
+    event = json.loads(events[0].read_text(encoding="utf-8"))
+    assert event["error_code"] == "TICK_TIMEOUT"
+    assert event["extra"]["stage"] == "timeout"
+    assert event["extra"]["rc"] == 124
 
 
 def test_default_tick_process_uses_session_and_terminates_process_group(
@@ -201,7 +208,81 @@ def test_run_tick_cron_reports_process_failure_distinct_from_lock(tmp_path, caps
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out == ""
-    assert captured.err.strip() == "EXEC_FAILED_RC_1"
+    assert captured.err.strip() == "<3>EXEC_FAILED_RC_1"
+    events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
+    assert len(events) == 1
+    event = json.loads(events[0].read_text(encoding="utf-8"))
+    assert event["extra"]["failure_code"] == "TICK_EXEC_FAILED"
+    assert event["extra"]["stage"] == "child_exit"
+    assert event["extra"]["trigger_source"] == "cron"
+    assert event["extra"]["rc"] == 1
+    assert event["extra"]["first_error_at"]
+    assert event["extra"]["opend_login_state"] == "unknown"
+
+
+def test_tick_cron_clears_failure_only_with_matching_full_completion(tmp_path) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    latest = tmp_path / "output_shared" / "state" / "current" / "tick_cron_last_result.hk.current.json"
+    config = _write_json(tmp_path / "config.hk.json", {"accounts": ["lx"]})
+
+    def _failed(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 2)
+
+    assert run_tick_cron(
+        market="hk", accounts=["lx"], lock_path=str(tmp_path / "tick.lock"),
+        runtime_root=tmp_path, run_cmd=_failed, preflight_config_fn=None, environ={},
+    ) == 2
+    assert json.loads(latest.read_text())["status"] == "failed"
+
+    def _skipped(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0)
+
+    assert run_tick_cron(
+        market="hk", accounts=["lx"], lock_path=str(tmp_path / "tick.lock"),
+        runtime_root=tmp_path, run_cmd=_skipped, preflight_config_fn=None, environ={},
+    ) == 0
+    assert json.loads(latest.read_text())["status"] == "failed"
+
+    def _completed(command, **kwargs):
+        wrapper_id = kwargs["env"]["OM_TICK_CRON_RUN_ID"]
+        receipt = tmp_path / "output_runs" / wrapper_id / "state" / "child_tick_completion.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"status": "ok", "wrapper_run_id": wrapper_id,
+                                       "inner_run_id": "child-1", "market": "hk", "accounts": ["lx"]}))
+        return subprocess.CompletedProcess(command, 0)
+
+    assert run_tick_cron(
+        market="hk", accounts=["lx"], lock_path=str(tmp_path / "tick.lock"),
+        runtime_root=tmp_path, run_cmd=_completed, preflight_config_fn=None, environ={},
+        config_path=str(config),
+    ) == 0
+    assert json.loads(latest.read_text())["status"] == "ok"
+
+    _write_json(config, {"accounts": ["lx", "sy"]})
+    latest.write_text(json.dumps({"status": "failed", "error_code": "TICK_EXEC_FAILED"}))
+    assert run_tick_cron(
+        market="hk", accounts=["lx"], lock_path=str(tmp_path / "tick.lock"),
+        runtime_root=tmp_path, run_cmd=_completed, preflight_config_fn=None, environ={},
+        config_path=str(config),
+    ) == 0
+    assert json.loads(latest.read_text())["status"] == "failed"
+
+
+def test_tick_cron_shared_audit_failure_marks_evidence_incomplete(monkeypatch, tmp_path, capsys) -> None:
+    from src.application import tick_cron
+
+    def _unwritable(*_args, **_kwargs):
+        raise OSError("shared audit unavailable")
+
+    monkeypatch.setattr(tick_cron.state_repo, "append_shared_audit_jsonl", _unwritable)
+    rc = _tick(tmp_path, lambda command, **_kwargs: subprocess.CompletedProcess(command, 2),
+               preflight_config_fn=None)
+
+    assert rc == 2
+    latest = tmp_path / "output_shared" / "state" / "current" / "tick_cron_last_result.hk.current.json"
+    assert json.loads(latest.read_text())["status"] == "evidence_incomplete"
+    assert "FAILURE_RECORD_WRITE_FAILED stages=shared" in capsys.readouterr().err
 
 
 def test_run_tick_cron_preflight_rejects_config_missing_generation_metadata(tmp_path, capsys) -> None:

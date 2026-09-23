@@ -202,7 +202,7 @@ class OpenDTradePushListener:
                 if "init connect fail" not in detail or "OpenSecTradeContext" not in detail:
                     return
                 error_code, message = classify_watchdog_result(None, detail)
-                if error_code == "OPEND_NEEDS_PHONE_VERIFY":
+                if error_code in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
                     auth_evidence.update(error_code=error_code, message=message, detail=detail)
                     auth_required.set()
 
@@ -267,7 +267,7 @@ class OpenDTradePushListener:
             else:
                 detail = f"get_global_state ret={ret} data={data}"
                 error_code, message = classify_watchdog_result(None, detail)
-        if error_code == "OPEND_NEEDS_PHONE_VERIFY":
+        if error_code in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
             raise TradeIntakeAuthRequired(error_code=error_code, message=message, detail=detail)
         raise RuntimeError(f"{error_code} {message}: {detail}")
 

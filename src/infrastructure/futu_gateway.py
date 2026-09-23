@@ -580,6 +580,10 @@ class FutuGatewayNeed2FAError(FutuGatewayError):
     code = "NEED_2FA"
 
 
+class FutuGatewayNeedPicVerifyError(FutuGatewayError):
+    code = "NEED_PIC_VERIFY"
+
+
 class FutuGatewayAuthExpiredError(FutuGatewayError):
     code = "AUTH_EXPIRED"
 
@@ -620,6 +624,9 @@ def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
 
     if code is OpenDRetCode.NEED_2FA:
         return FutuGatewayNeed2FAError(f"{action} failed: {msg}", raw_error=exc)
+
+    if code is OpenDRetCode.NEED_PIC_VERIFY:
+        return FutuGatewayNeedPicVerifyError(f"{action} failed: {msg}", raw_error=exc)
 
     if code is OpenDRetCode.AUTH_EXPIRED:
         return FutuGatewayAuthExpiredError(f"{action} failed: {msg}", raw_error=exc)

@@ -7,15 +7,21 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.storage.repositories import state_repo
+from src.application.account_config import accounts_from_config_path
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     RuntimeConfigIdentityError,
     ensure_runtime_config_freshness,
     ensure_runtime_config_identity,
 )
+from src.application.runtime_paths import resolve_runtime_root
+from src.infrastructure.io_utils import read_json
+from src.infrastructure.run_log import create_run_id
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,89 @@ def _write_line(stream: Any, text: str) -> None:
         pass
 
 
+def _record_failure(
+    *,
+    base: Path,
+    run_id: str,
+    plan: TickCronPlan,
+    code: str,
+    stage: str,
+    rc: int,
+    message: str,
+    stderr: Any,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    pending = read_json(base / "output_shared" / "state" / "opend_phone_verify_pending.json", {})
+    login_state = "phone_verify_pending" if isinstance(pending, dict) and pending.get("pending") else "unknown"
+    event = state_repo.normalize_audit_event({
+        "event_type": "tick_cron",
+        "action": "failed",
+        "status": "error",
+        "run_id": run_id,
+        "error_code": code,
+        "message": message[:500],
+        "event_at_utc": now,
+        "extra": {
+            "market": plan.market,
+            "accounts": plan.accounts,
+            "failure_code": code,
+            "stage": stage,
+            "trigger_source": plan.trigger_env["OM_TRIGGER_SOURCE"],
+            "rc": rc,
+            "first_error_at": now,
+            "opend_login_state": login_state,
+        },
+    })
+    incomplete: list[str] = []
+    try:
+        state_repo.append_run_audit_jsonl(base, run_id, "audit_events.jsonl", event)
+    except Exception:
+        incomplete.append("run")
+    try:
+        state_repo.append_shared_audit_jsonl(base, "audit_events.jsonl", event)
+    except Exception:
+        incomplete.append("shared")
+    try:
+        state_repo.write_shared_current_read_model(
+            base,
+            f"tick_cron_last_result.{plan.market}.current.json",
+            {"status": "evidence_incomplete" if incomplete else "failed", "run_id": run_id,
+             "market": plan.market, "accounts": plan.accounts, "error_code": code,
+             "stage": stage, "rc": rc, "event_at_utc": now, "incomplete": incomplete},
+        )
+    except Exception:
+        incomplete.append("latest")
+    if incomplete:
+        _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=" + ",".join(incomplete))
+
+
+def _completed_receipt(base: Path, run_id: str, plan: TickCronPlan) -> dict[str, Any] | None:
+    path = base / "output_runs" / run_id / "state" / "child_tick_completion.json"
+    try:
+        receipt = read_json(path, {})
+    except Exception:
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if (
+        receipt.get("status") != "ok"
+        or receipt.get("wrapper_run_id") != run_id
+        or receipt.get("market") != plan.market
+        or sorted(receipt.get("accounts") or []) != sorted(plan.accounts)
+        or not receipt.get("inner_run_id")
+    ):
+        return None
+    return receipt
+
+
+def _full_account_scope(plan: TickCronPlan, *, cwd: str | Path | None) -> bool:
+    try:
+        configured = accounts_from_config_path(_resolve_config_for_preflight(plan, cwd=cwd), fallback=())
+    except Exception:
+        return False
+    return bool(configured) and len(plan.accounts) == len(configured) and set(plan.accounts) == set(configured)
+
+
 
 
 def _resolve_config_for_preflight(plan: TickCronPlan, *, cwd: str | Path | None) -> Path:
@@ -227,6 +316,7 @@ def run_tick_cron(
     stdout: Any = None,
     stderr: Any = None,
     environ: dict[str, str] | None = None,
+    runtime_root: str | Path | None = None,
 ) -> int | dict[str, Any]:
     plan = build_tick_cron_plan(
         market=market,
@@ -268,6 +358,16 @@ def run_tick_cron(
             _write_line(stdout, "SKIP_LOCKED")
             return 0
 
+        env = dict(environ if environ is not None else os.environ)
+        base = resolve_runtime_root(
+            repo_root=Path(cwd).resolve() if cwd is not None else Path.cwd(),
+            runtime_root=runtime_root,
+            environ=env,
+        ).runtime_root
+        run_id = create_run_id()
+        env.update(plan.trigger_env)
+        env["OM_TICK_CRON_RUN_ID"] = run_id
+
         if preflight_config_fn is not None:
             try:
                 preflight_config_fn(
@@ -275,12 +375,19 @@ def run_tick_cron(
                     cwd=cwd,
                     allow_stale_config=allow_stale_config,
                 )
+            except Exception as exc:
+                _record_failure(base=base, run_id=run_id, plan=plan,
+                                code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
+                                message=f"{type(exc).__name__}: {exc}", stderr=stderr)
+                _write_line(stderr, "<3>EXEC_PREFLIGHT_FAILED_RC_1")
+                return 1
             except SystemExit as exc:
-                _write_line(stderr, str(exc))
+                _record_failure(base=base, run_id=run_id, plan=plan,
+                                code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
+                                message=str(exc), stderr=stderr)
+                _write_line(stderr, "<3>" + str(exc))
                 return 1
 
-        env = dict(environ if environ is not None else os.environ)
-        env.update(plan.trigger_env)
         try:
             if run_cmd is None:
                 proc = _run_tick_process_group(
@@ -298,18 +405,34 @@ def run_tick_cron(
                     check=False,
                 )
         except subprocess.TimeoutExpired:
-            _write_line(stderr, "EXEC_TIMEOUT_RC_124")
+            _record_failure(base=base, run_id=run_id, plan=plan,
+                            code="TICK_TIMEOUT", stage="timeout", rc=124,
+                            message="tick child timed out", stderr=stderr)
+            _write_line(stderr, "<3>EXEC_TIMEOUT_RC_124")
             return 124
-        finally:
+        except Exception as exc:
+            _record_failure(base=base, run_id=run_id, plan=plan,
+                            code="TICK_START_FAILED", stage="start", rc=1,
+                            message=f"{type(exc).__name__}: {exc}", stderr=stderr)
+            _write_line(stderr, "<3>EXEC_START_FAILED_RC_1")
+            return 1
+        rc = int(getattr(proc, "returncode", 1))
+        if rc != 0:
+            _record_failure(base=base, run_id=run_id, plan=plan,
+                            code="TICK_EXEC_FAILED", stage="child_exit", rc=rc,
+                            message=f"tick child exited with rc={rc}", stderr=stderr)
+            _write_line(stderr, f"<3>EXEC_FAILED_RC_{rc}")
+        elif _full_account_scope(plan, cwd=cwd) and not plan.symbols and not no_send and _completed_receipt(base, run_id, plan):
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                state_repo.write_shared_current_read_model(
+                    base, f"tick_cron_last_result.{plan.market}.current.json",
+                    {"status": "ok", "run_id": run_id, "market": plan.market,
+                     "accounts": plan.accounts, "event_at_utc": datetime.now(timezone.utc).isoformat()},
+                )
             except Exception:
-                pass
-
-    rc = int(getattr(proc, "returncode", 1))
-    if rc != 0:
-        _write_line(stderr, f"EXEC_FAILED_RC_{rc}")
-    return rc
+                _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=latest_success")
+                return 1
+        return rc
 
 
 def _run_tick_process_group(

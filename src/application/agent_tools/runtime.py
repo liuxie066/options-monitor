@@ -435,7 +435,9 @@ def _public_runtime_logs(data: dict[str, Any]) -> dict[str, Any]:
             "requested_run_found": raw_summary.get("requested_run_found"),
             "file_count": len(files),
             "existing_file_count": sum(1 for item in files if item["exists"]),
+            "log_source": str(raw_summary.get("log_source") or "files"),
         },
+        "journal_hint": data.get("journal_hint"),
         "selected_run": selected_run,
         "files": files,
     }

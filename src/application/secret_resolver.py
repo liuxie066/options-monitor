@@ -152,20 +152,31 @@ def resolve_feishu_holdings_config(
     *,
     environ: Mapping[str, str] | None = None,
     secret_provider: SecretProvider | None = None,
+    metadata_only: bool = False,
 ) -> FeishuHoldingsConfig:
     feishu_cfg = _dict(_dict(data_cfg).get("feishu"))
     tables = _dict(feishu_cfg.get("tables"))
     app_id_env = _text(feishu_cfg.get("app_id_env")) or DEFAULT_FEISHU_APP_ID_ENV
     app_secret_env = _text(feishu_cfg.get("app_secret_env")) or DEFAULT_FEISHU_APP_SECRET_ENV
     holdings_env = _text(tables.get("holdings_env") or feishu_cfg.get("holdings_env")) or DEFAULT_FEISHU_HOLDINGS_TABLE_ENV
-    return FeishuHoldingsConfig(
-        app_id=_env(environ, app_id_env),
-        app_secret=_secret(
+    if metadata_only:
+        status = resolve_secret_status(
+            FEISHU_HOLDINGS_APP_SECRET,
+            provider=secret_provider,
+            environ=environ if secret_provider is None else None,
+            legacy_env_name=app_secret_env,
+        )
+        app_secret = "configured" if status.configured else ""
+    else:
+        app_secret = _secret(
             FEISHU_HOLDINGS_APP_SECRET,
             environ=environ,
             provider=secret_provider,
             legacy_env_name=app_secret_env,
-        ),
+        )
+    return FeishuHoldingsConfig(
+        app_id=_env(environ, app_id_env),
+        app_secret=app_secret,
         holdings_ref=_env(environ, holdings_env),
         app_id_env=app_id_env,
         app_secret_env=app_secret_env,

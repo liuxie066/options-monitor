@@ -103,7 +103,9 @@ def test_render_systemd_bundle_service_hardening() -> None:
     auto_close_us_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
     auto_close_hk_timer = files["systemd/options-monitor-auto-close-hk.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
-    assert "TimeoutStartSec=" not in tick
+    assert "TimeoutStartSec=900" in tick
+    assert "TimeoutStopSec=30" in tick
+    assert "SyslogLevelPrefix=yes" in tick
     assert "TimeoutStartSec=" not in runtime_status
     assert "TimeoutStartSec=" not in verify
     assert "TimeoutStartSec=" not in intake
