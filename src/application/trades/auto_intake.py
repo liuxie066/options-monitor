@@ -1117,9 +1117,13 @@ def main(argv: list[str] | None = None) -> int:
             for physical, label in intake_cfg["account_mapping"].items()
         ]
         def process_file_row(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            selected = (sources[0] if payload.get("_trade_intake_file_errors") else
-                        _select_source_for_payload(sources, payload=payload,
-                                                   account_mapping=intake_cfg["account_mapping"], require_match=False))
+            try:
+                selected = (sources[0] if payload.get("_trade_intake_file_errors") else
+                            _select_source_for_payload(sources, payload=payload,
+                                                       account_mapping=intake_cfg["account_mapping"],
+                                                       require_match=bool(apply_changes)))
+            except ValueError as exc:
+                return {"status": "rejected", "reason": str(exc)}
             return _process_payload(
                 payload, repo=repo, state_path=Path(selected["state_path"]),
                 inbox_path=Path(selected["inbox_path"]), audit_path=Path(selected["audit_path"]),
@@ -1168,12 +1172,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     if args.deal_json or saved_inbox:
         payload = saved_inbox["payload"] if saved_inbox else json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
-        manual_source = _select_source_for_payload(
-            sources,
-            payload=payload,
-            account_mapping=intake_cfg["account_mapping"],
-            require_match=bool(apply_changes),
-        )
+        try:
+            manual_source = _select_source_for_payload(
+                sources,
+                payload=payload,
+                account_mapping=intake_cfg["account_mapping"],
+                require_match=bool(apply_changes),
+            )
+        except ValueError as exc:
+            print(str(exc))
+            return 2
         manual_host = str(args.host or manual_source.get("host") or "127.0.0.1")
         manual_port = int(args.port or manual_source.get("port") or 11111)
         manual_account_mapping = dict(manual_source.get("account_mapping") or intake_cfg["account_mapping"])
@@ -1252,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
         result = attach_write_contract(
             result,
             dry_run=not apply_changes,
-            write_applied=apply_changes and str(result.get("status") or "") not in {"dry_run", "skipped"},
+            write_applied=apply_changes and str(result.get("status") or "") == "applied",
             rollback_hint="void created trade events or restore option_positions SQLite from backup",
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1617,7 +1625,7 @@ def _select_source_for_payload(
     account = str(account_ref.get("account_label") or payload.get("account") or payload.get("internal_account") or "").strip().lower()
     mapped_account = str(account_mapping.get(futu_account_id) or "").strip().lower() if futu_account_id else ""
     if account and mapped_account and account != mapped_account:
-        raise SystemExit("deal-json payload account conflicts with futu_account_id mapping; pass a consistent payload or --host/--port")
+        raise ValueError("deal-json payload account conflicts with futu_account_id mapping; pass a consistent payload or --host/--port")
     if not account and mapped_account:
         account = mapped_account
 
@@ -1640,9 +1648,9 @@ def _select_source_for_payload(
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        raise SystemExit("deal-json payload matches multiple trade-intake sources; pass --host/--port explicitly")
+        raise ValueError("deal-json payload matches multiple trade-intake sources; pass --host/--port explicitly")
     if require_match:
-        raise SystemExit("deal-json apply mode with multiple trade-intake sources requires payload futu_account_id/account or explicit --host/--port")
+        raise ValueError("deal-json apply mode with multiple trade-intake sources requires payload futu_account_id/account or explicit --host/--port")
     return sources[0]
 
 
@@ -1742,47 +1750,54 @@ def _reconcile_source_completion(
             )
             matches = []
             reason = None
+            row_evidence_error = False
             for row in rows:
-                payload = row["payload"]
-                execution = payload.get("execution_input") or payload
-                physical = str((execution.get("broker_account_ref") or {}).get("external_account_id")
-                               or extract_primary_account_id(payload) or "")
-                if physical and physical not in mapping:
-                    # A shared Inbox can contain the other configured account's same deal ID.
-                    if row.get("broker_deal_key") in lookup_keys:
-                        reason = "inbox_account_mapping_unproven"
+                try:
+                    payload = row["payload"]
+                    execution = payload.get("execution_input") or payload
+                    physical = str((execution.get("broker_account_ref") or {}).get("external_account_id")
+                                   or extract_primary_account_id(payload) or "")
+                    if physical and physical not in mapping:
+                        # A shared Inbox can contain the other configured account's same deal ID.
+                        if row.get("broker_deal_key") in lookup_keys:
+                            reason = "inbox_account_mapping_unproven"
+                            break
+                        continue
+                    deal = normalize_trade_deal(
+                        payload, futu_account_mapping=mapping, allow_opend_refresh=False,
+                    )
+                    if not physical or not deal.internal_account:
+                        reason = "inbox_identity_unproven"
                         break
-                    continue
-                deal = normalize_trade_deal(
-                    payload, futu_account_mapping=mapping, allow_opend_refresh=False,
-                )
-                if not physical or not deal.internal_account:
-                    reason = "inbox_identity_unproven"
-                    break
-                if identity_key not in {broker_deal_key(deal), broker_external_event_key(deal)}:
-                    if row.get("broker_deal_key") in lookup_keys:
-                        reason = "inbox_identity_conflict"
+                    if identity_key not in {broker_deal_key(deal), broker_external_event_key(deal)}:
+                        if row.get("broker_deal_key") in lookup_keys:
+                            reason = "inbox_identity_conflict"
+                            break
+                        continue
+                    if (deal.internal_account != original.get("account")
+                            or (source.get("account") and deal.internal_account != source["account"])):
+                        reason = "inbox_account_conflict"
                         break
+                    if row.get("_reconciliation_evidence_error"):
+                        reason = row["_reconciliation_evidence_error"]
+                        break
+                    if (row.get("identity_status") != "bound" or row["status"] not in {"pending", "handled"}
+                            or (row.get("claim_id") and int(row.get("claim_until_ms") or 0) > int(time.time() * 1000))):
+                        reason = "inbox_claim_or_review_pending"
+                        break
+                    if action["reason"] == "ledger_event_already_recorded":
+                        proven = bool(completed_ledger_execution_events(repo.list_trade_events(), deal))
+                    else:
+                        proven = reconciled_source_matches_deal(action, deal)
+                    if not proven:
+                        reason = "inbox_economic_evidence_unproven"
+                        break
+                    matches.append((row, deal))
+                except Exception as exc:
+                    row_evidence_error = True
+                    deferred.append({"deal_id": key, "reason": "inbox_row_evidence_error",
+                                     "error": f"{type(exc).__name__}: {exc}"})
                     continue
-                if (deal.internal_account != original.get("account")
-                        or (source.get("account") and deal.internal_account != source["account"])):
-                    reason = "inbox_account_conflict"
-                    break
-                if row.get("_reconciliation_evidence_error"):
-                    reason = row["_reconciliation_evidence_error"]
-                    break
-                if (row.get("identity_status") != "bound" or row["status"] not in {"pending", "handled"}
-                        or (row.get("claim_id") and int(row.get("claim_until_ms") or 0) > int(time.time() * 1000))):
-                    reason = "inbox_claim_or_review_pending"
-                    break
-                if action["reason"] == "ledger_event_already_recorded":
-                    proven = bool(completed_ledger_execution_events(repo.list_trade_events(), deal))
-                else:
-                    proven = reconciled_source_matches_deal(action, deal)
-                if not proven:
-                    reason = "inbox_economic_evidence_unproven"
-                    break
-                matches.append((row, deal))
             if reason:
                 deferred.append({"deal_id": key, "reason": reason})
                 continue
@@ -1806,7 +1821,8 @@ def _reconcile_source_completion(
             except TradePayloadClaimLost:
                 deferred.append({"deal_id": key, "reason": "inbox_observation_changed"})
                 continue
-            allowed.append(key)
+            if not row_evidence_error:
+                allowed.append(key)
         return allowed
 
     # Serializes evidence, Inbox settlement and state write against every economic writer.
@@ -2157,10 +2173,22 @@ def _run_listener_source_loop(
         payload: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
+        preparation_error = None
         if apply_changes:
-            _persist_checkpoint_if_pending()
-            if settlement_observation_enabled:
-                _ensure_settlement_gateways()
+            try:
+                _persist_checkpoint_if_pending()
+                if settlement_observation_enabled:
+                    _ensure_settlement_gateways()
+            except Exception as exc:
+                preparation_error = {
+                    "status": "needs_review",
+                    "reason_codes": ["settlement_gateway_unavailable" if not checkpoint_seal_pending
+                                     else "checkpoint_seal_pending"],
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                status_state["last_lifecycle_intake_error"] = {
+                    **preparation_error, "deal_id": payload_deal_id(payload),
+                }
         result = _process_payload(
             payload,
             before_receipt_fn=lambda current: _attach_combo_reconciliation_after_open(
@@ -2171,6 +2199,9 @@ def _run_listener_source_loop(
             ),
             **kwargs,
         )
+        if preparation_error is not None:
+            result["lifecycle_timing"] = preparation_error
+            return result
         if not apply_changes or not settlement_observation_enabled:
             return result
         try:
@@ -2229,7 +2260,9 @@ def _run_listener_source_loop(
             fee_target = _durable_fee_target(
                 payload=payload,
                 result=result,
-                state=load_trade_intake_state(state_path),
+                state=(load_trade_intake_state(state_path)
+                       if str(result.get("status") or "").strip().lower() != "applied"
+                       and fee_target_from_trusted_payload(payload) is not None else {}),
                 account_mapping=account_mapping,
             )
             if fee_target is not None:
@@ -2289,55 +2322,79 @@ def _run_listener_source_loop(
                 f"deal_id={payload_deal_id(payload) or '-'} error={error}"
             )
             return
-        canonical_deal_key = ("" if payload.get("_trade_intake_source_identity_errors") else
-                              broker_deal_key_from_payload(payload, account_mapping=account_mapping))
-        inbox_id = enqueue_trade_payload(
-            inbox_path,
-            payload=payload,
-            source="push",
-            broker_deal_key=canonical_deal_key,
-            repo=repo,
-            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"],
-        )
-        if not canonical_deal_key:
-            append_trade_intake_audit(
-                audit_path,
-                {
-                    "phase": "push_identity_needs_review",
-                    "source": "push",
-                    "source_id": source.get("id"),
-                    "account": source.get("account"),
-                    "opend_process": "FutuOpenD",
-                    "opend_host": host,
-                    "opend_port": port,
-                    "received_at_utc": push_received_at,
-                    "deal_id": payload_deal_id(payload) or None,
-                    "inbox_id": inbox_id,
-                    "reason": "canonical_broker_identity_missing",
-                },
+        inbox_id = None
+        try:
+            canonical_deal_key = ("" if payload.get("_trade_intake_source_identity_errors") else
+                                  broker_deal_key_from_payload(payload, account_mapping=account_mapping))
+            inbox_id = enqueue_trade_payload(
+                inbox_path,
+                payload=payload,
+                source="push",
+                broker_deal_key=canonical_deal_key,
+                repo=repo,
+                adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"],
             )
-            status_state.update(
-                {
-                    "last_push_received_utc": push_received_at,
-                    "last_push_deal_id": payload_deal_id(payload) or None,
-                    "inbox": current_inbox_summary(),
-                }
-            )
-            _write_listener_status(
-                status_path,
-                status_state,
-                status="listening",
-                stage="push_identity_needs_review",
-            )
-            _log(
-                f"[WARN] TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED inbox_id={inbox_id} "
-                "reason=canonical_broker_identity_missing retryable=false "
-                "next_action=verify_broker_identity_before_replay"
-            )
+            if not canonical_deal_key:
+                append_trade_intake_audit(
+                    audit_path,
+                    {
+                        "phase": "push_identity_needs_review",
+                        "source": "push",
+                        "source_id": source.get("id"),
+                        "account": source.get("account"),
+                        "opend_process": "FutuOpenD",
+                        "opend_host": host,
+                        "opend_port": port,
+                        "received_at_utc": push_received_at,
+                        "deal_id": payload_deal_id(payload) or None,
+                        "inbox_id": inbox_id,
+                        "reason": "canonical_broker_identity_missing",
+                    },
+                )
+                status_state.update(
+                    {
+                        "last_push_received_utc": push_received_at,
+                        "last_push_deal_id": payload_deal_id(payload) or None,
+                        "inbox": current_inbox_summary(),
+                    }
+                )
+                _write_listener_status(
+                    status_path,
+                    status_state,
+                    status="listening",
+                    stage="push_identity_needs_review",
+                )
+                _log(
+                    f"[WARN] TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED inbox_id={inbox_id} "
+                    "reason=canonical_broker_identity_missing retryable=false "
+                    "next_action=verify_broker_identity_before_replay"
+                )
+                return
+            inbox_wakeup.set()
+            status_state.update({"last_push_received_utc": push_received_at,
+                                 "last_push_deal_id": payload_deal_id(payload) or None})
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            status_state.update(last_error=error, last_error_at=utc_now(),
+                                last_push_received_utc=push_received_at,
+                                last_push_deal_id=payload_deal_id(payload) or None)
+            try:
+                append_trade_intake_audit(audit_path, {
+                    "phase": "push_enqueue_failed", "source": "push",
+                    "source_id": source.get("id"), "account": source.get("account"),
+                    "deal_id": payload_deal_id(payload) or None, "inbox_id": inbox_id,
+                    "received_at_utc": push_received_at, "error": error,
+                })
+            except Exception as audit_exc:
+                _log(f"[WARN] trade push failure audit unavailable: {audit_exc}")
+            try:
+                _write_listener_status(status_path, status_state, status="listening",
+                                       stage="push_enqueue_failed")
+            except Exception as status_exc:
+                _log(f"[WARN] trade push failure status unavailable: {status_exc}")
+            _log(f"[WARN] trade push enqueue failed source={source.get('id')} "
+                 f"deal_id={payload_deal_id(payload) or '-'} error={error}")
             return
-        inbox_wakeup.set()
-        status_state.update({"last_push_received_utc": push_received_at,
-                             "last_push_deal_id": payload_deal_id(payload) or None})
 
     listener = None
     history_client = None

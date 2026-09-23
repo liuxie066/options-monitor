@@ -1592,3 +1592,60 @@ def test_unknown_buy_call_entry_point_preserves_evidence_without_open(tmp_path, 
     inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
     stored = read_trade_payload(inbox, inbox_id=result["inbox_id"], read_only=True)
     assert stored["result"]["reason"] == "unknown_position_effect"
+
+
+@pytest.mark.parametrize("failure", ["normalize", "proof"])
+@pytest.mark.parametrize("bad_first", [True, False])
+def test_reconcile_bad_row_does_not_block_good_rows_or_complete_its_action(tmp_path, monkeypatch, failure, bad_first):
+    from src.application.trades import auto_intake
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _, first_inbox, key, source = _recorded_source_pending(repo, tmp_path)
+    second = _process(repo, tmp_path, "push", _execution(deal_id="fill-2"))
+    state = load_trade_intake_state(source["state_path"])
+    second_key, second_entry = state["processed_deal_ids"].popitem()
+    state["unresolved_deal_ids"][second_key] = second_entry
+    write_trade_intake_state(source["state_path"], state)
+    read_rows = auto_intake.read_trade_payloads_for_reconciliation
+    normalize = auto_intake.normalize_trade_deal
+    proof = auto_intake.completed_ledger_execution_events
+    bad_deals = []
+
+    def rows(*args, **kwargs):
+        result = read_rows(*args, **kwargs)
+        if key in kwargs["deal_ids"]:
+            bad = {**result[0], "payload": {**result[0]["payload"], "_test_bad_row": True}}
+            return [bad, *result] if bad_first else [*result, bad]
+        return result
+
+    def normalize_row(payload, **kwargs):
+        if payload.get("_test_bad_row") and failure == "normalize":
+            raise ValueError("malformed evidence")
+        deal = normalize(payload, **kwargs)
+        if payload.get("_test_bad_row"):
+            bad_deals.append(deal)
+        return deal
+
+    def prove(events, deal):
+        if any(deal is bad for bad in bad_deals):
+            raise RuntimeError("economic evidence unavailable")
+        return proof(events, deal)
+
+    monkeypatch.setattr(auto_intake, "read_trade_payloads_for_reconciliation", rows)
+    monkeypatch.setattr(auto_intake, "normalize_trade_deal", normalize_row)
+    monkeypatch.setattr(auto_intake, "completed_ledger_execution_events", prove)
+    before_events = repo.list_trade_events()
+    result = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert result["inbox_updated_count"] == 2
+    assert result["applied_deal_ids"] == [second_key]
+    assert result["deferred"] == [{"deal_id": key, "reason": "inbox_row_evidence_error", "error":
+        "ValueError: malformed evidence" if failure == "normalize" else "RuntimeError: economic evidence unavailable"}]
+    saved = load_trade_intake_state(source["state_path"])
+    assert key in saved["unresolved_deal_ids"] and key not in saved["processed_deal_ids"]
+    assert second_key in saved["processed_deal_ids"]
+    for inbox_id in (first_inbox, second["inbox_id"]):
+        assert read_trade_payload(source["inbox_path"], inbox_id=inbox_id, read_only=True)["status"] == "handled"
+    retry = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert retry["inbox_updated_count"] == retry["applied_count"] == 0
+    assert repo.list_trade_events() == before_events

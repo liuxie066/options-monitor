@@ -229,12 +229,13 @@ def reconcile_trade_intake_state(
     audit_file = Path(audit_path) if audit_path else None
     state = load_state_fn(state_file)
     requested = _normalize_deal_ids(deal_ids)
-    audit_by_deal = _audit_events_by_deal(audit_file)
-    ledger_by_deal = _ledger_events_by_deal(repo)
-    assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
-    lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
-    delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo)
     candidates = _pending_deal_ids(state, requested=requested)
+    if candidates:
+        audit_by_deal = _audit_events_by_deal(audit_file)
+        ledger_by_deal = _ledger_events_by_deal(repo)
+        assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
+        lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
+        delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo)
 
     actions: list[dict[str, Any]] = []
     new_state = {

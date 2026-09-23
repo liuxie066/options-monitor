@@ -1918,3 +1918,42 @@ def test_source_completion_reports_all_mixed_terminal_types(tmp_path, asset):
     closed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
     assert closed["result"]["action"] == "mixed"
     assert _reconcile_source_completion(source=source, repo=repo, apply_changes=True)["applied_count"] == 0
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_empty_pending_state_skips_evidence_reads_and_preserves_schema(tmp_path, monkeypatch, apply):
+    from src.application.trades import state_reconcile
+    calls = []
+
+    class NoReadRepo:
+        def __getattr__(self, name):
+            if name.startswith(("list", "read", "get")):
+                calls.append(name)
+                pytest.fail(f"empty pending state read {name}")
+            raise AttributeError(name)
+
+    def audit(*_):
+        calls.append("audit")
+        pytest.fail("empty pending state must not read audit")
+
+    monkeypatch.setattr(state_reconcile, "_audit_events_by_deal", audit)
+    state = {"processed_deal_ids": {"old": {"status": "applied"}}, "failed_deal_ids": {}, "unresolved_deal_ids": {}}
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, state)
+    before = path.read_bytes()
+    result = reconcile_trade_intake_state(state_path=path, repo=NoReadRepo(),
+                                         audit_path=tmp_path / "audit.jsonl", apply_changes=apply)
+    assert calls == []
+    counts = {"processed_deal_ids": 1, "failed_deal_ids": 0, "unresolved_deal_ids": 0}
+    assert result == {"ok": True, "state_path": str(path), "audit_path": str(tmp_path / "audit.jsonl"),
+                      "requested_deal_ids": [], "pending_before": counts, "pending_after": counts,
+                      "planned_count": 0, "applied_count": 0, "applied_deal_ids": [],
+                      "state_written": False, "actions": [], "backup_path": None}
+    assert path.read_bytes() == before
+
+
+def test_empty_pending_explicit_deal_request_keeps_noop_action(tmp_path):
+    result = reconcile_trade_intake_state(state_path=tmp_path / "state.json", repo=FakeRepo([]), deal_ids=["missing"])
+    assert result["requested_deal_ids"] == ["missing"]
+    assert result["actions"] == [{"deal_id": "missing", "from_bucket": None, "action": "noop",
+                                  "reason": "deal_id_not_pending", "write_state": False}]
