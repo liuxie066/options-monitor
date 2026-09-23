@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import sqlite3
 
@@ -50,6 +51,40 @@ def _timed(tmp_path, monkeypatch):
     _advance(monkeypatch, clock, 0)
     path, key = _fixture(tmp_path)
     return clock, path, key
+
+
+def test_unsettled_receipt_writes_advance_query_and_recorded_time(tmp_path, monkeypatch):
+    clock, path, key = _timed(tmp_path, monkeypatch)
+    claim = inbox.claim_trade_payload(path, inbox_id=key)
+    assert claim is not None
+    _advance(monkeypatch, clock, 10)
+    inbox.save_trade_payload_result(path, claim=claim, result=_FAILED)
+    assert inbox.read_trade_payload(path, inbox_id=key)["status"] == "pending"
+    query = {"start_time": datetime.fromtimestamp(1005, timezone.utc).isoformat()}
+
+    def recorded_ms():
+        rows = inbox.query_trade_receipts(path, accounts=["lx"], query=query)
+        assert len(rows) == 1
+        return int(datetime.fromisoformat(rows[0]["recorded_at"]).timestamp() * 1000)
+
+    assert recorded_ms() == 1_010_000
+    original_ensure = inbox._ensure_schema
+    _advance(monkeypatch, clock, 60)
+
+    def delayed_ensure(conn):
+        original_ensure(conn)
+        clock[0] += 5  # model a lock wait before the receipt write
+
+    with monkeypatch.context() as patch:
+        patch.setattr(inbox, "_ensure_schema", delayed_ensure)
+        attempt = inbox.begin_trade_receipt_attempt(path, inbox_id=key, route=_ROUTE,
+                                                    message="frozen", claim=claim)
+    assert attempt["claimed"] is True
+    assert recorded_ms() == 1_075_000
+    _advance(monkeypatch, clock, 5)
+    inbox.finish_trade_receipt_attempt(path, inbox_id=key, attempt_id=attempt["attempt_id"],
+                                       result={"explicit_pre_acceptance_failure": True})
+    assert recorded_ms() == 1_080_000
 
 
 def test_claim_budget_due_and_settle_use_one_authoritative_counter(tmp_path, monkeypatch):
