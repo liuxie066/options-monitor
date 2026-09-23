@@ -298,15 +298,16 @@ trade intake、生命周期核对和 SQLite option-position ledger 形成权威�
 
 ### 4.4 Wheel Call 自动确认批次
 
-候选展示不代表用户已采用。只有用户或 Agent 在成交前明确选择 Wheel 候选并创建
-`wheel_call_intent`，成交后才可能自动关联批次；该操作只记录本地意图，不向 broker
-下单。Intent 固定账户、`stock_lot_id`、合约、数量、multiplier、候选快照和显式
-`expires_at_ms`，可取得时同时记录 broker order ID，并在有效期内预留相应覆盖股份。
+候选展示不代表用户已采用，broker 成交不携带策略归属。未启用全局归属规则的账户继续采用
+既有精确 intent 路径；启用后，Call/Put 都由同一交易归属 owner 汇总 Wheel、Combo 的竞争证据。
+唯一合法、成交时与当前均有效的 active 分支，且账户、合约、全部竞争成交和容量证据通过时，
+可以在没有 intent 的情况下按规则关联；存在多候选、缺失证据或容量不足时保持待核实。
+现有 intent 继续固定账户、批次、合约、数量、multiplier 和有效期；精确匹配才消费预留，
+不匹配时不能退回宽泛分支匹配。规则启用不启动新分支，也不重写经济成交。
 
-trade intake 仅在成交唯一精确匹配有效未消费 intent，且重新校验批次、成交归属、
-剩余股份和账户+标的级总覆盖均通过时，原子写入 Call 归属并消费 intent。无 intent、
-多 intent、多批次、策略冲突、事实变化或覆盖不足时禁止自动归属；实际未平仓 Short Call
-仍立即计入共享覆盖，并进入 `linkage_unresolved` 供人工确认或拒绝。
+人工确认统一通过 OM Bot 查询、请求预览，再由 Control 确认。归属冲突持久化到 ledger，
+相关分支停止新增扫描；复杂纠错需受控人工修复。完整规则与切换契约见
+[交易监听设计](FUTU_TRADE_HOLDINGS_SYNC.md)。
 
 Intent 过期由显式 `expires_at_ms` 和 `as_of_ms` 派生，不新增过期事件或自动延长；迟到
 成交按 `occurred_at_ms` 判断成交发生时是否仍有效。取消或失效会释放未消费预留，

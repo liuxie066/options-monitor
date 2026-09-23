@@ -8,6 +8,8 @@ from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import TradeEvent, project_trade_events
+from domain.domain.ledger.events import validate_trade_event
+from domain.domain.trade_execution import execution_identity_from_input
 from domain.domain.ledger.cash_facts import (
     assignment_principal_anchor,
     broker_settlement_multiplier_evidence,
@@ -17,6 +19,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.strategy_membership import strategy_metadata_has_owner
 from domain.domain.trade_contract_identity import contract_share_quantity
 
 from ._common import (
@@ -113,7 +116,7 @@ def lot_strategy_metadata_from_trade_events(
         event_id = str(event.get("event_id") or "").strip()
         return explicit or (f"lot_{event_id}" if event_id else "")
 
-    for raw in trade_events:
+    for raw in sorted(_active_trade_events(trade_events), key=lambda row: (int(row.get("event_time_ms") or 0), str(row.get("event_id") or ""))):
         if not isinstance(raw, Mapping):
             continue
         event_type = str(raw.get("event_type") or "").strip().lower()
@@ -228,11 +231,16 @@ def _trade_position_side(row: Mapping[str, Any]) -> str:
 
 
 def _active_trade_events(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    voided = {
-        str(row.get("target_event_id") or "").strip()
-        for row in rows
-        if _event_type(row) == "void" and str(row.get("target_event_id") or "").strip()
-    }
+    voided = set()
+    for row in rows:
+        if _event_type(row) != "void":
+            continue
+        try:
+            event = TradeEvent.from_dict(dict(row))
+            if not any(item.severity == "error" for item in validate_trade_event(event)):
+                voided.add(str(event.target_event_id or ""))
+        except (TypeError, ValueError, KeyError):
+            continue
     return [
         dict(row)
         for row in rows
@@ -393,10 +401,30 @@ def _intent_state(
     return active, reasons, summaries
 
 
+def _conflict_resolution_has_proof(resolution: Mapping[str, Any], conflict: Mapping[str, Any],
+                                   trade_events: Sequence[Mapping[str, Any]]) -> bool:
+    events = _active_trade_events(trade_events)
+    proof = next((row for row in events if row.get("event_id") == resolution["payload"]["resolution_evidence_event_id"]), {})
+    raw = proof.get("raw_payload") or {}
+    if (proof.get("event_type") != "adjust" or proof.get("source") not in {"trade_attribution", "wheel_linkage", "post_trade_combo_reconciliation"}
+            or raw.get("attribution_origin") != "manual" or not raw.get("actor") or not raw.get("attribution_request_id")
+            or int(proof.get("event_time_ms") or 0) < conflict["occurred_at_ms"]
+            or _trade_account(proof) != conflict["account"]):
+        return False
+    opening = next((row for row in events if row.get("event_type") == "open" and row.get("lot_id") == proof.get("target_lot_id")), {})
+    identity = execution_identity_from_input((opening.get("raw_payload") or {}).get("execution_input") or {})
+    if identity not in conflict["payload"]["execution_keys"]:
+        return False
+    return (raw.get("attribution_action") == "ordinary" or bool(raw.get("attribution_candidate_id"))
+            and set(conflict["payload"].get("candidate_ids") or []) <= set(raw.get("attribution_candidate_ids") or []))
+
+
 def effective_wheel_events(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
     as_of_ms: int | None = None,
+    known_trade_event_ids: set[str] | None = None,
+    trade_events: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], set[str]]]:
     events_by_id: dict[str, dict[str, Any]] = {}
     invalid_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -439,13 +467,32 @@ def effective_wheel_events(
         target = events_by_id.get(target_id)
         if (
             target is None
-            or target["event_type"] == "wheel_event_voided"
+            or target["event_type"] in {"wheel_event_voided", "wheel_attribution_conflict", "wheel_attribution_conflict_resolved"}
             or (target["account"], target["wheel_branch_id"]) != group
         ):
             invalid_by_group[group].add("wheel_void_target_invalid")
             continue
         voided_ids.add(target_id)
         valid_void_ids.add(event["event_id"])
+
+    conflicts = {event["event_id"]: event for event in events_by_id.values()
+                 if event["event_type"] == "wheel_attribution_conflict"}
+    resolved = set()
+    for event in events_by_id.values():
+        if event["event_type"] != "wheel_attribution_conflict_resolved":
+            continue
+        target = conflicts.get(event["payload"]["conflict_event_id"])
+        group = (event["account"], event["wheel_branch_id"])
+        if (target is None or group != (target["account"], target["wheel_branch_id"])
+                or event["occurred_at_ms"] < target["occurred_at_ms"]
+                or event["payload"]["resolution_evidence_event_id"] not in (known_trade_event_ids or set())
+                or not _conflict_resolution_has_proof(event, target, trade_events)):
+            invalid_by_group[group].add("invalid_attribution_conflict_resolution")
+        else:
+            resolved.add(target["event_id"])
+    for event_id, event in conflicts.items():
+        if event_id not in resolved:
+            invalid_by_group[(event["account"], event["wheel_branch_id"])].add("strategy_attribution_conflict")
 
     return (
         [
@@ -556,15 +603,7 @@ def project_wheel_call_linkage_candidates(
             or str(fields.get("position_side") or "").strip().lower()
             != "short"
             or _contracts_open(fields) <= 0
-            or any(
-                str(fields.get(key) or "").strip()
-                for key in (
-                    "strategy",
-                    "leg_role",
-                    "strategy_group_id",
-                    "source_stock_lot_id",
-                )
-            )
+            or strategy_metadata_has_owner(fields)
         ):
             continue
         call_lot_id = _required_text(row.get("record_id"), "call_record_id")
@@ -579,7 +618,6 @@ def project_wheel_call_linkage_candidates(
             if (
                 batch.get("lifecycle_status") != "active"
                 or batch.get("integrity_status") != "trusted"
-                or batch.get("active_call_lot_ids")
                 or str(batch.get("account") or "").strip().lower() != account
                 or str(batch.get("symbol") or "").strip().upper() != symbol
                 or (call_open_event_id, lot_id) in rejected
@@ -589,7 +627,8 @@ def project_wheel_call_linkage_candidates(
                 required_shares = _contracts_open(fields) * int(
                     float(fields.get("multiplier") or 0)
                 )
-                shares_remaining = int(batch.get("shares_remaining"))
+                shares_remaining = (int(batch.get("shares_remaining"))
+                                    - int(batch.get("active_option_committed_shares") or 0))
             except (TypeError, ValueError):
                 continue
             if required_shares <= 0 or shares_remaining < required_shares:
@@ -716,15 +755,7 @@ def project_wheel_linkage_candidates(
             or str(fields.get("position_side") or "").strip().lower()
             != "short"
             or _contracts_open(fields) <= 0
-            or any(
-                str(fields.get(key) or "").strip()
-                for key in (
-                    "strategy",
-                    "leg_role",
-                    "strategy_group_id",
-                    "source_wheel_branch_id",
-                )
-            )
+            or strategy_metadata_has_owner(fields)
         ):
             continue
         lot_id = _required_text(row.get("record_id"), "option_record_id")
@@ -740,7 +771,6 @@ def project_wheel_linkage_candidates(
                 str(branch.get("direction") or "").strip().lower() != "put"
                 or branch.get("lifecycle_status") != "active"
                 or branch.get("integrity_status") != "trusted"
-                or branch.get("active_option_lot_ids")
                 or str(branch.get("account") or "").strip().lower() != account
                 or str(branch.get("symbol") or "").strip().upper() != symbol
                 or (open_event_id, branch_id) in rejected
@@ -749,7 +779,8 @@ def project_wheel_linkage_candidates(
             try:
                 contracts = _contracts_open(fields)
                 multiplier = int(float(fields.get("multiplier") or 0))
-                remaining = int(branch.get("remaining_contracts") or 0)
+                remaining = (int(branch.get("remaining_contracts") or 0)
+                             - int(branch.get("active_option_committed_contracts") or 0))
                 branch_multiplier = int(branch.get("multiplier") or 0)
             except (TypeError, ValueError):
                 continue
@@ -843,12 +874,20 @@ def project_wheel_lifecycles(
     effective_events, invalid_by_group = effective_wheel_events(
         wheel_events,
         as_of_ms=instant,
+        trade_events=trade_events,
+        known_trade_event_ids={str(event.get("event_id") or "") for event in _active_trade_events(trade_events)
+                               if int(event.get("event_time_ms") or 0) <= instant},
     )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    legacy_groups = {(event["account"], event["stock_lot_id"]) for event in effective_events
+                     if event["event_schema_version"] == WHEEL_EVENT_SCHEMA_V1}
     for event in effective_events:
-        if event["event_schema_version"] != WHEEL_EVENT_SCHEMA_V1:
+        if event["event_schema_version"] != WHEEL_EVENT_SCHEMA_V1 and not (
+            event["event_type"] in {"wheel_attribution_conflict", "wheel_attribution_conflict_resolved"}
+            and (event["account"], event["wheel_branch_id"]) in legacy_groups
+        ):
             continue
-        grouped[(event["account"], event["stock_lot_id"])].append(event)
+        grouped[(event["account"], event["wheel_branch_id"])].append(event)
 
     active_trade_events = _active_trade_events(trade_events)
     trade_by_id = {
@@ -1001,15 +1040,7 @@ def project_wheel_lifecycles(
                 or str(call_key.get("option_type") or "").strip().lower() != "call"
                 or str(fields.get("position_side") or "").strip().lower() != "short"
                 or _contracts_open(fields) <= 0
-                or any(
-                    str(fields.get(key) or "").strip()
-                    for key in (
-                        "strategy",
-                        "leg_role",
-                        "strategy_group_id",
-                        "source_stock_lot_id",
-                    )
-                )
+                or strategy_metadata_has_owner(fields)
                 or str(fields.get("open_event_id") or "").strip()
                 in rejected_call_event_ids
             ):
@@ -1049,6 +1080,8 @@ def project_wheel_lifecycles(
         except (TypeError, ValueError):
             reserved_shares = None
             reasons.add("wheel_intent_units_invalid")
+        if any(item.get("status") == "conflict" for item in intent_summaries):
+            reserved_shares = None
         conflict_codes = {
             reason
             for reason in reasons
@@ -1153,6 +1186,7 @@ def project_wheel_lifecycles(
             "start_event_id": start["event_id"],
             "terminal_event_id": terminal["event_id"] if terminal is not None else None,
             "active_call_lot_ids": active_call_lot_ids,
+            "active_option_committed_shares": None if "wheel_call_multiplier_invalid" in reasons else locked_shares,
             "unresolved_call_lot_ids": unresolved_call_lot_ids,
             "active_intent_ids": active_intent_ids,
             "active_intent_reserved_shares": reserved_shares,
@@ -1221,6 +1255,9 @@ def project_wheel_branches(
     effective_events, invalid_by_group = effective_wheel_events(
         wheel_events,
         as_of_ms=instant,
+        trade_events=trade_events,
+        known_trade_event_ids={str(event.get("event_id") or "") for event in _active_trade_events(trade_events)
+                               if int(event.get("event_time_ms") or 0) <= instant},
     )
     v2_events = [
         event
@@ -1538,6 +1575,20 @@ def project_wheel_branches(
                         "remaining_contracts": remaining,
                     }
                 )
+        try:
+            committed_shares = sum(contract_share_quantity(_contracts_open(fields), fields.get("multiplier"))
+                                   for _, fields in linked_lots if _contracts_open(fields) > 0)
+        except (TypeError, ValueError):
+            committed_shares = None
+            reasons.add("wheel_option_units_invalid")
+        try:
+            reserved_shares = sum(contract_share_quantity(item.get("remaining_contracts"), (item.get("payload") or {}).get("multiplier"))
+                for item in intent_summaries if item.get("status") == "active")
+        except (TypeError, ValueError):
+            reserved_shares = None
+            reasons.add("wheel_intent_units_invalid")
+        if any(item.get("status") == "conflict" for item in intent_summaries):
+            reserved_shares = None
         lot_id = str(created.get("stock_lot_id") or "").strip() or None
         stock_row = stock_by_id.get(lot_id or "")
         if direction == "call" and stock_row is None:
@@ -1634,6 +1685,9 @@ def project_wheel_branches(
             "start_event_id": created["event_id"],
             "terminal_event_id": terminal_event_id,
             "active_option_lot_ids": active_lot_ids,
+            "active_intent_reserved_shares": reserved_shares,
+            "active_option_committed_contracts": sum(_contracts_open(fields) for _, fields in linked_lots),
+            "active_option_committed_shares": committed_shares,
             "active_intent_ids": active_intent_ids,
             "active_intent_reserved_contracts": sum(
                 int(item.get("remaining_contracts") or 0)
@@ -1661,3 +1715,41 @@ def project_wheel_branches(
             str(item.get("wheel_branch_id") or ""),
         ),
     )
+
+
+def project_wheel_coverage(branch: Mapping[str, Any]) -> dict[str, Any]:
+    """Quantity coverage; reservations never count as committed option exposure."""
+    def quantity(value: Any) -> int | None:
+        try:
+            number = Decimal(str(value))
+            return int(number) if number.is_finite() and number >= 0 and number == int(number) else None
+        except (ValueError, TypeError, ArithmeticError):
+            return None
+    direction = branch.get("direction") or "call"
+    multiplier = quantity(branch.get("multiplier"))
+    target = quantity(branch.get("shares_remaining"))
+    if direction == "put":
+        remaining = quantity(branch.get("remaining_contracts"))
+        target = remaining * multiplier if remaining is not None and multiplier else None
+    committed = quantity(branch.get("active_option_committed_shares"))
+    if committed is None and not branch.get("active_option_lot_ids") and not branch.get("active_call_lot_ids"):
+        committed = 0
+    reserved = quantity(branch.get("active_intent_reserved_shares"))
+    if "active_intent_reserved_shares" not in branch:
+        contracts = quantity(branch.get("active_intent_reserved_contracts", 0))
+        reserved = contracts * multiplier if contracts is not None and multiplier else 0 if contracts == 0 else None
+    reasons = []
+    if target is None or committed is None or reserved is None or not multiplier:
+        reasons.append("coverage_quantity_unavailable")
+    if branch.get("phase") == "linkage_unresolved":
+        reasons.append("linkage_unresolved")
+    if branch.get("integrity_status") != "trusted":
+        reasons.extend(branch.get("reason_codes") or ["wheel_integrity_conflict"])
+    available = max(0, target - committed - reserved) if all(v is not None for v in (target, committed, reserved)) else None
+    overallocated = bool(multiplier) and all(v is not None for v in (target, committed, reserved)) and committed + reserved > target
+    status = ("overallocated" if overallocated else "unavailable" if reasons else
+              "not_applicable" if target == 0 else "none" if committed == 0 else "full" if committed == target else "partial")
+    if status == "overallocated":
+        reasons.append("coverage_overallocated")
+    return {"status": status, "target_shares": target, "committed_shares": committed,
+            "reserved_shares": reserved, "available_shares": available, "reason_codes": sorted(set(reasons))}

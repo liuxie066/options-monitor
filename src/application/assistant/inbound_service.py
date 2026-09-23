@@ -134,12 +134,13 @@ def handle_assistant_request(
         _check_request_deadline(normalized_request)
         if command is None:
             bot_result = _run_bot(normalized_request, command_id=command_id, audit_db=store.path)
-            if bot_result.control_request:
+            if bot_result.ok and bot_result.status == "control_requested" and bot_result.control_request:
                 _check_request_deadline(normalized_request)
                 command = _control_command_from_bot(bot_result.control_request)
                 control = execute_explicit_control(
                     command,
-                    request=normalized_request,
+                    request=(replace(normalized_request, conversation_id=request.conversation_id)
+                             if command.intent_name.startswith("attribution_") else normalized_request),
                     command_id=command_id,
                     operation_store=InboundOperationStore(store.path),
                     execute_tool_fn=execute_tool_fn,
@@ -175,7 +176,8 @@ def handle_assistant_request(
             )
         control = execute_explicit_control(
             command,
-            request=normalized_request,
+            request=(replace(normalized_request, conversation_id=request.conversation_id)
+                     if command.intent_name.startswith("attribution_") else normalized_request),
             command_id=command_id,
             operation_store=InboundOperationStore(store.path),
             execute_tool_fn=execute_tool_fn,

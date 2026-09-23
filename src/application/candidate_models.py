@@ -162,6 +162,8 @@ class CandidateContractInput:
             "last_price_activity_status": self.last_price_activity_status,
             "snapshot_requested_at_utc": self.snapshot_requested_at_utc,
             "snapshot_received_at_utc": self.snapshot_received_at_utc,
+            "quote_update_time": None,
+            "quote_observed_at_utc": self.snapshot_received_at_utc,
             "snapshot_age_seconds": self.snapshot_age_seconds,
             "price_tick": self.price_tick,
             "open_interest": self.open_interest,

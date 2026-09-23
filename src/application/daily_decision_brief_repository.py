@@ -1170,7 +1170,7 @@ def read_combo_candidate_exposures(
         market_trading_date=date_norm,
     )
     if not listed.get("available"):
-        return {**listed, "exposures": []}
+        return {**listed, "complete": False, "delivery_available": False, "exposures": []}
     delivery_result = read_daily_decision_brief_delivery_state(
         base=base_path,
         account=account_norm,
@@ -1237,7 +1237,9 @@ def read_combo_candidate_exposures(
             out_by_id[str(item["candidate_exposure_id"])] = item
     return {
         "available": True,
-        "reason": "partial" if invalid_revisions else "ok",
+        "reason": "partial" if invalid_revisions or not delivery_result.get("available") else "ok",
+        "complete": not invalid_revisions and delivery_result.get("available") is True,
+        "delivery_available": delivery_result.get("available") is True,
         "account": account_norm,
         "market": market_norm,
         "market_trading_date": date_norm,

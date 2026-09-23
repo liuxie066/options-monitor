@@ -320,6 +320,7 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
             "shares_remaining": 100,
             "status": "ready",
             "recommended_contracts": 1,
+            "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
             "reason_code": "partial_data",
             "expiration": "2026-08-21",
             "strike": 110,
@@ -350,6 +351,7 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
             "principal_anchor": 10_500,
             "status": "ready",
             "recommended_contracts": 1,
+            "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
             "reason_code": "partial_data",
             "expiration": "2026-08-21",
             "strike": 100,
@@ -379,6 +381,7 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
             "shares_remaining": 100,
             "status": "ready",
             "recommended_contracts": 1,
+            "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
             "expiration": "2026-08-21",
             "strike": 110,
         },
@@ -389,6 +392,7 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
             "remaining_contracts": 1,
             "status": "ready",
             "recommended_contracts": 1,
+            "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
             "expiration": "2026-08-21",
             "strike": 100,
         },
@@ -636,6 +640,7 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
     brief["status"] = "blocked"
     brief["wheel_batches"] = [{
         "symbol": "UNSAFE", "recommended_contracts": 1,
+            "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
         "reason_codes": ["multiplier_unproven"],
     }]
     assert "UNSAFE" not in render_fixed_report_card_markdown(brief)
@@ -1625,3 +1630,20 @@ def test_wheel_no_recommendation_status_is_readable(direction, reason, expected)
     assert f"状态｜{expected}" in message
     if reason != "unknown_wheel_reason":
         assert reason not in message
+
+
+@pytest.mark.parametrize("direction,status,label", [("call","full","已全覆盖"),("call","partial","部分覆盖"),
+    ("call","none","未覆盖"),("put","full","全部安排"),("put","partial","部分安排"),("put","none","尚未安排")])
+def test_wheel_quantity_and_same_candidate_limit_price(direction,status,label):
+    brief=_brief()
+    brief["wheel_batches"]=[{"symbol":"NVDA","direction":direction,"recommended_contracts":1,
+        "expiration":"2026-08-21","strike":110,"currency":"USD","sell_limit":2.15,"mid":2.125,
+        "quote_observed_at_utc":"2026-07-31T14:00:00Z","coverage":{"status":status,"target_shares":300,
+        "committed_shares":100,"reserved_shares":100,"available_shares":100}}]
+    rendered=render_fixed_report(brief,context=_scheduled_context())
+    assert label in rendered and "100 / 300 股" in rendered
+    assert "建议限价｜USD 2.15" in rendered and "2.125" not in rendered
+    assert "意图预留｜100 股" in rendered and "以账户容量检查为准" in rendered
+    brief["wheel_batches"][0].pop("sell_limit")
+    unavailable=render_fixed_report(brief,context=_scheduled_context())
+    assert "建议价格暂不可用" in unavailable and "建议｜卖出 1 张 08-21 $110" not in unavailable

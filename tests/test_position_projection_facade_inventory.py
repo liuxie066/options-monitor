@@ -110,6 +110,8 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
 
     assert runtime_calls == Counter(
         {
+            ("src/application/ledger/trade_attribution.py", "record_trade_ordinary_attribution>run", "'forced_full'"): 1,
+            ("src/application/ledger/trade_attribution_migration.py", "apply_trade_attribution_migration", "'forced_full'"): 1,
             (
                 "src/application/ledger/bootstrap.py",
                 "materialize_bootstrap_events>_run",
@@ -216,6 +218,7 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
 
     assert full_calls == Counter(
         {
+            ("src/application/ledger/trade_attribution.py", "trade_attribution_facts_from_events", "project_stored_trade_events_to_position_lots"): 1,
             (
                 "src/application/ledger/bootstrap.py",
                 "materialize_bootstrap_events>_run",

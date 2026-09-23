@@ -85,6 +85,13 @@ def reconcile_account_post_trade_combos(
                 "market_date": market_date,
                 "available": bool(result.get("available")),
                 "reason": result.get("reason"),
+                "complete": (
+                    result.get("available") is True
+                    and result.get("reason") in {None, "ok"}
+                    and not result.get("invalid_revisions")
+                    and result.get("complete") is True
+                    and result.get("delivery_available") is True
+                ),
                 "exposure_count": len(result.get("exposures") or []),
             }
         )
@@ -104,7 +111,17 @@ def reconcile_account_post_trade_combos(
     auto_adoptions = []
     auto_adoption_errors = []
     if mode_value == "auto":
+        complete_scopes = {(row["market"], row["market_date"]) for row in evidence_reads if row["complete"]}
         for inference in reconciled.get("inferences") or []:
+            if (inference.get("market"), inference.get("market_date")) not in complete_scopes:
+                continue
+            from src.application.trades.attribution import trade_attribution_enabled_for_execution
+            if any(trade_attribution_enabled_for_execution(repo,
+                    execution={"broker_account_ref": (inference.get(leg) or {}).get("broker_account_ref") or {}},
+                    account=account_value, market=str(inference.get("market") or "").lower(),
+                    event_time_ms=int((inference.get(leg) or {}).get("trade_time_ms") or 0))
+                   for leg in ("put_lot_snapshot", "call_lot_snapshot")):
+                continue
             if not (
                 inference.get("status") == "proposal_ready"
                 and inference.get("evidence_grade") == "exact_delivered_candidate"

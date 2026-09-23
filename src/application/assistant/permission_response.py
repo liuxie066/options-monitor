@@ -28,6 +28,12 @@ class _PermissionFamily:
 
 _FAMILIES: tuple[_PermissionFamily, ...] = (
     _PermissionFamily(
+        key="attribution", operation_types=frozenset({"trade_attribution"}),
+        confirm_intent="attribution_confirm", cancel_intent="attribution_cancel", subject="成交归属",
+        aliases=frozenset({"attribution", "归属"}), retry_hint="请先查询成交并生成归属预览。",
+        wrong_family_message="这不是成交归属预览。", not_found_message="找不到成交归属预览。",
+    ),
+    _PermissionFamily(
         key="trade",
         operation_types=frozenset({"manual_open", "manual_close", "manual_assignment", "manual_expiry"}),
         confirm_intent="manual_trade_confirm",
@@ -198,6 +204,9 @@ def _resolve_operation_id(
     request: AssistantRequest,
     store: InboundOperationStore,
 ) -> str:
+    if operation_id and family.key == "attribution":
+        # The handler authenticates and reads durable effects, including after TTL.
+        return operation_id
     if operation_id is None and family.key == "trade":
         pending = store.list_pending_operations(
             channel=request.channel,

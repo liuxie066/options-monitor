@@ -8,6 +8,7 @@ from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload
 from src.application.assistant.capability_catalog import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, AssistantSafetyClass, ControlCommand
+from src.application.assistant.attribution_operations import handle_attribution_operation
 from src.application.assistant.manual_trade_operations import handle_manual_trade_operation
 from src.application.assistant.model_operations import handle_model_operation
 from src.application.assistant.monitor_run_operations import handle_monitor_run_operation
@@ -27,6 +28,7 @@ _COMMAND_SPECS_BY_INTENT = spec_by_intent()
 _OPERATION_TOOLS = frozenset(
     {
         "inbound.manual_trade",
+        "inbound.attribution",
         "inbound.symbols",
         "inbound.upgrade",
         "inbound.model",
@@ -356,6 +358,8 @@ def _handle_operation(
     command_id: str,
     store: InboundOperationStore,
 ) -> dict[str, Any]:
+    if tool_name == "inbound.attribution":
+        return handle_attribution_operation(command, request, command_id=command_id, store=store)
     if tool_name == "inbound.manual_trade":
         return handle_manual_trade_operation(command, request, command_id=command_id, store=store)
     if tool_name == "inbound.symbols":

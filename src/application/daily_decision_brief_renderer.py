@@ -1008,6 +1008,24 @@ def _wheel_batch_views(
                 "本金锚："
                 + _money(_number(row.get("principal_anchor")), market=market)
             )
+        coverage = row.get("coverage") or {}
+        coverage_status = coverage.get("status", "unavailable")
+        labels = ({"full": "已全覆盖", "partial": "部分覆盖", "none": "未覆盖"} if direction == "call" else
+                  {"full": "全部安排", "partial": "部分安排", "none": "尚未安排"})
+        label = labels.get(coverage_status, {"unavailable": "待核实", "overallocated": "超额待核实",
+            "not_applicable": "本阶段无待覆盖股份" if direction == "call" else "本阶段无待接股份"}.get(coverage_status, "待核实"))
+        committed, target = coverage.get("committed_shares"), coverage.get("target_shares")
+        quantity = f" · {committed} / {target} 股" if committed is not None and target is not None else ""
+        details.append(f"{'CC 覆盖' if direction == 'call' else 'CSP 安排'}：{label}{quantity}")
+        if coverage.get("reserved_shares"):
+            details.append(f"意图预留：{coverage['reserved_shares']} 股")
+        if coverage.get("available_shares") is not None:
+            details.append(f"分支剩余：{coverage['available_shares']} 股；可开数量以账户容量检查为准")
+        price = _number(row.get("sell_limit"))
+        observed = str(row.get("quote_observed_at_utc") or "").strip()
+        if contracts > 0 and (price is None or price <= 0 or not observed):
+            contracts = 0
+            details.append("建议价格暂不可用")
         if contracts > 0:
             expiration = str(row.get("expiration") or "").strip()
             strike = _number(row.get("strike"))
@@ -1018,6 +1036,10 @@ def _wheel_batch_views(
                 market=market,
             )
             details.append(f"建议：卖出 {contracts} 张 {contract}")
+            details.append(f"建议限价：{row.get('currency') or ('HKD' if market == 'HK' else 'USD')} {price:g}")
+            details.append(f"报价采集时间：{observed}")
+            if row.get("quote_update_time"):
+                details.append(f"行情更新时间：{row['quote_update_time']}")
             premium = _number(
                 row.get(
                     "candidate_put_net_premium"
@@ -1066,6 +1088,11 @@ def _wheel_reason_text(value: Any) -> str:
     reason = _lower(value)
     return {
         "wheel_disabled": "策略已关闭，现有生命周期继续监控",
+        "wheel_capacity_fully_committed_or_reserved": "分支额度已覆盖或预留，无新增建议",
+        "coverage_quantity_unavailable": "覆盖数量待核实",
+        "coverage_overallocated": "覆盖或预留超过分支额度，待核实",
+        "wheel_suggested_price_unavailable": "建议价格暂不可用",
+        "strategy_attribution_conflict": "成交策略归属冲突，暂停新增建议",
         "wheel_call_open": "已有 Wheel Call，等待后续状态",
         "wheel_call_pending": "已有 Call intent，等待成交或取消",
         "wheel_put_open": "已有 Wheel Put，等待后续状态",

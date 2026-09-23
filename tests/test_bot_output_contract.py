@@ -93,7 +93,7 @@ def test_scene_visible_read_tools_have_closed_s8_output_contracts():
             "mode": "keyset" if tool_name in {
                 "receipt_read", "project_files", "candidate_filter_explain",
                 "candidate_rank_explain", "notification_perception_read",
-                "option_performance_report",
+                "option_performance_report", "trade_attribution_read",
             } else "none"
         }
 

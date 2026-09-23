@@ -529,6 +529,7 @@ def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
         "inbound.model",
         "inbound.monitor_run",
         "inbound.pending",
+        "inbound.attribution",
         "inbound.symbols",
         "inbound.upgrade",
     }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.wheel.intents import resolve_wheel_fill_intent
+
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -89,6 +91,7 @@ from src.application.candidate_snapshot_contract import sha256_text
 from src.application.runtime_config_paths import authoritative_config_yaml_path
 from src.application.settings import build_effective_env
 from src.application.ledger.api import (
+    assert_trade_attribution_unclaimed,
     read_wheel_activation_windows_read_only,
     ledger_store_write_guard,
     open_wheel_activation_repository,
@@ -1385,6 +1388,8 @@ def confirm_wheel_call_linkage(
     market: str,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
+    conn: Any = None,
+    attribution_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     call_lot_value = str(call_lot_id or "").strip()
@@ -1450,6 +1455,7 @@ def confirm_wheel_call_linkage(
                 write_applied=False,
             )
 
+        assert_trade_attribution_unclaimed(rows.get("trade_events") or [], [call_lot_value])
         model = build_wheel_read_model_from_rows(
             rows,
             account=account_value,
@@ -1514,6 +1520,7 @@ def confirm_wheel_call_linkage(
                 "source_stock_lot_id": stock_lot_value,
                 "source_wheel_branch_id": str(batch["wheel_branch_id"]),
                 "patch": patch.to_dict(),
+                **dict(attribution_metadata or {}),
             },
         )
         open_rows = [
@@ -1524,40 +1531,13 @@ def confirm_wheel_call_linkage(
         if len(open_rows) != 1:
             raise ValueError("Wheel Call open event is not unique")
         fill = open_rows[0]
-        intent_plans: list[dict[str, Any]] = []
-        known_ids = {
-            str(item.get("event_id") or "").strip()
-            for item in rows.get("trade_events") or []
-            if str(item.get("event_id") or "").strip()
-        }
-        for intent in project_wheel_call_intents(
-            rows.get("account_wheel_events") or [],
-            account=account_value,
-            lot_id=stock_lot_value,
-            as_of_ms=int(fill.get("event_time_ms") or 0),
-            known_trade_event_ids=known_ids,
-        ):
-            if intent.get("status") != "active":
-                continue
-            try:
-                intent_plans.append(
-                    plan_wheel_call_intent_consume(
-                        batch,
-                        intent,
-                        fill,
-                        {
-                            **dict(coverage_fact),
-                            "status": "available",
-                            "shares_available_for_cover": candidate["required_shares"],
-                        },
-                        recorded_at_ms=instant,
-                    )
-                )
-            except ValueError:
-                continue
-        if len(intent_plans) > 1:
-            raise ValueError("multiple Wheel Call intents match this fill")
-        intent_event = intent_plans[0] if intent_plans else None
+        intent_check = resolve_wheel_fill_intent(batch, fill, rows.get("account_wheel_events") or [], now_ms=instant,
+            known_trade_event_ids={str(item.get("event_id") or "") for item in rows["trade_events"]})
+        if intent_check["reason_codes"]:
+            raise ValueError("Wheel Call intent does not admit this fill")
+        intent_event = (plan_wheel_call_intent_consume(batch, intent_check["intent"], fill,
+            {**dict(coverage_fact), "status": "available", "shares_available_for_cover": candidate["required_shares"]},
+            recorded_at_ms=instant) if intent_check["intent"] else None)
         if not apply_changes:
             return _linkage_result(
                 status="planned",
@@ -1642,6 +1622,8 @@ def confirm_wheel_call_linkage(
             intent_event_id=(intent_event or {}).get("event_id"),
         )
 
+    if conn is not None:
+        return _run(repo, conn)
     return with_sqlite_repo_transaction(
         repo,
         _run,
@@ -2458,6 +2440,8 @@ def confirm_wheel_linkage(
     market: str,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
+    conn: Any = None,
+    attribution_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     branch_id = str(wheel_branch_id or "").strip()
@@ -2528,6 +2512,7 @@ def confirm_wheel_linkage(
                     write_applied=False,
                 )
 
+            assert_trade_attribution_unclaimed(rows.get("trade_events") or [], [values["option_record_id"]])
             model = build_wheel_read_model_from_rows(
                 rows,
                 account=account_value,
@@ -2599,6 +2584,7 @@ def confirm_wheel_linkage(
                     "actor": values["actor"],
                     "source_wheel_branch_id": branch_id,
                     "patch": patch.to_dict(),
+                    **dict(attribution_metadata or {}),
                 },
             )
             open_rows = [
@@ -2610,46 +2596,13 @@ def confirm_wheel_linkage(
             if len(open_rows) != 1:
                 raise ValueError("Wheel Put open event is not unique")
             fill = open_rows[0]
-            matching_intents = []
-            for intent in project_wheel_intents(
-                rows.get("account_wheel_events") or [],
-                account=account_value,
-                wheel_branch_id=branch_id,
-                direction="put",
-                as_of_ms=int(fill.get("event_time_ms") or 0),
-                known_trade_event_ids={
-                    str(item.get("event_id") or "").strip()
-                    for item in rows.get("trade_events") or []
-                    if str(item.get("event_id") or "").strip()
-                },
-            ):
-                payload = intent.get("payload") or {}
-                intent_strike, intent_expiration_ymd = _lot_contract_scalars(fields)
-                if (
-                    intent.get("status") == "active"
-                    and float(payload.get("strike") or 0) == float(intent_strike or 0)
-                    and str(payload.get("expiration_ymd") or "")
-                    == str(intent_expiration_ymd or "")
-                    and int(payload.get("multiplier") or 0)
-                    == int(float(effective_multiplier(fields) or 0))
-                ):
-                    matching_intents.append(intent)
-            if len(matching_intents) > 1:
-                raise ValueError("multiple Wheel Put intents match this fill")
-            intent_event = (
-                plan_wheel_put_intent_consume(
-                    branch,
-                    matching_intents[0],
-                    fill,
-                    _bound_put_capacity_fact(
-                        matching_intents[0],
-                        capacity_fact,
-                    ),
-                    recorded_at_ms=instant,
-                )
-                if matching_intents
-                else None
-            )
+            intent_check = resolve_wheel_fill_intent(branch, fill, rows.get("account_wheel_events") or [], now_ms=instant,
+                known_trade_event_ids={str(item.get("event_id") or "") for item in rows["trade_events"]})
+            if intent_check["reason_codes"]:
+                raise ValueError("Wheel Put intent does not admit this fill")
+            intent_event = (plan_wheel_put_intent_consume(branch, intent_check["intent"], fill,
+                _bound_put_capacity_fact(intent_check["intent"], capacity_fact), recorded_at_ms=instant)
+                if intent_check["intent"] else None)
             if not apply_changes:
                 return _wheel_linkage_result(
                     status="planned",
@@ -2707,7 +2660,7 @@ def confirm_wheel_linkage(
                 )
                 if any(
                     item.get("intent_id") == intent_event.get("intent_id")
-                    and item.get("status") == "active"
+                    and int(item.get("remaining_contracts") or 0) != int(intent_check["intent"]["remaining_contracts"]) - int(fill["contracts"])
                     for item in after_intents
                 ):
                     raise ValueError("Wheel Put intent consumption verification failed")
@@ -2731,6 +2684,8 @@ def confirm_wheel_linkage(
                 intent_event_id=(intent_event or {}).get("event_id"),
             )
 
+        if conn is not None:
+            return _run(repo, conn)
         return with_sqlite_repo_transaction(
             repo,
             _run,
@@ -2750,6 +2705,8 @@ def confirm_wheel_linkage(
         raise ValueError("Wheel Call branch has no stock lot")
     result = confirm_wheel_call_linkage(
         repo,
+        conn=conn,
+        attribution_metadata=attribution_metadata,
         account=account_value,
         call_lot_id=option_lot_id,
         lot_id=lot_id,

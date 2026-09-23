@@ -17,6 +17,7 @@ def _lot(lot_id: str, *, option_type: str, strike: int, trade_time_ms: int) -> d
         "account": "lx",
         "broker": "futu",
         "runtime_environment": "test",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"},
         "market": "US",
         "market_date": "2026-07-31",
         "symbol": "NVDA",

@@ -33,7 +33,8 @@ def _lot(
         "open_event_id": f"open-{lot_id}",
         "account": account,
         "broker": "futu",
-        "runtime_environment": "test",
+        "runtime_environment": "real",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"},
         "market": "US",
         "market_date": market_date,
         "symbol": symbol,
@@ -231,3 +232,13 @@ def test_combo_rejects_invalid_canonical_fields_instead_of_using_legacy_aliases(
         result = match_post_trade_combo_pairs(lots=[{**put, **patch}, call])
         assert not result["inferences"]
         assert any(expected in item["reason_codes"] for item in result["excluded_lots"])
+
+
+def test_physical_identity_blocks_cross_account_pair_and_legacy_records():
+    put = _lot("put", option_type="put", strike=100, trade_time_ms=BASE_TIME_MS)
+    call = _lot("call", option_type="call", strike=110, trade_time_ms=BASE_TIME_MS + 1000)
+    call["broker_account_ref"]["external_account_id"] = "2002"
+    assert match_post_trade_combo_pairs(lots=[put, call])["inferences"] == []
+    call.pop("broker_account_ref")
+    result = match_post_trade_combo_pairs(lots=[put, call])
+    assert result["inferences"] == []

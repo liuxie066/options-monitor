@@ -147,6 +147,7 @@ def test_wheel_v2_snapshot_maps_put_branch_identity(monkeypatch) -> None:
                     "granted_contracts": 1,
                     "final_candidate": {
                         "candidate_id": "put-1",
+                        "sell_limit": 2.1, "quote_observed_at_utc": "2026-07-31T14:00:00Z",
                         "expiration": "2026-08-21",
                         "strike": 100,
                         "candidate_put_net_premium": 185,
@@ -2791,3 +2792,27 @@ def test_strategy_step_failure_empty_summary_points_to_reminders(tmp_path: Path)
     assert "SPCX CSP 扫描失败，本轮无结果" in view["reminders"]
     assert "XYZ CSP 扫描失败，本轮无结果" in view["reminders"]
     assert not any("本轮结果不完整" in item for item in view["reminders"])
+
+
+@pytest.mark.parametrize("quote_time,price", [(None,2.1),("bad-time",2.1),("2026-07-31T14:00:00Z",None),
+    ("2026-07-31T14:00:00Z",float("nan")),("2026-07-31T14:00:00Z",2.15)])
+def test_wheel_suggestion_requires_original_price_and_quote_time(monkeypatch, quote_time, price):
+    from src.application import daily_decision_brief_service as service
+    monkeypatch.setattr(service, "validate_wheel_candidate_snapshot", lambda *a, **k: None)
+    coverage = {"status": "partial", "target_shares":300,"committed_shares":100,"reserved_shares":0,
+        "available_shares":200,"reason_codes":[]}
+    final = {"sell_limit":price,"price_tick":0.05,"bid":2.10,"ask":2.15,"mid":2.125,
+        "quote_observed_at_utc":quote_time,"quote_update_time":None,"currency":"USD","multiplier":100,
+        "fee_basis":"estimated","granted_contracts":2,"strike":110,"expiration":"2026-08-21"}
+    gaps=[]
+    views, candidates, available = service._load_wheel_snapshot_family(run_id="run",account="lx",market="US",
+        source_artifacts=[],data_gaps=gaps,snapshot={"batches":[{"symbol":"NVDA","coverage":coverage,
+            "shares_remaining":300,"granted_contracts":2,"final_candidate":final}]})
+    assert available and views[0]["coverage"] == coverage
+    if quote_time == "2026-07-31T14:00:00Z" and price == 2.15:
+        assert len(candidates) == 1 and views[0]["recommended_contracts"] == 2
+        assert all(views[0][key] == final[key] for key in final if key not in {"mid"})
+        assert not gaps
+    else:
+        assert not candidates and views[0]["recommended_contracts"] == 0
+        assert gaps[0]["reason"] == "wheel_suggested_price_unavailable"

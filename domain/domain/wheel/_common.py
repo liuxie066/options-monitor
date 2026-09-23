@@ -32,6 +32,8 @@ WHEEL_EVENT_TYPES = WHEEL_EVENT_TYPES_V1 | frozenset(
         "wheel_put_intent_cancelled",
         "wheel_put_intent_consumed",
         "wheel_put_linkage_rejected",
+        "wheel_attribution_conflict",
+        "wheel_attribution_conflict_resolved",
     }
 )
 WHEEL_EVENT_SCHEMA_V1 = "wheel_event.v1"

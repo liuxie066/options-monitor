@@ -22,6 +22,28 @@ POLICY_A = {"wheel": {"call": {"min_dte": 30}, "put": {"min_dte": 30}}}
 POLICY_B = {"wheel": {"call": {"min_dte": 7}, "put": {"min_dte": 7}}}
 
 
+@pytest.mark.parametrize("multiplier", [None, "100.5", "duplicate"])
+def test_historical_v2_invalid_intent_units_remain_unknown(tmp_path, monkeypatch, multiplier):
+    from domain.domain.wheel import build_wheel_event
+    repo, branch, _, _, _ = _environment(tmp_path, "put", monkeypatch)
+    event = build_wheel_event(event_id="invalid-intent", account="lx", lot_id=None,
+        wheel_branch_id=branch["wheel_branch_id"], event_type="wheel_put_intent_created",
+        occurred_at_ms=5100, recorded_at_ms=5100, intent_id="invalid-intent", payload={
+            "contracts": 1, "multiplier": 100 if multiplier == "duplicate" else multiplier, "expires_at_ms": 9000, "strike": 100,
+            "cash_reservation_currency": "USD", "capacity_identity_hash": "capacity"})
+    with repo._writer_connection(begin_immediate=True) as conn:
+        repo.append_wheel_event_once(event, conn=conn)
+        if multiplier == "duplicate":
+            repo.append_wheel_event_once(build_wheel_event(event_id="duplicate", account="lx", lot_id=None,
+                wheel_branch_id=branch["wheel_branch_id"], event_type="wheel_put_intent_created",
+                occurred_at_ms=5200, recorded_at_ms=5200, intent_id="invalid-intent", payload=event["payload"]), conn=conn)
+    current = build_wheel_read_model(repo, "lx", 6000, market="us")["wheel_branches"][0]
+    assert current["integrity_status"] == "conflict"
+    assert current["active_intent_reserved_shares"] is None
+    assert current["coverage"]["reserved_shares"] is None
+    assert current["coverage"]["available_shares"] is None
+
+
 def _patch_cli(monkeypatch, *, runtime, config, repo, resolved, capacity) -> None:
     monkeypatch.setattr(cli, "_open_runtime", lambda *_a, **_k: (runtime, config, repo))
     monkeypatch.setattr(cli, "_now_ms", lambda: 5_000)

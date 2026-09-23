@@ -18,7 +18,7 @@ from src.application.payload_helpers import nested as _nested
 
 OPERATION_TIMELINE_SCHEMA_VERSION = "operation-timeline-v1"
 _TIMELINE_STATUSES = ("previewed", "confirmed", "running", "applied", "cancelled", "expired", "failed")
-_OPERATION_AUDIT_TOOLS = frozenset({"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model", "inbound.monitor_run"})
+_OPERATION_AUDIT_TOOLS = frozenset({"inbound.attribution", "inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model", "inbound.monitor_run"})
 
 
 def collect_pending_operations(

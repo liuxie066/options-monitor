@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.ledger_sqlite_test_support import connect_ledger_fixture
+
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -232,7 +234,7 @@ def test_backfill_applies_to_a_pre_section7_stored_event(tmp_path: Path) -> None
     assert applied.migrated_conversion_count == 2
     assert applied.changed_event_count == 1
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         stored = json.loads(
             conn.execute(
                 "SELECT event_json FROM trade_events WHERE event_id = 'open-1'"
@@ -272,7 +274,7 @@ def test_stored_trade_event_rejects_a_reencoded_contract_key(tmp_path: Path) -> 
         "underlying_symbol": "NVDA",
     }
 
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         assert conn.execute(
             "SELECT json_type(event_json, '$.contract_key.strike') FROM trade_events"
         ).fetchone()[0] == "real"
@@ -285,7 +287,7 @@ def test_stored_trade_event_rejects_a_reencoded_contract_key(tmp_path: Path) -> 
 
 
 def _has_table(path: Path, name: str) -> bool:
-    with sqlite3.connect(path) as conn:
+    with connect_ledger_fixture(path) as conn:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (name,),
@@ -321,7 +323,7 @@ def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
     assert conversions["option_fee_cash"]["amount_cny"] == "-7.2"
     assert conversions["option_trade_cash_gross"]["rate_source"] == "pbc_central_parity"
     assert conversions["option_trade_cash_gross"]["rate_evidence_fact_id"] == fx_fact_id
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         audit_count = conn.execute(
             "SELECT COUNT(*) FROM cash_conversion_backfill_audit"
         ).fetchone()[0]
@@ -364,7 +366,7 @@ def test_backfill_after_opend_time_correction_preserves_prior_audit(
 
     assert reapplied.changed_event_count == 1
     assert reapplied.migrated_conversion_count == 2
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM cash_conversion_backfill_audit"
         ).fetchone()[0] == 2
@@ -564,7 +566,7 @@ def test_correction_requires_explicit_superseding_evidence_and_is_auditable(
         for conversions in (trade_conversions, stock_conversions)
         for conversion in conversions.values()
     )
-    with sqlite3.connect(db_path) as conn:
+    with connect_ledger_fixture(db_path) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM cash_conversion_correction_audit"
         ).fetchone()[0] == 4

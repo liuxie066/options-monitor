@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+
 from .repository_common import (
     Any,
     AssignedStockEventRepo,
@@ -120,6 +122,7 @@ from .repository_trade_schema import (
 def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.create_function("om_execution_writer_v1", 0, lambda: 1)
+    conn.create_function("om_trade_attribution_writer_v1", 0, lambda: 1)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA recursive_triggers=ON")
     row = conn.execute("PRAGMA foreign_keys").fetchone()
@@ -127,3 +130,40 @@ def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection
     if enabled != 1:
         raise RuntimeError("SQLite foreign key enforcement is required for the option ledger")
     return conn
+
+
+def ensure_trade_attribution_policy_schema(conn: Any) -> None:
+    """Fresh stores and controlled migration only; opening an old store never enables rules."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS trade_attribution_policy_enablings (
+        broker TEXT NOT NULL CHECK(broker != '' AND broker = lower(broker)),
+        physical_account_id TEXT NOT NULL CHECK(physical_account_id != ''),
+        environment TEXT NOT NULL CHECK(environment IN ('REAL', 'SIMULATE')),
+        account TEXT NOT NULL CHECK(account != '' AND account = lower(account)),
+        market TEXT NOT NULL CHECK(market IN ('us', 'hk')),
+        policy_version TEXT NOT NULL CHECK(policy_version != ''),
+        effective_from_ms INTEGER NOT NULL CHECK(typeof(effective_from_ms) = 'integer' AND effective_from_ms >= created_at_ms),
+        created_at_ms INTEGER NOT NULL CHECK(typeof(created_at_ms) = 'integer' AND created_at_ms > 0),
+        actor TEXT NOT NULL CHECK(actor != ''), request_id TEXT NOT NULL CHECK(request_id != ''),
+        request_hash TEXT NOT NULL CHECK(length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
+        PRIMARY KEY(broker, physical_account_id, environment, account, market, policy_version),
+        UNIQUE(broker, physical_account_id, environment, account, market, request_id)
+    )""")
+    for action in ("UPDATE", "DELETE"):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS trg_trade_attribution_policy_{action.lower()}
+            BEFORE {action} ON trade_attribution_policy_enablings BEGIN
+            SELECT RAISE(ABORT, 'trade attribution policy enablings are append-only'); END""")
+
+
+def ensure_trade_attribution_writer_fence(conn: Any) -> None:
+    owned = {"trade_events", "position_lots", "assigned_stock_events", "wheel_events", "wheel_activation_windows",
+             "wheel_activation_policy_bindings", "trade_attribution_policy_enablings",
+             "strategy_group_identities", "combo_pair_inferences"}
+    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        if row[0] not in owned:
+            continue
+        table = str(row[0]).replace('"', '""')
+        for action in ("INSERT", "UPDATE", "DELETE"):
+            trigger = "trg_attribution_writer_" + canonical_sha256([table, action])[:24]
+            conn.execute(f'''CREATE TRIGGER IF NOT EXISTS "{trigger}" BEFORE {action} ON "{table}"
+                BEGIN SELECT CASE WHEN om_trade_attribution_writer_v1() != 1
+                THEN RAISE(ABORT, 'trade attribution requires a compatible writer') END; END''')

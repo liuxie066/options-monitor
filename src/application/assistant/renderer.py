@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, cast
 
+from domain.domain.money import quantize_money, to_decimal
+from domain.domain.trade_contract_identity import contract_share_quantity
+
 from src.application.assistant.capability_catalog import command_help_text
 from src.application.assistant.contracts import ControlCommand
 from src.application.payload_helpers import as_dict as _dict
@@ -65,6 +68,37 @@ def render_inbound_text(*, intent: ControlCommand | None, tool_result: dict[str,
     return "查询完成。"
 
 
+def render_attribution_preview(operation: dict[str, Any]) -> str:
+    preview = operation["preview"]
+    lines = [f"归属预览｜{operation['payload']['account']}"]
+    target = preview["target"]
+    for index, fact in enumerate(preview["members"], 1):
+        contract = fact["contract_key"]
+        ref = fact["broker_account_ref"]
+        side = "卖出开仓" if fact["position_side"] == "short" else "买入开仓"
+        current = {"pending": "待归属", "ordinary": "普通单腿", "conflict": "归属冲突"}.get(fact["status"], fact.get("strategy") or "待核实")
+        try:
+            gross = quantize_money(to_decimal(fact["price"], field_name="price") * contract_share_quantity(fact["contracts"], fact["multiplier"]))
+            amount = f"{fact['currency']} {gross:.2f}"
+        except (TypeError, ValueError, ArithmeticError):
+            amount = "待核实"
+        lines.extend([
+            f"第 {index} 腿｜{contract['underlying_symbol']} {contract['expiration_ymd']} {contract['strike']} {contract['option_type'].title()}",
+            f"成交｜{side} {fact['contracts']} 张，单价 {fact['currency']} {fact['price']}，乘数 {fact['multiplier']}",
+            f"权利金毛{'流入' if fact['position_side'] == 'short' else '流出'}｜{amount}（未含费用）",
+            f"成交身份｜{fact['execution_key']}；开仓事件 {fact['open_event_id']}",
+            f"券商账户｜{ref['broker_id']} / {ref['environment']} / {ref['external_account_id']}",
+            f"归属｜{current} → {target}",
+        ])
+        if fact.get("reason_codes"):
+            lines.append("当前提示｜" + "、".join(fact["reason_codes"]))
+    lines.extend(["本次只调整归属，成交金额和数量不变；覆盖和风险提示仍单独核对。",
+        "本次归属准入已通过，确认时将重新核对。",
+        f"确认：/confirm attribution {operation['operation_id']}",
+        f"取消：/cancel attribution {operation['operation_id']}", f"有效期至：{operation['expires_at']}"])
+    return "\n".join(lines)
+
+
 def render_pending_operations(operations: list[dict[str, Any]]) -> str:
     if not operations:
         return "当前对话没有待确认操作。"
@@ -88,6 +122,8 @@ def render_pending_operations(operations: list[dict[str, Any]]) -> str:
 
 
 def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
+    if operation_type == "trade_attribution":
+        return "/confirm attribution", "/cancel attribution"
     if operation_type.startswith("symbol_"):
         return "/confirm symbol", "/cancel symbol"
     if operation_type.startswith("upgrade_"):
@@ -101,6 +137,7 @@ def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
 
 def _pending_operation_label(operation_type: str) -> str:
     return {
+        "trade_attribution": "成交策略归属",
         "manual_open": "交易开仓",
         "manual_close": "交易平仓",
         "manual_expiry": "期权到期失效",

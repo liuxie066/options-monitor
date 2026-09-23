@@ -853,6 +853,7 @@ def fetch_futu_portfolio_context(
     account: str | None,
     market: str = "富途",
     base_currency: str = "CNY",
+    include_options: bool = False,
 ) -> dict[str, Any]:
     if not account:
         raise ValueError("futu portfolio context requires account")
@@ -904,8 +905,8 @@ def fetch_futu_portfolio_context(
             "external_account_id": physical_account_id, "environment": trd_env,
             "account_label": account,
         },
-        markets=sorted({capacity_market.upper()} | {str(symbol_market(_pick(row, "code", "symbol", "stock_code")) or "").upper() for row in position_rows} - {""}),
-        asset_types=["stock"], observed_at_utc=source_observed_at, completeness="complete",
+        markets=sorted({"US", "HK", capacity_market.upper()} | {str(symbol_market(_pick(row, "code", "symbol", "stock_code")) or "").upper() for row in position_rows} - {""}),
+        asset_types=["stock", "option"] if include_options else ["stock"], observed_at_utc=source_observed_at, completeness="complete",
     )
     position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
 

@@ -372,3 +372,15 @@ Bot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细�
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)
 - [Inbound Control](INBOUND_CONTROL.md)
 - [Bot v2 Design](BOT_DESIGN.md)
+
+### `trade_attribution_read`
+
+只读当前配置账户的成交策略归属、候选身份、原因和数量覆盖。输入 `account`（必填），可选
+`execution_key`、`status`、`cursor`、`limit`（1–100）及配置选择。响应返回 `rows`、`next_cursor` 和证据完整性。
+账户、物理 broker 身份与配置不一致时不能确认；查询不更新 Inbox 或 Control operation。
+人工操作见 [Inbound Control](INBOUND_CONTROL.md#已入账成交的策略归属)。
+
+规则管理由人类 CLI `om trade-intake attribution-enable` / `attribution-migrate` 提供，默认预览。
+使用 `--help` 检查必需参数；`--apply --confirm` 才写入。迁移须先停流并排空旧 writer，
+提供 `--writers-stopped`、预览 manifest 和新的备份目标；启用须给明确账户、actor、request ID 与未来生效时间。
+迁移不会自动启用规则，部署与生产启用均需单独授权。

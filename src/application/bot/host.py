@@ -94,6 +94,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
     messages: list[dict] = []
     memory_failed = False
     history: list[dict] = []
+    control_request = None
 
     def cancelled():
         if is_cancelled and is_cancelled():
@@ -103,20 +104,21 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         return bool(host_store and host_store.is_cancel_requested(run_id))
 
     def finish(status, text, error=None):
-        result = AppResult(status=status, user_response=text, error=error, ok=status == "answered",
+        result = AppResult(status=status, user_response=text, error=error, ok=status in {"answered", "control_requested"},
+                           control_request=control_request if status == "control_requested" else None,
                            request_id=contract.request_id, contract_id=contract.contract_id, run_id=run_id,
                            decision_trace=contract.decision_trace)
         decision = admit_result_with_decision(result)
         result = decision.result
         if cancelled():
-            result = replace(result, status="cancelled", ok=False, user_response="分析已取消。", error={"code": "CANCELLED"})
+            result = replace(result, status="cancelled", ok=False, control_request=None, user_response="分析已取消。", error={"code": "CANCELLED"})
         if host_store:
             wanted = "commit" if result.status == "answered" else "discard"
             winner = host_store.claim_admission_decision(run_id, wanted)
             if winner == "cancel":
-                result = replace(result, status="cancelled", ok=False, user_response="分析已取消。", error={"code": "CANCELLED"})
+                result = replace(result, status="cancelled", ok=False, control_request=None, user_response="分析已取消。", error={"code": "CANCELLED"})
             elif winner != wanted:
-                result = replace(result, status="failed", ok=False, user_response="回答未完成持久化。", error={"code": "PERSISTENCE_FAILED"})
+                result = replace(result, status="failed", ok=False, control_request=None, user_response="回答未完成持久化。", error={"code": "PERSISTENCE_FAILED"})
         log.record("run_metrics", {"elapsed_seconds": time.monotonic() - received, "answer_status": result.status,
                    "termination_reason": (result.error or {}).get("reason") or (result.error or {}).get("code") or "completed"})
         log.record_final_result(result)
@@ -129,7 +131,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                 return host_store.finish_run(result, reply_builder=reply_builder, deadline_monotonic=deadline,
                                              chat_messages=transcript[-20:] if session_key else None)
             except Exception:
-                return replace(result, status="failed", ok=False, user_response="回答持久化未完成，本次未确认成功。", error={"code": "PERSISTENCE_FAILED"})
+                return replace(result, status="failed", ok=False, control_request=None, user_response="回答持久化未完成，本次未确认成功。", error={"code": "PERSISTENCE_FAILED"})
         return result
 
     try:
@@ -152,6 +154,9 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         manifest = build_scene_manifest(contract, run_id)
         descriptions = [{k: item[k] for k in ("name", "description", "input_schema")}
                         for item in manifest.tool_descriptions]
+        from src.application.bot.control_handoff import CONTROL_PREVIEW_TOOL, build_control_preview_request, control_preview_tool_description
+        if control_preview_specs:
+            descriptions.append(control_preview_tool_description(control_preview_specs))
         messages = [dict(m) for m in manifest.messages if m["role"] == "system"]
         memory = scope = None
         if host_store and contract.execution_environment == "channel":
@@ -179,14 +184,24 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                    "tool_count": len(descriptions), "runtime": "python", **manifest.provenance})
 
         def tool_call(name, arguments):
-            nonlocal memory_failed
+            nonlocal memory_failed, control_request
             check_run(deadline, cancelled)
             ref = new_id("obv")
             log.record("tool_call", {"tool_name": name, "tool_input": bot_tools.audit_tool_input(name, arguments)})
             payload = None
             try:
                 validate(arguments, schemas[name])
-                if name == "bot_memory":
+                if name == CONTROL_PREVIEW_TOOL:
+                    requested, error = build_control_preview_request(arguments,
+                        user_message=str(contract.input.get("user_message") or ""), specs=control_preview_specs)
+                    if control_request is not None and requested != control_request:
+                        error = "only one preview may be requested per turn"
+                    if error:
+                        response = {"ok": False, "error": {"code": "INPUT_ERROR", "message": error}}
+                    else:
+                        control_request = requested
+                        response = {"ok": True, "data": {"status": "control_requested", "applied": False}}
+                elif name == "bot_memory":
                     from src.application.bot.memory_worker import configured_memory_scope, verified_sources_from_run
                     if not memory or configured_memory_scope(contract) != scope:
                         raise ValueError("memory scope unavailable")
@@ -236,6 +251,8 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         check_run(deadline, cancelled)
         if memory_failed:
             return finish("failed", "记忆操作未确认，请重试同一幂等键或重新查询。", {"code": "MEMORY_UNCONFIRMED"})
+        if control_request is not None:
+            return finish("control_requested", "已请求生成预览，尚未执行。")
         return finish("answered", str(redact_value(answer)))
     except RunStopped as exc:
         return finish("cancelled" if exc.code == "CANCELLED" else "failed",

@@ -1793,7 +1793,36 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
     allow_additional_input=False,
 )
 
+from src.application.trades.attribution import trade_attribution_read
+
+TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
+    name="trade_attribution_read",
+    description="只读查看当前账户成交的策略归属、待核实原因和确认条件。",
+    handler=trade_attribution_read,
+    requires=(),
+    pure_read=True,
+    allow_additional_input=False,
+    bot_input_fields=("config_key", "account", "execution_key", "status", "cursor", "limit"),
+    capabilities=("positions", "local_read"),
+    input_schema={
+        "config_key": {"type": "string", "enum": ["us", "hk"]},
+        "config_path": "host supplied runtime config path",
+        "account": {"type": "string", "required": True, "minLength": 1},
+        "execution_key": "optional canonical execution identity",
+        "status": "optional attribution status", "cursor": "optional last open_event_id",
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    },
+    output_contract={"schema_version": "trade_attribution_read.v1", "evidence_type": "collection",
+                     "bounded_projection": "contract_fields", "coverage": "source_declared",
+                     "freshness": "source_declared", "pagination": {"mode": "keyset"},
+                     "primary_rows": "rows", "row_count_field": "returned_count",
+                     "model_preview_fields": ["account", "rows", "next_cursor", "evidence_complete"],
+                     "model_value_fields": ["account", "rows", "next_cursor", "evidence_complete"],
+                     "fact_fields": ["rows"], "missing_data_fields": ["rows[].reason_codes"]},
+)
+
 TOOLS: tuple[AgentTool, ...] = (
+    TRADE_ATTRIBUTION_READ_TOOL,
     OPTION_PERFORMANCE_REPORT_TOOL,
     OPTION_POSITIONS_READ_TOOL,
     WHEEL_END_TOOL,

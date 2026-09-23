@@ -116,7 +116,13 @@ def build_cancelled_operation_response(
     payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
     preview = operation.get("preview") if isinstance(operation.get("preview"), dict) else {}
     result = {"operation_id": operation_id, "status": "cancelled"}
-    store.mark_cancelled(operation_id, result=result)
+    if not store.mark_cancelled(operation_id, result=result):
+        current = store.get(operation_id) or {}
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="操作状态已变化，未取消；请核对执行结果。",
+            details={"operation_id": operation_id, "status": current.get("status")},
+        )
     lifecycle = build_action_lifecycle(
         operation_id=operation_id,
         operation_type=str(operation.get("operation_type") or ""),
@@ -227,7 +233,7 @@ def confirm_previewed_operation_or_raise(
             details=result,
         )
     verify_operation_signature(operation)
-    if not store.mark_confirmed(operation_id, result=confirmed_result):
+    if not store.mark_confirmed(operation_id, result=confirmed_result, expected_payload_hash=current_hash):
         current = store.get(operation_id) or {}
         current_status = str(current.get("status") or "-")
         raise AgentToolError(

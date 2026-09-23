@@ -43,6 +43,7 @@ def _read_model() -> dict:
                 "phase": "ready",
                 "monitoring_gate": "enabled",
                 "shares_remaining": 100,
+                "multiplier": 100,
                 "batch_generation_hash": "a" * 64,
                 "projection_hash": "b" * 64,
             }
@@ -870,3 +871,29 @@ def test_unknown_wheel_reservation_blocks_scan_and_transaction_coverage():
             assert result["status"] == ("available" if reserved == 0 else "unavailable")
             if reserved != 0:
                 assert result["reason"] == "wheel_intent_reserved_shares_invalid"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_partial_coverage_scans_only_uncommitted_unreserved_shares(direction):
+    from domain.domain.wheel import project_wheel_coverage
+    model = _read_model()
+    branch = model["batches"][0]
+    branch.update(direction=direction, wheel_branch_id="stock-1", phase="option_open", shares_remaining=350,
+        remaining_contracts=3, active_option_committed_shares=100, active_intent_reserved_shares=100,
+        principal_anchor=30_030, realized_put_net_pnl_in_current_stage=0, currency="USD")
+    model["wheel_branches"] = [branch]
+    branch["coverage"] = project_wheel_coverage(branch)
+    row = phase2_opening_row({**_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110, "delta": -0.3 if direction == "put" else 0.3})
+    def scan():
+        args = (model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}})
+        fees = {"exchange_rate_converter": _converter(), "stock_assignment_fee_fact_fn": lambda *_: {"basis": "estimated", "amount": 10}}
+        return (run_wheel_call_scan(*args, {}, fees, decision_time_ms=int(AS_OF.timestamp()*1000)) if direction == "call"
+            else run_wheel_put_scan(*args, fees, decision_time_ms=int(AS_OF.timestamp()*1000)))
+    result = scan()
+    assert result["capacity_claims"][0]["requested_contracts"] == 1, result
+    assert branch["coverage"]["status"] == "partial"
+    branch["active_option_committed_shares"] = 300 if direction == "put" else 350
+    branch["active_intent_reserved_shares"] = 0
+    branch["coverage"] = project_wheel_coverage(branch)
+    assert not scan()["capacity_claims"]

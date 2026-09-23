@@ -715,8 +715,8 @@ def test_build_trade_intake_receipt_message_marks_same_expiry_combo_relation_pen
 
     assert "状态｜✅ 已完成" in msg
     assert "资金｜权利金毛流出 USD 73.00" in msg
-    assert "组合｜关系待确认" in msg
-    assert "未自动归入 Combo Yield 组" in msg
+    assert "策略｜归属尚未核实" in msg
+    assert "pair_intent_id" not in msg
 
 
 def test_build_trade_intake_receipt_message_reports_auto_combo_adoption() -> None:
@@ -772,3 +772,15 @@ def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_p
     assert out["status"] == "failed"
     assert out["delivery_confirmed"] is False
     assert out["error_code"] == "FEISHU_POST_TOO_LARGE"
+
+
+def test_receipt_distinguishes_recording_attribution_and_coverage():
+    result = {"status":"applied","reason":"applied_open","account":"lx","action":"open","deal_id":"fill",
+        "attribution_result":{"status":"linked","strategy":"wheel","origin":"rule","direction":"call",
+        "coverage":{"status":"partial","target_shares":300,"committed_shares":100,"available_shares":200}}}
+    message=build_trade_intake_receipt_message(deal=None,result=result,payload={})
+    assert "按规则关联 Wheel" in message and "100 / 300 股，部分覆盖" in message
+    assert "200 股；可开数量以账户容量检查为准" in message
+    result["attribution_result"]={"status":"pending"}
+    message=build_trade_intake_receipt_message(deal=None,result=result,payload={})
+    assert "OM Bot" in message and "按规则关联" not in message and "状态｜✅ 已完成" in message

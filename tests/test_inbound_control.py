@@ -4233,3 +4233,43 @@ def test_inbound_database_lock_waits_use_remaining_budget(tmp_path):
         blocker.rollback()
     with InboundAuditStore(path)._connect() as conn:
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_operation_family_filter_precedes_limit_and_claim_compares_hash(tmp_path: Path) -> None:
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    for operation_id, family in [("old_trade", "manual_open"), ("new_model", "model_use")]:
+        store.save_preview(operation_id=operation_id, command_id=operation_id,
+                           channel="wechat", sender_id="ou_1", conversation_id="chat",
+                           operation_type=family, payload_hash="frozen", payload={}, preview={}, ttl_seconds=600)
+    rows = store.list_pending_operations(channel="wechat", sender_id="ou_1", conversation_id="chat",
+                                         operation_types={"manual_open"}, limit=1)
+    assert [row["operation_id"] for row in rows] == ["old_trade"]
+    assert not store.mark_confirmed("old_trade", expected_payload_hash="stale")
+    assert store.mark_confirmed("old_trade", expected_payload_hash="frozen")
+    assert not store.mark_cancelled("old_trade", result={"status": "cancelled"})
+    store.mark_expired("old_trade", result={"status": "expired"})
+    assert store.get("old_trade")["status"] == "confirmed"
+    store.mark_applied("old_trade", result={"status": "applied"})
+    store.mark_failed("old_trade", result={"status": "failed"})
+    assert store.get("old_trade")["status"] == "applied"
+
+
+def test_attribution_operation_requires_conversation_and_owns_stale_recovery(tmp_path: Path) -> None:
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    arguments = dict(operation_id="attribution", command_id="attribution", channel="wechat",
+                     sender_id="ou_1", operation_type="trade_attribution", payload_hash="frozen",
+                     payload={}, preview={}, ttl_seconds=600, created_at="2026-01-01T00:00:00+00:00")
+    with pytest.raises(ValueError, match="conversation"):
+        store.save_preview(**arguments)
+    store.save_preview(**arguments, conversation_id="chat")
+    with pytest.raises(ValueError, match="immutable"):
+        store.update_preview("attribution", payload_hash="changed", payload={}, preview={})
+    denied = store.resolve_pending_operation(channel="wechat", sender_id="ou_1", conversation_id=None,
+                                            operation_types={"trade_attribution"}, explicit_operation_id="attribution")
+    assert denied["status"] == "forbidden"
+    # Expiry above may expire the preview. Use a second operation for the claim.
+    store.save_preview(**{**arguments, "operation_id": "claimed"}, conversation_id="chat")
+    assert store.mark_confirmed("claimed", expected_payload_hash="frozen")
+    store.list_pending_operations(channel="wechat", sender_id="ou_1", conversation_id="chat",
+                                  operation_types={"model_use"}, now=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    assert store.get("claimed")["status"] == "confirmed"

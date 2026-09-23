@@ -1130,11 +1130,11 @@ def test_former_derived_inbox_cannot_be_abandoned_by_new_authority(tmp_path: Pat
 
 
 @pytest.mark.parametrize("namespace", ["futu.deal", "verified.partition.deal"])
-def test_inferred_open_recovers_after_commit_with_one_receipt(tmp_path: Path, monkeypatch, namespace: str) -> None:
+def test_explicit_open_recovers_after_commit_with_one_receipt(tmp_path: Path, monkeypatch, namespace: str) -> None:
     from src.application.trades import auto_intake, receipt
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    payload = {**_execution(), "position_effect": None, "side": "buy", "external_id_namespace": namespace}
+    payload = {**_execution(), "position_effect": "open", "side": "buy", "external_id_namespace": namespace}
     payload["instrument_ref"] = {**payload["instrument_ref"], "option_type": "call"}
     calls = []
 
@@ -1160,7 +1160,7 @@ def test_inferred_open_recovers_after_commit_with_one_receipt(tmp_path: Path, mo
         _process(repo, tmp_path, "initial", payload, source="push", on_result_fn=callback, before_receipt_fn=after_commit)
     events, lots = repo.list_trade_events(), repo.list_position_lots()
     assert len(events) == 1 and events[0]["event_type"] == "open"
-    assert events[0]["raw_payload"]["execution_input"]["position_effect"] is None
+    assert events[0]["raw_payload"]["execution_input"]["position_effect"] == "open"
     assert calls == [] and not (tmp_path / "initial/state.json").exists()
     path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
     after_lease = time.time() + 121
@@ -1578,6 +1578,20 @@ def test_converged_recorded_receipt_projects_success_and_known_auxiliary_failure
         assert state["processed_deal_ids"][key]["diagnostics"]["recovered_from_ledger"]
     stored = read_trade_payload(resolve_execution_inbox_path(repo, tmp_path / "unused"), inbox_id=result["inbox_id"])
     assert stored["receipt"]["message"] == message and stored["receipt"]["status"] == "sent"
+
+
+@pytest.mark.parametrize("source", ["push", "history_backfill"])
+def test_unknown_buy_call_entry_point_preserves_evidence_without_open(tmp_path, source):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = {**_execution(), "position_effect": None, "side": "buy"}
+    payload["instrument_ref"] = {**payload["instrument_ref"], "option_type": "call"}
+    result = _process(repo, tmp_path, source, payload, source=source)
+    assert result["status"] == "unresolved"
+    assert repo.list_trade_events() == []
+    assert repo.list_position_lots() == []
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    stored = read_trade_payload(inbox, inbox_id=result["inbox_id"], read_only=True)
+    assert stored["result"]["reason"] == "unknown_position_effect"
 
 
 @pytest.mark.parametrize("failure", ["normalize", "proof"])

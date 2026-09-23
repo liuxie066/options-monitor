@@ -54,6 +54,81 @@ class OptionStrategyMembership:
         }
 
 
+@dataclass(frozen=True)
+class TradeAttributionResolution:
+    """A proposal, never evidence that a ledger write succeeded."""
+
+    status: str
+    candidate_ids: tuple[str, ...] = ()
+    selected_candidate_id: str | None = None
+    reason_codes: tuple[str, ...] = ()
+
+
+def strategy_metadata_has_owner(metadata: Mapping[str, Any]) -> bool:
+    """CSP/CC describe a leg; only relationship metadata claims strategy ownership."""
+    resolved = resolve_strategy_metadata(metadata)
+    value = resolved.metadata
+    return bool(resolved.issues or value.strategy not in {"", "unassigned", STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL}
+                or value.leg_role or value.strategy_group_id or value.source_lot_id or value.source_wheel_branch_id)
+
+
+def resolve_trade_attribution(
+    *,
+    candidates: tuple[Mapping[str, Any], ...],
+    evidence_complete: bool,
+    existing: Mapping[str, Any] | None = None,
+    applicable: bool = True,
+) -> TradeAttributionResolution:
+    """Arbitrate owner-validated proposals from one complete economic snapshot.
+
+    Wheel/Combo owners validate identity, history, intent, quantities and policy.
+    A known competing proposal remains a blocker even if it cannot auto-apply.
+    The application publishes `linked` only after durable ledger readback.
+    """
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for candidate in candidates:
+        candidate_id = _text(candidate.get("candidate_id"))
+        if not candidate_id or candidate.get("strategy") not in {"wheel", "combo_yield"}:
+            return TradeAttributionResolution("pending", reason_codes=("invalid_candidate_evidence",))
+        if candidate_id in by_id and dict(by_id[candidate_id]) != dict(candidate):
+            return TradeAttributionResolution("pending", reason_codes=("candidate_identity_conflict",))
+        by_id[candidate_id] = candidate
+    ids = tuple(sorted(by_id))
+    existing = existing or {}
+    if existing.get("status") in {"linked", "ordinary", "conflict"}:
+        if existing.get("status") == "conflict":
+            return TradeAttributionResolution("conflict", ids, reason_codes=("unresolved_attribution_conflict",))
+        if existing.get("status") == "ordinary" and existing.get("origin") == "manual":
+            return TradeAttributionResolution("ordinary", ids, reason_codes=("manual_ordinary_preserved",))
+        if existing.get("status") == "linked":
+            target = _text(existing.get("candidate_id"))
+            # Missing evidence cannot disprove a durable relationship.
+            acknowledged = set(existing.get("acknowledged_candidate_ids") or []) if existing.get("origin") == "manual" else set()
+            conflicts = [key for key in ids if key != target and key not in acknowledged]
+            if conflicts:
+                return TradeAttributionResolution("conflict", ids, reason_codes=("late_competing_evidence",))
+            capacity_conflicts = {"competing_fills_exceed_capacity", "competing_fills_exceed_intent_remainder",
+                                  "account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}
+            if target in by_id and capacity_conflicts.intersection(by_id[target].get("reason_codes") or []):
+                return TradeAttributionResolution("conflict", ids, reason_codes=("late_capacity_conflict",))
+            return TradeAttributionResolution("linked", ids, reason_codes=("existing_attribution_preserved",))
+    if not applicable:
+        return TradeAttributionResolution("not_applicable")
+    if not evidence_complete:
+        return TradeAttributionResolution("pending", ids, reason_codes=("attribution_evidence_incomplete",))
+    if not ids:
+        return TradeAttributionResolution("ordinary", reason_codes=("no_strategy_candidate",))
+    if len(ids) != 1:
+        return TradeAttributionResolution("pending", ids, reason_codes=("multiple_strategy_candidates",))
+    candidate = by_id[ids[0]]
+    reasons = tuple(sorted(set(candidate.get("reason_codes") or ())))
+    if candidate.get("eligible") is not True or reasons:
+        return TradeAttributionResolution("pending", ids, reason_codes=reasons or ("candidate_not_eligible",))
+    return TradeAttributionResolution(
+        "pending", ids, selected_candidate_id=ids[0], reason_codes=("awaiting_ledger_commit",)
+    )
+
+
 def resolve_strategy_metadata(
     payload: Mapping[str, Any] | None,
     *,
@@ -226,6 +301,8 @@ def _text(value: Any) -> str:
 __all__ = [
     "OptionStrategyMembership",
     "StrategyMetadata",
+    "TradeAttributionResolution",
+    "resolve_trade_attribution",
     "StrategyMetadataResolution",
     "resolve_expiry_structure",
     "resolve_option_strategy_membership",
