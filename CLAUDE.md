@@ -7,16 +7,7 @@
 
 ## Readiness
 
-Use the standard read-only checks first:
-
-```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-```
-
-After that, follow the standard hierarchy in `AGENTS.md`:
-- Read-only diagnostics before mutating commands
-- `./om-agent` > `./om` > `python3 -m ...` > `python3 scripts/...`
+Follow `AGENTS.md` for entry points, authorization, and runtime evidence binding. Use the task-specific diagnostics in `docs/AGENT_WIKI.md` only when the request concerns actual runtime state or readiness; ordinary source or documentation work does not require environment health checks.
 
 ## Commit Format
 

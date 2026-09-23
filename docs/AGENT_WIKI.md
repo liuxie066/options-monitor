@@ -43,15 +43,16 @@ verification maps, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 
 ## 2. First Five Minutes
 
-When entering an unfamiliar task, gather just enough context:
+Start with the direct owner and enough evidence to answer the task; expand when a gap remains:
 
 ```bash
 git status --short
 rg -n "<user keyword>" README.md docs AGENTS.md src domain tests
-./om-agent spec
 ```
 
-For live quality or runtime questions, start with existing state:
+Read only the relevant sections of this handbook. Use `./om-agent spec` when tool discovery or a manifest contract is part of the question.
+
+For live quality or runtime questions, first bind the host, effective config/runtime root, market, account scope, and evidence time. Local artifacts do not establish remote production state. The `us` and `lx` values below are examples, not defaults; use the selected environment and inspect existing state before choosing additional readiness checks:
 
 ```bash
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
@@ -828,11 +829,11 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 
 ### Online Quality Looks Bad
 
-1. Read `runtime_status`.
+1. Bind the target environment and read existing `runtime_status` evidence.
 2. Add scheduler evidence if the issue involves cron or online jobs.
-3. Collect `research` handoff with `scope=full`.
-4. Inspect findings: scheduler, freshness, account failures, prefetch, notifications, maintenance, trade intake.
-5. Only then decide whether to run focused local tests or modify code.
+3. If evidence is missing, collect the relevant `research` scope; use `full` only for a cross-cutting question or when narrower evidence is insufficient.
+4. Trace the relevant findings, such as freshness, account failures, prefetch, notifications, maintenance, or trade intake.
+5. Once the evidence supports a diagnosis, choose the affected owner and focused checks. Production mutation still requires its explicit authorization.
 
 ### A Symbol Is Missing
 
@@ -914,7 +915,9 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 
-For type checking, prefer the narrow touched path first. Use broad checks when touching shared contracts.
+This matrix lists candidate checks, not a mandatory whole-row suite. Select tests that would fail for the changed behavior, include affected consumers for shared contracts, and retain required CI gates. Domain unit tests can establish calculation and invariant evidence; entry-point, persistence, and external-effect changes also need relevant facade or integration coverage. Pure development-instruction edits need meaning, link, formatting, and guardrail checks; runtime prompts and user-visible output require owning behavior checks.
+
+For type checking, prefer the narrow touched path first. Reuse passing checks only while the relevant code, tests, config, dependencies, generated inputs, base, and validation environment remain valid.
 
 ## 10. Documentation Rules
 

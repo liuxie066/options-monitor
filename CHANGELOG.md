@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Clarified evidence ownership, repository safety boundaries, and scoped validation guidance for agent workflows.
+
 ## 3.6.5 - 2026-09-22
 
 ### Improvements
