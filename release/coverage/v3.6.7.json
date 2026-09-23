@@ -1,0 +1,90 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.6.7",
+  "base": {
+    "tag": "v3.6.6",
+    "commit": "cdf2ad800db05ee55e4a9861f2771306d1aa0247"
+  },
+  "reviewed_head": "9fef6e9c17306a123fb515e2acee063b9bd8b645",
+  "commits": [
+    {
+      "sha": "34a3cd29ef25e97700eb2866074dafd597ae9621",
+      "subject": "fix(inbox): repair receipt reads and indexed lookups"
+    },
+    {
+      "sha": "f1b38268e6844c596fc9c99196b717154c6ed2d5",
+      "subject": "Merge pull request #345 from liuxie066/codex/inbox-t1-t4"
+    },
+    {
+      "sha": "6c0397fc691605df2cbfb8915851cbbc110cfdba",
+      "subject": "fix(opend): bound watchdog and preserve audit evidence"
+    },
+    {
+      "sha": "d832d6a45fc157f987507c28b41598bd22293d0a",
+      "subject": "chore(docs): refresh dependency graph"
+    },
+    {
+      "sha": "9fef6e9c17306a123fb515e2acee063b9bd8b645",
+      "subject": "Merge PR #346"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复交易收据读取与索引查找，确保收据生命周期和重试状态在异常场景下保持一致。",
+      "commits": [
+        "34a3cd29ef25e97700eb2866074dafd597ae9621",
+        "f1b38268e6844c596fc9c99196b717154c6ed2d5"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "OpenD 登录失效时让行情 tick 立即失败并告警，避免无限重试空转；大型通知审计文件改为读取尾部并明确历史覆盖不完整。",
+      "commits": [
+        "6c0397fc691605df2cbfb8915851cbbc110cfdba"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "d832d6a45fc157f987507c28b41598bd22293d0a",
+      "reason": "刷新依赖图生成产物，确保发布门禁与当前源码一致，无独立运行时变化。"
+    },
+    {
+      "commit": "9fef6e9c17306a123fb515e2acee063b9bd8b645",
+      "reason": "合并已覆盖的 PR #346 变更，不产生额外代码变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "34a3cd29ef25e97700eb2866074dafd597ae9621",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/345"
+      ]
+    },
+    {
+      "commit": "f1b38268e6844c596fc9c99196b717154c6ed2d5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/345"
+      ]
+    },
+    {
+      "commit": "6c0397fc691605df2cbfb8915851cbbc110cfdba",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/346"
+      ]
+    },
+    {
+      "commit": "d832d6a45fc157f987507c28b41598bd22293d0a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/346"
+      ]
+    },
+    {
+      "commit": "9fef6e9c17306a123fb515e2acee063b9bd8b645",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/346"
+      ]
+    }
+  ]
+}
