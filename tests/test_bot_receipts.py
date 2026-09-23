@@ -79,6 +79,41 @@ def test_real_inbox_semantic_receipts_are_read_only_and_not_delivery_inference(t
     assert query_trade_receipts(db, accounts=["lx"], query={}) == []
 
 
+def test_unlinkable_receipt_skips_only_its_entry_and_logs_count(tmp_path, monkeypatch, caplog):
+    db = tmp_path / "inbox.sqlite3"
+    payload = {"account": "lx", "market": "US"}
+    shared = {"schema_version": 2, "current_result_key": "good", "receipts": {
+        "bad": {"receipt_id": "bad", "payload": {"account": "sy"}},
+        "good": {"receipt_id": "same-row-good", "payload": {"account": "lx"}},
+    }}
+    other = {"receipt_id": "other-row-good", "payload": {"account": "lx"}}
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE trade_inbox(inbox_id TEXT, deal_id TEXT, payload_json TEXT, "
+                     "result_json TEXT, receipt_json TEXT, received_at_ms INTEGER, updated_at_ms INTEGER)")
+        conn.executemany("INSERT INTO trade_inbox VALUES (?,?,?,?,?,?,?)", [
+            ("one", "one", json.dumps(payload), "{}", json.dumps(shared), 1_000, 2_000),
+            ("two", "two", json.dumps(payload), "{}", json.dumps(other), 1_001, 2_001),
+        ])
+    before = db.read_bytes()
+    with caplog.at_level("WARNING", logger="src.application.trades.inbox"):
+        rows = query_trade_receipts(db, accounts=["lx"], query={})
+    assert {row["event_ref"]["source_event_id"] for row in rows} == {
+        "same-row-good", "other-row-good"}
+    assert [record.getMessage() for record in caplog.records] == [
+        "trade_receipt_account_unlinkable skipped_unlinkable=1"]
+    assert db.read_bytes() == before
+
+    monkeypatch.setattr(receipts, "resolve_position_ledger_sqlite_path", lambda **kw: tmp_path / "ledger.sqlite3")
+    monkeypatch.setattr(receipts, "resolve_trade_intake_config", lambda cfg: {"sources": [{"inbox_path": str(db)}]})
+    monkeypatch.setattr(receipts, "resolve_execution_inbox_path", lambda repo, path: path)
+    monkeypatch.setattr(receipts, "query_lifecycle_receipts", lambda *args, **kwargs: [])
+    rows, missing = receipts._sources(base=tmp_path, cfg={}, config_path=tmp_path / "config.json",
+                                      accounts=["lx"], market="US", query={"type": "trade"})
+    assert {row["event_ref"]["source_event_id"] for row in rows} == {
+        "same-row-good", "other-row-good"}
+    assert missing == []
+
+
 def test_monitor_and_scheduled_retained_facts_do_not_create_state(tmp_path):
     from src.application.positions.maintenance_receipt import query_maintenance_receipts
     from src.application.agent_tools.runtime_status_impl import query_run_receipts

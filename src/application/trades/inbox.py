@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -28,6 +29,9 @@ from src.application.trades.settlement_attempts import (
     settlement_attempt_updates_after_outcome,
 )
 from src.infrastructure.private_storage import connect_private_sqlite
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 SETTLEMENT_ATTEMPT_MIN_LEASE_MS = 120_000
@@ -272,7 +276,8 @@ def read_trade_source_evidence(
     connection.row_factory = sqlite3.Row
     with closing(connection) as conn:
         if not read_only:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
+            conn.commit()
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(trade_inbox_evidence)")}
         if column.endswith("evidence_id") and "evidence_id" not in columns:
             return []
@@ -582,7 +587,7 @@ def read_trade_payload(path: str | Path, *, inbox_id: str, read_only: bool = Fal
     connection.row_factory = sqlite3.Row
     with closing(connection) as conn, conn:
         if not read_only:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
         row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
     return _trade_payload_row(row) if row is not None else None
 
@@ -817,10 +822,13 @@ def _prepare_trade_receipt_result(conn: sqlite3.Connection, row: Mapping[str, An
         receipt_json = (json.dumps(envelope, ensure_ascii=False, default=str)
                         if lifecycle_owned and envelope and envelope.get("schema_version") == 2
                         else row["receipt_json"])
+    # Receipt queries use this write time for both start filtering and recorded time,
+    # including the window after a result is saved but before its row is settled.
+    now_ms = int(time.time() * 1000)
     conn.execute("""UPDATE trade_inbox SET result_json = ?, result_status = ?, result_reason = ?,
-                    receipt_json = ? WHERE inbox_id = ?""",
+                    receipt_json = ?, updated_at_ms = ? WHERE inbox_id = ?""",
                  (json.dumps(enriched, ensure_ascii=False, default=str), enriched.get("status"),
-                  enriched.get("reason"), receipt_json, row["inbox_id"]))
+                  enriched.get("reason"), receipt_json, now_ms, row["inbox_id"]))
     return enriched
 
 
@@ -877,9 +885,9 @@ def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
                                 claim: Mapping[str, Any] | None = None,
                                 result_key: str | None = None) -> dict[str, Any]:
     """Claim the current semantic result; mark unknown before any external I/O."""
-    now_ms = int(time.time() * 1000)
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
+        now_ms = int(time.time() * 1000)
         row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
         if claim is not None and (
             row is None or row["status"] != "pending" or row["claim_id"] != claim.get("claim_id")
@@ -922,8 +930,8 @@ def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
                           attempt_count=int(frozen.get("attempt_count", 0)) + 1,
                           route=frozen.get("route", route), message=frozen.get("message", message))
             frozen.pop("result", None)
-        conn.execute("UPDATE trade_inbox SET receipt_json = ? WHERE inbox_id = ?",
-                     (json.dumps(envelope, ensure_ascii=False), inbox_id))
+        conn.execute("UPDATE trade_inbox SET receipt_json = ?, updated_at_ms = ? WHERE inbox_id = ?",
+                     (json.dumps(envelope, ensure_ascii=False), now_ms, inbox_id))
         return {**frozen, "claimed": not bool(frozen.get("stop_reason"))}
 
 
@@ -944,13 +952,14 @@ def finish_trade_receipt_attempt(path: str | Path, *, inbox_id: str, attempt_id:
             return
         status = ("sent" if result.get("delivery_confirmed") else
                   "failed" if result.get("explicit_pre_acceptance_failure") else "unknown")
+        now_ms = int(time.time() * 1000)
         frozen.update(result=result, status=status)
         if status == "failed":
-            frozen["next_attempt_at_ms"] = int(time.time() * 1000) + 60_000
+            frozen["next_attempt_at_ms"] = now_ms + 60_000
             if int(frozen.get("attempt_count", 0)) >= 20:
                 frozen["stop_reason"] = "notification_attempts_exhausted"
-        conn.execute("UPDATE trade_inbox SET receipt_json = ? WHERE inbox_id = ?",
-                     (json.dumps(envelope, ensure_ascii=False), inbox_id))
+        conn.execute("UPDATE trade_inbox SET receipt_json = ?, updated_at_ms = ? WHERE inbox_id = ?",
+                     (json.dumps(envelope, ensure_ascii=False), now_ms, inbox_id))
 
 
 def list_trade_receipt_recovery_rows(path: str | Path, *, account_ids: Iterable[str],
@@ -961,7 +970,7 @@ def list_trade_receipt_recovery_rows(path: str | Path, *, account_ids: Iterable[
     now_ms = int(time.time() * 1000)
     out = []
     with closing(_connect(Path(path))) as conn, conn:
-        _ensure_schema(conn)
+        _ensure_schema_for_read(conn)
         rows = conn.execute("""SELECT * FROM trade_inbox WHERE delivery_purpose = 'live'
             AND receipt_recovery_allowed = 1 AND source IN ('push', 'backfill')
             AND status != 'conflict' AND (claim_id IS NULL OR claim_until_ms <= ?)
@@ -1042,7 +1051,7 @@ def list_retryable_trade_payloads(
     cutoff_ms = int(time.time() * 1000 - max(0.0, retry_delay_sec) * 1000)
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             rows = conn.execute(
                 """
                 SELECT inbox_id, source, deal_id, payload_json, attempt_count,
@@ -1285,7 +1294,7 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
     receipt_attention = []
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             for item in conn.execute("SELECT inbox_id, receipt_json FROM trade_inbox WHERE receipt_json IS NOT NULL"):
                 envelope = _receipt_envelope(item["receipt_json"])
                 if not envelope:
@@ -1357,7 +1366,7 @@ def trade_inbox_revision(path: str | Path) -> int:
         return 0
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             row = conn.execute(
                 """
                 SELECT revision
@@ -1380,7 +1389,7 @@ def get_settlement_attempt_state(
         return None
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             row = conn.execute(
                 """
                 SELECT *
@@ -1415,7 +1424,7 @@ def list_settlement_attempt_states(
         return {}
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             rows = _fetch_settlement_attempt_rows(
                 conn,
                 columns="*",
@@ -2494,7 +2503,7 @@ def settlement_attempt_summary(
         }
     with closing(_connect(inbox_path)) as conn:
         with conn:
-            _ensure_schema(conn)
+            _ensure_schema_for_read(conn)
             rows = _fetch_settlement_attempt_rows(
                 conn,
                 columns="*",
@@ -2687,6 +2696,72 @@ def _settlement_attempt_scope(
         )
     )
     return source_key, account_key, normalized_case_ids
+
+
+_READ_SCHEMA_COLUMNS = {
+    "trade_inbox": """inbox_id source deal_id broker_deal_key identity_status payload_json
+        economic_payload_hash status attempt_count received_at_ms updated_at_ms last_error
+        result_status result_reason portfolio_refresh_intent_json portfolio_refresh_attempted_at_ms
+        next_attempt_at_ms payload_version claim_id claim_until_ms claim_owner result_json
+        receipt_json receipt_recovery_allowed delivery_purpose""".split(),
+    "trade_inbox_evidence": """inbox_id source payload_hash payload_json received_at_ms
+        evidence_id evidence_json""".split(),
+    "trade_inbox_revisions": "scope revision".split(),
+    "trade_inbox_recovery": "inbox_id operator resumed_at_ms".split(),
+    "lifecycle_settlement_attempt_state": """source_id account case_id case_scope_fingerprint
+        provider_input_scope_fingerprint collector_contract_version capability_fingerprint
+        classification outcome_kind reason_code provider_code error_class attempt_count
+        no_progress_count next_attempt_at_ms last_attempt_at_ms last_semantic_fingerprint
+        claim_id claim_until_ms updated_at_ms invocation_writer_epoch invocation_id
+        invocation_state invocation_attempted_at_ms pending_outcome_code
+        pending_semantic_fingerprint pending_receipt_sha256 pending_diagnostic_sha256
+        committed_chain_sha256 pending_outcome_kind pending_reason_code pending_provider_code
+        pending_error_class pending_retry_after_ms pending_control_now_ms
+        committed_audit_ordinal""".split(),
+}
+
+
+def _ensure_schema_for_read(conn: sqlite3.Connection) -> None:
+    """Skip the write lock only when reads need no schema migration."""
+    try:
+        objects = {
+            str(row["name"]): (str(row["type"]), str(row["sql"] or ""))
+            for row in conn.execute(
+                "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'trigger', 'index')"
+            )
+        }
+        ready = all(
+            objects.get(table, (None,))[0] == "table"
+            and set(columns).issubset({str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")})
+            for table, columns in _READ_SCHEMA_COLUMNS.items()
+        )
+        ready = ready and all(
+            objects.get(f"trg_trade_inbox_summary_{operation}", (None,))[0] == "trigger"
+            for operation in ("insert", "update", "delete")
+        )
+        ready = ready and all(
+            objects.get(name, (None,))[0] == "index"
+            for name in ("idx_trade_inbox_broker_deal_key", "idx_trade_inbox_deal_id")
+        )
+        ready = ready and all(
+            objects.get(f"{table}_{operation}_writer_guard", (None, ""))[0] == "trigger"
+            and "trade_inbox_writer_version() != 2"
+                in objects[f"{table}_{operation}_writer_guard"][1]
+            for table in ("trade_inbox", "trade_inbox_evidence", "trade_inbox_recovery")
+            for operation in ("insert", "update", "delete")
+        )
+        ready = ready and objects.get(
+            "trg_lifecycle_settlement_attempt_invocation_writer_fence", (None,)
+        )[0] == "trigger"
+        if ready:
+            ready = conn.execute(
+                "SELECT 1 FROM trade_inbox_evidence "
+                "WHERE evidence_id IS NULL OR evidence_json IS NULL LIMIT 1"
+            ).fetchone() is None
+    except sqlite3.Error:
+        ready = False
+    if not ready:
+        _ensure_schema(conn)
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -2969,6 +3044,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON trade_inbox(status, updated_at_ms, received_at_ms)
         """
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_inbox_broker_deal_key ON trade_inbox(broker_deal_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_inbox_deal_id ON trade_inbox(deal_id)")
 
 
 def _payload_deal_id(payload: dict[str, Any]) -> str:
@@ -3510,6 +3587,7 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
     if len(rows) > MAX_SOURCE_ROWS:
         raise ValueError("trade_inbox_query_needs_narrowing")
     result = []
+    skipped_unlinkable = 0
     for summary in rows:
         if summary["size"] > 262144:
             raise ValueError("trade_receipt_size_limit")
@@ -3530,7 +3608,8 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
             if label:
                 labels.add(str(label).strip().lower())
             if len(labels) != 1:
-                raise ValueError("trade_receipt_account_unlinkable")
+                skipped_unlinkable += 1
+                continue
             account = next(iter(labels))
             if account not in accounts:
                 continue
@@ -3545,4 +3624,6 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
                 related={"superseded_by": receipt.get("superseded_by")})
             if receipt_matches(row_event, query):
                 result.append(row_event)
+    if skipped_unlinkable:
+        _LOGGER.warning("trade_receipt_account_unlinkable skipped_unlinkable=%d", skipped_unlinkable)
     return result

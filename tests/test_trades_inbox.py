@@ -16,7 +16,9 @@ from src.application.trades.inbox import (
     claim_trade_payload,
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
+    get_settlement_attempt_state,
     list_retryable_trade_payloads,
+    list_settlement_attempt_states,
     list_trade_receipt_recovery_rows,
     list_unclaimed_trade_payload_refresh_intents,
     mark_trade_payload_handled,
@@ -27,6 +29,7 @@ from src.application.trades.inbox import (
     record_trade_payload_refresh_intent,
     settle_trade_payload_result,
     settle_reconciled_trade_payload,
+    settlement_attempt_summary,
     trade_payload_evidence_ref,
     trade_inbox_revision,
     trade_inbox_summary,
@@ -44,18 +47,99 @@ def _enqueue(path: Path, payload: dict, **overrides: object) -> str:
     return enqueue_trade_payload(path, payload=payload, **base)
 
 
+def test_complete_inbox_read_schema_avoids_ensure_and_ddl(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    key = _enqueue(path, payload={"deal_id": "one", "futu_account_id": "1001"},
+                   broker_deal_key="futu:lx:1001:one")
+    with sqlite3.connect(path) as conn:
+        objects_before = conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").fetchall()
+
+    def unexpected_ensure(_conn):
+        raise AssertionError("complete read schema entered full ensure")
+
+    monkeypatch.setattr("src.application.trades.inbox._ensure_schema", unexpected_ensure)
+    for _ in range(2):
+        assert read_trade_payload(path, inbox_id=key)["inbox_id"] == key
+        assert read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(key))
+        assert isinstance(list_trade_receipt_recovery_rows(path, account_ids=["1001"]), list)
+        assert len(list_retryable_trade_payloads(path)) == 1
+        assert trade_inbox_summary(path)["pending_count"] == 1
+        assert trade_inbox_revision(path) > 0
+        assert get_settlement_attempt_state(path, source_id="test", account="lx", case_id="c") is None
+        assert list_settlement_attempt_states(path, source_id="test", account="lx", case_ids=["c"]) == {}
+        assert settlement_attempt_summary(path, source_id="test", now_ms=1_000,
+                                          account="lx", case_ids=["c"])["eligible_count"] == 0
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").fetchall() == objects_before
+
+
+def test_existing_empty_inbox_read_still_creates_schema(tmp_path: Path) -> None:
+    path = tmp_path / "empty.sqlite3"
+    with sqlite3.connect(path):
+        pass
+    assert trade_inbox_summary(path)["pending_count"] == 0
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_inbox'").fetchone()
+    assert trade_inbox_revision(path) == 0
+
+
+@pytest.mark.parametrize("missing", ["column", "revision_trigger", "evidence_envelope", "lookup_indexes"])
+def test_incomplete_inbox_read_falls_back_to_full_migration(tmp_path: Path, missing: str) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    key = _enqueue(path, payload={"deal_id": "one"}, broker_deal_key="futu:lx:1001:one")
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        if missing == "column":
+            conn.execute("ALTER TABLE trade_inbox DROP COLUMN portfolio_refresh_attempted_at_ms")
+        elif missing == "revision_trigger":
+            conn.execute("DROP TRIGGER trg_trade_inbox_summary_update")
+        elif missing == "evidence_envelope":
+            conn.execute("UPDATE trade_inbox_evidence SET evidence_id=NULL, evidence_json=NULL")
+        else:
+            conn.execute("DROP INDEX idx_trade_inbox_broker_deal_key")
+            conn.execute("DROP INDEX idx_trade_inbox_deal_id")
+    if missing == "evidence_envelope":
+        assert read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(key))
+    else:
+        assert trade_inbox_summary(path)["pending_count"] == 1
+    with sqlite3.connect(path) as conn:
+        if missing == "column":
+            assert "portfolio_refresh_attempted_at_ms" in {
+                row[1] for row in conn.execute("PRAGMA table_info(trade_inbox)")}
+        elif missing == "revision_trigger":
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                                "AND name='trg_trade_inbox_summary_update'").fetchone()
+            before = trade_inbox_revision(path)
+            conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+            conn.execute("UPDATE trade_inbox SET last_error='after repair' WHERE inbox_id=?", (key,))
+            conn.commit()
+            assert trade_inbox_revision(path) == before + 1
+        elif missing == "evidence_envelope":
+            assert conn.execute("SELECT 1 FROM trade_inbox_evidence "
+                                "WHERE evidence_id IS NULL OR evidence_json IS NULL").fetchone() is None
+        else:
+            assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                                                   "AND name LIKE 'idx_trade_inbox_%'")} >= {
+                "idx_trade_inbox_broker_deal_key", "idx_trade_inbox_deal_id"}
+
+
 def test_reconciliation_discovery_is_read_only_and_keeps_all_identities(tmp_path: Path) -> None:
     path = tmp_path / "inbox.sqlite3"
     assert read_trade_payloads_for_reconciliation(path, deal_ids=["same"]) == []
     assert not path.exists()
-    for key in ("futu:lx:1001:same", "futu:sy:1002:same", None):
+    created = [
         _enqueue(path, payload={"deal_id": "same"}, broker_deal_key=key)
+        for key in ("futu:lx:1001:same", "futu:sy:1002:same", None)
+    ]
     with sqlite3.connect(path) as conn:
         conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
         conn.execute("UPDATE trade_inbox SET status='conflict' WHERE broker_deal_key='futu:sy:1002:same'")
     before = path.read_bytes()
     rows = read_trade_payloads_for_reconciliation(path, deal_ids=["same", "futu:lx:1001:same"])
     assert len(rows) == 3
+    assert {row["inbox_id"] for row in rows} == set(created)
+    assert [(row["received_at_ms"], row["inbox_id"]) for row in rows] == sorted(
+        (row["received_at_ms"], row["inbox_id"]) for row in rows)
     assert {row["status"] for row in rows} == {"pending", "conflict", "identity_needs_review"}
     assert path.read_bytes() == before
     assert len(read_trade_payloads_for_reconciliation(path, deal_ids=["futu:lx:1001:same"])) == 1
@@ -65,6 +149,37 @@ def test_reconciliation_discovery_is_read_only_and_keeps_all_identities(tmp_path
         pass
     with pytest.raises(sqlite3.DatabaseError, match="schema unavailable"):
         read_trade_payloads_for_reconciliation(unavailable, deal_ids=["same"])
+
+
+def test_inbox_deal_and_broker_lookup_plans_use_indexes(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    _enqueue(path, payload={"deal_id": "same"}, broker_deal_key="futu:lx:1001:same")
+    queries = {
+        "reconciliation": (
+            "SELECT * FROM trade_inbox WHERE deal_id IN (?,?) OR broker_deal_key IN (?,?) "
+            "ORDER BY received_at_ms, inbox_id",
+            ("same", "other", "same", "other"),
+            ("idx_trade_inbox_deal_id", "idx_trade_inbox_broker_deal_key"),
+        ),
+        "attribution": (
+            "SELECT * FROM trade_inbox WHERE broker_deal_key = ? AND status = 'handled' "
+            "AND identity_status = 'bound'",
+            ("futu:lx:1001:same",),
+            ("idx_trade_inbox_broker_deal_key",),
+        ),
+        "receipt_deal": (
+            "SELECT inbox_id, length(payload_json) + coalesce(length(receipt_json), 0) AS size "
+            "FROM trade_inbox WHERE receipt_json IS NOT NULL AND deal_id = ? "
+            "ORDER BY received_at_ms DESC, inbox_id DESC LIMIT ?",
+            ("same", 1001),
+            ("idx_trade_inbox_deal_id",),
+        ),
+    }
+    with sqlite3.connect(path) as conn:
+        for sql, args, indexes in queries.values():
+            plan = "\n".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, args))
+            assert "SCAN trade_inbox" not in plan, plan
+            assert all(index in plan for index in indexes), plan
 
 
 @pytest.mark.parametrize("changed", ["payload_version", "economic_payload_hash", "result_json", "receipt_json", "claim_id", "identity_status", "status"])
