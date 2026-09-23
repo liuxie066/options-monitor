@@ -1,0 +1,149 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.0",
+  "base": {
+    "tag": "v3.6.8",
+    "commit": "43109d5d1d1a9951c3e9e0a4f260701196fed4be"
+  },
+  "reviewed_head": "40dde55999cb1adf74dc99fd4f8ffa01ebad272d",
+  "commits": [
+    {
+      "sha": "0af1b6a0a4548ed4741635c6381d2d711baa26fb",
+      "subject": "fix(close-advice): preserve stable symbol data gaps"
+    },
+    {
+      "sha": "9a536083fbecce9a70ec9dc6b3e0d8624a5031eb",
+      "subject": "docs(graph): refresh dependency counts for close-advice regression"
+    },
+    {
+      "sha": "564cc6c1b2733fcf59d53df796b4e60b9459707e",
+      "subject": "Merge pull request #350 from liuxie066/codex/fix-close-advice-partial-snapshot"
+    },
+    {
+      "sha": "759dce0bcefda0de36273970bcf9e090eca7a604",
+      "subject": "feat(close-advice): use remaining yield for early close alerts"
+    },
+    {
+      "sha": "770de5a8207dfa0415e206239c362759872f344b",
+      "subject": "chore(close-advice): integrate current main"
+    },
+    {
+      "sha": "bbb7521f24bb361a3ecfd5fb01d3a62879480655",
+      "subject": "Merge pull request #351 from liuxie066/codex/close-advice-yield"
+    },
+    {
+      "sha": "c15d14a957f2043021ebfda7a75426f7dba92ad5",
+      "subject": "fix(runtime): preserve failure evidence and bound audit reads"
+    },
+    {
+      "sha": "40dde55999cb1adf74dc99fd4f8ffa01ebad272d",
+      "subject": "Merge pull request #352 from liuxie066/codex/runtime-failure-evidence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "支持按时间窗流式读取历史通知审计，并提供事故磁盘回收的只读引用检查预览。",
+      "commits": [
+        "c15d14a957f2043021ebfda7a75426f7dba92ad5"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Close Advice 改用净兑现至少 80% 与剩余最高年化不超过 10% 的提前平仓条件，并展示资金分母和决策指标。",
+      "commits": [
+        "759dce0bcefda0de36273970bcf9e090eca7a604"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "审计文件写入侧轮转，服务日志、drift 明细与无凭证健康检查提供更清晰的运维证据。",
+      "commits": [
+        "c15d14a957f2043021ebfda7a75426f7dba92ad5"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复已知标的行情失败时 Close Advice 将逐仓数据缺口误判为封存快照整体失效的问题。",
+      "commits": [
+        "0af1b6a0a4548ed4741635c6381d2d711baa26fb",
+        "770de5a8207dfa0415e206239c362759872f344b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "OpenD 登录失效、验证码和执行失败时，计划 Tick 当轮有界失败并留下可查询的原因、阶段、运行状态和告警证据。",
+      "commits": [
+        "c15d14a957f2043021ebfda7a75426f7dba92ad5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9a536083fbecce9a70ec9dc6b3e0d8624a5031eb",
+      "reason": "仅刷新依赖图计数，未引入独立运行时行为。"
+    },
+    {
+      "commit": "564cc6c1b2733fcf59d53df796b4e60b9459707e",
+      "reason": "合并 PR #350，改动已由 Close Advice 数据缺口修复条目覆盖。"
+    },
+    {
+      "commit": "bbb7521f24bb361a3ecfd5fb01d3a62879480655",
+      "reason": "合并 PR #351，改动已由 Close Advice 剩余收益条目覆盖。"
+    },
+    {
+      "commit": "40dde55999cb1adf74dc99fd4f8ffa01ebad272d",
+      "reason": "合并 PR #352，改动已由本版本运行故障与取证条目覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "0af1b6a0a4548ed4741635c6381d2d711baa26fb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/350"
+      ]
+    },
+    {
+      "commit": "9a536083fbecce9a70ec9dc6b3e0d8624a5031eb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/350"
+      ]
+    },
+    {
+      "commit": "564cc6c1b2733fcf59d53df796b4e60b9459707e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/350"
+      ]
+    },
+    {
+      "commit": "759dce0bcefda0de36273970bcf9e090eca7a604",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/351"
+      ]
+    },
+    {
+      "commit": "770de5a8207dfa0415e206239c362759872f344b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/351"
+      ]
+    },
+    {
+      "commit": "bbb7521f24bb361a3ecfd5fb01d3a62879480655",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/351"
+      ]
+    },
+    {
+      "commit": "c15d14a957f2043021ebfda7a75426f7dba92ad5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/352"
+      ]
+    },
+    {
+      "commit": "40dde55999cb1adf74dc99fd4f8ffa01ebad272d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/352"
+      ]
+    }
+  ]
+}
