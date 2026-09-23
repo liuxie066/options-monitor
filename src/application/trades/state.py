@@ -4,7 +4,7 @@ import fcntl
 import json
 import os
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from src.application.ledger.api import (
     validate_lifecycle_attempt_run_seal,
 )
 from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json, utc_now
+from domain.storage.json_io import rotating_private_jsonl_lock
 
 
 STATE_BUCKETS = ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids")
@@ -203,24 +204,30 @@ def append_trade_intake_audit(
     p = Path(path)
     ensure_dir(p.parent)
     line = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-    with p.open("a+b", buffering=0) as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            if durable:
-                _truncate_torn_audit_tail(handle)
-            else:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell():
-                    handle.seek(-1, os.SEEK_END)
-                    if handle.read(1) != b"\n":
-                        raise OSError("trade intake audit has an unterminated tail")
-            if handle.write(line) != len(line):
-                raise OSError("trade intake audit append was incomplete")
-            if durable:
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    lock = rotating_private_jsonl_lock(p, incoming_bytes=len(line)) if p.name in {
+        "audit.jsonl", "auto_trade_intake_audit.jsonl",
+    } else nullcontext()
+    with lock:
+        with p.open("a+b", buffering=0) as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                if p.name in {"audit.jsonl", "auto_trade_intake_audit.jsonl"}:
+                    os.fchmod(handle.fileno(), 0o600)
+                if durable:
+                    _truncate_torn_audit_tail(handle)
+                else:
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell():
+                        handle.seek(-1, os.SEEK_END)
+                        if handle.read(1) != b"\n":
+                            raise OSError("trade intake audit has an unterminated tail")
+                if handle.write(line) != len(line):
+                    raise OSError("trade intake audit append was incomplete")
+                if durable:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     return p
 
 
@@ -281,14 +288,22 @@ def read_latest_lifecycle_attempt_run_seal(
     latest: dict[str, Any] | None = None
     seal_count = 0
     torn_tail_ignored = False
-    try:
-        handle = Path(path).open("rb")
-    except FileNotFoundError:
-        handle = None
-    if handle is not None:
-        with handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+    current = Path(path)
+    lock_path = Path(f"{current}.lock")
+    lock = lock_path.open("rb") if lock_path.exists() else nullcontext()
+    with lock as stable_lock:
+        if stable_lock is not None:
+            fcntl.flock(stable_lock.fileno(), fcntl.LOCK_SH)
+        segments = sorted(current.parent.glob(f"{current.stem}.????????.??????{current.suffix}"))
+        for candidate in [*segments, current]:
+            if candidate.is_symlink():
+                raise OSError("trade intake audit segment is a symlink")
             try:
+                handle = candidate.open("rb")
+            except FileNotFoundError:
+                continue
+            with handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
                 for line_number, raw_line in enumerate(handle, start=1):
                     terminated = raw_line.endswith(b"\n")
                     try:
@@ -317,7 +332,6 @@ def read_latest_lifecycle_attempt_run_seal(
                     if source_value is not None and seal["source_id"] != source_value:
                         continue
                     latest = seal
-            finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     return {
         "schema_version": "trade_lifecycle_attempt_run_seal_reader.v1",

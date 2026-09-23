@@ -67,6 +67,105 @@ def test_large_shared_audit_returns_recent_evidence_with_partial_coverage(tmp_pa
     assert warnings == ["Notification perception audit covers only the recent file tail."]
 
 
+def test_window_streams_segments_and_keeps_conversation_scope(tmp_path: Path) -> None:
+    state = tmp_path / "output_shared" / "state"
+    state.mkdir(parents=True)
+    old = state / "audit_events.20260923.000001.jsonl"
+    current = state / "audit_events.jsonl"
+    for path, run_id, conversation in ((old, "old", "chat-a"), (current, "current", "chat-a"),
+                                        (current, "hidden", "chat-b")):
+        row = _row(run_id, "notification_prepared", conversation)
+        row["event_at_utc"] = "2026-09-23T12:00:00+00:00"
+        _append(path, row)
+    data = read_notification_perception_events(repo_root=tmp_path, conversation_id="chat-a",
+        start_utc="2026-09-23T00:00:00Z", end_utc="2026-09-24T00:00:00Z", limit=1)
+    assert data["summary"]["total_count"] == 2
+    assert data["summary"]["returned_count"] == 1
+    assert data["pagination"]["has_more"] is True
+    assert "chat-b" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_window_marks_history_before_first_retained_segment_partial(tmp_path: Path) -> None:
+    state = tmp_path / "output_shared" / "state"
+    state.mkdir(parents=True)
+    row = _row("new", "notification_prepared", "chat")
+    row["event_at_utc"] = "2026-09-24T12:00:00+00:00"
+    _append(state / "audit_events.20260924.000001.jsonl", row)
+    data = read_notification_perception_events(
+        repo_root=tmp_path, start_utc="2026-09-23T00:00:00Z", end_utc="2026-09-24T23:59:59Z",
+    )
+    assert data["summary"]["status"] == "partial"
+    assert data["coverage"]["stop_reason"] == "history_before_first_segment"
+    assert data["coverage"]["available_from_utc"] == "2026-09-24T00:00:00+00:00"
+
+
+def test_window_reports_budget_partial_without_loading_whole_file(tmp_path: Path, monkeypatch) -> None:
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    with audit.open("wb") as handle:
+        handle.write((b' ' * 1023 + b'\n') * 65537)
+    data = read_notification_perception_events(repo_root=tmp_path,
+        start_utc="2026-09-23T00:00:00Z", end_utc="2026-09-24T00:00:00Z")
+    assert data["summary"]["status"] == "partial"
+    assert data["coverage"]["scanned_bytes"] <= 64 * 1024 * 1024
+
+
+def test_window_cursor_survives_append_but_rejects_replacement(tmp_path: Path, monkeypatch) -> None:
+    from src.application.agent_tools import project_reader
+
+    monkeypatch.setattr(project_reader, "_key", lambda: "test-key")
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    for name in ("a", "b"):
+        row = _row(name, "notification_prepared", "chat")
+        row["event_at_utc"] = "2026-09-23T12:00:00+00:00"
+        _append(audit, row)
+    query = dict(repo_root=tmp_path, start_utc="2026-09-23T00:00:00Z",
+                 end_utc="2026-09-24T00:00:00Z", limit=1)
+    first = read_notification_perception_events(**query)
+    assert first["next_cursor"]
+    row = _row("new", "notification_prepared", "chat")
+    row["event_at_utc"] = "2026-09-23T13:00:00+00:00"
+    _append(audit, row)
+    second = read_notification_perception_events(**query, cursor=first["next_cursor"])
+    assert second["events"][0]["run_id"] in {"a", "b"}
+    audit.rename(audit.with_suffix(".old"))
+    audit.write_text("", encoding="utf-8")
+    with pytest.raises(AgentToolError, match="source_changed"):
+        read_notification_perception_events(**query, cursor=first["next_cursor"])
+
+
+def test_window_rejects_one_oversized_public_event(tmp_path: Path) -> None:
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    row = _row("large", "notification_prepared", "chat")
+    row["event_at_utc"] = "2026-09-23T12:00:00+00:00"
+    row["extra"]["detail"] = "x" * 7000
+    _append(audit, row)
+    with pytest.raises(AgentToolError, match="detail_too_large"):
+        read_notification_perception_events(repo_root=tmp_path,
+            start_utc="2026-09-23T00:00:00Z", end_utc="2026-09-24T00:00:00Z")
+
+
+def test_window_rejects_intermediate_symlink_outside_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    row = _row("outside", "notification_prepared", "chat")
+    row["event_at_utc"] = "2026-09-23T12:00:00+00:00"
+    _append(outside / "audit.jsonl", row)
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+
+    data = read_notification_perception_events(
+        repo_root=root, audit_path="linked/audit.jsonl",
+        start_utc="2026-09-23T00:00:00Z", end_utc="2026-09-24T00:00:00Z",
+    )
+    assert data["summary"]["status"] == "partial"
+    assert data["events"] == []
+    assert data["read_statuses"][0]["status"] == "unreadable"
+
+
 def test_notification_perception_read_tool_is_registered_and_read_only(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.notification_perception as notification_tools
     from src.application.agent_tool_registry import get_tool_definition

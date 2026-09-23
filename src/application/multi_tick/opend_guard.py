@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import fcntl
+import os
+import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +16,23 @@ from src.infrastructure.io_utils import read_json, atomic_write_json as write_js
 
 def opend_alert_rl_path(base: Path) -> Path:
     return (base / 'output_shared' / 'state' / 'opend_alert_rate_limit.json').resolve()
+
+
+@contextmanager
+def _alert_state_lock(base: Path):
+    path = opend_alert_rl_path(base).with_suffix('.lock')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("OpenD alert lock is not a regular file")
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def opend_phone_verify_pending_path(base: Path) -> Path:
@@ -54,6 +75,11 @@ def is_opend_phone_verify_pending(base: Path) -> bool:
 
 def record_opend_failure(base: Path, scope: str = 'project') -> int:
     """Increment the consecutive failure counter for *scope* and return the new count."""
+    with _alert_state_lock(base):
+        return _record_opend_failure_unlocked(base, scope)
+
+
+def _record_opend_failure_unlocked(base: Path, scope: str) -> int:
     p = opend_alert_rl_path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
     st = read_json(p, {}) if p.exists() else {}
@@ -77,6 +103,11 @@ def record_opend_failure(base: Path, scope: str = 'project') -> int:
 
 def record_opend_recovery(base: Path, scope: str = 'project') -> int:
     """Reset the consecutive failure counter for *scope*; return the count before reset."""
+    with _alert_state_lock(base):
+        return _record_opend_recovery_unlocked(base, scope)
+
+
+def _record_opend_recovery_unlocked(base: Path, scope: str) -> int:
     p = opend_alert_rl_path(base)
     if not p.exists():
         return 0
@@ -109,6 +140,12 @@ def record_opend_recovery(base: Path, scope: str = 'project') -> int:
             for key, value in sent.items()
             if not str(key).startswith(f'{scope_key}::')
         }
+    statuses = st.get('last_delivery_status_by_error')
+    if isinstance(statuses, dict):
+        st['last_delivery_status_by_error'] = {
+            key: value for key, value in statuses.items()
+            if not str(key).startswith(f'{scope_key}::')
+        }
     recent = st.get('recent_sent')
     if isinstance(recent, list):
         st['recent_sent'] = [
@@ -121,6 +158,8 @@ def record_opend_recovery(base: Path, scope: str = 'project') -> int:
 
 def _opend_alert_family(error_code: str) -> str:
     code = str(error_code or '').strip().upper()
+    if code in {'OPEND_NEEDS_PHONE_VERIFY', 'OPEND_NEEDS_PIC_VERIFY', 'OPEND_LOGIN_INVALID'}:
+        return 'OPEND_LOGIN_ACTION_REQUIRED'
     if code in {'OPEND_PORT_CLOSED', 'OPEND_NOT_READY', 'OPEND_QOT_NOT_LOGINED', 'OPEND_API_ERROR'}:
         return 'OPEND_UNHEALTHY'
     if code.startswith('OPEND_'):
@@ -195,6 +234,11 @@ def should_send_opend_alert(
     if record:
         m[error_key] = now.isoformat()
         st['last_sent_utc_by_error'] = m
+        statuses = st.get('last_delivery_status_by_error')
+        if not isinstance(statuses, dict):
+            statuses = {}
+        statuses[error_key] = 'delivery_unknown'
+        st['last_delivery_status_by_error'] = statuses
         recent.append({'ts': now.isoformat(), 'scope': scope_key, 'error_code': str(error_code), 'family': family})
         st['recent_sent'] = recent[-200:]
         write_json(p, st)
@@ -216,7 +260,7 @@ def _send_notification(base: Path, cfg: dict, *, message: str) -> bool:
             notifications=route.get('notifications') if isinstance(route.get('notifications'), dict) else {},
         )
         normalized = normalize_notification_delivery_result(send, normalize_fn=adapter.normalize_fn)
-        return bool(normalized.get('delivery_confirmed') or normalized.get('ok'))
+        return normalized.get('delivery_confirmed') is True
     except Exception:
         return False
 
@@ -258,16 +302,6 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
     if no_send:
         return False
 
-    if not should_send_opend_alert(
-        base,
-        str(error_code),
-        cooldown_sec=cooldown_sec,
-        burst_window_sec=burst_window_sec,
-        burst_max=burst_max,
-        record=False,
-    ):
-        return False
-
     now_utc = utc_now()
     fields: list[tuple[str, object]] = [
         ("时间", format_iso_time_beijing(now_utc) or now_utc),
@@ -283,16 +317,37 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         fields=fields,
     )
 
-    sent = _send_notification(base, cfg, message=msg)
-    if sent:
-        should_send_opend_alert(
+    with _alert_state_lock(base):
+        # Reserve the incident before contacting the provider. An ambiguous
+        # response remains reserved; recovery is the only automatic reset.
+        if not should_send_opend_alert(
             base,
             str(error_code),
             cooldown_sec=cooldown_sec,
             burst_window_sec=burst_window_sec,
             burst_max=burst_max,
+            record=False,
+        ):
+            return False
+        should_send_opend_alert(
+            base, str(error_code), cooldown_sec=cooldown_sec,
+            burst_window_sec=burst_window_sec, burst_max=burst_max,
         )
-    return sent
+        key = f'project::{_opend_alert_family(error_code)}'
+        reserved_at = (read_json(opend_alert_rl_path(base), {})
+                       .get('last_sent_utc_by_error', {}).get(key))
+    confirmed = _send_notification(base, cfg, message=msg)
+    if confirmed:
+        with _alert_state_lock(base):
+            path = opend_alert_rl_path(base)
+            state = read_json(path, {})
+            if isinstance(state, dict):
+                statuses = state.get('last_delivery_status_by_error')
+                sent = state.get('last_sent_utc_by_error')
+                if isinstance(statuses, dict) and isinstance(sent, dict) and sent.get(key) == reserved_at:
+                    statuses[key] = 'delivery_confirmed'
+                    write_json(path, state)
+    return confirmed
 
 
 def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project', no_send: bool = False) -> bool:

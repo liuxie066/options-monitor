@@ -70,6 +70,7 @@ def collect_runtime_logs(
         _log_entry(path, base=base, lines=line_count, allowed_roots=tuple(allowed_roots))
         for path in files
     ]
+    journal_only = kind == "service" and not entries
     ok = (not requested_run or (selected_run is not None and selected_run.exists())) and not (
         log_file and not entries[0].get("exists")
     )
@@ -89,7 +90,9 @@ def collect_runtime_logs(
             "requested_run_found": None if not requested_run else bool(selected_run is not None and selected_run.exists()),
             "file_count": len(entries),
             "existing_file_count": sum(1 for item in entries if item.get("exists")),
+            "log_source": "journal_only" if journal_only else "files",
         },
+        "journal_hint": "journalctl -u <options-monitor-unit>" if journal_only else None,
         "files": entries,
     }
 
@@ -110,7 +113,7 @@ def format_runtime_logs(data: dict[str, Any]) -> str:
 
     files = _list(data.get("files"))
     if not files:
-        lines.append("no log files found")
+        lines.append("service logs are in systemd journal; use journalctl -u <options-monitor-unit>" if summary.get("log_source") == "journal_only" else "no log files found")
         return "\n".join(lines).rstrip() + "\n"
 
     for item in files:

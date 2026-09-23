@@ -28,6 +28,8 @@ def test_classify_opend_error_covers_all_hint_categories() -> None:
         ("短信验证", OpenDRetCode.NEED_2FA),
         ("手机验证", OpenDRetCode.NEED_2FA),
         ("验证码", OpenDRetCode.NEED_2FA),
+        ("需要图形验证码", OpenDRetCode.NEED_PIC_VERIFY),
+        ("image captcha required", OpenDRetCode.NEED_PIC_VERIFY),
         ("timeout", OpenDRetCode.TRANSIENT),
         ("disconnected", OpenDRetCode.TRANSIENT),
         ("connection reset", OpenDRetCode.TRANSIENT),

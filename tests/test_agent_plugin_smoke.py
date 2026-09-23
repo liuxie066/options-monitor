@@ -361,6 +361,32 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert any("starter account label 'user1'" in item for item in out["warnings"])
 
 
+def test_healthcheck_reports_missing_secret_backend_as_skipped(monkeypatch, tmp_path: Path) -> None:
+    from src.application.secret_store.contracts import SecretBackendUnavailable
+    import src.application.secret_resolver as secret_resolver
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+
+    def unavailable(**_kwargs):
+        raise SecretBackendUnavailable("no credential context")
+
+    monkeypatch.setattr(secret_resolver, "resolve_secret", unavailable)
+    _patch_healthcheck_dependencies(
+        monkeypatch,
+        run_futu_doctor=unavailable,
+        build_ready_futu_broker_gateway=unavailable,
+    )
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["data"]["summary"]["reason_code"] == "SECRET_BACKEND_UNAVAILABLE"
+    assert out["data"]["summary"]["ok"] is False
+    assert any(item["name"].startswith("opend_quote_readiness_") and item["status"] == "skipped"
+               for item in out["data"]["checks"])
+    assert any(item["name"].startswith("opend_broker_readiness_") and item["status"] == "skipped"
+               for item in out["data"]["checks"])
+
+
 def test_healthcheck_quote_failure_keeps_broker_primary_but_fails_legacy_summary(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -3206,6 +3232,19 @@ def test_runtime_logs_agent_tool_returns_content_free_bounded_metadata(tmp_path:
     assert file_out["data"]["files"][0]["kind"] == "service"
     assert file_out["data"]["files"][0]["tail_line_count"] == 2
     assert "private-three" not in json.dumps(file_out, ensure_ascii=False)
+
+
+def test_runtime_logs_agent_tool_labels_journal_only_service(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    out = run_tool("runtime_logs", {"kind": "service", "logs_root": str(logs),
+                                    "runs_root": str(tmp_path / "runs")})
+    assert out["ok"] is True
+    assert out["data"]["summary"]["file_count"] == 0
+    assert out["data"]["summary"]["log_source"] == "journal_only"
+    assert "journalctl" in out["data"]["journal_hint"]
 
 
 def test_runtime_logs_agent_tool_rejects_outside_root_and_symlink(tmp_path: Path) -> None:

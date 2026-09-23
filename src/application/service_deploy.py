@@ -691,6 +691,8 @@ def _systemd_unit(
     wants: list[str] | None = None,
     before: list[str] | None = None,
     timeout_start_sec: int | None = None,
+    timeout_stop_sec: int | None = None,
+    syslog_level_prefix: bool = False,
     restart_prevent_exit_statuses: list[int] | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
@@ -728,6 +730,12 @@ def _systemd_unit(
         if int(timeout_start_sec) <= 0:
             raise ValueError("timeout_start_sec must be positive")
         lines.append(f"TimeoutStartSec={int(timeout_start_sec)}")
+    if timeout_stop_sec is not None:
+        if int(timeout_stop_sec) <= 0:
+            raise ValueError("timeout_stop_sec must be positive")
+        lines.append(f"TimeoutStopSec={int(timeout_stop_sec)}")
+    if syslog_level_prefix:
+        lines.append("SyslogLevelPrefix=yes")
     if restart:
         lines.append(f"Restart={restart}")
         lines.append("RestartSec=10")
@@ -1191,6 +1199,9 @@ def render_service_bundle(
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
                     exec_args=tick_args,
+                    timeout_start_sec=int(timeout_seconds) + 300,
+                    timeout_stop_sec=30,
+                    syslog_level_prefix=True,
                 ),
                 install_path=f"/etc/systemd/system/{service_name}",
                 kind="systemd_service",

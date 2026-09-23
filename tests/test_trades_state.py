@@ -276,6 +276,24 @@ def test_concurrent_ordinary_and_durable_audit_appends_are_complete(
     assert result["torn_tail_ignored"] is False
 
 
+def test_trade_audit_rotation_preserves_seal_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from domain.storage import json_io
+
+    path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(json_io, "AUDIT_SEGMENT_BYTES", 1)
+    first = _seal(completed_at_ms=1)
+    second = _seal(completed_at_ms=2)
+    append_trade_intake_audit(path, first, durable=True)
+    append_trade_intake_audit(path, second, durable=True)
+
+    segments = list(tmp_path.glob("audit.????????.??????.jsonl"))
+    assert len(segments) == 1
+    assert segments[0].stat().st_mode & 0o777 == 0o600
+    result = read_latest_lifecycle_attempt_run_seal(path)
+    assert result["seal_count"] == 2
+    assert result["last_seal"] == second
+
+
 def test_retryable_unresolved_state_is_distinguishable_from_terminal_state() -> None:
     state = upsert_deal_state(
         {}, bucket="unresolved_deal_ids", deal_id="deal-retry-1",
