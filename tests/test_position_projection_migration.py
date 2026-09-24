@@ -379,8 +379,11 @@ def test_execution_candidate_and_writer_queries_use_same_nonunique_index(tmp_pat
 
 @pytest.mark.parametrize("table", ["trade_events", "assigned_stock_events"])
 @pytest.mark.parametrize("cause", ["missing", "definition_mismatch"])
-def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog, table, cause):
-    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES
+def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog, monkeypatch, table, cause):
+    from src.application.ledger import repository_trade_schema as schema
+
+    monkeypatch.setattr(schema, "_warned_execution_identity_index_gaps", set())
+    EXECUTION_IDENTITY_INDEXES = schema.EXECUTION_IDENTITY_INDEXES
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     event = (
@@ -402,16 +405,79 @@ def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog,
             conn.execute(f"CREATE INDEX {name} ON {table}(trade_time_ms)")
 
     with caplog.at_level("WARNING", logger="src.application.ledger.repository_trade_schema"):
-        assert read("execution:v1:target") == full_read()
-    assert any(
-        f"table={table} cause={cause} rows=1" in record.message
-        for record in caplog.records
-    )
+        for _ in range(3):
+            assert read("execution:v1:target") == full_read()
+        other = SQLiteOptionPositionsRepository(tmp_path / "other.sqlite3")
+        other_read = (
+            other.list_assigned_stock_events_for_execution
+            if table == "assigned_stock_events" else other.list_trade_events_for_execution
+        )
+        with other._writer_connection(begin_immediate=True) as conn:
+            conn.execute(f"DROP INDEX {name}")
+            if cause == "definition_mismatch":
+                conn.execute(f"CREATE INDEX {name} ON {table}(trade_time_ms)")
+        assert other_read("execution:v1:target") == []
+    warnings = [
+        record.message for record in caplog.records
+        if record.name == "src.application.ledger.repository_trade_schema"
+    ]
+    assert warnings == [f"execution_identity_index_fallback table={table} cause={cause} rows=1"]
     status = module.position_projection_migration_status(repo.db_path)
     assert status["execution_identity_index_gaps"] == [
         {"table": table, "cause": cause, "rows": 1}
     ]
+    assert module.position_projection_migration_status(other.db_path)["execution_identity_index_gaps"] == [
+        {"table": table, "cause": cause, "rows": 0}
+    ]
     assert (status["readiness"], status["reasons"]) == (before["readiness"], before["reasons"])
+
+
+@pytest.mark.parametrize("table", ["trade_events", "assigned_stock_events"])
+def test_execution_index_ready_and_gap_agree_across_three_states(tmp_path, monkeypatch, caplog, table):
+    from src.application.ledger import repository_trade_schema as schema
+    from src.application.ledger.repository_trade_schema import (
+        EXECUTION_IDENTITY_INDEXES,
+        _execution_candidate_rows,
+        _execution_identity_index_gap,
+        _execution_identity_index_ready,
+        _execution_identity_index_sql,
+    )
+
+    monkeypatch.setattr(schema, "_warned_execution_identity_index_gaps", set())
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    name = EXECUTION_IDENTITY_INDEXES[table][0]
+    with repo._writer_connection(begin_immediate=True) as conn:
+        assert _execution_identity_index_ready(conn, table)
+        assert _execution_identity_index_gap(conn, table) is None
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") == []
+
+        conn.execute(f"DROP INDEX {name}")
+        assert not _execution_identity_index_ready(conn, table)
+        assert _execution_identity_index_gap(conn, table) == {"table": table, "cause": "missing", "rows": 0}
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") is None
+
+        conn.execute(_execution_identity_index_sql(table))
+        assert _execution_identity_index_ready(conn, table)
+        assert _execution_identity_index_gap(conn, table) is None
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") == []
+
+        conn.execute(f"DROP INDEX {name}")
+        conn.execute(f"CREATE INDEX {name} ON {table}(trade_time_ms)")
+        assert not _execution_identity_index_ready(conn, table)
+        assert _execution_identity_index_gap(conn, table) == {
+            "table": table, "cause": "definition_mismatch", "rows": 0,
+        }
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") is None
+
+        conn.execute(f"DROP INDEX {name}")
+        assert not _execution_identity_index_ready(conn, table)
+        assert _execution_identity_index_gap(conn, table) == {"table": table, "cause": "missing", "rows": 0}
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") is None
+
+    assert [record.message for record in caplog.records if record.name == schema.__name__] == [
+        f"execution_identity_index_fallback table={table} cause=missing rows=0",
+        f"execution_identity_index_fallback table={table} cause=definition_mismatch rows=0",
+    ]
 
 
 def test_execution_index_status_omits_ready_and_absent_optional_tables(tmp_path):

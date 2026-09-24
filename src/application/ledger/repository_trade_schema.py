@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from threading import Lock
 
 from domain.domain.trade_execution import execution_identity_from_input
 from .repository_common import (
@@ -22,6 +23,8 @@ EXECUTION_IDENTITY_INDEXES = {
 }
 
 _logger = logging.getLogger(__name__)
+_execution_identity_index_warning_lock = Lock()
+_warned_execution_identity_index_gaps: set[tuple[str, str]] = set()
 
 
 def validated_execution_identity_metadata(raw: Mapping[str, Any]) -> str:
@@ -40,28 +43,30 @@ def _execution_identity_index_sql(table: str) -> str:
     return f"CREATE INDEX {name} ON {table}(json_extract(event_json, '{path}'))"
 
 
-def _execution_identity_index_ready(conn: sqlite3.Connection, table: str) -> bool:
+def _execution_identity_index_cause(conn: sqlite3.Connection, table: str) -> str | None:
     name, _path = EXECUTION_IDENTITY_INDEXES[table]
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?",
         (name, table),
     ).fetchone()
-    return row is not None and row[0] == _execution_identity_index_sql(table)
+    if row is None:
+        return "missing"
+    return None if row[0] == _execution_identity_index_sql(table) else "definition_mismatch"
+
+
+def _execution_identity_index_ready(conn: sqlite3.Connection, table: str) -> bool:
+    return _execution_identity_index_cause(conn, table) is None
 
 
 def _execution_identity_index_gap(
     conn: sqlite3.Connection, table: str,
 ) -> dict[str, str | int] | None:
-    name, _path = EXECUTION_IDENTITY_INDEXES[table]
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?",
-        (name, table),
-    ).fetchone()
-    if row is not None and row[0] == _execution_identity_index_sql(table):
+    cause = _execution_identity_index_cause(conn, table)
+    if cause is None:
         return None
     return {
         "table": table,
-        "cause": "missing" if row is None else "definition_mismatch",
+        "cause": cause,
         "rows": int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]),
     }
 
@@ -69,12 +74,18 @@ def _execution_identity_index_gap(
 def _execution_candidate_rows(
     conn: sqlite3.Connection, table: str, execution_id: str,
 ) -> list[sqlite3.Row] | None:
-    gap = _execution_identity_index_gap(conn, table)
-    if gap is not None:
-        _logger.warning(
-            "execution_identity_index_fallback table=%s cause=%s rows=%s",
-            gap["table"], gap["cause"], gap["rows"],
-        )
+    cause = _execution_identity_index_cause(conn, table)
+    if cause is not None:
+        # ponytail: one global warning lock; split it if fallback contention matters.
+        with _execution_identity_index_warning_lock:
+            key = (table, cause)
+            if key not in _warned_execution_identity_index_gaps:
+                rows = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                _logger.warning(
+                    "execution_identity_index_fallback table=%s cause=%s rows=%s",
+                    table, cause, rows,
+                )
+                _warned_execution_identity_index_gaps.add(key)
         return None
     _name, path = EXECUTION_IDENTITY_INDEXES[table]
     identity = f"json_extract(event_json, '{path}')"
