@@ -8,9 +8,11 @@ from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.option_position_identity import normalize_account
 
 
-STRICT_CLOSE_POLICY_VERSION = "remaining_yield_capture.v1"
+STRICT_CLOSE_POLICY_VERSION = "remaining_yield_capture.v3"
 STRICT_MIN_NET_CAPTURE_RATIO = 0.80
 STRICT_MAX_REMAINING_ANNUALIZED_RETURN = 0.10
+EXPIRY_HOLD_MAX_TRADING_SESSIONS = 3
+EXPIRY_HOLD_MAX_ABS_DELTA = 0.05
 
 RECOMMENDATION_CLOSE = "close"
 RECOMMENDATION_HOLD = "hold"
@@ -65,6 +67,10 @@ class CloseAdviceInput:
     estimated_close_fee: float | None = None
     fee_calc_status: str | None = None
     fee_calc_basis: str | None = None
+    delta: float | None = None
+    remaining_trading_sessions: int | None = None
+    remaining_trading_sessions_min: int | None = None
+    remaining_trading_sessions_max: int | None = None
 
 
 def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
@@ -86,6 +92,16 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
     fee_status = str(inp.fee_calc_status or "").strip().lower()
     fee_basis = str(inp.fee_calc_basis or "").strip()
     currency = str(inp.currency or "").strip().upper()
+    delta = safe_float(inp.delta)
+    trading_sessions = safe_int(inp.remaining_trading_sessions)
+    sessions_min = safe_int(inp.remaining_trading_sessions_min)
+    sessions_max = safe_int(inp.remaining_trading_sessions_max)
+    if sessions_min is None and sessions_max is None:
+        sessions_min = sessions_max = trading_sessions
+    sessions_valid = (
+        sessions_min is not None and sessions_max is not None
+        and 0 <= sessions_min <= sessions_max
+    )
 
     flags: list[str] = []
     if not normalize_account(inp.account):
@@ -222,17 +238,36 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
         failed_gates.append("net_capture_below_threshold")
     if remaining_max_annualized_return > STRICT_MAX_REMAINING_ANNUALIZED_RETURN:
         failed_gates.append("remaining_annualized_above_threshold")
-
-    recommendation = (
-        RECOMMENDATION_HOLD if failed_gates else RECOMMENDATION_CLOSE
-    )
+    if failed_gates:
+        recommendation = RECOMMENDATION_HOLD
+    elif (delta is not None and abs(delta) <= 1 and abs(delta) > EXPIRY_HOLD_MAX_ABS_DELTA) or (
+        sessions_valid and sessions_min > EXPIRY_HOLD_MAX_TRADING_SESSIONS
+    ):
+        recommendation = RECOMMENDATION_CLOSE
+    elif (
+        delta is not None
+        and abs(delta) <= EXPIRY_HOLD_MAX_ABS_DELTA
+        and sessions_valid
+        and sessions_max <= EXPIRY_HOLD_MAX_TRADING_SESSIONS
+    ):
+        recommendation = RECOMMENDATION_HOLD
+        failed_gates.append("near_expiry_far_otm_hold")
+    else:
+        recommendation = RECOMMENDATION_NOT_EVALUABLE
+        failed_gates.append("expiry_hold_evidence_unavailable")
     return _result(
         inp,
         recommendation=recommendation,
         reason=(
             "已净兑现至少 80% 权利金，剩余最高年化不超过 10%，可考虑买回平仓"
             if recommendation == RECOMMENDATION_CLOSE
-            else "价内状态、净兑现或剩余最高年化未达到提前止盈条件，继续持有"
+            else (
+                "临近到期且 Delta 很低，倾向持有到期"
+                if failed_gates == ["near_expiry_far_otm_hold"]
+                else "临期交易日或 Delta 证据不足，当前无法排除持有到期条件"
+                if recommendation == RECOMMENDATION_NOT_EVALUABLE
+                else "价内状态、净兑现或剩余最高年化未达到提前止盈条件，继续持有"
+            )
         ),
         flags=failed_gates,
         spread_ratio=spread_ratio,
@@ -306,6 +341,10 @@ def _result(
         "ask": ask,
         "close_mid": close_mid,
         "dte": safe_int(inp.dte),
+        "delta": safe_float(inp.delta),
+        "remaining_trading_sessions": safe_int(inp.remaining_trading_sessions),
+        "remaining_trading_sessions_min": safe_int(inp.remaining_trading_sessions_min),
+        "remaining_trading_sessions_max": safe_int(inp.remaining_trading_sessions_max),
         "original_dte": safe_int(inp.original_dte),
         "multiplier": safe_float(inp.multiplier),
         "spot": safe_float(inp.spot),

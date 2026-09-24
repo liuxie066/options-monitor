@@ -198,6 +198,43 @@ def test_get_trading_days_normalizes_market_label() -> None:
     assert receipt["market"] == "HK"
 
 
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        ((0, [{"time": "2026-09-24", "trade_date_type": "WHOLE"}]), None),
+        ((0, [{"time": "2026-09-24", "trade_date_type": "WHOLE"}, "bad"]), ValueError),
+        ((None, [{"time": "2026-09-24", "trade_date_type": "WHOLE"}]), RuntimeError),
+    ],
+)
+def test_trading_calendar_receipt_requires_complete_success_response(
+    response, error,
+) -> None:
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    class FakeQuote:
+        def request_trading_days(self, **_kwargs):
+            return response
+
+    class FakeBackend:
+        def _ensure_clients(self):
+            return FakeQuote(), None
+
+    client = _FutuAPIClient(FakeBackend(), is_option_chain_cache_enabled=False)
+    if error:
+        with pytest.raises(error):
+            client.get_trading_days_with_receipt(
+                market="US", start="2026-09-24", end="2026-09-25"
+            )
+    else:
+        receipt = client.get_trading_days_with_receipt(
+            market="US", start="2026-09-24", end="2026-09-25"
+        )
+        assert receipt == {
+            "retcode": 0, "rows": response[1], "coverage_complete": True,
+            "pagination_complete": True, "page_count": 1,
+        }
+
+
 def test_get_trading_days_rejects_unknown_market() -> None:
     import pytest
 
