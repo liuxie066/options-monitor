@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
+from src.infrastructure.futu_gateway import (
+    FutuGatewayAuthExpiredError, FutuGatewayNeed2FAError,
+    FutuGatewayNeedPicVerifyError, FutuGatewayRateLimitError,
+)
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
+from src.infrastructure.opend_watchdog import classify_watchdog_result
 
 
 def test_classify_opend_error_prefers_exception_code() -> None:
@@ -52,3 +56,15 @@ def test_classify_opend_error_unknown_inputs() -> None:
     assert classify_opend_error(None) is OpenDRetCode.UNKNOWN
     assert classify_opend_error("") is OpenDRetCode.UNKNOWN
     assert classify_opend_error({}) is OpenDRetCode.UNKNOWN
+
+
+def test_auth_reason_codes_match_watchdog_and_gateway() -> None:
+    cases = (
+        ("登录密码被修改,已退出登录", FutuGatewayAuthExpiredError, "OPEND_LOGIN_INVALID"),
+        ("需要手机验证码", FutuGatewayNeed2FAError, "OPEND_NEEDS_PHONE_VERIFY"),
+        ("需要图形验证码", FutuGatewayNeedPicVerifyError, "OPEND_NEEDS_PIC_VERIFY"),
+    )
+    for message, error_type, reason_code in cases:
+        assert classify_watchdog_result(None, message)[0] == reason_code
+        assert classify_opend_error(message).reason_code == reason_code
+        assert error_type(message).reason_code == reason_code

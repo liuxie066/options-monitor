@@ -92,6 +92,7 @@ def test_generated_profile_drives_deduplicated_market_inventory(tmp_path: Path) 
         "options-monitor-projection-verify.timer",
         "options-monitor-runtime-status.timer",
         "options-monitor-tick-us.timer",
+        "options-monitor-trade-intake-heartbeat.timer",
     ]
     assert all(item["id"] == "systemd:" + item["name"] for item in value["tasks"])
     assert all(item["configured"] is True for item in value["tasks"])

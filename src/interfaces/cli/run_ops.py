@@ -8,7 +8,7 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.multi_account_tick import run_tick
 from src.application.tick_cron import run_tick_cron
-from src.application.service_failure_alert import alert_failed_service
+from src.application.service_failure_alert import alert_failed_service, check_trade_intake_heartbeat
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -60,6 +60,11 @@ def add_run_commands(subparsers: Any) -> None:
     failure_alert.add_argument("--market", required=True, choices=("us", "hk"))
     failure_alert.add_argument("--config", required=True)
     failure_alert.add_argument("--runtime-root", required=True)
+    heartbeat_check = run_sub.add_parser("trade-intake-heartbeat-check", help="alert on a stale trade intake heartbeat")
+    heartbeat_check.add_argument("--unit", required=True)
+    heartbeat_check.add_argument("--market", required=True, choices=("us", "hk"))
+    heartbeat_check.add_argument("--config", required=True)
+    heartbeat_check.add_argument("--runtime-root", required=True)
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
     trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
     trade_intake.add_argument("--effective-from-ms", type=int)
@@ -225,6 +230,12 @@ def handle_run_command(
 
     if args.run_command == "service-failure-alert":
         return alert_failed_service(
+            unit=args.unit, market=args.market, config_path=args.config,
+            runtime_root=args.runtime_root,
+        )
+
+    if args.run_command == "trade-intake-heartbeat-check":
+        return check_trade_intake_heartbeat(
             unit=args.unit, market=args.market, config_path=args.config,
             runtime_root=args.runtime_root,
         )

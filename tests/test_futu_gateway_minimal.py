@@ -297,6 +297,24 @@ def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
+@pytest.mark.parametrize("error_name", [
+    "FutuGatewayAuthExpiredError", "FutuGatewayNeed2FAError", "FutuGatewayNeedPicVerifyError",
+])
+def test_retry_futu_gateway_call_stops_on_login_action_required(error_name: str, monkeypatch) -> None:
+    from src.infrastructure import futu_gateway
+
+    attempts = []
+    monkeypatch.setattr(futu_gateway.time, "sleep", lambda _seconds: pytest.fail("auth failure must not retry"))
+
+    def _call():
+        attempts.append(1)
+        raise getattr(futu_gateway, error_name)("login action required")
+
+    with pytest.raises(RuntimeError):
+        futu_gateway.retry_futu_gateway_call("test_call", _call)
+    assert len(attempts) == 1
+
+
 def test_gateway_request_history_kline_returns_page_key() -> None:
 
     class FakeQuote:

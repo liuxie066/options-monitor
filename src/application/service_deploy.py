@@ -47,6 +47,7 @@ _SHARED_TIMER_NAMES = frozenset(
         "options-monitor-quality-recheck.timer",
         "options-monitor-quality-refresh.timer",
         "options-monitor-runtime-status.timer",
+        "options-monitor-trade-intake-heartbeat.timer",
         "options-monitor-upgrade.timer",
     }
 )
@@ -588,6 +589,7 @@ def _systemd_secret_bindings(
 
     bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
     bind("options-monitor-trade-intake-alert.service", FEISHU_BOT_APP_SECRET)
+    bind("options-monitor-trade-intake-heartbeat.service", FEISHU_BOT_APP_SECRET)
     bind(
         "options-monitor-feishu-ws.service",
         FEISHU_BOT_APP_SECRET,
@@ -873,6 +875,7 @@ def build_service_profile(
         if (
             str(name).endswith(".service")
             and not str(name).endswith("-alert.service")
+            and not str(name).endswith("-heartbeat.service")
             and (
                 "opend" in str(name)
                 or "trade-intake" in str(name)
@@ -1387,6 +1390,40 @@ def render_service_bundle(
             install_path=f"/etc/systemd/system/{alert_service}",
             kind="systemd_service",
             service_name=alert_service,
+        )
+
+        heartbeat_service = "options-monitor-trade-intake-heartbeat.service"
+        heartbeat_timer = "options-monitor-trade-intake-heartbeat.timer"
+        add(
+            f"systemd/{heartbeat_service}",
+            _systemd_unit(
+                description="Options Monitor trade intake heartbeat alert",
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=[
+                    om, "run", "trade-intake-heartbeat-check",
+                    "--unit", trade_service,
+                    "--market", trade_market,
+                    "--config", str(config_by_market[trade_market]),
+                    "--runtime-root", str(runtime),
+                ],
+                timeout_start_sec=120,
+                syslog_level_prefix=True,
+            ),
+            install_path=f"/etc/systemd/system/{heartbeat_service}",
+            kind="systemd_service",
+            service_name=heartbeat_service,
+        )
+        add(
+            f"systemd/{heartbeat_timer}",
+            _systemd_timer(description="Options Monitor trade intake heartbeat timer",
+                           unit_name=heartbeat_service, interval="1min"),
+            install_path=f"/etc/systemd/system/{heartbeat_timer}",
+            kind="systemd_timer",
+            service_name=heartbeat_timer,
         )
 
         status_service = "options-monitor-runtime-status.service"

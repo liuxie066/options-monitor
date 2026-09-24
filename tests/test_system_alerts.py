@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -164,6 +165,88 @@ def test_service_failure_handler_logs_alert_infrastructure_failure(monkeypatch, 
     assert capsys.readouterr().out.strip() == "<3>SERVICE_ALERT_INFRA_FAILED"
 
 
+@pytest.mark.parametrize("reason_code", [
+    "OPEND_NEEDS_PHONE_VERIFY", "OPEND_LOGIN_INVALID", "OPEND_NEEDS_PIC_VERIFY",
+])
+def test_auth_terminal_service_failure_alerts_once_with_reason_code(
+    monkeypatch, tmp_path: Path, reason_code: str,
+) -> None:
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    status_path.write_text(json.dumps({"status": "blocked", "reason_code": reason_code}), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "accounts_from_config_path", lambda *_args, **_kwargs: ["lx"])
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
+
+    for _ in range(2):
+        assert service_failure_alert.alert_failed_service(
+            unit="options-monitor-trade-intake.service", market="us",
+            config_path=str(config_path), runtime_root=tmp_path,
+        ) == 0
+    assert len(sends) == 1
+    assert reason_code in sends[0]["message"]
+
+
+def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkeypatch, tmp_path: Path) -> None:
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
+    now = datetime(2026, 9, 24, 2, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": (now - timedelta(minutes=4)).isoformat()}), encoding="utf-8")
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert len(sends) == 1
+    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+    terminal = dict(base=tmp_path, config=_config(), unit=args["unit"], market="us", account="lx",
+                    failure_code="SERVICE_TERMINAL_FAILURE", stage="unit_failed")
+    assert system_alerts.report_system_failure(**terminal, run_id="run-1", rc=78,
+        first_error_at=now.isoformat(), opend_login_state="unknown") == "confirmed"
+    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": now.isoformat()}), encoding="utf-8")
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert len(sends) == 4
+    assert sum("已恢复" in send["message"] for send in sends) == 2
+
+
+def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 2, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": now.isoformat()}), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 0
+    assert "TRADE_INTAKE_PROCESS_DOWN" in sends[0]["message"]
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert "已恢复" in sends[1]["message"]
+    monkeypatch.setattr(service_failure_alert, "report_system_failure", lambda **_kwargs: (_ for _ in ()).throw(OSError("state")))
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 1
+    assert "<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED" in capsys.readouterr().out
+
+
 def test_service_failure_alert_cli_dispatch(monkeypatch, tmp_path: Path) -> None:
     from src.interfaces.cli import run_ops
     from src.interfaces.cli.main import parse_args
@@ -171,6 +254,19 @@ def test_service_failure_alert_cli_dispatch(monkeypatch, tmp_path: Path) -> None
     calls = []
     monkeypatch.setattr(run_ops, "alert_failed_service", lambda **kwargs: calls.append(kwargs) or 0)
     args = parse_args(["run", "service-failure-alert", "--unit", "options-monitor-trade-intake.service",
+                       "--market", "us", "--config", str(tmp_path / "config.json"),
+                       "--runtime-root", str(tmp_path)])
+    assert run_ops.handle_run_command(args) == 0
+    assert calls[0]["unit"] == "options-monitor-trade-intake.service"
+
+
+def test_trade_intake_heartbeat_cli_dispatch(monkeypatch, tmp_path: Path) -> None:
+    from src.interfaces.cli import run_ops
+    from src.interfaces.cli.main import parse_args
+
+    calls = []
+    monkeypatch.setattr(run_ops, "check_trade_intake_heartbeat", lambda **kwargs: calls.append(kwargs) or 0)
+    args = parse_args(["run", "trade-intake-heartbeat-check", "--unit", "options-monitor-trade-intake.service",
                        "--market", "us", "--config", str(tmp_path / "config.json"),
                        "--runtime-root", str(tmp_path)])
     assert run_ops.handle_run_command(args) == 0

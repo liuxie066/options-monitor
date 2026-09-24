@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from src.application.account_config import accounts_from_config_path
-from src.application.system_alerts import report_system_failure
+from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
@@ -54,3 +56,69 @@ def alert_failed_service(*, unit: str, market: str, config_path: str, runtime_ro
         return 0
     print("<3>SERVICE_FAILURE_ALERT_UNCONFIRMED " + ",".join(results))
     return 1
+
+
+def check_trade_intake_heartbeat(
+    *, unit: str, market: str, config_path: str, runtime_root: str | Path,
+    unit_active_fn: Callable[[str], bool] | None = None,
+    now: datetime | None = None,
+) -> int:
+    config = read_json(Path(config_path), {})
+    if not isinstance(config, dict) or not config:
+        print("<3>INTAKE_HEARTBEAT_CONFIG_UNAVAILABLE")
+        return 1
+    base = Path(runtime_root)
+    try:
+        sources = [source for source in resolve_trade_intake_config(config).get("sources") or []
+                   if source.get("enabled", True)]
+        if not sources:
+            raise ValueError("no enabled trade intake sources")
+        active = unit_active_fn(unit) if unit_active_fn is not None else subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit], capture_output=True, timeout=5,
+        ).returncode == 0
+        checked_at = now or datetime.now(timezone.utc)
+        results: list[str] = []
+        for source in sources:
+            status_path = Path(source["status_path"])
+            if not status_path.is_absolute():
+                status_path = base / status_path
+            status = read_json(status_path, {})
+            status = status if isinstance(status, dict) else {}
+            account = str(source.get("account") or "").strip().lower()
+            heartbeat = str(status.get("last_heartbeat_utc") or "")
+            try:
+                age = (checked_at - datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))).total_seconds()
+            except (TypeError, ValueError):
+                age = float("inf")
+            healthy = active and status.get("status") == "listening" and -60 <= age <= 180
+            if healthy:
+                for failure_code, stage in (
+                    ("TRADE_INTAKE_PROCESS_DOWN", "heartbeat"),
+                    ("TRADE_INTAKE_HEARTBEAT_STALE", "heartbeat"),
+                    ("SERVICE_TERMINAL_FAILURE", "unit_failed"),
+                    ("OPEND_LOGIN_INVALID", "unit_failed"),
+                    ("OPEND_NEEDS_PHONE_VERIFY", "unit_failed"),
+                    ("OPEND_NEEDS_PIC_VERIFY", "unit_failed"),
+                ):
+                    results.append(report_system_recovery(
+                        base=base, config=config, unit=unit, market=market, account=account,
+                        failure_code=failure_code, stage=stage,
+                    ))
+                continue
+            failure_code = "TRADE_INTAKE_HEARTBEAT_STALE" if active else "TRADE_INTAKE_PROCESS_DOWN"
+            result = report_system_failure(
+                base=base, config=config, unit=unit, market=market, account=account,
+                failure_code=failure_code, stage="heartbeat", run_id=create_run_id(),
+                rc=0 if active else -1, first_error_at=heartbeat or checked_at.isoformat(),
+                opend_login_state=str(status.get("reason_code") or "unknown"),
+            )
+            results.append(result)
+            if result != "suppressed":
+                print(f"<4>{failure_code} account={account} delivery={result}")
+        if all(result in {"confirmed", "suppressed", "no_incident"} for result in results):
+            return 0
+        print("<3>INTAKE_HEARTBEAT_ALERT_UNCONFIRMED")
+        return 1
+    except Exception:
+        print("<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED")
+        return 1

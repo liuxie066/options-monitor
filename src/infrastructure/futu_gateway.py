@@ -575,17 +575,19 @@ class FutuGatewayError(RuntimeError):
         super().__init__(message)
         self.raw_error = raw_error
 
-
 class FutuGatewayNeed2FAError(FutuGatewayError):
     code = "NEED_2FA"
+    reason_code = "OPEND_NEEDS_PHONE_VERIFY"
 
 
 class FutuGatewayNeedPicVerifyError(FutuGatewayError):
     code = "NEED_PIC_VERIFY"
+    reason_code = "OPEND_NEEDS_PIC_VERIFY"
 
 
 class FutuGatewayAuthExpiredError(FutuGatewayError):
     code = "AUTH_EXPIRED"
+    reason_code = "OPEND_LOGIN_INVALID"
 
 
 class FutuGatewayRateLimitError(FutuGatewayError):

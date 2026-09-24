@@ -61,6 +61,10 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     alert_unit = files["systemd/options-monitor-trade-intake-alert.service"]["content"]
     assert "run service-failure-alert --unit options-monitor-trade-intake.service" in alert_unit
     assert "TimeoutStartSec=120" in alert_unit
+    heartbeat_unit = files["systemd/options-monitor-trade-intake-heartbeat.service"]["content"]
+    heartbeat_timer = files["systemd/options-monitor-trade-intake-heartbeat.timer"]["content"]
+    assert "run trade-intake-heartbeat-check --unit options-monitor-trade-intake.service" in heartbeat_unit
+    assert "OnUnitActiveSec=1min" in heartbeat_timer
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify

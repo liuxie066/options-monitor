@@ -860,6 +860,15 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 4. Use semantic repair/void workflows; do not hand-edit projected rows.
 5. Verify with focused ledger tests.
 
+The systemd bundle includes `options-monitor-trade-intake-heartbeat.timer` (one-minute
+interval). Its `./om run trade-intake-heartbeat-check --unit
+options-monitor-trade-intake.service --market us --config <runtime-config>
+--runtime-root <runtime-root>` service checks unit activity and each source's
+`last_heartbeat_utc`. A missing or stale heartbeat while the unit is active,
+an inactive unit, and a confirmed recovery use the configured system-alert
+notification route. This command can send a notification; use `runtime_status`
+for read-only inspection.
+
 ### Release Request
 
 Development delivery and release publication are separate:
