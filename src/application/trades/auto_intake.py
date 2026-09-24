@@ -3470,6 +3470,11 @@ def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: 
     )
     payload.update({key: value for key, value in extra.items() if value is not None})
     atomic_write_json(path, payload)
+    # Callers hold one base_payload across iterations and carry the current status
+    # forward rather than naming one (the receipt-recovery hook does), so the state
+    # they hold has to mirror what was just written.
+    base_payload["status"] = payload["status"]
+    base_payload["stage"] = payload["stage"]
 
 
 def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:

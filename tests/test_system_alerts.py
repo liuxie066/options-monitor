@@ -435,7 +435,8 @@ def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkey
     sends = []
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
     now = datetime(2026, 9, 24, 2, tzinfo=timezone.utc)
-    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": (now - timedelta(minutes=4)).isoformat()}), encoding="utf-8")
+    stale_age = service_failure_alert._HEARTBEAT_STALE_SECONDS + 60
+    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": (now - timedelta(seconds=stale_age)).isoformat()}), encoding="utf-8")
     args = dict(unit="options-monitor-trade-intake.service", market="us",
                 config_path=str(config_path), runtime_root=tmp_path, now=now,
                 disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
@@ -452,6 +453,157 @@ def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkey
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 4
     assert sum("已恢复" in send["message"] for send in sends) == 2
+
+
+def test_trade_intake_heartbeat_ignores_transient_stage_labels(monkeypatch, tmp_path: Path) -> None:
+    """A healthy intake mid-iteration must not be reported stale.
+
+    Production 2026-09-24: the listener writes `status="starting"` /
+    `stage="receipt_recovery"` at the top of every work-loop iteration, runs the
+    iteration's heavy work, then writes `listening` at the end of that same
+    iteration — so a once-a-minute sample almost always caught "starting" and
+    paged the operator every silence window (10 min), with the heartbeat only 41s
+    old when it fired. Liveness is the unit being active plus a fresh heartbeat;
+    the stage labels churn every iteration and carry no liveness meaning; only the
+    labels the writer reserves for a source that is not working count against it.
+    """
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 16, 3, 43, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({
+        "status": "starting",
+        "stage": "receipt_recovery",
+        "reason_code": "none",
+        "last_heartbeat_utc": (now - timedelta(seconds=41)).isoformat(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
+        send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
+    ))
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert sends == []
+
+
+@pytest.mark.parametrize(("status_label", "expected_sends"), [
+    ("listening", 0),
+    ("starting", 0),
+    ("once", 0),
+    ("reconnecting", 1),
+    ("blocked", 1),
+])
+def test_trade_intake_heartbeat_reads_the_status_vocabulary(monkeypatch, tmp_path: Path, status_label: str, expected_sends: int) -> None:
+    """A not-working label must still alert, and the working ones must not.
+
+    The 3.7.1 gate required `status == "listening"` outright. Deleting the label
+    entirely would have gone the other way and reported *recovery* for a source
+    that is not working: `reconnecting` is written when the listener throws
+    (OpenD down), and the retry loop's recovery tick refreshes the heartbeat while
+    it backs off, so freshness alone cannot see that outage.
+    """
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 16, 3, 43, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({
+        "status": status_label,
+        "stage": "listener_exception" if status_label == "reconnecting" else "heartbeat",
+        "reason_code": "none",
+        "last_heartbeat_utc": (now - timedelta(seconds=5)).isoformat(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
+        send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
+    ))
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert len(sends) == expected_sends, status_label
+    if expected_sends:
+        assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+
+
+def test_trade_intake_heartbeat_rejects_a_future_heartbeat(monkeypatch, tmp_path: Path) -> None:
+    """A clock-skewed heartbeat must not read as fresh forever.
+
+    The lower bound is the only guard against a timestamp written ahead of the
+    checker, and reading the file through `parse_utc` widened what parses at all,
+    so pin the bound itself.
+    """
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 16, 3, 43, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({
+        "status": "listening",
+        "last_heartbeat_utc": (now + timedelta(seconds=61)).isoformat(),
+    }), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
+        send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
+    ))
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+    assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+    assert len(sends) == 1
+    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+
+
+def test_trade_intake_heartbeat_window_clears_measured_worst_case_yet_still_alerts(monkeypatch, tmp_path: Path) -> None:
+    """Cover one full work-loop iteration, and keep firing past that window.
+
+    Widening the window must not be mistaken for silencing the alert: the last
+    assertion is the anti-regression control proving a genuinely stale heartbeat
+    still reaches the operator.
+    """
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 16, 3, 43, tzinfo=timezone.utc)
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
+        send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
+    ))
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+    worst_measured_iteration = 583  # production 2026-09-24, 16h of audit records (n=163)
+    for age_seconds, expected_sends in (
+        (worst_measured_iteration, 0),
+        (service_failure_alert._HEARTBEAT_STALE_SECONDS + 1, 1),
+    ):
+        status_path.write_text(json.dumps({
+            "status": "listening",
+            "last_heartbeat_utc": (now - timedelta(seconds=age_seconds)).isoformat(),
+        }), encoding="utf-8")
+        assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
+        assert len(sends) == expected_sends, f"age={age_seconds}s"
+    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
 
 
 def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(monkeypatch, tmp_path: Path, capsys) -> None:

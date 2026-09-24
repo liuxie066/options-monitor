@@ -7,10 +7,32 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.account_config import accounts_from_config_path
+from src.application.payload_helpers import parse_utc
 from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
+
+# The intake writes its status file once per work-loop iteration, so the
+# no-heartbeat window has to cover one iteration. Measured on production
+# 2026-09-24 over 16h of audit records (n=163 lx / 166 sy), from the interval
+# between consecutive `backfill_check_finished` records, which land at the end of
+# an iteration: 331s at p50, 424s at p90, and 583s at worst. 1200s is ~2x that
+# worst case, so a healthy intake stays silent while a hung one is still caught
+# within ~21 minutes. Re-measure when the loop's work changes — a longer backfill
+# lookback, a slower broker, or a new per-iteration stage all widen the cycle.
+_HEARTBEAT_STALE_SECONDS = 1200
+
+# `status` is a stage label, not the liveness signal: it churns every iteration
+# (the listener reports "starting" throughout receipt/backfill work), and every
+# write refreshes the heartbeat, so gating on one healthy label (3.7.1 required
+# `status == "listening"`) reported a healthy intake as stale. The whole
+# vocabulary the writer produces is listening / starting / once for a working
+# source and blocked / error / reconnecting / stopped for one that is not, so
+# only the latter four are listed here. `reconnecting` is the one that would
+# otherwise go silent: the retry loop refreshes the heartbeat while it backs off,
+# so ignoring the label would report recovery for a dead OpenD connection.
+_INTAKE_UNHEALTHY_STATUSES = frozenset({"blocked", "error", "reconnecting", "stopped"})
 
 
 def alert_failed_service(*, unit: str, market: str, config_path: str, runtime_root: str | Path) -> int:
@@ -104,12 +126,15 @@ def check_trade_intake_heartbeat(
             status = read_json(status_path, {})
             status = status if isinstance(status, dict) else {}
             account = str(source.get("account") or "").strip().lower()
-            heartbeat = str(status.get("last_heartbeat_utc") or "")
-            try:
-                age = (checked_at - datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))).total_seconds()
-            except (TypeError, ValueError):
-                age = float("inf")
-            healthy = active and status.get("status") == "listening" and -60 <= age <= 180
+            heartbeat_raw = str(status.get("last_heartbeat_utc") or "")
+            heartbeat = parse_utc(heartbeat_raw)
+            age = float("inf") if heartbeat is None else (checked_at - heartbeat).total_seconds()
+            status_label = str(status.get("status") or "").strip().lower()
+            healthy = (
+                active
+                and status_label not in _INTAKE_UNHEALTHY_STATUSES
+                and -60 <= age <= _HEARTBEAT_STALE_SECONDS
+            )
             if healthy:
                 for failure_code, stage in (
                     ("TRADE_INTAKE_PROCESS_DOWN", "heartbeat"),
@@ -128,7 +153,7 @@ def check_trade_intake_heartbeat(
             result = report_system_failure(
                 base=base, config=config, unit=unit, market=market, account=account,
                 failure_code=failure_code, stage="heartbeat", run_id=create_run_id(),
-                rc=0 if active else -1, first_error_at=heartbeat or checked_at.isoformat(),
+                rc=0 if active else -1, first_error_at=heartbeat_raw or checked_at.isoformat(),
                 opend_login_state=str(status.get("reason_code") or "unknown"),
             )
             results.append(result)
@@ -138,6 +163,8 @@ def check_trade_intake_heartbeat(
             return 0
         print("<3>INTAKE_HEARTBEAT_ALERT_UNCONFIRMED")
         return 1
-    except Exception:
-        print("<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED")
+    except Exception as error:
+        # Name the cause: an internal error here used to surface as a bare
+        # "infrastructure failure", which reads like the monitored system's fault.
+        print(f"<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED error={error!r}")
         return 1

@@ -2154,3 +2154,93 @@ def test_repository_logrotate_template_caps_runtime_logs_without_touching_audits
     assert "create 0600 @DEPLOY_USER@ @DEPLOY_USER@" in content
     assert "audit_events" not in content
     assert "copytruncate" not in content
+
+
+def test_upgrade_reconcile_delegates_to_the_new_release_cli(tmp_path: Path) -> None:
+    """The post-switch reconcile must run the release that is now current.
+
+    The upgrade process is the *previous* release's `om`, so reconciling in
+    process renders the previous release's bundle and the units the new release
+    declares are never installed: the 3.7.0 -> 3.7.1 upgrade (2026-09-24) reported
+    26 expected units and wrote nothing where 3.7.1's renderer expects 29. This
+    pins the delegation, the flags that carry the activation policy across, and
+    the shape of the result it reads back.
+    """
+    from src.application.service_upgrade import _reconcile_services_from_current_release
+
+    target_dir = tmp_path / "releases" / "1.0.1"
+    runtime = tmp_path / "runtime"
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+            "tool_name": "service.drift",
+            "ok": True,
+            "data": {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]},
+        }), stderr="")
+
+    reconcile = _reconcile_services_from_current_release(
+        repo_link=tmp_path / "current",
+        target_dir=target_dir,
+        runtime=runtime,
+        activation_policy="preserve-existing",
+        run_cmd=_run_cmd,
+    )
+
+    assert calls == [[
+        str(target_dir / "om"), "service", "drift",
+        "--repo-root", str(tmp_path / "current"),
+        "--runtime-root", str(runtime),
+        "--profile-path", str(runtime / "service.profile.json"),
+        "--confirm", "--preserve-activation-state",
+    ]]
+    assert reconcile == {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]}
+
+
+def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _reconcile_services_from_current_release
+
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout='{"summary": {"status": "ok"}}', stderr="")
+
+    _reconcile_services_from_current_release(
+        repo_link=tmp_path / "current",
+        target_dir=tmp_path / "releases" / "1.0.1",
+        runtime=tmp_path / "runtime",
+        activation_policy="ensure-active",
+        run_cmd=_run_cmd,
+    )
+
+    assert "--preserve-activation-state" not in calls[0]
+
+
+def test_upgrade_reconcile_fails_closed_when_the_child_prints_nothing(tmp_path: Path) -> None:
+    """A reconcile that cannot be read is a failed upgrade, not a silent one.
+
+    `_service_reconcile_failed` treats an empty result as success, so the helper
+    has to refuse to return one: an unreadable reconcile would otherwise let the
+    upgrade report success with the new release's units missing.
+    """
+    from src.application.service_upgrade import (
+        ServiceTransitionError,
+        _reconcile_services_from_current_release,
+    )
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="drift: no such unit\n")
+
+    with pytest.raises(ServiceTransitionError) as excinfo:
+        _reconcile_services_from_current_release(
+            repo_link=tmp_path / "current",
+            target_dir=tmp_path / "releases" / "1.0.1",
+            runtime=tmp_path / "runtime",
+            activation_policy="ensure-active",
+            run_cmd=_run_cmd,
+        )
+
+    assert excinfo.value.status == "upgraded_service_reconcile_failed"
+    assert any("drift: no such unit" in item for item in excinfo.value.remediation)

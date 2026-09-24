@@ -18,6 +18,7 @@ from tests.service_deploy_test_support import (
     _create_fake_venv_python_at,
     _fake_git_cache_materialize,
     _fake_pi_runtime_prepare,
+    _fake_release_drift_command,
     _fake_release_target_query,
     _fake_upgrade_release_runner,
     _fake_legacy_config_build,
@@ -1711,6 +1712,18 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
     )
     monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
 
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        # The forward reconcile now runs as the new release's own `om`, so its
+        # drift call reaches this test through the child runner rather than
+        # through the module attribute — but it is still the reconcile that
+        # `_service_drift` below sees first, and still the one that must fail.
+        drift = _fake_release_drift_command(
+            list(command), run_cmd=_run_cmd, service_drift_fn=_service_drift
+        )
+        if drift is not None:
+            return drift
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
     out = service_upgrade_module.service_upgrade(
         repo_root=current,
         runtime_root=runtime,
@@ -1718,9 +1731,7 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
         confirm=True,
         restart_services=False,
         preserve_activation_state=True,
-        run_cmd=lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 0, stdout="", stderr=""
-        ),
+        run_cmd=_run_cmd,
     )
 
     expected_snapshot = {
@@ -2973,6 +2984,9 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
             return materialized
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        drift = _fake_release_drift_command(list(command), run_cmd=_run_cmd)
+        if drift is not None:
+            return drift
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade(
