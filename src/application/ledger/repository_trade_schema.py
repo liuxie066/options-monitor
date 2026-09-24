@@ -24,7 +24,7 @@ EXECUTION_IDENTITY_INDEXES = {
 
 _logger = logging.getLogger(__name__)
 _execution_identity_index_warning_lock = Lock()
-_warned_execution_identity_index_gaps: set[tuple[str, str]] = set()
+_warned_execution_identity_index_gaps: set[tuple[str | None, str, str]] = set()
 
 
 def validated_execution_identity_metadata(raw: Mapping[str, Any]) -> str:
@@ -72,18 +72,18 @@ def _execution_identity_index_gap(
 
 
 def _execution_candidate_rows(
-    conn: sqlite3.Connection, table: str, execution_id: str,
+    conn: sqlite3.Connection, table: str, execution_id: str, *, store_key: str | None = None,
 ) -> list[sqlite3.Row] | None:
     cause = _execution_identity_index_cause(conn, table)
     if cause is not None:
         # ponytail: one global warning lock; split it if fallback contention matters.
         with _execution_identity_index_warning_lock:
-            key = (table, cause)
+            key = (store_key, table, cause)
             if key not in _warned_execution_identity_index_gaps:
                 rows = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 _logger.warning(
-                    "execution_identity_index_fallback table=%s cause=%s rows=%s",
-                    table, cause, rows,
+                    "execution_identity_index_fallback store_key=%s table=%s cause=%s rows=%s",
+                    store_key, table, cause, rows,
                 )
                 _warned_execution_identity_index_gaps.add(key)
         return None

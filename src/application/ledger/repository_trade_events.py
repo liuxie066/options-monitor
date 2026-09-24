@@ -216,7 +216,9 @@ class TradeEventRepositoryMixin:
         self, execution_id: str, *, conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
         with self._optional_conn(conn) as active_conn:
-            rows = _execution_candidate_rows(active_conn, "trade_events", execution_id)
+            rows = _execution_candidate_rows(
+                active_conn, "trade_events", execution_id, store_key=str(self.db_path),
+            )
             if rows is None:
                 return self.list_trade_events(conn=active_conn)
         return [trade_event_application_payload(json.loads(row["event_json"])) for row in rows]

@@ -218,9 +218,10 @@ def test_backfill_execution_index_gap_diagnostic_is_once_per_table(tmp_path: Pat
         record.message for record in caplog.records
         if record.name == "src.application.ledger.repository_trade_schema"
     ] == [
-        f"execution_identity_index_fallback table={table} cause=missing rows=0"
+        f"execution_identity_index_fallback store_key={repo.db_path} table={table} cause=missing rows=0"
         for table in repository_trade_schema.EXECUTION_IDENTITY_INDEXES
     ]
+    assert not any("PRAGMA database_list" in sql for sql in statements)
     for table in repository_trade_schema.EXECUTION_IDENTITY_INDEXES:
         assert sum(sql == f"SELECT COUNT(*) FROM {table}" for sql in statements) == 1
         assert sum(

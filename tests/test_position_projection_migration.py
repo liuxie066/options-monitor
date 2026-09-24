@@ -366,6 +366,8 @@ def test_execution_candidate_and_writer_queries_use_same_nonunique_index(tmp_pat
         statements = []
         conn.set_trace_callback(statements.append)
         assert _execution_candidate_rows(conn, table, "execution:v1:target") == []
+        assert len(statements) == 2
+        assert not any("PRAGMA database_list" in sql for sql in statements)
         query = next(sql for sql in statements if sql.startswith("SELECT event_json"))
         plans = [conn.execute("EXPLAIN QUERY PLAN " + query).fetchall(), conn.execute(
             f"EXPLAIN QUERY PLAN SELECT event_json FROM {table} WHERE json_extract(event_json, '{path}')=?",
@@ -407,6 +409,12 @@ def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog,
     with caplog.at_level("WARNING", logger="src.application.ledger.repository_trade_schema"):
         for _ in range(3):
             assert read("execution:v1:target") == full_read()
+        reopened = SQLiteOptionPositionsRepository(repo.db_path, initialize=False)
+        reopened_read = (
+            reopened.list_assigned_stock_events_for_execution
+            if table == "assigned_stock_events" else reopened.list_trade_events_for_execution
+        )
+        assert reopened_read("execution:v1:target") == full_read()
         other = SQLiteOptionPositionsRepository(tmp_path / "other.sqlite3")
         other_read = (
             other.list_assigned_stock_events_for_execution
@@ -421,7 +429,10 @@ def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog,
         record.message for record in caplog.records
         if record.name == "src.application.ledger.repository_trade_schema"
     ]
-    assert warnings == [f"execution_identity_index_fallback table={table} cause={cause} rows=1"]
+    assert warnings == [
+        f"execution_identity_index_fallback store_key={repo.db_path} table={table} cause={cause} rows=1",
+        f"execution_identity_index_fallback store_key={other.db_path} table={table} cause={cause} rows=0",
+    ]
     status = module.position_projection_migration_status(repo.db_path)
     assert status["execution_identity_index_gaps"] == [
         {"table": table, "cause": cause, "rows": 1}
@@ -475,8 +486,8 @@ def test_execution_index_ready_and_gap_agree_across_three_states(tmp_path, monke
         assert _execution_candidate_rows(conn, table, "execution:v1:target") is None
 
     assert [record.message for record in caplog.records if record.name == schema.__name__] == [
-        f"execution_identity_index_fallback table={table} cause=missing rows=0",
-        f"execution_identity_index_fallback table={table} cause=definition_mismatch rows=0",
+        f"execution_identity_index_fallback store_key=None table={table} cause=missing rows=0",
+        f"execution_identity_index_fallback store_key=None table={table} cause=definition_mismatch rows=0",
     ]
 
 

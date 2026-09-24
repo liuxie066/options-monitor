@@ -579,10 +579,11 @@ Ledger、Inbox、汇率表和业务判定，不新增领域实体、通用查询
 
 新空表在初始化时建立上述索引。有数据的旧表不在普通启动时全量扫描建索引；索引不存在
 或定义不匹配时继续安全全读。索引缺失不会使成交被拒收或丢弃。
-候选读取首次遇到每个（事件表、`missing` 或 `definition_mismatch` 原因）缺口时，
-仓储在该进程内发出一次 WARN，包含当时的表行数；只读 `projection-migration status` 的
-`execution_identity_index_gaps` 也列出相同的 `{table, cause, rows}`。该字段仅描述
-执行身份候选读取，不改变投影 checkpoint 的 `readiness` 或 `reasons`。
+候选读取首次遇到每个（库、事件表、`missing` 或 `definition_mismatch` 原因）缺口时，
+仓储在该进程内发出一次 WARN，消息包含库标识和当时的表行数；只读
+`projection-migration status` 的 `execution_identity_index_gaps` 列出同形的
+`{table, cause, rows}`，其中 `rows` 是每次查询当时的实时值。该字段仅描述执行身份候选读取，
+不改变投影 checkpoint 的 `readiness` 或 `reasons`。
 
 共享 `build_position_projection_indexes` 在同一 writer 锁和事务中解码、核验所有适用
 表，全部通过后才创建索引。无传入连接时使用 `BEGIN IMMEDIATE` 并负责提交/回滚；

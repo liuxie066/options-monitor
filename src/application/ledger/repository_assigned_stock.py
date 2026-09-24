@@ -228,7 +228,9 @@ class AssignedStockRepositoryMixin(WheelPolicyRepositoryMixin):
         with self._optional_conn(conn) as active_conn:
             if not self._table_exists("assigned_stock_events", conn=active_conn):
                 return []
-            rows = _execution_candidate_rows(active_conn, "assigned_stock_events", execution_id)
+            rows = _execution_candidate_rows(
+                active_conn, "assigned_stock_events", execution_id, store_key=str(self.db_path),
+            )
             if rows is None:
                 return self.list_assigned_stock_events(conn=active_conn)
         return [json.loads(row["event_json"]) for row in rows]
