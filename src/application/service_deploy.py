@@ -135,6 +135,8 @@ class OpendServicePlan:
     launchd_label: str
     root: Path
     executable: Path
+    host: str | None = None
+    port: int | None = None
 
 
 def normalize_target(value: str) -> ServiceTarget:
@@ -357,21 +359,22 @@ def _opend_service_plans_from_config(
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
-    candidates: list[tuple[str, Path]] = []
+    candidates: list[tuple[str, Path, str | None, int | None]] = []
     for account in accounts:
         runtime_plan = build_account_runtime_plan(config, account=account)
         if runtime_plan.account_type != "futu":
             continue
         if not runtime_plan.futu_opend_root:
             continue
-        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root)))
+        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root),
+                           runtime_plan.futu_host, runtime_plan.futu_port))
 
     if not candidates:
         return []
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
-    for account, root in candidates:
+    for account, root, host, port in candidates:
         slug = _service_slug(account)
         systemd_name = f"options-monitor-opend-{slug}.service" if multi else "options-monitor-opend.service"
         launchd_label = f"com.options-monitor.opend.{slug}" if multi else "com.options-monitor.opend"
@@ -382,6 +385,8 @@ def _opend_service_plans_from_config(
                 launchd_label=launchd_label,
                 root=root,
                 executable=_opend_executable_path(root, executable),
+                host=host,
+                port=port,
             )
         )
     return plans
@@ -406,6 +411,7 @@ def _opend_profile(target: ServiceTarget, plans: list[OpendServicePlan]) -> dict
             "root": str(item.root),
             "executable": str(item.executable),
             "service_name": item.systemd_service_name if target == "systemd" else item.launchd_label,
+            **({"host": item.host, "port": item.port} if item.host and item.port else {}),
         }
         for item in plans
     ]

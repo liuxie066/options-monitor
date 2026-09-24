@@ -33,3 +33,5 @@
 OpenD 已自行产生按日期分片的 `.ftlog`/`.logs` 文件。部署侧保留建议是 7 天且仅处理已关闭的已知后缀；启用自动清理前仍需确认实际文件命名、进程打开状态和证据保留期。不要对活动 OpenD 日志使用 `copytruncate`。审计段、备份与历史 run 的删除期也须单独确定并授权。
 
 仓库提供 `deploy/logrotate/options-monitor.conf.in` 作为普通 runtime `.log` 文件模板。部署时需按 service profile 填入 runtime root 和用户，并安排小时级 logrotate 调用；该模板不处理正在写入的审计段或 OpenD 自身日志。审计写入锁拒绝超过 64 MiB 的单条记录，避免单条记录突破段上限。
+
+新生成的 `service.profile.json` 为各 OpenD service 记录 `host`/`port`。受控升级重启 OpenD 后，服务健康检查用现有 watchdog 子进程对该端点做一次无 `--ensure` 的只读登录态探测，35 秒超时；端点缺失或登录失效均使健康检查失败。同版本升级返回 `already_current`；清理默认 `dry_run`，重复预览不会删除文件。
