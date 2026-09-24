@@ -2024,6 +2024,11 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
                 "contracts_open",
                 "ask",
                 "dte",
+                "delta",
+                "remaining_trading_sessions",
+                "remaining_trading_sessions_min",
+                "remaining_trading_sessions_max",
+                "trading_calendar_status",
                 "original_dte",
                 "remaining_term_ratio",
                 "net_capture_ratio",
@@ -2060,6 +2065,12 @@ def _position_view(
         "quote_status",
         "recommendation_state",
         "policy_version",
+        "delta",
+        "remaining_trading_sessions",
+        "remaining_trading_sessions_min",
+        "remaining_trading_sessions_max",
+        "trading_calendar_status",
+        "trading_calendar_reason",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
     out["advice_kind"] = "close_advice"
@@ -2068,6 +2079,10 @@ def _position_view(
         key: _json_safe(row.get(key))
         for key in (
             "ask",
+            "delta",
+            "remaining_trading_sessions",
+            "remaining_trading_sessions_min",
+            "remaining_trading_sessions_max",
             "remaining_term_ratio",
             "net_capture_ratio",
             "capital_basis",

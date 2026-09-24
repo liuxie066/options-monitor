@@ -7,7 +7,7 @@ from io import BytesIO
 import json
 import math
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import uuid4
@@ -19,6 +19,7 @@ from domain.domain.expiration_dates import (
     expiration_timestamp_to_date,
 )
 from domain.domain.fetch_source import is_futu_fetch_source
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.close_advice import (
     CloseAdviceInput,
     DECISION_EVIDENCE_NOT_EVALUABLE,
@@ -63,6 +64,7 @@ from src.application.close_advice_report_manifest import (
 from src.application.close_advice_required_data import (
     CloseAdviceRequiredDataPlanError,
     account_requirement_index,
+    close_advice_market_date,
     resolve_bound_close_advice_required_data_plan_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
@@ -105,6 +107,22 @@ OUTPUT_COLUMNS = [
     "ask",
     "close_mid",
     "dte",
+    "delta",
+    "remaining_trading_sessions",
+    "remaining_trading_sessions_min",
+    "remaining_trading_sessions_max",
+    "trading_calendar_status",
+    "trading_calendar_reason",
+    "trading_calendar_market",
+    "trading_calendar_as_of_market_date",
+    "trading_calendar_expiration",
+    "trading_calendar_request_start",
+    "trading_calendar_request_end",
+    "trading_calendar_dates",
+    "trading_calendar_input_hash",
+    "trading_calendar_receipt",
+    "market_state_after_snapshot",
+    "market_state_received_at_utc",
     "original_dte",
     "remaining_term_ratio",
     "spread_ratio",
@@ -1025,11 +1043,110 @@ def _strict_fee_estimates(
     )
 
 
+def _close_advice_calendar_evidence(
+    *,
+    requirement: Mapping[str, Any] | None,
+    quote: Mapping[str, Any] | None,
+    market: str,
+    market_date: date,
+    expiration: str | None,
+) -> tuple[dict[str, Any], bool]:
+    evidence = {
+        key: requirement.get(key)
+        for key in (
+            "trading_calendar_status", "trading_calendar_reason", "trading_calendar_market",
+            "trading_calendar_as_of_market_date", "trading_calendar_expiration",
+            "trading_calendar_request_start", "trading_calendar_request_end",
+            "trading_calendar_dates", "trading_calendar_input_hash", "trading_calendar_receipt",
+            "market_state_after_snapshot", "market_state_received_at_utc",
+        )
+    } if requirement else {"trading_calendar_status": "unavailable", "trading_calendar_reason": "calendar_plan_missing"}
+    evidence.update({"remaining_trading_sessions": None, "remaining_trading_sessions_min": None, "remaining_trading_sessions_max": None})
+    if not requirement or not quote:
+        return evidence, False
+    try:
+        snapshot = datetime.fromisoformat(str(quote["snapshot_received_at_utc"]).replace("Z", "+00:00"))
+        if (
+            snapshot.tzinfo is None
+            or str(quote.get("market") or "").upper() != market
+            or close_advice_market_date(snapshot, market) != market_date
+            or requirement.get("market") != market
+            or requirement.get("expiration") != expiration
+        ):
+            raise ValueError("snapshot_market_date_mismatch")
+    except (KeyError, ValueError, TypeError, CloseAdviceRequiredDataPlanError):
+        evidence.update({"trading_calendar_status": "unavailable", "trading_calendar_reason": "snapshot_market_date_mismatch"})
+        return evidence, False
+    if not requirement.get("trading_calendar_status"):
+        evidence.update({"trading_calendar_status": "unavailable", "trading_calendar_reason": "calendar_plan_not_enriched"})
+        return evidence, True
+    if (
+        requirement.get("trading_calendar_market") != market
+        or requirement.get("trading_calendar_as_of_market_date") != market_date.isoformat()
+        or requirement.get("trading_calendar_expiration") != expiration
+    ):
+        evidence.update({"trading_calendar_status": "unavailable", "trading_calendar_reason": "calendar_binding_mismatch"})
+        return evidence, False
+    if requirement.get("trading_calendar_status") != "ok":
+        return evidence, True
+    try:
+        start = date.fromisoformat(str(requirement["trading_calendar_request_start"]))
+        end = date.fromisoformat(str(requirement["trading_calendar_request_end"]))
+        expiry = date.fromisoformat(str(expiration))
+        days = json.loads(str(requirement["trading_calendar_dates"]))
+        receipt = requirement["trading_calendar_receipt"]
+        if (
+            start != market_date or end < expiry or not isinstance(days, list) or not days
+            or days != sorted(set(days))
+            or not isinstance(receipt, Mapping)
+            or receipt.get("retcode") != 0
+            or receipt.get("coverage_complete") is not True
+            or receipt.get("pagination_complete") is not True
+            or receipt.get("page_count") != 1
+            or not isinstance(receipt.get("row_count"), int)
+            or receipt["row_count"] < len(days)
+            or canonical_sha256({
+                "market": market, "start": start.isoformat(), "end": end.isoformat(), "dates": days,
+            }) != requirement["trading_calendar_input_hash"]
+        ):
+            raise ValueError("calendar_receipt_or_hash_mismatch")
+        parsed = [date.fromisoformat(item) for item in days]
+        if any(day.isoformat() != raw or not start <= day <= end for raw, day in zip(days, parsed)):
+            raise ValueError("calendar_date_invalid")
+        future = sum(market_date < day <= expiry for day in parsed)
+        today_in_calendar = market_date in parsed
+        include_today: bool | None = False if not today_in_calendar else None
+        state_time_raw = requirement.get("market_state_received_at_utc")
+        if today_in_calendar and state_time_raw:
+            state_time = datetime.fromisoformat(str(state_time_raw).replace("Z", "+00:00"))
+            state = str(requirement.get("market_state_after_snapshot") or "").upper()
+            if (
+                state_time.tzinfo is not None
+                and state_time >= snapshot
+                and close_advice_market_date(state_time, market) == market_date
+            ):
+                if state in {"MORNING", "AFTERNOON"}:
+                    include_today = True
+                elif state in {"CLOSED", "AFTERNOON_END", "AFTER_HOURS_BEGIN", "AFTER_HOURS_END"}:
+                    include_today = False
+        minimum = future + int(include_today is True)
+        maximum = future + int(include_today is not False and today_in_calendar)
+        evidence["remaining_trading_sessions_min"] = minimum
+        evidence["remaining_trading_sessions_max"] = maximum
+        if minimum == maximum:
+            evidence["remaining_trading_sessions"] = minimum
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError, CloseAdviceRequiredDataPlanError):
+        evidence.update({"trading_calendar_status": "unavailable", "trading_calendar_reason": "calendar_receipt_or_hash_mismatch"})
+        return evidence, False
+    return evidence, True
+
+
 def _position_to_input(
     pos: dict[str, Any],
     quote: dict[str, Any] | None,
     *,
     business_date: date,
+    calendar_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[CloseAdviceInput, list[str]]:
     expiration = _position_expiration(pos)
     mid, quote_flags = _mid_from_quote(quote)
@@ -1053,6 +1170,10 @@ def _position_to_input(
             bid=bid,
             ask=ask,
             dte=_calc_dte(expiration, business_date=business_date),
+            delta=safe_float((quote or {}).get("delta")),
+            remaining_trading_sessions=safe_int((calendar_evidence or {}).get("remaining_trading_sessions")),
+            remaining_trading_sessions_min=safe_int((calendar_evidence or {}).get("remaining_trading_sessions_min")),
+            remaining_trading_sessions_max=safe_int((calendar_evidence or {}).get("remaining_trading_sessions_max")),
             multiplier=_position_multiplier(pos),
             spot=safe_float((quote or {}).get("spot")),
             currency=normalize_currency(pos.get("currency") or (quote or {}).get("currency")),
@@ -1245,7 +1366,12 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     writer = csv.DictWriter(buf, fieldnames=OUTPUT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow(row)
+        output = dict(row)
+        if isinstance(output.get("trading_calendar_receipt"), Mapping):
+            output["trading_calendar_receipt"] = json.dumps(
+                output["trading_calendar_receipt"], sort_keys=True, separators=(",", ":")
+            )
+        writer.writerow(output)
     atomic_write_text(path, buf.getvalue(), encoding="utf-8")
 
 
@@ -1623,12 +1749,13 @@ def run_close_advice(
             if bound_plan is not None:
                 frozen_plan, frozen_plan_path, frozen_plan_bytes = bound_plan
                 frozen_plan_sha256 = sha256_bytes(frozen_plan_bytes)
-                business_date = datetime.strptime(
-                    str(frozen_plan["business_date"]),
-                    "%Y-%m-%d",
-                ).date()
+                market_dates = {
+                    market: date.fromisoformat(frozen_plan["as_of_market_dates"][market])
+                    for market in ("US", "HK")
+                }
             else:
-                business_date = expiration_business_today()
+                now_utc = datetime.now(timezone.utc)
+                market_dates = {market: close_advice_market_date(now_utc, market) for market in ("US", "HK")}
         except (
             OSError,
             ValueError,
@@ -1646,7 +1773,9 @@ def run_close_advice(
                 },
             )
     else:
-        business_date = expiration_business_today()
+        now_utc = datetime.now(timezone.utc)
+        market_dates = {market: close_advice_market_date(now_utc, market) for market in ("US", "HK")}
+    business_date = market_dates["HK"]  # Legacy report metadata; per-lot dates govern decisions.
     ctx = (
         _validate_context(dict(context_override))
         if context_override is not None
@@ -1679,7 +1808,7 @@ def run_close_advice(
             raise ValueError("close_advice position context has duplicate account/lot_id")
         seen_lots.add(key)
     position_entries = [
-        (pos, *_position_lifecycle(pos, business_date=business_date))
+        (pos, *_position_lifecycle(pos, business_date=market_dates.get(_market_for_symbol(pos.get("symbol")), business_date)))
         for pos in positions
         if isinstance(pos, dict)
     ]
@@ -1888,7 +2017,7 @@ def run_close_advice(
             inp, _quote_flags = _position_to_input(
                 pos0,
                 None,
-                business_date=business_date,
+                business_date=market_dates.get(_market_for_symbol(pos0.get("symbol")), business_date),
             )
             row = _lifecycle_not_evaluable_row(
                 inp=inp,
@@ -1920,10 +2049,20 @@ def run_close_advice(
 
         key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"), base_dir=Path(base_dir))
         quote = quotes.get(key)
+        lot_id = str(pos0.get("lot_id") or pos0.get("record_id") or "").strip()
+        market = _market_for_symbol(pos0.get("symbol"))
+        calendar_evidence, snapshot_aligned = _close_advice_calendar_evidence(
+            requirement=frozen_requirements_by_lot.get(lot_id) if frozen_mode else None,
+            quote=quote,
+            market=market,
+            market_date=market_dates.get(market, business_date),
+            expiration=exp,
+        )
         inp, quote_flags = _position_to_input(
             pos0,
             quote,
-            business_date=business_date,
+            business_date=market_dates.get(market, business_date),
+            calendar_evidence=calendar_evidence,
         )
         row = _evaluate_position_close_advice(
             inp=inp,
@@ -1931,6 +2070,7 @@ def run_close_advice(
             quote=quote,
         )
         row["position_lifecycle_state"] = lifecycle_state
+        row.update(calendar_evidence)
         row = _apply_required_data_row_provenance(
             row,
             position=pos0,
@@ -1943,6 +2083,13 @@ def run_close_advice(
             provenance_by_symbol=frozen_provenance,
         )
         row = _with_extra_flags(row, quote_flags)
+        if not frozen_mode or not snapshot_aligned:
+            row = _mark_not_evaluable(
+                row,
+                evaluation_status="not_evaluable",
+                quote_status="not_evaluable",
+                reason="当前缺少同次封存且市场日期一致的行情与日历证据",
+            )
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
         issue_reason = str(issue_reasons.get(key) or "").strip()
         if (
@@ -2231,6 +2378,7 @@ def run_close_advice(
         ),
         "close_advice_required_data_plan_sha256": frozen_plan_sha256,
         "business_date": business_date.isoformat(),
+        "as_of_market_dates": {market: day.isoformat() for market, day in market_dates.items()},
         "report_manifest": report_manifest,
         "csv": str(csv_path),
         "text": str(text_path),

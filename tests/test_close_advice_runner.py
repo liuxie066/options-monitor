@@ -22,6 +22,55 @@ def _freeze_business_date(monkeypatch: pytest.MonkeyPatch) -> None:
         "src.application.close_advice_runner.expiration_business_today",
         lambda: BUSINESS_DATE,
     )
+    monkeypatch.setattr(
+        "src.application.close_advice_runner.close_advice_market_date",
+        lambda _value, _market: BUSINESS_DATE,
+    )
+
+
+def test_sealed_calendar_counts_market_session_boundary_and_rejects_tamper() -> None:
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application.close_advice_runner import _close_advice_calendar_evidence
+    import json
+
+    days = ["2026-09-04", "2026-09-08", "2026-09-09", "2026-09-10"]
+    common = {
+        "market": "US", "expiration": "2026-09-10",
+        "trading_calendar_market": "US",
+        "trading_calendar_as_of_market_date": "2026-09-04",
+        "trading_calendar_expiration": "2026-09-10",
+        "trading_calendar_request_start": "2026-09-04",
+        "trading_calendar_request_end": "2026-09-10",
+        "trading_calendar_status": "ok",
+        "trading_calendar_dates": json.dumps(days),
+        "trading_calendar_input_hash": canonical_sha256({
+            "market": "US", "start": "2026-09-04", "end": "2026-09-10", "dates": days,
+        }),
+        "trading_calendar_receipt": {
+            "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+            "page_count": 1, "row_count": 4,
+        },
+    }
+    quote = {"market": "US", "snapshot_received_at_utc": "2026-09-04T14:00:00Z"}
+    kwargs = {"quote": quote, "market": "US", "market_date": date(2026, 9, 4),
+              "expiration": "2026-09-10"}
+    unknown, aligned = _close_advice_calendar_evidence(requirement=common, **kwargs)
+    assert aligned and (unknown["remaining_trading_sessions_min"], unknown["remaining_trading_sessions_max"]) == (3, 4)
+    assert pd.isna(unknown["remaining_trading_sessions"])
+
+    open_state = {**common, "market_state_after_snapshot": "MORNING",
+                  "market_state_received_at_utc": "2026-09-04T14:01:00Z"}
+    opened, aligned = _close_advice_calendar_evidence(requirement=open_state, **kwargs)
+    assert aligned and opened["remaining_trading_sessions"] == 4
+    closed_state = {**common, "market_state_after_snapshot": "CLOSED",
+                    "market_state_received_at_utc": "2026-09-04T20:01:00Z"}
+    closed, aligned = _close_advice_calendar_evidence(requirement=closed_state, **kwargs)
+    assert aligned and closed["remaining_trading_sessions"] == 3
+
+    tampered, aligned = _close_advice_calendar_evidence(
+        requirement={**common, "trading_calendar_input_hash": "0" * 64}, **kwargs
+    )
+    assert not aligned and tampered["trading_calendar_status"] == "unavailable"
 
 
 def _position(
@@ -316,7 +365,7 @@ def test_context_override_is_the_only_position_snapshot_evaluated(
     assert "TSLA" not in result["notification_text"]
 
 
-def test_remaining_yield_close_row_is_the_only_notified_state(
+def test_mutable_quote_cannot_notify_even_when_economic_gates_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -334,9 +383,9 @@ def test_remaining_yield_close_row_is_the_only_notified_state(
 
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
     assert result["rows"] == 1
-    assert result["notify_rows"] == 1
-    assert row["policy_version"] == "remaining_yield_capture.v1"
-    assert row["recommendation_state"] == "close"
+    assert result["notify_rows"] == 0
+    assert row["policy_version"] == "remaining_yield_capture.v3"
+    assert row["recommendation_state"] == "not_evaluable"
     assert row["net_capture_ratio"] >= 0.80
     assert row["capital_basis"] == 10000.0
     assert row["remaining_max_annualized_return"] <= 0.10
@@ -344,9 +393,46 @@ def test_remaining_yield_close_row_is_the_only_notified_state(
     assert row["leg_role"] == "funding_put"
     assert pd.isna(row["source_stock_lot_id"])
     assert row["strategy_family"] == "sell_put"
-    assert "NVDA Put 2026-06-15" in (
-        output_dir / "close_advice.txt"
-    ).read_text(encoding="utf-8")
+    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
+
+
+def test_rv_calendar_field_cannot_supply_close_advice_calendar_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.application.close_advice_runner.close_advice_market_date",
+        lambda _value, _market: date(2026, 9, 4),
+    )
+    quote = {
+        **_quote(bid=0.0, ask=0.01),
+        "expiration": "2026-09-08",  # Labor Day is September 7.
+        "delta": -0.04,
+        "term_matched_rv_status": "ok",
+        "term_matched_rv_remaining_sessions": 2,
+    }
+    (tmp_path / "calendar_ok").mkdir()
+    result, output_dir = _run(
+        tmp_path / "calendar_ok",
+        positions=[_position(expiration="2026-09-08")],
+        quotes=[quote],
+    )
+    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
+    assert result["notify_rows"] == 0
+    assert row["recommendation_state"] == "not_evaluable"
+    assert pd.isna(row["remaining_trading_sessions"])
+    assert row["delta"] == -0.04
+
+    quote["term_matched_rv_status"] = "data_unavailable"
+    (tmp_path / "calendar_missing").mkdir()
+    fallback, fallback_dir = _run(
+        tmp_path / "calendar_missing",
+        positions=[_position(expiration="2026-09-08")],
+        quotes=[quote],
+    )
+    fallback_row = pd.read_csv(fallback_dir / "close_advice.csv").iloc[0]
+    assert fallback["notify_rows"] == 0
+    assert fallback_row["recommendation_state"] == "not_evaluable"
 
 
 def test_lifecycle_not_evaluable_row_preserves_wheel_stock_relationship(
@@ -378,17 +464,16 @@ def test_lifecycle_not_evaluable_row_preserves_wheel_stock_relationship(
 
 
 @pytest.mark.parametrize(
-    ("quote", "expected_state"),
+    "quote",
     [
-        (_quote(bid=0.45, ask=0.50), "hold"),
-        (_quote(bid=0.02, ask=None), "not_evaluable"),
+        _quote(bid=0.45, ask=0.50),
+        _quote(bid=0.02, ask=None),
     ],
 )
 def test_non_close_states_are_recorded_but_not_notified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     quote: dict,
-    expected_state: str,
 ) -> None:
     _freeze_business_date(monkeypatch)
     result, output_dir = _run(
@@ -398,7 +483,7 @@ def test_non_close_states_are_recorded_but_not_notified(
     )
 
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["recommendation_state"] == expected_state
+    assert row["recommendation_state"] == "not_evaluable"
     assert result["notify_rows"] == 0
     assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
 
@@ -452,7 +537,7 @@ def test_boolean_position_evidence_fails_closed_before_domain_evaluation(
     assert result["notify_rows"] == 0
 
 
-def test_missing_open_date_still_allows_remaining_yield_evaluation(
+def test_missing_open_date_does_not_bypass_sealed_evidence_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -461,8 +546,8 @@ def test_missing_open_date_still_allows_remaining_yield_evaluation(
     position.pop("opened_at")
     result, output_dir = _run(tmp_path, positions=[position], quotes=[_quote()])
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert result["notify_rows"] == 1
-    assert row["recommendation_state"] == "close"
+    assert result["notify_rows"] == 0
+    assert row["recommendation_state"] == "not_evaluable"
     assert pd.isna(row["original_dte"])
 
 
@@ -489,7 +574,7 @@ def test_call_uses_spot_value_as_capital_proxy(
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
     assert row["capital_basis"] == 8000.0
     assert row["remaining_max_annualized_return"] > 0
-    assert "Call 标的市值代理" in (output_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
 
 
 def test_long_options_are_outside_close_advice_scope(
@@ -508,7 +593,7 @@ def test_long_options_are_outside_close_advice_scope(
     assert pd.read_csv(output_dir / "close_advice.csv").empty
 
 
-def test_notification_limit_does_not_change_policy_results(
+def test_notification_limit_cannot_promote_mutable_quotes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,9 +614,9 @@ def test_notification_limit_does_not_change_policy_results(
     )
 
     rows = pd.read_csv(output_dir / "close_advice.csv")
-    assert set(rows["recommendation_state"]) == {"close"}
+    assert set(rows["recommendation_state"]) == {"not_evaluable"}
     assert result["rows"] == 2
-    assert result["notify_rows"] == 1
+    assert result["notify_rows"] == 0
 
 
 def test_malformed_context_does_not_replace_last_good_report(

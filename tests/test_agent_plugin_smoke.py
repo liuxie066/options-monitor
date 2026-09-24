@@ -3512,6 +3512,14 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
             "recommendation_state": "close",
             "policy_version": "legacy_close_policy.v1",
         },
+        {
+            "recommendation_state": "close",
+            "policy_version": "remaining_yield_capture.v1",
+        },
+        {
+            "recommendation_state": "close",
+            "policy_version": "remaining_yield_capture.v2",
+        },
     ):
         projected = _decision_fields_for_read(row)
         assert projected["recommendation_state"] == "not_evaluable"
@@ -3530,7 +3538,7 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_evidence_status": "complete",
             },
             "missing_strict_decision_basis",
@@ -3538,7 +3546,7 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "not_evaluable",
                 "evaluation_status": "priced",
@@ -3549,7 +3557,7 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "not_evaluable",
@@ -3560,7 +3568,7 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         (
             {
                 "recommendation_state": "not_evaluable",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "missing_required_quote",
                 "decision_evidence_status": "not_evaluable",
                 "evaluation_status": "priced",
@@ -3588,7 +3596,7 @@ def test_close_advice_read_requires_new_metrics_and_sorts_by_remaining_yield(
         "position_side": "short",
         "evaluation_status": "priced",
         "recommendation_state": "close",
-        "policy_version": "remaining_yield_capture.v1",
+        "policy_version": "remaining_yield_capture.v3",
         "decision_basis": "remaining_yield_capture_all_gates_passed",
         "decision_evidence_status": "complete",
         "capital_basis": 10000,
@@ -4212,9 +4220,9 @@ def test_close_advice_summary_orders_strict_recommendations(tmp_path: Path) -> N
     text_path = tmp_path / "close_advice.txt"
     pd.DataFrame(
         [
-            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
-            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.91, "capital_basis": 10000, "remaining_max_annualized_return": 0.03},
-            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.95, "capital_basis": 10000, "remaining_max_annualized_return": 0.08},
+            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
+            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.91, "capital_basis": 10000, "remaining_max_annualized_return": 0.03},
+            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.95, "capital_basis": 10000, "remaining_max_annualized_return": 0.08},
         ]
     ).to_csv(csv_path, index=False)
     text_path.write_text("", encoding="utf-8")
@@ -4242,7 +4250,7 @@ def test_close_advice_summary_uses_supplied_validated_bytes(
                 "symbol": "NVDA",
                 "recommendation_state": "close",
                 "evaluation_status": "priced",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_evidence_status": "complete",
                 "net_capture_ratio": 0.95,
                 "capital_basis": 10000,
@@ -4260,7 +4268,7 @@ def test_close_advice_summary_uses_supplied_validated_bytes(
                 "symbol": "TSLA",
                 "recommendation_state": "hold",
                 "evaluation_status": "priced",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_evidence_status": "complete",
                 "net_capture_ratio": 0.10,
             }
