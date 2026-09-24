@@ -861,11 +861,15 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 The systemd bundle includes `options-monitor-trade-intake-heartbeat.timer` (one-minute
 interval). Its `./om run trade-intake-heartbeat-check --unit
 options-monitor-trade-intake.service --market us --config <runtime-config>
---runtime-root <runtime-root>` service checks unit activity and each source's
-`last_heartbeat_utc`. A missing or stale heartbeat while the unit is active,
-an inactive unit, and a confirmed recovery use the configured system-alert
-notification route. This command can send a notification; use `runtime_status`
-for read-only inspection.
+--runtime-root <runtime-root>` service checks unit activity, each source's
+`last_heartbeat_utc`, and whether that source's `status` is one of the values the
+listener reserves for a source that is not working (`blocked`, `error`,
+`reconnecting`, `stopped`). The stage labels it writes while working
+(`starting` during receipt/backfill work, `listening`, `once`) are not liveness
+signals and are reported as context only. A missing or stale heartbeat while the
+unit is active, an inactive unit, and a confirmed recovery use the configured
+system-alert notification route. This command can send a notification; use
+`runtime_status` for read-only inspection.
 
 ### Release Request
 

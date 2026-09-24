@@ -1821,6 +1821,29 @@ def test_deal_json_account_conflict_returns_clean_rejection(tmp_path, monkeypatc
     assert "Traceback" not in captured.err
 
 
+def test_listener_status_writer_records_status_for_carry_forward(tmp_path: Path) -> None:
+    """The receipt-recovery hook carries the current status forward, not a literal.
+
+    `_recover_local_intake_if_due` writes `status=str(status_state.get("status") or
+    "starting")` so it can preserve whatever the listener last reported, and it
+    reads that from the same state dict every writer shares. `_write_listener_status`
+    therefore has to record what it wrote: when it only wrote a local copy, the hook
+    relabelled a healthy listener as "starting" on every iteration — which paged the
+    operator every 10 minutes and made the runtime summary read "partial" forever.
+    """
+    status_path = tmp_path / "intake-status.json"
+    status_state: dict[str, object] = {}
+    auto_intake._write_listener_status(status_path, status_state, status="listening", stage="heartbeat")
+    assert status_state["status"] == "listening"
+    auto_intake._write_listener_status(
+        status_path, status_state,
+        status=str(status_state.get("status") or "starting"), stage="receipt_recovery",
+    )
+    written = json.loads(status_path.read_text(encoding="utf-8"))
+    assert written["status"] == "listening"
+    assert written["stage"] == "receipt_recovery"
+
+
 @pytest.mark.parametrize("mode,status,expected", [
     ("apply", "failed", False), ("apply", "applied", True), ("apply", "unresolved", False),
     ("apply", "verification_pending", False), ("apply", "skipped", False), ("dry-run", "applied", False),
@@ -1835,3 +1858,140 @@ def test_deal_json_write_contract_requires_applied_result(tmp_path, monkeypatch,
     assert result["status"] == status
     assert result["write_applied"] is expected
     assert result["dry_run"] is (mode == "dry-run")
+
+
+def test_source_loop_carries_listening_status_across_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A running source must not read as "starting" for the whole iteration.
+
+    `_recover_local_intake_if_due` writes the status file at the top of every work
+    iteration and has no status of its own to report, so it names whatever the
+    loop currently holds. The loop held nothing — `_write_listener_status` wrote
+    the file without updating its caller's state — so that write always said
+    "starting" and, because the heartbeat lands at the end of the iteration, the
+    file read "starting" for all but about a second of each cycle. That is what
+    the 3.7.1 heartbeat watchdog sampled when it paged production every silence
+    window on 2026-09-24. The observation point below is inside the loop's work,
+    between that write and the heartbeat, which is exactly where the operator's
+    samples landed.
+    """
+    order: list[str] = []
+
+    class Repo:
+        def list_trade_lifecycle_attempt_audit_heads_for_account(self, *, account: str) -> list[dict]:
+            assert account == "lx"
+            return []
+
+    class Listener:
+        def __init__(self, **_kwargs):
+            return None
+
+        def start(self, **_kwargs):
+            return None
+
+        def check_health(self):
+            return None
+
+        def close(self):
+            return None
+
+    class History:
+        def __init__(self, **_kwargs):
+            return None
+
+        def fetch(self):
+            return []
+
+        def close(self):
+            return None
+
+    class Gateway:
+        def close(self):
+            return None
+
+    class Stop:
+        stopped = False
+        waits = 0
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, _seconds):
+            self.waits += 1
+            if self.waits >= 2:
+                self.stopped = True
+            return self.stopped
+
+    monotonic = 0
+
+    def next_monotonic():
+        nonlocal monotonic
+        monotonic += 61
+        return float(monotonic)
+
+    status_path = tmp_path / "status.json"
+    observed: list[str] = []
+
+    def observe(*_args, **_kwargs):
+        observed.append(json.loads(status_path.read_text(encoding="utf-8"))["status"])
+        return {"seal_status": "not_required", "run_seal": None, "process_counters": _kwargs["process_metrics"]}
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(
+        auto_intake,
+        "append_lifecycle_attempt_checkpoint_seal",
+        lambda *_args, **_kwargs: order.append("seal"),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "build_futu_gateway",
+        lambda **_kwargs: order.append("gateway") or Gateway(),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_futu_quote_route",
+        lambda _cfg: SimpleNamespace(ok=False, errors=("quote unavailable",), status="unavailable", host=None, port=None),
+    )
+    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", observe)
+    monkeypatch.setattr(auto_intake, "trade_inbox_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(auto_intake, "list_retryable_trade_payloads", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(auto_intake, "_refresh_lifecycle_delivery_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(auto_intake.time, "monotonic", next_monotonic)
+    source = {
+        "id": "lx",
+        "account": "lx",
+        "host": "127.0.0.1",
+        "port": 11111,
+        "state_path": tmp_path / "state.json",
+        "audit_path": tmp_path / "audit.jsonl",
+        "status_path": status_path,
+        "inbox_path": tmp_path / "inbox.sqlite3",
+        "backfill_checkpoint_path": tmp_path / "backfill.json",
+        "account_mapping": {"1001": "lx"},
+        "futu_account_ids": ["1001"],
+        "backfill": {"enabled": False},
+    }
+
+    rc = auto_intake._run_listener_source_loop(
+        source=source,
+        repo=Repo(),
+        cfg={},
+        cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+        intake_cfg={"mode": "apply", "enabled": True, "backfill": {"enabled": False}},
+        apply_changes=True,
+        receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(),
+        stop_event=Stop(),
+    )
+
+    assert rc == 0
+    assert observed, "the loop never reached its work phase"
+    assert observed == ["listening"] * len(observed)
