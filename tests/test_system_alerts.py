@@ -438,8 +438,7 @@ def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkey
     stale_age = service_failure_alert._HEARTBEAT_STALE_SECONDS + 60
     status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": (now - timedelta(seconds=stale_age)).isoformat()}), encoding="utf-8")
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 1
@@ -487,8 +486,7 @@ def test_trade_intake_heartbeat_ignores_transient_stage_labels(monkeypatch, tmp_
         send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
     ))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert sends == []
 
@@ -529,8 +527,7 @@ def test_trade_intake_heartbeat_reads_the_status_vocabulary(monkeypatch, tmp_pat
         send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
     ))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == expected_sends, status_label
     if expected_sends:
@@ -562,8 +559,7 @@ def test_trade_intake_heartbeat_rejects_a_future_heartbeat(monkeypatch, tmp_path
         send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
     ))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 1
     assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
@@ -590,8 +586,7 @@ def test_trade_intake_heartbeat_window_clears_measured_worst_case_yet_still_aler
         send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
     ))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     worst_measured_iteration = 583  # production 2026-09-24, 16h of audit records (n=163)
     for age_seconds, expected_sends in (
         (worst_measured_iteration, 0),
@@ -620,8 +615,7 @@ def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(mon
     sends = []
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
+                config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 0
     assert "TRADE_INTAKE_PROCESS_DOWN" in sends[0]["message"]
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
@@ -631,7 +625,7 @@ def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(mon
     assert "<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED" in capsys.readouterr().out
 
 
-def test_root_disk_threshold_alerts_repeat_safely_and_recover(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_heartbeat_retires_old_disk_alert_without_a_new_notice(monkeypatch, tmp_path: Path) -> None:
     from src.application import service_failure_alert, system_alerts
 
     config_path = tmp_path / "config.json"
@@ -646,22 +640,24 @@ def test_root_disk_threshold_alerts_repeat_safely_and_recover(monkeypatch, tmp_p
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
         send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
     ))
-    used = [84]
-    args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now,
-                unit_active_fn=lambda _unit: True,
-                disk_usage_fn=lambda path: SimpleNamespace(total=100, used=used[0]))
-    for level, expected_sends in ((84, 0), (85, 1), (85, 1), (90, 2), (90, 2), (80, 4), (80, 4)):
-        used[0] = level
-        assert service_failure_alert.check_trade_intake_heartbeat(**args) == 0
-        assert len(sends) == expected_sends
-    assert sum("已恢复" in item["message"] for item in sends) == 2
-    output = capsys.readouterr().out
-    assert output.count("<4>ROOT_DISK_USAGE_85") == 1
-    assert output.count("<3>ROOT_DISK_USAGE_90") == 1
-    args["disk_usage_fn"] = lambda _path: (_ for _ in ()).throw(OSError("disk fixture unavailable"))
-    assert service_failure_alert.check_trade_intake_heartbeat(**args) == 1
-    assert "<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED" in capsys.readouterr().out
+    disk = dict(base=tmp_path, config=_config(), unit="options-monitor-root-disk",
+                market="host", account="system", failure_code="ROOT_DISK_USAGE_85",
+                stage="disk_capacity")
+    assert system_alerts.report_system_failure(
+        **disk, run_id="old-run", rc=0, first_error_at=now.isoformat(),
+        opend_login_state="not_applicable",
+    ) == "confirmed"
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: (_ for _ in ()).throw(AssertionError("disk polled")))
+    assert service_failure_alert.check_trade_intake_heartbeat(
+        unit="options-monitor-trade-intake.service", market="us",
+        config_path=str(config_path), runtime_root=tmp_path, now=now,
+        unit_active_fn=lambda _unit: True,
+    ) == 0
+    assert len(sends) == 1
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert state[system_alerts._fingerprint("options-monitor-root-disk", "host", "system",
+                                             "ROOT_DISK_USAGE_85", "disk_capacity")]["status"] == "retired"
+    assert system_alerts.system_alert_delivery_status(tmp_path)["active_count"] == 0
 
 
 def test_service_failure_alert_cli_dispatch(monkeypatch, tmp_path: Path) -> None:

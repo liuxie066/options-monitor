@@ -343,6 +343,20 @@ def report_system_recovery(
     return "confirmed" if confirmed else "unconfirmed"
 
 
+def retire_system_failure(
+    *, base: Path, unit: str, market: str, account: str, failure_code: str, stage: str,
+) -> None:
+    """Silently close a removed alert rule without asserting recovery."""
+    key = _fingerprint(unit, market, account, failure_code, stage)
+    path = base / "output_shared" / "state" / "system_alerts.json"
+    with _state_lock(path):
+        state = _read_state(path)
+        if isinstance(state.get(key), dict) and state[key].get("status") == "failed":
+            state[key]["status"] = "retired"
+            state[key]["retired_at"] = datetime.now(timezone.utc).isoformat()
+            atomic_write_json(path, state)
+
+
 def report_system_meta_signal(
     *, base: Path, unit: str, market: str, account: str, failure_code: str,
     stage: str, run_id: str, degraded: bool, reason: str = "",
