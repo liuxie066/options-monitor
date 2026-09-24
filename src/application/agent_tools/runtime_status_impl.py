@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -396,14 +397,19 @@ def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[
 def _ledger_context_summary(context_info: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(context_info, dict):
         return {"available": False, "status": "unknown", "fail_closed": False}
+    if not context_info.get("exists"):
+        return {"available": False, "status": "not_generated", "reason": "context_artifact_missing", "fail_closed": False}
+    if context_info.get("read_error") or not context_info.get("is_file", False):
+        return {"available": False, "status": "read_failed", "reason": "context_artifact_unreadable", "fail_closed": False}
     payload = context_info.get("json")
     context: dict[str, Any] = payload if isinstance(payload, dict) else {}
     ledger_raw = context.get("ledger")
     ledger: dict[str, Any] = ledger_raw if isinstance(ledger_raw, dict) else {}
     if not ledger:
         return {
-            "available": bool(context_info.get("exists")),
+            "available": False,
             "status": "unknown",
+            "reason": "context_payload_empty_or_unreadable" if not context else "ledger_section_missing",
             "fail_closed": False,
         }
     return {
@@ -1161,6 +1167,66 @@ def _parse_utc(value: Any) -> datetime | None:
     if out.tzinfo is None:
         return out.replace(tzinfo=timezone.utc)
     return out.astimezone(timezone.utc)
+
+
+def _tick_health_from_artifacts(
+    *,
+    shared_state_dir: Path,
+    market: str,
+    account_status: dict[str, Any],
+    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    market_key = str(market or "").strip().lower()
+    if market_key not in {"hk", "us"}:
+        return {"status": "unknown", "reason_code": "TICK_MARKET_UNKNOWN", "market": market_key}
+    pending = read_json_object_or_empty(shared_state_dir / "opend_phone_verify_pending.json")
+    if pending.get("pending"):
+        return {"status": "failed", "reason_code": "OPEND_NEEDS_PHONE_VERIFY", "market": market_key}
+    latest = read_json_object_or_empty(
+        shared_state_dir / "current" / f"tick_cron_last_result.{market_key}.current.json"
+    )
+    status = str(latest.get("status") or "").strip().lower()
+    if status == "ok":
+        return {"status": "ok", "reason_code": "TICK_COMPLETED", "market": market_key,
+                "observed_at_utc": latest.get("event_at_utc")}
+    if status in {"failed", "evidence_incomplete"}:
+        reason = str(latest.get("error_code") or "TICK_EXEC_FAILED")
+        wrapper_at = _parse_utc(latest.get("event_at_utc"))
+        for info in account_status.values():
+            last = _dict(_dict(info).get("last_run")).get("json")
+            account_run = _dict(last)
+            code = str(account_run.get("error_code") or "")
+            account_at = _parse_utc(account_run.get("last_run_utc"))
+            if (
+                code.startswith("OPEND_") and wrapper_at and account_at
+                and 0 <= (wrapper_at - account_at).total_seconds() <= 120
+            ):
+                reason = code
+                break
+        return {"status": status, "reason_code": reason, "market": market_key,
+                "observed_at_utc": latest.get("event_at_utc"), "run_id": latest.get("run_id")}
+    return {"status": "unknown", "reason_code": "TICK_EVIDENCE_MISSING", "market": market_key}
+
+
+def _tick_unit_execution_status(market: str) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", f"options-monitor-tick-{market}.service",
+             "--property=Result", "--property=ExecMainStatus"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    unit_result = fields.get("Result", "").strip()
+    exit_status = fields.get("ExecMainStatus", "").strip()
+    if unit_result and unit_result != "success":
+        return "failed"
+    if exit_status and exit_status != "0":
+        return "failed"
+    return "ok" if unit_result == "success" else "unknown"
 
 
 def _freshness_from_runtime_status(
@@ -2502,6 +2568,21 @@ def private_runtime_status_tool(
     shared_last_run_json_raw = shared_last_run.get("json")
     shared_last_run_json: dict[str, Any] = shared_last_run_json_raw if isinstance(shared_last_run_json_raw, dict) else {}
     latest_status = shared_last_run_json.get("status") or shared_last_run_json.get("last_status")
+    tick_health = _tick_health_from_artifacts(
+        shared_state_dir=shared_state_dir,
+        market=desired_market,
+        account_status=account_status,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
+    if bool(payload.get("include_service_status")) and tick_health["market"] in {"hk", "us"}:
+        unit_status = _tick_unit_execution_status(tick_health["market"])
+        if unit_status == "failed" and tick_health["status"] == "ok":
+            tick_health = {**tick_health, "status": "failed", "reason_code": "TICK_SERVICE_FAILED"}
+        elif unit_status == "unknown" and tick_health["status"] == "ok":
+            tick_health = {**tick_health, "status": "unknown", "reason_code": "TICK_SERVICE_UNAVAILABLE"}
+    if tick_health["status"] in {"failed", "evidence_incomplete"}:
+        warnings.append("Scheduled Tick failed: " + str(tick_health["reason_code"]))
+        warning_codes.append(str(tick_health["reason_code"]))
     env_file_path = _assistant_env_file_path_from_payload(payload, base=base)
     effective_env, environment = build_effective_env_with_status(
         repo_root=base,
@@ -2567,6 +2648,7 @@ def private_runtime_status_tool(
         "projection_verify": projection_verify,
         "service_upgrade": {**upgrade_status, "evaluation": upgrade_evaluation},
         "service_drift": service_drift,
+        "tick_health": tick_health,
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -2588,6 +2670,8 @@ def private_runtime_status_tool(
             "warning_count": len(warnings),
             "warning_codes": warning_codes,
             "latest_status": latest_status,
+            "tick_health_status": tick_health["status"],
+            "tick_health_reason_code": tick_health["reason_code"],
         },
     }
     data["account_summary"] = _account_summary(data)
@@ -2730,6 +2814,8 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             "warning_count",
             "warning_codes",
             "latest_status",
+            "tick_health_status",
+            "tick_health_reason_code",
             "freshness_status",
             "notification_status",
             "notification_reason",
@@ -2861,6 +2947,7 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
         "projection_verify": projection_verify,
         "service_upgrade": _status_safe_service_upgrade(data.get("service_upgrade")),
         "service_drift": _status_safe_service_drift(data.get("service_drift")),
+        "tick_health": _pick(data.get("tick_health"), {"status", "reason_code", "market", "observed_at_utc", "run_id"}),
         "accounts": _status_safe_accounts(data.get("accounts")),
         "latest_run_selection": latest_run_selection,
         "latest_run": _status_safe_run(latest_run),

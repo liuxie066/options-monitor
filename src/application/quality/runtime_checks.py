@@ -186,6 +186,23 @@ def build_runtime_checks(
             evidence_refs=[],
         )
     )
+    for item in runtime_statuses:
+        tick = item.get("tick_health") if isinstance(item.get("tick_health"), dict) else {}
+        status = str(tick.get("status") or "unknown")
+        reason = str(tick.get("reason_code") or "TICK_EVIDENCE_MISSING")
+        checks.append(
+            check_result(
+                check_id="RT-OM-005",
+                status="pass" if status == "ok" else "fail" if status in {"failed", "evidence_incomplete"} else "unknown",
+                scope={"market": tick.get("market"), "source": "tick-cron"},
+                observed_at_utc=observed_at_utc,
+                reason_code=reason,
+                message=f"Scheduled Tick state: {status}.",
+                observed={"status": status, "run_id": tick.get("run_id")},
+                expected={"status": "ok"},
+                evidence_refs=[],
+            )
+        )
     return checks
 
 

@@ -68,6 +68,8 @@
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
+- [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的研发设计。
+- [Runtime Failure Operations](RUNTIME_FAILURE_OPERATIONS.md)：Tick 故障取证、审计时间窗、drift 导出与只读回收预览。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
 ## Tool Gateway、Bot 与消息入口

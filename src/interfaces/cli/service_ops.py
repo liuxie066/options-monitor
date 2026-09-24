@@ -18,6 +18,7 @@ from src.application.service_drift import (
     SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
     migrate_service_credentials,
     service_drift,
+    export_service_drift,
 )
 from src.application.service_upgrade import (
     ServiceTransitionError,
@@ -138,6 +139,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_drift_cmd.add_argument("--repo-root", default=None)
     service_drift_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_drift_cmd.add_argument("--profile-path", default=None)
+    service_drift_cmd.add_argument("--output", default=None, help="write the complete drift details as private JSON")
     service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing/changed units and profile, then reload affected timers")
     service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_drift_cmd.add_argument(
@@ -405,6 +407,8 @@ def handle_service_update_command(
             confirmed=confirmed,
             rollback_hint="remove written units or restore the previous service.profile.json",
         )
+        if args.output:
+            export_service_drift(args.output, data)
         ok = bool(data.get("summary", {}).get("ok", True))
         return build_response(tool_name="service.drift", ok=ok, data=data)
 

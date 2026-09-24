@@ -158,12 +158,12 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "close_advice_read": {
         "intent_name": "position_exit_analysis",
-        "display_name": "严格平仓分析",
+        "display_name": "提前止盈分析",
         "arguments": ("account", "symbol", "option_type", "side", "strike", "expiration", "limit"),
         "direct_executable": True,
         "risk_level": "read_only",
-        "examples": ("分析 NVDA short put 是否已达到严格平仓条件", "查看 lx 账户 short call 的平仓建议"),
-        "summary": "read the latest strict close-advice report for matching short put/call positions",
+        "examples": ("分析 NVDA short put 是否已达到提前止盈条件", "查看 lx 账户 short call 的平仓建议"),
+        "summary": "read the latest close-advice report for matching short put/call positions",
         "scope_policy": "config_required",
     },
     "option_performance_report": {

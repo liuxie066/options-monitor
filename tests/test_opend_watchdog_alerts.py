@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,6 +57,23 @@ def test_opend_alert_rate_limit(tmp_path: Path) -> None:
     assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is False
     # Different code should still pass.
     assert should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
+
+
+def test_opend_alert_is_latched_until_recovery(tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    base = Path(tmp_path)
+
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is True
+    # A stale cooldown must not reopen the same incident.
+    state_path = opend_guard.opend_alert_rl_path(base)
+    state = opend_guard.read_json(state_path, {})
+    state['last_sent_utc_by_error']['project::OPEND_RATE_LIMIT'] = '2020-01-01T00:00:00+00:00'
+    opend_guard.write_json(state_path, state)
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is False
+
+    opend_guard.record_opend_recovery(base)
+    assert opend_guard.should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=60) is True
 
 
 def test_opend_alert_family_dedupe_and_burst_limit(tmp_path: Path) -> None:
@@ -152,7 +170,7 @@ def test_send_opend_alert_no_send_does_not_consume_rate_limit(monkeypatch, tmp_p
     assert len(calls) == 1
 
 
-def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch, tmp_path: Path) -> None:
+def test_send_opend_alert_failed_send_reserves_incident_attempt(monkeypatch, tmp_path: Path) -> None:
     from src.application.multi_tick import opend_guard
 
     calls: list[dict[str, object]] = []
@@ -181,8 +199,16 @@ def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch, t
     )
     assert failed is False
     assert len(calls) == 1
-    assert not opend_guard.opend_alert_rl_path(base).exists()
+    assert opend_guard.opend_alert_rl_path(base).exists()
+    alert_state = json.loads(opend_guard.opend_alert_rl_path(base).read_text())
+    assert alert_state["last_delivery_status_by_error"]["project::OPEND_LOGIN_ACTION_REQUIRED"] == "delivery_unknown"
+    assert opend_guard.send_opend_alert(
+        base, cfg, error_code="OPEND_LOGIN_INVALID", message_text="invalid login",
+        skip_consecutive_gate=True,
+    ) is False
+    assert len(calls) == 1
 
+    opend_guard.record_opend_recovery(base)
     sent = opend_guard.send_opend_alert(
         base,
         cfg,
@@ -192,6 +218,8 @@ def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch, t
     )
     assert sent is True
     assert len(calls) == 2
+    alert_state = json.loads(opend_guard.opend_alert_rl_path(base).read_text())
+    assert alert_state["last_delivery_status_by_error"]["project::OPEND_LOGIN_ACTION_REQUIRED"] == "delivery_confirmed"
 
     blocked = opend_guard.send_opend_alert(
         base,
@@ -202,6 +230,25 @@ def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch, t
     )
     assert blocked is False
     assert len(calls) == 2
+
+
+def test_late_delivery_confirmation_does_not_mark_new_incident(monkeypatch, tmp_path: Path) -> None:
+    import src.application.multi_tick.opend_guard as opend_guard
+
+    def confirm_after_new_incident(base: Path, cfg: dict, *, message: str) -> bool:
+        del cfg, message
+        opend_guard.record_opend_recovery(base)
+        assert opend_guard.should_send_opend_alert(base, "OPEND_LOGIN_INVALID") is True
+        return True
+
+    monkeypatch.setattr(opend_guard, "_send_notification", confirm_after_new_incident)
+    base = Path(tmp_path)
+    assert opend_guard.send_opend_alert(
+        base, _cfg(), error_code="OPEND_NEEDS_PHONE_VERIFY", message_text="needs phone",
+        skip_consecutive_gate=True,
+    ) is True
+    state = json.loads(opend_guard.opend_alert_rl_path(base).read_text())
+    assert state["last_delivery_status_by_error"]["project::OPEND_LOGIN_ACTION_REQUIRED"] == "delivery_unknown"
 
 
 def test_port_retry_loop_recovers_within_window(monkeypatch) -> None:

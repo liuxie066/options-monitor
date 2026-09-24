@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.storage import paths
 from domain.storage.json_io import append_private_text
+from domain.storage.json_io import rotating_private_jsonl_lock
 from domain.storage.json_io import atomic_write_private_json as write_json
 from domain.storage.json_io import atomic_write_private_text
 from domain.storage.json_io import read_json
@@ -140,7 +141,11 @@ def append_run_audit_jsonl(base: Path, run_id: str, name: str, payload: dict[str
 
 def append_shared_audit_jsonl(base: Path, name: str, payload: dict[str, Any]) -> Path:
     out = (shared_state_dir(base) / str(name)).resolve()
-    return append_private_text(out, json.dumps(payload, ensure_ascii=False) + "\n")
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
+    if name == "audit_events.jsonl":
+        with rotating_private_jsonl_lock(out, incoming_bytes=len(line.encode("utf-8"))):
+            return append_private_text(out, line)
+    return append_private_text(out, line)
 
 
 def normalize_audit_event(payload: dict[str, Any] | Any) -> dict[str, Any]:

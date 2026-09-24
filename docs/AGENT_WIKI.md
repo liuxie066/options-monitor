@@ -704,7 +704,7 @@ Core domain functions:
 def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]: ...
 ```
 
-The domain has one fixed `strict_profit_capture.v1` policy for short puts and
+The domain has one fixed `remaining_yield_capture.v1` policy for short puts and
 short calls. It returns only `close`, `hold`, or `not_evaluable`. The runner
 loads sealed position/quote facts, preserves fail-closed rows, and formats the
 report; it does not pair opening candidates or make replacement decisions.

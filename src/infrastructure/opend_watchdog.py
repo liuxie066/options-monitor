@@ -61,12 +61,28 @@ def _looks_like_phone_verify(msg: str) -> bool:
     return any(k in s for k in ["验证码", "手机验证", "短信验证"]) or any(k in sl for k in keys)
 
 
+def _looks_like_pic_verify(msg: str) -> bool:
+    s = msg or ""
+    low = s.lower()
+    return any(k in s for k in ("图形验证码", "图片验证码")) or any(
+        k in low for k in ("picture captcha", "image captcha", "graphic captcha", "pic verify")
+    )
+
+
+def _looks_like_invalid_login(msg: str) -> bool:
+    return "登录密码被修改" in msg and "已退出登录" in msg
+
+
 def classify_watchdog_result(state: dict | None, error_text: str | None) -> tuple[str, str]:
     err = str(error_text or "").strip()
     st = state if isinstance(state, dict) else {}
 
     if err:
         low = err.lower()
+        if _looks_like_invalid_login(err):
+            return ("OPEND_LOGIN_INVALID", "OpenD 登录已失效，需人工重新登录")
+        if _looks_like_pic_verify(err):
+            return ("OPEND_NEEDS_PIC_VERIFY", "OpenD 需要图形验证码登录")
         if "port not open" in low or "cannot connect" in low or "connection refused" in low:
             return ("OPEND_PORT_CLOSED", "OpenD 端口不可达")
         if _looks_like_rate_limit(err):
@@ -82,6 +98,8 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
 
     status = st.get("program_status_type")
     if status not in (None, "", "READY"):
+        if _looks_like_pic_verify(str(st)):
+            return ("OPEND_NEEDS_PIC_VERIFY", "OpenD 需要图形验证码登录")
         if _looks_like_phone_verify(str(st)):
             return ("OPEND_NEEDS_PHONE_VERIFY", "OpenD 需要手机验证码登录")
         return ("OPEND_NOT_READY", "OpenD 未就绪")
@@ -141,8 +159,13 @@ def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: b
     except Exception as exc:
         err1 = f"get_global_state failed: {type(exc).__name__}: {exc}"
         code1, _ = classify_watchdog_result(None, err1)
-        if code1 == "OPEND_NEEDS_PHONE_VERIFY":
-            return (None, err1, "fail_fast_phone_verify")
+        if code1 in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
+            action = {
+                "OPEND_LOGIN_INVALID": "fail_fast_login_invalid",
+                "OPEND_NEEDS_PHONE_VERIFY": "fail_fast_phone_verify",
+                "OPEND_NEEDS_PIC_VERIFY": "fail_fast_pic_verify",
+            }[code1]
+            return (None, err1, action)
         if code1 == "OPEND_RATE_LIMIT":
             return (None, err1, "no_retry_rate_limit")
         if retry_once and _looks_like_disconnect_error(err1):
@@ -350,6 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-interval-sec", type=float, default=3.0)
     parser.add_argument("--retry-timeout-sec", type=float, default=25.0)
     parser.add_argument("--success-threshold", type=int, default=2)
+    parser.add_argument("--required-capability", choices=("quote", "broker", "both"), default="both")
     return parser
 
 
@@ -363,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         retry_interval_sec=float(args.retry_interval_sec),
         retry_timeout_sec=float(args.retry_timeout_sec),
         success_threshold=int(args.success_threshold),
+        required_capability=args.required_capability,
     )
     _emit(h, bool(args.json))
     return 0 if h.ok else 2
@@ -380,3 +405,7 @@ __all__ = [
     "try_start_opend",
     "_port_retry_loop",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

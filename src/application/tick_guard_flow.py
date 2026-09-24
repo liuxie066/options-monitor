@@ -131,19 +131,20 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
     schedule_cfg = base_cfg.get("schedule", {}) or {}
     bj_tz = ZoneInfo(schedule_cfg.get("beijing_timezone", "Asia/Shanghai"))
 
-    if request.opend_phone_verify_continue:
-        request.clear_opend_phone_verify_pending_fn(request.base)
-
-    if request.is_opend_phone_verify_pending_fn(request.base):
-        request.audit_helper.audit("guard", "opend_phone_verify_pending", status="skip")
+    phone_verify_pending = request.is_opend_phone_verify_pending_fn(request.base)
+    if phone_verify_pending and not request.opend_phone_verify_continue:
+        request.audit_helper.audit("guard", "opend_phone_verify_pending", status="error",
+                                   error_code="OPEND_NEEDS_PHONE_VERIFY")
         request.runlog.safe_event(
             "run_end",
-            "skip",
+            "error",
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
             message="opend phone verify pending; paused until user confirmation",
         )
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(status="skipped", message="opend_phone_verify_pending")
-        return outcome(False, 0)
+        request.audit_helper.guard_mark_failure("OPEND_NEEDS_PHONE_VERIFY", "opend_phone_verify_pending")
+        request.complete_tick_idempotency_fn(status="failed", message="opend_phone_verify_pending",
+                                             ok=False, error_code="OPEND_NEEDS_PHONE_VERIFY")
+        return outcome(False, 2)
 
     watchdog_outcome = run_multi_tick_watchdog(
         base=request.base,
@@ -181,5 +182,8 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
             ),
         )
         return outcome(False, watchdog_outcome.return_code)
+
+    if phone_verify_pending and request.opend_phone_verify_continue:
+        request.clear_opend_phone_verify_pending_fn(request.base)
 
     return outcome(True, 0)

@@ -10,6 +10,7 @@ from src.application.agent_tool_config import repo_base
 from src.application.assistant.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
+from src.application.secret_store.contracts import SecretError
 from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
 from src.application.ledger.api import ledger_store_payload
 from src.application.runtime_config_freshness import infer_runtime_config_market
@@ -140,7 +141,7 @@ def run_healthcheck_tool(
             warnings.append("Configured portfolio.data_config is missing.")
 
     data_cfg = read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
-    feishu_holdings = resolve_feishu_holdings_config(data_cfg, environ=effective_env.values)
+    feishu_holdings = resolve_feishu_holdings_config(data_cfg, environ=effective_env.values, metadata_only=True)
     feishu_ready = bool(feishu_holdings.app_id and feishu_holdings.app_secret)
     holdings_ready = feishu_holdings.ready
     symbol_names = {
@@ -174,7 +175,7 @@ def run_healthcheck_tool(
         and normalize_notification_provider(notifications.get("provider") or notifications.get("channel"))
         == FEISHU_APP_NOTIFICATION_PROVIDER
     ):
-        bot_cfg = resolve_feishu_bot_config(notifications, environ=effective_env.values)
+        bot_cfg = resolve_feishu_bot_config(notifications, environ=effective_env.values, metadata_only=True)
         target = str(bot_cfg.user_open_id or "").strip()
         if target in {"ou_xxx", "user:ou_xxx", "chat:chat_xxx"}:
             checks.append(
@@ -474,6 +475,7 @@ def run_healthcheck_tool(
     broker_bindings = resolve_account_broker_binding_sets([(None, cfg)])
     quote_route = resolve_futu_quote_route(cfg)
     quote_ready = False
+    quote_skipped = False
     quote_message = "canonical Futu quote route is missing or conflicting"
     quote_global_state: dict[str, Any] = {}
     quote_telnet: dict[str, Any] = {}
@@ -487,27 +489,26 @@ def run_healthcheck_tool(
         )[:1]
         quote_key = f"{quote_route.host}:{quote_route.port}"
         quote_endpoint = opend_endpoints.get(quote_key) or {}
-        quote_probe = (
-            run_futu_doctor(
-                host=str(quote_route.host),
-                port=int(quote_route.port or 0),
-                symbols=quote_symbols,
-                timeout_sec=int(payload.get("timeout_sec") or 20),
-                telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
-                telnet_port=int(
-                    payload.get("opend_telnet_port")
-                    or quote_endpoint.get("telnet_port")
-                    or 22222
-                ),
-                required_capability="quote",
-            )
-            if quote_symbols
-            else {
-                "ok": False,
-                "message": "canonical Futu quote route has no representative symbol",
-            }
-        )
+        quote_probe = {"ok": False, "message": "canonical Futu quote route has no representative symbol"}
+        if quote_symbols:
+            try:
+                quote_probe = run_futu_doctor(
+                    host=str(quote_route.host),
+                    port=int(quote_route.port or 0),
+                    symbols=quote_symbols,
+                    timeout_sec=int(payload.get("timeout_sec") or 20),
+                    telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
+                    telnet_port=int(
+                        payload.get("opend_telnet_port")
+                        or quote_endpoint.get("telnet_port")
+                        or 22222
+                    ),
+                    required_capability="quote",
+                )
+            except SecretError:
+                quote_probe = {"ok": False, "skipped": True, "message": "secret backend unavailable"}
         quote_ready = bool(quote_probe.get("ok"))
+        quote_skipped = bool(quote_probe.get("skipped"))
         quote_watchdog = _dict(quote_probe.get("watchdog"))
         quote_global_state = _dict(quote_watchdog.get("state"))
         quote_telnet = _dict(quote_probe.get("telnet"))
@@ -553,6 +554,8 @@ def run_healthcheck_tool(
                     )
                     ready = True
                     message = "OpenD broker readiness passed"
+                except SecretError:
+                    message = "OpenD broker readiness skipped: secret backend unavailable"
                 except Exception as exc:
                     message = f"OpenD broker readiness failed: {type(exc).__name__}: {exc}"
                 finally:
@@ -563,6 +566,7 @@ def run_healthcheck_tool(
             broker_typed_evidence[account] = {
                 "ready": ready,
                 "message": message,
+                "skipped": "secret backend unavailable" in message,
                 "global_state": {
                     "program_status_type": "READY" if ready else "UNKNOWN",
                     "trd_logined": ready,
@@ -745,7 +749,7 @@ def run_healthcheck_tool(
                     f"{str(getattr(binding, 'host', None) or 'unknown').replace('.', '_').replace(':', '_')}_"
                     f"{int(getattr(binding, 'port', None) or 0)}"
                 ),
-                "status": "ok" if broker_ready else "error",
+                "status": "ok" if broker_ready else "skipped" if broker_typed_evidence.get(account, {}).get("skipped") else "error",
                 "message": message,
                 "value": {
                     **value,
@@ -774,7 +778,7 @@ def run_healthcheck_tool(
                 f"{str(quote_route.host or 'unknown').replace('.', '_').replace(':', '_')}_"
                 f"{int(quote_route.port or 0)}"
             ),
-            "status": "ok" if quote_ready else "error",
+            "status": "ok" if quote_ready else "skipped" if quote_skipped else "error",
             "message": quote_message,
             "value": {
                 "capability": "quote",
@@ -815,6 +819,7 @@ def run_healthcheck_tool(
         item for item in checks
         if item["status"] == "error" and not bool(item.get("summary_excluded"))
     ]
+    skipped = [item for item in checks if item["status"] == "skipped"]
     return (
         {
             "config": {
@@ -837,8 +842,10 @@ def run_healthcheck_tool(
                 }
             },
             "summary": {
-                "ok": not critical,
+                "ok": not critical and not skipped,
                 "critical_count": len(critical),
+                "skipped_count": len(skipped),
+                "reason_code": "SECRET_BACKEND_UNAVAILABLE" if skipped else None,
                 "warning_count": len(warnings) + len(
                     [item for item in checks if item["status"] == "warn" and not bool(item.get("summary_excluded"))]
                 ),
@@ -864,7 +871,7 @@ def _feishu_inbound_check(
     mask_path: Callable[[Any], str],
     environ: dict[str, str],
 ) -> tuple[dict[str, Any], list[str]]:
-    bot_cfg = resolve_feishu_bot_config(environ=environ)
+    bot_cfg = resolve_feishu_bot_config(environ=environ, metadata_only=True)
     audit_path = _audit_db_path(payload, environ=environ)
     value: dict[str, Any] = {
         "audit_db": mask_path(audit_path),

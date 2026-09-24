@@ -272,7 +272,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace
 - 开仓配置不再接受 `strategy=short_vol`。
 - Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；Funding Put 仍通过显式依赖复用 CSP underwriting。
 - 已有两腿（含历史错期组合）可用精确 lot id 原子登记 `pair_intent_id` 和共享 `strategy_group_id`，不做启发式匹配。
-- Close Advice 已收敛为固定 `strict_profit_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
+- Close Advice 使用固定 `remaining_yield_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
 - Research 与生产执行保持分离。
 
 下一步目标：

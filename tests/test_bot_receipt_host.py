@@ -6,9 +6,12 @@ import sqlite3
 
 import pytest
 
+from src.application.agent_tools import receipts
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id
 from src.application.bot.host import run_contract
+from src.application.bot.scene import build_scene_manifest
 from src.application.bot.service import prepare_contract
+from src.application.receipt_query import receipt_event
 from tests.bot_pi_test_support import _TEST_MODEL
 
 DEAL_ID = "7258806397173991645"  # Sanitized historical fixture, never a live lookup.
@@ -42,10 +45,10 @@ def receipt_runtime(tmp_path, monkeypatch):
     assert all(path.read_bytes() == original for path, original in snapshots.items())
 
 
-def _contract(config, *, prior_reference=""):
+def _contract(config, *, prior_reference="", user_message=None):
     prepared = prepare_contract(BotRequest(
-        request_id=new_id("receipt_test"), source_entry="test", user_message=f"查询成交 {DEAL_ID} 的历史回执，不推断当前故障原因。{prior_reference}",
-        explicit_scope=BotScope(config_key="hk", config_path=str(config)),
+        request_id=new_id("receipt_test"), source_entry="test", user_message=user_message or f"查询成交 {DEAL_ID} 的历史回执，不推断当前故障原因。{prior_reference}",
+        explicit_scope=BotScope(config_key=config.name.split(".")[1], config_path=str(config)),
     ), reference_year=2026)
     assert not isinstance(prepared, AppResult)
     return prepared
@@ -137,3 +140,81 @@ def test_prior_run_id_quoted_in_new_request_requires_new_read(receipt_runtime, m
     result, replies = _run(monkeypatch, contract, [lambda _: _read(), cite_new])
     assert result.ok and replies[-1]["ref"] in result.user_response
     assert old_ref not in result.user_response
+
+
+def _us_receipt_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    config = tmp_path / "config.us.json"
+    config.write_text(json.dumps({"accounts": ["lx"], "_generated": {"market": "us", "source_format": "yaml"}}))
+    reads = []
+    row = receipt_event(source="trade_inbox", event_id="us-fixture", account="lx", market="US",
+                        kind="trade", occurred=1788934554000, body="US_RECEIPT_BODY", deal_id=DEAL_ID)
+    def sources(**kwargs):
+        reads.append(dict(kwargs["query"]))
+        return [row], []
+    monkeypatch.setattr(receipts, "_sources", sources)
+    return config, reads
+
+
+def test_wrong_model_market_retries_in_fixed_us_scope(tmp_path, monkeypatch):
+    config, reads = _us_receipt_runtime(tmp_path, monkeypatch)
+    def retry(replies):
+        assert reads == []
+        assert replies[-1]["ok"] is False
+        assert replies[-1]["error"]["code"] == "INPUT_ERROR"
+        assert "does not establish" in replies[-1]["error"]["message"]
+        return _read(account="lx")
+    def answer(replies):
+        assert reads == [{"type": "trade", "account": "lx", "deal_id": DEAL_ID, "market": "US"}]
+        assert replies[-1]["ok"] is True
+        assert replies[-1]["data"]["rows"][0]["receipt_body"] == "US_RECEIPT_BODY"
+        return "按 US 范围找到了这笔回执。"
+    result, _ = _run(monkeypatch, _contract(config), [lambda _: _read(account="lx", market="HK"), retry, answer])
+    assert result.ok and result.user_response == "按 US 范围找到了这笔回执。"
+
+
+@pytest.mark.parametrize("bad_deal_id", ["..." + DEAL_ID[-4:], "…" + DEAL_ID[-4:]])
+def test_masked_deal_id_is_rejected_before_read(tmp_path, monkeypatch, bad_deal_id):
+    config, reads = _us_receipt_runtime(tmp_path, monkeypatch)
+    def answer(replies):
+        assert reads == []
+        assert replies[-1]["ok"] is False
+        assert replies[-1]["error"]["code"] == "INPUT_ERROR"
+        assert "complete deal_id" in replies[-1]["error"]["message"]
+        return "需要完整成交编号才能精确核实。"
+    result, _ = _run(monkeypatch, _contract(config, user_message=f"请查成交 {bad_deal_id}"),
+                     [lambda _: _read(account="lx", deal_id=bad_deal_id), answer])
+    assert result.ok and result.user_response == "需要完整成交编号才能精确核实。"
+
+
+def test_explicit_hk_request_does_not_retry_in_us_scope(tmp_path, monkeypatch):
+    config, reads = _us_receipt_runtime(tmp_path, monkeypatch)
+    def answer(replies):
+        assert reads == []
+        assert replies[-1]["error"]["code"] == "INPUT_ERROR"
+        return "当前 US 会话无法核实 HK 市场成交。"
+    result, _ = _run(monkeypatch, _contract(config, user_message=f"请查 HK 市场成交 {DEAL_ID}"),
+                     [lambda _: _read(account="lx", market="HK"), answer])
+    assert result.ok and result.user_response == "当前 US 会话无法核实 HK 市场成交。"
+
+
+@pytest.mark.parametrize("market", ["US", "us"])
+def test_same_scope_market_case_is_accepted(tmp_path, monkeypatch, market):
+    config, reads = _us_receipt_runtime(tmp_path, monkeypatch)
+    result, replies = _run(monkeypatch, _contract(config), [
+        lambda _: _read(account="lx", market=market),
+        lambda replies: "找到回执。" if replies[-1]["ok"] else "查询失败。",
+    ])
+    assert result.ok and result.user_response == "找到回执。"
+    assert len(reads) == 1 and reads[0]["market"] == "US"
+
+
+def test_receipt_rules_reach_model_with_fixed_scope(tmp_path, monkeypatch):
+    config, _ = _us_receipt_runtime(tmp_path, monkeypatch)
+    manifest = build_scene_manifest(_contract(config), new_id("receipt_scene"))
+    prompt = "\n".join(message["content"] for message in manifest.messages if message["role"] == "system")
+    assert manifest.fixed_tool_input["config_key"] == "us"
+    assert "Hong Kong time or broker location is not evidence" in prompt
+    assert "do not retry by omitting market" in prompt
+    assert "Never drop deal_id" in prompt
+    assert "not the receipt's actual market" in prompt

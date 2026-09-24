@@ -77,6 +77,8 @@ def _notification_perception_read_tool(
             event_kind=payload.get("event_kind"),
             limit=int(payload.get("limit") or 10),
             cursor=payload.get("cursor"),
+            start_utc=payload.get("start_utc"),
+            end_utc=payload.get("end_utc"),
             deadline_monotonic=deadline,
             cancelled=cancelled,
         )
@@ -117,10 +119,13 @@ def _notification_perception_read_tool(
     if summary.get("status") == "failed":
         warnings.append("Notification perception audit is unreadable.")
     elif summary.get("status") == "partial":
-        warnings.append(
-            "Notification perception audit is partially corrupt; "
-            f"malformed_rows={summary.get('malformed_count', 0)}."
-        )
+        if any(item.get("tail_truncated") for item in data.get("read_statuses") or []):
+            warnings.append("Notification perception audit covers only the recent file tail.")
+        if summary.get("malformed_count"):
+            warnings.append(
+                "Notification perception audit is partially corrupt; "
+                f"malformed_rows={summary['malformed_count']}."
+            )
     return data, warnings, {
         "audit_paths": [
             mask_path(path) for path in data.get("audit_paths") or []
@@ -154,6 +159,8 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         "conversation_id": "optional assistant conversation scope such as wechat:<chat_key>",
         "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "event_kind": "optional event kind filter",
+        "start_utc": "optional ISO-8601 UTC window start; requires end_utc",
+        "end_utc": "optional ISO-8601 UTC window end; requires start_utc",
         "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Page size, defaults to 10; continue with cursor and the same query"},
         "cursor": {"type": "string", "maxLength": 8192},
         "runtime_root": (

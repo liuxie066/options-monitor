@@ -9,7 +9,10 @@ if [[ "$repo_name" == *"options-monitor-prod"* ]] || [[ "$repo_root" == *"/optio
   exit 1
 fi
 
-python3 "$repo_root/scripts/guardrails_check.py" \
+source "$repo_root/scripts/python_runtime.sh"
+python_bin="$(om_select_repo_python "$repo_root")"
+
+exec "$python_bin" "$repo_root/scripts/guardrails_check.py" \
   --staged \
   --check-doc-wording \
   --check-runtime-config-tracking \

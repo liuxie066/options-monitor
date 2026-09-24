@@ -9,6 +9,7 @@ class OpenDRetCode(str, Enum):
     RATE_LIMIT = "RATE_LIMIT"
     AUTH_EXPIRED = "AUTH_EXPIRED"
     NEED_2FA = "NEED_2FA"
+    NEED_PIC_VERIFY = "NEED_PIC_VERIFY"
     TRANSIENT = "TRANSIENT"
     EMPTY_CHAIN = "EMPTY_CHAIN"
     UNKNOWN = "UNKNOWN"
@@ -27,6 +28,8 @@ _RATE_LIMIT_HINTS_TEXT = ("频率太高", "最多10次", "频率限制", "请求
 _AUTH_EXPIRED_HINTS_LOW = ("login expired", "auth expired", "token expired", "not logged", "not login")
 _NEED_2FA_HINTS_LOW = ("2fa", "phone verification", "verify code")
 _NEED_2FA_HINTS_TEXT = ("手机验证码", "短信验证", "手机验证", "验证码")
+_NEED_PIC_HINTS_LOW = ("picture captcha", "image captcha", "graphic captcha", "pic verify")
+_NEED_PIC_HINTS_TEXT = ("图形验证码", "图片验证码")
 _TRANSIENT_HINTS_LOW = ("timeout", "disconnected", "connection reset", "broken pipe", "temporarily unavailable")
 _EMPTY_CHAIN_HINTS_LOW = ("empty_chain", "empty")
 
@@ -59,6 +62,8 @@ def _classify_message(message: str) -> OpenDRetCode:
     if not text:
         return OpenDRetCode.UNKNOWN
     low = text.lower()
+    if _contains_any(low, _NEED_PIC_HINTS_LOW) or _contains_any(text, _NEED_PIC_HINTS_TEXT):
+        return OpenDRetCode.NEED_PIC_VERIFY
     if _contains_any(low, _NEED_2FA_HINTS_LOW) or _contains_any(text, _NEED_2FA_HINTS_TEXT):
         return OpenDRetCode.NEED_2FA
     if _contains_any(low, _AUTH_EXPIRED_HINTS_LOW):

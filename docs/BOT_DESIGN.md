@@ -24,6 +24,20 @@
 
 运行诊断把 `ran_scan` / `ran_pipeline` 写入标志投影为 `usable_scan_result` / `pipeline_completed_successfully`，避免把失败结果误读成流程从未调用。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
 
+### 成交回执的市场参数纠错（本次实现设计）
+
+问题：渠道会话固定 `config.us.json`，用户给出美股期权成交 `deal_id`，没有指定市场；模型却向 `receipt_read` 传入 `market=HK`。工具正确返回 `SCOPE_DENIED`，模型随后把参数冲突说成“这笔回执属于 HK”，并建议切换配置。`SCOPE_DENIED` 只证明请求参数超出当前授权范围，不能证明回执的实际市场或是否已被监听。通知里的“香港”也可能是时间地点或券商地点，不能据此填写 `market`。模型把完整 `deal_id` 写成省略形式同样会破坏精确查询。
+
+本次只修 Bot 的只读查询路径，保持渠道固定配置、`receipt_read` 自身的账户和市场权限校验、源数据与成交入账流程不变。
+
+1. Host 在 `build_tool_payload` 构造 `receipt_read` 参数时，以固定 `config_key` / `config_path` 对应的可信运行配置推导市场。模型显式传入的 `market` 与可信市场不同（大小写不计），则在调用工具前返回 `INPUT_ERROR`：指出冲突来自**本次工具参数**、成交实际市场仍未知；若用户没有明确指定市场，模型应省略 `market` 并按当前固定范围重试。不得自动改为模型要求的市场，也不得把冲突包装成“资源属于 HK”。工具自身的 `SCOPE_DENIED` 保持最后防线。
+2. 对 `receipt_read` 的 `deal_id`，Host 拒绝包含 `...` 或 `…` 的省略形式；提示使用用户给出的完整原值。其他合法标识不强加数字长度约束。模型提示词明确区分时区/券商所在地与标的市场，保留用户输入中的完整 ID；精确 ID 查询失败后不得省略 ID 退化为列表查询，再把某一行当成目标成交。若当前问题和可信上下文只有遮盖后的 ID，应请用户提供完整值，不从回执观察中的遮盖值还原。
+3. 用户明确要求查询当前固定范围之外的市场时，模型应只报告当前会话无法核实该市场，不能切换授权、跨范围查询，也不能声称目标回执属于那个市场。Host 的硬保证是不会执行**参数显式指定**的跨范围回执查询；目前 `build_tool_payload` 不接收原始用户问题，因此仅靠此层无法禁止模型在明确跨范围请求后省略 `market`、读取当前范围。提示词约束此类重试，脚本测试检查该行为，但不能据此声称 Host 已建立用户意图级的硬拦截。无可信市场或配置不可读时，保持失败，不默认为 US。
+
+验收：用真实 Host 工具循环的隔离 fixture 覆盖“US 固定范围 + 模型误传 HK → `INPUT_ERROR` 且实际读取次数为零 → 省略市场并保留完整 ID 重试 → 返回 US 回执”；覆盖同范围大小写、显式跨范围工具参数和省略 `deal_id` 时的零读取、完整 ID 可读。用脚本模型检查明确的用户跨范围请求不会省略 `market` 去读当前范围、只有遮盖 ID 时请求补全，且错误观察与回答不把参数冲突推断成回执市场。真实模型措辞效果需单独实测，脚本模型测试只证明 Host 合同与提示词输入及指定脚本行为。
+
+复用归属：可信市场推导复用 `runtime_config_freshness.infer_runtime_config_market` 与 `agent_tool_config.load_runtime_config`；参数汇合和报错复用 `bot.tools.build_tool_payload`、`host.py` 的 `INPUT_ERROR` 观察；数据与权限复用 `agent_tools.receipts._receipt_read`；提示词更新 `bot/prompts/tool_rules.md`。不新增市场字段、状态、权限或查询工具。检索范围为上述 owner、`bot/scene.py`、`bot/channel_facade.py` 及相关 Bot/回执测试；关键词为 `receipt_read`、`market`、`deal_id`、`SCOPE_DENIED`、`build_tool_payload`。这些位置已有所需 owner，无新增领域结构。
+
 ## 保留边界
 
 交易、账本、配置、通知与服务操作仍由原有业务模块和 deterministic Control 管理。模型没有修改这些状态的工具。既有渠道权限、去重、取消、Host 租约、outbox 和真实数据保持独立。

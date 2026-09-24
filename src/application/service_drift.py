@@ -27,6 +27,7 @@ from src.application.service_deploy import (
     render_service_bundle,
 )
 from src.application.secret_store import credential_spec
+from domain.storage.json_io import atomic_write_private_json
 
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
@@ -155,6 +156,11 @@ def service_drift(
         "operations": operations,
         "apply_errors": apply_errors,
     }
+
+
+def export_service_drift(path: str | Path, data: dict[str, Any]) -> None:
+    """Write an explicitly requested private copy of the complete drift result."""
+    atomic_write_private_json(Path(path).expanduser(), data)
 
 
 def service_drift_status(

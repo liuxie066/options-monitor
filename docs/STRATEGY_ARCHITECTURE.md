@@ -16,13 +16,13 @@
 
 `insurance_underwriting` 是 CSP / CC 唯一的新开仓策略语义，不是整个开仓域的统一策略。新开仓配置不再接受 `return_first` 或 `short_vol`，也不再接受会改变正式排序的 `score_weights`。
 
-历史 artifact 可为离线开仓研究解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Close Advice 不读取这些 thesis，只使用固定 `strict_profit_capture.v1`。Combo Yield 仍只有独立开仓策略，不定义组合级退出动作。
+历史 artifact 可为离线开仓研究解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Close Advice 不读取这些 thesis，只使用固定 `remaining_yield_capture.v1`。Combo Yield 仍只有独立开仓策略，不定义组合级退出动作。
 
 | Strategy Family | Opening Profile | Close Profile | Status |
 |---|---|---|---|
-| CSP | `insurance_underwriting` | `strict_profit_capture.v1` | active |
-| CC | `insurance_underwriting` | `strict_profit_capture.v1` | active |
-| Combo Yield | Combo Yield funding / participation | 无组合级退出；short 腿仅按严格策略独立评估 | opening strategy active |
+| CSP | `insurance_underwriting` | `remaining_yield_capture.v1` | active |
+| CC | `insurance_underwriting` | `remaining_yield_capture.v1` | active |
+| Combo Yield | Combo Yield funding / participation | 无组合级退出；short 腿仅按现行策略独立评估 | opening strategy active |
 
 ## 通用流水线
 

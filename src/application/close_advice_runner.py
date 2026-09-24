@@ -110,6 +110,8 @@ OUTPUT_COLUMNS = [
     "spread_ratio",
     "position_lifecycle_state",
     "net_capture_ratio",
+    "capital_basis",
+    "remaining_max_annualized_return",
     "opening_gross_credit",
     "estimated_open_fee",
     "opening_net_credit",
@@ -945,11 +947,13 @@ def _original_dte(pos: dict[str, Any], expiration: str | None) -> int | None:
     if not expiration:
         return None
     opened_at = pos.get("opened_at")
-    if isinstance(opened_at, bool):
+    if opened_at in (None, ""):
         return None
+    if isinstance(opened_at, bool):
+        return -1
     opened_date = expiration_timestamp_to_date(opened_at)
     if opened_date is None:
-        return None
+        return -1
     try:
         expiration_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
     except ValueError:
@@ -1078,7 +1082,7 @@ def _evaluate_position_close_advice(
             "strategy_family": (
                 "sell_put" if inp.option_type == "put" else "covered_call"
             ),
-            "strategy_profile": "strict_profit_capture.v1",
+            "strategy_profile": STRICT_CLOSE_POLICY_VERSION,
         }
     )
     return row
@@ -1092,7 +1096,7 @@ def _lifecycle_not_evaluable_row(
     lifecycle_state: str,
 ) -> dict[str, Any]:
     reasons = {
-        "expiry_day": "持仓已到到期日，已离开严格提前止盈窗口，当前不请求常规平仓报价",
+        "expiry_day": "持仓已到到期日，已离开提前止盈窗口，当前不请求常规平仓报价",
         "expired_open": "持仓到期日已过但仍标记为 open，需要先核对持仓生命周期；当前不请求行情",
         "unknown": "持仓缺少可解析到期日，当前无法确定生命周期或评估平仓建议",
     }
@@ -1141,7 +1145,7 @@ def _lifecycle_not_evaluable_row(
             "strategy_family": (
                 "sell_put" if inp.option_type == "put" else "covered_call"
             ),
-            "strategy_profile": "strict_profit_capture.v1",
+            "strategy_profile": STRICT_CLOSE_POLICY_VERSION,
         }
     )
     return row
@@ -1207,7 +1211,7 @@ def render_markdown(rows: list[dict[str, Any]], *, max_items: int) -> str:
     for acct, acct_rows in grouped.items():
         if lines:
             lines.append("")
-        lines.append(f"### [{acct}] 严格平仓提醒")
+        lines.append(f"### [{acct}] 提前止盈提醒")
         for row in acct_rows:
             opt = "Put" if str(row.get("option_type")) == "put" else "Call"
             exp = row.get("expiration") or "-"
@@ -1218,8 +1222,9 @@ def render_markdown(rows: list[dict[str, Any]], *, max_items: int) -> str:
                     f"- {row.get('symbol')} {opt} {exp} @{strike} · 建议买回平仓",
                     (
                         f"- 条件: 净兑现 {_pct(row.get('net_capture_ratio'))} | "
-                        f"平仓全成本/名义本金 {_pct(row.get('close_cost_ratio'))} | "
-                        f"剩余期限 {_pct(row.get('remaining_term_ratio'))}"
+                        f"剩余最高年化 {_pct(row.get('remaining_max_annualized_return'))} | "
+                        f"{'Put 担保资金代理' if opt == 'Put' else 'Call 标的市值代理'} "
+                        f"{_money(row.get('capital_basis'), currency)}"
                     ),
                     (
                         f"- 价格: 当前 ask={_money(row.get('ask'), currency)} | "
@@ -1663,6 +1668,16 @@ def run_close_advice(
         for pos in positions
         if isinstance(pos, dict) and _is_supported_short_option(pos)
     ]
+    seen_lots: set[tuple[str, str]] = set()
+    for pos in positions:
+        account_key = normalize_account(pos.get("account"))
+        lot_id = str(pos.get("lot_id") or pos.get("record_id") or "").strip()
+        if not account_key or not lot_id:
+            continue
+        key = (account_key, lot_id)
+        if key in seen_lots:
+            raise ValueError("close_advice position context has duplicate account/lot_id")
+        seen_lots.add(key)
     position_entries = [
         (pos, *_position_lifecycle(pos, business_date=business_date))
         for pos in positions
@@ -2053,7 +2068,7 @@ def run_close_advice(
                 symbols=symbols_to_validate,
                 expected_manifest_sha256=str(frozen_manifest_sha256),
             )
-            if unavailable_now:
+            if unavailable_now != frozen_symbol_unavailable:
                 raise RequiredDataSnapshotError(
                     "required-data symbol authority changed during Close Advice"
                 )

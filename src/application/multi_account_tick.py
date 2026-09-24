@@ -91,6 +91,7 @@ from src.infrastructure.external_services import (
 )
 
 from domain.storage.repositories import state_repo
+from domain.storage.json_io import atomic_write_private_json
 
 
 _CURRENT_RUN_ID: str | None = None
@@ -858,10 +859,35 @@ def main(argv: list[str] | None = None) -> int:
         post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
         trigger_kind=trigger_kind,
     )
-    return _run_notification_with_post_delivery_fallback(
+    rc = _run_notification_with_post_delivery_fallback(
         notification_request=notification_request,
         post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
     )
+    wrapper_run_id = str(os.environ.get("OM_TICK_CRON_RUN_ID") or "").strip()
+    if (
+        rc == 0
+        and wrapper_run_id
+        and Path(wrapper_run_id).name == wrapper_run_id
+        and trigger_kind == "scheduled"
+        and not no_send
+        and not symbols_arg
+        and account_ids
+        and set(account_ids) == set(account_execution.ran_pipeline_accounts)
+        and all(result.ran_scan for result in results if result.account in account_ids)
+        and {result.account for result in results if result.ran_scan} >= set(account_ids)
+    ):
+        try:
+            atomic_write_private_json(
+                state_repo.run_state_dir(base, wrapper_run_id) / "child_tick_completion.json",
+                {"status": "ok", "wrapper_run_id": wrapper_run_id, "inner_run_id": run_id,
+                 "market": market_cfg, "accounts": sorted(set(account_ids)),
+                 "completed_at_utc": utc_now()},
+            )
+        except Exception as exc:
+            runlog.safe_event("completion_receipt", "error", error_code="TICK_COMPLETION_RECEIPT_FAILED",
+                              message=str(exc)[:240])
+            return 2
+    return rc
 
 
 def _run_notification_with_post_delivery_fallback(

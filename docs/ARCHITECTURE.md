@@ -355,11 +355,11 @@ Close advice keeps deterministic policy in `domain.domain.close_advice`.
 `src.application.close_advice_runner` assembles option-position inputs, required
 data quotes, quality flags, Futu fee estimates, rows, and output files around
 that domain logic.
-Domain policy owns one fixed `strict_profit_capture.v1` rule for short puts and
+Domain policy owns one fixed `remaining_yield_capture.v1` rule for short puts and
 short calls. It emits only `close`, `hold`, or `not_evaluable`; it does not pair
 combo-yield legs, compare opening candidates, or produce roll,
 replacement, reallocation, short-vol, or long-option exit actions. The runner
-preserves those strict decisions, including fail-closed `not_evaluable` rows,
+preserves those decisions, including fail-closed `not_evaluable` rows,
 and publishes CSV/text reports plus their integrity manifest. The Close Advice
 state and evidence contract is documented in
 `docs/CLOSE_ADVICE_CONTRACT.md`.

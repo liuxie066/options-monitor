@@ -163,12 +163,13 @@ shared `last_run.json.run_id` 与所选 run 相同时才会回退 shared 计数�
 
 ```bash
 ./om-agent run --tool notification_perception_read \
-  --input-json '{"runtime_root":"/var/lib/options-monitor","limit":100}'
+  --input-json '{"runtime_root":"/var/lib/options-monitor","limit":10}'
 ```
 
 root 解析顺序是显式 `runtime_root`、`OM_RUNTIME_ROOT`、repo fallback；结果会报告
-root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partially_corrupt`
-或 `unreadable` 状态。partial/unreadable 不能解释为“没有通知事件”。
+root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_only`、
+`partially_corrupt` 或 `unreadable` 状态。共享审计文件超过 1 MiB 时只读最近尾部，
+`tail_truncated=true`、`summary.status=partial`；历史匹配总数未知，不能解释为“没有通知事件”。
 
 ### 指派后资产分布
 

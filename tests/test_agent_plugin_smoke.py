@@ -361,6 +361,32 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert any("starter account label 'user1'" in item for item in out["warnings"])
 
 
+def test_healthcheck_reports_missing_secret_backend_as_skipped(monkeypatch, tmp_path: Path) -> None:
+    from src.application.secret_store.contracts import SecretBackendUnavailable
+    import src.application.secret_resolver as secret_resolver
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+
+    def unavailable(**_kwargs):
+        raise SecretBackendUnavailable("no credential context")
+
+    monkeypatch.setattr(secret_resolver, "resolve_secret", unavailable)
+    _patch_healthcheck_dependencies(
+        monkeypatch,
+        run_futu_doctor=unavailable,
+        build_ready_futu_broker_gateway=unavailable,
+    )
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["data"]["summary"]["reason_code"] == "SECRET_BACKEND_UNAVAILABLE"
+    assert out["data"]["summary"]["ok"] is False
+    assert any(item["name"].startswith("opend_quote_readiness_") and item["status"] == "skipped"
+               for item in out["data"]["checks"])
+    assert any(item["name"].startswith("opend_broker_readiness_") and item["status"] == "skipped"
+               for item in out["data"]["checks"])
+
+
 def test_healthcheck_quote_failure_keeps_broker_primary_but_fails_legacy_summary(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -3208,6 +3234,19 @@ def test_runtime_logs_agent_tool_returns_content_free_bounded_metadata(tmp_path:
     assert "private-three" not in json.dumps(file_out, ensure_ascii=False)
 
 
+def test_runtime_logs_agent_tool_labels_journal_only_service(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    out = run_tool("runtime_logs", {"kind": "service", "logs_root": str(logs),
+                                    "runs_root": str(tmp_path / "runs")})
+    assert out["ok"] is True
+    assert out["data"]["summary"]["file_count"] == 0
+    assert out["data"]["summary"]["log_source"] == "journal_only"
+    assert "journalctl" in out["data"]["journal_hint"]
+
+
 def test_runtime_logs_agent_tool_rejects_outside_root_and_symlink(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
@@ -3482,11 +3521,16 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
             == "unsupported_or_missing_strict_policy_version"
         )
 
+    decision_metrics = {
+        "capital_basis": 10000,
+        "remaining_max_annualized_return": 0.05,
+        "net_capture_ratio": 0.95,
+    }
     for row, expected_basis in (
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_evidence_status": "complete",
             },
             "missing_strict_decision_basis",
@@ -3494,27 +3538,29 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "not_evaluable",
                 "evaluation_status": "priced",
+                **decision_metrics,
             },
             "invalid_strict_decision_evidence_status",
         ),
         (
             {
                 "recommendation_state": "close",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "not_evaluable",
+                **decision_metrics,
             },
             "strict_decision_not_priced",
         ),
         (
             {
                 "recommendation_state": "not_evaluable",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_basis": "missing_required_quote",
                 "decision_evidence_status": "not_evaluable",
                 "evaluation_status": "priced",
@@ -3526,6 +3572,49 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         assert projected["recommendation_state"] == "not_evaluable"
         assert projected["evaluation_status"] == "not_evaluable"
         assert projected["decision_basis"] == expected_basis
+
+
+def test_close_advice_read_requires_new_metrics_and_sorts_by_remaining_yield(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.close_advice_read_impl import _decision_fields_for_read
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us")), encoding="utf-8")
+    common = {
+        "account": "lx",
+        "option_type": "put",
+        "position_side": "short",
+        "evaluation_status": "priced",
+        "recommendation_state": "close",
+        "policy_version": "remaining_yield_capture.v1",
+        "decision_basis": "remaining_yield_capture_all_gates_passed",
+        "decision_evidence_status": "complete",
+        "capital_basis": 10000,
+    }
+    missing = {**common, "net_capture_ratio": 0.95}
+    assert _decision_fields_for_read(missing)["decision_basis"] == "missing_current_policy_decision_metrics"
+    rows = [
+        {**common, "position_lot_id": "high", "symbol": "HIGH", "net_capture_ratio": 0.95, "remaining_max_annualized_return": 0.08},
+        {**common, "position_lot_id": "low", "symbol": "LOW", "net_capture_ratio": 0.85, "remaining_max_annualized_return": 0.03},
+    ]
+    report_dir = tmp_path / "report"
+    _write_close_advice_report(report_dir, rows, run_id="run-1", market="US")
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "report_path": str(report_dir / "close_advice.csv"),
+            "account": "lx",
+            "run_id": "run-1",
+            "query": {"limit": 1},
+        },
+    )
+    assert out["ok"] is True
+    assert out["data"]["matched_count"] == 2
+    assert out["data"]["rows"][0]["symbol"] == "LOW"
+    assert out["data"]["rows"][0]["remaining_max_annualized_return"] == 0.03
 
 
 def test_close_advice_read_rejects_explicit_report_without_manifest(
@@ -4123,16 +4212,16 @@ def test_close_advice_summary_orders_strict_recommendations(tmp_path: Path) -> N
     text_path = tmp_path / "close_advice.txt"
     pd.DataFrame(
         [
-            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
-            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.91},
-            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.95},
+            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
+            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.91, "capital_basis": 10000, "remaining_max_annualized_return": 0.03},
+            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.95, "capital_basis": 10000, "remaining_max_annualized_return": 0.08},
         ]
     ).to_csv(csv_path, index=False)
     text_path.write_text("", encoding="utf-8")
 
     summary = close_advice_rows_summary(csv_path, text_path, safe_read_csv=safe_read_csv, as_float=as_float)
 
-    assert [row["symbol"] for row in summary["top_rows"]] == ["CLOSE1", "CLOSE2", "HOLD"]
+    assert [row["symbol"] for row in summary["top_rows"]] == ["CLOSE2", "CLOSE1", "HOLD"]
 
 
 def test_close_advice_summary_uses_supplied_validated_bytes(
@@ -4153,9 +4242,11 @@ def test_close_advice_summary_uses_supplied_validated_bytes(
                 "symbol": "NVDA",
                 "recommendation_state": "close",
                 "evaluation_status": "priced",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_evidence_status": "complete",
                 "net_capture_ratio": 0.95,
+                "capital_basis": 10000,
+                "remaining_max_annualized_return": 0.05,
             }
         ]
     ).to_csv(csv_path, index=False)
@@ -4169,7 +4260,7 @@ def test_close_advice_summary_uses_supplied_validated_bytes(
                 "symbol": "TSLA",
                 "recommendation_state": "hold",
                 "evaluation_status": "priced",
-                "policy_version": "strict_profit_capture.v1",
+                "policy_version": "remaining_yield_capture.v1",
                 "decision_evidence_status": "complete",
                 "net_capture_ratio": 0.10,
             }

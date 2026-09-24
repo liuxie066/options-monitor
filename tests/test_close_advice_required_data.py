@@ -1043,6 +1043,34 @@ def test_frozen_close_advice_rejects_parent_manifest_generation_mismatch(
     ]
 
 
+def test_frozen_close_advice_keeps_known_symbol_failure_as_data_gap(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application.close_advice_runner import run_close_advice
+
+    frozen = _frozen_workspace(tmp_path)
+    manifest = json.loads(frozen.manifest_path.read_text(encoding="utf-8"))
+    manifest["symbols"]["NVDA"] = {
+        "status": "failed",
+        "reason": "get_option_chain failed: PacketErr.Timeout",
+        "error_type": "RequiredDataFetchError",
+    }
+    manifest["summary"] = {"symbols_total": 1, "ready": 0, "failed": 1}
+    manifest["status"] = "failed"
+    manifest.pop("content_sha256")
+    manifest["content_sha256"] = canonical_sha256(manifest)
+    frozen.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
+
+    assert result["snapshot_authority"] == "valid"
+    assert result["status"] == "degraded"
+    assert result["evaluation_gap_rows"] == 1
+    assert result["flag_counts"]["required_data_snapshot_unavailable"] == 1
+    assert result["report_manifest"]["status"] == "success"
+
+
 def test_frozen_integrity_failure_invalidates_old_success_report(
     tmp_path: Path,
 ) -> None:

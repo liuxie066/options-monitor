@@ -508,8 +508,8 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
                 "ask": 0.52,
                 "estimated_pnl_if_close_net": 474.5,
                 "net_capture_ratio": 0.93,
-                "close_cost_ratio": 0.0008,
-                "remaining_term_ratio": 0.60,
+                "capital_basis": 6500,
+                "remaining_max_annualized_return": 0.08,
             },
         }
     ]
@@ -520,7 +520,7 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
     assert "3690.HK｜CSP｜08-28 HK$65 Put｜建议平仓" in message
     assert (
         "参考｜买回参考价 HK$0.52（ask） · 预计锁定收益 HK$474.50 · "
-        "净兑现比例 93.0% · 全成本平仓占名义本金 0.1% · 剩余期限比例 60.0%"
+        "净兑现比例 93.0% · 剩余最高年化 8.0% · Put 担保资金代理 HK$6,500.00"
         in message
     )
 
@@ -1465,8 +1465,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
         "ask": 0.35,
         "estimated_pnl_if_close_net": 285,
         "net_capture_ratio": 0.925,
-        "close_cost_ratio": 0.0008,
-        "remaining_term_ratio": 0.61,
+        "capital_basis": 10000,
+        "remaining_max_annualized_return": 0.05,
     }
     brief["positions"].append(
         {
@@ -1483,8 +1483,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
                 "ask": 0.52,
                 "estimated_pnl_if_close_net": 74.5,
                 "net_capture_ratio": 0.91,
-                "close_cost_ratio": 0.0009,
-                "remaining_term_ratio": 0.55,
+                "capital_basis": 15000,
+                "remaining_max_annualized_return": 0.08,
             },
         }
     )
@@ -1517,8 +1517,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "**1｜NVDA｜CSP｜08-21 $100 Put｜建议平仓**" in message
     assert "参考｜买回参考价 $0.35 · 预计锁定损益 +$285.00" in message
     assert "净兑现比例 92.5%" in message
-    assert "平仓成本占本金 0.1%" in message
-    assert "剩余期限比例 61.0%" in message
+    assert "剩余最高年化 5.0%" in message
+    assert "Put 担保资金代理 $10,000.00" in message
     assert "AMD｜CSP｜08-21 $150 Put｜建议平仓" in message
     assert "现金总额｜暂不可用" in message
     assert "可用于期权开仓｜暂不可用" in message

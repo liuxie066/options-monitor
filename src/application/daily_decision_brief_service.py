@@ -2012,7 +2012,7 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
         "strategy_group_id": _text(row.get("strategy_group_id")),
         "leg_role": _text(row.get("leg_role")).lower(),
         "source_stock_lot_id": _text(row.get("source_stock_lot_id")),
-        "title": "严格平仓提醒",
+        "title": "提前止盈提醒",
         "reason": _text(row.get("reason")),
         "recommendation_state": _text(
             row.get("recommendation_state")
@@ -2027,6 +2027,8 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
                 "original_dte",
                 "remaining_term_ratio",
                 "net_capture_ratio",
+                "capital_basis",
+                "remaining_max_annualized_return",
                 "opening_net_credit",
                 "all_in_close_cost",
                 "close_cost_ratio",
@@ -2068,6 +2070,8 @@ def _position_view(
             "ask",
             "remaining_term_ratio",
             "net_capture_ratio",
+            "capital_basis",
+            "remaining_max_annualized_return",
             "all_in_close_cost",
             "close_cost_ratio",
             "estimated_pnl_if_close_net",
