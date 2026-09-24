@@ -218,7 +218,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _log(message: str) -> None:
-    print(message, flush=True)
+    level = "<3>" if message.startswith("[ERROR]") else "<4>" if message.startswith("[WARN]") else ""
+    print(level + message, flush=True)
 
 
 def _dispatch_portfolio_refresh_intent(
@@ -2820,6 +2821,7 @@ def _run_listener_source_loop(
                 restart_count=restart_count,
                 last_error=str(exc),
                 error_code=exc.error_code,
+                reason_code=exc.error_code,
                 error_message=exc.message,
             )
             _log(f"[ERROR] listener source={source.get('id')} blocked: {exc}")

@@ -78,11 +78,15 @@ def _relative_path(path: Path, *, base: Path) -> str:
         return f".../{name}" if name else "..."
 
 
-def _is_env_file_permission_warning(message: str) -> bool:
-    return "failed to read env file:" in message and "Permission denied" in message
+def _is_env_file_nonblocking_warning(message: str) -> bool:
+    return message.startswith("env file not found:") or (
+        message.startswith("failed to read env file:") and "Permission denied" in message
+    )
 
 
 def _has_service_injected_env(effective_env: Any) -> bool:
+    if str(effective_env.get("OM_SECRET_BACKEND") or "").strip().lower() == "systemd":
+        return True
     for key in SERVICE_INJECTED_ENV_SENTINELS:
         value = str(effective_env.get(key) or "").strip()
         source = effective_env.source_of(key)
@@ -95,7 +99,7 @@ def _runtime_status_env_file_warnings(effective_env: Any) -> list[str]:
     items = [str(item) for item in effective_env.warnings]
     if not items or not _has_service_injected_env(effective_env):
         return items
-    return [item for item in items if not _is_env_file_permission_warning(item)]
+    return [item for item in items if not _is_env_file_nonblocking_warning(item)]
 
 
 def _mtime_utc(path: Path) -> str:

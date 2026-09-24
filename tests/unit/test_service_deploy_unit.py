@@ -56,6 +56,11 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
     assert "RestartPreventExitStatus=78" in intake
+    assert "SyslogLevelPrefix=yes" in intake
+    assert "OnFailure=options-monitor-trade-intake-alert.service" in intake
+    alert_unit = files["systemd/options-monitor-trade-intake-alert.service"]["content"]
+    assert "run service-failure-alert --unit options-monitor-trade-intake.service" in alert_unit
+    assert "TimeoutStartSec=120" in alert_unit
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
@@ -176,6 +181,10 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
     tick = files[
         "systemd/options-monitor-tick-us.service.d/zzzz-secret-credentials.conf"
     ]["content"]
+    alert_secret = files[
+        "systemd/options-monitor-trade-intake-alert.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert "om-feishu-bot-app-secret" in alert_secret
     assert f"om-feishu-holdings-app-secret:{store}/om-feishu-holdings-app-secret" in tick
     assert f"om-feishu-bot-app-secret:{store}/om-feishu-bot-app-secret" in tick
     assert "om-quality-read-token" not in tick

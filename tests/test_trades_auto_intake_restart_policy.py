@@ -92,6 +92,7 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: P
     assert status["status"] == "blocked"
     assert status["stage"] == "auth_required"
     assert status["error_code"] == "OPEND_NEEDS_PHONE_VERIFY"
+    assert status["reason_code"] == "OPEND_NEEDS_PHONE_VERIFY"
 
 
 def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monkeypatch) -> None:

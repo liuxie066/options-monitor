@@ -587,6 +587,7 @@ def _systemd_secret_bindings(
             bind(service_name, FEISHU_BOT_APP_SECRET)
 
     bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
+    bind("options-monitor-trade-intake-alert.service", FEISHU_BOT_APP_SECRET)
     bind(
         "options-monitor-feishu-ws.service",
         FEISHU_BOT_APP_SECRET,
@@ -694,6 +695,7 @@ def _systemd_unit(
     timeout_stop_sec: int | None = None,
     syslog_level_prefix: bool = False,
     restart_prevent_exit_statuses: list[int] | None = None,
+    on_failure: str | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
     wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
@@ -706,6 +708,8 @@ def _systemd_unit(
     before_units = _dedupe_unit_dependencies(before or [])
     if before_units:
         lines.append(f"Before={' '.join(before_units)}")
+    if on_failure:
+        lines.append(f"OnFailure={on_failure}")
     lines.extend([
         "",
         "[Service]",
@@ -868,6 +872,7 @@ def build_service_profile(
         for name in service_names
         if (
             str(name).endswith(".service")
+            and not str(name).endswith("-alert.service")
             and (
                 "opend" in str(name)
                 or "trade-intake" in str(name)
@@ -1350,12 +1355,38 @@ def render_service_bundle(
                 service_type="simple",
                 restart="always",
                 restart_prevent_exit_statuses=[78],
+                on_failure="options-monitor-trade-intake-alert.service",
+                syslog_level_prefix=True,
                 after=opend_dependency_units or None,
                 wants=opend_dependency_units or None,
             ),
             install_path=f"/etc/systemd/system/{trade_service}",
             kind="systemd_service",
             service_name=trade_service,
+        )
+        alert_service = "options-monitor-trade-intake-alert.service"
+        add(
+            f"systemd/{alert_service}",
+            _systemd_unit(
+                description="Options Monitor trade intake terminal failure alert",
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=[
+                    str(repo / "om"), "run", "service-failure-alert",
+                    "--unit", trade_service,
+                    "--market", trade_market,
+                    "--config", str(config_by_market[trade_market]),
+                    "--runtime-root", str(runtime),
+                ],
+                timeout_start_sec=120,
+                syslog_level_prefix=True,
+            ),
+            install_path=f"/etc/systemd/system/{alert_service}",
+            kind="systemd_service",
+            service_name=alert_service,
         )
 
         status_service = "options-monitor-runtime-status.service"
@@ -2106,6 +2137,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
             Path(item.install_path).name
             for item in files
             if item.kind == "systemd_service"
+            and not Path(item.install_path).name.endswith("-alert.service")
             and (
                 "opend" in item.install_path
                 or "trade-intake" in item.install_path

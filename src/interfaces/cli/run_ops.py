@@ -8,6 +8,7 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.multi_account_tick import run_tick
 from src.application.tick_cron import run_tick_cron
+from src.application.service_failure_alert import alert_failed_service
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -54,6 +55,11 @@ def add_run_commands(subparsers: Any) -> None:
     tick_cron.add_argument("--force", action="store_true")
     tick_cron.add_argument("--debug", action="store_true")
     tick_cron.add_argument("--allow-stale-config", action="store_true")
+    failure_alert = run_sub.add_parser("service-failure-alert", help="report a failed managed service")
+    failure_alert.add_argument("--unit", required=True)
+    failure_alert.add_argument("--market", required=True, choices=("us", "hk"))
+    failure_alert.add_argument("--config", required=True)
+    failure_alert.add_argument("--runtime-root", required=True)
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
     trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
     trade_intake.add_argument("--effective-from-ms", type=int)
@@ -216,5 +222,11 @@ def handle_run_command(
             from src.application.trades.process_supervisor import run_trade_intake_process as run_trade_intake_fn
 
         return int(run_trade_intake_fn(_trade_intake_argv(args)))
+
+    if args.run_command == "service-failure-alert":
+        return alert_failed_service(
+            unit=args.unit, market=args.market, config_path=args.config,
+            runtime_root=args.runtime_root,
+        )
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported run command: {args.run_command}")
