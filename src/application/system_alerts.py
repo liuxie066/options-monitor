@@ -167,10 +167,24 @@ def report_system_recovery(
         previous = state.get(key)
         if previous is None and allow_without_incident:
             previous = {"status": "failed", "reserved_at": datetime.now(timezone.utc).isoformat()}
-        if not isinstance(previous, dict) or previous.get("status") != "failed":
+        if not isinstance(previous, dict):
             return "no_incident"
+        retry = previous.get("status") == "recovered" and previous.get("recovery_delivery") == "unknown" and notify
+        if previous.get("status") != "failed" and not retry:
+            return "no_incident"
+        now = datetime.now(timezone.utc)
+        if retry:
+            try:
+                last_attempt = datetime.fromisoformat(str(previous["recovery_last_attempt_at"]))
+                if (now - last_attempt).total_seconds() < 60:
+                    return "suppressed"
+            except (KeyError, TypeError, ValueError):
+                pass
         incident_at = str(previous.get("reserved_at") or "")
-        state[key] = {**previous, "status": "recovered", "recovered_at": datetime.now(timezone.utc).isoformat(),
+        attempt_at = now.isoformat()
+        state[key] = {**previous, "status": "recovered",
+                      "recovered_at": previous.get("recovered_at") or attempt_at,
+                      "recovery_last_attempt_at": attempt_at,
                       "recovery_delivery": "unknown" if notify else "disabled"}
         atomic_write_json(path, _prune_state(state))
     if not notify:
@@ -184,9 +198,19 @@ def report_system_recovery(
     if confirmed:
         with _state_lock(path):
             state = _read_state(path)
-            if isinstance(state.get(key), dict) and state[key].get("reserved_at") == incident_at:
+            if (isinstance(state.get(key), dict) and state[key].get("reserved_at") == incident_at
+                    and state[key].get("recovery_last_attempt_at") == attempt_at):
                 state[key]["recovery_delivery"] = "confirmed"
                 atomic_write_json(path, state)
+    try:
+        report_system_meta_signal(
+            base=base, unit=unit, market=market, account=account,
+            failure_code="SYSTEM_RECOVERY_DELIVERY_UNCONFIRMED", stage="recovery_delivery",
+            run_id=str(previous.get("run_id") or ""), degraded=not confirmed,
+            reason=f"{failure_code}:{stage}",
+        )
+    except Exception as exc:
+        print(f"<3>SYSTEM_RECOVERY_META_FAILED {type(exc).__name__}", file=sys.stderr)
     return "confirmed" if confirmed else "unconfirmed"
 
 

@@ -69,6 +69,44 @@ def test_unconfirmed_alert_reserves_attempt_and_unconfigured_route_does_not(monk
     assert sends[0]["idempotency_key"] == sends[1]["idempotency_key"]
 
 
+def test_unconfirmed_recovery_is_visible_and_retries_with_same_key(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application import system_alerts
+
+    sends = []
+
+    def send(**kwargs):
+        sends.append(kwargs)
+        return {"delivery_confirmed": len(sends) != 2}
+
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda _provider: SimpleNamespace(send_fn=send, normalize_fn=lambda **_: {}))
+    fields = dict(base=tmp_path, config=_config(), unit="test.service", market="hk", account="lx",
+                  failure_code="TICK_EXEC_FAILED", stage="child_exit")
+    assert system_alerts.report_system_failure(
+        **fields, run_id="run-1", rc=1, first_error_at="2026-09-24T00:00:00+00:00",
+        opend_login_state="unknown",
+    ) == "confirmed"
+    assert system_alerts.report_system_recovery(**fields) == "unconfirmed"
+    assert "<3>SYSTEM_META_ALERT" in capsys.readouterr().err
+    assert system_alerts.report_system_recovery(**fields) == "suppressed"
+    assert len(sends) == 2
+
+    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    key = system_alerts._fingerprint("test.service", "hk", "lx", "TICK_EXEC_FAILED", "child_exit")
+    assert state[key]["status"] == "recovered"
+    assert state[key]["recovery_delivery"] == "unknown"
+    state[key]["recovery_last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert system_alerts.report_system_recovery(**fields) == "confirmed"
+    assert sends[1]["idempotency_key"] == sends[2]["idempotency_key"]
+    assert "<4>SYSTEM_META_RECOVERY" in capsys.readouterr().err
+    assert system_alerts.report_system_recovery(**fields) == "no_incident"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state[key]["recovery_delivery"] == "confirmed"
+
+
 def test_oversized_alert_state_is_pruned_before_new_alert(monkeypatch, tmp_path: Path) -> None:
     from src.application import system_alerts
 
