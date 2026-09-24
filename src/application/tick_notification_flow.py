@@ -687,6 +687,7 @@ def _record_notification_meta(
                 base=request.base, unit=f"options-monitor-tick-{market}.service",
                 market=market, account=account, failure_code=code, stage="delivery",
                 run_id=request.run_id, degraded=degraded, reason=detail,
+                config=request.base_cfg, external=True,
             )
         except Exception:
             outcome = "infra_failed"

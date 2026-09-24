@@ -24,6 +24,7 @@ from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
 from src.application.service_drift import service_drift_status
 from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.system_alerts import system_alert_delivery_status
 from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.secret_store import SecretError, resolve_secret_status
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -2559,6 +2560,10 @@ def private_runtime_status_tool(
         warnings.append("Notification delivery has unresolved duplicate risk.")
         warning_codes.append("NOTIFICATION_DUPLICATE_RISK")
     notification_delivery = _notification_delivery_health(notification_diagnosis, trade_intake)
+    system_alert_delivery = system_alert_delivery_status(base, state_path=shared_state_dir / "system_alerts.json")
+    if system_alert_delivery["status"] == "degraded":
+        warnings.append("System alert delivery is unconfirmed or its state is unreadable.")
+        warning_codes.append(system_alert_delivery["reason_code"])
     upgrade_evaluation = _upgrade_status_evaluation(
         upgrade_status,
         base=base,
@@ -2696,6 +2701,7 @@ def private_runtime_status_tool(
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
         "notification_delivery": notification_delivery,
+        "system_alert_delivery": system_alert_delivery,
         "environment": environment,
         "channel_status": channel_status,
         "channel_health": channel_health,
@@ -3003,6 +3009,8 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
         ),
         "notification_diagnosis": notification_diagnosis,
         "notification_delivery": _pick(data.get("notification_delivery"), {"status", "reason_codes", "expected"}),
+        "system_alert_delivery": _pick(data.get("system_alert_delivery"),
+                                       {"status", "reason_code", "active_count", "fallback_used", "provider"}),
         "environment": _status_safe_environment(data.get("environment")),
         "channel_status": _status_safe_channel_status(data.get("channel_status")),
         "channel_health": _status_safe_channels(data.get("channel_health")),

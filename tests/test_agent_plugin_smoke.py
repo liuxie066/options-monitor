@@ -3179,6 +3179,26 @@ def test_runtime_status_preserves_both_notification_health_signals(
         assert code in out["notification_delivery"]["reason_codes"]
 
 
+def test_runtime_status_shows_unconfirmed_system_alert_separately(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg()), encoding="utf-8")
+    state_dir = tmp_path / "output_shared" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "system_alerts.json").write_text(json.dumps({"incident": {
+        "status": "failed", "last_attempt_at": "2026-09-24T00:00:00+00:00",
+        "delivery_confirmed": False, "fallback_used": False, "provider": None,
+    }}), encoding="utf-8")
+    out = _execute_private_runtime_status({
+        "config_key": "us", "config_path": str(cfg_path),
+        "shared_state_dir": str(state_dir), "runs_root": str(tmp_path / "output_runs"),
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+    })["data"]
+    assert out["system_alert_delivery"]["status"] == "degraded"
+    assert "SYSTEM_ALERT_DELIVERY_UNCONFIRMED" in out["summary"]["warning_codes"]
+    assert out["summary"]["ok"] is False
+
+
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
 
     cfg_path = tmp_path / "config.us.json"

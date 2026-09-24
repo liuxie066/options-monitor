@@ -287,7 +287,9 @@ def test_opend_recovery_notice_after_unconfigured_failure_uses_system_state(monk
     assert not opend_guard.send_opend_alert(
         tmp_path, unconfigured, error_code="OPEND_RATE_LIMIT", message_text="rate limited",
     )
-    assert not (tmp_path / "output_shared/state/system_alerts.json").exists()
+    incident = next(iter(json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text()).values()))
+    assert incident["delivery"] == "journal"
+    assert system_alerts.system_alert_delivery_status(tmp_path)["status"] == "degraded"
     configured = _cfg(opend_alert_after_consecutive_failures=1)
     assert opend_guard.send_opend_recovery_notice(tmp_path, configured)
     assert not opend_guard.send_opend_recovery_notice(tmp_path, configured)
@@ -299,7 +301,7 @@ def test_opend_recovery_notice_after_unconfigured_failure_uses_system_state(monk
 def test_late_delivery_confirmation_does_not_mark_new_incident(monkeypatch, tmp_path: Path) -> None:
     import src.application.multi_tick.opend_guard as opend_guard
 
-    def confirm_after_new_incident(base: Path, cfg: dict, message: str, key: str) -> bool:
+    def confirm_after_new_incident(base: Path, cfg: dict, message: str, key: str) -> dict:
         del cfg, message, key
         opend_guard.record_opend_recovery(base)
         assert opend_guard.should_send_opend_alert(base, "OPEND_LOGIN_INVALID") is True
@@ -308,7 +310,8 @@ def test_late_delivery_confirmation_does_not_mark_new_incident(monkeypatch, tmp_
         incident = next(iter(state.values()))
         incident["reserved_at"] = "2026-01-01T00:00:00+00:00"
         path.write_text(json.dumps(state))
-        return True
+        return {"delivery_confirmed": True, "provider": "wechat_clawbot",
+                "fallback_used": False, "attempted": True}
 
     monkeypatch.setattr(system_alerts, "_send", confirm_after_new_incident)
     base = Path(tmp_path)

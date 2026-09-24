@@ -201,6 +201,11 @@ def handle_observability_command(
                 sys.stderr.write("<3>NOTIFICATION_DELIVERY_DEGRADED " + json.dumps(
                     {"reason_codes": delivery.get("reason_codes", [])}, ensure_ascii=False,
                 ) + "\n")
+            system_alert_delivery = data.get("system_alert_delivery") if isinstance(data, dict) else None
+            if isinstance(system_alert_delivery, dict) and system_alert_delivery.get("status") == "degraded":
+                sys.stderr.write("<3>SYSTEM_ALERT_DELIVERY_DEGRADED " + json.dumps(
+                    {"reason_code": system_alert_delivery.get("reason_code")}, ensure_ascii=False,
+                ) + "\n")
         else:
             sys.stdout.write(format_runtime_status_summary_fn(out))
         return 0 if out.get("ok", True) else 2

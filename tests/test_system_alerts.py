@@ -48,7 +48,7 @@ def test_system_alert_is_deduped_and_recovers_once(monkeypatch, tmp_path: Path) 
     assert sends[0]["idempotency_key"] != sends[3]["idempotency_key"]
 
 
-def test_unconfirmed_alert_reserves_attempt_and_unconfigured_route_does_not(monkeypatch, tmp_path: Path) -> None:
+def test_unconfirmed_alert_and_unconfigured_route_reserve_attempts(monkeypatch, tmp_path: Path) -> None:
     from src.application import system_alerts
 
     sends = []
@@ -58,10 +58,14 @@ def test_unconfirmed_alert_reserves_attempt_and_unconfigured_route_does_not(monk
                   first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
     assert system_alerts.report_system_failure(config={}, **fields) == "unconfigured"
     assert not sends
+    assert system_alerts.report_system_failure(config=_config(), **fields) == "suppressed"
+    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    next(iter(state.values()))["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(state), encoding="utf-8")
     assert system_alerts.report_system_failure(config=_config(), **fields) == "unconfirmed"
     assert system_alerts.report_system_failure(config=_config(), **fields) == "suppressed"
     assert len(sends) == 1
-    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
     state = json.loads(path.read_text(encoding="utf-8"))
     next(iter(state.values()))["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
     path.write_text(json.dumps(state), encoding="utf-8")
@@ -96,7 +100,12 @@ def test_unconfirmed_recovery_is_visible_and_retries_with_same_key(monkeypatch, 
     key = system_alerts._fingerprint("test.service", "hk", "lx", "TICK_EXEC_FAILED", "child_exit")
     assert state[key]["status"] == "recovered"
     assert state[key]["recovery_delivery"] == "unknown"
-    state[key]["recovery_last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    state[key]["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
+    path.write_text(json.dumps(state), encoding="utf-8")
+    assert system_alerts.report_system_recovery(**fields) == "suppressed"
+    assert len(sends) == 2
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state[key]["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
     path.write_text(json.dumps(state), encoding="utf-8")
 
     assert system_alerts.report_system_recovery(**fields) == "confirmed"
@@ -162,6 +171,172 @@ def test_journal_meta_signal_dedupes_and_reports_recovery(tmp_path: Path, capsys
     assert next(iter(state.values()))["status"] == "failed"
 
 
+def test_missing_primary_route_uses_independent_feishu_credentials_and_stable_fallback_key(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-open-id")
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append((provider, kwargs)) or {"delivery_confirmed": True},
+                                                         normalize_fn=lambda **_: {}))
+    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+                  failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
+                  first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
+    (tmp_path / "output_runs" / "run-1").mkdir(parents=True)
+    assert system_alerts.report_system_failure(**fields) == "confirmed"
+    assert sends[0][0] == "feishu_app"
+    assert sends[0][1]["target"] == "fixture-open-id"
+    assert sends[0][1]["notifications"] == {}
+    state_path = tmp_path / "output_shared/state/system_alerts.json"
+    incident = next(iter(json.loads(state_path.read_text()).values()))
+    primary_key = "om-" + system_alerts.hashlib.sha256(
+        (system_alerts._fingerprint("test.service", "hk", "lx", "TICK_TIMEOUT", "timeout")
+         + incident["reserved_at"]).encode()).hexdigest()[:32]
+    assert sends[0][1]["idempotency_key"] != primary_key
+    assert (incident["fallback_used"], incident["provider"], incident["delivery_confirmed"]) == (True, "feishu_app", True)
+    audit = [json.loads(line) for line in (tmp_path / "output_runs/run-1/state/audit_events.jsonl").read_text().splitlines()]
+    assert audit[-1]["fallback_used"] is True
+    assert audit[-1]["extra"]["provider"] == "feishu_app"
+    assert audit[-1]["extra"]["delivery_confirmed"] is True
+    assert system_alerts.report_system_failure(**fields) == "suppressed"
+    state = json.loads(state_path.read_text())
+    next(iter(state.values()))["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    state_path.write_text(json.dumps(state))
+    assert system_alerts.report_system_failure(**fields) == "confirmed"
+    assert sends[1][1]["idempotency_key"] == sends[0][1]["idempotency_key"]
+
+
+def test_missing_route_without_fallback_stays_local_and_degraded(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application import system_alerts
+
+    for name in ("OM_FEISHU_BOT_APP_ID", "OM_FEISHU_BOT_APP_SECRET", "OM_FEISHU_BOT_USER_OPEN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda _provider: (_ for _ in ()).throw(AssertionError("must not send")))
+    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+                  failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
+                  first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
+    assert system_alerts.report_system_failure(**fields) == "unconfigured"
+    assert "<3>SYSTEM_ALERT_UNCONFIRMED" in capsys.readouterr().err
+    assert system_alerts.system_alert_delivery_status(tmp_path)["status"] == "degraded"
+    assert system_alerts.report_system_failure(**fields) == "suppressed"
+
+
+def test_explicit_primary_unavailability_uses_distinct_fallback_key(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-open-id")
+    sends = []
+    def send(provider, **kwargs):
+        sends.append((provider, kwargs["idempotency_key"]))
+        return ({"delivery_confirmed": False, "explicit_pre_acceptance_failure": True}
+                if provider == "wechat_clawbot" else {"delivery_confirmed": True})
+
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda provider: SimpleNamespace(send_fn=lambda **kwargs: send(provider, **kwargs),
+                                                         normalize_fn=lambda **_: {}))
+    assert system_alerts.report_system_failure(
+        base=tmp_path, config=_config(), unit="test.service", market="hk", account="lx",
+        failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
+        first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown",
+    ) == "confirmed"
+    assert [provider for provider, _key in sends] == ["wechat_clawbot", "feishu_app"]
+    assert sends[0][1] != sends[1][1]
+
+
+def test_fallback_failure_does_not_cascade_and_meta_signal_is_single_attempt(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-open-id")
+    sends = []
+    def fail_send(provider, **_kwargs):
+        sends.append(provider)
+        raise RuntimeError("fixture provider failure")
+
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda provider: SimpleNamespace(send_fn=lambda **kwargs: fail_send(provider, **kwargs),
+                                                         normalize_fn=lambda **_: {}))
+    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+                  failure_code="NOTIFICATION_DELIVERY_UNCONFIRMED", stage="delivery", run_id="run-1", degraded=True,
+                  reason="route_missing", external=True)
+    assert system_alerts.report_system_meta_signal(**fields) == "signaled"
+    assert system_alerts.report_system_meta_signal(**fields) == "suppressed"
+    assert sends == ["feishu_app"]
+    incident = next(iter(json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text()).values()))
+    assert incident["fallback_used"] is True
+    assert incident["delivery_confirmed"] is False
+
+
+def test_missing_feishu_route_uses_single_independent_wechat_binding(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    state_dir = tmp_path / "output_shared/state/channels/wechat_clawbot/default"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(json.dumps({"bot_token": "fixture-token"}))
+    (state_dir / "bindings.json").write_text(json.dumps({"bindings": {"ops": {
+        "to_user_id": "fixture-user", "context_token": "fixture-context"}}}))
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append((provider, kwargs)) or {"delivery_confirmed": True},
+                                                         normalize_fn=lambda **_: {}))
+    fields = dict(base=tmp_path, config={"notifications": {"provider": "feishu_app"}},
+                  unit="test.service", market="hk", account="lx", failure_code="TICK_TIMEOUT",
+                  stage="timeout", run_id="run-1", rc=124,
+                  first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
+    assert system_alerts.report_system_failure(**fields) == "confirmed"
+    assert sends[0][0] == "wechat_clawbot"
+    assert sends[0][1]["target"] == "wechat:default:ops"
+
+
+def test_recovery_fallback_retries_after_600s_with_same_key_and_current_evidence(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-open-id")
+    sends = []
+    def send(provider, **kwargs):
+        sends.append((provider, kwargs))
+        return {"delivery_confirmed": provider == "wechat_clawbot" or len(sends) == 3}
+
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
+                        lambda provider: SimpleNamespace(send_fn=lambda **kwargs: send(provider, **kwargs),
+                                                         normalize_fn=lambda **_: {}))
+    fields = dict(base=tmp_path, unit="test.service", market="hk", account="lx",
+                  failure_code="TICK_TIMEOUT", stage="timeout")
+    (tmp_path / "output_runs/run-1").mkdir(parents=True)
+    assert system_alerts.report_system_failure(
+        **fields, config=_config(), run_id="run-1", rc=124,
+        first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown",
+    ) == "confirmed"
+    assert system_alerts.report_system_recovery(**fields, config={}) == "unconfirmed"
+    state_path = tmp_path / "output_shared/state/system_alerts.json"
+    state = json.loads(state_path.read_text())
+    incident = state[system_alerts._fingerprint("test.service", "hk", "lx", "TICK_TIMEOUT", "timeout")]
+    assert (incident["fallback_used"], incident["provider"], incident["delivery_confirmed"]) == (True, "feishu_app", False)
+    assert incident["failure_provider"] == "wechat_clawbot"
+    incident["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
+    state_path.write_text(json.dumps(state))
+    assert system_alerts.report_system_recovery(**fields, config={}) == "suppressed"
+    incident["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
+    state_path.write_text(json.dumps(state))
+    assert system_alerts.report_system_recovery(**fields, config={}) == "confirmed"
+    assert sends[1][1]["idempotency_key"] == sends[2][1]["idempotency_key"]
+    state = json.loads(state_path.read_text())
+    recovered = state[system_alerts._fingerprint("test.service", "hk", "lx", "TICK_TIMEOUT", "timeout")]
+    assert (recovered["fallback_used"], recovered["provider"], recovered["delivery_confirmed"]) == (True, "feishu_app", True)
+    audit = [json.loads(line) for line in (tmp_path / "output_runs/run-1/state/audit_events.jsonl").read_text().splitlines()]
+    assert audit[-1]["action"] == "recovery_delivery"
+    assert audit[-1]["fallback_used"] is True
+    assert audit[-1]["extra"]["delivery_confirmed"] is True
+
+
 def test_tick_failure_records_run_and_alerts_once(monkeypatch, tmp_path: Path) -> None:
     from src.application import system_alerts
     from src.application.tick_cron import run_tick_cron
@@ -182,7 +357,7 @@ def test_tick_failure_records_run_and_alerts_once(monkeypatch, tmp_path: Path) -
     assert "TICK_EXEC_FAILED" in sends[0]["message"]
     events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
     assert len(events) == 2
-    event = json.loads(events[0].read_text(encoding="utf-8"))
+    event = json.loads(events[0].read_text(encoding="utf-8").splitlines()[0])
     assert event["extra"]["account"] == "lx"
     assert event["extra"]["rc"] == 78
 

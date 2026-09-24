@@ -120,6 +120,14 @@ def test_notification_delivery_is_visible_alongside_existing_overall_failure() -
     assert "notification delivery: status=degraded reasons=NOTIFICATION_ROUTE_MISSING" in text
 
 
+def test_system_alert_fallback_and_unconfirmed_state_are_visible_in_status() -> None:
+    envelope = {"ok": True, "data": {"summary": {"ok": False},
+        "system_alert_delivery": {"status": "degraded", "reason_code": "SYSTEM_ALERT_DELIVERY_UNCONFIRMED",
+                                  "provider": "feishu_app", "fallback_used": True, "active_count": 1}}}
+    text = format_runtime_status_summary(envelope)
+    assert "system alert delivery: status=degraded provider=feishu_app fallback=yes active=1" in text
+
+
 def test_status_journal_emits_error_meta_signal_only_when_degraded(capsys) -> None:
     args = argparse.Namespace(command="status", json=False, journal_summary=True)
     delivery = {"status": "degraded", "reason_codes": ["NOTIFICATION_EVIDENCE_UNKNOWN"]}
@@ -140,3 +148,19 @@ def test_status_journal_emits_error_meta_signal_only_when_degraded(capsys) -> No
         runtime_status_payload_from_args_fn=lambda _args: {},
     ) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_status_journal_marks_system_alert_delivery_degraded(capsys) -> None:
+    args = argparse.Namespace(command="status", json=False, journal_summary=True)
+    execute = lambda _name, _payload: {"ok": True, "data": {
+        "summary": {"ok": False}, "system_alert_delivery": {
+            "status": "degraded", "reason_code": "SYSTEM_ALERT_DELIVERY_UNCONFIRMED",
+            "fallback_used": False, "provider": None, "active_count": 1,
+        },
+    }}
+    assert handle_observability_command(
+        args, execute_tool_fn=execute, runtime_status_payload_from_args_fn=lambda _args: {},
+    ) == 0
+    output = capsys.readouterr()
+    assert "system alert delivery: status=degraded" in output.out
+    assert "<3>SYSTEM_ALERT_DELIVERY_DEGRADED" in output.err

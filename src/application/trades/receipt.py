@@ -98,7 +98,7 @@ def send_trade_intake_receipt(
     channel = route.get("channel")
     target = route.get("target")
     if not str(target or "").strip():
-        _record_receipt_meta(base=base, deal=deal, payload=payload, result=result,
+        _record_receipt_meta(base=base, config=config, deal=deal, payload=payload, result=result,
                              inbox_id=inbox_id, degraded=True, reason="route_missing")
         return {
             "enabled": True,
@@ -211,13 +211,13 @@ def send_trade_intake_receipt(
         )
         finish_trade_receipt_attempt(inbox_path, inbox_id=inbox_id,
                                      attempt_id=attempt["attempt_id"], result=receipt)
-    _record_receipt_meta(base=base, deal=deal, payload=payload, result=result,
+    _record_receipt_meta(base=base, config=config, deal=deal, payload=payload, result=result,
                          inbox_id=inbox_id, degraded=not delivery_confirmed, reason=status)
     return receipt
 
 
 def _record_receipt_meta(
-    *, base: Path, deal: Any, payload: dict[str, Any] | None, result: dict[str, Any],
+    *, base: Path, config: dict[str, Any] | None, deal: Any, payload: dict[str, Any] | None, result: dict[str, Any],
     inbox_id: str | None, degraded: bool, reason: str,
 ) -> None:
     source = payload if isinstance(payload, dict) else {}
@@ -231,7 +231,7 @@ def _record_receipt_meta(
             base=base, unit=f"options-monitor-trade-intake-{account}.service",
             market=market, account=account, failure_code="TRADE_RECEIPT_UNCONFIRMED",
             stage="receipt_delivery", run_id=str(inbox_id or broker_deal_key(deal) or "-"),
-            degraded=degraded, reason=reason,
+            degraded=degraded, reason=reason, config=config, external=True,
         )
     except Exception:
         print("<3>RECEIPT_META_ALERT_INFRA_FAILED", file=sys.stderr)
