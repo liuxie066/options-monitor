@@ -1,0 +1,44 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.3",
+  "base": {
+    "tag": "v3.7.2",
+    "commit": "49470117546aed808cb3a13afe45a4d66138a05f"
+  },
+  "reviewed_head": "6c01eacc529c8d12362ec379ffdb1b4dda4f00ad",
+  "commits": [
+    {
+      "sha": "8c38f295568b435011ca811dd2de985901854222",
+      "subject": "fix(alerts): report disk failures through task receipts only"
+    },
+    {
+      "sha": "6c01eacc529c8d12362ec379ffdb1b4dda4f00ad",
+      "subject": "Merge pull request #365 from liuxie066/codex/disk-alert-failure-only"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "取消每分钟磁盘容量阈值检查与重复告警；磁盘空间问题仅在导致实际任务失败时，沿任务故障回执报告。升级时静默退役旧的磁盘阈值事故状态。",
+      "commits": [
+        "8c38f295568b435011ca811dd2de985901854222"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "6c01eacc529c8d12362ec379ffdb1b4dda4f00ad",
+      "reason": "PR 合并提交，内容由上列开发提交覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "8c38f295568b435011ca811dd2de985901854222",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/365"]
+    },
+    {
+      "commit": "6c01eacc529c8d12362ec379ffdb1b4dda4f00ad",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/365"]
+    }
+  ]
+}
