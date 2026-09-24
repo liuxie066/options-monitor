@@ -12,6 +12,8 @@
 
 系统故障告警入口清单：计划 Tick 子进程失败、trade-intake unit 失败、intake 心跳与根盘阈值、OpenD watchdog 均通过 `system_alerts` 记录指纹事故并处理恢复；通知投递和只读取证降级只在该底座记录 journal 元信号。OpenD 原有状态文件仍负责连续失败门槛和突发限额，实际发送使用公共事故状态与稳定投递键。普通策略候选通知属于业务投递，不属于系统故障告警。
 
+成交回执的传输键由 deal 与冻结的结果修订生成；同一修订重试复用键，已确认或投递结果未知的重复尝试记为 `skipped_duplicate` 类原因。计划通知的默认传输键由 run、账户和渲染内容生成；Daily Brief 继续使用冻结的业务投递键，跨 run 重试也保持同一键。
+
 `notification_perception_read` 默认读取当前审计文件末尾 1 MiB，超过部分明确标为 partial。历史查询同时传入 `start_utc` 和 `end_utc`（ISO-8601 UTC），按当前及 `audit_events.YYYYMMDD.NNNNNN.jsonl` 段逐行扫描，单次最多 64 MiB；超预算、损坏和缺失均标明覆盖不完整。分页必须带原查询参数与返回游标；活动文件追加允许继续，源文件被替换或轮转须重新查询。
 
 `./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。

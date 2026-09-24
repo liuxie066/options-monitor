@@ -623,6 +623,37 @@ def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path:
     assert calls[0]["notifications"] == {"provider": "feishu_app"}
 
 
+def test_trade_receipt_key_reuses_deal_revision_and_duplicate_is_skipped(tmp_path: Path) -> None:
+    calls: list[dict] = []
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {"command_ok": len(calls) > 1, "delivery_confirmed": len(calls) > 1,
+                "message_id": "fixture-message" if len(calls) > 1 else None}
+
+    fields = dict(config={"notifications": {"provider": "wechat_clawbot", "target": "fixture"}},
+                  deal=None, payload={"deal_id": "deal-1"}, send_fn=_send)
+    revision = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1",
+                "account": "lx", "action": "open", "receipt_result_key": "recorded"}
+    first = _send_receipt(tmp_path, **fields, result=revision)
+    second = _send_receipt(tmp_path, **fields, result=revision)
+    assert first["status"] == "failed" and second["status"] == "sent"
+    assert calls[0]["idempotency_key"] == calls[1]["idempotency_key"]
+    assert second["transport_idempotency_key"] == calls[1]["idempotency_key"]
+
+    duplicate = _send_receipt(
+        tmp_path, **fields,
+        state={"processed_deal_ids": {"deal-1": {"status": "applied", "receipt": second}}},
+        result={"status": "skipped", "reason": "duplicate_deal_id", "deal_id": "deal-1"},
+    )
+    assert duplicate["reason"] == "skipped_duplicate"
+    assert len(calls) == 2
+
+    corrected = _send_receipt(tmp_path, **fields, result={**revision, "receipt_result_key": "corrected"})
+    assert corrected["status"] == "sent"
+    assert calls[2]["idempotency_key"] != calls[1]["idempotency_key"]
+
+
 def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     msg = build_trade_intake_receipt_message(
         deal=None,
