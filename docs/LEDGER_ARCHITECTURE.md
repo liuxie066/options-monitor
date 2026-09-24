@@ -579,11 +579,31 @@ Ledger、Inbox、汇率表和业务判定，不新增领域实体、通用查询
 
 新空表在初始化时建立上述索引。有数据的旧表不在普通启动时全量扫描建索引；索引不存在
 或定义不匹配时继续安全全读。索引缺失不会使成交被拒收或丢弃。
+候选读取首次遇到每个（库、事件表、`missing` 或 `definition_mismatch` 原因）缺口时，
+仓储在该进程内发出一次 WARN，消息包含库标识和当时的表行数；只读
+`projection-migration status` 的 `execution_identity_index_gaps` 列出同形的
+`{table, cause, rows}`，其中 `rows` 是每次查询当时的实时值。该字段仅描述执行身份候选读取，
+不改变投影 checkpoint 的 `readiness` 或 `reasons`。
 
 共享 `build_position_projection_indexes` 在同一 writer 锁和事务中解码、核验所有适用
 表，全部通过后才创建索引。无传入连接时使用 `BEGIN IMMEDIATE` 并负责提交/回滚；
 传入连接必须已有事务，由调用方提交/回滚。新空表可用空表证明，不必做历史解码。
 历史声明身份矛盾使维护失败并回滚，继续使用原全读；修复历史身份是独立操作。
+
+对有数据的旧库，只补缺失索引而不执行完整投影迁移时，可在**另行批准的目标库**上从仓库
+根目录运行以下窄运维命令；本命令不是普通开库动作：
+
+```bash
+./.venv/bin/python -c 'import sys; from pathlib import Path; from src.application.ledger.repository import SQLiteOptionPositionsRepository; print(SQLiteOptionPositionsRepository(Path(sys.argv[1]), initialize=False).build_position_projection_indexes())' /path/to/approved.sqlite3
+```
+
+它复用同一事务里的两张现存执行事件表全行身份校验，然后才建索引。除两张执行身份索引，
+若缺失还可能创建 `idx_trade_events_trade_time`、`idx_trade_events_account_time`、
+`idx_position_lots_account_lot`；`initialize=False` 会拒绝不存在的库和不支持的旧 lot
+结构。同名但定义不匹配的索引不会被自动替换，命令报错回滚，读路径仍安全全读。
+执行前记录只读索引清单与投影状态，核对预期创建集合；执行后读回各索引的
+`sqlite_master.sql`、两类候选读取结果和投影状态。DDL 可能改变 schema cookie，
+使原有 checkpoint 的就绪检查失败；后续投影维护须另行决策，本命令不重建或激活 checkpoint。
 
 旧库复用 `position_projection_migration.py` 的完整受控维护。清单、事务内重查和验证
 绑定指派股票表的存在性和事件内容指纹；清单后股票事实变化会使证据失效。股票表存在时

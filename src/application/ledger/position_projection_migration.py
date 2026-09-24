@@ -65,6 +65,7 @@ def _lot_account(fields: Any) -> str:
 
 from src.application.ledger.repository_trade_schema import (
     EXECUTION_IDENTITY_INDEXES,
+    _execution_identity_index_gap,
     _execution_identity_index_ready,
 )
 from src.application.source_identity import source_commit_sha
@@ -1144,6 +1145,12 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
     implementation, timing = _loaded_implementation()
     with _read_only_connection(path) as conn:
         source = _source_state(conn)
+        execution_identity_index_gaps = []
+        for table in EXECUTION_IDENTITY_INDEXES:
+            if _table_exists(conn, table):
+                gap = _execution_identity_index_gap(conn, table)
+                if gap is not None:
+                    execution_identity_index_gaps.append(gap)
         checkpoints = (
             [dict(row) for row in conn.execute("SELECT * FROM position_projection_checkpoints")]
             if _table_exists(conn, "position_projection_checkpoints")
@@ -1265,6 +1272,7 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
                     "fields_json_bytes": int(fingerprint_scope[1] or 0),
                 },
                 "runtime_telemetry": position_projection_runtime_telemetry(),
+                "execution_identity_index_gaps": execution_identity_index_gaps,
                 "readiness": "ready" if not reasons else "not_ready",
                 "reasons": sorted(set(reasons)),
             }

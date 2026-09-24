@@ -216,7 +216,9 @@ class TradeEventRepositoryMixin:
         self, execution_id: str, *, conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
         with self._optional_conn(conn) as active_conn:
-            rows = _execution_candidate_rows(active_conn, "trade_events", execution_id)
+            rows = _execution_candidate_rows(
+                active_conn, "trade_events", execution_id, store_key=str(self.db_path),
+            )
             if rows is None:
                 return self.list_trade_events(conn=active_conn)
         return [trade_event_application_payload(json.loads(row["event_json"])) for row in rows]
@@ -387,11 +389,10 @@ class TradeEventRepositoryMixin:
                     """
                     SELECT event_id, account, event_json, trade_time_ms
                     FROM trade_events
-                    WHERE trade_time_ms > ?
-                       OR (trade_time_ms = ? AND event_id > ?)
+                    WHERE (trade_time_ms, event_id) > (?, ?)
                     ORDER BY trade_time_ms ASC, event_id ASC
                     """,
-                    (int(after[0]), int(after[0]), str(after[1])),
+                    (int(after[0]), str(after[1])),
                 ).fetchall()
         return [
             {
