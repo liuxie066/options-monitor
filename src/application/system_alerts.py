@@ -104,6 +104,7 @@ def report_system_failure(
     first_error_at: str,
     opend_login_state: str,
     silence_seconds: int = 600,
+    message: str | None = None,
 ) -> str:
     """Reserve an incident before delivery; an uncertain send is never retried inside the silence window."""
     key = _fingerprint(unit, market, account, failure_code, stage)
@@ -133,7 +134,7 @@ def report_system_failure(
             "opend_login_state": opend_login_state,
         }
         atomic_write_json(path, _prune_state(state))
-    message = render_system_notice(
+    message = message or render_system_notice(
         component=unit,
         status="❌ 不可用",
         fields=(("run_id", run_id), ("market", market), ("account", account),
@@ -155,23 +156,26 @@ def report_system_failure(
 
 def report_system_recovery(
     *, base: Path, config: dict, unit: str, market: str, account: str,
-    failure_code: str, stage: str,
+    failure_code: str, stage: str, message: str | None = None,
+    notify: bool = True, allow_without_incident: bool = False,
 ) -> str:
     key = _fingerprint(unit, market, account, failure_code, stage)
     path = base / "output_shared" / "state" / "system_alerts.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with _state_lock(path):
         state = _read_state(path)
-        if not isinstance(state.get(key), dict):
+        previous = state.get(key)
+        if previous is None and allow_without_incident:
+            previous = {"status": "failed", "reserved_at": datetime.now(timezone.utc).isoformat()}
+        if not isinstance(previous, dict) or previous.get("status") != "failed":
             return "no_incident"
-        if state[key].get("status") != "failed":
-            return "no_incident"
-        incident_at = str(state[key].get("reserved_at") or "")
-        state[key]["status"] = "recovered"
-        state[key]["recovered_at"] = datetime.now(timezone.utc).isoformat()
-        state[key]["recovery_delivery"] = "unknown"
+        incident_at = str(previous.get("reserved_at") or "")
+        state[key] = {**previous, "status": "recovered", "recovered_at": datetime.now(timezone.utc).isoformat(),
+                      "recovery_delivery": "unknown" if notify else "disabled"}
         atomic_write_json(path, _prune_state(state))
-    message = render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
+    if not notify:
+        return "suppressed"
+    message = message or render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
     try:
         recovery_key = hashlib.sha256((key + incident_at + "-recovery").encode()).hexdigest()
         confirmed = _send(base, config, message, recovery_key)
