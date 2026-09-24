@@ -282,6 +282,20 @@ def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
         conn.commit()
 
 
+def test_an_empty_store_does_not_report_a_missing_column(tmp_path: Path) -> None:
+    path = tmp_path / "empty.sqlite3"
+    SQLiteOptionPositionsRepository(path)
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+
+    assert inventory["counts"]["position_lots"] == 0
+    assert inventory["column_contract"]["position_lots"]["missing"] == []
+    assert inventory["readiness_reasons"] == []
+    assert inventory["pending"]["d2_lot_id_column"] == {
+        "column_present": True, "rows_null": 0,
+    }
+
+
 def _stored_rows(path: Path) -> dict[str, object]:
     with closing(connect_ledger_fixture(path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -1167,6 +1181,30 @@ def test_legacy_payload_without_asset_type_uses_replay_for_mixed_lots(
     }
 
 
+@pytest.mark.parametrize(
+    "asset_type",
+    ["unknown", "conflict", pytest.param(["option"], id="non-scalar")],
+)
+def test_asset_type_unknown_or_conflicting_with_replay_blocks_inventory(
+    tmp_path: Path, asset_type: object,
+) -> None:
+    path = _legacy_store(tmp_path)
+    _edit_lot_fields(
+        path,
+        "lot_assign-1",
+        lambda fields: fields.__setitem__(
+            "asset_type",
+            ("stock" if fields.get("asset_type") == "option" else "option")
+            if asset_type == "conflict"
+            else asset_type,
+        ),
+    )
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+
+    assert "lot_asset_type_unresolved" in inventory["readiness_reasons"]
+
+
 
 
 
@@ -1291,7 +1329,6 @@ def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, statu
     assert report["ok"] is False
     assert "projection_replay_mismatch" in report["readiness_reasons"]
     assert report["projection"]["mismatch_count"] == 1
-
 
 
 

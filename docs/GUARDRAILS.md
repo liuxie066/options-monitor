@@ -71,7 +71,7 @@ The base revision is never defaulted: `--check-public-surface` without `--public
 
 ## D) Retired-Column SQL Registry
 
-The lot-identity retirement (slice 3) pins, instead of trusting, the set of live SQL that still names a retired column (`position_lots.expiration`, `position_lots.record_id`, `wheel_events.stock_lot_id`). `docs/retired_column_sql_registry.json` enumerates that set — SQL text, schema-helper call arguments, and standalone index-name constants, per scope — plus the f-string statements that cannot be judged from literals (recorded as `dynamic_sql`, pinned, not silently missed) and the modules exempt because their job is to name these columns (the migration tool and the parity probe; the exemption is asserted non-empty so a rename fails rather than hollows it out).
+The lot-identity retirement pins live SQL that still names a retired column (`position_lots.expiration`, `position_lots.record_id`, `wheel_events.stock_lot_id`). `docs/retired_column_sql_registry.json` records SQL text, schema-helper arguments, index-name constants, and dynamic SQL against these tables even when an interpolated column is invisible to the scanner. Only the read-only lot-identity inventory and the position-projection migration retain reviewed old-column reads; the parity probe no longer does. Each exempt module must have a real hit.
 
 Run it locally:
 
@@ -80,10 +80,4 @@ Run it locally:
 ./.venv/bin/python scripts/retired_column_scan.py --write   # after an intended drift
 ```
 
-Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change reruns `--write` in the same commit and the diff is the review. Repointing statements away from the retired columns is the slice 3 work itself; the registry going empty (outside the exemptions) is its completion signal.
-
-The migration reads the same ledger at run time. Its SQL gate blocks each statement naming a retired column except an exact R1 old-shape entry in `lot_identity_migration.R1_POSITION_SQL_EXCEPTIONS`. Each entry pins the module, statement kind, normalized SQL digest and occurrence count. These branches use `position_lots_use_lot_id`; the initial `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table. The quality suite runs `test_r1_rebuilt_store_reopens_and_preserves_projection` on both shapes, including reopen, reads, insert/update/delete, backfill, indexes, account isolation and trusted reads after full publication. Changed or additional statements and unreviewed dynamic SQL still block; regenerating the registry cannot extend the exceptions. R2 removes the exceptions with the old branches after B7.
-
-Wheel SQL uses `wheel_events_use_lot_id` to select the old or renamed column. The controlled migration renames `wheel_events.stock_lot_id` to `lot_id` in the same transaction as the lot rebuild; it preserves event values, rowids and historical hash keys, checks readback and foreign keys, and reports `wheel_identity_rename`. The inventory fingerprints wheel rows so an append between inventory and apply invalidates the manifest. Ordinary repository open does not perform this rename.
-
-The SQL gate's success does not authorize the window: `LOT_IDENTITY_WINDOW_ENABLEMENT`, the explicit apply confirmation, manifest checks and transaction guards remain required. A blocked SQL gate names the offending statements in the receipt. The column contract remains dual-shape during R1 and cannot replace this statement-level evidence.
+Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change regenerates the registry and reviews the diff. New non-exempt retired-column SQL and unreviewed dynamic SQL fail the quality gate. The R1 statement exceptions, window switch, dual-shape write path, and destructive lot-identity `apply` were retired in R2. Ordinary repository open requires the final shape; `inventory` and `verify` remain read-only diagnostics for older stores.

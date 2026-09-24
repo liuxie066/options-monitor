@@ -149,8 +149,10 @@ def _ensure_wheel_events_v2(conn: sqlite3.Connection) -> None:
         _create_wheel_events_v2_guards(conn)
         return
     raise RuntimeError(
-        "wheel_events has a legacy or partial schema; run the controlled "
-        "lot-identity or trade-intake attribution-migrate workflow before ordinary repository access"
+        "wheel_events has a legacy or partial schema; inspect with "
+        "`om option-positions lot-identity-migration inventory` and `verify`; "
+        "recovery requires separately authorized historical migration code or "
+        "an approved restore before ordinary repository access"
     )
 
 
@@ -341,21 +343,26 @@ class RepositoryCoreMixin:
             }
             if "position_lots" in tables and not position_lots_use_lot_id(conn):
                 raise RuntimeError(
-                    "position_lots has a legacy schema; run `om option-positions "
-                    "lot-identity-migration inventory`, `verify`, and the controlled "
-                    "apply before ordinary repository access"
+                    "position_lots has a legacy schema; inspect with `om option-positions "
+                    "lot-identity-migration inventory` and `verify`; recovery requires "
+                    "separately authorized historical migration code or an approved "
+                    "restore before ordinary repository access"
                 )
             if "wheel_events" in tables and (
                 not wheel_events_use_lot_id(conn) or not _wheel_events_schema_is_v2(conn)
             ):
                 raise RuntimeError(
-                    "wheel_events has a legacy schema; run the controlled lot-identity "
-                    "or trade-intake attribution-migrate workflow before ordinary repository access"
+                    "wheel_events has a legacy schema; inspect with `om option-positions "
+                    "lot-identity-migration inventory` and `verify`; recovery requires "
+                    "separately authorized historical migration code or an approved "
+                    "restore before ordinary repository access"
                 )
         except ValueError as exc:
             raise RuntimeError(
-                "ledger has an unsupported or partial lot-identity schema; run the "
-                "lot-identity inventory and verify commands before ordinary access"
+                "ledger has an unsupported or partial lot-identity schema; inspect "
+                "with `om option-positions lot-identity-migration inventory` and "
+                "`verify`; recovery requires separately authorized historical "
+                "migration code or an approved restore before ordinary access"
             ) from exc
         finally:
             conn.close()

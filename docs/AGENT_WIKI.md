@@ -619,9 +619,9 @@ the cases an operator must not conflate:
 - `dropped_payload_keys_would_lose_facts` — a non-empty payload key (or a
   `note` KV pair) has no surviving home; `blocking_keys` names them.
 
-The production migration window is closed. `apply` without `--apply` is a
-read-only preview of the exact frozen manifest; it reports whether that manifest
-would have passed the migration gates. `--apply` is disabled in ordinary builds.
+The production migration window is closed. This build has no lot-identity
+`apply` or preview command. Recovering a legacy store requires separately
+authorized use of the released historical migration code or an approved restore.
 Repositories now require the final `lot_id` schema and refuse legacy or partial
 `position_lots` / `wheel_events` before an ordinary open can mutate the store.
 Historical `trade_events` remain readable through their compatibility decoder;

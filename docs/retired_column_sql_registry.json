@@ -1,5 +1,6 @@
 {
   "exempt_modules": [
+    "src/application/ledger/lot_identity_migration.py",
     "src/application/ledger/position_projection_migration.py"
   ],
   "retired_columns": {
@@ -22,9 +23,102 @@
     "by_module": {},
     "detail": [],
     "digest": "sha256:4f53cda18c2baa0c",
-    "dynamic_sql": [],
+    "dynamic_sql": [
+      {
+        "columns": [],
+        "digest": "sha256:00304c6023cc01e1",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:10ccc631371b73ad",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:11efe2ef73a5d799",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:3db215a46c8ea0c6",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:471fd62ac2cbdaf6",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:d899e724f091dcce",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:e65279505d598965",
+        "kind": "dynamic",
+        "module": "src/application/ledger/repository_projection_schema.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
+      {
+        "columns": [],
+        "digest": "sha256:2aa2f9d38a6a4493",
+        "kind": "dynamic",
+        "module": "src/application/ledger/trade_attribution_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "wheel_events"
+        ]
+      }
+    ],
     "exempt_dynamic": [],
     "exempt_hits": [
+      {
+        "columns": [
+          "record_id"
+        ],
+        "digest": "sha256:fde0f8e8075836b8",
+        "kind": "read",
+        "module": "src/application/ledger/lot_identity_migration.py",
+        "occurrences": 1,
+        "tables": [
+          "position_lots"
+        ]
+      },
       {
         "columns": [
           "expiration"
@@ -105,7 +199,7 @@
       "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:a0baece5f742e752",
+    "digest": "sha256:0096b8a737c4574d",
     "statements": 34
   }
 }

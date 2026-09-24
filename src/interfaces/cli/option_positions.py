@@ -560,10 +560,7 @@ def _register_projection_parsers(sub: Any) -> None:
     p_projection_deactivate.add_argument('--format', default='json', choices=['json'])
     _add_local_write_flags(p_projection_deactivate, high_risk=True)
 
-    # §13.2 row 8: same conventions as projection-migration, different names.
-    # Two `apply` commands with the same parameters but opposite semantics is
-    # this batch's one operator risk surface; the distinct parent group is the
-    # mitigation, and every payload carries its own schema_version.
+    # §13.2 row 8: preserve the separate parent group and read-only commands.
     p_lot_identity = sub.add_parser(
         'lot-identity-migration',
         help='inventory or verify the D1-D4 lot identity migration (read-only)',
