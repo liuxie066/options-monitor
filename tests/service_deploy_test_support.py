@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -323,6 +324,75 @@ def _write_cloned_release_with_configs(
     (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
 
 
+def _fake_release_drift_command(
+    command: list[str],
+    *,
+    run_cmd=None,  # type: ignore[no-untyped-def]
+    service_drift_fn=None,  # type: ignore[no-untyped-def]
+) -> subprocess.CompletedProcess | None:
+    """Answer ``<release>/om service drift ...`` the way the real CLI does.
+
+    The upgrade hands its post-switch reconcile to the release that is now
+    current, so the desired unit bundle comes from that release's code instead of
+    the upgrading process's. Tests stand in for that executable by running the
+    real CLI handler in process: the ambient ``OM_SYSTEMD_UNIT_ROOT`` keeps drift
+    off the host systemd, and the response travels back as the same stdout JSON
+    the CLI prints. ``run_cmd`` is the ambient command fake — the release's ``om``
+    issues its own systemctl calls, and running it in process means they have to
+    be answered by the fake that stands in for systemd everywhere else.
+    """
+
+    if len(command) < 3 or Path(str(command[0])).name != "om" or command[1:3] != ["service", "drift"]:
+        return None
+    options: dict[str, str] = {}
+    flags: set[str] = set()
+    index = 3
+    while index < len(command):
+        token = str(command[index])
+        if token.startswith("--"):
+            if index + 1 < len(command) and not str(command[index + 1]).startswith("--"):
+                options[token] = str(command[index + 1])
+                index += 2
+                continue
+            flags.add(token)
+        index += 1
+
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    handler_kwargs: dict[str, object] = {}
+    if service_drift_fn is not None:
+        handler_kwargs["service_drift_fn"] = service_drift_fn
+    elif run_cmd is not None:
+        from functools import partial
+
+        from src.application.service_drift import service_drift
+
+        handler_kwargs["service_drift_fn"] = partial(service_drift, run_cmd=run_cmd)
+    try:
+        response = handle_service_update_command(
+            argparse.Namespace(
+                command="service",
+                service_command="drift",
+                repo_root=options.get("--repo-root"),
+                runtime_root=options.get("--runtime-root"),
+                profile_path=options.get("--profile-path"),
+                confirm="--confirm" in flags,
+                yes=False,
+                preserve_activation_state="--preserve-activation-state" in flags,
+                output=options.get("--output"),
+            ),
+            **handler_kwargs,
+        )
+    except Exception as exc:  # a real `om` reports its failures as a non-zero exit
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
+    return subprocess.CompletedProcess(
+        command,
+        0 if response.get("ok", True) else 1,
+        stdout=json.dumps(response),
+        stderr="",
+    )
+
+
 def _fake_upgrade_release_runner(
     record=None,  # type: ignore[no-untyped-def]
     *,
@@ -360,6 +430,9 @@ def _fake_upgrade_release_runner(
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout=venv_stdout, stderr="")
+        drift = _fake_release_drift_command(command, run_cmd=_run_cmd)
+        if drift is not None:
+            return drift
         if tail is not None:
             result = tail(command)
             if result is not None:

@@ -24,6 +24,7 @@ from src.application.runtime_config_freshness import (
 from src.application.service_drift import (
     SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
     SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+    normalize_service_activation_policy,
     service_drift,
 )
 from src.application.service_cleanup import pi_session_database_paths
@@ -158,6 +159,15 @@ def _upgrade_lock_is_stale(path: Path) -> bool:
     return pid is None or not _pid_is_running(pid)
 
 
+def _clip_command_output(text: str, limit: int | None) -> str:
+    """Trim captured output to its tail; failures and summaries print last.
+
+    Callers that parse a child's stdout as JSON pass `limit=None`: a truncated
+    document is not parseable, and the drift response lists every unit.
+    """
+    return text if limit is None else text[-limit:]
+
+
 def _run_command(
     command: list[str],
     *,
@@ -165,6 +175,7 @@ def _run_command(
     run_cmd: Callable[..., Any],
     env: dict[str, str] | None = None,
     timeout: int = 300,
+    stdout_limit: int | None = 4000,
 ) -> dict[str, Any]:
     started_at = utc_now_iso()
     started = time.monotonic()
@@ -192,7 +203,7 @@ def _run_command(
             "ended_at": utc_now_iso(),
             "duration_seconds": round(time.monotonic() - started, 3),
             "returncode": None,
-            "stdout": stdout[-4000:],
+            "stdout": _clip_command_output(stdout, stdout_limit),
             "stderr": stderr[-4000:],
             "ok": False,
             "subprocess_error": type(exc).__name__,
@@ -213,7 +224,7 @@ def _run_command(
         "ended_at": utc_now_iso(),
         "duration_seconds": round(time.monotonic() - started, 3),
         "returncode": rc,
-        "stdout": stdout[-4000:],
+        "stdout": _clip_command_output(stdout, stdout_limit),
         "stderr": stderr[-4000:],
         "ok": rc == 0,
         **({"env_overrides": sorted(set(env) - set(os.environ))} if env is not None else {}),
@@ -996,6 +1007,76 @@ def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[st
     for item in service_reconcile.get("manual_actions") or []:
         out.append(str(item))
     return out
+
+
+def _parse_drift_response(stdout: str) -> dict[str, Any] | None:
+    """Unwrap the drift result the child CLI printed, or None if it printed none."""
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("tool_name") == "service.drift" and isinstance(payload.get("data"), dict):
+        return payload["data"]
+    return payload or None
+
+
+def _reconcile_services_from_current_release(
+    *,
+    repo_link: Path,
+    target_dir: Path,
+    runtime: Path,
+    activation_policy: str,
+    run_cmd: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    """Reconcile the service bundle using the code of the release now current.
+
+    The upgrade runs as the *previous* release's `om`, so reconciling in process
+    renders the previous release's bundle: units the new release declares read as
+    "not expected" and are never installed. On the 3.7.0 -> 3.7.1 upgrade
+    (2026-09-24) the in-process reconcile reported 26 expected units and wrote
+    nothing, while 3.7.1's renderer expects 29 — the trade-intake heartbeat timer
+    and its failure alert stayed missing until `om service drift --confirm` was
+    run from the new release by hand. Handing this step to `<target_dir>/om` keeps
+    the desired state in step with whatever `current` now points at.
+
+    Only the forward path uses this: the rollback and compensation paths restore
+    the symlink to an earlier release, where the desired state is that release's
+    bundle rather than this one's.
+    """
+    command = [
+        str(target_dir / "om"),
+        "service",
+        "drift",
+        "--repo-root",
+        str(repo_link),
+        "--runtime-root",
+        str(runtime),
+        "--profile-path",
+        str(runtime / "service.profile.json"),
+        "--confirm",
+    ]
+    # Normalise before comparing: any unnormalised spelling would fall through to
+    # ensure-active in the child and re-enable a timer an operator paused on
+    # purpose, which is the state the preserve policy exists to carry across.
+    if normalize_service_activation_policy(activation_policy) == SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING:
+        command.append("--preserve-activation-state")
+    # `om` prints the whole response, and the drift details list every expected and
+    # installed unit, so read stdout whole rather than through the usual tail.
+    result = _run_command(command, cwd=repo_link, run_cmd=run_cmd, timeout=300, stdout_limit=None)
+    reconcile = _parse_drift_response(str(result.get("stdout") or ""))
+    if reconcile is None:
+        raise ServiceTransitionError(
+            "service drift reconciliation after upgrade produced no readable result",
+            status="upgraded_service_reconcile_failed",
+            remediation=[
+                f"command failed: {' '.join(shlex.quote(part) for part in command)}",
+                f"returncode: {result.get('returncode')}",
+                f"stderr: {str(result.get('stderr') or '').strip()[-400:]}",
+            ],
+        )
+    return reconcile
 
 
 def capture_preserved_timer_activation_states(
@@ -2527,6 +2608,10 @@ def _compensate_service_transition(
     service_reconcile: dict[str, Any] = {}
     if symlink_restored and previous_profile:
         try:
+            # Stays in process on purpose: this branch just pointed `current` back at
+            # the previous release, which is the code this process is already running,
+            # so its renderer IS the restored release's. Delegating to a child would
+            # add a new failure mode to the path that exists to clean up after one.
             service_reconcile = service_drift(
                 repo_root=repo_link,
                 runtime_root=runtime_root,
@@ -2902,14 +2987,11 @@ def service_upgrade(
                 operations=operations,
             )
             if pre_upgrade_profile:
-                service_reconcile = service_drift(
-                    repo_root=repo_link,
-                    runtime_root=runtime,
-                    profile_path=runtime / "service.profile.json",
-                    profile=pre_upgrade_profile,
-                    confirm=True,
+                service_reconcile = _reconcile_services_from_current_release(
+                    repo_link=repo_link,
+                    target_dir=target_dir,
+                    runtime=runtime,
                     activation_policy=activation_policy,
-                    preserved_activation_states=preserved_activation_states,
                     run_cmd=run_cmd,
                 )
                 if _service_reconcile_failed(service_reconcile):
@@ -3293,6 +3375,10 @@ def service_rollback(
                 operations=operations,
             )
             if previous_profile:
+                # In process for the same reason as the compensation above: the
+                # symlink now points at the release this process is running, so it
+                # renders the right bundle without a child that could fail on the
+                # restore path.
                 service_reconcile = service_drift(
                     repo_root=repo_link,
                     runtime_root=runtime,
