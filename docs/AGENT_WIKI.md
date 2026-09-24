@@ -594,23 +594,19 @@ each remains a separate explicit operator action.
 #### Lot Identity Migration (D1-D4)
 
 A separate parent group from `projection-migration` above, with its own
-`schema_version` on every payload. `apply` exists in both groups with the same
-parameters and opposite meanings: the projection one lands a disabled
-checkpoint and is non-destructive, this one rewrites lot payloads and backfills
-identity. Always name the group.
+`schema_version` on every payload. It is **read-only**: `inventory` and `verify`
+both open the store without writing. The group's destructive half (`apply`: the
+D1/D2 rebuild, the D3/D4 payload rewrite and the one-off production window) was
+retired in R2 after that window closed, so nothing here rewrites a store.
 
 ```bash
 ./om option-positions --data-config <data.json> lot-identity-migration inventory
 ./om option-positions --data-config <data.json> lot-identity-migration verify
-./om option-positions --data-config <data.json> lot-identity-migration apply \
-  --manifest <inventory.json>
 ```
 
-`inventory` and `verify` open the store read-only. `inventory` reports the
-pending D1/D2 column work, the D3 drop-set classification
-(`carried`/`reconstructible`/`lost`) and the §13.5 R6 contract-scalar carrier
-distribution; it is the manifest `apply` consumes, so a manifest is bound to one
-store.
+`inventory` reports the pending D1/D2 column work, the D3 drop-set
+classification (`carried`/`reconstructible`/`lost`) and the §13.5 R6
+contract-scalar carrier distribution; its fingerprint binds it to one store.
 `verify` replays the projection from `trade_events` and judges the drop set; it
 never reuses a projection-verify checkpoint. Its `readiness_reasons` separate
 the cases an operator must not conflate:

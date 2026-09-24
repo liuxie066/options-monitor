@@ -23,7 +23,6 @@ from src.application.ledger.api import (
     adopt_existing_combo_identity,
     apply_current_decision_projection_migration,
     apply_position_projection_migration,
-    apply_lot_identity_migration,
     build_current_decision_projection_migration_inventory,
     build_lot_identity_migration_inventory,
     build_position_projection_migration_inventory,
@@ -40,7 +39,6 @@ from src.application.ledger.api import (
     list_position_rows,
     list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
-    preview_lot_identity_migration_apply,
     position_projection_migration_status,
     record_trade_event_void,
     reconcile_combo_pair_inferences,
@@ -568,7 +566,7 @@ def _register_projection_parsers(sub: Any) -> None:
     # mitigation, and every payload carries its own schema_version.
     p_lot_identity = sub.add_parser(
         'lot-identity-migration',
-        help='inventory, verify, or apply the D1-D4 lot identity migration',
+        help='inventory or verify the D1-D4 lot identity migration (read-only)',
     )
     lot_identity_sub = p_lot_identity.add_subparsers(
         dest='lot_identity_migration_cmd',
@@ -585,14 +583,6 @@ def _register_projection_parsers(sub: Any) -> None:
         command = lot_identity_sub.add_parser(command_name, help=help_text)
         _add_runtime_root_arg(command)
         command.add_argument('--format', default='json', choices=['json'])
-    p_lot_identity_apply = lot_identity_sub.add_parser(
-        'apply',
-        help='apply a frozen inventory: backfill lot identity and strip the retired position_id',
-    )
-    _add_runtime_root_arg(p_lot_identity_apply)
-    p_lot_identity_apply.add_argument('--manifest', required=True)
-    p_lot_identity_apply.add_argument('--format', default='json', choices=['json'])
-    _add_local_write_flags(p_lot_identity_apply, high_risk=True)
 
     p_decision_projection = sub.add_parser(
         'decision-projection',
@@ -1091,21 +1081,6 @@ def main(argv: list[str] | None = None) -> int:
             args,
             command_name=f"option-positions projection-migration {migration_command}",
         )
-    elif args.cmd == "lot-identity-migration" and getattr(
-        args, "lot_identity_migration_cmd", None
-    ) == "apply":
-        write_control_key = "lot-identity-migration:apply"
-        if any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes")):
-            write_controls[write_control_key] = _high_risk_write_control(
-                args,
-                command_name="option-positions lot-identity-migration apply",
-            )
-        else:
-            write_controls[write_control_key] = _resolve_write_control(
-                args,
-                command_name="option-positions lot-identity-migration apply",
-                high_risk=True,
-            )
     elif args.cmd == "lifecycle" and (
         getattr(args, "lifecycle_cmd", None)
         in {
@@ -1219,12 +1194,6 @@ def main(argv: list[str] | None = None) -> int:
             payload = build_lot_identity_migration_inventory(sqlite_path)
         elif command == "verify":
             payload = verify_lot_identity_migration(sqlite_path)
-        elif command == "apply":
-            manifest = _load_json_object(_resolve_path_under(args.manifest, base=base))
-            if write_controls["lot-identity-migration:apply"]["write_requested"]:
-                payload = apply_lot_identity_migration(sqlite_path, manifest)
-            else:
-                payload = preview_lot_identity_migration_apply(sqlite_path, manifest)
         else:  # pragma: no cover - argparse owns the command set
             raise SystemExit(f"unsupported lot identity migration command: {command}")
         print(json.dumps(payload, ensure_ascii=False, indent=2))

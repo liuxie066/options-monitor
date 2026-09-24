@@ -82,19 +82,8 @@ def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> Non
 
 
 def test_runtime_sql_no_longer_names_retired_columns() -> None:
-    from src.application.ledger import lot_identity_migration as migration
-
     registry = scan()["src"]
     assert registry["detail"] == []
     assert registry["dynamic_sql"] == []
-    assert migration._live_sql_naming_retired_columns() == ()
 
 
-def test_final_shape_regression(tmp_path, monkeypatch) -> None:
-    from tests import test_lot_identity_migration as regression
-
-    # Exercise real SQL gate and repository owners. Only the window token is
-    # enabled for the isolated fixture; the shipped token remains absent.
-    monkeypatch.setattr(regression.module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
-    assert regression.module._live_sql_naming_retired_columns() == ()
-    regression.test_r1_rebuilt_store_reopens_and_preserves_projection(tmp_path, None)

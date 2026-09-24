@@ -30,6 +30,41 @@
       "module": "src/application/runtime_logs_cli.py",
       "name": "MAX_LOG_FILE_BYTES",
       "reason": "Whole-file rejection was retired because runtime logs now read only a bounded tail regardless of file size."
+    },
+    {
+      "module": "src/application/ledger/lot_identity_migration.py",
+      "name": "APPLY_SCHEMA",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/lot_identity_migration.py",
+      "name": "REBUILD_RECIPE",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/lot_identity_migration.py",
+      "name": "RETIRED_LOT_COLUMNS",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/lot_identity_migration.py",
+      "name": "apply_lot_identity_migration",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/lot_identity_migration.py",
+      "name": "preview_lot_identity_migration_apply",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "apply_lot_identity_migration",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "preview_lot_identity_migration_apply",
+      "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
     }
   ]
 }
