@@ -630,10 +630,13 @@ def process_trade_payload(
         if isinstance(enriched_result, dict):
             result_dict = enriched_result
 
+    audit_phase = "failed" if result_dict.get("status") == "failed" else "resolved"
+    if result_dict.get("status") == "skipped" and result_dict.get("reason") == "duplicate_deal_id":
+        audit_phase = "skipped_duplicate"
     append_trade_intake_audit_fn(
         audit_path,
         build_trade_intake_audit_event(
-            "failed" if result_dict.get("status") == "failed" else "resolved",
+            audit_phase,
             source=source, deal=deal, result=result_dict,
         ),
     )
