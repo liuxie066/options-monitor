@@ -33,6 +33,7 @@ def _input(**overrides: object) -> CloseAdviceInput:
         "estimated_close_fee": 0.5,
         "fee_calc_status": "schedule_estimate",
         "fee_calc_basis": "test_schedule",
+        "delta": -0.06,
     }
     return CloseAdviceInput(**{**values, **overrides})  # type: ignore[arg-type]
 
@@ -119,6 +120,46 @@ def test_short_dte_missing_open_date_and_wide_spread_can_close() -> None:
     assert row["recommendation_state"] == RECOMMENDATION_CLOSE
     assert row["remaining_term_ratio"] is None
     assert row["spread_ratio"] == 2.0
+
+
+def test_near_expiry_low_delta_holds_only_with_calendar_session_evidence() -> None:
+    common = {"dte": 4, "bid": 0.0, "ask": 0.01, "delta": -0.05}
+    hold = _row(**common, remaining_trading_sessions=3)
+    assert hold["recommendation_state"] == RECOMMENDATION_HOLD
+    assert hold["decision_basis"] == "near_expiry_far_otm_hold"
+    assert hold["dte"] == 4  # Annualization still uses calendar days.
+    assert hold["remaining_trading_sessions"] == 3
+
+    assert _row(**common, remaining_trading_sessions=1)["recommendation_state"] == RECOMMENDATION_HOLD
+    assert _row(**common, remaining_trading_sessions=0)["recommendation_state"] == RECOMMENDATION_HOLD
+
+    for overrides in (
+        {"remaining_trading_sessions": 4},
+        {"remaining_trading_sessions": 2, "delta": -0.06},
+    ):
+        row = _row(**{**common, **overrides})
+        assert row["recommendation_state"] == RECOMMENDATION_CLOSE
+
+    for overrides in (
+        {"remaining_trading_sessions": -1},
+        {"remaining_trading_sessions": None},
+        {"remaining_trading_sessions": 2, "delta": None},
+    ):
+        row = _row(**{**common, **overrides})
+        assert row["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
+
+    assert _row(**common, remaining_trading_sessions_min=2,
+                remaining_trading_sessions_max=3)["recommendation_state"] == RECOMMENDATION_HOLD
+    assert _row(**common, remaining_trading_sessions_min=3,
+                remaining_trading_sessions_max=4)["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
+    assert _row(**common, remaining_trading_sessions_min=4,
+                remaining_trading_sessions_max=5)["recommendation_state"] == RECOMMENDATION_CLOSE
+
+    call = _row(
+        option_type="call", spot=80.0, dte=4, bid=0.0, ask=0.01,
+        delta=0.04, remaining_trading_sessions=2,
+    )
+    assert call["recommendation_state"] == RECOMMENDATION_HOLD
 
 
 def test_incomplete_quote_fee_or_invalid_open_date_is_not_evaluable() -> None:

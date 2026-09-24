@@ -611,10 +611,10 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
     monkeypatch.setattr(
-        mod,
-        "expiration_business_today",
-        lambda _now: date(2026, 7, 29),
+        "src.application.close_advice_required_data.close_advice_market_date",
+        lambda _now, _market: date(2026, 7, 29),
     )
+    monkeypatch.setattr(mod, "enrich_close_advice_required_data_plan_bounded", lambda **_kwargs: None)
     def _prepare_options(**kwargs):
         prepared_option_calls.append(kwargs)
         baseline = _fake_prepare_options(**kwargs)
@@ -953,7 +953,6 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
             40,
             tzinfo=timezone.utc,
         ),
-        business_date=date(2026, 7, 29),
         account_configs={
             "lx": {"close_advice": {"enabled": False}}
         },

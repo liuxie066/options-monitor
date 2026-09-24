@@ -1315,7 +1315,7 @@ def validate_config(cfg: dict):
         if 'strategy' in close_advice or 'strategy_profile' in close_advice:
             die(
                 'close_advice.strategy is not supported; '
-                'close_advice uses the fixed remaining_yield_capture.v1 policy'
+                'close_advice uses the fixed remaining_yield_capture.v3 policy'
             )
         if 'optimizer' in close_advice:
             die('close_advice.optimizer has been removed')
@@ -1336,7 +1336,7 @@ def validate_config(cfg: dict):
         if ignored_strict_policy_keys:
             warn(
                 'CLOSE_ADVICE_STRICT_POLICY_KEYS_IGNORED: '
-                'remaining_yield_capture.v1 uses fixed versioned thresholds; '
+                'remaining_yield_capture.v3 uses fixed versioned thresholds; '
                 'remove close_advice.'
                 + ', close_advice.'.join(ignored_strict_policy_keys)
             )

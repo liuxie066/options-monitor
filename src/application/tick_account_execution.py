@@ -12,7 +12,6 @@ from typing import Any, Callable, TypeVar
 
 from domain.domain.engine import decide_account_scan_gate
 from domain.domain.multi_tick import decide_should_notify
-from domain.domain.expiration_dates import expiration_business_today
 from domain.storage.repositories import run_repo, state_repo
 from src.application.account_run import (
     AccountRunOutcome,
@@ -52,6 +51,7 @@ from src.application.close_advice_required_data import (
     CloseAdviceRequiredDataPlanError,
     PLAN_FILE_NAME,
     build_close_advice_required_data_plan,
+    enrich_close_advice_required_data_plan_bounded,
     publish_close_advice_required_data_plan,
     resolve_bound_close_advice_required_data_plan,
 )
@@ -292,7 +292,6 @@ def _build_close_advice_barrier_plan(
     plan = build_close_advice_required_data_plan(
         run_id=request.run_id,
         run_started_at_utc=run_started_at_utc,
-        business_date=expiration_business_today(run_started_at_utc),
         account_configs=scanning_configs,
         base_config=request.base_cfg,
         markets_to_run=request.markets_to_run,
@@ -328,7 +327,6 @@ def _build_close_advice_barrier_plan(
         plan = build_close_advice_required_data_plan(
             run_id=request.run_id,
             run_started_at_utc=run_started_at_utc,
-            business_date=expiration_business_today(run_started_at_utc),
             account_configs=scanning_configs,
             base_config=request.base_cfg,
             markets_to_run=request.markets_to_run,
@@ -918,6 +916,17 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 producer_run_id=request.run_id,
                 scan_at_utc=run_started_at_utc,
             )
+            if close_advice_required_data_plan_path is not None:
+                calendar_error = enrich_close_advice_required_data_plan_bounded(
+                    plan_path=close_advice_required_data_plan_path,
+                    expected_run_id=request.run_id,
+                    python=request.vpy,
+                    repo_root=request.repo_root or request.base,
+                )
+                if calendar_error:
+                    request.runlog.safe_event(
+                        "close_advice_calendar", "degraded", message=calendar_error,
+                    )
             snapshot_manifest_path = (
                 run_state_dir / "required_data_snapshot_manifest.json"
             ).resolve()

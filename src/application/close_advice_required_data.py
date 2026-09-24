@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import (
@@ -31,14 +34,16 @@ from src.application.pipeline_watchlist import (
 )
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.payload_helpers import required_text
+from src.application.opend_utils import normalize_underlier
 from functools import partial
 
 
 _required_text = partial(required_text, error=lambda m: CloseAdviceRequiredDataPlanError(m))
 
 
-CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA = "close_advice_required_data_plan.v1"
+CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA = "close_advice_required_data_plan.v2"
 PLAN_FILE_NAME = "close_advice_required_data_plan.json"
+_MARKET_TIMEZONES = {"US": ZoneInfo("America/New_York"), "HK": ZoneInfo("Asia/Hong_Kong")}
 _ACCOUNT_STATUSES = frozenset(
     {"not_applicable", "ready", "partial", "unavailable"}
 )
@@ -49,11 +54,155 @@ class CloseAdviceRequiredDataPlanError(RuntimeError):
     pass
 
 
+def close_advice_market_date(value: datetime, market: str) -> date:
+    if value.tzinfo is None or market not in _MARKET_TIMEZONES:
+        raise CloseAdviceRequiredDataPlanError("market date requires aware UTC time and supported market")
+    return value.astimezone(_MARKET_TIMEZONES[market]).date()
+
+
+def _provider_rows(value: Any) -> list[dict[str, Any]]:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict("records")
+    if isinstance(value, list) and all(isinstance(row, Mapping) for row in value):
+        return [dict(row) for row in value]
+    raise ValueError("provider rows invalid")
+
+
+def _calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
+    if not isinstance(receipt, Mapping) or (
+        receipt.get("retcode") != 0
+        or receipt.get("coverage_complete") is not True
+        or receipt.get("pagination_complete") is not True
+        or receipt.get("page_count") != 1
+    ):
+        raise ValueError("calendar receipt incomplete")
+    dates: set[str] = set()
+    for row in _provider_rows(receipt.get("rows")):
+        raw = row.get("time") or row.get("date") or row.get("trade_date")
+        kind = str(row.get("trade_date_type") or "").strip().upper()
+        if not isinstance(raw, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
+            raise ValueError("calendar row invalid")
+        day = date.fromisoformat(raw)
+        if day.isoformat() != raw or not start <= day <= end:
+            raise ValueError("calendar date outside request")
+        dates.add(raw)
+    if not dates:
+        raise ValueError("calendar returned no trading dates")
+    return sorted(dates)
+
+
+def enrich_close_advice_required_data_plan(
+    *,
+    plan_path: Path,
+    expected_run_id: str,
+    gateway_factory: Any = None,
+) -> dict[str, Any]:
+    """Seal independent calendar and post-prefetch market-state observations."""
+    if gateway_factory is None:
+        from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+        gateway_factory = build_ready_futu_quote_gateway
+    plan = load_close_advice_required_data_plan(path=plan_path, expected_run_id=expected_run_id)
+    groups: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
+    for account in plan["accounts"].values():
+        for requirement in account.get("requirements") or []:
+            binding = requirement.get("fetch_binding") or {}
+            if requirement.get("planning_status") != "ready" or not binding:
+                continue
+            key = (
+                str(requirement["market"]), str(binding["host"]), int(binding["port"]),
+                date.fromisoformat(requirement["expiration"]).year,
+            )
+            groups.setdefault(key, []).append(requirement)
+    for (market, host, port, _year), requirements in groups.items():
+        start = date.fromisoformat(plan["as_of_market_dates"][market])
+        end = max(date.fromisoformat(item["expiration"]) for item in requirements)
+        calendar: dict[str, Any] = {
+            "trading_calendar_market": market,
+            "trading_calendar_as_of_market_date": start.isoformat(),
+            "trading_calendar_request_start": start.isoformat(),
+            "trading_calendar_request_end": end.isoformat(),
+            "trading_calendar_status": "unavailable",
+        }
+        if end.year != start.year:
+            calendar["trading_calendar_reason"] = "calendar_cross_year_unsupported"
+            for requirement in requirements:
+                requirement.update(calendar)
+                requirement["trading_calendar_expiration"] = requirement["expiration"]
+            continue
+        gateway = None
+        try:
+            gateway = gateway_factory(host=host, port=port)
+            response = gateway.get_trading_days_with_receipt(
+                market=market, start=start.isoformat(), end=end.isoformat()
+            )
+            dates = _calendar_dates(response, start=start, end=end)
+            calendar.update({
+                "trading_calendar_status": "ok",
+                "trading_calendar_dates": json.dumps(dates, separators=(",", ":")),
+                "trading_calendar_input_hash": canonical_sha256({
+                    "market": market, "start": start.isoformat(), "end": end.isoformat(), "dates": dates,
+                }),
+                "trading_calendar_receipt": {
+                    "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                    "page_count": 1, "row_count": len(response["rows"]),
+                    "received_at_utc": _utc_iso(datetime.now(timezone.utc)),
+                },
+            })
+        except Exception as exc:
+            calendar["trading_calendar_reason"] = f"calendar_unavailable:{type(exc).__name__}"
+        states_by_symbol: dict[str, tuple[str, str] | None] = {}
+        for requirement in requirements:
+            requirement.update(calendar)
+            requirement["trading_calendar_expiration"] = requirement["expiration"]
+            if gateway is None:
+                continue
+            symbol = str(requirement["symbol"])
+            if symbol not in states_by_symbol:
+                states_by_symbol[symbol] = None
+                try:
+                    code = normalize_underlier(symbol).code
+                    state_rows = _provider_rows(gateway.get_market_state([code]))
+                    received = datetime.now(timezone.utc)
+                    matching = [row for row in state_rows if str(row.get("code") or "") == code]
+                    if len(matching) == 1:
+                        states_by_symbol[symbol] = (
+                            str(matching[0].get("market_state") or "").strip().upper(),
+                            _utc_iso(received),
+                        )
+                except Exception:
+                    pass
+            state = states_by_symbol[symbol]
+            if state is not None:
+                requirement["market_state_after_snapshot"] = state[0]
+                requirement["market_state_received_at_utc"] = state[1]
+        if gateway is not None:
+            try:
+                gateway.close()
+            except Exception:
+                pass
+    return publish_close_advice_required_data_plan(path=plan_path, payload=plan)
+
+
+def enrich_close_advice_required_data_plan_bounded(
+    *, plan_path: Path, expected_run_id: str, python: Path, repo_root: Path,
+) -> str | None:
+    """Keep a stalled OpenD call from blocking the tick indefinitely."""
+    try:
+        subprocess.run(
+            [str(python), "-m", "src.application.close_advice_required_data", str(plan_path), expected_run_id],
+            cwd=repo_root, capture_output=True, check=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return "calendar_enrichment_timeout"
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return f"calendar_enrichment_failed:{type(exc).__name__}"
+    return None
+
+
 def build_close_advice_required_data_plan(
     *,
     run_id: str,
     run_started_at_utc: datetime,
-    business_date: date,
     account_configs: Mapping[str, Mapping[str, Any]],
     base_config: Mapping[str, Any],
     markets_to_run: list[str] | None,
@@ -62,6 +211,10 @@ def build_close_advice_required_data_plan(
     blocked_markets_by_account: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     run_id_norm = _required_text(run_id, "run_id")
+    market_dates = {
+        market: close_advice_market_date(run_started_at_utc, market)
+        for market in _MARKET_TIMEZONES
+    }
     market_allow = {
         str(value or "").strip().upper()
         for value in (markets_to_run or [])
@@ -127,10 +280,12 @@ def build_close_advice_required_data_plan(
         expected_broker = normalize_broker(portfolio_cfg.get("broker"))
         for record in position_records_by_account.get(account, []):
             try:
-                view = position_lot_risk_view(
-                    record,
-                    as_of_date=business_date,
-                )
+                raw_fields = record.get("fields") if isinstance(record.get("fields"), Mapping) else record
+                market_hint = str(symbol_market(raw_fields.get("symbol")) or "").upper()
+                if market_hint not in market_dates:
+                    continue
+                as_of_date = market_dates[market_hint]
+                view = position_lot_risk_view(record, as_of_date=as_of_date)
             except Exception:
                 continue
             if not view.fields or not view.is_open or int(view.contracts_open or 0) <= 0:
@@ -139,7 +294,7 @@ def build_close_advice_required_data_plan(
                 continue
             if expected_broker and normalize_broker(view.broker) != expected_broker:
                 continue
-            position = view.as_open_position_min(as_of_date=business_date)
+            position = view.as_open_position_min(as_of_date=as_of_date)
             if str(position.get("side") or "").strip().lower() != "short":
                 continue
             symbol = canonical_symbol(position.get("symbol")) or str(
@@ -166,7 +321,7 @@ def build_close_advice_required_data_plan(
                 ).date()
             except ValueError:
                 expiration_date = None
-            if expiration_date is None or expiration_date <= business_date:
+            if expiration_date is None or expiration_date <= as_of_date:
                 continue
             if not (lot_id and symbol and option_type in {"put", "call"} and strike):
                 errors.append(
@@ -244,7 +399,7 @@ def build_close_advice_required_data_plan(
         "schema_version": CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA,
         "run_id": run_id_norm,
         "run_started_at_utc": _utc_iso(run_started_at_utc),
-        "business_date": business_date.isoformat(),
+        "as_of_market_dates": {market: day.isoformat() for market, day in market_dates.items()},
         "accounts": accounts,
     }
     return finalize_close_advice_required_data_plan(payload)
@@ -458,15 +613,24 @@ def _load_close_advice_required_data_plan_bytes(
         raise CloseAdviceRequiredDataPlanError(
             "close-advice required-data plan content hash mismatch"
         )
+    market_dates = payload.get("as_of_market_dates")
+    if not isinstance(market_dates, dict) or set(market_dates) != set(_MARKET_TIMEZONES):
+        raise CloseAdviceRequiredDataPlanError("close-advice market dates are invalid")
+    for raw in market_dates.values():
+        try:
+            if date.fromisoformat(str(raw)).isoformat() != raw:
+                raise ValueError
+        except ValueError as exc:
+            raise CloseAdviceRequiredDataPlanError("close-advice market date is invalid") from exc
     try:
-        datetime.strptime(
-            _required_text(payload.get("business_date"), "business_date"),
-            "%Y-%m-%d",
-        )
-    except ValueError as exc:
-        raise CloseAdviceRequiredDataPlanError(
-            "close-advice required-data plan business date is invalid"
-        ) from exc
+        started = datetime.fromisoformat(str(payload["run_started_at_utc"]).replace("Z", "+00:00"))
+        if any(
+            close_advice_market_date(started, market).isoformat() != market_dates[market]
+            for market in _MARKET_TIMEZONES
+        ):
+            raise ValueError
+    except (KeyError, ValueError, CloseAdviceRequiredDataPlanError) as exc:
+        raise CloseAdviceRequiredDataPlanError("close-advice market dates do not match run time") from exc
     accounts = payload.get("accounts")
     if not isinstance(accounts, dict):
         raise CloseAdviceRequiredDataPlanError(
@@ -653,6 +817,7 @@ __all__ = [
     "CloseAdviceRequiredDataPlanError",
     "PLAN_FILE_NAME",
     "account_requirement_index",
+    "close_advice_market_date",
     "build_close_advice_required_data_plan",
     "finalize_close_advice_required_data_plan",
     "load_close_advice_required_data_plan",
@@ -661,3 +826,9 @@ __all__ = [
     "resolve_bound_close_advice_required_data_plan_snapshot",
     "resolve_position_fetch_binding",
 ]
+
+
+if __name__ == "__main__":
+    enrich_close_advice_required_data_plan(
+        plan_path=Path(sys.argv[1]), expected_run_id=sys.argv[2]
+    )
