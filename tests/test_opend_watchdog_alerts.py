@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.application import system_alerts
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
@@ -103,7 +104,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch,
         captured["provider"] = provider
         return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
 
-    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", fake_select)
     monkeypatch.setattr(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00")
 
     base = Path(tmp_path)
@@ -142,7 +143,7 @@ def test_send_opend_alert_no_send_does_not_consume_rate_limit(monkeypatch, tmp_p
 
     fake_select = _adapter(fake_send)
 
-    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", fake_select)
 
     base = Path(tmp_path)
     cfg = _cfg(opend_alert_cooldown_sec=600)
@@ -185,7 +186,7 @@ def test_send_opend_alert_failed_send_reserves_incident_attempt(monkeypatch, tmp
 
     fake_select = _adapter(fake_send)
 
-    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", fake_select)
 
     base = Path(tmp_path)
     cfg = _cfg(opend_alert_cooldown_sec=600)
@@ -208,7 +209,7 @@ def test_send_opend_alert_failed_send_reserves_incident_attempt(monkeypatch, tmp
     ) is False
     assert len(calls) == 1
 
-    opend_guard.record_opend_recovery(base)
+    opend_guard.send_opend_recovery_notice(base, cfg, no_send=True)
     sent = opend_guard.send_opend_alert(
         base,
         cfg,
@@ -232,16 +233,87 @@ def test_send_opend_alert_failed_send_reserves_incident_attempt(monkeypatch, tmp
     assert len(calls) == 2
 
 
+def test_opend_watchdog_uses_system_incident_for_repeat_and_recovery(monkeypatch, tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    sends: list[dict[str, object]] = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", _adapter(
+        lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True},
+    ))
+    cfg = _cfg(opend_alert_after_consecutive_failures=1)
+    fields = dict(base=tmp_path, cfg=cfg, error_code="OPEND_LOGIN_INVALID",
+                  message_text="login invalid")
+    assert opend_guard.send_opend_alert(**fields)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert len(sends) == 1
+    state_path = tmp_path / "output_shared/state/system_alerts.json"
+    first = next(iter(json.loads(state_path.read_text()).values()))
+    assert first["failure_code"] == "OPEND_LOGIN_ACTION_REQUIRED"
+    assert first["stage"] == "watchdog"
+    assert first["status"] == "failed"
+    assert sends[0]["idempotency_key"].startswith("om-")
+
+    assert opend_guard.send_opend_recovery_notice(tmp_path, cfg)
+    assert not opend_guard.send_opend_recovery_notice(tmp_path, cfg)
+    assert next(iter(json.loads(state_path.read_text()).values()))["status"] == "recovered"
+    assert len(sends) == 2
+    assert opend_guard.send_opend_alert(**fields)
+    assert len(sends) == 3
+    assert sends[0]["idempotency_key"] != sends[2]["idempotency_key"]
+
+
+def test_opend_alert_state_failure_emits_error_without_provider_send(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application.multi_tick import opend_guard
+
+    path = tmp_path / "output_shared/state/system_alerts.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: (_ for _ in ()).throw(AssertionError("provider must not send")))
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid",
+        skip_consecutive_gate=True,
+    )
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in capsys.readouterr().err
+
+
+def test_opend_recovery_notice_after_unconfigured_failure_uses_system_state(monkeypatch, tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    sends: list[dict[str, object]] = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", _adapter(
+        lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True},
+    ))
+    unconfigured = {"notifications": {"opend_alert_after_consecutive_failures": 1}}
+    assert not opend_guard.send_opend_alert(
+        tmp_path, unconfigured, error_code="OPEND_RATE_LIMIT", message_text="rate limited",
+    )
+    incident = next(iter(json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text()).values()))
+    assert incident["delivery"] == "journal"
+    assert system_alerts.system_alert_delivery_status(tmp_path)["status"] == "degraded"
+    configured = _cfg(opend_alert_after_consecutive_failures=1)
+    assert opend_guard.send_opend_recovery_notice(tmp_path, configured)
+    assert not opend_guard.send_opend_recovery_notice(tmp_path, configured)
+    assert len(sends) == 1
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["status"] == "recovered"
+
+
 def test_late_delivery_confirmation_does_not_mark_new_incident(monkeypatch, tmp_path: Path) -> None:
     import src.application.multi_tick.opend_guard as opend_guard
 
-    def confirm_after_new_incident(base: Path, cfg: dict, *, message: str) -> bool:
-        del cfg, message
+    def confirm_after_new_incident(base: Path, cfg: dict, message: str, key: str) -> dict:
+        del cfg, message, key
         opend_guard.record_opend_recovery(base)
         assert opend_guard.should_send_opend_alert(base, "OPEND_LOGIN_INVALID") is True
-        return True
+        path = base / "output_shared/state/system_alerts.json"
+        state = json.loads(path.read_text())
+        incident = next(iter(state.values()))
+        incident["reserved_at"] = "2026-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(state))
+        return {"delivery_confirmed": True, "provider": "wechat_clawbot",
+                "fallback_used": False, "attempted": True}
 
-    monkeypatch.setattr(opend_guard, "_send_notification", confirm_after_new_incident)
+    monkeypatch.setattr(system_alerts, "_send", confirm_after_new_incident)
     base = Path(tmp_path)
     assert opend_guard.send_opend_alert(
         base, _cfg(), error_code="OPEND_NEEDS_PHONE_VERIFY", message_text="needs phone",
@@ -401,7 +473,7 @@ def test_consecutive_threshold_gates_alert(tmp_path: Path) -> None:
     cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_cooldown_sec=1)
 
     with (
-        mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(system_alerts, "select_notification_delivery_adapter", fake_select),
         mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
     ):
         # First two calls should be gated (below threshold).
@@ -431,7 +503,7 @@ def test_consecutive_threshold_skip_gate_sends_immediately(tmp_path: Path) -> No
     base = Path(tmp_path)
     cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_cooldown_sec=1)
     with (
-        mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(system_alerts, "select_notification_delivery_adapter", fake_select),
         mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
     ):
         r = opend_guard.send_opend_alert(
@@ -461,7 +533,7 @@ def test_send_opend_recovery_notice_after_threshold_failures(tmp_path: Path) -> 
     cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_send_recovery_notice=True)
 
     with (
-        mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(system_alerts, "select_notification_delivery_adapter", fake_select),
         mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
     ):
         # No failures recorded yet; recovery notice should NOT be sent.
@@ -502,7 +574,7 @@ def test_send_opend_recovery_notice_disabled_by_config(tmp_path: Path) -> None:
         opend_guard.record_opend_failure(base)
 
     calls: list[object] = []
-    with mock.patch.object(opend_guard, "select_notification_delivery_adapter", lambda *_: calls.append("select")):
+    with mock.patch.object(system_alerts, "select_notification_delivery_adapter", lambda *_: calls.append("select")):
         r = opend_guard.send_opend_recovery_notice(base, cfg)
     assert r is False
     assert calls == []

@@ -47,6 +47,7 @@ _SHARED_TIMER_NAMES = frozenset(
         "options-monitor-quality-recheck.timer",
         "options-monitor-quality-refresh.timer",
         "options-monitor-runtime-status.timer",
+        "options-monitor-trade-intake-heartbeat.timer",
         "options-monitor-upgrade.timer",
     }
 )
@@ -134,6 +135,8 @@ class OpendServicePlan:
     launchd_label: str
     root: Path
     executable: Path
+    host: str | None = None
+    port: int | None = None
 
 
 def normalize_target(value: str) -> ServiceTarget:
@@ -356,21 +359,22 @@ def _opend_service_plans_from_config(
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
-    candidates: list[tuple[str, Path]] = []
+    candidates: list[tuple[str, Path, str | None, int | None]] = []
     for account in accounts:
         runtime_plan = build_account_runtime_plan(config, account=account)
         if runtime_plan.account_type != "futu":
             continue
         if not runtime_plan.futu_opend_root:
             continue
-        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root)))
+        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root),
+                           runtime_plan.futu_host, runtime_plan.futu_port))
 
     if not candidates:
         return []
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
-    for account, root in candidates:
+    for account, root, host, port in candidates:
         slug = _service_slug(account)
         systemd_name = f"options-monitor-opend-{slug}.service" if multi else "options-monitor-opend.service"
         launchd_label = f"com.options-monitor.opend.{slug}" if multi else "com.options-monitor.opend"
@@ -381,6 +385,8 @@ def _opend_service_plans_from_config(
                 launchd_label=launchd_label,
                 root=root,
                 executable=_opend_executable_path(root, executable),
+                host=host,
+                port=port,
             )
         )
     return plans
@@ -405,6 +411,7 @@ def _opend_profile(target: ServiceTarget, plans: list[OpendServicePlan]) -> dict
             "root": str(item.root),
             "executable": str(item.executable),
             "service_name": item.systemd_service_name if target == "systemd" else item.launchd_label,
+            **({"host": item.host, "port": item.port} if item.host and item.port else {}),
         }
         for item in plans
     ]
@@ -587,6 +594,8 @@ def _systemd_secret_bindings(
             bind(service_name, FEISHU_BOT_APP_SECRET)
 
     bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
+    bind("options-monitor-trade-intake-alert.service", FEISHU_BOT_APP_SECRET)
+    bind("options-monitor-trade-intake-heartbeat.service", FEISHU_BOT_APP_SECRET)
     bind(
         "options-monitor-feishu-ws.service",
         FEISHU_BOT_APP_SECRET,
@@ -694,6 +703,7 @@ def _systemd_unit(
     timeout_stop_sec: int | None = None,
     syslog_level_prefix: bool = False,
     restart_prevent_exit_statuses: list[int] | None = None,
+    on_failure: str | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
     wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
@@ -706,6 +716,8 @@ def _systemd_unit(
     before_units = _dedupe_unit_dependencies(before or [])
     if before_units:
         lines.append(f"Before={' '.join(before_units)}")
+    if on_failure:
+        lines.append(f"OnFailure={on_failure}")
     lines.extend([
         "",
         "[Service]",
@@ -868,6 +880,8 @@ def build_service_profile(
         for name in service_names
         if (
             str(name).endswith(".service")
+            and not str(name).endswith("-alert.service")
+            and not str(name).endswith("-heartbeat.service")
             and (
                 "opend" in str(name)
                 or "trade-intake" in str(name)
@@ -1350,12 +1364,72 @@ def render_service_bundle(
                 service_type="simple",
                 restart="always",
                 restart_prevent_exit_statuses=[78],
+                on_failure="options-monitor-trade-intake-alert.service",
+                syslog_level_prefix=True,
                 after=opend_dependency_units or None,
                 wants=opend_dependency_units or None,
             ),
             install_path=f"/etc/systemd/system/{trade_service}",
             kind="systemd_service",
             service_name=trade_service,
+        )
+        alert_service = "options-monitor-trade-intake-alert.service"
+        add(
+            f"systemd/{alert_service}",
+            _systemd_unit(
+                description="Options Monitor trade intake terminal failure alert",
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=[
+                    str(repo / "om"), "run", "service-failure-alert",
+                    "--unit", trade_service,
+                    "--market", trade_market,
+                    "--config", str(config_by_market[trade_market]),
+                    "--runtime-root", str(runtime),
+                ],
+                timeout_start_sec=120,
+                syslog_level_prefix=True,
+            ),
+            install_path=f"/etc/systemd/system/{alert_service}",
+            kind="systemd_service",
+            service_name=alert_service,
+        )
+
+        heartbeat_service = "options-monitor-trade-intake-heartbeat.service"
+        heartbeat_timer = "options-monitor-trade-intake-heartbeat.timer"
+        add(
+            f"systemd/{heartbeat_service}",
+            _systemd_unit(
+                description="Options Monitor trade intake heartbeat alert",
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=[
+                    om, "run", "trade-intake-heartbeat-check",
+                    "--unit", trade_service,
+                    "--market", trade_market,
+                    "--config", str(config_by_market[trade_market]),
+                    "--runtime-root", str(runtime),
+                ],
+                timeout_start_sec=120,
+                syslog_level_prefix=True,
+            ),
+            install_path=f"/etc/systemd/system/{heartbeat_service}",
+            kind="systemd_service",
+            service_name=heartbeat_service,
+        )
+        add(
+            f"systemd/{heartbeat_timer}",
+            _systemd_timer(description="Options Monitor trade intake heartbeat timer",
+                           unit_name=heartbeat_service, interval="1min"),
+            install_path=f"/etc/systemd/system/{heartbeat_timer}",
+            kind="systemd_timer",
+            service_name=heartbeat_timer,
         )
 
         status_service = "options-monitor-runtime-status.service"
@@ -1377,6 +1451,7 @@ def render_service_bundle(
                 deploy_user=systemd_user,
                 deploy_home=systemd_home,
                 exec_args=status_args,
+                syslog_level_prefix=True,
             ),
             install_path=f"/etc/systemd/system/{status_service}",
             kind="systemd_service",
@@ -2106,6 +2181,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
             Path(item.install_path).name
             for item in files
             if item.kind == "systemd_service"
+            and not Path(item.install_path).name.endswith("-alert.service")
             and (
                 "opend" in item.install_path
                 or "trade-intake" in item.install_path

@@ -20,6 +20,7 @@ from src.application.runtime_config_freshness import (
     ensure_runtime_config_identity,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
 
@@ -177,6 +178,7 @@ def _record_failure(
     rc: int,
     message: str,
     stderr: Any,
+    cwd: str | Path | None,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     pending = read_json(base / "output_shared" / "state" / "opend_phone_verify_pending.json", {})
@@ -192,6 +194,7 @@ def _record_failure(
         "extra": {
             "market": plan.market,
             "accounts": plan.accounts,
+            "account": plan.accounts[0] if len(plan.accounts) == 1 else None,
             "failure_code": code,
             "stage": stage,
             "trigger_source": plan.trigger_env["OM_TRIGGER_SOURCE"],
@@ -221,6 +224,17 @@ def _record_failure(
         incomplete.append("latest")
     if incomplete:
         _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=" + ",".join(incomplete))
+    config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
+    if isinstance(config, dict):
+        for account in plan.accounts or ["-"]:
+            try:
+                report_system_failure(
+                    base=base, config=config, unit=f"options-monitor-tick-{plan.market}.service",
+                    market=plan.market, account=account, failure_code=code, stage=stage,
+                    run_id=run_id, rc=rc, first_error_at=now, opend_login_state=login_state,
+                )
+            except Exception as exc:
+                _write_line(stderr, f"<3>ALERT_RECORD_FAILED {type(exc).__name__}")
 
 
 def _completed_receipt(base: Path, run_id: str, plan: TickCronPlan) -> dict[str, Any] | None:
@@ -378,13 +392,13 @@ def run_tick_cron(
             except Exception as exc:
                 _record_failure(base=base, run_id=run_id, plan=plan,
                                 code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
-                                message=f"{type(exc).__name__}: {exc}", stderr=stderr)
+                                message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
                 _write_line(stderr, "<3>EXEC_PREFLIGHT_FAILED_RC_1")
                 return 1
             except SystemExit as exc:
                 _record_failure(base=base, run_id=run_id, plan=plan,
                                 code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
-                                message=str(exc), stderr=stderr)
+                                message=str(exc), stderr=stderr, cwd=cwd)
                 _write_line(stderr, "<3>" + str(exc))
                 return 1
 
@@ -407,22 +421,36 @@ def run_tick_cron(
         except subprocess.TimeoutExpired:
             _record_failure(base=base, run_id=run_id, plan=plan,
                             code="TICK_TIMEOUT", stage="timeout", rc=124,
-                            message="tick child timed out", stderr=stderr)
+                            message="tick child timed out", stderr=stderr, cwd=cwd)
             _write_line(stderr, "<3>EXEC_TIMEOUT_RC_124")
             return 124
         except Exception as exc:
             _record_failure(base=base, run_id=run_id, plan=plan,
                             code="TICK_START_FAILED", stage="start", rc=1,
-                            message=f"{type(exc).__name__}: {exc}", stderr=stderr)
+                            message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
             _write_line(stderr, "<3>EXEC_START_FAILED_RC_1")
             return 1
         rc = int(getattr(proc, "returncode", 1))
         if rc != 0:
             _record_failure(base=base, run_id=run_id, plan=plan,
                             code="TICK_EXEC_FAILED", stage="child_exit", rc=rc,
-                            message=f"tick child exited with rc={rc}", stderr=stderr)
+                            message=f"tick child exited with rc={rc}", stderr=stderr, cwd=cwd)
             _write_line(stderr, f"<3>EXEC_FAILED_RC_{rc}")
         elif _full_account_scope(plan, cwd=cwd) and not plan.symbols and not no_send and _completed_receipt(base, run_id, plan):
+            config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
+            if isinstance(config, dict):
+                for account in plan.accounts or ["-"]:
+                    for code, stage in (("TICK_PREFLIGHT_FAILED", "preflight"),
+                                        ("TICK_TIMEOUT", "timeout"),
+                                        ("TICK_START_FAILED", "start"),
+                                        ("TICK_EXEC_FAILED", "child_exit")):
+                        try:
+                            report_system_recovery(
+                                base=base, config=config, unit=f"options-monitor-tick-{plan.market}.service",
+                                market=plan.market, account=account, failure_code=code, stage=stage,
+                            )
+                        except Exception as exc:
+                            _write_line(stderr, f"<3>ALERT_RECOVERY_RECORD_FAILED {type(exc).__name__}")
             try:
                 state_repo.write_shared_current_read_model(
                     base, f"tick_cron_last_result.{plan.market}.current.json",

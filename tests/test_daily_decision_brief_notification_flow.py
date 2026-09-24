@@ -501,6 +501,7 @@ def test_pending_fixed_failure_without_provider_attempt_is_preserved(
 def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
     monkeypatch,
     tmp_path: Path,
+    capsys,
 ) -> None:
     _patch_assembler(monkeypatch, blocked=True)
     failed_calls: list[dict] = []
@@ -521,6 +522,8 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
         pipeline_ok=False,
     )
     assert mod.run_tick_notification_flow(failed.request) == 1
+    assert any(item["action"] == "notification_meta_signal" and item["status"] == "error"
+               for item in failed.request.audit_helper.events)
 
     _patch_assembler(monkeypatch)
     recovered_calls: list[dict] = []
@@ -542,6 +545,22 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
     assert len(recovered_calls) == 1
     assert "数据异常" in recovered_calls[0]["message"]
     assert audit["pending_delivery_status"] == "existing_pending_preserved"
+    meta_log = capsys.readouterr().err
+    assert meta_log.count("<3>SYSTEM_META_ALERT") == 1
+    assert meta_log.count("<4>SYSTEM_META_RECOVERY") == 1
+
+
+def test_scheduled_delivery_without_target_records_local_meta_alert(monkeypatch, tmp_path: Path, capsys) -> None:
+    _patch_assembler(monkeypatch)
+    bundle = _request(tmp_path, run_id="route-missing", config={
+        "notifications": {"provider": "wechat_clawbot", "channel": "wechat_clawbot"},
+        "schedule": {"timezone": "America/New_York"},
+    })
+    with pytest.raises(SystemExit, match="CONFIG_ERROR"):
+        mod.run_tick_notification_flow(bundle.request)
+    assert capsys.readouterr().err.count("<3>SYSTEM_META_ALERT") == 1
+    assert any(item["action"] == "notification_meta_signal" and item["extra"]["reason"] == "route_missing"
+               for item in bundle.request.audit_helper.events)
 
 
 def test_ambiguous_fixed_failure_retries_same_frozen_delivery_idempotently(

@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from src.application.trades import auto_intake
 from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
@@ -67,18 +69,28 @@ def _run(tmp_path: Path, monkeypatch, listener_type, *, reconnect_sec: int = 5, 
     )
 
 
-def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("reason_code,message", [
+    ("OPEND_NEEDS_PHONE_VERIFY", "OpenD 需要手机验证码登录"),
+    ("OPEND_LOGIN_INVALID", "OpenD 登录已失效，需人工重新登录"),
+    ("OPEND_NEEDS_PIC_VERIFY", "OpenD 需要图形验证码登录"),
+])
+def test_auth_required_stops_without_retry_and_writes_blocked_status(
+    tmp_path: Path, monkeypatch, reason_code: str, message: str,
+) -> None:
     class _Listener:
+        starts = 0
+
         def __init__(self, **_kwargs):
             self.close_count = 0
 
         def start(self, **_kwargs):
+            type(self).starts += 1
             return None
 
         def check_health(self):
             raise TradeIntakeAuthRequired(
-                error_code="OPEND_NEEDS_PHONE_VERIFY",
-                message="OpenD 需要手机验证码登录",
+                error_code=reason_code,
+                message=message,
                 detail="需要手机验证码",
             )
 
@@ -91,7 +103,9 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: P
     status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
     assert status["status"] == "blocked"
     assert status["stage"] == "auth_required"
-    assert status["error_code"] == "OPEND_NEEDS_PHONE_VERIFY"
+    assert status["error_code"] == reason_code
+    assert status["reason_code"] == reason_code
+    assert _Listener.starts == 1
 
 
 def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monkeypatch) -> None:

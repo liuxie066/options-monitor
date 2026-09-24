@@ -1004,6 +1004,11 @@ def test_process_payload_records_non_option_deal_once_without_receipt(tmp_path: 
     assert observed["futu_account_id"] == "REAL_1"
     assert observed["broker_deal_key"] == "futu:lx:REAL_1:deal-stock-1"
     assert any(event.get("phase") == "resolved" and event.get("reason") == "not_option_deal" for event in events)
+    duplicate_events = [event for event in events if event.get("phase") == "skipped_duplicate"]
+    assert [(event["source"], event["deal_id"], event["reason"]) for event in duplicate_events] == [
+        ("backfill", "deal-stock-1", "duplicate_deal_id"),
+        ("push", "deal-stock-1", "duplicate_deal_id"),
+    ]
     assert not any(str(event.get("phase") or "").startswith("receipt_") for event in events)
 
 

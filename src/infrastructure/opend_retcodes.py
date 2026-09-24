@@ -22,6 +22,14 @@ class OpenDRetCode(str, Enum):
     def is_retryable(self) -> bool:
         return self in (OpenDRetCode.RATE_LIMIT, OpenDRetCode.TRANSIENT)
 
+    @property
+    def reason_code(self) -> str:
+        return {
+            OpenDRetCode.AUTH_EXPIRED: "OPEND_LOGIN_INVALID",
+            OpenDRetCode.NEED_2FA: "OPEND_NEEDS_PHONE_VERIFY",
+            OpenDRetCode.NEED_PIC_VERIFY: "OPEND_NEEDS_PIC_VERIFY",
+        }.get(self, self.value)
+
 
 _RATE_LIMIT_HINTS_LOW = ("rate limit", "too frequent")
 _RATE_LIMIT_HINTS_TEXT = ("频率太高", "最多10次", "频率限制", "请求过快")
@@ -62,6 +70,8 @@ def _classify_message(message: str) -> OpenDRetCode:
     if not text:
         return OpenDRetCode.UNKNOWN
     low = text.lower()
+    if "登录密码被修改" in text and "已退出登录" in text:
+        return OpenDRetCode.AUTH_EXPIRED
     if _contains_any(low, _NEED_PIC_HINTS_LOW) or _contains_any(text, _NEED_PIC_HINTS_TEXT):
         return OpenDRetCode.NEED_PIC_VERIFY
     if _contains_any(low, _NEED_2FA_HINTS_LOW) or _contains_any(text, _NEED_2FA_HINTS_TEXT):

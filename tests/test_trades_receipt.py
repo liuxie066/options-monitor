@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -516,7 +517,7 @@ def test_receipt_decision_skips_non_option_deal() -> None:
     assert out == {"should_send": False, "reason": "skipped_not_option_deal"}
 
 
-def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
+def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path, capsys) -> None:
     out = send_trade_intake_receipt(
         base=tmp_path,
         config={"notifications": {"provider": "wechat_clawbot"}},
@@ -530,6 +531,30 @@ def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
 
     assert out["status"] == "skipped"
     assert out["reason"] == "skipped_no_route"
+    assert "<3>SYSTEM_META_ALERT" in capsys.readouterr().err
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["reason"] == "route_missing"
+
+
+def test_receipt_channel_meta_signal_only_on_availability_changes(tmp_path: Path, capsys) -> None:
+    payload = {"deal_id": "deal-1", "internal_account": "lx", "instrument_ref": {"market": "us"}}
+    result = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"}
+    config = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}
+    outcomes = iter((False, False, True, True))
+
+    def send(**_kwargs):
+        confirmed = next(outcomes)
+        return {"command_ok": confirmed, "delivery_confirmed": confirmed,
+                "message_id": "msg-1" if confirmed else None, "returncode": 0 if confirmed else 1}
+
+    statuses = [_send_receipt(tmp_path, config=config, deal=None, result=result,
+                              payload=payload, send_fn=send)["status"] for _ in range(4)]
+    assert statuses == ["failed", "failed", "sent", "sent"]
+    log = capsys.readouterr().err
+    assert log.count("<3>SYSTEM_META_ALERT") == 1
+    assert log.count("<4>SYSTEM_META_RECOVERY") == 1
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["status"] == "recovered"
 
 
 def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path) -> None:
@@ -596,6 +621,37 @@ def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path:
     assert out["status"] == "sent"
     assert calls[0]["target"] == "ou_bot"
     assert calls[0]["notifications"] == {"provider": "feishu_app"}
+
+
+def test_trade_receipt_key_reuses_deal_revision_and_duplicate_is_skipped(tmp_path: Path) -> None:
+    calls: list[dict] = []
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {"command_ok": len(calls) > 1, "delivery_confirmed": len(calls) > 1,
+                "message_id": "fixture-message" if len(calls) > 1 else None}
+
+    fields = dict(config={"notifications": {"provider": "wechat_clawbot", "target": "fixture"}},
+                  deal=None, payload={"deal_id": "deal-1"}, send_fn=_send)
+    revision = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1",
+                "account": "lx", "action": "open", "receipt_result_key": "recorded"}
+    first = _send_receipt(tmp_path, **fields, result=revision)
+    second = _send_receipt(tmp_path, **fields, result=revision)
+    assert first["status"] == "failed" and second["status"] == "sent"
+    assert calls[0]["idempotency_key"] == calls[1]["idempotency_key"]
+    assert second["transport_idempotency_key"] == calls[1]["idempotency_key"]
+
+    duplicate = _send_receipt(
+        tmp_path, **fields,
+        state={"processed_deal_ids": {"deal-1": {"status": "applied", "receipt": second}}},
+        result={"status": "skipped", "reason": "duplicate_deal_id", "deal_id": "deal-1"},
+    )
+    assert duplicate["reason"] == "skipped_duplicate"
+    assert len(calls) == 2
+
+    corrected = _send_receipt(tmp_path, **fields, result={**revision, "receipt_result_key": "corrected"})
+    assert corrected["status"] == "sent"
+    assert calls[2]["idempotency_key"] != calls[1]["idempotency_key"]
 
 
 def test_build_trade_intake_receipt_message_marks_unresolved() -> None:

@@ -3107,6 +3107,96 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
     assert diagnosis["sent_accounts"] == []
     assert out["data"]["summary"]["ok"] is False
     assert "NOTIFICATION_DELIVERY_FAILED" in out["data"]["summary"]["warning_codes"]
+    assert out["data"]["notification_delivery"] == {
+        "status": "degraded",
+        "reason_codes": ["NOTIFICATION_DELIVERY_FAILED"],
+        "expected": True,
+    }
+
+
+def test_runtime_status_preserves_both_notification_health_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg()), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    shared_state_dir.mkdir(parents=True)
+    runs_root = tmp_path / "output_runs"
+    run_dir = runs_root / "run-notify"
+    metrics_path = run_dir / "state" / "tick_metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    payload = {
+        "config_key": "us",
+        "config_path": str(cfg_path),
+        "run_id": "run-notify",
+        "shared_state_dir": str(shared_state_dir),
+        "runs_root": str(runs_root),
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+    }
+
+    for confirmed in (False, True):
+        notify_summary = {
+            "account_messages_count": 1,
+            "send_attempted_count": 1,
+            "send_confirmed_count": int(confirmed),
+            "send_failed_count": int(not confirmed),
+        }
+        (shared_state_dir / "last_run.json").write_text(
+            json.dumps({"run_id": "run-notify", "status": "ok", "sent": confirmed,
+                        "sent_accounts": ["user1"] if confirmed else [],
+                        "notify_summary": notify_summary}),
+            encoding="utf-8",
+        )
+        metrics_path.write_text(json.dumps({"sent": confirmed, "notify_summary": notify_summary,
+                                            "sent_accounts": ["user1"] if confirmed else []}),
+                                encoding="utf-8")
+        out = _execute_private_runtime_status(payload)["data"]
+        summary = out["summary"]
+        delivery = out["notification_delivery"]
+        assert summary["ok"] is confirmed
+        assert ("NOTIFICATION_DELIVERY_FAILED" in summary["warning_codes"]) == (not confirmed)
+        assert delivery["status"] == ("confirmed" if confirmed else "degraded")
+        assert delivery["reason_codes"] == ([] if confirmed else ["NOTIFICATION_DELIVERY_FAILED"])
+
+    import src.application.agent_tools.runtime_status_impl as runtime_status
+
+    for status, duplicate_count, code in (
+        ("sent_partial", 0, "NOTIFICATION_PARTIAL_FAILURE"),
+        ("notification_route_missing", 0, "NOTIFICATION_ROUTE_MISSING"),
+        ("sent", 1, "NOTIFICATION_DUPLICATE_RISK"),
+    ):
+        monkeypatch.setattr(
+            runtime_status, "_notification_diagnosis",
+            lambda **_kwargs: {"status": status, "reason": "fixture",
+                               "duplicate_risk_count": duplicate_count},
+        )
+        out = _execute_private_runtime_status(payload)["data"]
+        assert out["summary"]["ok"] is False
+        assert code in out["summary"]["warning_codes"]
+        assert out["notification_delivery"]["status"] == "degraded"
+        assert code in out["notification_delivery"]["reason_codes"]
+
+
+def test_runtime_status_shows_unconfirmed_system_alert_separately(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg()), encoding="utf-8")
+    state_dir = tmp_path / "output_shared" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "system_alerts.json").write_text(json.dumps({"incident": {
+        "status": "failed", "last_attempt_at": "2026-09-24T00:00:00+00:00",
+        "delivery_confirmed": False, "fallback_used": False, "provider": None,
+    }}), encoding="utf-8")
+    out = _execute_private_runtime_status({
+        "config_key": "us", "config_path": str(cfg_path),
+        "shared_state_dir": str(state_dir), "runs_root": str(tmp_path / "output_runs"),
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+    })["data"]
+    assert out["system_alert_delivery"]["status"] == "degraded"
+    assert "SYSTEM_ALERT_DELIVERY_UNCONFIRMED" in out["summary"]["warning_codes"]
+    assert out["summary"]["ok"] is False
 
 
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
@@ -3274,8 +3364,7 @@ def test_runtime_logs_agent_tool_rejects_outside_root_and_symlink(tmp_path: Path
     assert "private-value" not in json.dumps(linked_out, ensure_ascii=False)
 
 
-def test_runtime_logs_agent_tool_caps_lines_type_and_file_size(monkeypatch, tmp_path: Path) -> None:
-    import src.application.runtime_logs_cli as runtime_logs_cli
+def test_runtime_logs_agent_tool_caps_lines_type_and_tails_large_file(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     logs_root = tmp_path / "logs"
@@ -3301,15 +3390,18 @@ def test_runtime_logs_agent_tool_caps_lines_type_and_file_size(monkeypatch, tmp_
     assert unsupported_out["ok"] is False
     assert unsupported_out["error"]["code"] == "POLICY_ERROR"
 
-    monkeypatch.setattr(runtime_logs_cli, "MAX_LOG_FILE_BYTES", 8)
     oversized = logs_root / "oversized.log"
-    oversized.write_text("more-than-eight-bytes", encoding="utf-8")
+    with oversized.open("wb") as stream:
+        stream.truncate(92 * 1024 * 1024)
+        stream.seek(-len(b"\nlast-line\n"), 2)
+        stream.write(b"\nlast-line\n")
     oversized_out = run_tool(
         "runtime_logs",
         {"logs_root": str(logs_root), "log_file": str(oversized), "lines": 1},
     )
-    assert oversized_out["ok"] is False
-    assert oversized_out["error"]["code"] == "POLICY_ERROR"
+    assert oversized_out["ok"] is True
+    assert oversized_out["data"]["files"][0]["tail_truncated"] is True
+    assert oversized_out["data"]["files"][0]["tail_line_count"] == 1
 
 
 def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:

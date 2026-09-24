@@ -3,13 +3,13 @@ from __future__ import annotations
 import fcntl
 import os
 import stat
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.application.notification_delivery_adapter import normalize_notification_delivery_result, select_notification_delivery_adapter
-from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.notification_shells import render_system_notice
+from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.application.trade_time_format import format_iso_time_beijing
 from src.infrastructure.io_utils import read_json, atomic_write_json as write_json, utc_now
 
@@ -245,26 +245,6 @@ def should_send_opend_alert(
     return True
 
 
-def _send_notification(base: Path, cfg: dict, *, message: str) -> bool:
-    try:
-        route = resolve_notification_delivery_route(config=cfg)
-        target = str(route.get('target') or '').strip()
-        if not target:
-            return False
-        adapter = select_notification_delivery_adapter(route.get('provider'))
-        send = adapter.send_fn(
-            base=base,
-            channel=str(route.get('channel') or ''),
-            target=target,
-            message=message,
-            notifications=route.get('notifications') if isinstance(route.get('notifications'), dict) else {},
-        )
-        normalized = normalize_notification_delivery_result(send, normalize_fn=adapter.normalize_fn)
-        return normalized.get('delivery_confirmed') is True
-    except Exception:
-        return False
-
-
 def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False, skip_consecutive_gate: bool = False) -> bool:
     cooldown_sec = 600
     burst_window_sec = 900
@@ -336,7 +316,17 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         key = f'project::{_opend_alert_family(error_code)}'
         reserved_at = (read_json(opend_alert_rl_path(base), {})
                        .get('last_sent_utc_by_error', {}).get(key))
-    confirmed = _send_notification(base, cfg, message=msg)
+    try:
+        outcome = report_system_failure(
+            base=base, config=cfg, unit='OpenD', market='all', account='all',
+            failure_code=_opend_alert_family(error_code), stage='watchdog',
+            run_id=now_utc, rc=1, first_error_at=reserved_at or now_utc,
+            opend_login_state=str(error_code), message=msg,
+        )
+    except Exception:
+        print('<3>OPEND_ALERT_INFRA_FAILED', file=sys.stderr)
+        return False
+    confirmed = outcome == 'confirmed'
     if confirmed:
         with _alert_state_lock(base):
             path = opend_alert_rl_path(base)
@@ -370,15 +360,17 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
     except Exception:
         pass
 
+    state = read_json(opend_alert_rl_path(base), {})
+    sent = state.get('last_sent_utc_by_error') if isinstance(state, dict) else {}
+    families = sorted({str(key).split('::', 1)[1] for key in sent
+                       if str(key).startswith(f'{scope}::')}) if isinstance(sent, dict) else []
     try:
         prev_count = record_opend_recovery(base, scope=scope)
     except Exception:
         prev_count = 0
 
-    if not send_recovery or prev_count < consecutive_threshold:
-        return False
-
-    if no_send:
+    should_notify = send_recovery and prev_count >= consecutive_threshold and not no_send
+    if not families and not should_notify:
         return False
 
     now_utc = utc_now()
@@ -391,4 +383,20 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
         ),
     )
 
-    return _send_notification(base, cfg, message=msg)
+    try:
+        outcomes = [report_system_recovery(
+            base=base, config=cfg, unit='OpenD', market='all', account='all',
+            failure_code=family, stage='watchdog', message=msg,
+            notify=should_notify and index == 0,
+            allow_without_incident=should_notify and index == 0,
+        ) for index, family in enumerate(families)]
+        if not families and should_notify:
+            outcomes.append(report_system_recovery(
+                base=base, config=cfg, unit='OpenD', market='all', account='all',
+                failure_code='OPEND_RECOVERY_ONLY', stage='watchdog', message=msg,
+                allow_without_incident=True,
+            ))
+    except Exception:
+        print('<3>OPEND_ALERT_INFRA_FAILED', file=sys.stderr)
+        return False
+    return 'confirmed' in outcomes

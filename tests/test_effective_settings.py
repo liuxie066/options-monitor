@@ -156,6 +156,20 @@ def test_settings_public_diagnostics_do_not_echo_missing_env_file_path(tmp_path)
     assert "private-user" not in serialized
 
 
+def test_runtime_status_missing_env_file_is_nonblocking_with_service_injected_credentials(tmp_path) -> None:
+    from src.application.agent_tools.runtime_status_impl import _runtime_status_env_file_warnings
+    from src.application.settings.effective import build_effective_env
+
+    missing = tmp_path / "missing.env"
+    injected = build_effective_env(environ={"DEEPSEEK_API_KEY": "fixture"}, env_file=missing)
+    plain = build_effective_env(environ={}, env_file=missing)
+    credential = build_effective_env(environ={"OM_SECRET_BACKEND": "systemd"}, env_file=missing)
+
+    assert _runtime_status_env_file_warnings(injected) == []
+    assert _runtime_status_env_file_warnings(credential) == []
+    assert len(_runtime_status_env_file_warnings(plain)) == 1
+
+
 def test_effective_env_loads_repo_local_env_file_when_enabled(tmp_path) -> None:
     repo = tmp_path / "repo"
     env_dir = repo / ".env"

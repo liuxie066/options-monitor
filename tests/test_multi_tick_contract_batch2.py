@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 from types import SimpleNamespace
 from pathlib import Path
@@ -373,7 +374,7 @@ def test_multi_tick_notify_aggregates_provider_and_outer_retries() -> None:
     assert result["retry_attempt_count"] == 3
 
 
-def test_multi_tick_notify_without_override_preserves_legacy_transport_key() -> None:
+def test_multi_tick_notify_without_override_uses_renderer_transport_key() -> None:
     helper = importlib.import_module("src.application.scheduled_notification")
     adapter = importlib.import_module("src.application.notification_delivery_adapter")
     seen: list[str] = []
@@ -400,12 +401,21 @@ def test_multi_tick_notify_without_override_preserves_legacy_transport_key() -> 
     expected = adapter.build_notification_idempotency_key(
         run_id="run-legacy",
         account="lx",
-        target="user:test",
-        message="hello",
+        renderer="scheduled_notification:" + hashlib.sha256(b"hello").hexdigest(),
     )
     assert result["ok"] is True
     assert seen == [expected]
     assert result["idempotency_key"] == expected
+
+
+def test_notification_key_is_stable_for_run_account_renderer() -> None:
+    from src.application.notification_delivery_adapter import build_notification_idempotency_key
+
+    fields = dict(run_id="run-1", account="LX", renderer="daily_brief:v1:abc")
+    first = build_notification_idempotency_key(**fields)
+    assert first == build_notification_idempotency_key(**{**fields, "account": "lx"})
+    assert first != build_notification_idempotency_key(**{**fields, "run_id": "run-2"})
+    assert first != build_notification_idempotency_key(**{**fields, "renderer": "daily_brief:v2:abc"})
 
 
 def test_multi_tick_notify_compacts_logical_override_and_reuses_it_for_retries() -> None:

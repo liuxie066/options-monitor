@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections import Counter
+import sys
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1312,10 +1313,19 @@ def _jsonl_tail(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     }
     if not path.exists() or not path.is_file() or limit <= 0:
         return out
-    rows: list[Any] = []
+    rows: deque[Any] = deque(maxlen=limit)
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
+            while line := fh.readline(1024 * 1024 + 1):
+                if len(line) > 1024 * 1024:
+                    if not line.endswith("\n"):
+                        while chunk := fh.readline(1024 * 1024 + 1):
+                            if chunk.endswith("\n"):
+                                break
+                    out["line_count"] += 1
+                    out["partial"] = True
+                    rows.append({"error": "line_too_large"})
+                    continue
                 text = line.strip()
                 if not text:
                     continue
@@ -1324,11 +1334,15 @@ def _jsonl_tail(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
                     item = json.loads(text)
                 except json.JSONDecodeError:
                     item = {"raw": text[:1000]}
+                    out["partial"] = True
                 rows.append(item)
     except Exception as exc:
         out["read_error"] = f"{type(exc).__name__}: {exc}"
+        print("<3>READ_DIAGNOSTIC_DEGRADED reason=AUDIT_READ_FAILED tool=research_evidence", file=sys.stderr)
         return out
-    out["rows"] = rows[-limit:]
+    if out.get("partial"):
+        print("<3>READ_DIAGNOSTIC_DEGRADED reason=LINE_TOO_LARGE tool=research_evidence", file=sys.stderr)
+    out["rows"] = list(rows)
     return out
 
 

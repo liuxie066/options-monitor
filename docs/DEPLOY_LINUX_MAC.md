@@ -245,6 +245,8 @@ sudo systemctl enable --now options-monitor-trade-intake.service
 sudo systemctl enable --now options-monitor-feishu-ws.service
 ```
 
+渲染的 `options-monitor-trade-intake.service` 通过 `OnFailure=options-monitor-trade-intake-alert.service` 处理终止态；告警 unit 是按需触发的 oneshot，不单独 `enable`。它运行 `./om run service-failure-alert`，从生成的 runtime config 选择现有通知路由并记录发送结果。安装新模板及其凭据 drop-in 后仍需按受控部署流程执行 `daemon-reload`；仅更新仓库源码不会改变已安装 unit。
+
 如果 render 时传了 `--include-feishu-agent-credential`，先确认加密凭据已经存在，再安装 helper 和 drop-in：
 
 ```bash

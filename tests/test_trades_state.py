@@ -280,9 +280,12 @@ def test_trade_audit_rotation_preserves_seal_history(tmp_path: Path, monkeypatch
     from domain.storage import json_io
 
     path = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(json_io, "AUDIT_SEGMENT_BYTES", 1)
     first = _seal(completed_at_ms=1)
     second = _seal(completed_at_ms=2)
+    monkeypatch.setattr(json_io, "AUDIT_SEGMENT_BYTES", max(
+        len((json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8"))
+        for item in (first, second)
+    ) + 1)
     append_trade_intake_audit(path, first, durable=True)
     append_trade_intake_audit(path, second, durable=True)
 

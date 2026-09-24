@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -9,6 +10,7 @@ from domain.domain.multi_tick import resolve_notification_route_from_config
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.notification_delivery_adapter import (
+    build_notification_transport_key,
     normalize_notification_delivery_result,
     select_notification_delivery_adapter,
 )
@@ -16,6 +18,7 @@ from src.application.notification_shells import render_receipt
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.ledger.api import canonical_payload_hash
+from src.application.system_alerts import report_system_meta_signal
 
 
 BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
@@ -95,6 +98,8 @@ def send_trade_intake_receipt(
     channel = route.get("channel")
     target = route.get("target")
     if not str(target or "").strip():
+        _record_receipt_meta(base=base, config=config, deal=deal, payload=payload, result=result,
+                             inbox_id=inbox_id, degraded=True, reason="route_missing")
         return {
             "enabled": True,
             "status": "skipped",
@@ -106,8 +111,14 @@ def send_trade_intake_receipt(
             "message_id": None,
         }
 
+    deal_identity = str(broker_deal_key(deal) or _deal_id(deal, result, payload) or "").strip()
+    if not deal_identity:
+        return {"enabled": True, "status": "skipped", "reason": "skipped_missing_deal_identity",
+                "delivery_confirmed": False, "message_id": None}
+
     message = build_trade_intake_receipt_message(deal=deal, result=result, payload=payload)
     attempt = None
+    transport_key = None
     try:
         if send_fn is None or normalize_fn is None:
             adapter = adapter_selector(provider)
@@ -124,18 +135,28 @@ def send_trade_intake_receipt(
                 claim=inbox_claim, result_key=result.get("receipt_result_key"),
             )
             if not attempt["claimed"]:
+                status = str(attempt["status"])
                 return {"enabled": True, "status": "skipped",
-                        "reason": f"durable_receipt_{attempt['status']}",
-                        "delivery_confirmed": attempt["status"] == "sent", "message_id": None}
+                        "reason": ("skipped_duplicate" if status == "sent" else
+                                   "skipped_duplicate_delivery_unknown" if status == "unknown" else
+                                   f"durable_receipt_{status}"),
+                        "delivery_confirmed": status == "sent", "message_id": None}
         if attempt is not None:
             message = attempt["message"]
             provider, channel, target = (attempt["route"][key] for key in ("provider", "channel", "target"))
+        revision = ((attempt or {}).get("result_key") or result.get("receipt_result_key")
+                    or result.get("resolution_revision") or result.get("revision")
+                    or canonical_payload_hash({key: result.get(key) for key in ("status", "reason", "action")}))
+        transport_key = build_notification_transport_key(canonical_payload_hash(
+            {"deal": deal_identity, "revision": str(revision)}
+        ))
         send_result = resolved_send_fn(
             base=base,
             channel=str(channel),
             target=str(target),
             message=message,
             notifications=route.get("notifications") or {},
+            idempotency_key=transport_key,
         )
         normalized = normalize_notification_delivery_result(send_result, normalize_fn=resolved_normalize_fn)
     except TradePayloadClaimLost:
@@ -177,6 +198,7 @@ def send_trade_intake_receipt(
         "error_code": normalized.get("error_code"),
         "message_len": len(message),
         "send_message": _optional_str(normalized.get("message")),
+        "transport_idempotency_key": transport_key,
     }
     if attempt is not None and attempt.get("claimed"):
         from src.application.trades.inbox import finish_trade_receipt_attempt
@@ -189,7 +211,30 @@ def send_trade_intake_receipt(
         )
         finish_trade_receipt_attempt(inbox_path, inbox_id=inbox_id,
                                      attempt_id=attempt["attempt_id"], result=receipt)
+    _record_receipt_meta(base=base, config=config, deal=deal, payload=payload, result=result,
+                         inbox_id=inbox_id, degraded=not delivery_confirmed, reason=status)
     return receipt
+
+
+def _record_receipt_meta(
+    *, base: Path, config: dict[str, Any] | None, deal: Any, payload: dict[str, Any] | None, result: dict[str, Any],
+    inbox_id: str | None, degraded: bool, reason: str,
+) -> None:
+    source = payload if isinstance(payload, dict) else {}
+    instrument = source.get("instrument_ref") if isinstance(source.get("instrument_ref"), dict) else {}
+    account = str(result.get("account") or source.get("internal_account")
+                  or getattr(deal, "internal_account", None) or "-").strip().lower()
+    market = str(result.get("market") or instrument.get("market")
+                 or getattr(deal, "market", None) or "-").strip().lower()
+    try:
+        report_system_meta_signal(
+            base=base, unit=f"options-monitor-trade-intake-{account}.service",
+            market=market, account=account, failure_code="TRADE_RECEIPT_UNCONFIRMED",
+            stage="receipt_delivery", run_id=str(inbox_id or broker_deal_key(deal) or "-"),
+            degraded=degraded, reason=reason, config=config, external=True,
+        )
+    except Exception:
+        print("<3>RECEIPT_META_ALERT_INFRA_FAILED", file=sys.stderr)
 
 
 def build_trade_lifecycle_notification_message(

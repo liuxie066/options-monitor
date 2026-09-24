@@ -1,0 +1,12 @@
+# Render @RUNTIME_ROOT@ and @DEPLOY_USER@ from the service profile before installation.
+# Run logrotate hourly; maxsize is checked only when logrotate runs.
+@RUNTIME_ROOT@/logs/*.log {
+    hourly
+    maxsize 16M
+    rotate 168
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 @DEPLOY_USER@ @DEPLOY_USER@
+}

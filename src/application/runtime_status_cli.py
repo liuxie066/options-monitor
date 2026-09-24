@@ -40,6 +40,8 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     latest_run = _dict(data.get("latest_run_selection"))
     latest_scanned = _dict(data.get("latest_scanned_run_selection"))
     notification = _dict(data.get("notification_diagnosis"))
+    notification_delivery = _dict(data.get("notification_delivery"))
+    system_alert_delivery = _dict(data.get("system_alert_delivery"))
     ledger = _dict(data.get("ledger_store"))
     projection = _dict(data.get("projection_verify"))
     trade = _dict(data.get("trade_intake"))
@@ -63,6 +65,8 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _freshness_line(freshness),
         "",
         _notification_line(notification),
+        _notification_delivery_line(notification_delivery),
+        _system_alert_delivery_line(system_alert_delivery),
         _ledger_line(summary=summary, ledger=ledger),
         _projection_line(projection),
         _trade_intake_line(trade),
@@ -95,6 +99,8 @@ def format_runtime_status_journal_summary(envelope: dict[str, Any], *, max_bytes
     config = _dict(data.get("config"))
     latest_run = _dict(data.get("latest_run_selection"))
     notification = _dict(data.get("notification_diagnosis"))
+    notification_delivery = _dict(data.get("notification_delivery"))
+    system_alert_delivery = _dict(data.get("system_alert_delivery"))
     ledger = _dict(data.get("ledger_store"))
     trade = _dict(data.get("trade_intake"))
     service = _dict(data.get("service_upgrade"))
@@ -108,6 +114,8 @@ def format_runtime_status_journal_summary(envelope: dict[str, Any], *, max_bytes
         _run_line("latest", latest_run, summary.get("latest_status")),
         _freshness_line(freshness),
         _notification_line(notification),
+        _notification_delivery_line(notification_delivery),
+        _system_alert_delivery_line(system_alert_delivery),
         _ledger_line(summary=summary, ledger=ledger),
         _trade_intake_line(trade),
         _service_line(service),
@@ -236,6 +244,24 @@ def _notification_line(notification: dict[str, Any]) -> str:
         f"sent={_int_value(notification.get('send_attempted_count'))} "
         f"confirmed={_int_value(notification.get('send_confirmed_count'))} "
         f"failed={_int_value(notification.get('send_failed_count'))}"
+    )
+
+
+def _notification_delivery_line(delivery: dict[str, Any]) -> str:
+    return (
+        "notification delivery: "
+        f"status={_value(delivery.get('status'))} "
+        f"reasons={_value(','.join(_list(delivery.get('reason_codes'))))}"
+    )
+
+
+def _system_alert_delivery_line(delivery: dict[str, Any]) -> str:
+    return (
+        "system alert delivery: "
+        f"status={_value(delivery.get('status'))} "
+        f"provider={_value(delivery.get('provider'))} "
+        f"fallback={_yes_no(delivery.get('fallback_used'))} "
+        f"active={_int_value(delivery.get('active_count'))}"
     )
 
 

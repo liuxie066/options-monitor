@@ -732,6 +732,35 @@ def _post_upgrade_service_health(
             if not result.get("ok"):
                 failed.append(public)
 
+    opend_profile = profile.get("opend")
+    opend_entries = opend_profile.get("services") if isinstance(opend_profile, dict) else None
+    opend_entries = opend_entries if isinstance(opend_entries, list) else []
+    for service_name in (name for name in services if "opend" in name):
+        endpoint = next((item for item in opend_entries
+                         if isinstance(item, dict) and item.get("service_name") == service_name), {})
+        host, port = str(endpoint.get("host") or "").strip(), endpoint.get("port")
+        if not host or not isinstance(port, int) or not 1 <= port <= 65535:
+            public = {"service": service_name, "check": "opend-login-check", "ok": False,
+                      "reason_code": "OPEND_ENDPOINT_MISSING"}
+        else:
+            command = [str(_release_python(repo_root)), "-m", "src.infrastructure.opend_watchdog",
+                       "--json", "--host", host, "--port", str(port), "--required-capability", "both"]
+            result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, timeout=35)
+            result.update(operation="post_upgrade_service_health", check="opend-login-check", service=service_name)
+            operations.append(result)
+            try:
+                payload = json.loads(str(result.get("stdout") or ""))
+            except (TypeError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            public = {"service": service_name, "check": "opend-login-check",
+                      "ok": bool(result.get("ok")) and payload.get("ok") is not False,
+                      "reason_code": payload.get("error_code")}
+        checks.append(public)
+        if not public["ok"]:
+            failed.append(public)
+
     if "options-monitor-feishu-ws.service" in services:
         command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
@@ -945,6 +974,8 @@ def _service_health_remediation(
             root = Path(raw_root).expanduser() if raw_root else Path(".")
         command = _wechat_clawbot_check_command(profile=profile_payload, repo_root=root)
         remediation.append("manual_check: " + " ".join(shlex.quote(str(part)) for part in command))
+    if any(item.get("check") == "opend-login-check" for item in failed_checks):
+        remediation.append("manual_check: verify OpenD login and the endpoint in service.profile.json")
     return remediation
 
 
