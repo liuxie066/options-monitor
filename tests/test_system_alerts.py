@@ -224,7 +224,8 @@ def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkey
     now = datetime(2026, 9, 24, 2, tzinfo=timezone.utc)
     status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": (now - timedelta(minutes=4)).isoformat()}), encoding="utf-8")
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now)
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 1
@@ -254,13 +255,47 @@ def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(mon
     sends = []
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
     args = dict(unit="options-monitor-trade-intake.service", market="us",
-                config_path=str(config_path), runtime_root=tmp_path, now=now)
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                disk_usage_fn=lambda _path: SimpleNamespace(total=100, used=10))
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 0
     assert "TRADE_INTAKE_PROCESS_DOWN" in sends[0]["message"]
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert "已恢复" in sends[1]["message"]
     monkeypatch.setattr(service_failure_alert, "report_system_failure", lambda **_kwargs: (_ for _ in ()).throw(OSError("state")))
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 1
+    assert "<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED" in capsys.readouterr().out
+
+
+def test_root_disk_threshold_alerts_repeat_safely_and_recover(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application import service_failure_alert, system_alerts
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    status_path = tmp_path / "intake-status.json"
+    now = datetime(2026, 9, 24, 2, tzinfo=timezone.utc)
+    status_path.write_text(json.dumps({"status": "listening", "last_heartbeat_utc": now.isoformat()}), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"account": "lx", "status_path": str(status_path)}],
+    })
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
+        send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {},
+    ))
+    used = [84]
+    args = dict(unit="options-monitor-trade-intake.service", market="us",
+                config_path=str(config_path), runtime_root=tmp_path, now=now,
+                unit_active_fn=lambda _unit: True,
+                disk_usage_fn=lambda path: SimpleNamespace(total=100, used=used[0]))
+    for level, expected_sends in ((84, 0), (85, 1), (85, 1), (90, 2), (90, 2), (80, 4), (80, 4)):
+        used[0] = level
+        assert service_failure_alert.check_trade_intake_heartbeat(**args) == 0
+        assert len(sends) == expected_sends
+    assert sum("已恢复" in item["message"] for item in sends) == 2
+    output = capsys.readouterr().out
+    assert output.count("<4>ROOT_DISK_USAGE_85") == 1
+    assert output.count("<3>ROOT_DISK_USAGE_90") == 1
+    args["disk_usage_fn"] = lambda _path: (_ for _ in ()).throw(OSError("disk fixture unavailable"))
+    assert service_failure_alert.check_trade_intake_heartbeat(**args) == 1
     assert "<3>INTAKE_HEARTBEAT_ALERT_INFRA_FAILED" in capsys.readouterr().out
 
 

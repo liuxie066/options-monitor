@@ -1445,6 +1445,7 @@ def render_service_bundle(
                 deploy_user=systemd_user,
                 deploy_home=systemd_home,
                 exec_args=status_args,
+                syslog_level_prefix=True,
             ),
             install_path=f"/etc/systemd/system/{status_service}",
             kind="systemd_service",

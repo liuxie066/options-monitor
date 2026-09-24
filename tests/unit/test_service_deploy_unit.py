@@ -53,6 +53,7 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
     assert str(repo / "om") + " status --profile-path " + str(runtime / "service.profile.json") in runtime_status
     assert "--journal-summary" in runtime_status
+    assert "SyslogLevelPrefix=yes" in runtime_status
     assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
     assert "RestartPreventExitStatus=78" in intake
@@ -2082,3 +2083,14 @@ def test_service_upgrade_restart_no_profile_is_noop(tmp_path: Path) -> None:
 
     assert restarted == []
     assert calls == []
+
+
+def test_repository_logrotate_template_caps_runtime_logs_without_touching_audits() -> None:
+    template = Path(__file__).resolve().parents[2] / "deploy/logrotate/options-monitor.conf.in"
+    content = template.read_text(encoding="utf-8")
+    assert "@RUNTIME_ROOT@/logs/*.log" in content
+    assert "maxsize 16M" in content
+    assert "hourly" in content
+    assert "create 0600 @DEPLOY_USER@ @DEPLOY_USER@" in content
+    assert "audit_events" not in content
+    assert "copytruncate" not in content
