@@ -550,11 +550,21 @@ class _FutuAPIClient:
         )
 
     def get_trading_days_with_receipt(self, **kwargs: Any) -> Any:
-        return self._query_with_coverage(
-            self._quote().request_trading_days,
-            paginated=False,
-            kwargs=kwargs,
-        )
+        result = self._quote().request_trading_days(**kwargs)
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ValueError("Futu trading calendar response is invalid")
+        ret, rows = result
+        if ret != 0:
+            raise RuntimeError(rows)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Futu trading calendar rows are invalid")
+        return {
+            "retcode": 0,
+            "rows": rows,
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": 1,
+        }
 
     def get_earnings_calendar(self, **kwargs: Any) -> Any:
         quote = self._quote()

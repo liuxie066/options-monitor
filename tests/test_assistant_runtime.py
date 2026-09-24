@@ -202,7 +202,7 @@ def test_position_exit_renderer_uses_only_current_close_contract() -> None:
                     "expiration": "2026-09-18",
                     "strike": 100,
                     "currency": "USD",
-                    "policy_version": "remaining_yield_capture.v1",
+                    "policy_version": "remaining_yield_capture.v3",
                     "recommendation_state": "close",
                     "evaluation_status": "priced",
                     "reason": "all_strict_close_gates_passed",

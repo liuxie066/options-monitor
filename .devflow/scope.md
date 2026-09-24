@@ -1,84 +1,265 @@
-# Bot receipt market argument correction — Devflow scope
+# Close Advice v3 Devflow Impl scope
 
-goal: 修复 Bot 把成交回执查询参数冲突误报为成交实际市场的问题。
-non_goals:
-  - 修改回执数据、成交入账、行情或 OpenD 监听行为
-  - 扩大渠道授权或自动切换市场配置
-  - 修复券商成交时间解释问题
-  - 提交、推送、发布或升级运行环境
-scope: Bot receipt_read 参数构造、对应提示词、隔离回归测试及现有 Bot 设计文档
-success_signals:
-  - S1: US 固定范围下模型误传 HK 时不读回执，错误说明只是参数冲突；省略 market 重试能读 US 回执。
-  - S2: 显式跨范围工具参数仍被拒绝，不能自动切换配置或声称回执实际属于请求市场。
-  - S3: 省略形式 deal_id 被拒绝，完整 ID 能用于精确查询。
-  - S4: 提示词明确区分香港时间/券商地点与标的市场，模型不能把 SCOPE_DENIED 当作资源归属证据。
-authorized_slices:
-  - {slice: receipt-input-boundary, design_doc_ref: 'docs/BOT_DESIGN.md sha256:3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d', success_signal: [S1, S2, S3], depends_on: []}
-  - {slice: receipt-model-guidance, design_doc_ref: 'docs/BOT_DESIGN.md sha256:3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d', success_signal: [S4], depends_on: [receipt-input-boundary]}
-slice_checkpoints:
-  - {slice: receipt-input-boundary, diff_fingerprint: 'git-diff sha256:7cda8154855c3c5cb428d5af05f6d55270cfbebc1747b39919a00ce770f81987', validation: '28 focused tests passed; git diff --check passed', done: true}
-  - {slice: receipt-model-guidance, diff_fingerprint: 'git-diff sha256:360b74a76f278c92400b36e003020c32564d30a9c19b8e21f6206bf274619fb5', validation: '55 Bot/receipt tests plus 132 adjacent caller tests passed; guardrails, ruff and diff check passed', done: true}
-user_confirmation:
-  - '用户：[$devflow] 按建议优化实施'
-  - '用户选择：simple（推荐）'
-prd_doc: not-applicable
-prd_doc_ref: not-applicable
-design_doc: docs/BOT_DESIGN.md
-design_ref: 'docs/BOT_DESIGN.md sha256:3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d'
-implementation_workspace: /private/tmp/om-bot-receipt-scope
-review_base: origin/main@5670eb384c8c7c521bfdcf0dfa79da2ade873bb3
-authorization_diffs: []
-workflow_version: 2
-mode: workflow
-workflow_path: simple
-node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
-current_node: Review
-internal_step: complete
-status: completed
-next_action: None within authorized Devflow scope; Delivery or live-model validation requires a separate instruction.
-approved_scope_ref: '用户：[$devflow] 按建议优化实施'
-path_approval_ref: '用户选择：simple（推荐）'
-implementation_baseline:
-  design_doc: 'docs/BOT_DESIGN.md sha256:3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d'
-  implementation_workspace: /private/tmp/om-bot-receipt-scope
-  review_base: origin/main@5670eb384c8c7c521bfdcf0dfa79da2ade873bb3
-  head: 5670eb384c8c7c521bfdcf0dfa79da2ade873bb3
-  git_status: ' M docs/BOT_DESIGN.md'
-  staged: []
-  unstaged:
-    - {path: docs/BOT_DESIGN.md, hash: 3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d, size: 8577}
-  untracked: []
-inventory:
-  - {path: .devflow/scope.md, status: M, hash: self-referential-tracker, size: self-referential-tracker, type: file, mode: '0o644', classification: planned, evidence_ref: Devflow scope contract}
-  - {path: docs/BOT_DESIGN.md, status: M, hash: 3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d, size: 8577, type: file, mode: '0o644', classification: planned, evidence_ref: design_ref}
-  - {path: docs/DEPENDENCY_GRAPH.md, status: M, hash: 579ea0f6a2334f7286bb86450a832b629c57d7ae15b8782b2730cac92a703af3, size: 8918, type: file, mode: '0o644', classification: required-correctness/safety, evidence_ref: pre-push dependency graph --check}
-  - {path: src/application/bot/prompts/tool_rules.md, status: M, hash: f866c7c0823174baaecdaf7b6832461d32d52b6e48441f2a4a2056bb36f6fc7e, size: 2673, type: file, mode: '0o644', classification: planned, evidence_ref: receipt-model-guidance}
-  - {path: src/application/bot/tools.py, status: M, hash: 960737d599b1d2edd60dc916d59a121a47723241ff16fa26dd5072eca3eef3df, size: 33617, type: file, mode: '0o644', classification: planned, evidence_ref: receipt-input-boundary}
-  - {path: tests/test_bot_receipt_host.py, status: M, hash: 9ede3f99c1377e067cff097632d0fda3be764b2195ceb4065697c75a171daf8d, size: 11533, type: file, mode: '0o644', classification: planned, evidence_ref: receipt-input-boundary and receipt-model-guidance}
-content_revision: 'docs/BOT_DESIGN.md sha256:3327f01112a84e29ea08084b69b42c64c1ebfcb4c24a19ed3135da41ae985b5d'
-planreview_round: 1
-deepreview_round: 1
-in_flight: []
-evidence_paths:
-  - docs/BOT_DESIGN.md
-  - docs/reviews/plan-review-20260924-115230.md
-  - docs/reviews/code-review-20260924-115920.md (pass-with-risks)
-  - tests/test_bot_receipt_host.py
-  - tests/test_bot_receipt_scope.py
-  - docs/DEPENDENCY_GRAPH.md (generated; --check passed)
-panel_reviews:
-  snapshot: 'docs/BOT_DESIGN.md sha256:6c30752a93e873bf207115eb2416ef721dcd12d3153f69f5f5aae5e3d0a96380'
-  reviewer_backend: native-subagent
-  reviewer_model: unknown
-  independence: unverified
-  usable_results: 4
-  accepted:
-    - 参数冲突不等于资源归属；区分工具参数级与用户意图级保证
-    - 零读取断言、市场大小写等价
-    - 遮盖 ID 时请求补全，精确查询不得退化为列表查询
-  rejected: []
-  deferred:
-    - 'Host 级自然语言市场意图判定；owner: Bot scope design；destination: 后续获授权的设计切片'
-blocking_findings: []
-residual_risks:
-  - {item: 真实模型是否按参数冲突提示重试尚未实测, classification: assigned-to-later-work-unit, owner: Bot 真实模型验收, destination: 后续只读渠道复验}
+下方 JSON 是实施完成时的检查点。其 hash、文件清单、验证结果与 next_action 不代表后续 DeepReview 修复后的工作树现值；当前结果以最新 review artifact 和工作树为准。
+
+```json
+{
+  "goal": "Implement single Close Advice v3 policy with independently sealed trading-calendar evidence and near-expiry hold",
+  "design_doc": "docs/CLOSE_ADVICE_CONTRACT.md",
+  "design_sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
+  "implementation_workspace": "<task-worktree>/options-monitor",
+  "review_base": "origin/main@915095650316a6e9d5d82c0e8924046528d19f91",
+  "head": "915095650316a6e9d5d82c0e8924046528d19f91",
+  "baseline_git_status": [
+    " M docs/CLOSE_ADVICE_CONTRACT.md",
+    " M domain/domain/close_advice.py",
+    " M src/application/close_advice_runner.py",
+    " M src/application/config_validator.py",
+    " M tests/test_agent_plugin_smoke.py",
+    " M tests/test_assistant_runtime.py",
+    " M tests/test_close_advice_runner.py",
+    " M tests/test_daily_decision_brief_service.py",
+    " M tests/test_strict_close_advice.py"
+  ],
+  "implementation_baseline": {
+    "staged": [],
+    "unstaged": [
+      {
+        "path": "docs/CLOSE_ADVICE_CONTRACT.md",
+        "status": " M",
+        "sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
+        "size": 24869
+      },
+      {
+        "path": "domain/domain/close_advice.py",
+        "status": " M",
+        "sha256": "774fb2d97d13af71f99f93bc456ef7150fa72a1c83e33b5b49cd9bd6551f36df",
+        "size": 15333
+      },
+      {
+        "path": "src/application/close_advice_runner.py",
+        "status": " M",
+        "sha256": "3d4ff0a5078d812a1a6552dc755f06bc44de2bd13462659f0d060c4e3ba1e3ed",
+        "size": 86371
+      },
+      {
+        "path": "src/application/config_validator.py",
+        "status": " M",
+        "sha256": "5980793d5066dcaac906f99f1066b5fe16cebff36b7215ef436a7b6b52215c4a",
+        "size": 75588
+      },
+      {
+        "path": "tests/test_agent_plugin_smoke.py",
+        "status": " M",
+        "sha256": "99545ba08957aa725bd866b52f5f9863532339e2e0b8fa76ed719b408b13d537",
+        "size": 207295
+      },
+      {
+        "path": "tests/test_assistant_runtime.py",
+        "status": " M",
+        "sha256": "a1747f45f2572d241f826647c1c71a68b370025a64b63f620708eebc433816c6",
+        "size": 9446
+      },
+      {
+        "path": "tests/test_close_advice_runner.py",
+        "status": " M",
+        "sha256": "1f0a155b01f4efe79a6bc87c33f80584041a2ece4c94446f3b94322cb8dc1758",
+        "size": 20495
+      },
+      {
+        "path": "tests/test_daily_decision_brief_service.py",
+        "status": " M",
+        "sha256": "b92c531ba254ace7a950c4957bc457a2417dd4f7fee21c1febc261de2adedc8b",
+        "size": 102311
+      },
+      {
+        "path": "tests/test_strict_close_advice.py",
+        "status": " M",
+        "sha256": "5441046123e782e8f0491f3d993e91f8f85d012ead755d0ee8e5c627d9823735",
+        "size": 10124
+      }
+    ],
+    "untracked": []
+  },
+  "success_signals": {
+    "S1": "Each eligible lot has one row; economic failure holds; valid near expiry low delta holds; otherwise close only with sufficient evidence",
+    "S2": "Independent market calendar handles holidays, half days, market-local dates, current session boundary and sealed receipt/hash",
+    "S3": "Scheduled and manual entries use same v3 policy; missing evidence is not_evaluable and does not notify; old reports fail closed"
+  },
+  "authorized_slices": [
+    {
+      "slice": "calendar",
+      "signals": [
+        "S1",
+        "S2",
+        "S3"
+      ],
+      "depends_on": [],
+      "owners": [
+        "src/application/close_advice_required_data.py",
+        "src/application/tick_account_execution.py",
+        "src/application/opend_symbol_fetching.py",
+        "src/application/opend_symbol_outputs.py",
+        "src/application/close_advice_runner.py",
+        "relevant tests"
+      ]
+    },
+    {
+      "slice": "decision_consumers",
+      "signals": [
+        "S1",
+        "S3"
+      ],
+      "depends_on": [
+        "calendar"
+      ],
+      "owners": [
+        "domain/domain/close_advice.py",
+        "src/application/close_advice_runner.py",
+        "readers and Daily Brief",
+        "relevant tests"
+      ]
+    }
+  ],
+  "scope_note": "Pre-existing nine task edits migrated byte-for-byte from older worktree. The prior clean .devflow/scope.md belonged to completed Bot work and remains in Git history at review_base.",
+  "slice_checkpoints": [
+    {
+      "slice": "calendar",
+      "diff_fingerprint": "f4d2211c7604b073fad01383fbfbbf2264355c73d138fc2572d5055122a93275",
+      "validation": "tests/test_close_advice_required_data.py: 26 passed; frozen v3 close/hold and calendar timeout/cross-year evidence",
+      "done": true,
+      "checkpoint_note": "Final restricted-diff fingerprint; no earlier temporal checkpoint was preserved"
+    },
+    {
+      "slice": "decision_consumers",
+      "diff_fingerprint": "df8a9e9d5ab64d0d27a9742454b504d8a4a9debf4894977cce2d8ee874b20ba1",
+      "validation": "Related pytest suite: 313 passed; Ruff --no-cache passed; git diff --check passed",
+      "done": true
+    }
+  ],
+  "status": "implementation_completed",
+  "inventory": [
+    {
+      "path": "docs/CLOSE_ADVICE_CONTRACT.md",
+      "sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
+      "size": 24869,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "domain/domain/close_advice.py",
+      "sha256": "99db3a8336c9273c2c9a86a56d8b9c04d73a6798c8c5c010aeb1e9e4d5807ea5",
+      "size": 16471,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/agent_tools/close_advice_read_impl.py",
+      "sha256": "a9b2f2221e3679b7e5cbd6b2f185ec62f6ea5b013136a9d97a30f52752000ef6",
+      "size": 34911,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/close_advice_required_data.py",
+      "sha256": "330363823d227fa2940e194d339a9b68c6f0bbd12ef06431141055c38eb81122",
+      "size": 32258,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/close_advice_runner.py",
+      "sha256": "5029cac45955c3dc92fd295d7d3fbbfefaa04fe4d385dbef6274be53867dff20",
+      "size": 94197,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/config_validator.py",
+      "sha256": "46a7c502c1a27224c8cc61fe79c86d2698054c4ea93fcbf84324389b91860ee6",
+      "size": 75588,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/daily_decision_brief_service.py",
+      "sha256": "1250603987cb4fc288c0c3af97720498e3a616ee1a72b1646a16dd46bfb18588",
+      "size": 103920,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "src/application/tick_account_execution.py",
+      "sha256": "c36befd137a1aa324ad13f5ba52b9c5fe176a09f9fba9e972f73c55813b2280f",
+      "size": 71596,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_agent_plugin_smoke.py",
+      "sha256": "ffcc6358df900236d771372ddf433ff06e4acfcbf5e4e27e209e0c1293f5dc9e",
+      "size": 207421,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_assistant_runtime.py",
+      "sha256": "3260cf96ea0516fea48e9672d90d5f5358d4fc01f92af2ce145aabefddd72a14",
+      "size": 9446,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_close_advice_required_data.py",
+      "sha256": "42e520f84e38c73cbe91450cec22f7a3f945e67ba6550701c916448d93535db8",
+      "size": 53304,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_close_advice_runner.py",
+      "sha256": "31256a599567c0c14d1c9e55dddc92c5c25cae8020af74d5bfc5d9fececb81a5",
+      "size": 22875,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_daily_decision_brief_service.py",
+      "sha256": "920941a1f6e0437061972d5946d02b7c4f275799ea538ee1855f3b9db374e35b",
+      "size": 102311,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_strict_close_advice.py",
+      "sha256": "9fd6af713ed0c4e0446f8e27ac94314b4302141ec862731a7a90303f73927169",
+      "size": 10782,
+      "status": "M",
+      "classification": "planned"
+    },
+    {
+      "path": "tests/test_tick_account_execution_barrier.py",
+      "sha256": "d091ee711566e687a9c5d3a5556a5755d115bef207d20c25b2948e4ac12c520e",
+      "size": 59124,
+      "status": "M",
+      "classification": "planned"
+    }
+  ],
+  "content_revision": "08302a129b6b1787621bc8cbbacebe8bd4a25c1b838a0e2139dbe013e0ebcad7",
+  "evidence_paths": [
+    "docs/CLOSE_ADVICE_CONTRACT.md",
+    "tests/test_close_advice_required_data.py",
+    "tests/test_close_advice_runner.py",
+    "tests/test_strict_close_advice.py"
+  ],
+  "residual_risks": [
+    {
+      "item": "No local historical Close Advice reports available for v2/v3 per-lot replay",
+      "classification": "needs-new-issue-or-user-decision",
+      "owner": "Close Advice strategy owner",
+      "destination": "Read-only historical replay before production activation"
+    }
+  ],
+  "next_action": "Await separately authorized Review or Delivery"
+}
+```

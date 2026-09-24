@@ -1616,7 +1616,7 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
                 "strike": 100,
                 "reason": "收益已锁定",
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
@@ -1673,7 +1673,7 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
                 "strike": strike,
                 "reason": "test",
                 "recommendation_state": state,
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": (
                     "strict_profit_capture_all_gates_passed"
                     if state == "close"
@@ -1745,7 +1745,7 @@ def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
@@ -1873,7 +1873,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
                 "strike": strike,
                 "reason": "test",
                 "recommendation_state": "close",
-                "policy_version": "remaining_yield_capture.v1",
+                "policy_version": "remaining_yield_capture.v3",
                 "decision_basis": "strict_profit_capture_all_gates_passed",
                 "decision_evidence_status": "complete",
                 "evaluation_status": "priced",

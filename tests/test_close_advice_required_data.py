@@ -77,7 +77,6 @@ def _plan(**overrides: object) -> dict:
     base: dict[str, object] = {
         "run_id": "run-1",
         "run_started_at_utc": datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
-        "business_date": date(2026, 7, 29),
         "markets_to_run": ["US"],
     }
     base.update(overrides)
@@ -121,6 +120,161 @@ def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> 
     )
     assert requirement["fetch_binding"]["binding_id"]
     assert forward["summary"]["requirements_total"] == 1
+
+
+def test_plan_uses_market_local_date_and_seals_independent_calendar(tmp_path: Path) -> None:
+    from src.application.close_advice_required_data import (
+        enrich_close_advice_required_data_plan,
+        load_close_advice_required_data_plan,
+        publish_close_advice_required_data_plan,
+    )
+
+    config = _config(account="lx")
+    plan = _plan(
+        account_configs={"lx": config}, base_config=config,
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
+    )
+    assert plan["as_of_market_dates"] == {"US": "2026-07-28", "HK": "2026-07-29"}
+    path = tmp_path / "plan.json"
+    publish_close_advice_required_data_plan(path=path, payload=plan)
+
+    class Gateway:
+        def get_trading_days_with_receipt(self, **kwargs):
+            assert kwargs == {"market": "US", "start": "2026-07-28", "end": "2026-08-28"}
+            return {
+                "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                "page_count": 1,
+                "rows": [
+                    {"time": "2026-07-28", "trade_date_type": "WHOLE"},
+                    {"time": "2026-08-28", "trade_date_type": "MORNING"},
+                ],
+            }
+
+        def get_market_state(self, codes):
+            assert codes == ["US.NVDA"]
+            return [{"code": "US.NVDA", "market_state": "MORNING"}]
+
+        def close(self):
+            pass
+
+    enrich_close_advice_required_data_plan(
+        plan_path=path, expected_run_id="run-1",
+        gateway_factory=lambda **_kwargs: Gateway(),
+    )
+    loaded = load_close_advice_required_data_plan(path=path, expected_run_id="run-1")
+    requirement = loaded["accounts"]["lx"]["requirements"][0]
+    assert requirement["trading_calendar_status"] == "ok"
+    assert json.loads(requirement["trading_calendar_dates"]) == ["2026-07-28", "2026-08-28"]
+    assert requirement["market_state_after_snapshot"] == "MORNING"
+
+
+def test_calendar_rejects_missing_session_type() -> None:
+    from src.application.close_advice_required_data import _calendar_dates
+
+    with pytest.raises(ValueError, match="calendar row invalid"):
+        _calendar_dates(
+            {"retcode": 0, "coverage_complete": True, "pagination_complete": True,
+             "page_count": 1, "rows": [{"time": "2026-07-28"}]},
+            start=date(2026, 7, 28), end=date(2026, 8, 28),
+        )
+
+
+def test_malformed_opend_calendar_seals_unavailable_plan(tmp_path: Path) -> None:
+    from src.application.close_advice_required_data import (
+        enrich_close_advice_required_data_plan,
+        publish_close_advice_required_data_plan,
+    )
+    from src.infrastructure.futu_gateway import _FutuAPIClient, build_futu_gateway
+
+    config = _config(account="lx")
+    plan_path = tmp_path / "plan.json"
+    publish_close_advice_required_data_plan(
+        path=plan_path,
+        payload=_plan(
+            account_configs={"lx": config}, base_config=config,
+            position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
+        ),
+    )
+
+    class FakeBackend:
+        def __init__(self, *, host, port):
+            pass
+
+        def _ensure_clients(self):
+            class FakeQuote:
+                def request_trading_days(self, **_kwargs):
+                    return 0, [
+                        {"time": "2026-07-28", "trade_date_type": "WHOLE"},
+                        "malformed-row",
+                    ]
+
+            return FakeQuote(), None
+
+    enriched = enrich_close_advice_required_data_plan(
+        plan_path=plan_path,
+        expected_run_id="run-1",
+        gateway_factory=lambda **kwargs: build_futu_gateway(
+            **kwargs, backend_cls=FakeBackend, client_cls=_FutuAPIClient
+        ),
+    )
+    requirement = enriched["accounts"]["lx"]["requirements"][0]
+    assert requirement["trading_calendar_status"] == "unavailable"
+    assert requirement["trading_calendar_reason"] == "calendar_unavailable:FutuGatewayError"
+
+
+def test_calendar_enrichment_timeout_leaves_plan_for_fail_closed_seal(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+    from src.application import close_advice_required_data as mod
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text('{"sentinel": true}', encoding="utf-8")
+
+    def _timeout(*args, **kwargs):
+        assert kwargs["timeout"] == 30
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(mod.subprocess, "run", _timeout)
+    assert mod.enrich_close_advice_required_data_plan_bounded(
+        plan_path=plan_path, expected_run_id="run-1", python=Path("python"), repo_root=tmp_path,
+    ) == "calendar_enrichment_timeout"
+    assert json.loads(plan_path.read_text(encoding="utf-8")) == {"sentinel": True}
+
+
+def test_cross_year_calendar_is_explicitly_unavailable(tmp_path: Path) -> None:
+    from src.application.close_advice_required_data import (
+        enrich_close_advice_required_data_plan, publish_close_advice_required_data_plan,
+    )
+
+    config = _config(account="lx")
+    plan = _plan(
+        account_configs={"lx": config}, base_config=config,
+        position_records_by_account={"lx": [
+            _position(account="lx", lot_id="lot-lx", expiration="2027-01-15"),
+            _position(account="lx", lot_id="lot-near", expiration="2026-08-28"),
+        ]},
+    )
+    path = tmp_path / "plan.json"
+    publish_close_advice_required_data_plan(path=path, payload=plan)
+    class Gateway:
+        def get_trading_days_with_receipt(self, **kwargs):
+            assert kwargs["end"] == "2026-08-28"
+            return {"retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                    "page_count": 1, "rows": [{"time": "2026-08-28", "trade_date_type": "WHOLE"}]}
+
+        def get_market_state(self, _codes):
+            return []
+
+        def close(self):
+            pass
+
+    enriched = enrich_close_advice_required_data_plan(
+        plan_path=path, expected_run_id="run-1",
+        gateway_factory=lambda **_kwargs: Gateway(),
+    )
+    requirements = {r["position_lot_id"]: r for r in enriched["accounts"]["lx"]["requirements"]}
+    assert requirements["lot-lx"]["trading_calendar_status"] == "unavailable"
+    assert requirements["lot-lx"]["trading_calendar_reason"] == "calendar_cross_year_unsupported"
+    assert requirements["lot-near"]["trading_calendar_status"] == "ok"
 
 
 def test_candidate_route_wins_and_only_conflicting_position_is_rejected() -> None:
@@ -427,11 +581,18 @@ def _frozen_workspace(
     quote_strike: float = 100,
     position_fields: dict[str, object] | None = None,
     ledger_wheel: bool = False,
+    run_started_at_utc: datetime | None = None,
+    quote_expiration: str = "2026-08-28",
+    quote_ask: float = 2.1,
+    quote_delta: float = -0.3,
+    calendar_days: list[str] | None = None,
 ) -> _FrozenWorkspace:
     from src.application.ledger import api as ledger_api
     from src.application.close_advice_required_data import (
         PLAN_FILE_NAME,
         build_close_advice_required_data_plan,
+        close_advice_market_date,
+        enrich_close_advice_required_data_plan,
         publish_close_advice_required_data_plan,
     )
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -530,11 +691,12 @@ def _frozen_workspace(
     else:
         record = _position(account="lx", lot_id="lot-lx")
         record["fields"].update(position_fields or {})
+        record["fields"]["expiration_ymd"] = quote_expiration
         position_records = [record]
+    started = run_started_at_utc or datetime(2026, 7, 29, 14, 40, tzinfo=timezone.utc)
     plan = build_close_advice_required_data_plan(
         run_id=run_id,
-        run_started_at_utc=datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
-        business_date=date(2026, 7, 29),
+        run_started_at_utc=started,
         account_configs={"lx": config},
         base_config=config,
         markets_to_run=["US"],
@@ -545,10 +707,9 @@ def _frozen_workspace(
         path=plan_path,
         payload=plan,
     )
-    observed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    observed_at = started if run_started_at_utc else datetime.now(timezone.utc) - timedelta(seconds=5)
     completed_at = observed_at + timedelta(seconds=1)
-    quote_expiration = "2026-08-28"
-    discovery_trading_date = date(2026, 7, 29)
+    discovery_trading_date = close_advice_market_date(started, "US")
     quote_dte = (
         date.fromisoformat(quote_expiration) - discovery_trading_date
     ).days
@@ -684,16 +845,17 @@ def _frozen_workspace(
         "rows": [
             {
                 "symbol": "NVDA",
+                "market": "US",
                 "option_type": "put",
                 "expiration": quote_expiration,
                 "dte": quote_dte,
                 "contract_symbol": "NVDA-P",
                 "strike": quote_strike,
                 "spot": quote_spot,
-                "bid": 1.9,
-                "ask": 2.1,
-                "mid": 2.0,
-                "last_price": 2.0,
+                "bid": 1.9 if quote_ask >= 1.9 else quote_ask / 2,
+                "ask": quote_ask,
+                "mid": ((1.9 if quote_ask >= 1.9 else quote_ask / 2) + quote_ask) / 2,
+                "last_price": quote_ask,
                 "implied_volatility": 0.3,
                 "realized_volatility_20": 0.2,
                 "realized_volatility_60": 0.2,
@@ -708,7 +870,8 @@ def _frozen_workspace(
                 "term_matched_rv_input_end": discovery_trading_date.isoformat(),
                 "term_matched_rv_input_session_count": term_lookback + 1,
                 "term_matched_rv_input_hash": term_input_hash,
-                "delta": -0.3,
+                "delta": quote_delta,
+                "snapshot_received_at_utc": completed_at.isoformat(),
                 "multiplier": 100,
             }
         ],
@@ -747,6 +910,25 @@ def _frozen_workspace(
             "discovery_status": "complete",
         }
     ]
+    if calendar_days is not None:
+        class Gateway:
+            def get_trading_days_with_receipt(self, **_kwargs):
+                return {
+                    "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                    "page_count": 1,
+                    "rows": [{"time": day, "trade_date_type": "WHOLE"} for day in calendar_days],
+                }
+
+            def get_market_state(self, _codes):
+                return [{"code": "US.NVDA", "market_state": "MORNING"}]
+
+            def close(self):
+                pass
+
+        enrich_close_advice_required_data_plan(
+            plan_path=plan_path, expected_run_id=run_id,
+            gateway_factory=lambda **_kwargs: Gateway(),
+        )
     manifest_path = state_dir / "required_data_snapshot_manifest.json"
     seal_required_data_snapshot(
         manifest_path=manifest_path,
@@ -766,7 +948,7 @@ def _frozen_workspace(
         position_records,
         broker="富途",
         account="lx",
-        observed_at=datetime(2026, 7, 29, 14, tzinfo=timezone.utc),
+        observed_at=started,
     )
     context_path = account_state / "option_positions_context.json"
     context_path.write_text(
@@ -776,6 +958,61 @@ def _frozen_workspace(
     return _FrozenWorkspace(
         config, context_path, required_root, output_dir, manifest_path
     )
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"), [(-0.06, "close"), (-0.01, "hold")]
+)
+def test_frozen_v3_decision_uses_sealed_calendar_and_delta(
+    tmp_path: Path, delta: float, expected: str,
+) -> None:
+    from src.application.close_advice_required_data import close_advice_market_date
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    market_day = close_advice_market_date(started, "US")
+    expiry = market_day + timedelta(days=14)
+    frozen = _frozen_workspace(
+        tmp_path,
+        run_started_at_utc=started,
+        quote_expiration=expiry.isoformat(),
+        quote_ask=0.1,
+        quote_delta=delta,
+        calendar_days=[market_day.isoformat(), expiry.isoformat()],
+    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
+    row = pd.read_csv(frozen[3] / "close_advice.csv").iloc[0]
+
+    assert result["snapshot_authority"] == "valid"
+    assert row["policy_version"] == "remaining_yield_capture.v3"
+    assert row["trading_calendar_status"] == "ok"
+    assert row["remaining_trading_sessions"] == 2
+    assert row["recommendation_state"] == expected
+    assert row["decision_evidence_status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"), [(-0.06, "close"), (-0.01, "not_evaluable")]
+)
+def test_frozen_v3_missing_calendar_uses_delta_only_when_conclusive(
+    tmp_path: Path, delta: float, expected: str,
+) -> None:
+    from src.application.close_advice_required_data import close_advice_market_date
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    expiry = close_advice_market_date(started, "US") + timedelta(days=14)
+    frozen = _frozen_workspace(
+        tmp_path, run_started_at_utc=started, quote_expiration=expiry.isoformat(),
+        quote_ask=0.1, quote_delta=delta,
+    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
+    row = pd.read_csv(frozen[3] / "close_advice.csv").iloc[0]
+
+    assert result["snapshot_authority"] == "valid"
+    assert row["trading_calendar_status"] == "unavailable"
+    assert row["trading_calendar_reason"] == "calendar_plan_not_enriched"
+    assert row["recommendation_state"] == expected
 
 
 def test_frozen_close_advice_reads_only_sealed_snapshot(
@@ -1215,7 +1452,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
     result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
-    assert result["evaluable_rows"] == 1
+    assert result["evaluable_rows"] == 0
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
     assert row["close_mid"] == 2.0
     assert quote_csv.read_bytes() == original_bytes
@@ -1242,7 +1479,7 @@ def test_legacy_unbound_snapshot_degrades_positions_without_fetch(
     )
     monkeypatch.setattr(
         runner,
-        "expiration_business_today",
+        "close_advice_market_date",
         lambda *_args, **_kwargs: date(2026, 7, 29),
     )
     monkeypatch.setattr(
