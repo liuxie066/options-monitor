@@ -57,10 +57,11 @@ RETIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 #: Modules whose job requires naming the retired columns. Recorded, counted,
-#: and asserted present -- exempt is not invisible.
+#: and asserted present -- exempt is not invisible. Shortens as R2 retires the
+#: old-shape branches: ``lot_parity_probe`` left the list when it stopped reading
+#: ``record_id`` (the probe now refuses the retired identity shape instead).
 EXEMPT_MODULES: tuple[str, ...] = (
     "src/application/ledger/lot_identity_migration.py",
-    "src/application/ledger/lot_parity_probe.py",
     "src/application/ledger/position_projection_migration.py",
 )
 

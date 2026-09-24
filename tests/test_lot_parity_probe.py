@@ -1182,10 +1182,9 @@ def test_probe_face_c_reports_a_missing_stored_row(tmp_path: Path) -> None:
 def test_probe_face_c_detects_a_duplicate_identity(tmp_path: Path) -> None:
     """Two rows collapsing onto one identity is what the old instrument silently lost.
 
-    A unique index pins the ``lot_id`` column, so the collision has to come from
-    the carrier-or-fallback rule the two existing read surfaces share: one row
-    carries ``lot_probe_shared`` while a second, carrier-less row falls back to
-    the same string through ``record_id``.
+    R2 removed the carrier-or-fallback rule, so the collision is built the way the
+    final shape can still produce one: two rows that both carry
+    ``lot_probe_shared`` in the identity column the readers now use.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _degrade_lot_table(sqlite_path, with_carrier=True)
@@ -1207,8 +1206,8 @@ def test_probe_face_c_detects_a_duplicate_identity(tmp_path: Path) -> None:
                 INSERT INTO position_lots (
                     record_id, account, fields_json, source_event_id,
                     expiration, strike, multiplier, updated_at_ms, lot_id
-                ) VALUES ('lot_probe_shared', 'lx', '{"account":"lx"}', NULL,
-                          NULL, NULL, NULL, 1, NULL)
+                ) VALUES ('probe_second_row', 'lx', '{"account":"lx"}', NULL,
+                          NULL, NULL, NULL, 1, 'lot_probe_shared')
                 """,
                 (),
             ),
@@ -1401,8 +1400,8 @@ def test_probe_c_attribution_counts_are_a_partition_of_the_differing_lots(
                 INSERT INTO position_lots (
                     record_id, account, fields_json, source_event_id,
                     expiration, strike, multiplier, updated_at_ms, lot_id
-                ) VALUES ('lot_probe_dup', 'lx', '{"account":"lx"}', ?,
-                          NULL, NULL, NULL, 1, NULL)
+                ) VALUES ('probe_dup_second', 'lx', '{"account":"lx"}', ?,
+                          NULL, NULL, NULL, 1, 'lot_probe_dup')
                 """,
                 (ledger_event_id,),
             ),
@@ -1440,10 +1439,9 @@ def test_probe_attributes_a_duplicate_identity_that_is_on_both_sides(
     nothing else.
 
     The rows are inserted with the carrier's unique index dropped because the
-    collision they describe is between two rows that *both* carry the identity
-    (the fallback half of the carrier-or-fallback rule is what makes them one
-    identity), which is the shape the read side has to describe whether or not
-    the index is still there to stop it.
+    collision they describe is between two rows that *both* carry the identity,
+    which is the shape the read side has to describe whether or not the index is
+    still there to stop it.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _degrade_lot_table(sqlite_path, with_carrier=True)
@@ -1533,52 +1531,25 @@ def test_probe_refuses_other_non_object_ledger_payloads(tmp_path: Path, raw: str
         run_lot_parity_probe(sqlite_path=sqlite_path)
 
 
-def test_probe_survives_the_record_id_rename(tmp_path: Path) -> None:
-    """Slice 3 renames ``record_id`` to ``lot_id`` and re-runs this comparison.
+def test_probe_refuses_the_retired_record_id_shape(tmp_path: Path) -> None:
+    """R2 removed the ``record_id`` branch; the retired shape is now a refusal.
 
-    A hard-coded ``record_id`` in the SELECT or the ORDER BY would make the
-    comparison die on the rename instead of describing the store on the other side
-    of it — at the one step that has to prove "replay == stored" still holds.
-    """
-    sqlite_path, _config = _build_green_store(tmp_path)
-    with connect_ledger_fixture(sqlite_path) as conn:
-        columns = {
-            str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)")
-        }
-    assert "lot_id" in columns and "record_id" not in columns
-
-    report = run_lot_parity_probe(sqlite_path=sqlite_path)
-
-    assert report["green"] is True
-    assert report["stored_lot_count"] == 1
-    assert _faces(report)["c_rows"]["difference_count"] == 0
-
-
-def test_probe_reads_a_store_that_only_has_record_id(tmp_path: Path) -> None:
-    """The production store today: ``record_id`` and no carrier column at all.
-
-    This is the shape of the acceptance input (``production-readout.md``'s
-    ``.backup`` copy, whose ``position_lots`` predates the carrier), and the shape
-    no fixture in this file produced: the write path creates both columns, so the
-    carrier-or-fallback branch that production actually takes was only ever
-    exercised by hand.
+    The branch existed to validate slice 3's ``RENAME COLUMN record_id TO
+    lot_id`` by re-running this comparison. That rename is verified and the
+    production window is closed (``CHANGELOG.md`` 3.6.5), so a store still
+    carrying the retired identity column is reported loudly rather than read
+    through a fallback that no longer has a reviewable caller.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _degrade_lot_table(sqlite_path)
-    conn = connect_ledger_fixture(sqlite_path)
-    try:
+    with connect_ledger_fixture(sqlite_path) as conn:
         columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()
         }
-    finally:
-        conn.close()
     assert "lot_id" not in columns and "record_id" in columns
 
-    report = run_lot_parity_probe(sqlite_path=sqlite_path)
-
-    assert report["green"] is True
-    assert report["stored_lot_count"] == 1
-    assert report["projected_lot_count"] == 1
+    with pytest.raises(ValueError, match="retired identity shape"):
+        run_lot_parity_probe(sqlite_path=sqlite_path)
 
 
 # --- zero writes -------------------------------------------------------------

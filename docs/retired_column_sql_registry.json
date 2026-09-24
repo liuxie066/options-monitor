@@ -1,7 +1,6 @@
 {
   "exempt_modules": [
     "src/application/ledger/lot_identity_migration.py",
-    "src/application/ledger/lot_parity_probe.py",
     "src/application/ledger/position_projection_migration.py"
   ],
   "retired_columns": {
@@ -98,18 +97,6 @@
       },
       {
         "columns": [
-          "record_id"
-        ],
-        "digest": "sha256:fde0f8e8075836b8",
-        "kind": "read",
-        "module": "src/application/ledger/lot_parity_probe.py",
-        "occurrences": 1,
-        "tables": [
-          "position_lots"
-        ]
-      },
-      {
-        "columns": [
           "expiration"
         ],
         "digest": "sha256:2533bf5b4afc0c98",
@@ -188,7 +175,7 @@
       "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:d99c77f5ff7c522d",
+    "digest": "sha256:b84d5ed51b6840f4",
     "statements": 38
   }
 }
