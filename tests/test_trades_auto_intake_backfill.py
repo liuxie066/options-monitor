@@ -173,6 +173,71 @@ def test_canonical_backfill_recovers_pending_receipt_after_ledger_commit(tmp_pat
     assert saved["result"]["operations"]
 
 
+def test_backfill_execution_index_gap_diagnostic_is_once_per_table(tmp_path: Path, monkeypatch, caplog) -> None:
+    from src.application.ledger import position_projection_migration, repository_trade_schema
+
+    monkeypatch.setattr(repository_trade_schema, "_warned_execution_identity_index_gaps", set())
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for name, _path in repository_trade_schema.EXECUTION_IDENTITY_INDEXES.values():
+            conn.execute(f"DROP INDEX {name}")
+
+    statements: list[str] = []
+    original_connect = repo._connect
+
+    def traced_connect():
+        conn = original_connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", traced_connect)
+    payloads = [
+        {**_standard_execution(), "external_execution_id": f"fill-{index}", "deal_id": f"fill-{index}"}
+        for index in range(4)
+    ]
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "legacy.sqlite3")
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs.update(repo=repo, account_mapping={"123": "lx"}, futu_account_ids=["123"], inbox_path=inbox)
+    with caplog.at_level("WARNING", logger="src.application.ledger.repository_trade_schema"):
+        result = run_history_backfill(
+            **kwargs,
+            history_deals_fn=lambda **_kwargs: (payloads, {
+                "account_results": [{"futu_account_id": "123", "ret": 0,
+                                     "coverage_status": "complete", "coverage_complete": True,
+                                     "pagination_complete": True}],
+            }),
+            process_payload_fn=lambda payload, **_context: {
+                "status": "unresolved", "reason": "test_only", "deal_id": payload["deal_id"],
+            },
+        )
+
+    assert result["deal_count"] == len(payloads)
+    with sqlite3.connect(inbox) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trade_inbox").fetchone()[0] == len(payloads)
+    assert [
+        record.message for record in caplog.records
+        if record.name == "src.application.ledger.repository_trade_schema"
+    ] == [
+        f"execution_identity_index_fallback store_key={repo.db_path} table={table} cause=missing rows=0"
+        for table in repository_trade_schema.EXECUTION_IDENTITY_INDEXES
+    ]
+    assert not any("PRAGMA database_list" in sql for sql in statements)
+    for table in repository_trade_schema.EXECUTION_IDENTITY_INDEXES:
+        assert sum(sql == f"SELECT COUNT(*) FROM {table}" for sql in statements) == 1
+        assert sum(
+            "SELECT sql FROM sqlite_master WHERE type='index'" in sql and f"'{table}'" in sql
+            for sql in statements
+        ) >= len(payloads)
+
+    record_normalized_trade_event(repo, normalize_trade_deal(payloads[0]))
+    assert position_projection_migration.position_projection_migration_status(repo.db_path)[
+        "execution_identity_index_gaps"
+    ] == [
+        {"table": "trade_events", "cause": "missing", "rows": 1},
+        {"table": "assigned_stock_events", "cause": "missing", "rows": 0},
+    ]
+
+
 def test_backfill_assigned_stock_completion_keys_require_physical_scope() -> None:
     class StockRepo(_FakeRepo):
         def list_assigned_stock_events(self):
