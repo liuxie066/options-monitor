@@ -1,0 +1,81 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.2",
+  "base": {
+    "tag": "v3.7.1",
+    "commit": "8e23273c71f5c02d6d0b3eca53aba90092ce733e"
+  },
+  "reviewed_head": "04187bacb212a5fe09a715f905b8528d4de9c335",
+  "commits": [
+    {
+      "sha": "e0cbcdf4c153167a0faacf3023a92fe8f7e1a0f6",
+      "subject": "fix(alerts): 心跳判据只看单元活性与心跳新鲜度，状态标签只作上下文"
+    },
+    {
+      "sha": "58e9f094352443f8af856c7ecc7d904dfa35e49a",
+      "subject": "fix(service): 升级后的服务对账改用新 release 自己的 om 渲染"
+    },
+    {
+      "sha": "47925188ca9b095c6d72d173a417d67810f81c22",
+      "subject": "docs(deploy): 对账由目标 release 的 om 执行，并重建依赖图"
+    },
+    {
+      "sha": "04187bacb212a5fe09a715f905b8528d4de9c335",
+      "subject": "Merge pull request #362 from liuxie066/codex/heartbeat-fix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复成交接收心跳看门狗把健康账号长期判为失联并实际投递告警的问题：判据只看单元活性与心跳新鲜度（1200 秒，约实测单轮最坏值的 2 倍），阶段标签只作为告警上下文；OpenD 掉线进入重连期间仍判失联，不会假报恢复。同时修复状态文件长期停在 `starting`、`runtime_status` 的 `listener_status` 恒为 `partial` 的问题。",
+      "commits": [
+        "e0cbcdf4c153167a0faacf3023a92fe8f7e1a0f6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复升级后的服务对账使用启动升级的旧 release 渲染代码的问题：现在由新 release 自己的 `om` 执行，升级新增的 systemd 单元不再漏装。",
+      "commits": [
+        "58e9f094352443f8af856c7ecc7d904dfa35e49a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "47925188ca9b095c6d72d173a417d67810f81c22",
+      "reason": "生成物同步（依赖图随新增导入边重建）与对账行为的文档更正，无用户或运维可见行为变化。"
+    },
+    {
+      "commit": "04187bacb212a5fe09a715f905b8528d4de9c335",
+      "reason": "PR 合并提交，内容由上列提交覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "e0cbcdf4c153167a0faacf3023a92fe8f7e1a0f6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/362",
+        "docs/AGENT_WIKI.md"
+      ]
+    },
+    {
+      "commit": "58e9f094352443f8af856c7ecc7d904dfa35e49a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/362",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    },
+    {
+      "commit": "47925188ca9b095c6d72d173a417d67810f81c22",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/362"
+      ]
+    },
+    {
+      "commit": "04187bacb212a5fe09a715f905b8528d4de9c335",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/362"
+      ]
+    }
+  ]
+}
