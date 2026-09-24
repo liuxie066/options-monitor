@@ -14,6 +14,8 @@
 
 `./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。
 
+`./om logs --kind audit` 只读取文件末尾 256 KiB，超过 16 MiB 的旧审计文件仍可返回近期行；`tail_truncated` 明示未覆盖全文件。`research` 的审计尾读保留最多请求行数，单行超过 1 MiB 时标 `partial`。只读取证发生读取失败或覆盖不完整时，会向本机 stderr/journal 写 `<3>READ_DIAGNOSTIC_DEGRADED`，不尝试外发通知。
+
 ## 保留与回收
 
 共享通知审计、trade-intake 审计按 UTC 日期或 64 MiB 在写入锁内封段。历史段格式为 `<stem>.YYYYMMDD.NNNNNN.jsonl`，当前文件名不变；历史段**没有自动删除**。`output_runs` 使用已有 `./om service cleanup` 预览、计划摘要和确认门，不能对照旧报告直接清除。

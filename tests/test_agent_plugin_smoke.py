@@ -3278,8 +3278,7 @@ def test_runtime_logs_agent_tool_rejects_outside_root_and_symlink(tmp_path: Path
     assert "private-value" not in json.dumps(linked_out, ensure_ascii=False)
 
 
-def test_runtime_logs_agent_tool_caps_lines_type_and_file_size(monkeypatch, tmp_path: Path) -> None:
-    import src.application.runtime_logs_cli as runtime_logs_cli
+def test_runtime_logs_agent_tool_caps_lines_type_and_tails_large_file(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     logs_root = tmp_path / "logs"
@@ -3305,15 +3304,18 @@ def test_runtime_logs_agent_tool_caps_lines_type_and_file_size(monkeypatch, tmp_
     assert unsupported_out["ok"] is False
     assert unsupported_out["error"]["code"] == "POLICY_ERROR"
 
-    monkeypatch.setattr(runtime_logs_cli, "MAX_LOG_FILE_BYTES", 8)
     oversized = logs_root / "oversized.log"
-    oversized.write_text("more-than-eight-bytes", encoding="utf-8")
+    with oversized.open("wb") as stream:
+        stream.truncate(92 * 1024 * 1024)
+        stream.seek(-len(b"\nlast-line\n"), 2)
+        stream.write(b"\nlast-line\n")
     oversized_out = run_tool(
         "runtime_logs",
         {"logs_root": str(logs_root), "log_file": str(oversized), "lines": 1},
     )
-    assert oversized_out["ok"] is False
-    assert oversized_out["error"]["code"] == "POLICY_ERROR"
+    assert oversized_out["ok"] is True
+    assert oversized_out["data"]["files"][0]["tail_truncated"] is True
+    assert oversized_out["data"]["files"][0]["tail_line_count"] == 1
 
 
 def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:

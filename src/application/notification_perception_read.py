@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import os
 import stat
 from datetime import datetime, timezone
@@ -139,6 +140,8 @@ def read_notification_perception_events(
         for status in read_statuses:
             status["line_count"] = None
             status["parsed_count"] = None
+    if read_status in {"failed", "partial"}:
+        print(f"<3>READ_DIAGNOSTIC_DEGRADED reason={read_status} tool=notification_perception_read", file=sys.stderr)
     return result
 
 
@@ -388,6 +391,8 @@ def _read_window(
     if conversation_id:
         for item in read_statuses:
             item["line_count"] = None
+    if status == "partial":
+        print("<3>READ_DIAGNOSTIC_DEGRADED reason=partial tool=notification_perception_read", file=sys.stderr)
     return result
 
 
