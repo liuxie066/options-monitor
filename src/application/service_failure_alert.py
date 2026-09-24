@@ -41,11 +41,15 @@ def alert_failed_service(*, unit: str, market: str, config_path: str, runtime_ro
         pass
     results = []
     for account in accounts:
-        results.append(report_system_failure(
-            base=base, config=config, unit=unit, market=market, account=account,
-            failure_code=reason_by_account.get(account, "SERVICE_TERMINAL_FAILURE"), stage="unit_failed", run_id=run_id,
-            rc=-1, first_error_at=now, opend_login_state=login_state,
-        ))
+        try:
+            results.append(report_system_failure(
+                base=base, config=config, unit=unit, market=market, account=account,
+                failure_code=reason_by_account.get(account, "SERVICE_TERMINAL_FAILURE"), stage="unit_failed", run_id=run_id,
+                rc=-1, first_error_at=now, opend_login_state=login_state,
+            ))
+        except Exception:
+            print("<3>SERVICE_ALERT_INFRA_FAILED")
+            return 1
     if all(item in {"confirmed", "suppressed"} for item in results):
         return 0
     print("<3>SERVICE_FAILURE_ALERT_UNCONFIRMED " + ",".join(results))

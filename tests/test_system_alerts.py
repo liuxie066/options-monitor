@@ -31,11 +31,20 @@ def test_system_alert_is_deduped_and_recovers_once(monkeypatch, tmp_path: Path) 
     assert len(sends) == 1
     assert sends[0]["target"] == "fixture-target"
     assert "run-1" in sends[0]["message"]
+    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    incident = next(iter(state.values()))
+    reservation = incident["reserved_at"]
+    incident["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    assert system_alerts.report_system_failure(**{**failure, "run_id": "run-2"}) == "confirmed"
+    assert sends[0]["idempotency_key"] == sends[1]["idempotency_key"]
+    assert next(iter(json.loads(path.read_text(encoding="utf-8")).values()))["reserved_at"] == reservation
     assert system_alerts.report_system_recovery(**fields) == "confirmed"
     assert system_alerts.report_system_recovery(**fields) == "no_incident"
     assert system_alerts.report_system_failure(**{**failure, "run_id": "run-3"}) == "confirmed"
-    assert len(sends) == 3
-    assert sends[0]["idempotency_key"] != sends[2]["idempotency_key"]
+    assert len(sends) == 4
+    assert sends[0]["idempotency_key"] != sends[3]["idempotency_key"]
 
 
 def test_unconfirmed_alert_reserves_attempt_and_unconfigured_route_does_not(monkeypatch, tmp_path: Path) -> None:
@@ -51,6 +60,35 @@ def test_unconfirmed_alert_reserves_attempt_and_unconfigured_route_does_not(monk
     assert system_alerts.report_system_failure(config=_config(), **fields) == "unconfirmed"
     assert system_alerts.report_system_failure(config=_config(), **fields) == "suppressed"
     assert len(sends) == 1
+    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    next(iter(state.values()))["last_attempt_at"] = "2020-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    assert system_alerts.report_system_failure(config=_config(), **fields) == "unconfirmed"
+    assert sends[0]["idempotency_key"] == sends[1]["idempotency_key"]
+
+
+def test_oversized_alert_state_is_pruned_before_new_alert(monkeypatch, tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    path = tmp_path / "output_shared" / "state" / "system_alerts.json"
+    path.parent.mkdir(parents=True)
+    old = {f"old-{index}": {"status": "recovered", "reserved_at": "2020-01-01T00:00:00+00:00", "padding": "x" * 1024}
+           for index in range(1100)}
+    path.write_text(json.dumps(old), encoding="utf-8")
+    assert path.stat().st_size > 1024 * 1024
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True}, normalize_fn=lambda **_: {}))
+    assert system_alerts.report_system_failure(
+        base=tmp_path, config=_config(), unit="test.service", market="us", account="lx",
+        failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
+        first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown",
+    ) == "confirmed"
+    assert len(sends) == 1
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert len(state) == system_alerts._MAX_INCIDENTS
+    assert "old-0" not in state
+    assert system_alerts._fingerprint("test.service", "us", "lx", "TICK_TIMEOUT", "timeout") in state
 
 
 def test_corrupt_alert_state_fails_closed_without_resending(monkeypatch, tmp_path: Path) -> None:
@@ -110,6 +148,20 @@ def test_service_failure_handler_routes_terminal_state_without_broker(monkeypatc
     assert calls[0]["stage"] == "unit_failed"
     assert calls[0]["account"] == "lx"
     assert calls[0]["rc"] == -1
+
+
+def test_service_failure_handler_logs_alert_infrastructure_failure(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application import service_failure_alert
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+    monkeypatch.setattr(service_failure_alert, "accounts_from_config_path", lambda *_args, **_kwargs: ["lx"])
+    monkeypatch.setattr(service_failure_alert, "report_system_failure", lambda **_kwargs: (_ for _ in ()).throw(OSError("state unavailable")))
+    assert service_failure_alert.alert_failed_service(
+        unit="options-monitor-trade-intake.service", market="us",
+        config_path=str(config_path), runtime_root=tmp_path,
+    ) == 1
+    assert capsys.readouterr().out.strip() == "<3>SERVICE_ALERT_INFRA_FAILED"
 
 
 def test_service_failure_alert_cli_dispatch(monkeypatch, tmp_path: Path) -> None:

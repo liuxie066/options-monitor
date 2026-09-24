@@ -17,6 +17,8 @@ from src.application.notification_delivery_adapter import (
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.notification_shells import render_system_notice
 
+_MAX_INCIDENTS = 512
+
 
 @contextmanager
 def _state_lock(path: Path):
@@ -42,8 +44,7 @@ def _read_state(path: Path) -> dict:
         return {}
     try:
         info = os.fstat(fd)
-        # ponytail: 1 MiB state cap; prune old incidents if alert cardinality grows.
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("system alert state is invalid")
         with os.fdopen(fd, "r", encoding="utf-8") as stream:
             fd = -1
@@ -54,6 +55,16 @@ def _read_state(path: Path) -> dict:
     if not isinstance(state, dict):
         raise ValueError("system alert state must be an object")
     return state
+
+
+def _prune_state(state: dict) -> dict:
+    if len(state) <= _MAX_INCIDENTS:
+        return state
+    return dict(sorted(
+        state.items(),
+        key=lambda item: str(item[1].get("last_attempt_at") or item[1].get("recovered_at") or item[1].get("reserved_at") or "")
+        if isinstance(item[1], dict) else "",
+    )[-_MAX_INCIDENTS:])
 
 
 def _fingerprint(unit: str, market: str, account: str, failure_code: str, stage: str) -> str:
@@ -101,9 +112,10 @@ def report_system_failure(
         state = _read_state(path)
         now = datetime.now(timezone.utc)
         previous = state.get(key)
-        if isinstance(previous, dict) and previous.get("status") == "failed":
+        active = isinstance(previous, dict) and previous.get("status") == "failed"
+        if active:
             try:
-                prior = datetime.fromisoformat(str(previous["reserved_at"]))
+                prior = datetime.fromisoformat(str(previous.get("last_attempt_at") or previous["reserved_at"]))
                 if (now - prior).total_seconds() < max(1, silence_seconds):
                     return "suppressed"
             except (KeyError, TypeError, ValueError):
@@ -111,13 +123,15 @@ def report_system_failure(
         route = resolve_notification_delivery_route(config=config)
         if not route.get("target"):
             return "unconfigured"
+        incident_at = str(previous.get("reserved_at") or now.isoformat()) if active else now.isoformat()
         state[key] = {
-            "status": "failed", "reserved_at": now.isoformat(), "delivery": "unknown",
+            "status": "failed", "reserved_at": incident_at, "last_attempt_at": now.isoformat(), "delivery": "unknown",
             "unit": unit, "market": market, "account": account, "failure_code": failure_code,
-            "stage": stage, "run_id": run_id, "rc": rc, "first_error_at": first_error_at,
+            "stage": stage, "run_id": run_id, "rc": rc,
+            "first_error_at": previous.get("first_error_at", first_error_at) if active else first_error_at,
             "opend_login_state": opend_login_state,
         }
-        atomic_write_json(path, state)
+        atomic_write_json(path, _prune_state(state))
     message = render_system_notice(
         component=unit,
         status="❌ 不可用",
@@ -126,13 +140,13 @@ def report_system_failure(
                 ("first_error_at", first_error_at), ("opend_login_state", opend_login_state)),
     )
     try:
-        confirmed = _send(base, config, message, hashlib.sha256((key + now.isoformat()).encode()).hexdigest())
+        confirmed = _send(base, config, message, hashlib.sha256((key + incident_at).encode()).hexdigest())
     except Exception:
         confirmed = False
     if confirmed:
         with _state_lock(path):
             state = _read_state(path)
-            if isinstance(state.get(key), dict) and state[key].get("reserved_at") == now.isoformat():
+            if isinstance(state.get(key), dict) and state[key].get("reserved_at") == incident_at and state[key].get("last_attempt_at") == now.isoformat():
                 state[key]["delivery"] = "confirmed"
                 atomic_write_json(path, state)
     return "confirmed" if confirmed else "unconfirmed"
@@ -155,7 +169,7 @@ def report_system_recovery(
         state[key]["status"] = "recovered"
         state[key]["recovered_at"] = datetime.now(timezone.utc).isoformat()
         state[key]["recovery_delivery"] = "unknown"
-        atomic_write_json(path, state)
+        atomic_write_json(path, _prune_state(state))
     message = render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
     try:
         recovery_key = hashlib.sha256((key + incident_at + "-recovery").encode()).hexdigest()
