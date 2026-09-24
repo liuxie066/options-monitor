@@ -3105,12 +3105,78 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
     assert diagnosis["send_confirmed_count"] == 0
     assert diagnosis["send_failed_count"] == 1
     assert diagnosis["sent_accounts"] == []
+    assert out["data"]["summary"]["ok"] is False
+    assert "NOTIFICATION_DELIVERY_FAILED" in out["data"]["summary"]["warning_codes"]
     assert out["data"]["notification_delivery"] == {
         "status": "degraded",
         "reason_codes": ["NOTIFICATION_DELIVERY_FAILED"],
         "expected": True,
     }
-    assert "NOTIFICATION_DELIVERY_FAILED" not in out["data"]["summary"]["warning_codes"]
+
+
+def test_runtime_status_preserves_both_notification_health_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg()), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    shared_state_dir.mkdir(parents=True)
+    runs_root = tmp_path / "output_runs"
+    run_dir = runs_root / "run-notify"
+    metrics_path = run_dir / "state" / "tick_metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    payload = {
+        "config_key": "us",
+        "config_path": str(cfg_path),
+        "run_id": "run-notify",
+        "shared_state_dir": str(shared_state_dir),
+        "runs_root": str(runs_root),
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+    }
+
+    for confirmed in (False, True):
+        notify_summary = {
+            "account_messages_count": 1,
+            "send_attempted_count": 1,
+            "send_confirmed_count": int(confirmed),
+            "send_failed_count": int(not confirmed),
+        }
+        (shared_state_dir / "last_run.json").write_text(
+            json.dumps({"run_id": "run-notify", "status": "ok", "sent": confirmed,
+                        "sent_accounts": ["user1"] if confirmed else [],
+                        "notify_summary": notify_summary}),
+            encoding="utf-8",
+        )
+        metrics_path.write_text(json.dumps({"sent": confirmed, "notify_summary": notify_summary,
+                                            "sent_accounts": ["user1"] if confirmed else []}),
+                                encoding="utf-8")
+        out = _execute_private_runtime_status(payload)["data"]
+        summary = out["summary"]
+        delivery = out["notification_delivery"]
+        assert summary["ok"] is confirmed
+        assert ("NOTIFICATION_DELIVERY_FAILED" in summary["warning_codes"]) == (not confirmed)
+        assert delivery["status"] == ("confirmed" if confirmed else "degraded")
+        assert delivery["reason_codes"] == ([] if confirmed else ["NOTIFICATION_DELIVERY_FAILED"])
+
+    import src.application.agent_tools.runtime_status_impl as runtime_status
+
+    for status, duplicate_count, code in (
+        ("sent_partial", 0, "NOTIFICATION_PARTIAL_FAILURE"),
+        ("notification_route_missing", 0, "NOTIFICATION_ROUTE_MISSING"),
+        ("sent", 1, "NOTIFICATION_DUPLICATE_RISK"),
+    ):
+        monkeypatch.setattr(
+            runtime_status, "_notification_diagnosis",
+            lambda **_kwargs: {"status": status, "reason": "fixture",
+                               "duplicate_risk_count": duplicate_count},
+        )
+        out = _execute_private_runtime_status(payload)["data"]
+        assert out["summary"]["ok"] is False
+        assert code in out["summary"]["warning_codes"]
+        assert out["notification_delivery"]["status"] == "degraded"
+        assert code in out["notification_delivery"]["reason_codes"]
 
 
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:

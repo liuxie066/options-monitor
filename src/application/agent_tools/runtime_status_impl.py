@@ -2541,6 +2541,23 @@ def private_runtime_status_tool(
         latest_run_payload=latest_run_payload,
         trigger_context=trigger_context,
     )
+    notification_status = str(notification_diagnosis.get("status") or "")
+    notification_warning_codes = {
+        "sent_partial": "NOTIFICATION_PARTIAL_FAILURE",
+        "send_failed_or_unconfirmed": "NOTIFICATION_DELIVERY_FAILED",
+        "notification_route_missing": "NOTIFICATION_ROUTE_MISSING",
+    }
+    notification_warning_code = notification_warning_codes.get(notification_status)
+    if notification_warning_code is not None:
+        warnings.append(
+            "Notification delivery is unhealthy: "
+            f"{notification_status}: "
+            f"{notification_diagnosis.get('reason')}"
+        )
+        warning_codes.append(notification_warning_code)
+    if int(notification_diagnosis.get("duplicate_risk_count") or 0) > 0:
+        warnings.append("Notification delivery has unresolved duplicate risk.")
+        warning_codes.append("NOTIFICATION_DUPLICATE_RISK")
     notification_delivery = _notification_delivery_health(notification_diagnosis, trade_intake)
     upgrade_evaluation = _upgrade_status_evaluation(
         upgrade_status,

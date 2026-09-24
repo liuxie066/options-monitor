@@ -105,18 +105,18 @@ def test_notification_delivery_has_separate_degraded_state_for_unknown_and_recei
     assert _notification_delivery_health(confirmed, trade)["reason_codes"] == ["TRADE_RECEIPT_UNCONFIRMED"]
 
 
-def test_notification_delivery_is_visible_without_changing_overall_health() -> None:
+def test_notification_delivery_is_visible_alongside_existing_overall_failure() -> None:
     envelope = {
         "ok": True,
         "data": {
-            "summary": {"ok": True},
+            "summary": {"ok": False, "warning_codes": ["NOTIFICATION_ROUTE_MISSING"]},
             "notification_delivery": {
                 "status": "degraded", "reason_codes": ["NOTIFICATION_ROUTE_MISSING"],
             },
         },
     }
     text = format_runtime_status_summary(envelope)
-    assert "overall: OK" in text
+    assert "overall: FAIL" in text
     assert "notification delivery: status=degraded reasons=NOTIFICATION_ROUTE_MISSING" in text
 
 
