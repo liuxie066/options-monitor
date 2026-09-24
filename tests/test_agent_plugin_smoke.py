@@ -3105,8 +3105,12 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
     assert diagnosis["send_confirmed_count"] == 0
     assert diagnosis["send_failed_count"] == 1
     assert diagnosis["sent_accounts"] == []
-    assert out["data"]["summary"]["ok"] is False
-    assert "NOTIFICATION_DELIVERY_FAILED" in out["data"]["summary"]["warning_codes"]
+    assert out["data"]["notification_delivery"] == {
+        "status": "degraded",
+        "reason_codes": ["NOTIFICATION_DELIVERY_FAILED"],
+        "expected": True,
+    }
+    assert "NOTIFICATION_DELIVERY_FAILED" not in out["data"]["summary"]["warning_codes"]
 
 
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:

@@ -196,7 +196,11 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
         "pending_count": len(failed) + len(unresolved),
         "receipt_count": len(receipt_items),
         "receipt_confirmed_count": sum(1 for item in receipt_items if bool(item.get("delivery_confirmed"))),
-        "receipt_failed_count": sum(1 for item in receipt_items if str(item.get("status") or "") in {"failed", "unconfirmed"}),
+        "receipt_failed_count": sum(
+            1 for item in receipt_items
+            if str(item.get("status") or "") in {"failed", "unconfirmed", "unresolved"}
+            or item.get("reason") == "skipped_no_route"
+        ),
     }
 
 
@@ -1760,6 +1764,40 @@ def _notification_diagnosis(
     }
 
 
+def _notification_delivery_health(
+    diagnosis: dict[str, Any], trade_intake: dict[str, Any],
+) -> dict[str, Any]:
+    status = str(diagnosis.get("status") or "unknown")
+    expected = (
+        not diagnosis.get("no_send")
+        and diagnosis.get("scheduler_should_run_scan") is not False
+        and (diagnosis.get("scheduler_should_notify") is True
+             or int(diagnosis.get("account_messages_count") or 0) > 0
+             or int(diagnosis.get("send_attempted_count") or 0) > 0)
+    )
+    codes = {
+        "sent_partial": "NOTIFICATION_PARTIAL_FAILURE",
+        "send_failed_or_unconfirmed": "NOTIFICATION_DELIVERY_FAILED",
+        "notification_route_missing": "NOTIFICATION_ROUTE_MISSING",
+    }
+    reasons = [codes[status]] if status in codes else []
+    if status == "unknown" and expected:
+        reasons.append("NOTIFICATION_EVIDENCE_UNKNOWN")
+    if int(diagnosis.get("duplicate_risk_count") or 0) > 0:
+        reasons.append("NOTIFICATION_DUPLICATE_RISK")
+    receipt = _dict(_dict(trade_intake.get("summary")).get("last_receipt_result"))
+    receipt_summary = _dict(trade_intake.get("summary"))
+    if (int(receipt_summary.get("receipt_failed_count") or 0) > 0
+            or receipt.get("status") in {"failed", "unconfirmed", "unresolved"}
+            or receipt.get("reason") == "skipped_no_route"):
+        reasons.append("TRADE_RECEIPT_UNCONFIRMED")
+    return {
+        "status": "degraded" if reasons else "confirmed" if status == "sent" else "unknown",
+        "reason_codes": reasons,
+        "expected": bool(expected),
+    }
+
+
 def _run_payload(
     run_dir: Path,
     *,
@@ -2503,29 +2541,7 @@ def private_runtime_status_tool(
         latest_run_payload=latest_run_payload,
         trigger_context=trigger_context,
     )
-    notification_status = str(
-        notification_diagnosis.get("status") or ""
-    )
-    notification_warning_codes = {
-        "sent_partial": "NOTIFICATION_PARTIAL_FAILURE",
-        "send_failed_or_unconfirmed": "NOTIFICATION_DELIVERY_FAILED",
-        "notification_route_missing": "NOTIFICATION_ROUTE_MISSING",
-    }
-    notification_warning_code = notification_warning_codes.get(
-        notification_status
-    )
-    if notification_warning_code is not None:
-        warnings.append(
-            "Notification delivery is unhealthy: "
-            f"{notification_status}: "
-            f"{notification_diagnosis.get('reason')}"
-        )
-        warning_codes.append(notification_warning_code)
-    if int(notification_diagnosis.get("duplicate_risk_count") or 0) > 0:
-        warnings.append(
-            "Notification delivery has unresolved duplicate risk."
-        )
-        warning_codes.append("NOTIFICATION_DUPLICATE_RISK")
+    notification_delivery = _notification_delivery_health(notification_diagnosis, trade_intake)
     upgrade_evaluation = _upgrade_status_evaluation(
         upgrade_status,
         base=base,
@@ -2662,6 +2678,7 @@ def private_runtime_status_tool(
         "latest_scanned_run_required_data_prefetch": latest_scanned_prefetch_summary,
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
+        "notification_delivery": notification_delivery,
         "environment": environment,
         "channel_status": channel_status,
         "channel_health": channel_health,
@@ -2686,6 +2703,7 @@ def private_runtime_status_tool(
     data["summary"]["notification_status"] = notification_diagnosis.get(
         "status"
     )
+    data["summary"]["notification_delivery_status"] = notification_delivery["status"]
     data["summary"]["notification_reason"] = notification_diagnosis.get(
         "reason"
     )
@@ -2822,6 +2840,7 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             "tick_health_reason_code",
             "freshness_status",
             "notification_status",
+            "notification_delivery_status",
             "notification_reason",
             "notification_send_attempted_count",
             "notification_send_confirmed_count",
@@ -2966,6 +2985,7 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             {"observed", "source", "delivery_mode", "announce_expected", "timeout_seconds"},
         ),
         "notification_diagnosis": notification_diagnosis,
+        "notification_delivery": _pick(data.get("notification_delivery"), {"status", "reason_codes", "expected"}),
         "environment": _status_safe_environment(data.get("environment")),
         "channel_status": _status_safe_channel_status(data.get("channel_status")),
         "channel_health": _status_safe_channels(data.get("channel_health")),

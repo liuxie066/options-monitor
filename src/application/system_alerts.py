@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -183,3 +184,38 @@ def report_system_recovery(
                 state[key]["recovery_delivery"] = "confirmed"
                 atomic_write_json(path, state)
     return "confirmed" if confirmed else "unconfirmed"
+
+
+def report_system_meta_signal(
+    *, base: Path, unit: str, market: str, account: str, failure_code: str,
+    stage: str, run_id: str, degraded: bool, reason: str = "",
+) -> str:
+    """Record a journal-only failure or recovery in the existing incident state."""
+    key = _fingerprint(unit, market, account, failure_code, stage)
+    path = base / "output_shared" / "state" / "system_alerts.json"
+    now = datetime.now(timezone.utc).isoformat()
+    with _state_lock(path):
+        state = _read_state(path)
+        previous = state.get(key)
+        active = isinstance(previous, dict) and previous.get("status") == "failed"
+        if degraded == active:
+            return "suppressed" if degraded else "no_incident"
+        if degraded:
+            state[key] = {
+                "status": "failed", "reserved_at": now, "last_attempt_at": now,
+                "delivery": "journal", "unit": unit, "market": market,
+                "account": account, "failure_code": failure_code, "stage": stage,
+                "run_id": run_id, "reason": reason,
+            }
+        else:
+            state[key]["status"] = "recovered"
+            state[key]["recovered_at"] = now
+        atomic_write_json(path, _prune_state(state))
+    event = "SYSTEM_META_ALERT" if degraded else "SYSTEM_META_RECOVERY"
+    priority = "<3>" if degraded else "<4>"
+    print(priority + event + " " + json.dumps({
+        "unit": unit, "market": market, "account": account,
+        "failure_code": failure_code, "stage": stage, "run_id": run_id,
+        "reason": reason,
+    }, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)
+    return "signaled" if degraded else "recovered"

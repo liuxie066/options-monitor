@@ -835,6 +835,8 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 4. Trace the relevant findings, such as freshness, account failures, prefetch, notifications, maintenance, or trade intake.
 5. Once the evidence supports a diagnosis, choose the affected owner and focused checks. Production mutation still requires its explicit authorization.
 
+`runtime_status` exposes `notification_delivery.status` and `reason_codes` separately from overall health. A scheduled notification with no confirmed delivery is `degraded`; `./om status --journal-summary` emits a local `<3>NOTIFICATION_DELIVERY_DEGRADED` journal line for that state. This is a journal signal, so it does not establish external alert delivery when the notification route is missing.
+
 ### A Symbol Is Missing
 
 1. Get run/account/symbol from the user or runtime artifact.

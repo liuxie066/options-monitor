@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ from src.application.scheduled_notification import (
     build_per_account_delivery_batch,
     execute_per_account_delivery,
 )
+from src.application.system_alerts import report_system_meta_signal
 from src.infrastructure.io_utils import read_json, utc_now
 
 
@@ -344,6 +346,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         )
     except ValueError as err:
         request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
+        _record_notification_meta(request, account_messages=account_messages,
+                                  markets=daily_brief_prep.markets, confirmed_accounts=(), reason="route_missing")
         _run_post_delivery_sidecars_best_effort(request)
         raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
@@ -503,6 +507,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         sent_accounts = [] if request.delivery_only else list(would_send_accounts)
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
+    if bool(notify_delivery.get("should_send")):
+        reasons = {str(item.get("account") or ""): str(item.get("error_code") or "send_unconfirmed")
+                   for item in notify_failures}
+        _record_notification_meta(
+            request, account_messages=account_messages, markets=daily_brief_prep.markets,
+            confirmed_accounts=sent_accounts, reason_by_account=reasons,
+        )
+
     record_tick_latency(
         runlog=request.runlog,
         stage="provider_delivery",
@@ -657,6 +669,37 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             error_code=daily_brief_prep.blocked_error_code,
         )
     return rc
+
+
+def _record_notification_meta(
+    request: TickNotificationRequest, *, account_messages: dict[str, str],
+    markets: tuple[str, ...], confirmed_accounts: list[str] | tuple[str, ...],
+    reason: str = "send_unconfirmed", reason_by_account: dict[str, str] | None = None,
+) -> None:
+    market = str(markets[0] if markets else "unknown").lower()
+    confirmed = set(confirmed_accounts)
+    for account in account_messages:
+        degraded = account not in confirmed
+        code = "NOTIFICATION_DELIVERY_UNCONFIRMED"
+        detail = (reason_by_account or {}).get(account, reason)
+        try:
+            outcome = report_system_meta_signal(
+                base=request.base, unit=f"options-monitor-tick-{market}.service",
+                market=market, account=account, failure_code=code, stage="delivery",
+                run_id=request.run_id, degraded=degraded, reason=detail,
+            )
+        except Exception:
+            outcome = "infra_failed"
+            print("<3>NOTIFICATION_META_ALERT_INFRA_FAILED", file=sys.stderr)
+        if degraded or outcome in {"recovered", "infra_failed"}:
+            request.runlog.safe_event("notify", "error" if degraded else "ok",
+                                      error_code=code if degraded else None,
+                                      data={"account": account, "reason": detail, "meta_outcome": outcome})
+            request.audit_helper.audit(
+                "notify", "notification_meta_signal", run_id=request.run_id,
+                account=account, status="error" if degraded else "ok",
+                extra={"failure_code": code, "reason": detail, "meta_outcome": outcome},
+            )
 
 
 def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:

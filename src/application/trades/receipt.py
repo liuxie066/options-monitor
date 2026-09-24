@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -16,6 +17,7 @@ from src.application.notification_shells import render_receipt
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.ledger.api import canonical_payload_hash
+from src.application.system_alerts import report_system_meta_signal
 
 
 BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
@@ -95,6 +97,8 @@ def send_trade_intake_receipt(
     channel = route.get("channel")
     target = route.get("target")
     if not str(target or "").strip():
+        _record_receipt_meta(base=base, deal=deal, payload=payload, result=result,
+                             inbox_id=inbox_id, degraded=True, reason="route_missing")
         return {
             "enabled": True,
             "status": "skipped",
@@ -189,7 +193,30 @@ def send_trade_intake_receipt(
         )
         finish_trade_receipt_attempt(inbox_path, inbox_id=inbox_id,
                                      attempt_id=attempt["attempt_id"], result=receipt)
+    _record_receipt_meta(base=base, deal=deal, payload=payload, result=result,
+                         inbox_id=inbox_id, degraded=not delivery_confirmed, reason=status)
     return receipt
+
+
+def _record_receipt_meta(
+    *, base: Path, deal: Any, payload: dict[str, Any] | None, result: dict[str, Any],
+    inbox_id: str | None, degraded: bool, reason: str,
+) -> None:
+    source = payload if isinstance(payload, dict) else {}
+    instrument = source.get("instrument_ref") if isinstance(source.get("instrument_ref"), dict) else {}
+    account = str(result.get("account") or source.get("internal_account")
+                  or getattr(deal, "internal_account", None) or "-").strip().lower()
+    market = str(result.get("market") or instrument.get("market")
+                 or getattr(deal, "market", None) or "-").strip().lower()
+    try:
+        report_system_meta_signal(
+            base=base, unit=f"options-monitor-trade-intake-{account}.service",
+            market=market, account=account, failure_code="TRADE_RECEIPT_UNCONFIRMED",
+            stage="receipt_delivery", run_id=str(inbox_id or broker_deal_key(deal) or "-"),
+            degraded=degraded, reason=reason,
+        )
+    except Exception:
+        print("<3>RECEIPT_META_ALERT_INFRA_FAILED", file=sys.stderr)
 
 
 def build_trade_lifecycle_notification_message(

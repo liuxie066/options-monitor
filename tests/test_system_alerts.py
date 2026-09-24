@@ -107,6 +107,23 @@ def test_corrupt_alert_state_fails_closed_without_resending(monkeypatch, tmp_pat
         )
 
 
+def test_journal_meta_signal_dedupes_and_reports_recovery(tmp_path: Path, capsys) -> None:
+    from src.application import system_alerts
+
+    fields = dict(base=tmp_path, unit="options-monitor-tick-us.service", market="us",
+                  account="lx", failure_code="NOTIFICATION_DELIVERY_UNCONFIRMED",
+                  stage="delivery", run_id="run-1", reason="send_unconfirmed")
+    assert system_alerts.report_system_meta_signal(**fields, degraded=True) == "signaled"
+    assert system_alerts.report_system_meta_signal(**fields, degraded=True) == "suppressed"
+    assert capsys.readouterr().err.count("<3>SYSTEM_META_ALERT") == 1
+    assert system_alerts.report_system_meta_signal(**fields, degraded=False) == "recovered"
+    assert system_alerts.report_system_meta_signal(**fields, degraded=False) == "no_incident"
+    assert capsys.readouterr().err.count("<4>SYSTEM_META_RECOVERY") == 1
+    assert system_alerts.report_system_meta_signal(**fields, degraded=True) == "signaled"
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["status"] == "failed"
+
+
 def test_tick_failure_records_run_and_alerts_once(monkeypatch, tmp_path: Path) -> None:
     from src.application import system_alerts
     from src.application.tick_cron import run_tick_cron

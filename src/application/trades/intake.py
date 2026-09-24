@@ -352,7 +352,7 @@ def _receipt_audit_phase(receipt_result: dict[str, Any]) -> str:
     status = str(receipt_result.get("status") or "").strip().lower()
     if status == "sent":
         return "receipt_sent"
-    if status in {"failed", "unconfirmed"}:
+    if status in {"failed", "unconfirmed"} or receipt_result.get("reason") == "skipped_no_route":
         return "receipt_failed"
     return "receipt_skipped"
 

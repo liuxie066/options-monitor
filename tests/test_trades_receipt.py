@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -516,7 +517,7 @@ def test_receipt_decision_skips_non_option_deal() -> None:
     assert out == {"should_send": False, "reason": "skipped_not_option_deal"}
 
 
-def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
+def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path, capsys) -> None:
     out = send_trade_intake_receipt(
         base=tmp_path,
         config={"notifications": {"provider": "wechat_clawbot"}},
@@ -530,6 +531,30 @@ def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
 
     assert out["status"] == "skipped"
     assert out["reason"] == "skipped_no_route"
+    assert "<3>SYSTEM_META_ALERT" in capsys.readouterr().err
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["reason"] == "route_missing"
+
+
+def test_receipt_channel_meta_signal_only_on_availability_changes(tmp_path: Path, capsys) -> None:
+    payload = {"deal_id": "deal-1", "internal_account": "lx", "instrument_ref": {"market": "us"}}
+    result = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"}
+    config = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}
+    outcomes = iter((False, False, True, True))
+
+    def send(**_kwargs):
+        confirmed = next(outcomes)
+        return {"command_ok": confirmed, "delivery_confirmed": confirmed,
+                "message_id": "msg-1" if confirmed else None, "returncode": 0 if confirmed else 1}
+
+    statuses = [_send_receipt(tmp_path, config=config, deal=None, result=result,
+                              payload=payload, send_fn=send)["status"] for _ in range(4)]
+    assert statuses == ["failed", "failed", "sent", "sent"]
+    log = capsys.readouterr().err
+    assert log.count("<3>SYSTEM_META_ALERT") == 1
+    assert log.count("<4>SYSTEM_META_RECOVERY") == 1
+    state = json.loads((tmp_path / "output_shared/state/system_alerts.json").read_text())
+    assert next(iter(state.values()))["status"] == "recovered"
 
 
 def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path) -> None:
