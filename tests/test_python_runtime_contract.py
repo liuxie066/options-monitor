@@ -155,6 +155,27 @@ def test_old_python3_is_only_a_diagnostic_final_candidate(tmp_path: Path) -> Non
     assert str(old) in result.stderr
 
 
+def test_pre_commit_uses_python312_when_default_python3_is_old(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".githooks").mkdir(parents=True)
+    (repo / "scripts").mkdir()
+    shutil.copy2(ROOT / ".githooks" / "pre-commit", repo / ".githooks" / "pre-commit")
+    shutil.copy2(ROOT / "scripts" / "python_runtime.sh", repo / "scripts" / "python_runtime.sh")
+    (repo / "scripts" / "guardrails_check.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_python(fake_bin / "python3", version="3.9.6")
+    log = tmp_path / "guardrails.log"
+    _write_fake_python(fake_bin / "python3.12", version="3.12.4", log=log)
+
+    result = _run(["bash", str(repo / ".githooks" / "pre-commit")],
+                  env=_runtime_env(fake_bin), cwd=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "scripts/guardrails_check.py --staged" in log.read_text(encoding="utf-8")
+
+
 def test_bootstrap_selector_rejects_interpreter_inside_target_venv(tmp_path: Path) -> None:
     target = tmp_path / "repo" / ".venv"
     target_python = _write_fake_python(target / "bin" / "python", version="3.12.3")
