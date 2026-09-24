@@ -90,8 +90,8 @@ def read_wheel_activation_windows_read_only(
         resolved = path.resolve()
         wal = resolved.with_name(resolved.name + "-wal")
         shm = resolved.with_name(resolved.name + "-shm")
-        # A cleanly closed WAL database checkpoints and removes both sidecars;
-        # that state remains readable.  A partial sidecar pair is unsafe.
+        # SQLite sidecar lifetime varies by platform. Reject a partial pair;
+        # with both or neither present, the mode=ro open decides readability.
         if wal.exists() != shm.exists():
             return {"windows": [], "source_status": "unreadable"}
         with closing(

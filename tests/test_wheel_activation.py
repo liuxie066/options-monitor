@@ -276,6 +276,34 @@ def test_wheel_activation_read_only_does_not_create_wal_sidecars(
     assert not Path(f"{repo.db_path}-shm").exists()
 
 
+def test_wheel_activation_absent_sidecars_open_failure_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_window(repo)
+    wal = Path(f"{repo.db_path}-wal")
+    shm = Path(f"{repo.db_path}-shm")
+    wal.unlink(missing_ok=True)
+    shm.unlink(missing_ok=True)
+    assert not wal.exists() and not shm.exists()
+    attempted = []
+
+    def fail_read_only_open(database, *args, **kwargs):
+        assert not wal.exists() and not shm.exists()
+        attempted.append((str(database), kwargs))
+        raise sqlite3.OperationalError("injected read-only open failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(assigned_stock_repository.sqlite3, "connect", fail_read_only_open)
+        result = read_wheel_activation_windows_read_only(repo.db_path, "us", "lx")
+
+    assert result == {"windows": [], "source_status": "unreadable"}
+    assert len(attempted) == 1
+    assert "?mode=ro" in attempted[0][0]
+    assert attempted[0][1]["uri"] is True
+    assert not wal.exists() and not shm.exists()
+
+
 def test_wheel_activation_path_resolution_is_pure_and_writer_skips_bootstrap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

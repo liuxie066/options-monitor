@@ -387,11 +387,10 @@ class TradeEventRepositoryMixin:
                     """
                     SELECT event_id, account, event_json, trade_time_ms
                     FROM trade_events
-                    WHERE trade_time_ms > ?
-                       OR (trade_time_ms = ? AND event_id > ?)
+                    WHERE (trade_time_ms, event_id) > (?, ?)
                     ORDER BY trade_time_ms ASC, event_id ASC
                     """,
-                    (int(after[0]), int(after[0]), str(after[1])),
+                    (int(after[0]), str(after[1])),
                 ).fetchall()
         return [
             {

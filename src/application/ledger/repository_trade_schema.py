@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from domain.domain.trade_execution import execution_identity_from_input
 from .repository_common import (
     Any,
@@ -18,6 +20,8 @@ EXECUTION_IDENTITY_INDEXES = {
     "trade_events": ("idx_trade_events_execution_identity_v1", "$.raw_payload.execution_id"),
     "assigned_stock_events": ("idx_assigned_stock_execution_identity_v1", "$.execution_id"),
 }
+
+_logger = logging.getLogger(__name__)
 
 
 def validated_execution_identity_metadata(raw: Mapping[str, Any]) -> str:
@@ -45,10 +49,32 @@ def _execution_identity_index_ready(conn: sqlite3.Connection, table: str) -> boo
     return row is not None and row[0] == _execution_identity_index_sql(table)
 
 
+def _execution_identity_index_gap(
+    conn: sqlite3.Connection, table: str,
+) -> dict[str, str | int] | None:
+    name, _path = EXECUTION_IDENTITY_INDEXES[table]
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?",
+        (name, table),
+    ).fetchone()
+    if row is not None and row[0] == _execution_identity_index_sql(table):
+        return None
+    return {
+        "table": table,
+        "cause": "missing" if row is None else "definition_mismatch",
+        "rows": int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]),
+    }
+
+
 def _execution_candidate_rows(
     conn: sqlite3.Connection, table: str, execution_id: str,
 ) -> list[sqlite3.Row] | None:
-    if not _execution_identity_index_ready(conn, table):
+    gap = _execution_identity_index_gap(conn, table)
+    if gap is not None:
+        _logger.warning(
+            "execution_identity_index_fallback table=%s cause=%s rows=%s",
+            gap["table"], gap["cause"], gap["rows"],
+        )
         return None
     _name, path = EXECUTION_IDENTITY_INDEXES[table]
     identity = f"json_extract(event_json, '{path}')"

@@ -377,6 +377,137 @@ def test_execution_candidate_and_writer_queries_use_same_nonunique_index(tmp_pat
         assert next(row[2] for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == name) == 0
 
 
+@pytest.mark.parametrize("table", ["trade_events", "assigned_stock_events"])
+@pytest.mark.parametrize("cause", ["missing", "definition_mismatch"])
+def test_execution_index_fallback_warns_and_status_reports_gap(tmp_path, caplog, table, cause):
+    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    event = (
+        {"stock_event_id": "stock-1", "account": "lx", "trade_time_ms": 1_000}
+        if table == "assigned_stock_events" else _event()
+    )
+    put = repo.upsert_assigned_stock_event if table == "assigned_stock_events" else repo.upsert_trade_event
+    read = (
+        repo.list_assigned_stock_events_for_execution
+        if table == "assigned_stock_events" else repo.list_trade_events_for_execution
+    )
+    full_read = repo.list_assigned_stock_events if table == "assigned_stock_events" else repo.list_trade_events
+    put(event)
+    before = module.position_projection_migration_status(repo.db_path)
+    name = EXECUTION_IDENTITY_INDEXES[table][0]
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute(f"DROP INDEX {name}")
+        if cause == "definition_mismatch":
+            conn.execute(f"CREATE INDEX {name} ON {table}(trade_time_ms)")
+
+    with caplog.at_level("WARNING", logger="src.application.ledger.repository_trade_schema"):
+        assert read("execution:v1:target") == full_read()
+    assert any(
+        f"table={table} cause={cause} rows=1" in record.message
+        for record in caplog.records
+    )
+    status = module.position_projection_migration_status(repo.db_path)
+    assert status["execution_identity_index_gaps"] == [
+        {"table": table, "cause": cause, "rows": 1}
+    ]
+    assert (status["readiness"], status["reasons"]) == (before["readiness"], before["reasons"])
+
+
+def test_execution_index_status_omits_ready_and_absent_optional_tables(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "current.sqlite3")
+    assert module.position_projection_migration_status(repo.db_path)["execution_identity_index_gaps"] == []
+
+    legacy = _legacy_store(tmp_path, name="legacy.sqlite3")
+    assert module.position_projection_migration_status(legacy)["execution_identity_index_gaps"] == [
+        {"table": "trade_events", "cause": "missing", "rows": 1}
+    ]
+
+
+def test_populated_execution_index_maintenance_repairs_both_missing_indexes(tmp_path):
+    from src.application.ledger.repository_trade_schema import (
+        EXECUTION_IDENTITY_INDEXES,
+        _execution_identity_index_sql,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_event(_event())
+    repo.upsert_assigned_stock_event(
+        {"stock_event_id": "stock-1", "account": "lx", "trade_time_ms": 1_000}
+    )
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for name, _path in EXECUTION_IDENTITY_INDEXES.values():
+            conn.execute(f"DROP INDEX {name}")
+    before = (
+        repo.list_trade_events_for_execution("execution:v1:target"),
+        repo.list_assigned_stock_events_for_execution("execution:v1:target"),
+    )
+    created = repo.build_position_projection_indexes()
+    assert set(created) == {name for name, _path in EXECUTION_IDENTITY_INDEXES.values()}
+    assert repo.build_position_projection_indexes() == ()
+    with repo._connect() as conn:
+        for table, (name, _path) in EXECUTION_IDENTITY_INDEXES.items():
+            assert conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()[0] == (
+                _execution_identity_index_sql(table)
+            )
+    assert (
+        repo.list_trade_events_for_execution("execution:v1:target"),
+        repo.list_assigned_stock_events_for_execution("execution:v1:target"),
+    ) == before
+    assert module.position_projection_migration_status(repo.db_path)["execution_identity_index_gaps"] == []
+
+
+def test_execution_index_maintenance_refuses_mismatch_and_rolls_back(tmp_path):
+    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_event(_event())
+    repo.upsert_assigned_stock_event(
+        {"stock_event_id": "stock-1", "account": "lx", "trade_time_ms": 1_000}
+    )
+    trade_index = EXECUTION_IDENTITY_INDEXES["trade_events"][0]
+    stock_index = EXECUTION_IDENTITY_INDEXES["assigned_stock_events"][0]
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute(f"DROP INDEX {trade_index}")
+        conn.execute(f"DROP INDEX {stock_index}")
+        conn.execute(f"CREATE INDEX {stock_index} ON assigned_stock_events(trade_time_ms)")
+    with pytest.raises(ValueError, match="execution identity index definition mismatch"):
+        repo.build_position_projection_indexes()
+    with repo._connect() as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (trade_index,)).fetchone() is None
+        assert conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (stock_index,)).fetchone()[0] == (
+            f"CREATE INDEX {stock_index} ON assigned_stock_events(trade_time_ms)"
+        )
+
+
+def test_position_projection_tail_seek_preserves_exclusive_ordered_boundary(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    for event_id, at_ms in (
+        ("e-01", 1_000), ("e-02", 1_000), ("e-03", 1_000), ("e-00", 2_000)
+    ):
+        repo.upsert_trade_event(_event(event_id, event_time_ms=at_ms))
+
+    def ids(after):
+        return [row["event_id"] for row in repo.list_position_projection_event_rows(after=after)]
+
+    assert ids(None) == ["e-01", "e-02", "e-03", "e-00"]
+    assert ids((1_000, "e-02")) == ["e-03", "e-00"]
+    assert ids((1_000, "e-03")) == ["e-00"]
+    assert ids((2_000, "e-00")) == []
+
+    with repo._connect() as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT event_id, account, event_json, trade_time_ms "
+            "FROM trade_events WHERE (trade_time_ms, event_id) > (?, ?) "
+            "ORDER BY trade_time_ms ASC, event_id ASC",
+            (1_000, "e-02"),
+        ).fetchall()
+    assert any(
+        "SEARCH" in row[3] and "idx_trade_events_trade_time" in row[3]
+        for row in plan
+    )
+
+
 def test_apply_rejects_stale_and_wrong_store_manifests(tmp_path: Path) -> None:
     first = _legacy_store(tmp_path, name="first.sqlite3")
     second = _legacy_store(tmp_path, name="second.sqlite3")
