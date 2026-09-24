@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import subprocess
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from src.application.account_config import accounts_from_config_path
 from src.application.payload_helpers import parse_utc
-from src.application.system_alerts import report_system_failure, report_system_recovery
+from src.application.system_alerts import report_system_failure, report_system_recovery, retire_system_failure
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
@@ -85,7 +84,6 @@ def check_trade_intake_heartbeat(
     *, unit: str, market: str, config_path: str, runtime_root: str | Path,
     unit_active_fn: Callable[[str], bool] | None = None,
     now: datetime | None = None,
-    disk_usage_fn: Callable[[str], Any] = shutil.disk_usage,
 ) -> int:
     config = read_json(Path(config_path), {})
     if not isinstance(config, dict) or not config:
@@ -101,24 +99,14 @@ def check_trade_intake_heartbeat(
             ["systemctl", "is-active", "--quiet", unit], capture_output=True, timeout=5,
         ).returncode == 0
         checked_at = now or datetime.now(timezone.utc)
-        usage = disk_usage_fn("/")
-        if usage.total <= 0:
-            raise ValueError("root disk size is unavailable")
         results: list[str] = []
+        # Retire the old capacity incidents without claiming the disk recovered.
         for threshold in (85, 90):
-            code = f"ROOT_DISK_USAGE_{threshold}"
-            fields = dict(base=base, config=config, unit="options-monitor-root-disk",
-                          market="host", account="system", failure_code=code, stage="disk_capacity")
-            if usage.used * 100 >= usage.total * threshold:
-                outcome = report_system_failure(
-                    **fields, run_id=create_run_id(), rc=0,
-                    first_error_at=checked_at.isoformat(), opend_login_state="not_applicable",
-                )
-                if outcome != "suppressed":
-                    print(f"<{'3' if threshold == 90 else '4'}>{code} used={usage.used} total={usage.total} delivery={outcome}")
-            else:
-                outcome = report_system_recovery(**fields)
-            results.append(outcome)
+            retire_system_failure(
+                base=base, unit="options-monitor-root-disk",
+                market="host", account="system", failure_code=f"ROOT_DISK_USAGE_{threshold}",
+                stage="disk_capacity",
+            )
         for source in sources:
             status_path = Path(source["status_path"])
             if not status_path.is_absolute():

@@ -10,7 +10,7 @@
 
 ## 审计取证
 
-系统故障告警入口清单：计划 Tick 子进程失败、trade-intake unit 失败、intake 心跳与根盘阈值、OpenD watchdog 均通过 `system_alerts` 记录指纹事故并处理恢复；通知投递降级也在该底座记录 journal 元信号，并在调用方明确传入配置时尝试外发。只读取证降级保留 journal 元信号。OpenD 原有状态文件仍负责连续失败门槛和突发限额，实际发送使用公共事故状态与稳定投递键。普通策略候选通知属于业务投递，不属于系统故障告警。
+系统故障告警入口清单：计划 Tick 子进程失败、trade-intake unit 失败、intake 心跳、OpenD watchdog 均通过 `system_alerts` 记录指纹事故并处理恢复；通知投递降级也在该底座记录 journal 元信号，并在调用方明确传入配置时尝试外发。只读取证降级保留 journal 元信号。根盘容量不再按分钟或阈值告警；计划 Tick 或成交摄取因存储不足失败时，仍走各自已有的失败通知或成交回执。旧 `ROOT_DISK_USAGE_85/90` 事故会被静默标记为 `retired`，不虚报磁盘已恢复。OpenD 原有状态文件仍负责连续失败门槛和突发限额，实际发送使用公共事故状态与稳定投递键。普通策略候选通知属于业务投递，不属于系统故障告警。
 
 系统告警和通知投递元信号先走当前主 route；主 route 缺失或在发送前明确不可用时，尝试另一已注册 provider。WeChat 为主时，飞书兜底凭据来自进程有效环境与 systemd credential/secret backend（`OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_USER_OPEN_ID`、`FEISHU_BOT_APP_SECRET`），不读取主通知 route；飞书为主时，WeChat 兜底读取 `output_shared/state/channels/wechat_clawbot/<label>/state.json` 的 token 和同目录 `bindings.json`，仅在唯一完整绑定时投递。兜底使用独立且稳定的投递键，事故状态与 run 审计记录 `fallback_used`、实际 provider 和 `delivery_confirmed`。主通道结果不明确时不跨 provider 重发，避免双发；兜底失败也不再次跳转。两条通道都不可用时留 `<3>` journal 元信号，`runtime_status.system_alert_delivery.status=degraded`，人工检查本机 journal、凭据和绑定。业务日报及普通成交回执仍按原 route 投递，不使用此兜底。
 
