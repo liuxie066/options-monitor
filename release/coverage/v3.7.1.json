@@ -1,0 +1,581 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.1",
+  "base": {
+    "tag": "v3.7.0",
+    "commit": "fe136afd9f0738fd403a45b3df004dd52bbf16cd"
+  },
+  "reviewed_head": "366f8d9de0a4906258bac7c4e75a2a9727588503",
+  "commits": [
+    {
+      "sha": "76a440bb30905ced0f73893dff35b3016db198c9",
+      "subject": "docs(guardrails): check dependency graph before push"
+    },
+    {
+      "sha": "5670eb384c8c7c521bfdcf0dfa79da2ade873bb3",
+      "subject": "Merge pull request #354 from liuxie066/codex/prepush-dependency-graph-check-current"
+    },
+    {
+      "sha": "1e5de8e93747d739166f751029de77e57ea8ea7b",
+      "subject": "fix(alerting): dedupe tick failures and alert on intake termination"
+    },
+    {
+      "sha": "564a67c9242aaa6bfcd2e9e32b1bc67eab8992ef",
+      "subject": "fix(alerting): stabilize incident keys and prune alert state"
+    },
+    {
+      "sha": "79717c4548d5ce50eaffa8d967330f9329777103",
+      "subject": "fix(bot): clarify receipt scope conflicts"
+    },
+    {
+      "sha": "e2e76bdfe0aa0d5b83eea30a6ce32b5a5a5dc7df",
+      "subject": "feat(alerting): monitor intake heartbeat and unify login reasons"
+    },
+    {
+      "sha": "0f320d812ce7a8921866d99e78e204649b764dce",
+      "subject": "Merge pull request #355 from liuxie066/codex/bot-receipt-scope"
+    },
+    {
+      "sha": "ec2ca2b7f71640e49b93bcd2a4dac303b66f3ce2",
+      "subject": "fix(dev): use compatible Python in pre-commit hook"
+    },
+    {
+      "sha": "eedd8784e723d0e79b3b85e47e88f2afae846a0a",
+      "subject": "fix(trades): record duplicate intake audit explicitly"
+    },
+    {
+      "sha": "aa23653dc13807bbdb4188f2f97330e553a5cbf7",
+      "subject": "chore(merge): merge main into codex/alerting-idempotency"
+    },
+    {
+      "sha": "915095650316a6e9d5d82c0e8924046528d19f91",
+      "subject": "Merge pull request #356 from liuxie066/codex/precommit-python"
+    },
+    {
+      "sha": "62f4e9d5592789c72e2c5edde232b3f3ac8b8767",
+      "subject": "feat(alerting): record notification delivery meta signals"
+    },
+    {
+      "sha": "b36c580813b32104a8d168e3b50b2026a28aaa33",
+      "subject": "fix(intake): classify failed result logs as warnings"
+    },
+    {
+      "sha": "354aaed8df63780b1bc694c5f725f359eabf5fb5",
+      "subject": "fix(evidence): stream large audit tails and signal degraded reads"
+    },
+    {
+      "sha": "2223705c9c7732dbf24c88d98b13c9d5ea64e3e6",
+      "subject": "feat(ops): alert on disk thresholds and cap audit segments"
+    },
+    {
+      "sha": "067a216c8bfcd702a4816df58ddb1882407787ed",
+      "subject": "fix(ledger): expose execution index gaps and seek projection tails"
+    },
+    {
+      "sha": "2f6c8e720faa31b776549fa3a8c5f549a61bf59a",
+      "subject": "refactor(alerting): route OpenD incidents through system alerts"
+    },
+    {
+      "sha": "357ec8129f4bec93bc69422958b0ab53a3bf2918",
+      "subject": "feat(ops): verify OpenD login after upgrade restart"
+    },
+    {
+      "sha": "130ecb85bb46a437bf20aa1f7b916862effd9efd",
+      "subject": "fix(notify): stabilize receipt and renderer delivery keys"
+    },
+    {
+      "sha": "dd81e315d681b3dcad42dc762e7b5791b6a72fef",
+      "subject": "chore(ledger): integrate current main"
+    },
+    {
+      "sha": "8cc16c2713a4853df4e650d993e0c012a1c6dcb4",
+      "subject": "chore(merge): merge main into codex/alerting-idempotency"
+    },
+    {
+      "sha": "a2f915a0ae227be648c1aeb8e2d9f2827e886674",
+      "subject": "fix(status): preserve legacy notification health signals"
+    },
+    {
+      "sha": "acea93175f4502acff701a450d85698c10c72c7a",
+      "subject": "fix(alerting): retry unconfirmed recovery delivery"
+    },
+    {
+      "sha": "3d963ae65904a43a52722d5195533e94cca22d38",
+      "subject": "feat(close-advice): hold low-delta positions near expiry"
+    },
+    {
+      "sha": "794ace9006a92022af7072c69037205bb3036346",
+      "subject": "Merge pull request #357 from liuxie066/codex/close-advice-v3-20260924"
+    },
+    {
+      "sha": "6dd6dd4702a7566a0f05c0279ca7093c42ce3f73",
+      "subject": "chore(merge): merge main into codex/alerting-idempotency"
+    },
+    {
+      "sha": "a77f0d9a17344e89c8ab2d506cd7399173465f39",
+      "subject": "feat(alerting): add cross-provider fallback and align recovery retries"
+    },
+    {
+      "sha": "ce393fa4d13eba104a9a74356f9dc3e1d9ab0349",
+      "subject": "fix(ledger): bound execution index diagnostics"
+    },
+    {
+      "sha": "9119834a3d7df34e11781466222892e4a419f1e0",
+      "subject": "fix(ledger): scope index diagnostics by store"
+    },
+    {
+      "sha": "e1ff4e9a114ecbb82b6667e57d0dafa8bd1a25a4",
+      "subject": "chore(ledger): integrate current main"
+    },
+    {
+      "sha": "b7c25e29b0d185b23e498eccc1402aec749200f8",
+      "subject": "Merge pull request #358 from liuxie066/codex/alerting-idempotency"
+    },
+    {
+      "sha": "4da603ac4182bcc28e6ae2430190d427cfac7384",
+      "subject": "chore(ledger): integrate current main"
+    },
+    {
+      "sha": "fee16524fbe4404aa525032de9879bb43f6afc82",
+      "subject": "Merge pull request #359 from liuxie066/codex/ledger-bce"
+    },
+    {
+      "sha": "881d1ee6d7686e03a9e8b57c4be9a196a5a4e6dd",
+      "subject": "refactor(ledger): retire the parity probe's record_id read path"
+    },
+    {
+      "sha": "4e737b8b166f134eb5a397df58c127fd7f94f41a",
+      "subject": "refactor(ledger): retire the spent lot-identity window's destructive half"
+    },
+    {
+      "sha": "f9991e10628b413981ae2f787186425e456bcb82",
+      "subject": "chore(merge): merge main into codex/lot-identity-r2-retire"
+    },
+    {
+      "sha": "70f4c0afe7a3ce301341ca5a5018f6ea09417138",
+      "subject": "fix(ledger): close R2 retirement review findings"
+    },
+    {
+      "sha": "366f8d9de0a4906258bac7c4e75a2a9727588503",
+      "subject": "Merge pull request #360 from liuxie066/codex/lot-identity-r2-retire"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "退役 `om option-positions lot-identity-migration apply`（含 `--dry-run`）：一次性 D1–D4 生产窗口已于 3.6.5 执行完毕，破坏性半边（D1/D2 重建、D3/D4 payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关一并移除；该父组只剩只读的 `inventory` / `verify`。需要重跑窗口只能使用 3.6.x 的旧 tag。",
+      "commits": [
+        "70f4c0afe7a3ce301341ca5a5018f6ea09417138",
+        "4e737b8b166f134eb5a397df58c127fd7f94f41a",
+        "881d1ee6d7686e03a9e8b57c4be9a196a5a4e6dd"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Close Advice 在净兑现和剩余年化条件成立后，对剩余可交易日不超过 3 日且绝对 Delta 不超过 0.05 的价外期权建议持有到期；美港股分别使用独立交易日日历，缺少判断证据时不提醒。",
+      "commits": [
+        "3d963ae65904a43a52722d5195533e94cca22d38"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "运行故障主动告警：计划 Tick 失败、成交接收进入不可自恢复终止态、成交接收心跳失联、磁盘使用率越过 85%/90% 都会发出通知，并留下含失败码、阶段、退出码与首次出错时间的运行记录；同一指纹在静默窗内只发一次，恢复后发出恢复通知。",
+      "commits": [
+        "1e5de8e93747d739166f751029de77e57ea8ea7b",
+        "e2e76bdfe0aa0d5b83eea30a6ce32b5a5a5dc7df",
+        "2223705c9c7732dbf24c88d98b13c9d5ea64e3e6",
+        "2f6c8e720faa31b776549fa3a8c5f549a61bf59a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "通知渠道自身失效不再沉默：渠道未配置、投递未确认、渠道可用性变化都会发出元信号；主渠道缺失时可改用另一个已注册渠道投递，两者都不可用时记录到本机 journal。",
+      "commits": [
+        "62f4e9d5592789c72e2c5edde232b3f3ac8b8767",
+        "a77f0d9a17344e89c8ab2d506cd7399173465f39"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "升级重启 OpenD 后自动执行登录态只读自检，未通过时在升级结果中记录失败检查与修复建议。",
+      "commits": [
+        "357ec8129f4bec93bc69422958b0ab53a3bf2918"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "成交接收心跳区分「进程不在」与「进程在但不出数据」，登录失效原因码在网关、状态文件与告警三处统一。",
+      "commits": [
+        "e2e76bdfe0aa0d5b83eea30a6ce32b5a5a5dc7df"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "只读 `om option-positions projection-migration status` 新增 `execution_identity_index_gaps`（`table`/`cause`/`rows`），可识别执行身份索引缺失或定义不匹配的库；投影尾部读取改用索引定位，行序与安全全读回退不变。",
+      "commits": [
+        "067a216c8bfcd702a4816df58ddb1882407787ed",
+        "ce393fa4d13eba104a9a74356f9dc3e1d9ab0349",
+        "9119834a3d7df34e11781466222892e4a419f1e0"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "超大审计文件改为有界流式读取（不再整体拒读），取证工具降级时发出元信号；失败路径日志提升到 WARNING/ERROR。",
+      "commits": [
+        "354aaed8df63780b1bc694c5f725f359eabf5fb5",
+        "b36c580813b32104a8d168e3b50b2026a28aaa33"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "随仓库提供 logrotate 配置，并对单个审计段设体积上限。",
+      "commits": [
+        "2223705c9c7732dbf24c88d98b13c9d5ea64e3e6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复告警事故键被时间戳盐化导致重发保护失效、恢复通知投递未确认后永久丢失、通知回执与渲染键不稳定造成重复投递的问题。",
+      "commits": [
+        "564a67c9242aaa6bfcd2e9e32b1bc67eab8992ef",
+        "acea93175f4502acff701a450d85698c10c72c7a",
+        "130ecb85bb46a437bf20aa1f7b916862effd9efd"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复成交重复入库只报错不留证据的问题：同一 `deal` 经 push 与 backfill 双路到达只入账一次，并记录 `skipped_duplicate`。",
+      "commits": [
+        "eedd8784e723d0e79b3b85e47e88f2afae846a0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复 systemd 凭据已物化时 `ENV_FILE` 缺失把 `runtime_status` 长期压成 unhealthy 的误报，并让通知健康信号在既有字段与新增投递字段同时可见。",
+      "commits": [
+        "a2f915a0ae227be648c1aeb8e2d9f2827e886674"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复 Bot 成交回执查询把市场参数冲突说成回执所属市场的问题：冲突时在读取前返回 `INPUT_ERROR`，遮盖形式的 `deal_id` 要求补全，不再建议切换配置或把回执判给被拒绝的市场。",
+      "commits": [
+        "79717c4548d5ce50eaffa8d967330f9329777103"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "76a440bb30905ced0f73893dff35b3016db198c9",
+      "reason": "开发工具链：pre-push 依赖图检查步骤，无用户或运维可见行为变化。"
+    },
+    {
+      "commit": "ec2ca2b7f71640e49b93bcd2a4dac303b66f3ce2",
+      "reason": "开发工具链：pre-commit 钩子的 Python 解释器兼容性，无用户或运维可见行为变化。"
+    },
+    {
+      "commit": "5670eb384c8c7c521bfdcf0dfa79da2ade873bb3",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "0f320d812ce7a8921866d99e78e204649b764dce",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "aa23653dc13807bbdb4188f2f97330e553a5cbf7",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "915095650316a6e9d5d82c0e8924046528d19f91",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "dd81e315d681b3dcad42dc762e7b5791b6a72fef",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "8cc16c2713a4853df4e650d993e0c012a1c6dcb4",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "794ace9006a92022af7072c69037205bb3036346",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "6dd6dd4702a7566a0f05c0279ca7093c42ce3f73",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "e1ff4e9a114ecbb82b6667e57d0dafa8bd1a25a4",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "b7c25e29b0d185b23e498eccc1402aec749200f8",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "4da603ac4182bcc28e6ae2430190d427cfac7384",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "fee16524fbe4404aa525032de9879bb43f6afc82",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "f9991e10628b413981ae2f787186425e456bcb82",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    },
+    {
+      "commit": "366f8d9de0a4906258bac7c4e75a2a9727588503",
+      "reason": "分支集成或合并提交，其内容已由同一分支的子提交登记。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "76a440bb30905ced0f73893dff35b3016db198c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/354"
+      ]
+    },
+    {
+      "commit": "5670eb384c8c7c521bfdcf0dfa79da2ade873bb3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/354"
+      ]
+    },
+    {
+      "commit": "79717c4548d5ce50eaffa8d967330f9329777103",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/355"
+      ]
+    },
+    {
+      "commit": "0f320d812ce7a8921866d99e78e204649b764dce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/355"
+      ]
+    },
+    {
+      "commit": "ec2ca2b7f71640e49b93bcd2a4dac303b66f3ce2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/356"
+      ]
+    },
+    {
+      "commit": "915095650316a6e9d5d82c0e8924046528d19f91",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/356"
+      ]
+    },
+    {
+      "commit": "3d963ae65904a43a52722d5195533e94cca22d38",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/357"
+      ]
+    },
+    {
+      "commit": "794ace9006a92022af7072c69037205bb3036346",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/357"
+      ]
+    },
+    {
+      "commit": "1e5de8e93747d739166f751029de77e57ea8ea7b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "564a67c9242aaa6bfcd2e9e32b1bc67eab8992ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "e2e76bdfe0aa0d5b83eea30a6ce32b5a5a5dc7df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "eedd8784e723d0e79b3b85e47e88f2afae846a0a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "62f4e9d5592789c72e2c5edde232b3f3ac8b8767",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "b36c580813b32104a8d168e3b50b2026a28aaa33",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "354aaed8df63780b1bc694c5f725f359eabf5fb5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "2223705c9c7732dbf24c88d98b13c9d5ea64e3e6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "2f6c8e720faa31b776549fa3a8c5f549a61bf59a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "357ec8129f4bec93bc69422958b0ab53a3bf2918",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "130ecb85bb46a437bf20aa1f7b916862effd9efd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "a2f915a0ae227be648c1aeb8e2d9f2827e886674",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "acea93175f4502acff701a450d85698c10c72c7a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "a77f0d9a17344e89c8ab2d506cd7399173465f39",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "aa23653dc13807bbdb4188f2f97330e553a5cbf7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "8cc16c2713a4853df4e650d993e0c012a1c6dcb4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "6dd6dd4702a7566a0f05c0279ca7093c42ce3f73",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "b7c25e29b0d185b23e498eccc1402aec749200f8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/358",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "067a216c8bfcd702a4816df58ddb1882407787ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "ce393fa4d13eba104a9a74356f9dc3e1d9ab0349",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "9119834a3d7df34e11781466222892e4a419f1e0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "dd81e315d681b3dcad42dc762e7b5791b6a72fef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "e1ff4e9a114ecbb82b6667e57d0dafa8bd1a25a4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "4da603ac4182bcc28e6ae2430190d427cfac7384",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "fee16524fbe4404aa525032de9879bb43f6afc82",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/359"
+      ]
+    },
+    {
+      "commit": "881d1ee6d7686e03a9e8b57c4be9a196a5a4e6dd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/360"
+      ]
+    },
+    {
+      "commit": "4e737b8b166f134eb5a397df58c127fd7f94f41a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/360"
+      ]
+    },
+    {
+      "commit": "70f4c0afe7a3ce301341ca5a5018f6ea09417138",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/360"
+      ]
+    },
+    {
+      "commit": "f9991e10628b413981ae2f787186425e456bcb82",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/360"
+      ]
+    },
+    {
+      "commit": "366f8d9de0a4906258bac7c4e75a2a9727588503",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/360"
+      ]
+    }
+  ]
+}

@@ -2,11 +2,24 @@
 
 ## Unreleased
 
-### Breaking Changes
-- 退役 `om option-positions lot-identity-migration apply`（含 `--dry-run`）：一次性 D1–D4 生产窗口已于 3.6.5 执行完毕，破坏性半边（D1/D2 重建、D3/D4 payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关一并移除；该父组只剩只读的 `inventory` / `verify`。需要重跑窗口只能使用 3.6.x 的旧 tag。
+## 3.7.1 - 2026-09-24
 
 ### Improvements
+- 退役 `om option-positions lot-identity-migration apply`（含 `--dry-run`）：一次性 D1–D4 生产窗口已于 3.6.5 执行完毕，破坏性半边（D1/D2 重建、D3/D4 payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关一并移除；该父组只剩只读的 `inventory` / `verify`。需要重跑窗口只能使用 3.6.x 的旧 tag。
 - Close Advice 在净兑现和剩余年化条件成立后，对剩余可交易日不超过 3 日且绝对 Delta 不超过 0.05 的价外期权建议持有到期；美港股分别使用独立交易日日历，缺少判断证据时不提醒。
+- 运行故障主动告警：计划 Tick 失败、成交接收进入不可自恢复终止态、成交接收心跳失联、磁盘使用率越过 85%/90% 都会发出通知，并留下含失败码、阶段、退出码与首次出错时间的运行记录；同一指纹在静默窗内只发一次，恢复后发出恢复通知。
+- 通知渠道自身失效不再沉默：渠道未配置、投递未确认、渠道可用性变化都会发出元信号；主渠道缺失时可改用另一个已注册渠道投递，两者都不可用时记录到本机 journal。
+- 升级重启 OpenD 后自动执行登录态只读自检，未通过时在升级结果中记录失败检查与修复建议。
+- 成交接收心跳区分「进程不在」与「进程在但不出数据」，登录失效原因码在网关、状态文件与告警三处统一。
+- 只读 `om option-positions projection-migration status` 新增 `execution_identity_index_gaps`（`table`/`cause`/`rows`），可识别执行身份索引缺失或定义不匹配的库；投影尾部读取改用索引定位，行序与安全全读回退不变。
+- 超大审计文件改为有界流式读取（不再整体拒读），取证工具降级时发出元信号；失败路径日志提升到 WARNING/ERROR。
+- 随仓库提供 logrotate 配置，并对单个审计段设体积上限。
+
+### Bug Fixes
+- 修复告警事故键被时间戳盐化导致重发保护失效、恢复通知投递未确认后永久丢失、通知回执与渲染键不稳定造成重复投递的问题。
+- 修复成交重复入库只报错不留证据的问题：同一 `deal` 经 push 与 backfill 双路到达只入账一次，并记录 `skipped_duplicate`。
+- 修复 systemd 凭据已物化时 `ENV_FILE` 缺失把 `runtime_status` 长期压成 unhealthy 的误报，并让通知健康信号在既有字段与新增投递字段同时可见。
+- 修复 Bot 成交回执查询把市场参数冲突说成回执所属市场的问题：冲突时在读取前返回 `INPUT_ERROR`，遮盖形式的 `deal_id` 要求补全，不再建议切换配置或把回执判给被拒绝的市场。
 
 ## 3.7.0 - 2026-09-24
 
