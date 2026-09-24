@@ -294,12 +294,17 @@ apply 后的效果：
 
 ## 6. 订单统一：停写窗口、验收与回退
 
-本节是窗口准备说明，不构成生产执行授权。合并源码、发布 R1、升级、执行 DDL / 数据
-迁移、恢复服务是独立动作。R1 必须先证明能够读写旧、新两种表形状；只有生产只读副本
-的全量核对通过后，才能另行交付收紧到单一新形状的 R2。窗口外
-`LOT_IDENTITY_WINDOW_ENABLEMENT` 保持 `None`，不能为通过检查临时启用。
+> **本节是历史记录：窗口已于 2026-09-22 执行完毕**（`CHANGELOG.md` 3.6.5）。
+> R2 已退役破坏性入口（`lot-identity-migration apply`、D1/D2 重建、D3/D4
+> payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关
+> `LOT_IDENTITY_WINDOW_ENABLEMENT`，因此下列“执行”步骤**已不可重跑**；需要它
+> 时只能 checkout 3.6.x 的旧 tag。保留下来的只有只读面（`inventory`、`verify`、
+> `verify-projection`）与回退/rowid 核对部分，它们仍然有效。
 
-### 窗口前冻结证据
+本节记录窗口准备与验收的要求，不构成生产执行授权。合并源码、发布、升级、执行 DDL /
+数据迁移、恢复服务各自是独立动作，且都要单独授权。
+
+### 窗口前冻结证据（历史）
 
 1. 记录主机、运行版本 / commit、runtime root、实际 SQLite 路径、配置路径、账户及市场。
    用 `option-positions store inspect` 核实 active store；不能根据文件名猜目标。
@@ -326,13 +331,13 @@ apply 后的效果：
 补列并改变 schema cookie；必须在这个转换之后重新生成冻结 manifest。若 apply 拒绝
 manifest 漂移，重新调查并生成预览，不能修改旧 manifest 的哈希或绕过检查。
 
-### 执行与验收
+### 执行与验收（历史）
+
+> 下面的 `apply` 流程属于已执行的窗口，入口已退役；保留它是为了说明当初的验收口径。
 
 单独获准的窗口使用冻结 manifest 经公开 `lot-identity-migration apply` 入口执行；
-保留原始 apply JSON receipt。此入口需要 `--manifest`、`--runtime-root`、`--apply --yes`，
-并且构建自身必须已获该窗口的启用授权。不得用手写 SQL 代替，也不能把部分步骤的
-`deferred` 当成 D1–D4 全部完成。该命令没有 `status` 子命令，后续状态由 inventory、
-verify 和 store inspect 读取。
+保留原始 apply JSON receipt（该入口没有 `status` 子命令，后续状态由 inventory、
+verify 和 store inspect 读取）。
 
 停写保持期间重新执行前述三个读取命令，分别保存为 `*-after.json`。逐项检查：
 

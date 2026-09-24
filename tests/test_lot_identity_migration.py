@@ -180,7 +180,9 @@ def _lot_option_type(fields: dict) -> str:
     return str(contract_key.get("option_type") or fields.get("option_type") or "")
 
 
-def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
+def _legacy_store(
+    tmp_path: Path, *, name: str = "ledger.sqlite3", degrade: bool = True
+) -> Path:
     """A store holding both lot families, degraded to the pre-migration shape.
 
     Two option lots (one assigned, one still open) and two stock lots, so the
@@ -218,6 +220,8 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
         repo, lot_id=put_lot["record_id"], contracts_to_close=1,
         stock_side="buy", stock_qty=100, stock_price=100.0, as_of_ms=3000,
     )
+    if not degrade:
+        return path
 
     with closing(connect_ledger_fixture(path)) as conn, conn:
         conn.execute("ALTER TABLE position_lots RENAME COLUMN lot_id TO record_id")
@@ -278,6 +282,20 @@ def _edit_lot_fields(path: Path, record_id: str, mutate) -> None:
         conn.commit()
 
 
+def test_an_empty_store_does_not_report_a_missing_column(tmp_path: Path) -> None:
+    path = tmp_path / "empty.sqlite3"
+    SQLiteOptionPositionsRepository(path)
+
+    inventory = module.build_lot_identity_migration_inventory(path)
+
+    assert inventory["counts"]["position_lots"] == 0
+    assert inventory["column_contract"]["position_lots"]["missing"] == []
+    assert inventory["readiness_reasons"] == []
+    assert inventory["pending"]["d2_lot_id_column"] == {
+        "column_present": True, "rows_null": 0,
+    }
+
+
 def _stored_rows(path: Path) -> dict[str, object]:
     with closing(connect_ledger_fixture(path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -295,90 +313,16 @@ def _stored_rows(path: Path) -> dict[str, object]:
         }
 
 
-def _run_apply(path: Path, **kwargs: object) -> dict[str, object]:
-    inventory = module.build_lot_identity_migration_inventory(path)
-    return module.apply_lot_identity_migration(path, inventory, **kwargs)
 
 
-@pytest.fixture(autouse=True)
-def _lot_identity_window_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Carry the window token the machinery tests run behind.
-
-    ``apply`` refuses to run while ``LOT_IDENTITY_WINDOW_ENABLEMENT`` is unset;
-    the rest of this module exercises the migration machinery itself, so it
-    runs armed. The unarmed refusal is pinned by
-    ``test_apply_refuses_while_the_window_is_not_enabled``, which clears the
-    token again.
-    """
-
-    monkeypatch.setattr(module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
-    # Explicit pre-R1 registry for deferred cases; repointed_build uses the
-    # real registry and exact exceptions instead of bypassing the SQL gate.
-    registry = tmp_path / "unrepointed-registry.json"
-    registry.write_text(json.dumps({"src": {
-        "detail": [{"module": "src/unrepointed.py", "kind": "read"}],
-        "dynamic_sql": [],
-    }}))
-    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH", registry)
 
 
-def test_apply_refuses_while_the_window_is_not_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No window token on the build: refuse before opening the store.
-
-    The manifest checks all pass on this store — the refusal must not depend
-    on them, and must not so much as open a connection: the file keeps the
-    exact bytes it had.
-    """
-
-    monkeypatch.setattr(module, "LOT_IDENTITY_WINDOW_ENABLEMENT", None)
-    path = _legacy_store(tmp_path)
-    inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
-
-    with pytest.raises(RuntimeError, match="not enabled on this build"):
-        module.apply_lot_identity_migration(path, inventory)
-
-    assert path.read_bytes() == before
 
 
-def test_apply_preview_treats_backfill_as_work_not_a_blocker(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    preview = module.preview_lot_identity_migration_apply(path, inventory)
-
-    assert inventory["readiness_reasons"] == ["lot_id_backfill_pending"]
-    assert preview["migration_ready"] is True
-    assert preview["would_apply"] is True
-    assert preview["blocking_reasons"] == []
 
 
-def test_apply_preview_blocks_a_payload_fact_with_no_carrier(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _edit_lot_fields(
-        path,
-        _put_lot_record_id(path),
-        lambda fields: fields.update({"strategy": "wheel"}),
-    )
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    preview = module.preview_lot_identity_migration_apply(path, inventory)
-
-    assert preview["migration_ready"] is False
-    assert preview["would_apply"] is False
-    assert preview["blocking_reasons"] == [
-        "dropped_payload_keys_would_lose_facts"
-    ]
 
 
-@pytest.fixture
-def repointed_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use the real R1 registry and exact exceptions without bypassing the gate."""
-    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH",
-                        Path(module.__file__).resolve().parents[3] / "docs/retired_column_sql_registry.json")
-    assert module._live_sql_naming_retired_columns() == ()
 
 
 def _table_info(path: Path, table: str = "position_lots") -> list[sqlite3.Row]:
@@ -387,61 +331,14 @@ def _table_info(path: Path, table: str = "position_lots") -> list[sqlite3.Row]:
         return conn.execute(f"PRAGMA table_info({table})").fetchall()
 
 
-def _object_sql(path: Path, kind: str, table: str = "position_lots") -> dict[str, str]:
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        return {
-            str(row["name"]): " ".join(str(row["sql"]).split())
-            for row in conn.execute(
-                f"SELECT name, sql FROM sqlite_master WHERE type=? AND tbl_name=?"
-                " AND sql IS NOT NULL ORDER BY name",
-                (kind, table),
-            )
-        }
 
 
-def _columns(path: Path, table: str = "position_lots") -> list[str]:
-    return [str(row["name"]) for row in _table_info(path, table)]
 
 
-def _primary_key(path: Path, table: str = "position_lots") -> str | None:
-    return next(
-        (str(row["name"]) for row in _table_info(path, table) if int(row["pk"]) == 1),
-        None,
-    )
 
 
-def _rebuilt_rows(path: Path) -> dict[str, dict[str, object]]:
-    """Every lot row of a store on the rebuilt shape, keyed by ``lot_id``."""
-
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        return {
-            str(row["lot_id"]): {
-                "account": row["account"],
-                "source_event_id": row["source_event_id"],
-                "fields": json.loads(row["fields_json"]),
-                "fields_json": row["fields_json"],
-            }
-            for row in conn.execute(
-                "SELECT lot_id, account, source_event_id, fields_json FROM position_lots"
-            )
-        }
 
 
-def _new_shape_guard(sql: str) -> str:
-    """The declared three edits the rebuild applies to a stored guard.
-
-    Spelled out here rather than imported so the pin is independent of the
-    implementation: whatever the migration does, the guards on the rebuilt table
-    must be the store's own guards with the identity renamed, the retired
-    column forgotten, and the account read where the target shape keeps it.
-    """
-
-    rewritten = re.sub(r"\brecord_id\b", "lot_id", sql)
-    rewritten = re.sub(r"\s+OR\s+OLD\.expiration IS NOT NEW\.expiration", "", rewritten)
-    rewritten = re.sub(r"\s*,\s*expiration\b", "", rewritten)
-    return " ".join(rewritten.replace("'$.account'", "'$.contract_key.account'").split())
 
 
 # --- the shape pin -----------------------------------------------------------
@@ -832,31 +729,6 @@ def test_a_note_only_scalar_blocks_even_with_a_populated_column(tmp_path: Path) 
     assert without_column["lost"]["note"]["reason"] == "note_kv_only:multiplier"
 
 
-def test_an_empty_store_does_not_report_a_missing_column(tmp_path: Path) -> None:
-    """Column presence comes from the table, not from the rows.
-
-    Inferring it from ``rows[0]`` made an empty ``position_lots`` report every
-    column as absent while the ``column_contract`` in the same payload said the
-    opposite — a ``lot_id_column_missing`` reason on a store that has the column,
-    and an ``ensure_lot_id_column: applied`` step for a DDL no-op.
-    """
-
-    path = tmp_path / "empty.sqlite3"
-    SQLiteOptionPositionsRepository(path)
-
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    assert inventory["counts"]["position_lots"] == 0
-    assert inventory["column_contract"]["position_lots"]["missing"] == []
-    assert inventory["readiness_reasons"] == []
-    assert inventory["pending"]["d2_lot_id_column"] == {
-        "column_present": True, "rows_null": 0,
-    }
-
-    result = module.apply_lot_identity_migration(path, inventory)
-    steps = {step["step"]: step for step in result["steps"]}
-    assert steps["ensure_lot_id_column"]["status"] == "already_present"
-    assert result["write_applied"] is False
 
 
 def test_inventory_reports_where_each_contract_scalar_lives(tmp_path: Path) -> None:
@@ -918,13 +790,12 @@ def test_verify_is_content_side_not_shape_side(tmp_path: Path) -> None:
 
     Flipping ``shares_open``/``shares_closed`` keeps every key and every count,
     so a shape-only check would pass it. ``compare_projection_lots`` compares
-    the payloads themselves. ``apply`` first, so the corruption is the only
-    thing left that differs from a fresh replay — and ``apply`` never touches
-    ``shares_*``, so nothing about the rigged numbers is being repaired.
+    the payloads themselves. The store is built in the final shape (the window's
+    migration is not needed to reach it), so the corruption is the only thing
+    that differs from a fresh replay.
     """
 
-    path = _legacy_store(tmp_path)
-    _run_apply(path)
+    path = _legacy_store(tmp_path, degrade=False)
     assert module.verify_lot_identity_migration(path)["projection"]["summary"] == {
         "matched": 4
     }
@@ -1152,218 +1023,18 @@ def test_verify_rejects_free_prose_in_the_note(tmp_path: Path) -> None:
 # --- apply -------------------------------------------------------------------
 
 
-def test_end_to_end_inventory_verify_apply_verify(tmp_path: Path) -> None:
-    """§13.4 row 3: the designed run, ending on a store that verifies clean."""
-
-    path = _legacy_store(tmp_path)
-
-    before = module.verify_lot_identity_migration(path)
-    assert before["ok"] is False
-    assert before["readiness_reasons"] == [
-        "lot_id_backfill_pending",
-        "projection_replay_mismatch",
-    ]
-
-    result = _run_apply(path)
-
-    assert result["schema_version"] == module.APPLY_SCHEMA
-    assert result["write_applied"] is True
-    steps = {step["step"]: step for step in result["steps"]}
-    assert steps["backfill_lot_id"] == {
-        "item": "D2", "step": "backfill_lot_id", "status": "applied", "rows_updated": 4,
-    }
-    assert steps["strip_position_id_from_fields_json"]["rows_updated"] == 4
-    assert steps["ensure_lot_id_column"]["status"] == "already_present"
-    for deferred in (
-        "switch_primary_key_to_lot_id_and_drop_record_id",
-        "drop_expiration_column",
-        "rewrite_fields_json_to_lot_shape",
-    ):
-        assert steps[deferred]["status"] == "deferred"
-    assert steps["drop_expiration_column"]["reason"] == "live_sql_repointing_precedes_rebuild"
-    assert steps["rewrite_fields_json_to_lot_shape"]["reason"] == (
-        "live_sql_repointing_precedes_rebuild"
-    )
-    assert result["deferred_rebuild_recipe"]
-
-    # D4 rewrites fields_json, which is in the generation trigger's
-    # AFTER UPDATE OF list, so the republish requirement is not optional.
-    assert result["projection_heads_advanced"]["accounts"] == ["lx", "sy"]
-    # A real entry point, not a placeholder name: the follow-up has to be
-    # runnable, and the CLI is where this store is republished from.
-    assert result["required_follow_up"] == ["om option-positions rebuild"]
-
-    with connect_ledger_fixture(path) as conn:
-        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-
-    rows = _stored_rows(path)
-    assert len(rows) == 4
-    assert all(row["lot_id"] == lot_id for lot_id, row in rows.items())
-    assert all("position_id" not in row["fields"] for row in rows.values())
-
-    after = module.verify_lot_identity_migration(path)
-    assert after["ok"] is True
-    assert after["readiness_reasons"] == []
-    assert after["projection"]["summary"] == {"matched": 4}
-    assert after["blocking_keys"] == []
 
 
-def test_apply_rolls_back_everything_on_failure(tmp_path: Path) -> None:
-    """§13.4 row 3's failure path, checked against the bytes that were there."""
-
-    path = _legacy_store(tmp_path)
-    before = _stored_rows(path)
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    stages: list[str] = []
-
-    def _hook(stage: str) -> None:
-        stages.append(stage)
-        if stage == "before_commit":
-            raise RuntimeError("injected")
-
-    with pytest.raises(RuntimeError, match="injected"):
-        module.apply_lot_identity_migration(path, inventory, failure_hook=_hook)
-
-    assert stages == [
-        "after_manifest_recheck",
-        "after_schema",
-        "after_lot_id_backfill",
-        "after_position_id_strip",
-        "before_commit",
-    ]
-    assert _stored_rows(path) == before
-    assert all(row["lot_id"] is None for row in _stored_rows(path).values())
-    with connect_ledger_fixture(path) as conn:
-        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-def test_apply_refuses_a_stale_or_foreign_manifest(tmp_path: Path) -> None:
-    """The two refusals are distinct, because they need different recoveries.
-
-    A shared message would leave the operator to guess whether the store is the
-    wrong one or merely moved on, and the named drift is what makes the second
-    case actionable.
-    """
-
-    path = _legacy_store(tmp_path)
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    # Re-signed, so the refusal below is the store-binding gate and not the
-    # tamper check that runs first: a manifest can be internally consistent and
-    # still describe a store that has moved on.
-    stale = module._manifest(
-        {
-            **{k: v for k, v in inventory.items() if k != "manifest_hash"},
-            "inventory_fingerprint": "0" * 64,
-        }
-    )
-    with pytest.raises(ValueError, match="is stale: the store changed") as stale_error:
-        module.apply_lot_identity_migration(path, stale)
-    assert "another store" not in str(stale_error.value)
-
-    other = _legacy_store(tmp_path, name="other.sqlite3")
-    other_inventory = module.build_lot_identity_migration_inventory(other)
-    with pytest.raises(ValueError, match="belongs to another store"):
-        module.apply_lot_identity_migration(path, other_inventory)
-
-    # The refusals above must not have half-applied anything.
-    assert all(row["lot_id"] is None for row in _stored_rows(path).values())
 
 
-def test_open_path_refuses_pre_carrier_store_without_mutating_it(tmp_path: Path) -> None:
-
-    path = _legacy_store(tmp_path)
-    with connect_ledger_fixture(path) as conn:
-        conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
-        conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
-        conn.commit()
-
-    frozen = module.build_lot_identity_migration_inventory(path)
-    assert "lot_id_column_missing" in frozen["readiness_reasons"]
-    before = path.read_bytes()
-
-    with pytest.raises(RuntimeError, match="legacy schema"):
-        SQLiteOptionPositionsRepository(path)
-    assert path.read_bytes() == before
-
-    result = module.apply_lot_identity_migration(path, frozen)
-    assert {step["step"]: step["status"] for step in result["steps"]} == {
-        "ensure_lot_id_column": "applied",
-        "backfill_lot_id": "applied",
-        "strip_position_id_from_fields_json": "applied",
-        "switch_primary_key_to_lot_id_and_drop_record_id": "deferred",
-        "drop_expiration_column": "deferred",
-        "rewrite_fields_json_to_lot_shape": "deferred",
-    }
-    assert module.verify_lot_identity_migration(path)["ok"] is True
 
 
-def test_apply_rejects_a_manifest_of_the_wrong_schema(tmp_path: Path) -> None:
-    """Two ``apply`` commands share a name; the schema is the discriminator."""
-
-    path = _legacy_store(tmp_path)
-    report = module.verify_lot_identity_migration(path)
-
-    with pytest.raises(ValueError):
-        module.apply_lot_identity_migration(path, report)
 
 
-def test_apply_is_idempotent(tmp_path: Path) -> None:
-    """A second run finds nothing to do, and *says so* instead of failing.
-
-    The assertion is on the status, not only on the row count: a constant
-    ``"applied"`` reports a re-run of a migrated store exactly like the migration
-    itself, which leaves an operator or a follow-up automation unable to tell
-    "already done" from "just did it".
-    """
-
-    path = _legacy_store(tmp_path)
-    first = _run_apply(path)
-    assert first["write_applied"] is True
-    assert first["steps_changed"] == [
-        "backfill_lot_id",
-        "strip_position_id_from_fields_json",
-    ]
-
-    second = _run_apply(path)
-
-    steps = {step["step"]: step for step in second["steps"]}
-    assert steps["backfill_lot_id"] == {
-        "item": "D2",
-        "step": "backfill_lot_id",
-        "status": "already_satisfied",
-        "rows_updated": 0,
-    }
-    assert steps["strip_position_id_from_fields_json"]["status"] == "already_satisfied"
-    assert steps["strip_position_id_from_fields_json"]["rows_updated"] == 0
-    assert second["write_applied"] is False
-    assert second["steps_changed"] == []
-    assert module.verify_lot_identity_migration(path)["ok"] is True
 
 
-def test_apply_backfills_the_carrier_on_a_store_that_never_had_the_column(
-    tmp_path: Path,
-) -> None:
-    """§13.2 row 7's gated backfill: the column may be missing entirely."""
-
-    path = _legacy_store(tmp_path)
-    with connect_ledger_fixture(path) as conn:
-        conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
-        conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
-        conn.commit()
-
-    inventory = module.build_lot_identity_migration_inventory(path)
-    assert "lot_id_column_missing" in inventory["readiness_reasons"]
-    assert inventory["pending"]["d2_lot_id_column"] == {
-        "column_present": False, "rows_null": 4,
-    }
-
-    result = module.apply_lot_identity_migration(path, inventory)
-    steps = {step["step"]: step for step in result["steps"]}
-    assert steps["ensure_lot_id_column"]["status"] == "applied"
-    assert steps["backfill_lot_id"]["rows_updated"] == 4
-    assert module.verify_lot_identity_migration(path)["ok"] is True
 
 
 # --- module contract ---------------------------------------------------------
@@ -1450,59 +1121,6 @@ def test_final_lot_identity_rejects_null(tmp_path: Path) -> None:
             )
 
 
-def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> None:
-    """The shape this module is the readiness surface for must not crash it.
-
-    ``REBUILD_RECIPE`` step 4 lands ``lot_id`` as the primary key and drops
-    ``record_id``. No current write path can produce that shape, so it is built
-    here by hand — and what is under test is the column probes, not the payload
-    handling that every other fixture in this file exercises through the real
-    writers.
-    """
-
-    path = tmp_path / "rebuilt.sqlite3"
-    with connect_ledger_fixture(path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE position_lots (
-              lot_id TEXT PRIMARY KEY,
-              account TEXT,
-              fields_json TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO position_lots (lot_id, account, fields_json) VALUES (?, ?, ?)",
-            ("lot-1", "lx", json.dumps({"account": "lx", "position_id": "LEGACY-1"})),
-        )
-        conn.commit()
-
-    inventory = module.build_lot_identity_migration_inventory(path)
-
-    assert inventory["counts"]["position_lots"] == 1
-    assert inventory["readiness_reasons"] == [
-        "column_contract_open",
-        "record_id_column_missing",
-        "lot_asset_type_unresolved",
-    ]
-    assert inventory["pending"]["d2_record_id_column"]["column_present"] is False
-    assert inventory["dropped_key_classification"]["lost"] == {}
-
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        # Both writers behind ``apply`` key off ``record_id``, which is not
-        # there, so they must fall back to the identity column that is — a
-        # rebuild leaves exactly this shape and still runs them afterwards.
-        assert module._backfill_lot_id(conn) == 0
-        assert module._rewrite_lot_payloads(conn, align_to_lot_shape=False) == {
-            "rows_scanned": 1,
-            "position_id_rows": 1,
-            "rewritten_rows": 1,
-        }
-        remaining = json.loads(
-            conn.execute("SELECT fields_json FROM position_lots").fetchone()["fields_json"]
-        )
-    assert "position_id" not in remaining
 
 
 # --- the retired-column registry gate ------------------------------------------
@@ -1516,510 +1134,38 @@ def test_the_post_rebuild_shape_reports_instead_of_crashing(tmp_path: Path) -> N
 # release that repoints the SQL is the release that enables the migration.
 
 
-def test_the_destructive_steps_are_deferred_while_the_sql_names_them(
-    tmp_path: Path,
-) -> None:
-    """Both directions of the gate, from one store, with nothing but the gate changed.
-
-    The reasons are asserted by name, not only the statuses: they are what an
-    operator reads to learn *why* the window has not opened, and a status that
-    became ``deferred`` for a different reason is a different instruction.
-    """
-
-    path = _legacy_store(tmp_path)
-    # The fixture supplies an unreviewed statement to exercise the closed gate.
-    live = module._live_sql_naming_retired_columns()
-    assert live
-
-    result = _run_apply(path)
-
-    steps = {step["step"]: step for step in result["steps"]}
-    for deferred in (
-        "switch_primary_key_to_lot_id_and_drop_record_id",
-        "drop_expiration_column",
-    ):
-        assert steps[deferred]["status"] == "deferred"
-        assert steps[deferred]["reason"] == "live_sql_repointing_precedes_rebuild"
-    assert steps["rewrite_fields_json_to_lot_shape"]["status"] == "deferred"
-    assert steps["rewrite_fields_json_to_lot_shape"]["reason"] == (
-        "live_sql_repointing_precedes_rebuild"
-    )
-    # The receipt names the cause statement by statement, so an operator can
-    # read which repointing is missing instead of only that something is.
-    assert result["rebuild_gate"]["live_statements"] == list(live)
-    # The store keeps the shape it had: the gate closed the destructive half,
-    # not just its report.
-    assert "record_id" in _columns(path)
-    assert "expiration" in _columns(path)
-    assert _primary_key(path) == "record_id"
 
 
-def test_repointing_the_sql_is_what_enables_the_destructive_steps(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """The gate is derived state, so nothing else has to be flipped with it.
-
-    The same store, the same code, the same command: only the build's statements
-    moved — which is exactly the difference between this tree and R1. The
-    contract-tightening release (§9.5 M6 step 5) is a later edit this gate does
-    not wait for, and a flag would be the wrong shape for it.
-    """
-
-    path = _legacy_store(tmp_path)
-    assert "record_id" in _columns(path)
-
-    result = _run_apply(path)
-
-    steps = {step["step"]: step for step in result["steps"]}
-    for applied in (
-        "switch_primary_key_to_lot_id_and_drop_record_id",
-        "drop_expiration_column",
-        "rewrite_fields_json_to_lot_shape",
-    ):
-        assert steps[applied]["status"] == "applied"
-        assert "reason" not in steps[applied]
-    assert result["rebuild"]["rebuilt"] is True
-    assert "record_id" not in _columns(path)
-    assert _primary_key(path) == "lot_id"
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        projection = module.project_stored_trade_events_to_position_lots(
-            module._events(module._load_event_rows(conn))
-        )
-        expected = {item.lot_id: module._canonical_fields_json(item.fields) for item in projection.lots}
-        actual = {
-            str(row["lot_id"]): str(row["fields_json"])
-            for row in conn.execute("SELECT lot_id, fields_json FROM position_lots")
-        }
-    assert actual == expected
 
 
-def test_the_closed_gates_receipt_carries_the_pinned_key_set(
-    tmp_path: Path,
-) -> None:
-    """The pre-window receipt's key set is a contract this batch must not drop.
-
-    The whole result is pinned, key set included: an operator's follow-up
-    automation keys on these names, and a window that ships a differently shaped
-    receipt has changed the surface it promised not to touch. The destructive
-    three are ``deferred`` with the repointing reason, ``rebuild_gate`` names
-    what held them back, ``write_applied`` still means "something changed", and
-    no rebuild report appears at all.
-    """
-
-    path = _legacy_store(tmp_path)
-    result = _run_apply(path)
-
-    assert sorted(result) == [
-        "deferred_rebuild_recipe",
-        "generated_at_utc",
-        "manifest_hash",
-        "operation",
-        "pending_before",
-        "projection_heads_advanced",
-        "rebuild_gate",
-        "required_follow_up",
-        "schema_version",
-        "source_manifest_hash",
-        "sqlite_bytes",
-        "steps",
-        "steps_changed",
-        "store_identity",
-        "timing",
-        "write_applied",
-    ]
-    assert result["steps"] == [
-        {"item": "D2", "step": "ensure_lot_id_column", "status": "already_present"},
-        {
-            "item": "D2",
-            "step": "backfill_lot_id",
-            "status": "applied",
-            "rows_updated": 4,
-        },
-        {
-            "item": "D4",
-            "step": "strip_position_id_from_fields_json",
-            "status": "applied",
-            "rows_updated": 4,
-        },
-        {
-            "item": "D2",
-            "step": "switch_primary_key_to_lot_id_and_drop_record_id",
-            "status": "deferred",
-            "reason": "live_sql_repointing_precedes_rebuild",
-        },
-        {
-            "item": "D1",
-            "step": "drop_expiration_column",
-            "status": "deferred",
-            "reason": "live_sql_repointing_precedes_rebuild",
-        },
-        {
-            "item": "D3",
-            "step": "rewrite_fields_json_to_lot_shape",
-            "status": "deferred",
-            "reason": "live_sql_repointing_precedes_rebuild",
-        },
-    ]
-    assert result["write_applied"] is True
-    assert result["steps_changed"] == [
-        "backfill_lot_id",
-        "strip_position_id_from_fields_json",
-    ]
-    # The report is the visible half; this is the other half. While the gate is
-    # closed the payload keeps the converged shape the readers still consume —
-    # the D4 cleanup is the only edit — and ``record_id`` is still the key.
-    for row in _stored_rows(path).values():
-        assert "position_id" not in row["fields"]
-        assert row["fields"]["contract_key"]["account"]
-        assert row["fields"]["contract_key"]["underlying_symbol"]
-    assert _primary_key(path) == "record_id"
-    assert set(_columns(path)) == {
-        "record_id",
-        "account",
-        "fields_json",
-        "source_event_id",
-        "expiration",
-        "strike",
-        "multiplier",
-        "updated_at_ms",
-        "lot_id",
-    }
 
 
 # --- D1/D2: the rebuild -------------------------------------------------------
 
 
-def test_the_rebuild_leaves_the_store_on_the_contracted_shape(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """§13.4 A8: the rebuilt store's column set *is* the contract minus the retired
-    columns.
-
-    The expectations come from ``POSITION_LOTS_COLUMN_CLASSIFICATION`` minus
-    ``RETIRED_LOT_COLUMNS`` — the shape R1 must keep able to read while its
-    contract is still dual-shape — so the shape the rebuild produces and the
-    shape the publish path gates on cannot drift apart. On this tree the check
-    still describes the pre-window shape and reports exactly the retired columns
-    as the delta; A2's repointing batch relaxes it to accept both shapes, and it
-    owns that half of the pin from there.
-    """
-
-    path = _legacy_store(tmp_path)
-    before = _stored_rows(path)
-    _run_apply(path)
-
-    # The store's own column order, with the identity promoted to the front and
-    # nothing else moved: a rebuild that reshuffled the table would show up here
-    # as a difference in a SELECT * row rather than only in a set.
-    assert _columns(path) == [
-        "lot_id",
-        "account",
-        "fields_json",
-        "source_event_id",
-        "strike",
-        "multiplier",
-        "updated_at_ms",
-    ]
-    assert set(_columns(path)) == set(module.POSITION_LOTS_COLUMN_CLASSIFICATION) - set(
-        module.RETIRED_LOT_COLUMNS
-    )
-    assert _primary_key(path) == "lot_id"
-    assert set(module.RETIRED_LOT_COLUMNS) & set(_columns(path)) == set()
-
-    rows = _rebuilt_rows(path)
-    assert len(rows) == len(before) == 4
-    assert sorted(rows) == sorted(before)
-    # Read-back equality of the columns that carry facts: the identity moved to
-    # lot_id, and everything else is the byte the old row held — compared
-    # against the old row's own columns, which is where both facts live now
-    # that the payload is converged.
-    for lot_id, row in rows.items():
-        assert row["source_event_id"] == before[lot_id]["source_event_id"]
-        assert row["account"] == before[lot_id]["account"]
-
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert conn.execute("PRAGMA foreign_key_check(position_lots)").fetchall() == []
-        # R1 accepts the exact rebuilt shape as well as the complete legacy shape.
-        from src.application.ledger.repository_projection_schema import (
-            _position_projection_column_contract,
-        )
-
-        contract = _position_projection_column_contract(conn)["position_lots"]
-        assert contract["missing"] == ()
-        assert contract["unclassified"] == ()
 
 
-def test_the_rebuild_recreates_the_stores_own_guards_on_the_new_shape(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """Step 11 recreates the guards the store is running, not a copy of them.
-
-    The pin is a derivation: take the triggers and indexes the store had before
-    the rebuild, apply the three declared edits, and require the rebuilt store's
-    to be exactly that. A hand-written guard set in the migration would fail
-    here the moment the real one moved, which is the drift the derivation exists
-    to prevent.
-    """
-
-    path = _legacy_store(tmp_path)
-    guards_before = _object_sql(path, "trigger")
-    indexes_before = _object_sql(path, "index")
-    assert len(guards_before) == 10
-    assert {name for name in guards_before if not name.startswith("trg_attribution_writer_")} == {
-        "trg_position_lots_account_insert_guard",
-        "trg_position_lots_account_update_guard",
-        "trg_position_lots_generation_insert",
-        "trg_position_lots_generation_delete",
-        "trg_position_lots_generation_update_same",
-        "trg_position_lots_generation_update_old",
-        "trg_position_lots_generation_update_new",
-    }
-
-    result = _run_apply(path)
-
-    guards_after = _object_sql(path, "trigger")
-    assert set(guards_after) == set(guards_before)
-    for name, sql in guards_after.items():
-        assert sql == _new_shape_guard(guards_before[name]), name
-        assert "record_id" not in sql
-        assert "expiration" not in sql
-        assert "'$.account'" not in sql
-    assert result["rebuild"]["triggers_recreated"] == 10
-
-    # The identity index survives — the open path re-creates it with
-    # ``CREATE UNIQUE INDEX IF NOT EXISTS`` on every open, so a rebuilt store
-    # that dropped it would churn its schema cookie on the next open.
-    assert "UNIQUE" in _object_sql(path, "index")["idx_position_lots_lot_id"]
-    # R1's account lookup uses the surviving identity; both old account indexes
-    # converge on one (account, lot_id) index.
-    assert set(_object_sql(path, "index")) == {
-        "idx_position_lots_lot_id",
-        "idx_position_lots_account_lot",
-    }
-    assert _object_sql(path, "index")["idx_position_lots_account_lot"].endswith(
-        "ON position_lots(account, lot_id)"
-    )
 
 
-def test_the_recreated_guards_accept_the_new_shape_and_reject_a_conflict(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """A guard that cannot fire on the shape it guards is not a guard.
-
-    The old bodies read the *flat* ``$.account``; the target shape carries the
-    account at ``contract_key.account``, so a verbatim recreation would reject
-    every write of an aligned row — the rebuilt store would be unwritable. The
-    pairs below are what "recreated on the new shape" has to mean.
-    """
-
-    path = _legacy_store(tmp_path)
-    _run_apply(path)
-    with connect_ledger_fixture(path) as conn:
-        conn.row_factory = sqlite3.Row
-        generation = conn.execute(
-            "SELECT lots_generation FROM position_projection_heads WHERE account='lx'"
-        ).fetchone()["lots_generation"]
-        fields = json.dumps(
-            {
-                "contract_key": {"account": "lx", "underlying_symbol": "AMD"},
-                "position_key": "富途|lx|AMD|stock|long",
-            }
-        )
-        conn.execute(
-            "INSERT INTO position_lots (lot_id, account, fields_json, updated_at_ms)"
-            " VALUES (?, ?, ?, ?)",
-            ("lot-new", "lx", fields, 4000),
-        )
-        conn.commit()
-        assert [
-            int(row["lots_generation"])
-            for row in conn.execute(
-                "SELECT lots_generation FROM position_projection_heads WHERE account='lx'"
-            )
-        ] == [int(generation) + 1]
-
-        # The account guard still has teeth on the new shape: the column and the
-        # payload must agree, and the payload must carry one at all.
-        with pytest.raises(sqlite3.IntegrityError, match="must be lowercase"):
-            conn.execute(
-                "INSERT INTO position_lots (lot_id, account, fields_json, updated_at_ms)"
-                " VALUES (?, ?, ?, ?)",
-                (
-                    "lot-bad",
-                    "lx",
-                    json.dumps({"contract_key": {"account": "LX"}}),
-                    4001,
-                ),
-            )
-        with pytest.raises(sqlite3.IntegrityError, match="account is required"):
-            conn.execute(
-                "INSERT INTO position_lots (lot_id, account, fields_json, updated_at_ms)"
-                " VALUES (?, ?, ?, ?)",
-                ("lot-empty", "lx", json.dumps({"position_key": "x"}), 4002),
-            )
 
 
-@pytest.mark.parametrize(
-    "stage",
-    [
-        "after_rebuild_rows_read",
-        "after_rebuild_insert",
-        "after_rebuild_row_count_check",
-        "after_rebuild_read_back_check",
-        "after_rebuild_foreign_key_check",
-        "after_rebuild_drop_old_table",
-        "after_rebuild_rename",
-        "after_rebuild_guards",
-        "after_rebuild",
-        "after_wheel_identity_rename",
-    ],
-)
-def test_a_failure_at_any_rebuild_check_leaves_the_store_byte_identical(
-    tmp_path: Path,
-    repointed_build: None,
-    stage: str,
-) -> None:
-    """§13.4 A9: no half-migrated table survives a failure, at any checkpoint.
-
-    The last stages are the ones worth having: by then the old table is dropped
-    and the new one renamed, so anything short of a real transaction would leave
-    a store that is neither shape. The comparison is on the file's bytes, since
-    "the old shape and the old rows are still there" is weaker than "nothing was
-    written".
-    """
-
-    path = _legacy_store(tmp_path)
-    before = path.read_bytes()
-    original_columns = _columns(path)
-    original_rows = _stored_rows(path)
-
-    def _hook(current: str) -> None:
-        if current == stage:
-            raise RuntimeError("injected")
-
-    with pytest.raises(RuntimeError, match="injected"):
-        _run_apply(path, failure_hook=_hook)
-
-    assert path.read_bytes() == before
-    assert _columns(path) == original_columns
-    assert _stored_rows(path) == original_rows
-    assert _primary_key(path) == "record_id"
-    with connect_ledger_fixture(path) as conn:
-        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-def test_the_rebuilds_row_count_check_is_not_a_pro_forma(
-    tmp_path: Path,
-    repointed_build: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The checks are the migration's own, so they are shown failing on their own.
-
-    Injected through the row copier rather than through the failure hook: the
-    hook proves the transaction rolls back, this proves the assertion in front
-    of it actually catches an incomplete copy instead of trusting the loop that
-    fed it.
-    """
-
-    path = _legacy_store(tmp_path)
-    before = path.read_bytes()
-    copied = module._insert_rebuild_rows
-
-    def short_copy(conn: sqlite3.Connection, columns: list[str], rows: list[object]) -> int:
-        return copied(conn, columns, rows[:-1])
-
-    monkeypatch.setattr(module, "_insert_rebuild_rows", short_copy)
-
-    with pytest.raises(RuntimeError, match="rebuild row count differs"):
-        _run_apply(path)
-
-    assert path.read_bytes() == before
-    assert "record_id" in _columns(path)
 
 
-def test_the_rebuilds_read_back_check_catches_a_mutated_row(
-    tmp_path: Path,
-    repointed_build: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A copy that comes back different is a copy that did not happen.
-
-    The row count is made to match, so the count check passes it; only the
-    read-back comparison can see that a value changed on the way through.
-    """
-
-    path = _legacy_store(tmp_path)
-    before = path.read_bytes()
-    copied = module._insert_rebuild_rows
-
-    def mutant_copy(conn: sqlite3.Connection, columns: list[str], rows: list[object]) -> int:
-        inserted = copied(conn, columns, rows[:-1])
-        values = [rows[-1][name] for name in columns]
-        values[columns.index("account")] = "zz"
-        placeholders = ",".join("?" for _ in columns)
-        conn.execute(
-            f"INSERT INTO {module.REBUILD_TEMP_TABLE} ({','.join(columns)})"
-            f" VALUES ({placeholders})",
-            values,
-        )
-        return inserted + 1
-
-    monkeypatch.setattr(module, "_insert_rebuild_rows", mutant_copy)
-
-    with pytest.raises(RuntimeError, match="read-back differs"):
-        _run_apply(path)
-
-    assert path.read_bytes() == before
-    assert "record_id" in _columns(path)
 
 
-def test_the_rebuild_is_idempotent_and_second_run_writes_nothing(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """A rebuilt store re-opened by the same code finds nothing to do.
-
-    The shape probe is what the second run leans on, so its verdict is asserted
-    by name (``shape_already_new``) rather than inferred from an unchanged byte
-    count: a probe that answered "rebuilt" and copied the table again would pass
-    any assertion made only on the file.
-    """
-
-    path = _legacy_store(tmp_path)
-    first = _run_apply(path)
-    assert first["rebuild"]["rebuilt"] is True
-    settled = path.read_bytes()
-    rows = _rebuilt_rows(path)
-
-    second = _run_apply(path)
-
-    assert second["rebuild"] == {
-        "rebuilt": False,
-        "reason": "shape_already_new",
-        "rows": 4,
-    }
-    assert second["write_applied"] is False
-    assert second["steps_changed"] == []
-    assert {step["status"] for step in second["steps"]} <= {
-        "already_present",
-        "already_satisfied",
-    }
-    assert path.read_bytes() == settled
-    assert _rebuilt_rows(path) == rows
 
 
 def test_legacy_payload_without_asset_type_uses_replay_for_mixed_lots(
     tmp_path: Path,
-    repointed_build: None,
 ) -> None:
+    """Asset type is read off the replay when the payload no longer carries it.
+
+    The inventory is the surface that has to answer for a store whose rows lost
+    ``asset_type``; the shape-key dispatch cannot, so the answer comes from
+    replaying the ledger instead of from a default.
+    """
     path = _legacy_store(tmp_path)
     _restore_legacy_flat_keys(path)
 
@@ -2034,21 +1180,13 @@ def test_legacy_payload_without_asset_type_uses_replay_for_mixed_lots(
         "sample_blocked_lot_ids": [],
     }
 
-    _run_apply(path)
-
-    asset_types = [row["fields"]["asset_type"] for row in _rebuilt_rows(path).values()]
-    assert asset_types.count("option") == asset_types.count("stock") == 2
-    assert module.verify_lot_identity_migration(path)["ok"] is True
-
 
 @pytest.mark.parametrize(
     "asset_type",
     ["unknown", "conflict", pytest.param(["option"], id="non-scalar")],
 )
-def test_asset_type_unknown_or_conflicting_with_replay_blocks_without_writes(
-    tmp_path: Path,
-    repointed_build: None,
-    asset_type: object,
+def test_asset_type_unknown_or_conflicting_with_replay_blocks_inventory(
+    tmp_path: Path, asset_type: object,
 ) -> None:
     path = _legacy_store(tmp_path)
     _edit_lot_fields(
@@ -2056,120 +1194,25 @@ def test_asset_type_unknown_or_conflicting_with_replay_blocks_without_writes(
         "lot_assign-1",
         lambda fields: fields.__setitem__(
             "asset_type",
-            (
-                "stock" if fields.get("asset_type") == "option" else "option"
-            )
+            ("stock" if fields.get("asset_type") == "option" else "option")
             if asset_type == "conflict"
             else asset_type,
         ),
     )
+
     inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
 
     assert "lot_asset_type_unresolved" in inventory["readiness_reasons"]
-    with pytest.raises(RuntimeError, match="asset_type"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
-def test_apply_refuses_fresh_manifest_when_stored_business_fact_differs(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    path = _legacy_store(tmp_path)
-    _restore_legacy_flat_keys(path)
-    target = next(
-        record_id
-        for record_id, row in _stored_rows(path).items()
-        if _lot_option_type(row["fields"]) == "call"
-    )
-
-    def drift_legacy_premium(fields: dict) -> None:
-        fields["premium"] = float(fields["premium"]) + 0.01
-        for key in ("asset_type", "contract_key", "open_event_id", "premium_open"):
-            fields.pop(key, None)
-
-    _edit_lot_fields(
-        path,
-        target,
-        drift_legacy_premium,
-    )
-    inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
-
-    with pytest.raises(RuntimeError, match="fresh replay differs"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
-def test_apply_refuses_fresh_manifest_when_legacy_stock_fact_differs(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    path = _legacy_store(tmp_path)
-    _restore_legacy_flat_keys(path)
-    target = next(
-        record_id
-        for record_id, row in _stored_rows(path).items()
-        if row["fields"].get("asset_type") == "stock"
-    )
-
-    def drift_legacy_stock(fields: dict) -> None:
-        fields["shares_open"] = str(Decimal(str(fields["shares_open"])) + 1)
-        _strip_converged_shape(fields)
-
-    _edit_lot_fields(path, target, drift_legacy_stock)
-    inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
-
-    with pytest.raises(RuntimeError, match="fresh replay differs"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
-def test_apply_refuses_fresh_manifest_when_new_shape_business_field_is_missing(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    path = _legacy_store(tmp_path)
-    _edit_lot_fields(
-        path,
-        "lot_manual-open-d2ffdb6be1d71922",
-        lambda fields: fields.pop("premium_open"),
-    )
-    inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
-
-    with pytest.raises(RuntimeError, match="fresh replay differs"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("conflict", ["open_event_id", "contract_asset_type"])
-def test_apply_refuses_new_shape_identity_conflict_without_writes(
-    tmp_path: Path,
-    repointed_build: None,
-    conflict: str,
-) -> None:
-    path = _legacy_store(tmp_path)
 
-    def introduce_conflict(fields: dict) -> None:
-        if conflict == "open_event_id":
-            fields["open_event_id"] = "wrong-event"
-        else:
-            contract = fields["contract_key"]
-            contract["asset_type"] = (
-                "stock" if contract["asset_type"] == "option" else "option"
-            )
 
-    _edit_lot_fields(path, "lot_manual-open-d2ffdb6be1d71922", introduce_conflict)
-    inventory = module.build_lot_identity_migration_inventory(path)
-    before = path.read_bytes()
-
-    assert "projection_replay_mismatch" in inventory["readiness_reasons"]
-    with pytest.raises(RuntimeError, match="fresh replay differs"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
 # --- D3/D4: the payload rewrite ----------------------------------------------
@@ -2213,91 +1256,8 @@ def test_the_rewrite_executes_only_carriers_the_classifier_declares() -> None:
     }
 
 
-def test_the_rewrite_aligns_every_row_and_loses_nothing(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """D3+D4 on a store the real write path built: nothing unaccounted for.
-
-    ``lost`` is asserted empty on this store for the same reason ``verify``
-    fails only on that bucket: it is the verdict that means "a fact has no
-    home", and on the payload the publisher actually produces there must be
-    none. The key set is then checked against the target shape's, which is what
-    "aligned to ``PositionLot.to_dict()``" can be asserted on without inventing
-    the keys ``to_dict()`` derives from the events (``open_event_id``,
-    ``realized_pnl``, ``close_event_ids``) and that no payload has ever carried.
-    """
-
-    path = _legacy_store(tmp_path)
-    inventory = module.build_lot_identity_migration_inventory(path)
-    assert inventory["dropped_key_classification"]["lost"] == {}
-
-    _run_apply(path)
-
-    for lot_id, row in _rebuilt_rows(path).items():
-        fields = row["fields"]
-        assert "position_id" not in fields, lot_id
-        assert "note" not in fields, lot_id
-        assert set(fields) <= module._lot_shape_keys(fields.get("asset_type"))
-        # Every carried fact is at the target the classifier named for it.
-        assert fields["contract_key"]["account"] == row["account"]
-        assert "contract_key" in fields and fields["contract_key"]["broker"]
-        assert "premium_open" in fields or fields.get("asset_type") == "stock"
-        assert isinstance(fields.get("opened_at_ms"), int)
-    option = next(
-        row for row in _rebuilt_rows(path).values()
-        if row["fields"].get("contract_key", {}).get("option_type") == "put"
-    )
-    assert option["fields"]["contract_key"]["expiration_ymd"] == "2026-06-19"
-    assert option["fields"]["contract_key"]["strike"] == "100"
-    assert option["fields"]["position_side"] == "short"
-    assert option["fields"]["contracts_opened"] == 1
 
 
-def test_the_rewrite_blocks_a_note_only_fact_instead_of_dropping_it(
-    tmp_path: Path,
-    repointed_build: None,
-) -> None:
-    """§13.4 row 3's negative case, now on the write side as well as the report.
-
-    ``verify`` has always reported this row as blocking; ``apply`` must refuse it
-    too, because a dry-run gate that the write path does not honour is a
-    suggestion. The refusal happens before anything is written, so the store is
-    left exactly as it was.
-    """
-
-    path = _legacy_store(tmp_path)
-    with connect_ledger_fixture(path) as conn:
-        raw = conn.execute(
-            "SELECT record_id, fields_json FROM position_lots WHERE record_id = ?",
-            ("lot_assign-1",),
-        ).fetchone()
-        fields = json.loads(raw[1])
-        fields.pop("expiration", None)
-        fields.pop("expiration_ymd", None)
-        # A converged payload carries no ``note`` at all, so the note-only fact
-        # is written whole here: with the structured copies popped above (and
-        # the row's ``expiration`` column NULL), the note's ``exp`` is the
-        # fact's only copy — §13.5 R6's shape.
-        fields.get("contract_key", {}).pop("expiration_ymd", None)
-        fields["note"] = "exp=2026-06-19"
-        conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (json.dumps(fields, ensure_ascii=False, sort_keys=True), raw[0]),
-        )
-        conn.commit()
-
-    before = path.read_bytes()
-    inventory = module.build_lot_identity_migration_inventory(path)
-    assert "dropped_payload_keys_would_lose_facts" in module.verify_lot_identity_migration(
-        path
-    )["readiness_reasons"]
-
-    with pytest.raises(RuntimeError, match="would lose a fact: key 'note'"):
-        module.apply_lot_identity_migration(path, inventory)
-
-    assert path.read_bytes() == before
-    assert "record_id" in _columns(path)
 
 
 def test_the_ms_expiration_mirror_is_carried_by_one_shared_rule() -> None:
@@ -2341,41 +1301,8 @@ def test_the_ms_expiration_mirror_is_carried_by_one_shared_rule() -> None:
     ) is None  # the ymd wrote that target already
 
 
-def test_rebuild_gate_blocks_dynamic_sql_and_malformed_inventory(tmp_path, monkeypatch):
-    path = tmp_path / "registry.json"
-    monkeypatch.setattr(module, "RETIRED_COLUMN_REGISTRY_PATH", path)
-    hit = {"module": "src/live.py", "kind": "dynamic"}
-    for src in (
-        {"detail": [], "dynamic_sql": [hit]},
-        {"detail": {}, "dynamic_sql": []},
-        {"detail": [], "dynamic_sql": {}},
-        {"detail": []},
-    ):
-        path.write_text(json.dumps({"src": src}), encoding="utf-8")
-        assert module._live_sql_naming_retired_columns()
-    path.write_text(json.dumps({"src": {"detail": [], "dynamic_sql": []}}), encoding="utf-8")
-    assert module._live_sql_naming_retired_columns() == ()
 
 
-def test_carrier_conflict_blocks_inventory_and_apply(tmp_path, repointed_build):
-    path = _legacy_store(tmp_path)
-    with connect_ledger_fixture(path) as conn:
-        raw = conn.execute(
-            "SELECT fields_json FROM position_lots WHERE record_id = ?", ("lot_assign-1",)
-        ).fetchone()
-        fields = json.loads(raw[0])
-        fields["strike"] = "200"
-        fields["contract_key"]["strike"] = "100"
-        conn.execute(
-            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (json.dumps(fields), "lot_assign-1"),
-        )
-    before = path.read_bytes()
-    inventory = module.build_lot_identity_migration_inventory(path)
-    assert inventory["dropped_key_classification"]["lost"]["strike"]["reason"] == "carrier_value_conflict"
-    with pytest.raises(RuntimeError, match="carrier_value_conflict"):
-        module.apply_lot_identity_migration(path, inventory)
-    assert path.read_bytes() == before
 
 
 def test_alignment_preserves_existing_nested_payload():
@@ -2388,16 +1315,6 @@ def test_alignment_preserves_existing_nested_payload():
         module._aligned_lot_payload(fields, {}, {})
 
 
-def test_rebuilt_identity_rejects_null_empty_and_duplicates(tmp_path, repointed_build):
-    path = _legacy_store(tmp_path)
-    _run_apply(path)
-    with connect_ledger_fixture(path) as conn:
-        identity, = conn.execute("SELECT lot_id FROM position_lots LIMIT 1").fetchone()
-        for invalid in (None, "", "   "):
-            with pytest.raises(sqlite3.IntegrityError):
-                conn.execute("UPDATE position_lots SET lot_id = ? WHERE lot_id = ?", (invalid, identity))
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE position_lots SET lot_id = ?", (identity,))
 
 
 @pytest.mark.parametrize("status", ["duplicate_lot_id", "empty_lot_id", "count_mismatch"])
@@ -2414,198 +1331,6 @@ def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, statu
     assert report["projection"]["mismatch_count"] == 1
 
 
-def test_r1_rebuilt_store_reopens_and_preserves_projection(
-    tmp_path: Path, repointed_build: None,
-) -> None:
-    from src.application.ledger.repository_common import PositionLotRecord
-    from src.application.ledger.sqlite_row_codec import position_lots_use_lot_id
-
-    path = _legacy_store(tmp_path)
-    from domain.domain.wheel.events import build_wheel_event
-
-    _run_apply(path)
-    wheel_repo = SQLiteOptionPositionsRepository(path)
-    wheel_events = [build_wheel_event(
-        event_id=f"wheel-rename-{index}", account="lx",
-        wheel_branch_id=f"branch-{index}", lot_id=lot_id,
-        event_type="wheel_branch_created", occurred_at_ms=2000,
-        recorded_at_ms=2001, payload={"direction": "put"},
-    ) for index, lot_id in enumerate((None, "independent-lot"))]
-    with wheel_repo._writer_connection(begin_immediate=True) as conn:
-        for event in wheel_events:
-            assert wheel_repo.append_wheel_event_once(event, conn=conn)
-    stale_manifest = module.build_lot_identity_migration_inventory(path)
-    # An append changes the facts protected by the manifest, even though the
-    # position table and schema cookie did not change.
-    extra = build_wheel_event(
-        event_id="wheel-new-after-inventory", account="lx", wheel_branch_id="late-branch",
-        lot_id=None, event_type="wheel_branch_created", occurred_at_ms=2500,
-        recorded_at_ms=2501, payload={"direction": "put"},
-    )
-    with wheel_repo._writer_connection(begin_immediate=True) as conn:
-        assert wheel_repo.append_wheel_event_once(extra, conn=conn)
-    wheel_events.append(extra)
-    with pytest.raises(ValueError, match="manifest is stale.*wheel_identity"):
-        module.apply_lot_identity_migration(path, stale_manifest)
-    # Recreate through the ordinary open path, not just the migration's
-    # translated trigger SQL, so both R1 DDL branches are exercised.
-    with connect_ledger_fixture(path) as conn:
-        conn.execute("DROP TRIGGER trg_position_lots_generation_update_same")
-        conn.execute("DROP TRIGGER trg_position_lots_generation_update_old")
-        conn.execute("DROP TRIGGER trg_position_lots_generation_update_new")
-    repo = SQLiteOptionPositionsRepository(path)
-    assert repo.list_wheel_events(account="lx") == wheel_events
-    with repo._writer_connection(begin_immediate=True) as conn:
-        for event in wheel_events:
-            assert not repo.append_wheel_event_once(event, conn=conn)
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            conn.execute("UPDATE wheel_events SET recorded_at_ms = recorded_at_ms + 1")
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            conn.execute("DELETE FROM wheel_events")
-        later = build_wheel_event(
-            event_id="wheel-after-reopen", account="sy", wheel_branch_id="other-branch",
-            lot_id="other-lot", event_type="wheel_branch_created",
-            occurred_at_ms=3000, recorded_at_ms=3001, payload={"direction": "put"},
-        )
-        assert repo.append_wheel_event_once(later, conn=conn)
-    assert repo.list_wheel_events(account="sy") == [later]
-    assert module.verify_lot_identity_migration(path)["ok"] is True
-    from src.application.ledger.lot_parity_probe import run_lot_parity_probe
-    parity = run_lot_parity_probe(sqlite_path=path)
-    assert parity["green"] is True
-    assert parity.get("retired_columns", []) == ["expiration"]
-    assert "expiration" not in parity["derived_columns"]
-    records = repo.list_position_lots()
-    evidence_repo = open_trade_reconciliation_evidence_repo(path)
-    assert {row["lot_id"]: row["fields"] for row in evidence_repo.list_position_lots()} == {
-        row["lot_id"]: row["fields"] for row in records
-    }
-    desired = [PositionLotRecord(lot_id=row['lot_id'], fields=row['fields']) for row in records]
-    assert repo.replace_position_lots(desired) == len(desired)
-    assert repo.position_projection_indexes_ready()
-    assert all(not item['missing'] and not item['unclassified'] for item in repo.position_projection_column_contract().values())
-    assert repo.list_position_lots() == records
-    assert repo.get_position_lot_fields(desired[0].lot_id) == desired[0].fields
-    assert len(repo.get_position_lots_by_ids([desired[0].lot_id])) == 1
-    assert repo.backfill_position_lot_contract_columns() == 0
-    assert repo.backfill_position_projection_accounts() == {
-        "trade_events_updated": 0, "position_lots_updated": 0,
-    }
-    assert repo.build_position_projection_indexes() == ()
-    assert repo.position_projection_normalized_columns_ready()
-    for account in ("lx", "sy"):
-        owned = [row for row in records if row["fields"]["contract_key"]["account"] == account]
-        snapshot = repo.position_projection_account_snapshot(account, include_records=True)
-        assert snapshot.lot_count == len(owned)
-        assert {row["lot_id"] for row in snapshot.records} == {row["lot_id"] for row in owned}
-        assert {row["lot_id"] for row in repo.list_active_position_lots(account=account)} == {
-            row["lot_id"] for row in owned if row["fields"]["status"] == "open"
-        }
-        inputs = evidence_repo.read_current_decision_projection_inputs(account)
-        assert {row["lot_id"] for row in inputs["lots"]} == {row["lot_id"] for row in owned}
-    from src.application.ledger.position_projection_migration import build_position_projection_migration_inventory
-    inventory = build_position_projection_migration_inventory(path)
-    assert "normalized_columns_incomplete" not in inventory["readiness_reasons"]
-    assert "required_indexes_missing" not in inventory["readiness_reasons"]
-    repo.replace_position_lots(desired[1:])
-    repo.apply_position_lot_diff(desired[:1], remove_missing=False)
-    assert len(repo.list_position_lots()) == len(desired)
-    changed_fields = {**desired[0].fields, "note": "R1 update regression"}
-    account = changed_fields["contract_key"]["account"]
-    before = repo.read_position_projection_account_metadata(account)["head"]["lots_generation"]
-    changed = repo.apply_position_lot_diff(
-        [PositionLotRecord(lot_id=desired[0].lot_id, fields=changed_fields)], remove_missing=False,
-    )
-    assert changed.changed == 1
-    assert repo.get_position_lot_fields(desired[0].lot_id) == changed_fields
-    assert repo.read_position_projection_account_metadata(account)["head"]["lots_generation"] == before + 1
-    moved_account = "sy" if account == "lx" else "lx"
-    generations = {
-        owner: repo.read_position_projection_account_metadata(owner)["head"]["lots_generation"]
-        for owner in (account, moved_account)
-    }
-    moved_fields = {
-        **changed_fields,
-        "contract_key": {**changed_fields["contract_key"], "account": moved_account},
-    }
-    repo.apply_position_lot_diff(
-        [PositionLotRecord(lot_id=desired[0].lot_id, fields=moved_fields)], remove_missing=False,
-    )
-    for owner, generation in generations.items():
-        assert repo.read_position_projection_account_metadata(owner)["head"]["lots_generation"] == generation + 1
-    run_position_projection_forced_full(repo, [])
-    assert module.verify_lot_identity_migration(path)["ok"] is True
-    from src.application.ledger.position_projection_publication import read_current_position_projection
-    for account in ("lx", "sy"):
-        assert read_current_position_projection(repo, account=account)["status"] == "trusted"
-    from src.application.ledger.position_projection_migration import verify_position_projection_migration
-    verified = verify_position_projection_migration(path)
-    assert verified["full_oracle_parity"]["status"] == "pass", verified
-    from src.application.ledger.current_decision_migration import build_current_decision_projection_migration_inventory
-    decision = build_current_decision_projection_migration_inventory(path)
-    assert decision["readiness"] == "ready", decision
-    assert decision["repair"]["missing_indexes"] == []
-    with connect_ledger_fixture(path) as conn:
-        assert position_lots_use_lot_id(conn) is True
-    SQLiteOptionPositionsRepository(path)
-    assert 'record_id' not in _columns(path)
-    assert 'expiration' not in _columns(path)
-
-    # The batch-adjust public write path must keep group collision protection
-    # after the storage identity changes, both for payload and event carriers.
-    from src.application.ledger.manual_trades import persist_manual_adjust_events
-    target = next(row for row in repo.list_position_lots()
-                  if row["fields"]["asset_type"] == "option" and row["fields"]["status"] == "open")
-    other = next(row for row in repo.list_position_lots() if row["lot_id"] != target["lot_id"])
-    repo.apply_position_lot_diff([
-        PositionLotRecord(lot_id=other["lot_id"], fields={**other["fields"], "strategy_group_id": "r1-occupied"}),
-    ], remove_missing=False)
-    before_events = repo.list_trade_events()
-    with pytest.raises(ValueError, match="already assigned to another position lot"):
-        persist_manual_adjust_events(repo, [{
-            "record_id": target["lot_id"], "fields": target["fields"],
-            "strategy_group_id": "r1-occupied", "as_of_ms": 6000,
-        }])
-    assert repo.list_trade_events() == before_events
-    run_position_projection_forced_full(repo, [])
-    adjusted = persist_manual_adjust_events(repo, [{
-        "record_id": target["lot_id"], "fields": repo.get_position_lot_fields(target["lot_id"]),
-        "strategy_group_id": "r1-new-group", "as_of_ms": 7000,
-    }])
-    assert len(adjusted) == 1 and adjusted[0].created
-    assert module.verify_lot_identity_migration(path)["ok"] is True
 
 
-@pytest.mark.parametrize('mutation, reason', [
-    ("UPDATE position_lots SET expiration = expiration + 1 WHERE expiration IS NOT NULL", 'round trip'),
-    (
-        "UPDATE position_lots SET source_event_id = 'different-event'",
-        'source_event_id disagrees',
-    ),
-    ("UPDATE position_lots SET strike = NULL WHERE expiration IS NOT NULL", 'requires expiration and strike'),
-])
-def test_r1_retirement_refuses_loss_before_rebuild(tmp_path: Path, repointed_build: None, mutation: str, reason: str) -> None:
-    path = _legacy_store(tmp_path)
-    with connect_ledger_fixture(path) as conn:
-        conn.execute(mutation)
-    before = _columns(path)
-    with pytest.raises(RuntimeError, match=reason):
-        _run_apply(path)
-    assert _columns(path) == before
-    with connect_ledger_fixture(path) as conn:
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = ?", (module.REBUILD_TEMP_TABLE,)).fetchone()[0] == 0
 
-
-def test_r1_partial_final_shape_is_not_healed_on_open(tmp_path: Path, repointed_build: None) -> None:
-    path = _legacy_store(tmp_path)
-    _run_apply(path)
-    with connect_ledger_fixture(path) as conn:
-        # No trigger references this metadata column; its absence is still corruption.
-        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'position_lots'").fetchall():
-            conn.execute(f'DROP TRIGGER "{name}"')
-        conn.execute('ALTER TABLE position_lots DROP COLUMN multiplier')
-    with pytest.raises(RuntimeError, match='unsupported or partial lot-identity schema'):
-        SQLiteOptionPositionsRepository(path)
-    assert 'multiplier' not in _columns(path)
-    assert 'expiration' not in _columns(path)

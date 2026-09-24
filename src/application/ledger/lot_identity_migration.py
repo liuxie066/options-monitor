@@ -1,22 +1,27 @@
-"""D1–D4 lot-identity migration: gated ``inventory`` / ``verify`` / ``apply``.
+"""D1–D4 lot-identity migration, read-only half: ``inventory`` / ``verify``.
 
-§13.2 row 8 fixes the conventions: this batch reuses the *conventions* of
-``om option-positions projection-migration`` (read-only ``inventory``, a
-required ``--manifest``, ``_add_local_write_flags(..., high_risk=True)`` for
-writes) but **not** its subcommand names. ``inventory`` / ``verify`` / ``apply``
-are already taken there and mean checkpoint/tail work, and ``activate`` /
-``deactivate`` are live in production. So this batch hangs off its own parent
-group (``lot-identity-migration``) and leaves the existing semantics alone.
+R2 retired the destructive half — ``apply``, its ``--dry-run`` preview, the D1/D2
+table rebuild, the D3/D4 payload rewrite, the ``wheel_events.stock_lot_id``
+rename, and the statement-level registry gate that deferred them. The one-off
+production window they existed for is complete (``CHANGELOG.md`` 3.6.5,
+2026-09-22), ``LOT_IDENTITY_WINDOW_ENABLEMENT`` is gone, and the removed code is
+recoverable from the released 3.6.x tags if a restored pre-window backup ever
+has to be migrated again.
 
-Two ``apply`` commands now exist with the same name and the same parameters but
-opposite meanings — the projection one lands a *disabled checkpoint* and is
-non-destructive, this one rewrites lot payloads and backfills identity. §13.3
-calls that "本批次唯一的操作者风险面"; the mitigation is the distinct parent
-group plus the distinct ``schema_version`` carried in every payload below.
+What is left answers the two questions a store still raises: what a D1–D4
+migration would have to do to it (``inventory``), and whether the payload
+classification behind that answer holds up against a fresh replay (``verify``).
+Neither writes, and neither needs a manifest.
+
+§13.2 row 8 fixes the conventions: this parent group reuses the *conventions* of
+``om option-positions projection-migration`` (a read-only ``inventory``) but
+**not** its subcommand names, because ``inventory`` / ``verify`` / ``apply``
+already mean checkpoint/tail work there and ``activate`` / ``deactivate`` are
+live in production.
 
 The D1–D4 definitions live in §9.4; the execution design in §12; the rulings in
-§9.5 (M1–M6). Four of §13.3's slice-3 assumptions did not survive contact with
-the code and are corrected here rather than silently implemented around:
+§9.5 (M1–M6). The assumptions below did not survive contact with the code and
+are corrected here rather than silently implemented around:
 
 1. **A dropped payload key is not automatically a defect.** §13.3 slice 3 says
    "凡 D3 计划丢弃的键在旧 payload 中非空即判 fail". The target shape
@@ -35,38 +40,7 @@ the code and are corrected here rather than silently implemented around:
    instead of certifying a loss (``EVENT_LAYER_MEASURED_DROPPED_KEYS``). The negative
    case §13.4 row 3 asks for (structured field empty, fact only in ``note`` KV)
    lands in ``lost``, which is the case this rule was written for.
-2. **D1/D2's rebuild is gated on this build's live SQL, not on the column
-   contract.** The window runs on the release that keeps *both* shapes
-   readable — the contract-tightening release (§9.5 M6 step 5) comes *after*
-   the window — so on window day the contract is deliberately still dual-shape
-   and answers the wrong question. What the rebuild must know is whether the
-   build that will keep running can read the rebuilt shape back, and that is a
-   statement-level property of its SQL: ``apply`` therefore reads the pinned
-   retired-column registry (``docs/retired_column_sql_registry.json``, the
-   ledger the repo-wide guardrail and its quality test pin against the tree)
-   and defers the destructive half while any unreviewed live statement — read,
-   write or DDL, since an open path that re-adds a retired column pushes the
-   rebuilt store back to the old shape — still names a retired column. R1's
-   exact old-shape exceptions require both-shape regression evidence; they are
-   removed with those branches in R2. The
-   deferred report names the statements that made it defer. §9.5 M2 also fixes
-   the granularity — D1's
-   ``drop_expiration`` and D2-step-2's
-   ``switch_primary_key_to_lot_id_and_drop_record_id`` are *one* table rebuild,
-   so both steps report that one traversal.
-3. **D3's rewrite is gated on the same fact, and cannot drop a fact.**
-   §12.4 D3 states the precondition itself — "写侧改为纯 lot 形状；读侧必须留
-   兼容读窗口，否则存量行读不出" — and the read side leaves that window in the
-   same release that repoints the SQL above (the payload readers move with it),
-   so the one registry gate opens the column rebuild and the payload rewrite
-   together. When it opens, a fresh full replay supplies the exact canonical
-   ``PositionLot.to_dict()`` payload for every lot. Before any rebuild, the
-   batch requires a replay without errors, full agreement with the stored
-   business payloads, and no key that ``_drop_disposition`` calls ``lost``.
-   The classifier is therefore the rewrite's loss gate, while the canonical
-   event replay is the write source; the old row is never used to synthesize a
-   partial v2 payload.
-4. **The checkpoint shortcut is weaker than "shape-only", but stronger than
+2. **The checkpoint shortcut is weaker than "shape-only", but stronger than
    nothing.** §13.3 slice 3 asks that ``verify`` not take
    ``projection_verify``'s reuse shortcut. The shortcut is real — ``--mode
    auto`` can answer ``ok: True`` with synthesised ``matched`` items and no
@@ -79,34 +53,18 @@ the code and are corrected here rather than silently implemented around:
    checkpoint was written. The guarantee below is structural — the reuse entry
    point is never called — rather than a claim that the shortcut would have
    fired.
-5. **The open path, not this batch, moves the store into its own precondition.**
-   ``_ensure_position_projection_schema`` adds ``lot_id`` and its unique index
-   from ``_init_db``, so the first ordinary writer open after the release lands
-   flips a pre-carrier store to the post-carrier shape. That is the shape this
-   batch's ``inventory`` reports as ``not_ready`` *by design*
-   (``lot_id_column_missing`` / ``lot_id_backfill_pending``), and it also moves
-   ``sqlite_schema_cookie``, ``column_contract`` and ``pending`` — i.e. the
-   inventory fingerprint — while ``store_identity`` stays equal. An ``inventory``
-   taken before that first open is therefore refused by ``apply`` even though it
-   describes this very store, and a refusal that blamed "another store" would
-   send the operator after the wrong problem. The transition fires once per
-   store (the second open is a no-op), so ``apply`` names the drift and the
-   recovery: re-inventory the store as it now is. Nothing else about the gate
-   changes — a store that genuinely moved on is still refused.
 """
 
 from __future__ import annotations
 
 from .sqlite_row_codec import FINAL_POSITION_LOT_COLUMNS, position_lots_use_lot_id, wheel_events_use_lot_id
 
-from collections import Counter
 from copy import deepcopy
 import json
 from pathlib import Path
 import re
 import sqlite3
-import time
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 # The ms → ``YYYY-MM-DD`` rule is the domain's, timezone included
 # (``EXPIRATION_DATE_TZ``); re-deriving it here is how a migration invents an
@@ -117,7 +75,6 @@ from src.application.ledger.position_projection_migration import (
     _assert_read_only_persistent_sizes,
     _column_names,
     _events,
-    _fail,
     _file_sizes,
     _json_object,
     _load_event_rows,
@@ -130,8 +87,6 @@ from src.application.ledger.position_projection_migration import (
     _store_identity,
     _store_path,
     _table_exists,
-    _validate_manifest,
-    _write_connection,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
@@ -145,7 +100,6 @@ from src.infrastructure.feishu_bitable import parse_note_kv
 
 INVENTORY_SCHEMA = "lot_identity_migration_inventory.v1"
 VERIFY_SCHEMA = "lot_identity_migration_verify.v1"
-APPLY_SCHEMA = "lot_identity_migration_apply.v1"
 
 #: The D3 target shape: exactly the keys ``PositionLot.to_dict()`` emits
 #: (``domain/domain/ledger/lots.py``). Pinned to the domain object by
@@ -332,19 +286,6 @@ _NOTE_KV_RECONSTRUCTION = (
 #: still names a retired column: the rebuilt shape would be one the build that
 #: keeps running cannot fully read back. §13.5 R4 / §9.5 M6 step 3, sequenced
 #: by the window's R1/R2 split.
-_DEFERRED_REPOINT_REASON = "live_sql_repointing_precedes_rebuild"
-
-#: The one-off D1-D4 production window is complete. Ordinary builds keep the
-#: write path disabled; inventory, verification, and dry-run remain read-only.
-LOT_IDENTITY_WINDOW_ENABLEMENT: str | None = None
-
-#: The two columns the rebuild retires: D1's derived ``expiration`` mirror and
-#: D2's legacy identity name. §9.5 M2 makes their removal *one* rebuild.
-RETIRED_LOT_COLUMNS = ("expiration", "record_id")
-
-#: §12.3 step 3's temporary name. ``DROP TABLE IF EXISTS`` on it is what makes
-#: a re-run after an interrupted window idempotent.
-REBUILD_TEMP_TABLE = "position_lots_lot_identity_rebuild"
 
 #: Dropped keys the D3 traversal must write somewhere, and where. Every entry is
 #: a path into the target shape, and each path is exactly the carrier string
@@ -376,89 +317,6 @@ CARRIER_TARGETS = {
 #: They are classified together because they are the same fact in the ms and the
 #: ``YYYY-MM-DD`` vocabulary, and the rewrite has to know which copy to trust.
 _EXPIRATION_CARRIER_KEYS = ("expiration", "expiration_ymd")
-
-#: The inventory keys that move when the *writer* open path adds the identity
-#: carrier to a store that predates it (``repository_projection_schema``'s
-#: ``_ensure_position_projection_schema``, reached from ``repository_core``'s
-#: ``_init_db`` on an ordinary ``SQLiteOptionPositionsRepository(path)``). This
-#: drift is this migration's own precondition being met rather than the store
-#: diverging, so ``apply`` names it instead of leaving the operator to guess.
-_SCHEMA_TRANSITION_KEYS = ("column_contract", "pending", "sqlite_schema_cookie")
-
-
-def _schema_transition_hint(drift: list[str]) -> str:
-    """Explain the one drift the open path causes, and only that one."""
-
-    if set(drift) != set(_SCHEMA_TRANSITION_KEYS):
-        return ""
-    return (
-        "; that is the lot_id carrier a writer's first open adds to a store that "
-        "predates it, which happens once per store — re-run inventory against the "
-        "store as it now is"
-    )
-
-
-#: The statement-level ledger of live SQL that names the retired columns:
-#: generated by ``scripts/retired_column_scan.py --write`` (line scan + window
-#: scan — DDL column lists span lines) and pinned against the tree by the
-#: repo-wide guardrail and its quality test. ``apply`` reads it as the build's
-#: own answer to "can the running build read the rebuilt shape back?".
-RETIRED_COLUMN_REGISTRY_PATH = (
-    Path(__file__).resolve().parents[3] / "docs" / "retired_column_sql_registry.json"
-)
-
-def _live_sql_naming_retired_columns() -> tuple[str, ...]:
-    """Which live statements of this build still name a retired column.
-
-    The gate is *derived from the ledger in force*, never from a flag: the
-    registry is what the ``--check`` guardrail and its quality test hold the
-    tree to, so "the build still carries such a statement" and "the ledger
-    lists one" are the same fact, checked on every PR and every production
-    upgrade. The rebuild's question — "can this build read the rebuilt shape
-    back?" — is a statement-level property of the SQL, and the registry answers
-    it per statement. The column contract deliberately cannot answer that
-    question because the migration window may still be dual-shape.
-
-    Returns one ``"module (kind)"`` descriptor per live statement in the
-    ledger's order; empty means the destructive half may run. An unreadable or
-    malformed ledger reports a deferral too: this gate opens on evidence,
-    never on a missing file.
-    """
-
-    try:
-        registry = json.loads(RETIRED_COLUMN_REGISTRY_PATH.read_text(encoding="utf-8"))
-        detail = registry["src"]["detail"]
-        dynamic = registry["src"]["dynamic_sql"]
-        if not isinstance(detail, list) or not isinstance(dynamic, list):
-            raise ValueError("statement inventories must be lists")
-        return tuple(
-            f"{hit['module']} ({hit['kind']})" for hit in detail + dynamic
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return (f"<registry unreadable: {RETIRED_COLUMN_REGISTRY_PATH.name}>",)
-
-
-#: §12.3's checked rebuild recipe, carried by ``apply`` for the window.
-REBUILD_RECIPE = (
-    "probe shape (PRAGMA table_info + expected index set); return if already new",
-    "read every row and normalize in Python",
-    "DROP TABLE IF EXISTS position_lots_lot_identity_rebuild",
-    "CREATE TABLE position_lots_lot_identity_rebuild with lot_id as PRIMARY KEY and without expiration/record_id",
-    "INSERT every normalized row",
-    "assert row count equality",
-    "assert read-back equality",
-    "PRAGMA foreign_key_check(position_lots_lot_identity_rebuild)",
-    "DROP TABLE position_lots",
-    "ALTER TABLE position_lots_lot_identity_rebuild RENAME TO position_lots",
-    "recreate guard triggers and indexes without expiration/record_id",
-)
-
-
-def _canonical_fields_json(fields: Mapping[str, Any]) -> str:
-    """The write path's own encoding (``repository_common._position_lot_storage_values``)."""
-
-    return json.dumps(fields, ensure_ascii=False, sort_keys=True, allow_nan=False)
-
 
 def _lot_shape_keys(asset_type: Any) -> frozenset[str]:
     """The keys ``PositionLot.to_dict()`` emits for this row.
@@ -743,59 +601,38 @@ def _parse_fields(raw: Any) -> dict[str, Any] | None:
 def _scan_lot_payloads(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Read every lot row through a column probe so an older store still reads.
 
-    Same idiom as §13.2's existing probes (``position_projection_migration``
-    ``:271``-``:273``): a store that predates the identity carrier must still be
-    readable, so a missing column is selected as ``NULL AS <name>`` rather than
-    crashing the inventory that is supposed to report it.
+    A store that predates the identity carrier must still be readable. Keep
+    the old-column SQL literal so the retired-column registry can pin it.
     """
 
     if not _table_exists(conn, "position_lots"):
         return []
     columns = set(_column_names(conn, "position_lots"))
-    identity = "lot_id" if "lot_id" in columns else "NULL AS lot_id"
-    # ``record_id`` is what D2's rebuild retires, and this module is the surface
-    # that reports readiness for that shape — so it probes its own ordering key
-    # as well, rather than crashing the inventory that is supposed to name the
-    # missing column. ``lot_id`` becomes the key at that point.
     if "record_id" in columns:
-        key_column: str | None = "record_id"
+        sql = "SELECT * FROM position_lots ORDER BY record_id"
     elif "lot_id" in columns:
-        key_column = "lot_id"
+        sql = "SELECT * FROM position_lots ORDER BY lot_id"
     else:
-        key_column = None
-    selected = [
-        "record_id" if "record_id" in columns else "NULL AS record_id",
-        identity,
-        "fields_json",
-    ]
-    for name in (
-        "account",
-        "source_event_id",
-        "expiration",
-        "strike",
-        "multiplier",
-    ):
-        selected.append(name if name in columns else f"NULL AS {name}")
-    order = f" ORDER BY {key_column}" if key_column else ""
+        sql = "SELECT * FROM position_lots"
     rows: list[dict[str, Any]] = []
-    for row in conn.execute(
-        f"SELECT {','.join(selected)} FROM position_lots{order}"
-    ):
+    for row in conn.execute(sql):
+        values = dict(row)
+        lot_id = values.get("lot_id")
         rows.append(
             {
-                "record_id": str(row["record_id"] or ""),
+                "record_id": str(values.get("record_id") or ""),
                 "lot_id": (
-                    str(row["lot_id"]).strip()
-                    if row["lot_id"] not in (None, "")
+                    str(lot_id).strip()
+                    if lot_id not in (None, "")
                     else None
                 ),
                 "fields_json": row["fields_json"],
                 "fields": _parse_fields(row["fields_json"]),
-                "account": row["account"],
-                "source_event_id": row["source_event_id"],
-                "expiration": row["expiration"],
-                "strike": row["strike"],
-                "multiplier": row["multiplier"],
+                "account": values.get("account"),
+                "source_event_id": values.get("source_event_id"),
+                "expiration": values.get("expiration"),
+                "strike": values.get("strike"),
+                "multiplier": values.get("multiplier"),
             }
         )
     return rows
@@ -963,15 +800,6 @@ def _classify_dropped_keys(
     return buckets
 
 
-def _projection_heads(conn: sqlite3.Connection) -> dict[str, int]:
-    if not _table_exists(conn, "position_projection_heads"):
-        return {}
-    return {
-        str(row["account"]): int(row["lots_generation"] or 0)
-        for row in conn.execute(
-            "SELECT account, lots_generation FROM position_projection_heads"
-        )
-    }
 
 
 def _inventory_from_conn(
@@ -1154,60 +982,6 @@ def build_lot_identity_migration_inventory(sqlite_path: str | Path) -> dict[str,
     )
 
 
-def preview_lot_identity_migration_apply(
-    sqlite_path: str | Path,
-    manifest: Mapping[str, Any],
-) -> dict[str, Any]:
-    supplied = _validate_manifest(manifest, schema=INVENTORY_SCHEMA)
-    current = _validate_manifest(
-        build_lot_identity_migration_inventory(sqlite_path),
-        schema=INVENTORY_SCHEMA,
-    )
-    checks = {
-        "store_identity": supplied.get("store_identity") == current.get("store_identity"),
-        "inventory_fingerprint": supplied.get("inventory_fingerprint")
-        == current.get("inventory_fingerprint"),
-    }
-    reasons = set(current.get("readiness_reasons") or [])
-    blocking_reasons = [
-        reason
-        for reason in (
-            "base_tables_missing",
-            "record_id_column_missing",
-            "lot_asset_type_unresolved",
-        )
-        if reason in reasons
-    ]
-    contract = current.get("column_contract", {}).get("position_lots", {})
-    if "column_contract_open" in reasons and (
-        contract.get("unclassified")
-        or set(contract.get("missing") or ()) - {"lot_id"}
-    ):
-        blocking_reasons.append("column_contract_open")
-    if not _live_sql_naming_retired_columns() and "projection_replay_mismatch" in reasons:
-        blocking_reasons.append("projection_replay_mismatch")
-    dropped = dict(current.get("dropped_key_classification") or {})
-    if dropped.get("lost"):
-        blocking_reasons.append("dropped_payload_keys_would_lose_facts")
-    manifest_matches = all(checks.values())
-    migration_ready = not blocking_reasons
-    apply_enabled = bool(LOT_IDENTITY_WINDOW_ENABLEMENT)
-    return {
-        "schema_version": "lot_identity_migration_apply_preview.v1",
-        "operation": "apply_preview",
-        "dry_run": True,
-        "write_applied": False,
-        "apply_enabled": apply_enabled,
-        "manifest_matches": manifest_matches,
-        "migration_ready": migration_ready,
-        "would_apply": manifest_matches and migration_ready and apply_enabled,
-        "ok": manifest_matches and migration_ready and apply_enabled,
-        "checks": checks,
-        "readiness": current.get("readiness"),
-        "blocking_reasons": blocking_reasons,
-        "pending": current.get("pending"),
-        "dropped_key_classification": dropped,
-    }
 
 
 def verify_lot_identity_migration(sqlite_path: str | Path) -> dict[str, Any]:
@@ -1372,33 +1146,6 @@ def _checkpoint_state(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def _backfill_lot_id(conn: sqlite3.Connection) -> int:
-    """Fill the identity carrier for rows that predate it.
-
-    §13.2 row 7's gated form: same shape as
-    ``backfill_position_lot_contract_columns`` — an explicit ``UPDATE`` inside
-    the gated ``apply`` transaction, never on the open path. ``record_id`` is
-    the primary key, so the assignment cannot produce a duplicate and the
-    ``idx_position_lots_lot_id`` unique index cannot trip.
-    """
-
-    if "record_id" not in set(_column_names(conn, "position_lots")):
-        # Past D2's rebuild the carrier *is* the primary key, so there is no
-        # legacy column left to read an identity from and nothing to fill.
-        return 0
-    updated = conn.execute(
-        "UPDATE position_lots SET lot_id = record_id WHERE lot_id IS NULL"
-    ).rowcount
-    return int(updated or 0)
-
-
-def _ensure_lot_identity_carrier_schema(conn: sqlite3.Connection) -> None:
-    if "lot_id" not in set(_column_names(conn, "position_lots")):
-        conn.execute("ALTER TABLE position_lots ADD COLUMN lot_id TEXT")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_lots_lot_id "
-        "ON position_lots(lot_id)"
-    )
 
 
 def _place_carried(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
@@ -1466,89 +1213,6 @@ def _aligned_lot_payload(
     return aligned
 
 
-def _rewrite_lot_payloads(
-    conn: sqlite3.Connection,
-    *,
-    align_to_lot_shape: bool,
-    replayed_payloads: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, int]:
-    """D3 and D4 in one traversal over ``position_lots``.
-
-    §9.4's D3 and D4 are two items with one edit: aligning a row to the lot
-    shape and removing the retired ``position_id`` both rewrite the same
-    ``fields_json``, so a second pass would only re-encode the first pass's
-    output. ``align_to_lot_shape`` separates the halves the two items own:
-    ``apply`` runs the alignment only once the gate's ledger says the read side
-    has converged, and otherwise performs exactly the D4 cleanup the batch has
-    always performed.
-
-    ``fields_json`` is rewritten in the write path's own canonical form
-    (``sort_keys``, ``ensure_ascii=False``, ``allow_nan=False``), so a later
-    republish of an unchanged lot produces identical bytes.
-
-    The row key is probed like every other column here: ``record_id`` is what
-    D2's rebuild retires, and ``lot_id`` is the key after it.
-    """
-
-    columns = set(_column_names(conn, "position_lots"))
-    if "record_id" in columns:
-        key_column = "record_id"
-    elif "lot_id" in columns:
-        key_column = "lot_id"
-    else:
-        return {"rows_scanned": 0, "position_id_rows": 0, "rewritten_rows": 0}
-    # ``NOTE_KV_SURVIVING_COLUMNS`` names the derived columns a note-only fact
-    # may still live in, so the classification below needs their values, not
-    # just their names.
-    surviving = [
-        name for name in NOTE_KV_SURVIVING_COLUMNS.values() if name in columns
-    ]
-    rows = conn.execute(
-        f"SELECT {key_column} AS row_key, fields_json"
-        f"{''.join(f', {name}' for name in surviving)}"
-        f" FROM position_lots ORDER BY {key_column}"
-    ).fetchall()
-    # The event-layer keys are answered by measurement, not declaration (see
-    # ``_drop_disposition``), so the rewrite asks the same question with the
-    # same reader the inventory does — classifying against an empty event
-    # layer here would abort the batch on rows whose family is really there.
-    families = _event_layer_strategy_families(conn)
-    scanned = position_id_rows = rewritten = 0
-    for row in rows:
-        scanned += 1
-        fields = _parse_fields(row["fields_json"])
-        if fields is None:
-            continue
-        has_position_id = _non_empty(fields.get("position_id"))
-        if has_position_id:
-            position_id_rows += 1
-        if align_to_lot_shape:
-            if replayed_payloads is not None:
-                lot_id = str(row["row_key"])
-                if lot_id not in replayed_payloads:
-                    raise RuntimeError(f"fresh replay omitted position lot: {lot_id}")
-                aligned = deepcopy(dict(replayed_payloads[lot_id]))
-            else:
-                aligned = _aligned_lot_payload(
-                    fields, row, _family_for_row({key_column: row["row_key"]}, families)
-                )
-        elif has_position_id:
-            aligned = {key: value for key, value in fields.items() if key != "position_id"}
-        else:
-            continue
-        encoded = _canonical_fields_json(aligned)
-        if encoded == _canonical_fields_json(fields):
-            continue
-        conn.execute(
-            f"UPDATE position_lots SET fields_json = ? WHERE {key_column} = ?",
-            (encoded, str(row["row_key"])),
-        )
-        rewritten += 1
-    return {
-        "rows_scanned": scanned,
-        "position_id_rows": position_id_rows,
-        "rewritten_rows": rewritten,
-    }
 
 
 def _fresh_replay_payloads(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
@@ -1580,384 +1244,6 @@ def _fresh_replay_payloads(conn: sqlite3.Connection) -> dict[str, dict[str, Any]
 #: ``PRAGMA table_info`` — which reports type/NOT NULL/DEFAULT but not CHECK,
 #: COLLATE or generated-column clauses, i.e. it silently drops every constraint
 #: it does not model.
-_TABLE_BODY = re.compile(
-    r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s*\((?P<body>.*)\)\s*(?:STRICT\s*)?$",
-    re.IGNORECASE | re.DOTALL,
-)
-
-_INDEX_DDL = re.compile(
-    r"^\s*CREATE\s+(?P<unique>UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>\S+)"
-    r"\s+ON\s+(?P<table>\S+)\s*\((?P<columns>[^)]*)\)(?P<tail>.*)$",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _primary_key_column(conn: sqlite3.Connection, table: str) -> str | None:
-    for row in conn.execute(f"PRAGMA table_info({table})"):
-        if int(row["pk"] or 0) == 1:
-            return str(row["name"])
-    return None
-
-
-def _split_column_defs(body: str) -> list[str]:
-    """Split a ``CREATE TABLE`` body on top-level commas only.
-
-    A ``CHECK(...)``/``DEFAULT (...)`` clause contains commas of its own, so a
-    plain ``split(",")`` would cut a column definition in half.
-    """
-
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for char in body:
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        if char == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-            continue
-        current.append(char)
-    parts.append("".join(current))
-    return [part.strip() for part in parts if part.strip()]
-
-
-def _column_def_name(definition: str) -> str:
-    name = definition.strip().split(None, 1)[0]
-    return name.strip('"`[]')
-
-
-def _rebuild_column_defs(conn: sqlite3.Connection, retained: list[str]) -> list[str]:
-    """The rebuilt table's column definitions, in ``retained`` order.
-
-    Every surviving column keeps the declaration the store already had; the
-    only authored change is D2's: the primary key moves from the retired
-    ``record_id`` onto ``lot_id``.
-    """
-
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='position_lots'"
-    ).fetchone()
-    if row is None or not str(row["sql"] or "").strip():
-        raise RuntimeError("rebuild requires the stored CREATE TABLE for position_lots")
-    match = _TABLE_BODY.match(str(row["sql"]).strip())
-    if match is None:
-        raise RuntimeError("position_lots CREATE TABLE is not in a parseable form")
-    declared = {
-        _column_def_name(definition): definition
-        for definition in _split_column_defs(match.group("body"))
-    }
-    if set(declared) != set(_column_names(conn, "position_lots")):
-        raise RuntimeError(
-            "position_lots CREATE TABLE and PRAGMA table_info disagree about its columns"
-        )
-    missing = [name for name in retained if name not in declared]
-    if missing:
-        raise RuntimeError(f"rebuilt table would lose columns: {', '.join(missing)}")
-    defs: list[str] = []
-    for name in retained:
-        definition = declared[name]
-        if name == "lot_id":
-            definition = f"{definition} NOT NULL PRIMARY KEY CHECK (length(trim(lot_id)) > 0)"
-        defs.append(definition)
-    return defs
-
-
-def _new_shape_trigger_sql(sql: str) -> str:
-    """Rewrite a stored ``position_lots`` trigger for the rebuilt shape.
-
-    The guards are recreated from the definitions the store is actually running
-    rather than from a copy of them kept here: a second copy of the guard DDL in
-    a migration module is a guard that drifts every time the real one is
-    touched, and the guards on the rebuilt table would then be the migration's
-    idea of them. Two edits are declared and nothing else:
-
-    * the identity column is renamed (``record_id`` → ``lot_id``, D2);
-    * the retired ``expiration`` column stops being watched (D1), in both the
-      ``AFTER UPDATE OF`` list and the change test; and
-    * the account the guard reads moves to where the target shape keeps it
-      (``$.account`` → ``$.contract_key.account``).
-
-    The third edit is forced by the first two being landable at all: the guard
-    the store is running (``repository_projection_schema``:
-    ``trg_position_lots_account_*``, the three generation triggers) reads the
-    *flat* ``$.account``, and ``PositionLot.to_dict()`` has no such key — it
-    carries the account at ``contract_key.account``. A rebuilt table that kept a
-    flat reading guard would reject every write of an aligned row, so the
-    rebuild would produce a store that cannot be written to. It is one more
-    reason the D3 rewrite runs after this function and not before: the guards
-    have to be the new shape's before the payloads become the new shape.
-
-    Anything left over that still names a retired column, or still reads the
-    flat account path, raises — a body this rewrite does not understand stops
-    the migration instead of silently installing a guard that cannot fire.
-    """
-
-    rewritten = re.sub(r"\brecord_id\b", "lot_id", sql)
-    rewritten = re.sub(
-        r"\s+OR\s+OLD\.expiration IS NOT NEW\.expiration", "", rewritten
-    )
-    rewritten = re.sub(r"\s*,\s*expiration\b", "", rewritten)
-    rewritten = rewritten.replace("'$.account'", "'$.contract_key.account'")
-    for retired in (*RETIRED_LOT_COLUMNS, "'$.account'"):
-        if re.search(rf"\b{retired}\b" if retired.isidentifier() else re.escape(retired), rewritten):
-            raise RuntimeError(
-                f"cannot rebuild guard trigger {sql.split()[2] if len(sql.split()) > 2 else ''}"
-                f": {retired} still named after the declared rewrite"
-            )
-    return rewritten
-
-
-def _new_shape_index_sql(sql: str) -> str | None:
-    """Rewrite one stored ``position_lots`` index for the rebuilt shape.
-
-    Its column list loses the retired columns; an index whose list becomes
-    empty, or whose partial ``WHERE`` clause names a retired column, has no
-    shape left and is dropped. The name and the UNIQUE flag are kept, so the
-    store's index set stays recognisable.
-    """
-
-    match = _INDEX_DDL.match(sql.strip())
-    if match is None:
-        raise RuntimeError("position_lots index DDL is not in a parseable form")
-    tail = match.group("tail") or ""
-    for retired in RETIRED_LOT_COLUMNS:
-        if re.search(rf"\b{retired}\b", tail):
-            return None
-    columns = [item.strip() for item in match.group("columns").split(",")]
-    if match.group("name") in {"idx_position_lots_account_expiration", "idx_position_lots_account_record"}:
-        if columns not in (["account", "expiration", "record_id"], ["account", "record_id"]):
-            raise RuntimeError("position_lots account index has an unexpected definition")
-        return "CREATE INDEX idx_position_lots_account_lot ON position_lots(account, lot_id)"
-    kept = [item for item in columns if _column_def_name(item) not in RETIRED_LOT_COLUMNS]
-    if not kept:
-        return None
-    unique = "UNIQUE " if match.group("unique") else ""
-    return (
-        f"CREATE {unique}INDEX {match.group('name')} ON {match.group('table')}"
-        f"({', '.join(kept)}){tail}"
-    )
-
-
-def _new_shape_guard_sql(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
-    """The triggers and indexes the rebuilt table must carry.
-
-    Read before the old table is dropped, because dropping it drops both.
-    Identical index shapes are collapsed to one — after the retirement an
-    ``(expiration, record_id)`` and an ``(account, record_id)`` index can filter
-    down to the same column list, and carrying two indexes over one list is
-    write cost with no lookup to show for it. The UNIQUE entry wins, so the
-    identity index the open path re-creates on every open (``CREATE UNIQUE
-    INDEX IF NOT EXISTS idx_position_lots_lot_id``) is the one that survives and
-    the next open stays a no-op.
-    """
-
-    triggers = [
-        _new_shape_trigger_sql(str(row["sql"]))
-        for row in conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='position_lots'"
-            " AND sql IS NOT NULL ORDER BY name"
-        )
-    ]
-    parsed: list[tuple[bool, str, tuple[str, ...]]] = []
-    for row in conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='position_lots'"
-        " AND sql IS NOT NULL ORDER BY name"
-    ):
-        rewritten = _new_shape_index_sql(str(row["sql"]))
-        if rewritten is None:
-            continue
-        match = _INDEX_DDL.match(rewritten)
-        assert match is not None  # _new_shape_index_sql rebuilt this exact form
-        columns = tuple(
-            _column_def_name(item).lower()
-            for item in match.group("columns").split(",")
-        )
-        parsed.append((bool(match.group("unique")), rewritten, columns))
-    # UNIQUE first, then first-come: dropping a UNIQUE index because a plain one
-    # over the same columns was declared earlier would be a silent weakening.
-    indexes: list[str] = []
-    seen: set[tuple[str, ...]] = set()
-    for unique, rewritten, columns in sorted(parsed, key=lambda item: not item[0]):
-        if columns in seen:
-            continue
-        seen.add(columns)
-        indexes.append(rewritten)
-    return triggers, indexes
-
-
-def _row_key(values: Any) -> tuple[Any, ...]:
-    # ``repr`` for floats so the comparison is on the stored bits rather than on
-    # a arithmetic identity SQLite does not promise (and so a NaN, which is not
-    # equal to itself, cannot make every row differ).
-    return tuple(repr(value) if isinstance(value, float) else value for value in values)
-
-
-def _normalized_rebuild_values(
-    row: Mapping[str, Any],
-    columns: list[str],
-) -> list[Any]:
-    """§12.3 step 2 for one row: copy it out, then normalize in Python.
-
-    ``lot_id`` is the identity (D2); a row that still predates the gated
-    backfill inherits it from ``record_id``, which is the same value under the
-    old name (§9.5 M4). One implementation, because the read-back check has to
-    expect the same values the copier writes — a normalization applied only on
-    the way in reports every such row as a mismatch.
-    """
-
-    values = [row[name] for name in columns]
-    if not values[0] and "record_id" in row.keys():
-        values[0] = row["record_id"]
-    return values
-
-
-def _insert_rebuild_rows(
-    conn: sqlite3.Connection,
-    columns: list[str],
-    rows: list[Mapping[str, Any]],
-) -> int:
-    """§12.3 step 5. Rows go in column by column, so nothing a column holds is
-    dropped on the way through — including columns this batch has never heard
-    of."""
-
-    placeholders = ",".join("?" for _ in columns)
-    statement = (
-        f"INSERT INTO {REBUILD_TEMP_TABLE} ({','.join(columns)}) VALUES ({placeholders})"
-    )
-    inserted = 0
-    for row in rows:
-        conn.execute(statement, _normalized_rebuild_values(row, columns))
-        inserted += 1
-    return inserted
-
-
-def _assert_retirement_preserves_facts(
-    conn: sqlite3.Connection,
-    replayed_payloads: Mapping[str, Mapping[str, Any]],
-) -> None:
-    from domain.domain.ledger.position_fields import parse_exp_to_ms
-
-    for row in conn.execute("SELECT * FROM position_lots"):
-        legacy_fields = _parse_fields(row["fields_json"])
-        lot_id = str(row["lot_id"] or row["record_id"] or "").strip()
-        fields = replayed_payloads.get(lot_id)
-        if fields is None:
-            raise RuntimeError(f"fresh replay omitted position lot: {lot_id}")
-        contract = fields.get("contract_key") or {}
-        asset_type = fields.get("asset_type")
-        if asset_type not in {"option", "stock"}:
-            raise RuntimeError("retirement requires an explicit option or stock asset_type")
-        if not row["account"] or row["account"] != contract.get("account"):
-            raise RuntimeError("retirement account disagrees with contract_key")
-        if not row["source_event_id"] or row["source_event_id"] != fields.get("open_event_id"):
-            raise RuntimeError("retirement source_event_id disagrees with open_event_id")
-        legacy_source = legacy_fields.get("source_event_id")
-        if legacy_source not in (None, "", fields.get("open_event_id")):
-            raise RuntimeError("retirement payload source_event_id disagrees with open_event_id")
-        if asset_type == "option":
-            original = row["expiration"]
-            if original is None or row["strike"] is None:
-                raise RuntimeError("retirement option requires expiration and strike")
-            # Dropping milliseconds is only safe when the date round trip is exact.
-            ymd = expiration_timestamp_to_ymd(original)
-            if parse_exp_to_ms(ymd) != original or parse_exp_to_ms(contract.get("expiration_ymd")) != original:
-                raise RuntimeError("retirement expiration millisecond round trip differs")
-
-
-def _rebuild_position_lots(
-    conn: sqlite3.Connection,
-    *,
-    replayed_payloads: Mapping[str, Mapping[str, Any]],
-    failure_hook: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    """§12.3's checked rebuild: D1's dropped column and D2's renamed key in one.
-
-    §9.5 M2 makes ``drop_expiration`` and
-    ``switch_primary_key_to_lot_id_and_drop_record_id`` a single rebuild — one
-    table pass, one set of checks, one rollback — so this performs both or
-    neither. The order is the recipe's, and every check either passes or raises
-    ``RuntimeError``: the caller's transaction rolls back and no half-rebuilt
-    table survives. The hooks between the steps exist so that claim is testable
-    at each point, including the ones after the old table is dropped.
-    """
-
-    columns = _column_names(conn, "position_lots")
-    if not columns:
-        raise RuntimeError("rebuild requires a position_lots table")
-    probe = set(columns)
-    if "lot_id" not in probe:
-        raise RuntimeError("rebuild requires the lot_id identity column")
-    retired_present = [name for name in RETIRED_LOT_COLUMNS if name in probe]
-    if not retired_present and _primary_key_column(conn, "position_lots") == "lot_id":
-        return {
-            "rebuilt": False,
-            "reason": "shape_already_new",
-            "rows": int(conn.execute("SELECT count(*) FROM position_lots").fetchone()[0]),
-        }
-
-    _assert_retirement_preserves_facts(conn, replayed_payloads)
-    retained = [
-        "lot_id",
-        *(name for name in columns if name != "lot_id" and name not in set(RETIRED_LOT_COLUMNS)),
-    ]
-    defs = _rebuild_column_defs(conn, retained)
-    triggers, indexes = _new_shape_guard_sql(conn)
-    audit = [*retained, *(["record_id"] if "record_id" in probe else [])]
-    rows = conn.execute(
-        f"SELECT {','.join(audit)} FROM position_lots ORDER BY rowid"
-    ).fetchall()
-    _fail(failure_hook, "after_rebuild_rows_read")
-
-    conn.execute(f"DROP TABLE IF EXISTS {REBUILD_TEMP_TABLE}")
-    conn.execute(f"CREATE TABLE {REBUILD_TEMP_TABLE} ({', '.join(defs)})")
-    inserted = _insert_rebuild_rows(conn, retained, rows)
-    _fail(failure_hook, "after_rebuild_insert")
-    if inserted != len(rows):
-        raise RuntimeError(
-            f"rebuild row count differs: read {len(rows)}, inserted {inserted}"
-        )
-    _fail(failure_hook, "after_rebuild_row_count_check")
-
-    readback = conn.execute(
-        f"SELECT {','.join(retained)} FROM {REBUILD_TEMP_TABLE}"
-    ).fetchall()
-    written = Counter(
-        _row_key(_normalized_rebuild_values(row, retained)) for row in rows
-    )
-    stored = Counter(_row_key(row) for row in readback)
-    if written != stored:
-        raise RuntimeError("rebuild read-back differs from the rows copied out")
-    _fail(failure_hook, "after_rebuild_read_back_check")
-
-    violations = conn.execute(f"PRAGMA foreign_key_check({REBUILD_TEMP_TABLE})").fetchall()
-    if violations:
-        raise RuntimeError(f"rebuild foreign_key_check reported {len(violations)} violation(s)")
-    _fail(failure_hook, "after_rebuild_foreign_key_check")
-
-    conn.execute("DROP TABLE position_lots")
-    _fail(failure_hook, "after_rebuild_drop_old_table")
-    conn.execute(f"ALTER TABLE {REBUILD_TEMP_TABLE} RENAME TO position_lots")
-    _fail(failure_hook, "after_rebuild_rename")
-    for statement in triggers:
-        conn.execute(statement)
-    for statement in indexes:
-        conn.execute(statement)
-    _fail(failure_hook, "after_rebuild_guards")
-
-    return {
-        "rebuilt": True,
-        "temp_table": REBUILD_TEMP_TABLE,
-        "rows": len(rows),
-        "retired_columns": retired_present,
-        "columns": retained,
-        "primary_key": "lot_id",
-        "triggers_recreated": len(triggers),
-        "indexes_recreated": len(indexes),
-        "foreign_key_check": "ok",
-        "read_back": "equal",
-    }
 
 
 def _wheel_identity_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1972,320 +1258,18 @@ def _wheel_identity_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def _rename_wheel_lot_identity(conn: sqlite3.Connection) -> dict[str, Any]:
-    before = _wheel_identity_inventory(conn)
-    if before["status"] != "stock_lot_id":
-        return {**before, "renamed": False}
-    # SQLite rewrites dependent indexes and checks. Event bytes, historical
-    # hash keys, rowids and append-only triggers must survive unchanged.
-    conn.execute("ALTER TABLE wheel_events RENAME COLUMN stock_lot_id TO lot_id")
-    after = _wheel_identity_inventory(conn)
-    if after != {**before, "status": "lot_id"}:
-        raise RuntimeError("wheel identity rename changed stored event facts")
-    if conn.execute("PRAGMA foreign_key_check(wheel_events)").fetchall():
-        raise RuntimeError("wheel identity rename failed foreign_key_check")
-    return {**after, "renamed": True, "read_back": "equal"}
 
 
-def apply_lot_identity_migration(
-    sqlite_path: str | Path,
-    manifest: Mapping[str, Any],
-    *,
-    failure_hook: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    """Run the gated part of D1–D4 and itemize the part this batch may not run."""
-
-    if not LOT_IDENTITY_WINDOW_ENABLEMENT:
-        raise RuntimeError(
-            "lot-identity apply is not enabled on this build: the D1-D4 window "
-            "batch runs only inside an authorized migration window. Arming it is "
-            "a reviewed commit that sets "
-            "lot_identity_migration.LOT_IDENTITY_WINDOW_ENABLEMENT to that "
-            "window's authorization token; this build carries none."
-        )
-    supplied = _validate_manifest(manifest, schema=INVENTORY_SCHEMA)
-    path = _store_path(sqlite_path)
-    implementation, _timing = _loaded_implementation()
-    wall_start = time.perf_counter_ns()
-    cpu_start = time.process_time_ns()
-    with _write_connection(path) as conn:
-        before_sizes = _file_sizes(path)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            current = _inventory_from_conn(path, conn, implementation=implementation)
-            # Identity first: a fingerprint alone cannot tell "a different store"
-            # from "this store moved on", and the two need different recoveries.
-            if current["store_identity"] != supplied.get("store_identity"):
-                raise ValueError("migration manifest belongs to another store")
-            if current["inventory_fingerprint"] != supplied.get("inventory_fingerprint"):
-                # Every key of ``current`` outside these three *is* a fingerprint
-                # input (``_inventory_from_conn`` derives the other three from
-                # them), so this names what actually moved.
-                drift = sorted(
-                    key
-                    for key, value in current.items()
-                    if key not in ("inventory_fingerprint", "readiness", "readiness_reasons")
-                    and supplied.get(key) != value
-                )
-                raise ValueError(
-                    "migration manifest is stale: the store changed after the inventory "
-                    f"was taken (changed: {', '.join(drift) or 'unknown'})"
-                    f"{_schema_transition_hint(drift)}"
-                )
-            if "base_tables_missing" in current["readiness_reasons"]:
-                raise ValueError("migration requires an existing position_lots table")
-            _fail(failure_hook, "after_manifest_recheck")
-
-            heads_before = _projection_heads(conn)
-            lot_id_present_before = current["pending"]["d2_lot_id_column"][
-                "column_present"
-            ]
-            _ensure_lot_identity_carrier_schema(conn)
-            _fail(failure_hook, "after_schema")
-
-            backfilled = _backfill_lot_id(conn)
-            _fail(failure_hook, "after_lot_id_backfill")
-
-            # The gate reads the build's own ledger, not the store: the window
-            # runs on the release whose live SQL has been repointed while the
-            # column contract there is deliberately still dual-shape, so the
-            # statements — not the contract — are what say the rebuilt shape
-            # can be read back.
-            deferred_by = _live_sql_naming_retired_columns()
-            replayed_payloads: dict[str, dict[str, Any]] | None = None
-            if not deferred_by:
-                if "lot_asset_type_unresolved" in current["readiness_reasons"]:
-                    raise RuntimeError(
-                        "lot asset_type is missing, unknown, or conflicts with fresh replay"
-                    )
-                if "projection_replay_mismatch" in current["readiness_reasons"]:
-                    raise RuntimeError("fresh replay differs from stored position lots")
-                lost = current["dropped_key_classification"]["lost"]
-                if lost:
-                    key = sorted(lost)[0]
-                    raise RuntimeError(
-                        "lot payload rewrite would lose a fact: "
-                        f"key {key!r} has no carrier ({lost[key]['reason']})"
-                    )
-                replayed_payloads = _fresh_replay_payloads(conn)
-            # The rebuild goes first, and the payload rewrite follows it: the
-            # rebuilt table's account guards read the account at the target
-            # shape's path (``contract_key.account``), so they can only be
-            # installed before the rows are aligned to it. Step order in the
-            # report below is the *item* order (D1–D4 design order), not this
-            # execution order.
-            rebuild = (
-                _rebuild_position_lots(
-                    conn,
-                    replayed_payloads=replayed_payloads or {},
-                    failure_hook=failure_hook,
-                )
-                if not deferred_by
-                else None
-            )
-            if rebuild is not None:
-                _fail(failure_hook, "after_rebuild")
-            wheel_rename = _rename_wheel_lot_identity(conn) if not deferred_by else None
-            if wheel_rename is not None:
-                _fail(failure_hook, "after_wheel_identity_rename")
-            rewrite = _rewrite_lot_payloads(
-                conn,
-                align_to_lot_shape=not deferred_by,
-                replayed_payloads=replayed_payloads,
-            )
-            _fail(failure_hook, "after_position_id_strip")
-
-            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-            if str(integrity) != "ok":
-                raise RuntimeError(f"integrity_check failed: {integrity}")
-            lot_count = int(
-                conn.execute("SELECT count(*) FROM position_lots").fetchone()[0]
-            )
-            if lot_count != current["counts"]["position_lots"]:
-                raise RuntimeError("lot count changed during the identity backfill")
-            null_lot_ids = int(
-                conn.execute(
-                    "SELECT count(*) FROM position_lots WHERE lot_id IS NULL"
-                ).fetchone()[0]
-            )
-            if null_lot_ids:
-                raise RuntimeError("lot identity backfill left NULL carriers")
-            heads_after = _projection_heads(conn)
-            _fail(failure_hook, "before_commit")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    advanced = sorted(
-        account
-        for account, generation in heads_after.items()
-        if generation != heads_before.get(account)
-    )
-    # Each status is derived from what the step actually changed, so a re-run on
-    # a migrated store reads as "already satisfied" instead of as the same
-    # "applied" a first migration reports. The step names are the surface an
-    # operator or a follow-up automation keys on, so a constant here would make
-    # "migrated" and "nothing happened" indistinguishable.
-    ensure_status = "already_present" if lot_id_present_before else "applied"
-    rebuilt = int(bool(rebuild and rebuild["rebuilt"]))
-    changed: list[tuple[str, int]] = [
-        ("ensure_lot_id_column", int(not lot_id_present_before)),
-        ("backfill_lot_id", backfilled),
-        ("strip_position_id_from_fields_json", rewrite["position_id_rows"]),
-    ]
-    if not deferred_by:
-        changed += [
-            # D1 and D2 share one rebuild (§9.5 M2), so one table pass satisfies
-            # both steps and both names are reported as changed — an operator
-            # reading the ledger item by item should not have to know that D1's
-            # line was carried by D2's.
-            ("switch_primary_key_to_lot_id_and_drop_record_id", rebuilt),
-            ("drop_expiration_column", rebuilt),
-            ("rewrite_fields_json_to_lot_shape", rewrite["rewritten_rows"]),
-            ("rename_wheel_stock_lot_id", int(bool(wheel_rename and wheel_rename["renamed"]))),
-        ]
-    steps_changed = [name for name, count in changed if count]
-    # The three destructive steps are the same three entries in both states —
-    # same items, same names, same order — so an operator's ledger keeps its
-    # shape across the window. Only the status changes, and the one reason is
-    # the one fact the gate reads: this build still owes the window the
-    # repointing that lets the rebuilt shape be read back.
-    if deferred_by:
-        destructive_steps: list[dict[str, Any]] = [
-            {
-                "item": "D2",
-                "step": "switch_primary_key_to_lot_id_and_drop_record_id",
-                "status": "deferred",
-                "reason": _DEFERRED_REPOINT_REASON,
-            },
-            {
-                "item": "D1",
-                "step": "drop_expiration_column",
-                "status": "deferred",
-                "reason": _DEFERRED_REPOINT_REASON,
-            },
-            {
-                "item": "D3",
-                "step": "rewrite_fields_json_to_lot_shape",
-                "status": "deferred",
-                "reason": _DEFERRED_REPOINT_REASON,
-            },
-        ]
-        rebuild_report: dict[str, Any] = {
-            # The deferral's cause, statement by statement: an operator reading
-            # a window receipt sees which build-side repointing is still
-            # missing rather than only that something is.
-            "rebuild_gate": {
-                "criterion": "no live SQL names a retired column",
-                "ledger": RETIRED_COLUMN_REGISTRY_PATH.name,
-                "live_statements": list(deferred_by),
-            }
-        }
-    else:
-        assert rebuild is not None  # the gate is what decides whether it runs
-        rebuild_status = "applied" if rebuild["rebuilt"] else "already_satisfied"
-        destructive_steps = [
-            {
-                "item": "D2",
-                "step": "switch_primary_key_to_lot_id_and_drop_record_id",
-                "status": rebuild_status,
-            },
-            {
-                "item": "D1",
-                "step": "drop_expiration_column",
-                "status": rebuild_status,
-            },
-            {
-                "item": "D3",
-                "step": "rewrite_fields_json_to_lot_shape",
-                "status": "applied" if rewrite["rewritten_rows"] else "already_satisfied",
-                "rows_updated": rewrite["rewritten_rows"],
-            },
-        ]
-        # The rebuild's own receipt, only in this state: the deferred receipt
-        # carries ``rebuild_gate`` instead, because there the question an
-        # operator asks is which statements held the rebuild back, not what a
-        # rebuild that did not run returned.
-        rebuild_report = {"rebuild": rebuild, "wheel_identity_rename": wheel_rename}
-    result = {
-        "schema_version": APPLY_SCHEMA,
-        "generated_at_utc": _now_iso(),
-        "operation": "apply",
-        "write_applied": bool(steps_changed),
-        "steps_changed": steps_changed,
-        "store_identity": _store_identity(path),
-        "source_manifest_hash": supplied["manifest_hash"],
-        "steps": [
-            {
-                "item": "D2",
-                "step": "ensure_lot_id_column",
-                "status": ensure_status,
-            },
-            {
-                "item": "D2",
-                "step": "backfill_lot_id",
-                "status": "applied" if backfilled else "already_satisfied",
-                "rows_updated": backfilled,
-            },
-            {
-                "item": "D4",
-                "step": "strip_position_id_from_fields_json",
-                "status": (
-                    "applied" if rewrite["position_id_rows"] else "already_satisfied"
-                ),
-                "rows_updated": rewrite["position_id_rows"],
-            },
-            *destructive_steps,
-        ],
-        "deferred_rebuild_recipe": list(REBUILD_RECIPE),
-        **rebuild_report,
-        "pending_before": {
-            key: current["pending"][key]
-            for key in (
-                "d1_expiration_column",
-                "d2_record_id_column",
-                "d2_lot_id_column",
-                "d4_position_id_rows",
-            )
-        },
-        "projection_heads_advanced": {
-            "accounts": advanced,
-            "reason": "fields_json is in the generation trigger's AFTER UPDATE OF list, so the D4 rewrite bumps lots_generation",
-        },
-        # A real entry point, not a placeholder: D4 rewrites ``fields_json``,
-        # which the generation trigger watches, so the head's ``lots_generation``
-        # moves ahead of what the tail built and readers gate on the pair.
-        # ``om option-positions rebuild`` republishes ``position_lots`` from
-        # canonical ``trade_events``; the next ordinary tail publish heals it too.
-        "required_follow_up": (
-            ["om option-positions rebuild"] if advanced else []
-        ),
-        "sqlite_bytes": {
-            "before": before_sizes,
-            "after": _file_sizes(path),
-        },
-        "timing": {
-            "wall_ns": time.perf_counter_ns() - wall_start,
-            "cpu_ns": time.process_time_ns() - cpu_start,
-        },
-    }
-    return _manifest(result)
 
 
 __all__ = [
-    "APPLY_SCHEMA",
     "CARRIED_DROPPED_KEYS",
     "CARRIER_TARGETS",
     "INVENTORY_SCHEMA",
     "LOT_SHAPE_KEYS_COMMON",
     "LOT_SHAPE_KEYS_STOCK_EXTRA",
-    "REBUILD_RECIPE",
     "RECONSTRUCTIBLE_DROPPED_KEYS",
-    "RETIRED_LOT_COLUMNS",
     "VERIFY_SCHEMA",
-    "apply_lot_identity_migration",
     "build_lot_identity_migration_inventory",
-    "preview_lot_identity_migration_apply",
     "verify_lot_identity_migration",
 ]

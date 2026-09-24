@@ -328,16 +328,12 @@ def _decode_fields_json(raw: Any, *, lot_id: str) -> dict[str, Any]:
 def read_stored_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Read the stored rows **raw** — no codec, no column heal.
 
-    Identity follows the same carrier-or-fallback rule as
-    ``sqlite_row_codec.position_lot_row_to_record`` and
-    ``read_only_evidence._read_position_lots``: the ``lot_id`` column when the
-    store has one (production does not yet), else the ``record_id`` column.
-
-    Both identity columns are probed rather than assumed. ``record_id`` is the
-    pre-slice-3 spelling of the carrier and slice 3 validates its ``RENAME
-    COLUMN record_id TO lot_id`` by re-running this comparison — a hard-coded
-    column name would make the probe die on the rename instead of describing the
-    store on the other side of it.
+    Identity is the ``lot_id`` column, and only it: R2 removed the
+    ``record_id`` branch once the production window closed (``CHANGELOG.md``
+    3.6.5) and the rename it existed to validate was verified. A store still
+    carrying the retired identity column is refused loudly rather than read
+    through a fallback, so a shape nothing should still have cannot decide what
+    the comparison measures.
     """
     if not _table_exists(conn, "position_lots"):
         raise ValueError("position lot parity probe requires a position_lots table")
@@ -352,24 +348,19 @@ def read_stored_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "position_lots is missing derived columns required by face B: "
             + ", ".join(missing_columns)
         )
-    identity_columns = [name for name in ("lot_id", "record_id") if name in columns]
-    if not identity_columns:
+    if "lot_id" not in columns:
         raise ValueError(
-            "position_lots has neither lot_id nor record_id: the probe cannot "
-            "identify its rows"
+            "position_lots still carries the retired identity shape (no lot_id "
+            "column): the parity probe reads only the final shape"
         )
     rows = conn.execute(
-        "SELECT * FROM position_lots ORDER BY lot_id" if "lot_id" in columns else
-        "SELECT * FROM position_lots ORDER BY record_id"
+        "SELECT * FROM position_lots ORDER BY lot_id"
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
-        record_id = str(row["record_id"] or "") if "record_id" in columns else ""
-        raw_carrier = row["lot_id"] if "lot_id" in row.keys() else None
-        lot_id = str(raw_carrier).strip() if raw_carrier not in (None, "") else record_id
+        lot_id = str(row["lot_id"] or "").strip()
         out.append(
             {
-                "record_id": record_id,
                 "lot_id": lot_id,
                 "fields": _decode_fields_json(row["fields_json"], lot_id=lot_id),
                 "columns": {
@@ -877,7 +868,6 @@ def run_lot_parity_probe(
             {
                 "status": "extra_in_store",
                 "lot_id": lot_id,
-                "record_id": stored_by_id[lot_id]["record_id"],
             }
         )
     for lot_id in missing_ids:
@@ -922,7 +912,6 @@ def run_lot_parity_probe(
         attribution_items.append(
             {
                 "lot_id": lot_id,
-                "record_id": row["record_id"],
                 "attribution": attribution,
                 "source_event_id": source_event_id,
                 "source_event_id_source": source_event_id_source,

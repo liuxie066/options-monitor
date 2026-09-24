@@ -468,8 +468,11 @@ def test_repository_rejects_wheel_event_v1_without_changing_facts(
         conn.commit()
 
     before = db_path.read_bytes()
-    with pytest.raises(RuntimeError, match="wheel_events has a legacy schema"):
+    with pytest.raises(RuntimeError, match="wheel_events has a legacy schema") as error:
         SQLiteOptionPositionsRepository(db_path)
+    assert "lot-identity-migration inventory" in str(error.value)
+    assert "separately authorized historical migration code" in str(error.value)
+    assert "apply" not in str(error.value)
     assert db_path.read_bytes() == before
 
 

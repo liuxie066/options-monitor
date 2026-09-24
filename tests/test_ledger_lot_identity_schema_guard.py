@@ -66,9 +66,14 @@ def test_legacy_or_partial_store_is_rejected_without_mutation(
         conn.execute(position_lots_ddl)
     before = path.read_bytes()
 
-    with pytest.raises(RuntimeError, match="legacy|unsupported or partial"):
+    with pytest.raises(RuntimeError, match="legacy|unsupported or partial") as error:
         SQLiteOptionPositionsRepository(path)
 
+    message = str(error.value)
+    assert "lot-identity-migration inventory" in message
+    assert "`verify`" in message
+    assert "separately authorized historical migration code" in message
+    assert "apply" not in message
     assert path.read_bytes() == before
     assert not any(Path(f"{path}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal", ".writer.lock"))
 

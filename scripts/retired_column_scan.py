@@ -20,14 +20,13 @@ output as the canonical count) found all three:
 3. Index-name constants: ``idx_position_lots_account_expiration`` is not
    SQL text, but dropping that index is part of retiring the column.
 
-Dynamically assembled SQL (f-strings) cannot be judged from literals, so
-each f-string that names a table is recorded in ``dynamic_sql`` -- pinned,
-not silently missed.
+Dynamically assembled SQL (f-strings) naming a retired table cannot be
+judged from literals alone. Record each in ``dynamic_sql``, even if its
+retired-column list is empty because the column could be interpolated.
 
-The migration tool and the parity probe must name the retired columns (the
-probe's whole job is to compare them); they are scanned but recorded in the
-``exempt`` section, and the exemption is asserted non-empty so a renamed
-module cannot hollow it out.
+The read-only lot-identity inventory and the projection migration still need
+old-column reads; they are scanned but recorded in the ``exempt`` section.
+The exemption is asserted non-empty so a renamed module cannot hollow it out.
 
 Usage:
     ./.venv/bin/python scripts/retired_column_scan.py --write
@@ -57,10 +56,11 @@ RETIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 #: Modules whose job requires naming the retired columns. Recorded, counted,
-#: and asserted present -- exempt is not invisible.
+#: and asserted present -- exempt is not invisible. R2 removed the parity
+#: probe's old-shape branch; the read-only lot-identity inventory still reads
+#: the old shape to diagnose it.
 EXEMPT_MODULES: tuple[str, ...] = (
     "src/application/ledger/lot_identity_migration.py",
-    "src/application/ledger/lot_parity_probe.py",
     "src/application/ledger/position_projection_migration.py",
 )
 
@@ -165,7 +165,7 @@ def _scan_module(path: Path, module: str) -> tuple[list[Hit], list[Hit]]:
     def _record(bucket: dict, kind: str, text: str) -> None:
         tables = _mentioned_tables(text)
         columns = _retired_in(text, tables) or _index_name_columns(text)
-        if not columns:
+        if not columns and kind != "dynamic":
             return
         digest = _digest(text)
         key = (kind, digest, module)

@@ -31,6 +31,12 @@ def test_every_exempt_module_still_names_retired_columns() -> None:
     src = scan()["src"]
     named = {h["module"] for h in src["exempt_hits"] + src["exempt_dynamic"]}
     assert set(EXEMPT_MODULES) <= named
+    assert any(
+        h["module"] == "src/application/ledger/lot_identity_migration.py"
+        and h["kind"] == "read"
+        and h["columns"] == ["record_id"]
+        for h in src["exempt_hits"]
+    )
 
 
 def test_a_planted_statement_naming_a_retired_column_is_flagged(tmp_path) -> None:
@@ -39,7 +45,9 @@ def test_a_planted_statement_naming_a_retired_column_is_flagged(tmp_path) -> Non
     planted.write_text(
         'SQL_OLD = "SELECT record_id, expiration FROM position_lots WHERE account = ?"\n'
         'SQL_OTHER_TABLE = "SELECT expiration FROM option_contracts"\n'
-        'INDEX_NAME = "idx_position_lots_account_record"\n',
+        'INDEX_NAME = "idx_position_lots_account_record"\n'
+        'def read(conn, column):\n'
+        '    return conn.execute(f"SELECT {column} FROM position_lots")\n',
         encoding="utf-8",
     )
     detail = scan(root=tmp_path)["src"]["detail"]
@@ -50,6 +58,10 @@ def test_a_planted_statement_naming_a_retired_column_is_flagged(tmp_path) -> Non
     # index_name hit. The option_contracts expiration is a different table's
     # domain concept and must NOT be flagged.
     assert kinds == {"read", "index_name"}
+    dynamic = scan(root=tmp_path)["src"]["dynamic_sql"]
+    assert [(h["module"], h["columns"]) for h in dynamic] == [
+        ("src/planted.py", []),
+    ]
 
 
 def test_check_mode_round_trips() -> None:
@@ -82,19 +94,15 @@ def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> Non
 
 
 def test_runtime_sql_no_longer_names_retired_columns() -> None:
-    from src.application.ledger import lot_identity_migration as migration
-
     registry = scan()["src"]
     assert registry["detail"] == []
-    assert registry["dynamic_sql"] == []
-    assert migration._live_sql_naming_retired_columns() == ()
-
-
-def test_final_shape_regression(tmp_path, monkeypatch) -> None:
-    from tests import test_lot_identity_migration as regression
-
-    # Exercise real SQL gate and repository owners. Only the window token is
-    # enabled for the isolated fixture; the shipped token remains absent.
-    monkeypatch.setattr(regression.module, "LOT_IDENTITY_WINDOW_ENABLEMENT", "test-window-token")
-    assert regression.module._live_sql_naming_retired_columns() == ()
-    regression.test_r1_rebuilt_store_reopens_and_preserves_projection(tmp_path, None)
+    assert {(h["module"], h["digest"]) for h in registry["dynamic_sql"]} == {
+        ("src/application/ledger/repository_projection_schema.py", "sha256:00304c6023cc01e1"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:10ccc631371b73ad"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:11efe2ef73a5d799"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:3db215a46c8ea0c6"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:471fd62ac2cbdaf6"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:d899e724f091dcce"),
+        ("src/application/ledger/repository_projection_schema.py", "sha256:e65279505d598965"),
+        ("src/application/ledger/trade_attribution_migration.py", "sha256:2aa2f9d38a6a4493"),
+    }

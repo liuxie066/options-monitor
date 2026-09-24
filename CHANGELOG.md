@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Breaking Changes
+- 退役 `om option-positions lot-identity-migration apply`（含 `--dry-run`）：一次性 D1–D4 生产窗口已于 3.6.5 执行完毕，破坏性半边（D1/D2 重建、D3/D4 payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关一并移除；该父组只剩只读的 `inventory` / `verify`。需要重跑窗口只能使用 3.6.x 的旧 tag。
+
 ### Improvements
 - Close Advice 在净兑现和剩余年化条件成立后，对剩余可交易日不超过 3 日且绝对 Delta 不超过 0.05 的价外期权建议持有到期；美港股分别使用独立交易日日历，缺少判断证据时不提醒。
 
