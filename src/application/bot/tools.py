@@ -83,24 +83,39 @@ def build_tool_payload(
         if explicit not in (None, "") and explicit != value:
             return None, f"tool input conflicts with trusted scope: {name}"
         payload[name] = value.strip() if isinstance(value, str) else value
-    if "account" in fields and payload.get("account") not in (None, ""):
+    needs_account_scope = "account" in fields and payload.get("account") not in (None, "")
+    if tool_name == "receipt_read" or needs_account_scope:
         from src.application.account_config import accounts_from_config, normalize_account_label
         from src.application.agent_tool_config import load_runtime_config
         from src.application.agent_tool_contracts import AgentToolError
+        from src.application.runtime_config_freshness import infer_runtime_config_market
 
         trusted = dict(payload)
         for key in ("config_key", "config_path"):
             if (fixed_input or {}).get(key) not in (None, ""):
                 trusted[key] = fixed_input[key]
         try:
-            _, config = load_runtime_config(config_key=trusted.get("config_key"), config_path=trusted.get("config_path"))
-            account = normalize_account_label(payload["account"])
-            allowed = accounts_from_config(config, fallback=())
+            path, config = load_runtime_config(config_key=trusted.get("config_key"), config_path=trusted.get("config_path"))
+            if tool_name == "receipt_read":
+                market = infer_runtime_config_market(config=config, config_key=trusted.get("config_key"), config_path=path)
+                if market not in {"us", "hk"}:
+                    return None, "无法确认当前回执查询的市场范围。"
+                requested_market = payload.get("market")
+                if requested_market and str(requested_market).lower() != market:
+                    return None, ("receipt_read market argument conflicts with trusted scope; this does not establish "
+                                  "the receipt's market. If the user did not request another market, retry without market.")
+                deal_id = payload.get("deal_id")
+                if isinstance(deal_id, str) and ("..." in deal_id or "…" in deal_id):
+                    return None, "receipt_read needs the complete deal_id from the user; masked IDs cannot identify a receipt."
+            if needs_account_scope:
+                account = normalize_account_label(payload["account"])
+                allowed = accounts_from_config(config, fallback=())
         except (AgentToolError, ValueError, OSError):
-            return None, "无法验证账户配置；先使用 project_context 确认有效范围。"
-        if account not in allowed:
-            return None, "account is outside the configured scope; use project_context to discover valid scope"
-        payload["account"] = account
+            return None, "无法验证账户或回执配置；先使用 project_context 确认有效范围。"
+        if needs_account_scope:
+            if account not in allowed:
+                return None, "account is outside the configured scope; use project_context to discover valid scope"
+            payload["account"] = account
     return payload, None
 
 
