@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,6 @@ from src.application.runtime_runs_cli import resolve_runtime_runs_root
 
 SCHEMA_VERSION = "runtime_logs.v1"
 MAX_LOG_LINES = 200
-MAX_LOG_FILE_BYTES = 16 * 1024 * 1024
 MAX_LOG_TAIL_BYTES = 256 * 1024
 ALLOWED_LOG_SUFFIXES = frozenset({".json", ".jsonl", ".log", ".txt"})
 RUN_LOG_FILES = {
@@ -73,7 +73,7 @@ def collect_runtime_logs(
     journal_only = kind == "service" and not entries
     ok = (not requested_run or (selected_run is not None and selected_run.exists())) and not (
         log_file and not entries[0].get("exists")
-    )
+    ) and not any(item.get("error") for item in entries)
     return {
         "schema_version": SCHEMA_VERSION,
         "runs_root": str(root),
@@ -199,8 +199,6 @@ def _log_entry(
     safe_path = _validate_log_path(path, allowed_roots=allowed_roots)
     exists = safe_path.exists() and safe_path.is_file()
     size_bytes = safe_path.stat().st_size if exists else None
-    if size_bytes is not None and size_bytes > MAX_LOG_FILE_BYTES:
-        raise AgentToolError(code="POLICY_ERROR", message="log file exceeds the safe size limit")
     entry: dict[str, Any] = {
         "path": str(safe_path),
         "path_display": _display_path(safe_path, base=base),
@@ -217,6 +215,7 @@ def _log_entry(
     except OSError:
         entry["error"] = "log file could not be read"
         entry["error_code"] = "LOG_READ_FAILED"
+        print("<3>READ_DIAGNOSTIC_DEGRADED reason=LOG_READ_FAILED tool=runtime_logs", file=sys.stderr)
         return entry
     entry["tail"] = tail
     entry["tail_line_count"] = len(tail)
@@ -232,8 +231,6 @@ def _tail_lines(path: Path, *, lines: int) -> list[str]:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise AgentToolError(code="POLICY_ERROR", message="log target must be a regular file")
-        if info.st_size > MAX_LOG_FILE_BYTES:
-            raise AgentToolError(code="POLICY_ERROR", message="log file exceeds the safe size limit")
         read_size = min(info.st_size, MAX_LOG_TAIL_BYTES)
         os.lseek(fd, max(info.st_size - read_size, 0), os.SEEK_SET)
         raw = os.read(fd, read_size)

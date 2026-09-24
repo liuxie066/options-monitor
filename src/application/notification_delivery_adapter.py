@@ -44,15 +44,13 @@ def build_notification_idempotency_key(
     *,
     run_id: str,
     account: str,
-    target: str,
-    message: str,
+    renderer: str,
 ) -> str:
     raw = "\n".join(
         [
             str(run_id or "").strip(),
             str(account or "").strip().lower(),
-            str(target or "").strip(),
-            hashlib.sha256(str(message or "").encode("utf-8")).hexdigest(),
+            str(renderer or "").strip(),
         ]
     )
     return "om-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

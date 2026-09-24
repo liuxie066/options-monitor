@@ -42,7 +42,7 @@ def test_notification_perception_read_can_read_run_scoped_audit(tmp_path: Path) 
     assert data["events"][0]["source_path"] == "output_runs/run_2/state/audit_events.jsonl"
 
 
-def test_large_shared_audit_returns_recent_evidence_with_partial_coverage(tmp_path: Path) -> None:
+def test_large_shared_audit_returns_recent_evidence_with_partial_coverage(tmp_path: Path, capsys) -> None:
     audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
     audit.parent.mkdir(parents=True)
     with audit.open("w", encoding="utf-8") as stream:
@@ -60,6 +60,7 @@ def test_large_shared_audit_returns_recent_evidence_with_partial_coverage(tmp_pa
     assert data["coverage"]["status"] == "partial"
     assert data["pagination"]["matched_count"] is None
     assert data["read_statuses"][0]["tail_truncated"] is True
+    assert "<3>READ_DIAGNOSTIC_DEGRADED reason=partial" in capsys.readouterr().err
     from src.application.agent_tool_registry import get_tool_definition
     _, warnings, _ = get_tool_definition("notification_perception_read").call(
         {"runtime_root": str(tmp_path), "limit": 10}
@@ -85,7 +86,7 @@ def test_window_streams_segments_and_keeps_conversation_scope(tmp_path: Path) ->
     assert "chat-b" not in json.dumps(data, ensure_ascii=False)
 
 
-def test_window_marks_history_before_first_retained_segment_partial(tmp_path: Path) -> None:
+def test_window_marks_history_before_first_retained_segment_partial(tmp_path: Path, capsys) -> None:
     state = tmp_path / "output_shared" / "state"
     state.mkdir(parents=True)
     row = _row("new", "notification_prepared", "chat")
@@ -97,6 +98,7 @@ def test_window_marks_history_before_first_retained_segment_partial(tmp_path: Pa
     assert data["summary"]["status"] == "partial"
     assert data["coverage"]["stop_reason"] == "history_before_first_segment"
     assert data["coverage"]["available_from_utc"] == "2026-09-24T00:00:00+00:00"
+    assert "<3>READ_DIAGNOSTIC_DEGRADED reason=partial" in capsys.readouterr().err
 
 
 def test_window_reports_budget_partial_without_loading_whole_file(tmp_path: Path, monkeypatch) -> None:

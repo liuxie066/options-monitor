@@ -22,6 +22,34 @@ from src.application.strategy_scan_status import (
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
+def test_research_audit_tail_bounds_rows_and_oversized_line(tmp_path: Path, capsys) -> None:
+    from src.application.research.evidence import _jsonl_tail
+
+    audit = tmp_path / "audit_events.jsonl"
+    with audit.open("w", encoding="utf-8") as stream:
+        for index in range(1000):
+            stream.write(json.dumps({"index": index}) + "\n")
+        stream.write("x" * (1024 * 1024 + 1) + "\n")
+        stream.write('{"index":1000}\n')
+    first = _jsonl_tail(audit, base=tmp_path, limit=2)
+    second = _jsonl_tail(audit, base=tmp_path, limit=2)
+    assert first["line_count"] == second["line_count"] == 1002
+    assert first["rows"] == second["rows"] == [{"error": "line_too_large"}, {"index": 1000}]
+    assert first["partial"] is True
+    assert capsys.readouterr().err.count("<3>READ_DIAGNOSTIC_DEGRADED") == 2
+
+
+def test_research_audit_tail_marks_malformed_row_partial(tmp_path: Path, capsys) -> None:
+    from src.application.research.evidence import _jsonl_tail
+
+    audit = tmp_path / "audit_events.jsonl"
+    audit.write_text('invalid\n{"index":1}\n', encoding="utf-8")
+    out = _jsonl_tail(audit, base=tmp_path, limit=2)
+    assert out["partial"] is True
+    assert out["rows"] == [{"raw": "invalid"}, {"index": 1}]
+    assert "<3>READ_DIAGNOSTIC_DEGRADED" in capsys.readouterr().err
+
+
 def _seal_combo_diagnostic_fixture(
     base: Path,
     *,

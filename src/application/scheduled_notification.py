@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass
@@ -355,8 +356,7 @@ def send_account_message_with_retry(
         idempotency_key = build_notification_idempotency_key(
             run_id=run_id,
             account=account,
-            target=target,
-            message=message,
+            renderer="scheduled_notification:" + hashlib.sha256(str(message).encode("utf-8")).hexdigest(),
         )
 
     for attempt in range(1, attempts + 1):

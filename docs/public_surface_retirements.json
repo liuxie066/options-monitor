@@ -25,6 +25,11 @@
       "module": "domain/domain/close_advice.py",
       "name": "STRICT_MAX_SPREAD_RATIO",
       "reason": "The spread percentage ceiling was retired; a valid two-sided quote is now evaluated at its ask price with fees."
+    },
+    {
+      "module": "src/application/runtime_logs_cli.py",
+      "name": "MAX_LOG_FILE_BYTES",
+      "reason": "Whole-file rejection was retired because runtime logs now read only a bounded tail regardless of file size."
     }
   ]
 }

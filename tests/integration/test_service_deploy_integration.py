@@ -3394,6 +3394,10 @@ def test_service_cleanup_dry_run_reports_releases_and_caches(tmp_path: Path) -> 
     assert v100.exists()
     assert internal_cache.exists()
     assert downloads.exists()
+    repeated = service_cleanup(repo_root=current, releases_root=releases, cleanup_downloads=True)
+    assert repeated["status"] == "dry_run"
+    assert repeated["deleted_paths"] == []
+    assert repeated["delete_releases"] == out["delete_releases"]
 
 def test_service_cleanup_confirm_deletes_only_old_releases_and_selected_caches(tmp_path: Path) -> None:
     from src.application.service_cleanup import service_cleanup

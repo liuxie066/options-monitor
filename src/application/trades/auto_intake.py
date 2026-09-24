@@ -218,7 +218,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _log(message: str) -> None:
-    print(message, flush=True)
+    level = "<3>" if message.startswith("[ERROR]") else "<4>" if message.startswith("[WARN]") else ""
+    print(level + message, flush=True)
 
 
 def _dispatch_portfolio_refresh_intent(
@@ -2558,6 +2559,7 @@ def _run_listener_source_loop(
                             status_state["last_inbox_retry_error"] = (
                                 f"{type(exc).__name__}: {exc}"
                             )
+                            _log(f"[WARN] inbox retry failed source={source.get('id')} error={type(exc).__name__}")
                             break
                     if apply_changes and is_portfolio_management_enabled(cfg):
                         try:
@@ -2820,6 +2822,7 @@ def _run_listener_source_loop(
                 restart_count=restart_count,
                 last_error=str(exc),
                 error_code=exc.error_code,
+                reason_code=exc.error_code,
                 error_message=exc.message,
             )
             _log(f"[ERROR] listener source={source.get('id')} blocked: {exc}")
@@ -3681,8 +3684,14 @@ def _receipt_summary(receipt: object) -> dict[str, Any] | None:
 def _format_result_summary(result: dict[str, Any]) -> str:
     summary = _result_summary(result)
     receipt = _receipt_summary(result.get("receipt"))
+    failed = summary.get("status") in {"failed", "unresolved", "blocked"} or (
+        receipt is not None and (
+            receipt.get("status") in {"failed", "unconfirmed", "unresolved"}
+            or receipt.get("reason") == "skipped_no_route"
+        )
+    )
     parts = [
-        "AUTO_TRADE_INTAKE",
+        "[WARN] AUTO_TRADE_INTAKE" if failed else "AUTO_TRADE_INTAKE",
         f"status={summary.get('status')}",
         f"action={summary.get('action')}",
         f"account={summary.get('account')}",

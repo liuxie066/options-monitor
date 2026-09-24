@@ -21,6 +21,19 @@ BASE = Path(__file__).resolve().parents[1]
 AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
 
 
+def test_intake_result_failures_have_journal_warning_level(capsys) -> None:
+    failed = {"status": "failed", "account": "lx", "deal_id": "d-1"}
+    receipt_missing = {"status": "handled", "account": "lx", "deal_id": "d-2",
+                       "receipt": {"status": "skipped", "reason": "skipped_no_route"}}
+    success = {"status": "handled", "account": "lx", "deal_id": "d-3"}
+    for result in (failed, failed, receipt_missing, success):
+        auto_intake._log(auto_intake._format_result_summary(result))
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 4
+    assert all(line.startswith("<4>[WARN] AUTO_TRADE_INTAKE") for line in lines[:3])
+    assert lines[3].startswith("AUTO_TRADE_INTAKE")
+
+
 def _listener_source(tmp_path: Path, account: str, port: int) -> dict:
     return {
         "id": account,

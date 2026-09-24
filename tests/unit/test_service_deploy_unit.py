@@ -53,9 +53,19 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
     assert str(repo / "om") + " status --profile-path " + str(runtime / "service.profile.json") in runtime_status
     assert "--journal-summary" in runtime_status
+    assert "SyslogLevelPrefix=yes" in runtime_status
     assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
     assert "RestartPreventExitStatus=78" in intake
+    assert "SyslogLevelPrefix=yes" in intake
+    assert "OnFailure=options-monitor-trade-intake-alert.service" in intake
+    alert_unit = files["systemd/options-monitor-trade-intake-alert.service"]["content"]
+    assert "run service-failure-alert --unit options-monitor-trade-intake.service" in alert_unit
+    assert "TimeoutStartSec=120" in alert_unit
+    heartbeat_unit = files["systemd/options-monitor-trade-intake-heartbeat.service"]["content"]
+    heartbeat_timer = files["systemd/options-monitor-trade-intake-heartbeat.timer"]["content"]
+    assert "run trade-intake-heartbeat-check --unit options-monitor-trade-intake.service" in heartbeat_unit
+    assert "OnUnitActiveSec=1min" in heartbeat_timer
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
@@ -176,6 +186,10 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
     tick = files[
         "systemd/options-monitor-tick-us.service.d/zzzz-secret-credentials.conf"
     ]["content"]
+    alert_secret = files[
+        "systemd/options-monitor-trade-intake-alert.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert "om-feishu-bot-app-secret" in alert_secret
     assert f"om-feishu-holdings-app-secret:{store}/om-feishu-holdings-app-secret" in tick
     assert f"om-feishu-bot-app-secret:{store}/om-feishu-bot-app-secret" in tick
     assert "om-quality-read-token" not in tick
@@ -435,12 +449,16 @@ def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path:
             "root": str(opend_lx),
             "executable": str(opend_lx / "FutuOpenD"),
             "service_name": "options-monitor-opend-lx.service",
+            "host": "127.0.0.1",
+            "port": 11111,
         },
         {
             "account": "sy",
             "root": str(opend_sy),
             "executable": str(opend_sy / "FutuOpenD"),
             "service_name": "options-monitor-opend-sy.service",
+            "host": "127.0.0.1",
+            "port": 11112,
         },
     ]
     assert "root" not in profile["opend"]
@@ -506,12 +524,16 @@ markets:
             "root": str(opend_lx),
             "executable": str(opend_lx / "FutuOpenD"),
             "service_name": "options-monitor-opend-lx.service",
+            "host": "127.0.0.1",
+            "port": 11111,
         },
         {
             "account": "sy",
             "root": str(opend_sy),
             "executable": str(opend_sy / "FutuOpenD"),
             "service_name": "options-monitor-opend-sy.service",
+            "host": "127.0.0.1",
+            "port": 11112,
         },
     ]
 
@@ -1158,6 +1180,56 @@ def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: P
     assert out["failed_checks"][0]["check"] == "feishu-ws-check"
     assert "manual_check: source the env file, then run ./om inbound feishu-ws --check" in out["remediation"]
 
+
+def test_post_upgrade_opend_login_check_is_read_only_and_repeatable(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _post_upgrade_service_health
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    service = "options-monitor-opend-lx.service"
+    profile = {"service_provider": "systemd", "services": [{"name": service}],
+               "opend": {"services": [{"service_name": service, "host": "127.0.0.1", "port": 11111}]}}
+    probes: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if "src.infrastructure.opend_watchdog" in command:
+            probes.append(list(command))
+            assert kwargs["timeout"] == 35
+            assert "--ensure" not in command and "--retry-enabled" not in command
+            status = ({"ok": False, "error_code": "OPEND_LOGIN_INVALID"} if len(probes) == 1
+                      else {"ok": True})
+            return subprocess.CompletedProcess(command, 2 if len(probes) == 1 else 0,
+                                               stdout=json.dumps(status), stderr="")
+        assert command[:2] == ["systemctl", "is-active"] or command[:2] == ["systemctl", "is-enabled"]
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    first = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+    assert first["ok"] is False
+    assert first["failed_checks"][0]["reason_code"] == "OPEND_LOGIN_INVALID"
+    for _ in range(2):
+        healthy = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+        assert healthy["ok"] is True
+    assert len(probes) == 3
+    assert probes[0] == probes[1] == probes[2]
+
+
+def test_post_upgrade_opend_login_check_requires_profile_endpoint(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _post_upgrade_service_health
+
+    service = "options-monitor-opend.service"
+    profile = {"service_provider": "systemd", "services": [{"name": service}],
+               "opend": {"services": [{"service_name": service}]}}
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    out = _post_upgrade_service_health(profile=profile, repo_root=tmp_path, run_cmd=_run_cmd, operations=[])
+    assert out["ok"] is False
+    assert out["failed_checks"][0]["reason_code"] == "OPEND_ENDPOINT_MISSING"
+    assert all("src.infrastructure.opend_watchdog" not in call for call in calls)
+
 def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_path: Path) -> None:
     from src.application.service_upgrade import _post_upgrade_service_health
 
@@ -1449,6 +1521,8 @@ def test_service_upgrade_restart_includes_opend_when_profile_declares_it(tmp_pat
         ["systemctl", "restart", "options-monitor-trade-intake.service"],
         ["systemctl", "restart", "options-monitor-feishu-ws.service"],
     ]
+    assert _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[]) == restarted
+    assert calls[3:] == calls[:3]
 
 @pytest.mark.parametrize(
     ("profile_extras", "expected_command", "expected_source"),
@@ -2069,3 +2143,14 @@ def test_service_upgrade_restart_no_profile_is_noop(tmp_path: Path) -> None:
 
     assert restarted == []
     assert calls == []
+
+
+def test_repository_logrotate_template_caps_runtime_logs_without_touching_audits() -> None:
+    template = Path(__file__).resolve().parents[2] / "deploy/logrotate/options-monitor.conf.in"
+    content = template.read_text(encoding="utf-8")
+    assert "@RUNTIME_ROOT@/logs/*.log" in content
+    assert "maxsize 16M" in content
+    assert "hourly" in content
+    assert "create 0600 @DEPLOY_USER@ @DEPLOY_USER@" in content
+    assert "audit_events" not in content
+    assert "copytruncate" not in content

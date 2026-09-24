@@ -835,6 +835,8 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 4. Trace the relevant findings, such as freshness, account failures, prefetch, notifications, maintenance, or trade intake.
 5. Once the evidence supports a diagnosis, choose the affected owner and focused checks. Production mutation still requires its explicit authorization.
 
+`runtime_status` exposes `notification_delivery.status` and `reason_codes` separately from overall health. A scheduled notification with no confirmed delivery is `degraded`; `./om status --journal-summary` emits a local `<3>NOTIFICATION_DELIVERY_DEGRADED` journal line for that state. This is a journal signal, so it does not establish external alert delivery when the notification route is missing.
+
 ### A Symbol Is Missing
 
 1. Get run/account/symbol from the user or runtime artifact.
@@ -859,6 +861,15 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 3. Check trade intake summaries and unresolved/failed counts in `runtime_status`.
 4. Use semantic repair/void workflows; do not hand-edit projected rows.
 5. Verify with focused ledger tests.
+
+The systemd bundle includes `options-monitor-trade-intake-heartbeat.timer` (one-minute
+interval). Its `./om run trade-intake-heartbeat-check --unit
+options-monitor-trade-intake.service --market us --config <runtime-config>
+--runtime-root <runtime-root>` service checks unit activity and each source's
+`last_heartbeat_utc`. A missing or stale heartbeat while the unit is active,
+an inactive unit, and a confirmed recovery use the configured system-alert
+notification route. This command can send a notification; use `runtime_status`
+for read-only inspection.
 
 ### Release Request
 

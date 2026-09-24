@@ -352,7 +352,7 @@ def _receipt_audit_phase(receipt_result: dict[str, Any]) -> str:
     status = str(receipt_result.get("status") or "").strip().lower()
     if status == "sent":
         return "receipt_sent"
-    if status in {"failed", "unconfirmed"}:
+    if status in {"failed", "unconfirmed"} or receipt_result.get("reason") == "skipped_no_route":
         return "receipt_failed"
     return "receipt_skipped"
 
@@ -630,10 +630,13 @@ def process_trade_payload(
         if isinstance(enriched_result, dict):
             result_dict = enriched_result
 
+    audit_phase = "failed" if result_dict.get("status") == "failed" else "resolved"
+    if result_dict.get("status") == "skipped" and result_dict.get("reason") == "duplicate_deal_id":
+        audit_phase = "skipped_duplicate"
     append_trade_intake_audit_fn(
         audit_path,
         build_trade_intake_audit_event(
-            "failed" if result_dict.get("status") == "failed" else "resolved",
+            audit_phase,
             source=source, deal=deal, result=result_dict,
         ),
     )

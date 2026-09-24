@@ -20,6 +20,8 @@ AUDIT_SEGMENT_BYTES = 64 * 1024 * 1024
 @contextmanager
 def rotating_private_jsonl_lock(path: str | Path, *, incoming_bytes: int):
     """Serialize append and rename through a stable lock, never through the rotated inode."""
+    if incoming_bytes > AUDIT_SEGMENT_BYTES:
+        raise ValueError("audit record exceeds segment size limit")
     target = Path(path)
     _ensure_private_directory(target.parent)
     lock_path = Path(f"{target}.lock")
