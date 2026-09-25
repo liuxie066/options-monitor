@@ -860,7 +860,9 @@ def _reconcile_due_lifecycle_cases_for_source(
             case_id=case_id,
             invocation_id=invocation_id,
         )
-        reconciled = reconcile_settlement_attempt_invocation(
+        reconciled, control_error = _run_settlement_control_operation(
+            inbox_path,
+            reconcile_settlement_attempt_invocation,
             inbox_path,
             source_id=source_id,
             account=account,
@@ -868,6 +870,30 @@ def _reconcile_due_lifecycle_cases_for_source(
             invocation_id=invocation_id,
             audit=audit,
         )
+        if control_error is not None:
+            local_result = _plan_due_cases(
+                repo,
+                account=account,
+                case_ids=tuple(candidates_by_id),
+                now_ms=int(now_ms),
+                apply_changes=True,
+                wheel_start_enabled=wheel_start_enabled,
+            )
+            return _control_store_unavailable_result(
+                account=account,
+                source_id=source_id,
+                collector_enabled=collector_enabled,
+                collector=collector,
+                candidate_count=len(candidates_by_id),
+                planned_case_count=len(candidates_by_id),
+                provider_claim_count=0,
+                provider_attempt_count=0,
+                control_error=control_error,
+                local_result=local_result,
+                metrics=metrics,
+            )
+        if not isinstance(reconciled, dict):
+            raise TypeError("settlement invocation reconciliation is invalid")
         states[case_id] = reconciled
         if (
             invocation_state == "provider_finished"
@@ -1094,6 +1120,8 @@ def _reconcile_due_lifecycle_cases_for_source(
                 if not isinstance(stored, dict):
                     raise TypeError("settlement attempt state is invalid")
                 states[case_id] = stored
+                if not getattr(stored, "write_applied", False):
+                    continue
                 stored_matches_scope = (
                     str(stored.get("case_scope_fingerprint") or "")
                     == fingerprint
@@ -1155,7 +1183,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             if str(state.get("outcome_kind") or "") == "disabled":
                 skipped_counts["disabled"] += 1
                 continue
-            _stored, control_error = _run_settlement_control_operation(
+            stored, control_error = _run_settlement_control_operation(
                 inbox_path,
                 upsert_settlement_attempt_state,
                 inbox_path,
@@ -1176,7 +1204,11 @@ def _reconcile_due_lifecycle_cases_for_source(
                     control_error,
                     provider_claim_count=provider_claim_count,
                 )
-            skipped_counts["disabled"] += 1
+            if not isinstance(stored, dict):
+                raise TypeError("settlement attempt state is invalid")
+            states[case_id] = stored
+            if getattr(stored, "write_applied", False):
+                skipped_counts["disabled"] += 1
             continue
         active_collector = require_collector()
         if not _collector_scope_matches(state, active_collector):
@@ -1203,6 +1235,8 @@ def _reconcile_due_lifecycle_cases_for_source(
             if not isinstance(state, dict):
                 raise TypeError("settlement attempt state is invalid")
             states[case_id] = state
+            if not getattr(state, "write_applied", False):
+                continue
         if not active_collector.capability.supported:
             if str(state.get("outcome_kind") or "") == "blocked_static":
                 skipped_counts["blocked"] += 1
@@ -1221,7 +1255,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                 reason_code="missing_static_capability",
                 error_class="missing_static",
             )
-            _stored, control_error = _run_settlement_control_operation(
+            stored, control_error = _run_settlement_control_operation(
                 inbox_path,
                 upsert_settlement_attempt_state,
                 inbox_path,
@@ -1248,7 +1282,11 @@ def _reconcile_due_lifecycle_cases_for_source(
                     control_error,
                     provider_claim_count=provider_claim_count,
                 )
-            skipped_counts["blocked"] += 1
+            if not isinstance(stored, dict):
+                raise TypeError("settlement attempt state is invalid")
+            states[case_id] = stored
+            if getattr(stored, "write_applied", False):
+                skipped_counts["blocked"] += 1
             continue
         if str(state.get("outcome_kind") or "") in {
             "blocked_static",
@@ -1418,16 +1456,17 @@ def _reconcile_due_lifecycle_cases_for_source(
                 if not isinstance(stored, dict):
                     raise TypeError("settlement attempt state is invalid")
                 states[failed_case_id] = stored
-                provider_results.append(
-                    {
-                        "case_id": failed_case_id,
-                        "outcome": failed_outcome.to_dict(
-                            include_observation=False
-                        ),
-                        "semantic_fingerprint": None,
-                        "admission_status": None,
-                    }
-                )
+                if getattr(stored, "write_applied", False):
+                    provider_results.append(
+                        {
+                            "case_id": failed_case_id,
+                            "outcome": failed_outcome.to_dict(
+                                include_observation=False
+                            ),
+                            "semantic_fingerprint": None,
+                            "admission_status": None,
+                        }
+                    )
                 eligible_provider_case_ids = []
 
     if eligible_provider_case_ids:
@@ -2432,6 +2471,7 @@ def _reconcile_due_lifecycle_cases_for_source(
         "skipped_counts": skipped_counts,
         "control_status": "ok",
         "control_summary": control_summary,
+        "ambiguous_provider_result_ids": control_summary.get("ambiguous_provider_result_ids", []),
         "local_reconciliation": local_result,
         "provider_results": provider_results,
         "process_counters": dict(metrics),

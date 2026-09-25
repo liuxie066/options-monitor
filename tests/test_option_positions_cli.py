@@ -1262,6 +1262,106 @@ def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
     assert "quote_gateway" not in captured
 
 
+def test_resolve_ambiguous_cli_previews_read_only_then_applies_one_scoped_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from src.application.trades.inbox import (
+        get_settlement_attempt_state,
+        mark_settlement_attempt_provider_started,
+        reconcile_settlement_attempt_invocation,
+        reserve_settlement_attempt_invocation,
+        upsert_settlement_attempt_state,
+    )
+    from src.application.trades.settlement_attempts import prepare_provider_required_state
+
+    ledger_path = tmp_path / "output_shared/state/option_positions.sqlite3"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_repository.SQLiteOptionPositionsRepository(ledger_path)
+    inbox_path = ledger_path.with_name(ledger_path.name + ".trade_intake_inbox.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=ledger_path)
+    runtime_config = tmp_path / "runtime.json"
+    runtime_config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(cli_mod, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"id": "lx", "account": "lx", "inbox_path": inbox_path}],
+    })
+    monkeypatch.setattr(
+        cli_mod, "resolve_option_positions_repo",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ordinary ledger open is forbidden")),
+    )
+    state = prepare_provider_required_state(
+        None, source_id="lx", account="lx", case_id="case-1",
+        case_scope_fingerprint_value="case-scope", provider_input_scope_fingerprint_value="provider-scope",
+        contract_version="collector.v1", capability_fingerprint="capability-1", now_ms=1_000,
+    )
+    upsert_settlement_attempt_state(inbox_path, state=state)
+    reserved = reserve_settlement_attempt_invocation(
+        inbox_path, source_id="lx", account="lx", case_id="case-1",
+        case_scope_fingerprint="case-scope", claim_id="claim-1", now_ms=1_000, lease_ms=120_000,
+    )
+    assert reserved is not None
+    started = mark_settlement_attempt_provider_started(
+        inbox_path, source_id="lx", account="lx", case_id="case-1",
+        claim_id="claim-1", invocation_id=reserved["invocation_id"], attempted_at_ms=1_500,
+    )
+    reconcile_settlement_attempt_invocation(
+        inbox_path, source_id="lx", account="lx", case_id="case-1",
+        invocation_id=started["invocation_id"], audit=None,
+    )
+    command = _om_cli_args(
+        data_config, "lifecycle", "resolve-ambiguous", "--runtime-root", tmp_path,
+        "--config", runtime_config, "--account", "lx", "--source-id", "lx",
+        "--case-id", "case-1", "--invocation-id", started["invocation_id"],
+        "--resolution", "not-executed",
+    )
+    before = (ledger_path.read_bytes(), inbox_path.read_bytes())
+    assert cli_mod.main(command) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["status"] == "preview"
+    assert preview["dry_run"] is True
+    assert (ledger_path.read_bytes(), inbox_path.read_bytes()) == before
+    with pytest.raises(SystemExit, match="use --confirm or --yes"):
+        cli_mod.main([*command, "--apply"])
+
+    monkeypatch.setattr(cli_mod, "_guard_write", lambda **_kwargs: {"ok": True})
+    assert cli_mod.main([
+        *command, "--provider-evidence-ref", "provider:no-call",
+        "--worker-quiescence-ref", "worker:drained", "--apply", "--confirm",
+    ]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["status"] == "applied"
+    assert applied["write_applied"] is True
+    stored = get_settlement_attempt_state(
+        inbox_path, source_id="lx", account="lx", case_id="case-1"
+    )
+    assert stored is not None and stored["invocation_id"] is None
+    runtime_config.write_text(
+        json.dumps({"portfolio": {"data_config": str(data_config)}}), encoding="utf-8"
+    )
+    guarded_paths: list[Path] = []
+    monkeypatch.setattr(
+        cli_mod, "_guard_write",
+        lambda **kwargs: guarded_paths.append(kwargs["data_config"]) or {"ok": True},
+    )
+    assert cli_mod.main([
+        *command[2:], "--provider-evidence-ref", "provider:no-call",
+        "--worker-quiescence-ref", "worker:drained", "--apply", "--confirm",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "already_applied"
+    assert guarded_paths == [data_config]
+    from src.application.trades.inbox import enqueue_trade_payload
+
+    legacy_path = tmp_path / "legacy-inbox.sqlite3"
+    enqueue_trade_payload(legacy_path, payload={"deal_id": "legacy-1"}, source="test")
+    monkeypatch.setattr(cli_mod, "resolve_trade_intake_config", lambda _cfg: {
+        "sources": [{"id": "lx", "account": "lx", "inbox_path": legacy_path}],
+    })
+    with pytest.raises(SystemExit, match="legacy_inbox_migration_required"):
+        cli_mod.main(command)
+
+
 @pytest.mark.parametrize(
     ("seal_status", "expected_return_code"),
     [("not_required", 0), ("seal_persist_failed", 1)],

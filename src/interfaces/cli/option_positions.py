@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ from src.application.ledger.api import (
     list_position_rows,
     list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
+    open_trade_reconciliation_evidence_repo,
     position_projection_migration_status,
     record_trade_event_void,
     reconcile_combo_pair_inferences,
@@ -46,6 +48,7 @@ from src.application.ledger.api import (
     refresh_position_lot_projection,
     resolve_ledger_store,
     resolve_position_data_config_path,
+    resolve_position_ledger_sqlite_path,
     preview_trade_event_void,
     verify_position_lot_projection,
     verify_current_decision_projection_migration,
@@ -86,6 +89,11 @@ from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.trades.lifecycle_runtime import (
     reconcile_due_lifecycle_cases_for_source,
 )
+from src.application.trades.inbox import (
+    SettlementAttemptClaimOwnershipLost,
+    resolve_ambiguous_settlement_attempt,
+)
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.state import (
     append_lifecycle_attempt_checkpoint_seal,
     append_trade_intake_audit,
@@ -680,6 +688,24 @@ def _register_lifecycle_parsers(sub: Any) -> None:
     p_lifecycle_due.add_argument('--observed-at-ms', type=int, default=None)
     p_lifecycle_due.add_argument('--format', default='json', choices=['json', 'text'])
     _add_local_write_flags(p_lifecycle_due, high_risk=True)
+    p_lifecycle_ambiguous = lifecycle_sub.add_parser(
+        'resolve-ambiguous',
+        help='preview or apply one evidence-backed ambiguous settlement invocation resolution',
+    )
+    _add_runtime_root_arg(p_lifecycle_ambiguous)
+    p_lifecycle_ambiguous.add_argument('--config', required=True)
+    p_lifecycle_ambiguous.add_argument('--account', required=True)
+    p_lifecycle_ambiguous.add_argument('--source-id', required=True)
+    p_lifecycle_ambiguous.add_argument('--case-id', required=True)
+    p_lifecycle_ambiguous.add_argument('--invocation-id', required=True)
+    p_lifecycle_ambiguous.add_argument('--resolution', required=True, choices=['committed', 'not-executed'])
+    p_lifecycle_ambiguous.add_argument('--provider-evidence-ref', default=None)
+    p_lifecycle_ambiguous.add_argument(
+        '--worker-quiescence-ref', default=None,
+        help='required for not-executed apply: operator evidence that the old source/account worker is drained',
+    )
+    p_lifecycle_ambiguous.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_lifecycle_ambiguous, high_risk=True)
     for command_name, help_text in (
         (
             'resolve',
@@ -1084,6 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
             "confirm-expired",
             "reconcile",
             "reconcile-due",
+            "resolve-ambiguous",
             "resolve",
             "correct",
         }
@@ -1146,7 +1173,8 @@ def main(argv: list[str] | None = None) -> int:
         write_controls[args.cmd] = _resolve_write_control(args, command_name="option-positions rebuild", high_risk=False)
     write_cmd = bool(write_controls.get(write_control_key, {}).get("write_requested", False))
     data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
-    if write_cmd:
+    ambiguous_resolution = args.cmd == 'lifecycle' and args.lifecycle_cmd == 'resolve-ambiguous'
+    if write_cmd and not ambiguous_resolution:
         guard = _guard_write(
             data_config=data_config_path,
             args=args,
@@ -1154,6 +1182,83 @@ def main(argv: list[str] | None = None) -> int:
         )
         if guard is None:
             return 2
+
+    if ambiguous_resolution:
+        control = write_controls['lifecycle:resolve-ambiguous']
+        if control['write_requested'] and not bool(args.confirm):
+            raise SystemExit('resolve-ambiguous apply requires --confirm')
+        config_path = _resolve_path_under(args.config, base=base)
+        cfg = _load_json_object(config_path)
+        bound_data_config = resolve_position_data_config_path(
+            base=base,
+            cfg=cfg,
+            data_config=args.data_config,
+            config_path=config_path,
+        )
+        if control['write_requested']:
+            guard = _guard_write(data_config=bound_data_config, args=args, as_json=True)
+            if guard is None:
+                return 2
+        account_value = str(args.account).strip().lower()
+        source_id = str(args.source_id).strip()
+        intake_cfg = resolve_trade_intake_config(cfg)
+        sources = [
+            dict(item)
+            for item in intake_cfg.get('sources') or []
+            if isinstance(item, dict)
+            and str(item.get('id') or account_value).strip() == source_id
+            and (
+                str(item.get('account') or '').strip().lower() == account_value
+                or account_value in {
+                    str(value or '').strip().lower()
+                    for value in dict(item.get('account_mapping') or {}).values()
+                }
+            )
+        ]
+        if len(sources) != 1:
+            raise SystemExit('resolve-ambiguous requires exactly one configured source/account binding')
+        ledger_path = resolve_position_ledger_sqlite_path(
+            base=base,
+            cfg=cfg,
+            data_config=bound_data_config,
+            config_path=config_path,
+            runtime_root=_runtime_root_arg(args),
+        )
+        if not ledger_path.is_file():
+            raise SystemExit(f'ledger store is unavailable: {ledger_path}')
+        repo = open_trade_reconciliation_evidence_repo(ledger_path)
+        requested_path = Path(sources[0]['inbox_path'])
+        if not requested_path.is_absolute():
+            requested_path = ledger_path.parents[2] / requested_path
+        try:
+            inbox_path = resolve_execution_inbox_path(repo, requested_path)
+            audit = repo.get_trade_lifecycle_attempt_audit_by_invocation(
+                case_id=str(args.case_id),
+                invocation_id=str(args.invocation_id),
+            )
+            result = resolve_ambiguous_settlement_attempt(
+                inbox_path,
+                source_id=source_id,
+                account=account_value,
+                case_id=str(args.case_id),
+                invocation_id=str(args.invocation_id),
+                resolution=str(args.resolution),
+                audit=audit,
+                provider_evidence_ref=str(args.provider_evidence_ref or ''),
+                worker_quiescence_ref=str(args.worker_quiescence_ref or ''),
+                apply_changes=bool(control['write_requested']),
+            )
+        except (ValueError, sqlite3.Error, SettlementAttemptClaimOwnershipLost) as exc:
+            raise SystemExit(f'resolve-ambiguous refused: {exc}') from exc
+        payload = attach_write_contract(
+            {'operation': 'lifecycle_resolve_ambiguous', **result,
+             'ledger_path': str(ledger_path), 'inbox_path': str(inbox_path)},
+            dry_run=not bool(control['write_requested']),
+            write_applied=result['status'] == 'applied',
+            rollback_hint='review the durable resolution receipt; a completed provider effect cannot be undone here',
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     if args.cmd == "decision-projection":
         store = resolve_ledger_store(

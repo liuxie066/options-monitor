@@ -89,6 +89,47 @@ _SETTLEMENT_INVOCATION_FIELDS = (
 _SETTLEMENT_INVOCATION_CLEAR_SQL = ", ".join(
     f"{field} = NULL" for field in _SETTLEMENT_INVOCATION_FIELDS
 )
+_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_NAME = (
+    "trg_lifecycle_settlement_attempt_invocation_epoch_increment"
+)
+_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_NAME = (
+    "trg_lifecycle_settlement_attempt_invocation_writer_fence"
+)
+_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_SQL = """
+    CREATE TRIGGER IF NOT EXISTS
+    trg_lifecycle_settlement_attempt_invocation_epoch_increment
+    BEFORE UPDATE ON lifecycle_settlement_attempt_state
+    WHEN (
+      OLD.invocation_state IS NOT NULL
+      OR NEW.invocation_state IS NOT NULL
+    ) AND (
+      typeof(NEW.invocation_writer_epoch) != 'integer'
+      OR NEW.invocation_writer_epoch
+         != OLD.invocation_writer_epoch + 1
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'lifecycle settlement invocation epoch must increment by one');
+    END
+"""
+_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_SQL = """
+    CREATE TRIGGER IF NOT EXISTS
+    trg_lifecycle_settlement_attempt_invocation_writer_fence
+    BEFORE UPDATE ON lifecycle_settlement_attempt_state
+    WHEN (
+      OLD.invocation_state IS NOT NULL
+      OR NEW.invocation_state IS NOT NULL
+    ) AND (
+      typeof(NEW.invocation_writer_epoch) != 'integer'
+      OR NEW.invocation_writer_epoch
+         != OLD.invocation_writer_epoch + 1
+    )
+    BEGIN
+      SELECT RAISE(
+        ABORT,
+        'lifecycle settlement invocation requires current writer'
+      );
+    END
+"""
 _SETTLEMENT_CONTROL_KIND_BY_AUDIT_KIND = {
     audit_kind: {
         "stale_generation_after_call": "stale_generation",
@@ -107,6 +148,12 @@ _SETTLEMENT_AUDIT_KIND_BY_CODE = {
 
 class SettlementAttemptClaimOwnershipLost(RuntimeError):
     """The attempt lease is no longer owned by the active worker."""
+
+
+class SettlementAttemptUpsertResult(dict[str, Any]):
+    def __init__(self, state: dict[str, Any], *, write_applied: bool) -> None:
+        super().__init__(state)
+        self.write_applied = write_applied
 
 
 def enqueue_trade_payload(
@@ -1451,14 +1498,14 @@ def upsert_settlement_attempt_state(
         raise ValueError("settlement attempt state identity is incomplete")
     if any(payload.get(field) is not None for field in _SETTLEMENT_INVOCATION_FIELDS):
         raise ValueError(
-            "generic settlement attempt upsert cannot mutate invocation state"
+            "generic settlement attempt upsert cannot directly specify non-null invocation fields"
         )
     inbox_path = Path(path)
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
-            conn.execute(
+            cursor = conn.execute(
                 f"""
                 INSERT INTO lifecycle_settlement_attempt_state (
                   source_id, account, case_id, case_scope_fingerprint,
@@ -1514,15 +1561,16 @@ def upsert_settlement_attempt_state(
                     }
                 ),
             )
-    stored = get_settlement_attempt_state(
-        inbox_path,
-        source_id=source_id,
-        account=account,
-        case_id=case_id,
-    )
-    if stored is None:
-        raise RuntimeError("settlement attempt state disappeared")
-    return stored
+            stored = _read_settlement_attempt_row(
+                conn,
+                source_id=source_id,
+                account=account,
+                case_id=case_id,
+            )
+            return SettlementAttemptUpsertResult(
+                stored,
+                write_applied=cursor.rowcount == 1,
+            )
 
 
 def claim_settlement_attempt(
@@ -2210,6 +2258,199 @@ def reconcile_settlement_attempt_invocation(
             raise
 
 
+def resolve_ambiguous_settlement_attempt(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    invocation_id: str,
+    resolution: str,
+    audit: Mapping[str, Any] | None,
+    provider_evidence_ref: str = "",
+    worker_quiescence_ref: str = "",
+    apply_changes: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply one evidence-backed transition from an ambiguous invocation."""
+
+    source_key = _required_text(source_id, field="source_id")
+    account_key = _required_text(account, field="account").lower()
+    case_key = _required_text(case_id, field="case_id")
+    invocation_key = _canonical_uuid_text(invocation_id)
+    if resolution not in {"committed", "not-executed"}:
+        raise ValueError("unsupported ambiguous settlement resolution")
+    evidence_ref = str(provider_evidence_ref or "").strip()
+    quiescence_ref = str(worker_quiescence_ref or "").strip()
+    if any("\n" in value or len(value) > 512 for value in (evidence_ref, quiescence_ref)):
+        raise ValueError("settlement resolution evidence reference is invalid")
+    if apply_changes and not evidence_ref:
+        raise ValueError("provider evidence reference is required for apply")
+    if apply_changes and resolution == "not-executed" and not quiescence_ref:
+        raise ValueError("old-worker quiescence reference is required for not-executed apply")
+    if audit is not None and str(audit.get("account") or "").strip().lower() != account_key:
+        raise ValueError("settlement invocation audit account mismatch")
+    inbox_path = Path(path)
+    if not inbox_path.is_file():
+        raise ValueError("settlement control store is unavailable")
+    conn = (
+        _connect(inbox_path)
+        if apply_changes
+        else sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)
+    )
+    conn.row_factory = sqlite3.Row
+    with closing(conn) as conn, conn:
+        if apply_changes:
+            _ensure_schema(conn)
+        else:
+            conn.execute("PRAGMA query_only=ON")
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(lifecycle_settlement_attempt_state)")
+            }
+            if not set(_READ_SCHEMA_COLUMNS["lifecycle_settlement_attempt_state"]).issubset(columns):
+                raise ValueError("settlement control schema migration is required")
+        current = _read_settlement_attempt_row(
+            conn,
+            source_id=source_key,
+            account=account_key,
+            case_id=case_key,
+        )
+        receipt_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'lifecycle_settlement_attempt_resolutions'"
+        ).fetchone() is not None
+        prior = (
+            conn.execute(
+                "SELECT * FROM lifecycle_settlement_attempt_resolutions "
+                "WHERE source_id = ? AND account = ? AND case_id = ? AND invocation_id = ?",
+                (source_key, account_key, case_key, invocation_key),
+            ).fetchone()
+            if receipt_exists
+            else None
+        )
+        if prior is not None:
+            receipt = dict(prior)
+            if receipt["resolution"] != resolution or (
+                apply_changes
+                and (
+                    receipt["provider_evidence_ref"] != evidence_ref
+                    or receipt["worker_quiescence_ref"] != (quiescence_ref or None)
+                )
+            ):
+                raise ValueError("settlement invocation already has a conflicting resolution")
+            if resolution == "not-executed" and audit is not None:
+                raise ValueError("late ledger audit conflicts with not-executed resolution")
+            return {"status": "already_applied", "receipt": receipt}
+        if current.get("invocation_id") != invocation_key or current.get("invocation_state") != "ambiguous_provider_result":
+            raise SettlementAttemptClaimOwnershipLost("settlement ambiguous invocation CAS identity changed")
+        ordinal: int | None = None
+        chain: bytes | None = None
+        projected: dict[str, Any] | None = None
+        if resolution == "committed":
+            if current.get("pending_outcome_code") is None:
+                raise ValueError("committed resolution requires a persisted pending provider receipt")
+            ordinal, chain = _match_settlement_invocation_audit(current, audit)
+            projected = _pending_settlement_control_updates(current)
+            _validate_settlement_invocation_fields({
+                **current, **projected,
+                "claim_id": None, "claim_until_ms": None,
+                "invocation_state": "ledger_committed",
+                "committed_audit_ordinal": ordinal,
+                "committed_chain_sha256": chain,
+            })
+        else:
+            if audit is not None:
+                raise ValueError("not-executed resolution conflicts with ledger audit")
+            if any(current.get(field) is not None for field in _SETTLEMENT_PENDING_FIELDS):
+                raise ValueError("not-executed resolution refuses a persisted pending provider receipt")
+        view = {
+            "source_id": source_key,
+            "account": account_key,
+            "case_id": case_key,
+            "invocation_id": invocation_key,
+            "resolution": resolution,
+            "current_state": current["invocation_state"],
+            "current_writer_epoch": current["invocation_writer_epoch"],
+            "audit_ordinal": ordinal,
+            "audit_chain_sha256": chain.hex() if chain is not None else None,
+            "manual_provider_evidence_required": True,
+            "manual_old_worker_quiescence_required": resolution == "not-executed",
+        }
+        if not apply_changes:
+            return {"status": "preview", **view}
+        if resolution == "committed":
+            assert projected is not None and ordinal is not None and chain is not None
+            values = _settlement_attempt_values({**current, **projected})
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET case_scope_fingerprint = ?, provider_input_scope_fingerprint = ?,
+                    collector_contract_version = ?, capability_fingerprint = ?,
+                    classification = ?, outcome_kind = ?, reason_code = ?, provider_code = ?,
+                    error_class = ?, attempt_count = ?, no_progress_count = ?,
+                    next_attempt_at_ms = ?, last_attempt_at_ms = ?, last_semantic_fingerprint = ?,
+                    claim_id = NULL, claim_until_ms = NULL, updated_at_ms = ?,
+                    invocation_state = 'ledger_committed',
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    committed_audit_ordinal = ?, committed_chain_sha256 = ?
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND invocation_id = ? AND invocation_state = 'ambiguous_provider_result'
+                  AND invocation_writer_epoch = ?
+                """,
+                (
+                    *values[3:17], values[19], ordinal, chain,
+                    source_key, account_key, case_key, invocation_key,
+                    current["invocation_writer_epoch"],
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                f"""
+                UPDATE lifecycle_settlement_attempt_state
+                SET {_SETTLEMENT_INVOCATION_CLEAR_SQL}, claim_id = NULL,
+                    claim_until_ms = NULL, updated_at_ms = ?,
+                    invocation_writer_epoch = invocation_writer_epoch + 1
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND invocation_id = ? AND invocation_state = 'ambiguous_provider_result'
+                  AND invocation_writer_epoch = ?
+                """,
+                (
+                    int(time.time() * 1000), source_key, account_key, case_key,
+                    invocation_key, current["invocation_writer_epoch"],
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise SettlementAttemptClaimOwnershipLost("settlement ambiguous resolution CAS failed")
+        resolved_at_ms = int(time.time() * 1000)
+        conn.execute(
+            """
+            INSERT INTO lifecycle_settlement_attempt_resolutions (
+                source_id, account, case_id, invocation_id, resolution,
+                provider_evidence_ref, worker_quiescence_ref, resolved_at_ms,
+                previous_writer_epoch, committed_audit_ordinal, committed_chain_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_key, account_key, case_key, invocation_key, resolution,
+                evidence_ref, quiescence_ref or None, resolved_at_ms,
+                current["invocation_writer_epoch"], ordinal,
+                chain.hex() if chain is not None else None,
+            ),
+        )
+        return {
+            "status": "applied",
+            **view,
+            "receipt": {
+                "provider_evidence_ref": evidence_ref,
+                "worker_quiescence_ref": quiescence_ref or None,
+                "resolved_at_ms": resolved_at_ms,
+                "previous_writer_epoch": current["invocation_writer_epoch"],
+                "committed_audit_ordinal": ordinal,
+                "committed_chain_sha256": chain.hex() if chain is not None else None,
+            },
+        }
+
+
 def claim_settlement_provider_batch(
     path: str | Path,
     *,
@@ -2497,6 +2738,7 @@ def settlement_attempt_summary(
             "backoff_count": 0,
             "claimed_count": 0,
             "ambiguous_provider_result_count": 0,
+            "ambiguous_provider_result_ids": [],
             "eligible_count": 0,
             "earliest_next_attempt_at_ms": None,
             "last_state_change": None,
@@ -2590,6 +2832,10 @@ def settlement_attempt_summary(
         "backoff_count": len(backoff),
         "claimed_count": len(claimed),
         "ambiguous_provider_result_count": len(ambiguous),
+        "ambiguous_provider_result_ids": [
+            {"case_id": row["case_id"], "invocation_id": row["invocation_id"]}
+            for row in sorted(ambiguous, key=lambda item: str(item["case_id"]))[:20]
+        ],
         "eligible_count": len(eligible),
         "earliest_next_attempt_at_ms": min(next_values)
         if next_values
@@ -2750,9 +2996,10 @@ def _ensure_schema_for_read(conn: sqlite3.Connection) -> None:
             for table in ("trade_inbox", "trade_inbox_evidence", "trade_inbox_recovery")
             for operation in ("insert", "update", "delete")
         )
-        ready = ready and objects.get(
-            "trg_lifecycle_settlement_attempt_invocation_writer_fence", (None,)
-        )[0] == "trigger"
+        epoch_trigger = objects.get(_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_NAME, (None, ""))
+        ready = ready and epoch_trigger[0] == "trigger" and (
+            "epoch must increment by one" in epoch_trigger[1]
+        )
         if ready:
             ready = conn.execute(
                 "SELECT 1 FROM trade_inbox_evidence "
@@ -2840,6 +3087,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS lifecycle_settlement_attempt_resolutions (
+            source_id TEXT NOT NULL,
+            account TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            invocation_id TEXT NOT NULL,
+            resolution TEXT NOT NULL CHECK(resolution IN ('committed', 'not-executed')),
+            provider_evidence_ref TEXT NOT NULL,
+            worker_quiescence_ref TEXT,
+            resolved_at_ms INTEGER NOT NULL,
+            previous_writer_epoch INTEGER NOT NULL,
+            committed_audit_ordinal INTEGER,
+            committed_chain_sha256 TEXT,
+            PRIMARY KEY(source_id, account, case_id, invocation_id)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS lifecycle_settlement_provider_batch_leases (
             source_id TEXT NOT NULL,
             account TEXT NOT NULL,
@@ -2847,14 +3112,6 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             claim_until_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY(source_id, account)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_lifecycle_settlement_attempt_due
-        ON lifecycle_settlement_attempt_state(
-          source_id, classification, next_attempt_at_ms, claim_until_ms
         )
         """
     )
@@ -3017,27 +3274,35 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE lifecycle_settlement_attempt_state "
                 f"ADD COLUMN {column} {sql_type}"
             )
-    conn.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS
-        trg_lifecycle_settlement_attempt_invocation_writer_fence
-        BEFORE UPDATE ON lifecycle_settlement_attempt_state
-        WHEN (
-          OLD.invocation_state IS NOT NULL
-          OR NEW.invocation_state IS NOT NULL
-        ) AND (
-          typeof(NEW.invocation_writer_epoch) != 'integer'
-          OR NEW.invocation_writer_epoch
-             != OLD.invocation_writer_epoch + 1
+    old_trigger_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        (_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_NAME,),
+    ).fetchone()
+    old_sql = " ".join(
+        _SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_SQL.split()
+    ).replace("IF NOT EXISTS ", "")
+    if old_trigger_row is not None:
+        existing_old_sql = " ".join(str(old_trigger_row[0] or "").split()).replace(
+            "IF NOT EXISTS ", ""
         )
-        BEGIN
-          SELECT RAISE(
-            ABORT,
-            'lifecycle settlement invocation requires current writer'
-          );
-        END
-        """
-    )
+        if existing_old_sql != old_sql:
+            raise ValueError("unsupported settlement invocation epoch trigger")
+        conn.execute(f"DROP TRIGGER {_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_NAME}")
+    trigger_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        (_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_NAME,),
+    ).fetchone()
+    if trigger_row is not None:
+        existing_sql = " ".join(str(trigger_row[0] or "").split()).replace(
+            "IF NOT EXISTS ", ""
+        )
+        expected_sql = " ".join(_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_SQL.split()).replace(
+            "IF NOT EXISTS ", ""
+        )
+        if existing_sql != expected_sql:
+            raise ValueError("unsupported settlement invocation epoch trigger")
+    # The epoch is an increment counter; claim/invocation IDs own the CAS.
+    conn.execute(_SETTLEMENT_INVOCATION_EPOCH_TRIGGER_SQL)
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_trade_inbox_retry
@@ -3532,7 +3797,6 @@ __all__ = [
     "SettlementAttemptClaimOwnershipLost",
     "claim_trade_payload_refresh_intent",
     "enqueue_trade_payload",
-    "claim_settlement_attempt",
     "claim_settlement_provider_batch",
     "complete_settlement_attempt",
     "get_settlement_attempt_state",

@@ -65,6 +65,11 @@
       "module": "src/application/ledger/api.py",
       "name": "preview_lot_identity_migration_apply",
       "reason": "R2 retired the one-off D1-D4 production window's destructive half (table rebuild, payload rewrite, wheel_events rename, apply/preview) once the window closed on 2026-09-22; only the read-only inventory/verify surfaces remain."
+    },
+    {
+      "module": "src/application/trades/inbox.py",
+      "name": "claim_settlement_attempt",
+      "reason": "The bare settlement claim does not reserve an invocation and is not a supported production entry point; the function remains available for direct legacy imports and tests."
     }
   ]
 }

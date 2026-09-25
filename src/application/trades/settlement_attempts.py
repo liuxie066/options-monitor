@@ -38,6 +38,11 @@ _PROVIDER_ERROR_CLASS_BY_CODE = {
     "TIMEOUT": "timeout",
     "PROVIDER_UNAVAILABLE": "provider_unavailable",
 }
+_RETRYABLE_PROVIDER_ERROR_CLASSES = frozenset(_PROVIDER_ERROR_CLASS_BY_CODE.values())
+
+
+def provider_error_class(provider_code: str) -> str:
+    return _PROVIDER_ERROR_CLASS_BY_CODE.get(str(provider_code or "").strip().upper(), "unknown")
 
 
 @dataclass(frozen=True)
@@ -219,14 +224,7 @@ def classify_observation_outcome(
         if explicit:
             kind = "blocked_account_explicit"
             reason = "provider_account_capability_blocked"
-        elif error_classes and error_classes <= {
-            "transient",
-            "rate_limit",
-            "auth_expired",
-            "need_2fa",
-            "timeout",
-            "provider_unavailable",
-        }:
+        elif error_classes and error_classes <= _RETRYABLE_PROVIDER_ERROR_CLASSES:
             kind = "retryable_error"
             reason = "provider_query_retryable"
         else:
@@ -287,10 +285,7 @@ def classify_exception_outcome(
     capability: SettlementCapabilitySnapshot,
 ) -> SettlementAttemptOutcome:
     provider_code = str(getattr(exc, "code", "") or "").strip().upper()
-    error_class = _PROVIDER_ERROR_CLASS_BY_CODE.get(
-        provider_code,
-        "unknown",
-    )
+    error_class = provider_error_class(provider_code)
     if provider_code in EXPLICIT_ACCOUNT_BLOCK_PROVIDER_CODES:
         kind = "blocked_account_explicit"
         reason = "provider_account_capability_blocked"

@@ -53,6 +53,22 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         conn.execute("PRAGMA query_only=ON")
         return conn
 
+    def get_trade_lifecycle_attempt_audit_by_invocation(
+        self,
+        *,
+        case_id: str,
+        invocation_id: str,
+    ) -> dict[str, Any] | None:
+        from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+        with closing(self._connect()) as conn:
+            repo = SQLiteOptionPositionsRepository(self.path, initialize=False)
+            return repo.get_trade_lifecycle_attempt_audit_by_invocation(
+                case_id=case_id,
+                invocation_id=invocation_id,
+                conn=conn,
+            )
+
     def list_trade_events(self) -> list[dict[str, Any]]:
         return [
             trade_event_application_payload(item)
