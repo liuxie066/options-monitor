@@ -1795,7 +1795,7 @@ def test_ambiguous_summary_ids_are_scoped_sorted_and_bounded(tmp_path: Path) -> 
                 """
                 UPDATE lifecycle_settlement_attempt_state
                 SET invocation_id = ?, invocation_state = 'ambiguous_provider_result',
-                    invocation_attempted_at_ms = 1_500,
+                    invocation_attempted_at_ms = 1500,
                     invocation_writer_epoch = invocation_writer_epoch + 1
                 WHERE case_id = ?
                 """,
@@ -1877,6 +1877,6 @@ def test_existing_old_epoch_trigger_is_upgraded_to_counter_message(tmp_path: Pat
         ).fetchone() is None
         with pytest.raises(sqlite3.IntegrityError, match="epoch must increment by one"):
             conn.execute(
-                "UPDATE lifecycle_settlement_attempt_state SET updated_at_ms = 3_000 WHERE case_id = 'case-1'"
+                "UPDATE lifecycle_settlement_attempt_state SET updated_at_ms = 3000 WHERE case_id = 'case-1'"
             )
     assert get_settlement_attempt_state(path, **_case()) == started
