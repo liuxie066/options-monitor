@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -28,6 +29,7 @@ from src.application.service_drift import (
     service_drift,
 )
 from src.application.service_cleanup import pi_session_database_paths
+from src.infrastructure.io_utils import parse_last_json_obj
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
     "ANTHROPIC_API_KEY",
@@ -713,6 +715,8 @@ def _post_upgrade_service_health(
     repo_root: Path,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     if not profile:
         return {"ok": True, "status": "skipped", "reason": "service_profile_missing", "checks": [], "failed_checks": []}
@@ -746,6 +750,22 @@ def _post_upgrade_service_health(
     opend_profile = profile.get("opend")
     opend_entries = opend_profile.get("services") if isinstance(opend_profile, dict) else None
     opend_entries = opend_entries if isinstance(opend_entries, list) else []
+    # Upgrade gate D1: 5 s polls, 300 s floor, 600 s cap, 35 s child grace.
+    # The shared watchdog config defaults to 25 s, which is too short after a restart.
+    budget = 300.0
+    requested_budget = budget
+    config_paths = profile.get("config_paths")
+    if isinstance(config_paths, dict):
+        for raw_path in config_paths.values():
+            try:
+                config = json.loads(Path(raw_path).expanduser().read_text(encoding="utf-8"))
+                candidate = config.get("watchdog", {}).get("retry_timeout_sec")
+            except (OSError, TypeError, ValueError, AttributeError):
+                continue
+            if (isinstance(candidate, (int, float)) and not isinstance(candidate, bool)
+                    and candidate > 0 and (isinstance(candidate, int) or math.isfinite(candidate))):
+                requested_budget = max(requested_budget, candidate)
+    budget = min(requested_budget, 600.0)
     for service_name in (name for name in services if "opend" in name):
         endpoint = next((item for item in opend_entries
                          if isinstance(item, dict) and item.get("service_name") == service_name), {})
@@ -754,20 +774,40 @@ def _post_upgrade_service_health(
             public = {"service": service_name, "check": "opend-login-check", "ok": False,
                       "reason_code": "OPEND_ENDPOINT_MISSING"}
         else:
-            command = [str(_release_python(repo_root)), "-m", "src.infrastructure.opend_watchdog",
-                       "--json", "--host", host, "--port", str(port), "--required-capability", "both"]
-            result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, timeout=35)
-            result.update(operation="post_upgrade_service_health", check="opend-login-check", service=service_name)
+            started = monotonic_fn()
+            deadline = started + budget
+            attempts = 0
+            max_attempts = math.ceil(budget / 5) + 1
+            for attempt in range(max_attempts):
+                remaining = max(0.0, deadline - monotonic_fn())
+                # Flag reference: external_services.run_opend_watchdog; omit --ensure for this read-only gate.
+                command = [str(_release_python(repo_root)), "-m", "src.infrastructure.opend_watchdog",
+                           "--json", "--host", host, "--port", str(port),
+                           "--retry-interval-sec", "5", "--retry-timeout-sec", str(remaining),
+                           "--success-threshold", "2", "--required-capability", "both", "--retry-enabled"]
+                result = _run_command(command, cwd=repo_root, run_cmd=run_cmd,
+                                      timeout=math.ceil(remaining) + 35, stdout_limit=None)
+                attempts += 1
+                payload = parse_last_json_obj(
+                    (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
+                )
+                if not isinstance(payload, dict):
+                    payload = {}
+                public = {"service": service_name, "check": "opend-login-check",
+                          "ok": bool(result.get("ok")) and payload.get("ok") is True,
+                          "reason_code": payload.get("error_code")}
+                result["ok"] = public["ok"]
+                remaining = deadline - monotonic_fn()
+                if public["ok"] or remaining <= 0 or attempt == max_attempts - 1:
+                    break
+                sleep_fn(min(5.0, remaining))
+            result["stdout"] = _clip_command_output(str(result.get("stdout") or ""), 4000)
+            result.update(operation="post_upgrade_service_health", check="opend-login-check", service=service_name,
+                          attempts=attempts, waited_seconds=round(monotonic_fn() - started, 3),
+                          retry_budget_seconds=budget)
+            if requested_budget > budget:
+                result["retry_budget_requested_seconds"] = requested_budget
             operations.append(result)
-            try:
-                payload = json.loads(str(result.get("stdout") or ""))
-            except (TypeError, ValueError):
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            public = {"service": service_name, "check": "opend-login-check",
-                      "ok": bool(result.get("ok")) and payload.get("ok") is not False,
-                      "reason_code": payload.get("error_code")}
         checks.append(public)
         if not public["ok"]:
             failed.append(public)
