@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 
 from src.application.runtime_status_cli import format_runtime_status_summary
-from src.application.agent_tools.runtime_status_impl import _notification_delivery_health
+from src.application.agent_tools.runtime_status_impl import (
+    _aggregate_trade_intake_summaries,
+    _notification_delivery_health,
+)
 from src.interfaces.cli.observability_ops import handle_observability_command
 
 
@@ -103,6 +106,78 @@ def test_notification_delivery_has_separate_degraded_state_for_unknown_and_recei
     assert _notification_delivery_health(confirmed, {})["status"] == "confirmed"
     trade = {"summary": {"last_receipt_result": {"status": "unresolved"}}}
     assert _notification_delivery_health(confirmed, trade)["reason_codes"] == ["TRADE_RECEIPT_UNCONFIRMED"]
+
+
+def test_trade_intake_aggregation_follows_latest_source_events_in_either_order() -> None:
+    older = {
+        "listener_status": "listening", "listener_stage": "ready",
+        "last_heartbeat_utc": "2026-01-01T00:00:00Z",
+        "last_push_received_utc": "2026-01-01T00:01:00Z", "last_push_deal_id": "old",
+        "last_backfill_check_utc": "2026-01-01T00:03:00Z",
+        "last_backfill_window_start_utc": "old-start", "last_backfill_error": "old-error",
+        "last_backfill_result": {"status": "failed"},
+        "last_backfill_deal_count": 4, "last_backfill_applied_count": 4,
+        "last_backfill_skipped_duplicate_count": 4, "last_backfill_failed_count": 4,
+        "last_backfill_unresolved_count": 4,
+        "last_deal_result": {"status": "old"},
+        "last_receipt_result": {"status": "unresolved"},
+    }
+    newer = {
+        "listener_status": "listening", "listener_stage": "recovering",
+        "last_heartbeat_utc": "2026-01-01T00:04:00+00:00",
+        "last_push_received_utc": "2026-01-01T01:02:00+01:00", "last_push_deal_id": "new",
+        "last_backfill_check_utc": "2026-01-01T00:05:00Z",
+        "last_backfill_window_start_utc": "new-start", "last_backfill_error": None,
+        "last_backfill_result": {"status": "applied"},
+        "last_backfill_deal_count": 1, "last_backfill_applied_count": 1,
+        "last_backfill_skipped_duplicate_count": 1, "last_backfill_failed_count": 1,
+        "last_backfill_unresolved_count": 1,
+        "last_deal_result": {"status": "new"},
+        "last_receipt_result": {"status": "sent"},
+    }
+    for sources in ([older, newer], [newer, older]):
+        trade = {"sources": [{"summary": item} for item in sources]}
+        summary = _aggregate_trade_intake_summaries(sources)
+        assert summary["last_heartbeat_utc"] == newer["last_heartbeat_utc"]
+        assert summary["last_push_deal_id"] == "new"
+        assert summary["last_backfill_window_start_utc"] == "new-start"
+        assert summary["last_backfill_error"] is None
+        assert summary["last_backfill_result"] == {"status": "applied"}
+        for key in (
+            "last_backfill_deal_count", "last_backfill_applied_count",
+            "last_backfill_skipped_duplicate_count", "last_backfill_failed_count",
+            "last_backfill_unresolved_count",
+        ):
+            assert summary[key] == 1
+        assert summary["listener_stage"] is None
+        assert summary["last_deal_result"] is None
+        assert summary["last_receipt_result"] is None
+        trade["summary"] = summary
+        assert "TRADE_RECEIPT_UNCONFIRMED" in _notification_delivery_health(
+            {"status": "sent"}, trade,
+        )["reason_codes"]
+
+
+def test_trade_intake_aggregation_nulls_conflicting_equal_time_events() -> None:
+    first = {
+        "last_push_received_utc": "2026-01-01T00:01:00Z", "last_push_deal_id": "a",
+        "last_backfill_check_utc": "2026-01-01T00:02:00Z",
+        "last_backfill_applied_count": 1, "last_backfill_result": {"status": "a"},
+        "last_fee_attempted_at_ms": 1000, "last_fee_error": "a",
+    }
+    second = {
+        "last_push_received_utc": "2026-01-01T01:01:00+01:00", "last_push_deal_id": "b",
+        "last_backfill_check_utc": "2026-01-01T01:02:00+01:00",
+        "last_backfill_applied_count": 4, "last_backfill_result": {"status": "b"},
+        "last_fee_attempted_at_ms": 1000, "last_fee_error": "b",
+    }
+    for sources in ([first, second], [second, first]):
+        summary = _aggregate_trade_intake_summaries(sources)
+        assert summary["last_push_deal_id"] is None
+        assert summary["last_backfill_applied_count"] is None
+        assert summary["last_backfill_result"] is None
+        assert summary["last_fee_attempted_at_ms"] == 1000
+        assert summary["last_fee_error"] is None
 
 
 def test_notification_delivery_is_visible_alongside_existing_overall_failure() -> None:

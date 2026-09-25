@@ -4,6 +4,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from copy import deepcopy
 from dataclasses import replace
+import json
+import sqlite3
 
 import pytest
 
@@ -37,6 +39,7 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades.deal_identity import completed_ledger_deal_keys
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.resolver import resolve_trade_deal
+from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 from test_trades_resolver_close import _deal
 
 
@@ -1271,6 +1274,14 @@ def _trade_intake_datasets(
     **overrides: object,
 ) -> list[dict]:
     # Shared preamble of the trade-intake runtime fixtures.
+    summary = dict(summary)
+    summary.setdefault("audit_reconciliation", {
+        "available": summary.get("reconciliation_preview_available"),
+        "pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
+        "delegated_lifecycle_pending_deal_ids": summary.get(
+            "delegated_lifecycle_pending_deal_ids"
+        ),
+    })
     return build_trade_intake_datasets(
         **{
             "runtime_statuses": [
@@ -1297,6 +1308,106 @@ def _trade_intake_datasets(
             **overrides,
         }
     )
+
+
+def test_trade_intake_audit_reconciliation_prevents_unrepairable_terminal_fail(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    state = {
+        "processed_deal_ids": {},
+        "failed_deal_ids": {},
+        "unresolved_deal_ids": {
+            "deal-non-option": {
+                "account": "lx",
+                "status": "unresolved",
+                "reason": "source_classification_pending",
+                "updated_at": "2026-07-13T09:00:00+00:00",
+            }
+        },
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_text(
+        json.dumps({
+            "phase": "resolved",
+            "deal_id": "deal-non-option",
+            "result": {"reason": "not_option_deal"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    ledger_path = tmp_path / "ledger.sqlite3"
+    with sqlite3.connect(ledger_path):
+        pass
+    no_audit = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path, sqlite_path=ledger_path,
+    )
+    with_audit = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path, sqlite_path=ledger_path, audit_path=audit_path,
+    )
+    assert no_audit["pending_after_reconcile_count"] == 1
+    assert with_audit["pending_after_reconcile_count"] == 0
+
+    datasets = _trade_intake_datasets(
+        tmp_path=tmp_path,
+        state={"path": str(state_path), "json": state},
+        summary={
+            "pending_count": 1,
+            "unresolved_count": 1,
+            "reconciliation_preview_available": True,
+            "pending_after_reconcile_count": 1,
+            "audit_reconciliation": with_audit,
+        },
+    )
+    check = next(item for item in datasets[0]["checks"] if item["check_id"] == "OM-INT-003")
+    assert check["status"] == "pass"
+    assert check["observed"]["pending_after_reconcile_count"] == 0
+    assert check["observed"]["missing_local_terminal_count"] == 0
+
+    legacy = build_trade_intake_datasets(
+        runtime_statuses=[{"trade_intake": {
+            "enabled": True,
+            "state": {"path": str(state_path), "json": state},
+            "summary": {
+                "pending_count": 1,
+                "unresolved_count": 1,
+                "reconciliation_preview_available": True,
+                "pending_after_reconcile_count": 1,
+                "audit_reconciliation": with_audit,
+            },
+        }}],
+        accounts=["lx"],
+        market="us",
+        repo_root=tmp_path,
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+    )
+    legacy_check = next(item for item in legacy[0]["checks"] if item["check_id"] == "OM-INT-003")
+    assert legacy_check["status"] == "pass"
+
+
+@pytest.mark.parametrize("audit_reconciliation", [
+    None,
+    {"available": False, "reason": "audit_unreadable"},
+    {"available": True, "pending_after_reconcile_count": None},
+])
+def test_trade_intake_terminal_check_is_unknown_without_audit_evidence(
+    tmp_path: Path, audit_reconciliation: dict | None,
+) -> None:
+    datasets = _trade_intake_datasets(
+        tmp_path=tmp_path,
+        state={"json": {"unresolved_deal_ids": {"deal-1": {"account": "lx"}}}},
+        summary={
+            "pending_count": 1,
+            "unresolved_count": 1,
+            "reconciliation_preview_available": True,
+            "pending_after_reconcile_count": 1,
+            "audit_reconciliation": audit_reconciliation,
+        },
+    )
+    check = next(item for item in datasets[0]["checks"] if item["check_id"] == "OM-INT-003")
+    assert check["status"] == "unknown"
+    assert check["observed"]["missing_local_terminal_count"] is None
 
 
 def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> None:

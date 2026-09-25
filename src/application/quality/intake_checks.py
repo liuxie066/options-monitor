@@ -152,11 +152,19 @@ def build_trade_intake_datasets(
         if not bool(intake.get("enabled")):
             continue
         intake_enabled = True
-        source_rows.extend(
+        enabled_sources = [
             item
             for item in intake.get("sources") or []
             if isinstance(item, dict) and bool(item.get("enabled"))
-        )
+        ]
+        source_rows.extend(enabled_sources)
+        if not intake.get("sources"):
+            source_rows.append({
+                "id": "trade-intake",
+                "account": None,
+                "state": intake.get("state"),
+                "summary": intake.get("summary"),
+            })
     if not intake_enabled:
         out: list[dict[str, Any]] = []
         for account in accounts:
@@ -191,6 +199,15 @@ def build_trade_intake_datasets(
         source_account = str(source.get("account") or "").strip().lower()
         scoped_accounts = [source_account] if source_account else list(accounts)
         summary = source.get("summary") if isinstance(source.get("summary"), dict) else {}
+        audit_reconciliation = (
+            summary.get("audit_reconciliation")
+            if isinstance(summary.get("audit_reconciliation"), dict)
+            else {}
+        )
+        audit_available = (
+            bool(audit_reconciliation.get("available"))
+            and audit_reconciliation.get("pending_after_reconcile_count") is not None
+        )
         pending_count = int(summary.get("pending_count") or 0)
         failed_count = int(summary.get("failed_count") or 0)
         unresolved_count = int(summary.get("unresolved_count") or 0)
@@ -202,6 +219,13 @@ def build_trade_intake_datasets(
             _delegated_lifecycle_pending_count(state_payload)
         )
         pending_deal_ids = _pending_deal_ids(state_payload)
+        audit_delegated_deal_ids = (
+            pending_deal_ids & _normalized_deal_ids(
+                audit_reconciliation.get("delegated_lifecycle_pending_deal_ids")
+            )
+            if audit_available
+            else set()
+        )
         unresolved_deal_ids = _unresolved_deal_ids(state_payload)
         preview_available = bool(summary.get("reconciliation_preview_available"))
         preview_delegated_lifecycle_pending_deal_ids = (
@@ -270,7 +294,12 @@ def build_trade_intake_datasets(
                 ),
                 "pending_age_seconds": pending_age,
                 "reconciliation_preview_available": summary.get("reconciliation_preview_available"),
-                "pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
+                "runtime_preview_pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
+                "audit_reconciliation_available": audit_available,
+                "audit_reconciliation_reason": audit_reconciliation.get("reason"),
+                "audit_pending_after_reconcile_count": audit_reconciliation.get(
+                    "pending_after_reconcile_count"
+                ) if audit_available else None,
                 "actionable_pending_after_reconcile_count": summary.get(
                     "actionable_pending_after_reconcile_count"
                 ),
@@ -328,13 +357,14 @@ def build_trade_intake_datasets(
                 expected={"failed_count": 0, "actionable_unresolved_count": 0},
                 evidence_refs=[evidence],
             )
-            terminal_available = preview_available
-            raw_terminal_missing = int(
-                summary.get("pending_after_reconcile_count") or 0
+            terminal_available = audit_available
+            raw_terminal_missing = (
+                int(audit_reconciliation.get("pending_after_reconcile_count") or 0)
+                if terminal_available else None
             )
-            terminal_missing = max(
-                0,
-                raw_terminal_missing - delegated_lifecycle_pending_count,
+            terminal_missing = (
+                max(0, raw_terminal_missing - len(audit_delegated_deal_ids))
+                if raw_terminal_missing is not None else None
             )
             broker_check = check_result(
                 check_id="OM-INT-003",
@@ -363,7 +393,8 @@ def build_trade_intake_datasets(
                 ),
                 observed={
                     "pending_after_reconcile_count": raw_terminal_missing,
-                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                    "audit_reconciliation_available": terminal_available,
+                    "delegated_lifecycle_pending_count": len(audit_delegated_deal_ids),
                     "missing_local_terminal_count": terminal_missing,
                 },
                 expected={"missing_local_terminal_count": 0},
