@@ -20,6 +20,7 @@ from src.application.ledger.api import (
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades.inbox import (
     SettlementAttemptClaimOwnershipLost,
+    SettlementAttemptUpsertResult,
     claim_settlement_attempt,
     claim_settlement_provider_batch,
     enqueue_trade_payload,
@@ -432,6 +433,31 @@ def _runtime_source(tmp_path: Path, *, enabled: bool = True) -> dict:
     }
 
 
+def _seed_provider_required_state(
+    path: Path,
+    candidate: dict,
+    collector: _Collector,
+    *,
+    case_scope: str | None = None,
+    capability_fingerprint: str | None = None,
+) -> dict:
+    case_id = str(candidate["lifecycle_case"]["case_id"])
+    state = prepare_provider_required_state(
+        None,
+        source_id="lx",
+        account="lx",
+        case_id=case_id,
+        case_scope_fingerprint_value=case_scope or case_scope_fingerprint(candidate),
+        provider_input_scope_fingerprint_value=provider_input_scope_fingerprint(
+            lifecycle_case=candidate["lifecycle_case"], read_model=_read_model(case_id)
+        ),
+        contract_version=collector.contract.contract_version,
+        capability_fingerprint=capability_fingerprint or collector.capability.capability_fingerprint,
+        now_ms=1_000,
+    )
+    return upsert_settlement_attempt_state(path, state=state)
+
+
 def _expired_runtime_invocation(
     path: Path,
     *,
@@ -790,6 +816,200 @@ def test_disabled_provider_branch_keeps_local_due_planning(
     assert result["local_reconciliation"]["case_count"] == 2
     assert result["skipped_counts"]["disabled"] == 1
     assert result["control_summary"]["disabled_count"] == 1
+
+
+def test_disabling_collector_after_committed_invocation_clears_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_due_planner(monkeypatch, candidates=[_candidate("provider-1")])
+    source = _runtime_source(tmp_path)
+    repo = _RuntimeAuditRepo()
+    collector = _Collector(supported=True)
+
+    first = _run_due(source, repo=repo, collector=collector)
+    committed = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+    )
+    assert first["provider_attempt_count"] == 1
+    assert committed is not None
+    assert committed["invocation_state"] == "ledger_committed"
+    assert committed["invocation_id"] is not None
+
+    disabled = _run_due(
+        _runtime_source(tmp_path, enabled=False), repo=repo, collector=collector
+    )
+    stored = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+    )
+    assert disabled["skipped_counts"]["disabled"] == 1
+    assert disabled["provider_attempt_count"] == 0
+    assert stored is not None
+    assert stored["invocation_id"] is None
+    assert stored["invocation_state"] is None
+    assert collector.calls == 1
+
+
+def test_plan_noop_claim_is_counted_and_blocks_sibling_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    stale = _candidate("provider-stale")
+    ready = _candidate("provider-ready")
+    _patch_due_planner(monkeypatch, candidates=[stale, ready])
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    _seed_provider_required_state(
+        source["inbox_path"], stale, collector, case_scope="old-scope"
+    )
+    _seed_provider_required_state(source["inbox_path"], ready, collector)
+    original_upsert = mod.upsert_settlement_attempt_state
+    noops = 0
+
+    def claim_before_plan_upsert(path, *, state):
+        nonlocal noops
+        if state["case_id"] == "provider-stale":
+            current = get_settlement_attempt_state(
+                path, source_id="lx", account="lx", case_id="provider-stale"
+            )
+            assert current is not None
+            assert claim_settlement_attempt(
+                path,
+                source_id="lx",
+                account="lx",
+                case_id="provider-stale",
+                case_scope_fingerprint=current["case_scope_fingerprint"],
+                claim_id="other-worker",
+                now_ms=1_000,
+                lease_ms=120_000,
+            )
+        stored = original_upsert(path, state=state)
+        if state["case_id"] == "provider-stale":
+            assert stored.write_applied is False
+            noops += 1
+        return stored
+
+    monkeypatch.setattr(mod, "upsert_settlement_attempt_state", claim_before_plan_upsert)
+    result = _run_due(source, collector=collector)
+
+    assert noops == 1
+    assert result["control_status"] == "ok"
+    assert result["candidate_count"] == 2
+    assert result["planned_case_count"] == 1
+    assert result["skipped_counts"]["claimed"] == 1
+    assert result["skipped_counts"]["state_not_writable"] == 0
+    assert result["provider_attempt_count"] == 0
+    assert collector.calls == 0
+
+
+def test_plan_noop_without_active_claim_is_counted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    candidate = _candidate("provider-1")
+    _patch_due_planner(monkeypatch, candidates=[candidate])
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    _seed_provider_required_state(
+        source["inbox_path"], candidate, collector, case_scope="old-scope"
+    )
+
+    def rejected_upsert(_path, *, state):
+        return SettlementAttemptUpsertResult(state, write_applied=False)
+
+    monkeypatch.setattr(mod, "upsert_settlement_attempt_state", rejected_upsert)
+    result = _run_due(source, collector=collector)
+
+    assert result["control_status"] == "ok"
+    assert result["candidate_count"] == 1
+    assert result["planned_case_count"] == 1
+    assert result["skipped_counts"]["state_not_writable"] == 1
+    assert result["skipped_counts"]["claimed"] == 0
+    assert result["provider_attempt_count"] == 0
+
+
+def test_capability_refresh_noop_claim_is_counted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    candidate = _candidate("provider-1")
+    _patch_due_planner(monkeypatch, candidates=[candidate])
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    _seed_provider_required_state(
+        source["inbox_path"],
+        candidate,
+        collector,
+        capability_fingerprint="previous-capability",
+    )
+    original_upsert = mod.upsert_settlement_attempt_state
+    noops = 0
+
+    def claim_before_refresh_upsert(path, *, state):
+        nonlocal noops
+        current = get_settlement_attempt_state(
+            path, source_id="lx", account="lx", case_id="provider-1"
+        )
+        assert current is not None
+        assert claim_settlement_attempt(
+            path,
+            source_id="lx",
+            account="lx",
+            case_id="provider-1",
+            case_scope_fingerprint=current["case_scope_fingerprint"],
+            claim_id="other-worker",
+            now_ms=1_000,
+            lease_ms=120_000,
+        )
+        stored = original_upsert(path, state=state)
+        assert stored.write_applied is False
+        noops += 1
+        return stored
+
+    monkeypatch.setattr(mod, "upsert_settlement_attempt_state", claim_before_refresh_upsert)
+    result = _run_due(source, collector=collector)
+
+    assert noops == 1
+    assert result["control_status"] == "ok"
+    assert result["planned_case_count"] == 0
+    assert result["skipped_counts"]["claimed"] == 1
+    assert result["provider_attempt_count"] == 0
+    assert collector.calls == 0
+
+
+def test_provider_case_scope_change_is_counted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    candidate = _candidate("provider-1")
+    _patch_due_planner(monkeypatch, candidates=[candidate])
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    _seed_provider_required_state(source["inbox_path"], candidate, collector)
+    original_list = mod.list_settlement_attempt_states
+
+    def change_scope_after_read(*args, **kwargs):
+        states = original_list(*args, **kwargs)
+        candidate["lifecycle_case"]["pending_until_ms"] = 201
+        return states
+
+    monkeypatch.setattr(mod, "list_settlement_attempt_states", change_scope_after_read)
+    result = _run_due(source, collector=collector)
+
+    assert result["control_status"] == "ok"
+    assert result["candidate_count"] == 1
+    assert result["planned_case_count"] == 0
+    assert result["skipped_counts"]["scope_changed"] == 1
+    assert result["provider_attempt_count"] == 0
+    assert collector.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -2198,6 +2418,50 @@ def test_initial_lease_guard_start_failure_completes_without_provider(
     assert state["next_attempt_at_ms"] == 301_000
     assert state["claim_id"] is None
     assert state["claim_until_ms"] is None
+
+
+def test_lease_start_failure_after_committed_invocation_clears_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    counts = _patch_due_planner(monkeypatch, candidates=[_candidate("provider-1")])
+    source = _runtime_source(tmp_path)
+    repo = _RuntimeAuditRepo()
+    collector = _Collector(supported=True)
+    first = _run_due(source, repo=repo, collector=collector)
+    committed = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+    )
+    assert first["provider_attempt_count"] == 1
+    assert committed is not None
+    assert committed["invocation_state"] == "ledger_committed"
+    assert committed["next_attempt_at_ms"] is not None
+    counts["control_now_ms"] = int(committed["next_attempt_at_ms"])
+    start_calls = 0
+
+    def fail_start(_thread):
+        nonlocal start_calls
+        start_calls += 1
+        raise RuntimeError("cannot start renewal thread")
+
+    monkeypatch.setattr(mod.threading.Thread, "start", fail_start)
+    _run_due(
+        source,
+        repo=repo,
+        collector=collector,
+        now_ms=counts["control_now_ms"],
+    )
+    stored = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+    )
+    assert start_calls == 1
+    assert collector.calls == 1
+    assert stored is not None
+    assert stored["reason_code"] == "settlement_attempt_lease_guard_failed"
+    assert stored["invocation_id"] is None
+    assert stored["invocation_state"] is None
 
 
 def test_lease_guard_failure_does_not_report_unpersisted_noop(

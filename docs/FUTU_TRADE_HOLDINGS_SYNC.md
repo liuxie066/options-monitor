@@ -1014,6 +1014,18 @@ upsert 实际写入标志是现有返回数据的补充；不新建终态、并�
 操作员提供的外部证据，不能由本地账本缺审计推定；归运行操作员在真正 apply 前
 核证。本轮不执行真实处置，生产启用和生产数据修复归后续单独授权。
 
+## Lifecycle due 运行修复设计（模块审查第 5 天）
+
+目标：在已有 provider invocation 已 `ledger_committed` 后关闭 collector，due pass 仍完成本地计划、将该 case 记为 `disabled` 并写出运行结果；计划或能力刷新被活跃 claim 拒写、或 case scope 在重读后变化时，结果明确计数。本轮仅改 T1、T2 和 T1 指定的另外两处同形状写入；不分解 `_reconcile_due_lifecycle_cases_for_source`，不改公共 API 的签名或名称、生产数据或版本。基线为 `28412d36690584233d7ba152c6f59a4394047958`。
+
+事实与归属：`inbox.py` 的 `_SETTLEMENT_INVOCATION_FIELDS` 是通用 upsert 禁止直接指定的 invocation 字段清单；固定基线的 `lifecycle_runtime.py` 尚未导入它，本轮需增加该导入。`upsert_settlement_attempt_state` 在 SQL 前拒绝这些字段的非空值，成功重规划 `ledger_committed` 行时由现有 SQL 清空旧 invocation。`lifecycle_runtime.py` 负责 due 调度与 `skipped_counts`，已有 `_active_claim` 判定活跃租约。当前禁用 collector、静态能力阻断、批量租约启动失败三处从完整持久行展开 payload，可携带 invocation 字段；计划和能力刷新写入 no-op、scope 不符则提前跳过而无计数。
+
+复用清单：复用 `inbox.py::_SETTLEMENT_INVOCATION_FIELDS` 定义字段边界，复用 `lifecycle_runtime.py::_active_claim` 判断活跃 claim，复用 `skipped_counts` 返回结构及现有 `claimed` 桶。新增模块内 `_settlement_state_for_generic_upsert`，只为上述三处剥除 invocation 字段，不建立新的状态或写入接口。新增 `state_not_writable`、`scope_changed` 两个计数桶，因为现有桶不能准确表示无可证活跃 claim 的 upsert no-op、或重读后 scope 不同。检索范围：`lifecycle_runtime.py` 的所有 `upsert_settlement_attempt_state` 调用点、`inbox.py` 的字段定义/upsert/claim、`tests/test_trades_lifecycle_runtime.py` 的 due 测试；关键词 `_SETTLEMENT_INVOCATION_FIELDS`、`write_applied`、`skipped_counts`、`_active_claim`。同语义 helper 命中为空。
+
+设计：在 `lifecycle_runtime.py` 模块级定义 `_settlement_state_for_generic_upsert(state)`，由 T1 的 disabled、blocked_static 与 batch lease 启动失败三处共同调用；其它已用 `prepare_provider_required_state` 或 `_refresh_capability_scope` 构造的 payload 不改。保持通用 upsert 的输入校验与 invocation 清空 SQL。T2 在计划和能力刷新 `write_applied=False` 后，若实际返回的持久行有活跃 claim，计 `claimed` 并置位现有 `provider_batch_claim_active`，阻止同轮其它 case 越过该 claim 调用 provider；否则计 `state_not_writable`。provider 循环的 case scope 不符计 `scope_changed`。`claimed` 在这两处 no-op 只表示返回状态可证明的活跃 claim；`state_not_writable` 表示写入未落库且不能证明活跃 claim，不推断具体原因；`scope_changed` 表示同轮重读后的 case fingerprint 与会话状态不一致。三个新增计数路径均按被跳过的 case 每次计一，仅保证成功的 `control_status=ok` 结果；错误结果的既有 payload 不承诺 `skipped_counts`。`planned_case_count` 与 `provider_attempt_count` 是重叠的处理阶段；批量门控及既有歧义状态也不逐 case 入桶，本轮只对 T2 指定三处做逐 case 对账，不建立各项简单相加等于 `candidate_count` 的错误恒等式。
+
+切片与验证：A（T1）先增加“provider 已 `ledger_committed` → collector 关闭”回归测试并保存修复前原始异常，再用单一 helper 修三处；批量租约启动失败测试也先形成 `ledger_committed` 行，推进控制时钟越过退避，并断言注入命中、失败状态落库、无重复 provider 调用和 invocation 清空。B（T2，依赖 A）在初始状态读取之后、目标 upsert 之前注入另一 worker 的活跃 claim，确认返回 `write_applied=False`；用双 case 断言该 claim 有计数且阻断同轮其余 provider 尝试。另覆盖能力刷新 no-op、无活跃 claim 的 `state_not_writable`、scope 变化的计数；按 T2 三处路径核对候选与阶段结果。最后跑工作树全量 pytest、依赖图 `--check`、文案闸门及 `git diff --check`。测试只使用 `tmp_path` SQLite；新 SQL 文本不用下划线数字。若设计出现新的产品或权限取舍，停下确认。
+
 ## 全局交易识别与策略归属优化设计（未实现）
 
 本节是拟实施设计，不改变上文现行契约。审查基线为本地提交

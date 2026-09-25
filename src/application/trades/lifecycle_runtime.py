@@ -24,6 +24,7 @@ from src.application.trades.close_reason_reconciliation import (
     reconcile_lifecycle_close_reason,
 )
 from src.application.trades.inbox import (
+    _SETTLEMENT_INVOCATION_FIELDS,
     SETTLEMENT_ATTEMPT_MIN_LEASE_MS,
     SettlementAttemptClaimOwnershipLost,
     claim_settlement_provider_batch,
@@ -71,6 +72,14 @@ _SETTLEMENT_CLAIM_MONOTONIC_FN = time.monotonic
 
 def _settlement_control_wall_clock_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _settlement_state_for_generic_upsert(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in state.items()
+        if key not in _SETTLEMENT_INVOCATION_FIELDS
+    }
 
 
 def _settlement_processing_failure_outcome(
@@ -911,6 +920,8 @@ def _reconcile_due_lifecycle_cases_for_source(
         "backoff": 0,
         "blocked": 0,
         "disabled": 0,
+        "state_not_writable": 0,
+        "scope_changed": 0,
     }
     for case_id, candidate in candidates_by_id.items():
         state = states.get(case_id)
@@ -1121,6 +1132,11 @@ def _reconcile_due_lifecycle_cases_for_source(
                     raise TypeError("settlement attempt state is invalid")
                 states[case_id] = stored
                 if not getattr(stored, "write_applied", False):
+                    if _active_claim(stored, now_ms=control_now_ms()):
+                        provider_batch_claim_active = True
+                        skipped_counts["claimed"] += 1
+                    else:
+                        skipped_counts["state_not_writable"] += 1
                     continue
                 stored_matches_scope = (
                     str(stored.get("case_scope_fingerprint") or "")
@@ -1174,6 +1190,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             str(state.get("case_scope_fingerprint") or "")
             != current_scope
         ):
+            skipped_counts["scope_changed"] += 1
             continue
         if _active_claim(state, now_ms=control_now_ms()):
             provider_batch_claim_active = True
@@ -1188,7 +1205,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                 upsert_settlement_attempt_state,
                 inbox_path,
                 state={
-                    **state,
+                    **_settlement_state_for_generic_upsert(state),
                     "outcome_kind": "disabled",
                     "reason_code": "collector_disabled",
                     "provider_code": None,
@@ -1236,6 +1253,11 @@ def _reconcile_due_lifecycle_cases_for_source(
                 raise TypeError("settlement attempt state is invalid")
             states[case_id] = state
             if not getattr(state, "write_applied", False):
+                if _active_claim(state, now_ms=control_now_ms()):
+                    provider_batch_claim_active = True
+                    skipped_counts["claimed"] += 1
+                else:
+                    skipped_counts["state_not_writable"] += 1
                 continue
         if not active_collector.capability.supported:
             if str(state.get("outcome_kind") or "") == "blocked_static":
@@ -1260,7 +1282,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                 upsert_settlement_attempt_state,
                 inbox_path,
                 state={
-                    **state,
+                    **_settlement_state_for_generic_upsert(state),
                     **settlement_attempt_updates_after_outcome(
                         state,
                         outcome=blocked,
@@ -1435,7 +1457,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                         upsert_settlement_attempt_state,
                         inbox_path,
                         state={
-                            **failed_state,
+                            **_settlement_state_for_generic_upsert(failed_state),
                             **failure_updates,
                             "claim_id": None,
                             "claim_until_ms": None,
