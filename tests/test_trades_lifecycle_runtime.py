@@ -671,6 +671,11 @@ def test_runtime_recovers_only_expired_invocations_before_provider(
     assert len(repo.lookups) == expected_lookup_count
     assert collector.calls == 0
     assert result["provider_attempt_count"] == 0
+    if expected_state == "ambiguous_provider_result":
+        expected_ids = [{"case_id": "provider-1", "invocation_id": state["invocation_id"]}]
+        assert result["control_summary"]["ambiguous_provider_result_count"] == 1
+        assert result["control_summary"]["ambiguous_provider_result_ids"] == expected_ids
+        assert result["ambiguous_provider_result_ids"] == expected_ids
     assert len(counts["seals"]) == (
         1 if expected_state == "ledger_committed" else 0
     )
@@ -2193,6 +2198,58 @@ def test_initial_lease_guard_start_failure_completes_without_provider(
     assert state["next_attempt_at_ms"] == 301_000
     assert state["claim_id"] is None
     assert state["claim_until_ms"] is None
+
+
+def test_lease_guard_failure_does_not_report_unpersisted_noop(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    _patch_due_planner(monkeypatch, candidates=[_candidate("provider-1")])
+    source = _runtime_source(tmp_path)
+
+    def competing_claim_then_fail(_thread):
+        current = get_settlement_attempt_state(
+            source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+        )
+        assert current is not None
+        assert claim_settlement_attempt(
+            source["inbox_path"], source_id="lx", account="lx", case_id="provider-1",
+            case_scope_fingerprint=current["case_scope_fingerprint"],
+            claim_id="other-worker", now_ms=1_000, lease_ms=120_000,
+        )
+        raise RuntimeError("cannot start renewal thread")
+
+    monkeypatch.setattr(mod.threading.Thread, "start", competing_claim_then_fail)
+    result = _run_due(source, collector=_Collector(supported=True))
+    stored = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id="provider-1"
+    )
+    assert result["provider_results"] == []
+    assert stored is not None and stored["reason_code"] != "settlement_attempt_lease_guard_failed"
+    assert stored["claim_id"] == "other-worker"
+
+
+def test_stale_invocation_operational_error_uses_control_store_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    counts = _patch_due_planner(monkeypatch, candidates=[_candidate("provider-1")])
+    counts["control_now_ms"] = 200_000
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    _expired_runtime_invocation(source["inbox_path"], collector=collector, finished=False)
+    monkeypatch.setattr(
+        mod, "reconcile_settlement_attempt_invocation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("write unavailable")),
+    )
+    result = _run_due(source, collector=collector)
+    assert result["control_status"] == "control_store_unavailable"
+    assert result["control_error_class"] == "OperationalError"
+    assert collector.calls == 0
 
 
 def test_post_refresh_guard_start_failure_completes_owned_claim(

@@ -25,6 +25,7 @@ from src.application.trades.settlement_attempts import (
     classify_exception_outcome,
     classify_observation_outcome,
     inspect_settlement_capabilities,
+    provider_error_class,
 )
 
 
@@ -757,14 +758,9 @@ def _query_receipt(
         provider_code = str(
             getattr(exc, "code", "") or ""
         ).strip().upper()
-        error_class = {
-            "TRANSIENT": "transient",
-            "RATE_LIMIT": "rate_limit",
-            "AUTH_EXPIRED": "auth_expired",
-            "NEED_2FA": "need_2fa",
-            "TIMEOUT": "timeout",
-            "PROVIDER_UNAVAILABLE": "provider_unavailable",
-        }.get(provider_code, "timeout" if isinstance(exc, TimeoutError) else "unknown")
+        error_class = provider_error_class(provider_code)
+        if error_class == "unknown" and isinstance(exc, TimeoutError):
+            error_class = "timeout"
         return build_settlement_source_receipt(
             source=source,
             query_input=query_input,

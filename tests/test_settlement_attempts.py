@@ -24,6 +24,7 @@ from src.application.trades.inbox import (
     list_settlement_attempt_states,
     mark_settlement_attempt_provider_started,
     reconcile_settlement_attempt_invocation,
+    resolve_ambiguous_settlement_attempt,
     replace_finished_settlement_attempt_provider_invocation,
     renew_settlement_attempt_claim,
     renew_settlement_provider_batch_claim,
@@ -43,6 +44,7 @@ from src.application.trades.settlement_attempts import (
     provider_input_scope_fingerprint,
     settlement_attempt_updates_after_outcome,
 )
+from src.application.trades.settlement_observation import _query_receipt
 
 
 def _account(**overrides: object) -> dict:
@@ -748,7 +750,7 @@ def test_invocation_columns_upgrade_additively_and_legacy_rows_remain_valid(
             FROM sqlite_master
             WHERE type = 'trigger'
               AND name =
-                'trg_lifecycle_settlement_attempt_invocation_writer_fence'
+                'trg_lifecycle_settlement_attempt_invocation_epoch_increment'
             """
         ).fetchone()[0]
     assert columns.count("invocation_writer_epoch") == 1
@@ -815,7 +817,7 @@ def test_base_writer_sql_updates_only_legacy_null_invocation_rows(
         else:
             with pytest.raises(
                 sqlite3.IntegrityError,
-                match="requires current writer",
+                match="epoch must increment by one",
             ):
                 _execute_base_14d06ca1_writer_sql(conn, operation)
             conn.rollback()
@@ -1252,6 +1254,9 @@ def test_unprovable_post_start_restart_becomes_unclaimed_ambiguous(
         **_account(case_ids=("case-1",), now_ms=999_999),
     )
     assert summary["ambiguous_provider_result_count"] == 1
+    assert summary["ambiguous_provider_result_ids"] == [
+        {"case_id": "case-1", "invocation_id": ambiguous["invocation_id"]}
+    ]
     assert summary["eligible_count"] == 0
 
 
@@ -1412,7 +1417,11 @@ def test_attempt_reads_are_scoped_to_current_candidate_ids(
     assert summary["blocked_count"] == 0
     assert summary["last_state_change"]["case_id"] == "case-1"
     assert empty_summary["provider_required_count"] == 0
+    assert empty_summary["ambiguous_provider_result_ids"] == []
     assert empty_summary["last_state_change"] is None
+    with sqlite3.connect(path) as conn:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(lifecycle_settlement_attempt_state)")}
+    assert "idx_lifecycle_settlement_attempt_due" not in indexes
     assert any(
         "SEARCH lifecycle_settlement_attempt_state" in str(row[3])
         and "source_id=? AND account=? AND case_id=?" in str(row[3])
@@ -1658,3 +1667,216 @@ def test_unclassified_exception_remains_unknown_retry() -> None:
 
     assert outcome.kind == "unknown_error"
     assert outcome.provider_code is None
+
+
+def test_ambiguous_resolution_committed_uses_exact_audit_and_one_receipt(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    finished = _failure_finished(path)
+    ambiguous = reconcile_settlement_attempt_invocation(
+        path, **_reconcile(finished, audit=None)
+    )
+    audit = {**_failure_audit(finished), "account": "lx"}
+    args = {
+        "source_id": "lx", "account": "lx", "case_id": "case-1",
+        "invocation_id": ambiguous["invocation_id"],
+        "resolution": "committed", "audit": audit,
+    }
+    before = path.read_bytes()
+    preview = resolve_ambiguous_settlement_attempt(path, **args)
+    assert preview["status"] == "preview"
+    assert preview["audit_ordinal"] == 1
+    assert path.read_bytes() == before
+
+    applied = resolve_ambiguous_settlement_attempt(
+        path, **args, provider_evidence_ref="case-audit:1", apply_changes=True
+    )
+    stored = get_settlement_attempt_state(path, **_case())
+    assert applied["status"] == "applied"
+    assert stored is not None and stored["invocation_state"] == "ledger_committed"
+    assert stored["committed_audit_ordinal"] == 1
+    repeated = resolve_ambiguous_settlement_attempt(
+        path, **args, provider_evidence_ref="case-audit:1", apply_changes=True
+    )
+    assert repeated["status"] == "already_applied"
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM lifecycle_settlement_attempt_resolutions").fetchone()[0] == 1
+    with pytest.raises(ValueError, match="conflicting resolution"):
+        resolve_ambiguous_settlement_attempt(
+            path, **{**args, "resolution": "not-executed", "audit": None},
+            provider_evidence_ref="provider:none", worker_quiescence_ref="worker:drained",
+            apply_changes=True,
+        )
+
+
+def test_ambiguous_resolution_not_executed_requires_quiescence_and_no_audit(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    started = _reserve_started(path)
+    ambiguous = reconcile_settlement_attempt_invocation(
+        path, **_reconcile(started, audit=None)
+    )
+    args = {
+        **_case(), "invocation_id": ambiguous["invocation_id"],
+        "resolution": "not-executed", "audit": None,
+    }
+    with pytest.raises(ValueError, match="quiescence reference"):
+        resolve_ambiguous_settlement_attempt(
+            path, **args, provider_evidence_ref="provider:no-call", apply_changes=True
+        )
+    applied = resolve_ambiguous_settlement_attempt(
+        path, **args, provider_evidence_ref="provider:no-call",
+        worker_quiescence_ref="worker:drained", apply_changes=True,
+    )
+    stored = get_settlement_attempt_state(path, **_case())
+    assert applied["status"] == "applied"
+    assert stored is not None and stored["invocation_id"] is None
+    assert stored["invocation_state"] is None
+    with pytest.raises(ValueError, match="late ledger audit"):
+        resolve_ambiguous_settlement_attempt(
+            path, **{**args, "audit": {"account": "lx"}},
+            provider_evidence_ref="provider:no-call",
+            worker_quiescence_ref="worker:drained", apply_changes=True,
+        )
+
+
+def test_ambiguous_resolution_refuses_insufficient_evidence_and_never_creates_preview_store(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.sqlite3"
+    with pytest.raises(ValueError, match="control store is unavailable"):
+        resolve_ambiguous_settlement_attempt(
+            missing, **_case(), invocation_id=str(uuid.uuid4()),
+            resolution="not-executed", audit=None,
+        )
+    assert not missing.exists()
+    old = tmp_path / "old.sqlite3"
+    with sqlite3.connect(old) as conn:
+        conn.execute("CREATE TABLE lifecycle_settlement_attempt_state (case_id TEXT)")
+    before = old.read_bytes()
+    with pytest.raises(ValueError, match="schema migration is required"):
+        resolve_ambiguous_settlement_attempt(
+            old, **_case(), invocation_id=str(uuid.uuid4()),
+            resolution="not-executed", audit=None,
+        )
+    assert old.read_bytes() == before
+    finished = _failure_finished(tmp_path / "finished.sqlite3")
+    reconcile_settlement_attempt_invocation(
+        tmp_path / "finished.sqlite3", **_reconcile(finished, audit=None)
+    )
+    with pytest.raises(ValueError, match="pending provider receipt"):
+        resolve_ambiguous_settlement_attempt(
+            tmp_path / "finished.sqlite3", **_case(),
+            invocation_id=finished["invocation_id"],
+            resolution="not-executed", audit=None,
+        )
+    started = _reserve_started(tmp_path / "started.sqlite3")
+    reconcile_settlement_attempt_invocation(
+        tmp_path / "started.sqlite3", **_reconcile(started, audit=None)
+    )
+    with pytest.raises(ValueError, match="pending provider receipt"):
+        resolve_ambiguous_settlement_attempt(
+            tmp_path / "started.sqlite3", **_case(),
+            invocation_id=started["invocation_id"],
+            resolution="committed", audit={"account": "lx"},
+        )
+    with pytest.raises(ValueError, match="account mismatch"):
+        resolve_ambiguous_settlement_attempt(
+            tmp_path / "started.sqlite3", **_case(),
+            invocation_id=started["invocation_id"],
+            resolution="committed", audit={"account": "sy"},
+        )
+
+
+def test_ambiguous_summary_ids_are_scoped_sorted_and_bounded(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    case_ids = [f"case-{index:02d}" for index in range(25)]
+    for case_id in reversed(case_ids):
+        state = {**_state(), "case_id": case_id}
+        upsert_settlement_attempt_state(path, state=state)
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET invocation_id = ?, invocation_state = 'ambiguous_provider_result',
+                    invocation_attempted_at_ms = 1500,
+                    invocation_writer_epoch = invocation_writer_epoch + 1
+                WHERE case_id = ?
+                """,
+                (str(uuid.uuid4()), case_id),
+            )
+    summary = settlement_attempt_summary(
+        path, **_account(case_ids=case_ids, now_ms=2_000)
+    )
+    scoped = settlement_attempt_summary(
+        path, **_account(case_ids=case_ids[:2], now_ms=2_000)
+    )
+    assert summary["ambiguous_provider_result_count"] == 25
+    assert [item["case_id"] for item in summary["ambiguous_provider_result_ids"]] == case_ids[:20]
+    assert scoped["ambiguous_provider_result_count"] == 2
+    assert [item["case_id"] for item in scoped["ambiguous_provider_result_ids"]] == case_ids[:2]
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("TRANSIENT", "transient"), ("RATE_LIMIT", "rate_limit"),
+        ("AUTH_EXPIRED", "auth_expired"), ("NEED_2FA", "need_2fa"),
+        ("TIMEOUT", "timeout"), ("PROVIDER_UNAVAILABLE", "provider_unavailable"),
+        ("UNRECOGNIZED", "unknown"),
+    ],
+)
+def test_provider_error_class_is_shared_by_exception_receipt_and_observation(code: str, expected: str) -> None:
+    class ProviderError(RuntimeError):
+        pass
+
+    error = ProviderError("provider failed")
+    error.code = code
+    contract, capability = _contract_and_capability()
+    exception_outcome = classify_exception_outcome(
+        error, **_case(), contract=contract, capability=capability,
+    )
+
+    def fail() -> None:
+        raise error
+
+    receipt = _query_receipt(
+        source="history_deals", query_input={}, observed_at_ms=1_000, query=fail,
+    )
+    observed_outcome = classify_observation_outcome(
+        _observation(**receipt), **_case(), contract=contract, capability=capability,
+    )
+    assert exception_outcome.error_class == receipt["error_class"] == observed_outcome.error_class == expected
+    assert exception_outcome.kind == observed_outcome.kind
+
+
+def test_upsert_noop_reports_original_row_and_false_write_applied(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    first = upsert_settlement_attempt_state(path, state=_state())
+    assert first.write_applied is True
+    assert claim_settlement_attempt(path, **_claim(lease_ms=120_000))
+    before = get_settlement_attempt_state(path, **_case())
+    attempted = upsert_settlement_attempt_state(path, state=_state(now_ms=2_000))
+    assert attempted.write_applied is False
+    assert dict(attempted) == before
+    assert get_settlement_attempt_state(path, **_case()) == before
+
+
+def test_existing_old_epoch_trigger_is_upgraded_to_counter_message(tmp_path: Path) -> None:
+    import src.application.trades.inbox as inbox_mod
+
+    path = tmp_path / "inbox.sqlite3"
+    started = _reserve_started(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER trg_lifecycle_settlement_attempt_invocation_epoch_increment")
+        conn.execute(inbox_mod._SETTLEMENT_INVOCATION_EPOCH_TRIGGER_OLD_SQL)
+    assert get_settlement_attempt_state(path, **_case()) == started
+    with sqlite3.connect(path) as conn:
+        trigger_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'trg_lifecycle_settlement_attempt_invocation_epoch_increment'"
+        ).fetchone()[0]
+        assert "epoch must increment by one" in trigger_sql
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'trg_lifecycle_settlement_attempt_invocation_writer_fence'"
+        ).fetchone() is None
+        with pytest.raises(sqlite3.IntegrityError, match="epoch must increment by one"):
+            conn.execute(
+                "UPDATE lifecycle_settlement_attempt_state SET updated_at_ms = 3000 WHERE case_id = 'case-1'"
+            )
+    assert get_settlement_attempt_state(path, **_case()) == started

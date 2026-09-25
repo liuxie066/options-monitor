@@ -886,6 +886,134 @@ bridge 和 legacy zero-price broker anchor，用于采集一份新的、独立�
 settlement observation；legacy source claim 始终保留原 owner，不得释放、
 转移或复制到 v2，bridge 本身也始终不参与 allocation。
 
+## 结算尝试控制修复设计（2026-09-25）
+
+本节的批准范围是模块审查第 4 天任务书 T1–T8；基线固定为
+`3c07f9967c6332221ff8b234af45190bb2ddaec8`。目标是让结算尝试的歧义状态可定位、
+经人工核证后可安全处置，并修正分类、错误降级、写入回执和公开面。C6 的
+blocked/eligible 计数和 F2 的锚点原因码不在本轮范围；不连接生产数据库，不改
+VERSION、发布或部署。验收为任务书每项对应回归、完整 pytest、公开面与依赖图闸门，
+以及仅在本地提交。任务书的复核事实优先于历史发现措辞。
+
+### 现状、归属与取舍
+
+- `trades/inbox.py` 是结算尝试 SQLite 状态、租约、invocation 及 summary 的 owner；
+  `lifecycle_runtime.py` 是 due 扫描、provider 调用和运行结果的 owner。过期调用
+  在下一轮调和中可进入 `ambiguous_provider_result`，该状态被 reserve、upsert、
+  complete 和候选扫描排除；冻结时间取决于扫描节奏，不承诺固定两分钟。
+- `settlement_attempts.py` 的代码到错误类目映射、内联可重试类目集合，与
+  `settlement_observation.py` 的异常回执映射重复。前者保留唯一映射，后者消费
+  同一分类函数；可重试类目从映射值导出。未知代码仍归 `unknown`/`unknown_error`，
+  `TimeoutError` 的现有回退仍为 `timeout`。
+- 三个现存结算状态读取点均按 `(source_id, account, case_id)` 完整主键过滤；
+  `idx_lifecycle_settlement_attempt_due` 不服务这些读取。仅停止新建此索引，不新增
+  替代索引，也不在本轮迁移或删除既有生产库索引。
+- `invocation_writer_epoch` 的 trigger 只要求每次相关更新递增一，故保留字段、
+  将 trigger 改名为 epoch_increment 并迁移旧定义，改准错误文案及注释为写计数器。claim_id/invocation_id 的既有 CAS
+  仍是所有权检查；本轮不改变它们，也不增加期望 epoch 参数。
+- 通用 upsert 接受不含 invocation 字段的输入；冲突更新仅在外部 claim 不活跃、
+  且旧 invocation 为空或 `ledger_committed` 时执行。后一种重规划会清空旧 invocation
+  与 pending/committed 字段，已有 `test_settlement_attempts.py` 重规划测试确认。
+  因此错误文案只说调用方不能直接指定非空 invocation 字段，不说整个操作不能改变它。
+- `claim_settlement_attempt` 不预留 invocation；生产代码零调用，现有测试直接导入。
+  按用户决定，仅从 `__all__` 撤出，保留函数与测试；将退役原因追加到
+  `docs/public_surface_retirements.json`，运行以固定基线为参数的公开面闸门。
+
+复用清单与检索边界：已检查 `inbox.py` 的状态读写、调和、summary、schema 和
+`__all__`，`settlement_attempts.py` 的分类，`settlement_observation.py` 的回执，
+`lifecycle_runtime.py` 的扫描与结果，`option_positions.py` 的 lifecycle 命令和
+`docs/GUARDRAILS.md` 的退役流程；关键词为 `ambiguous_provider_result`、
+`invocation_writer_epoch`、`claim_settlement_attempt`、`provider_code`、
+`settlement_attempt_summary`、`resolve-ambiguous`。现有 CLI 对
+`resolve-ambiguous` 命中为空，故在现有 lifecycle 命令组新增子命令；不用另建
+`trades` 顶层组。复用 `inbox.py` 的 invocation/audit 校验和 CAS、
+`ledger/repository_lifecycle_attempts.py` 的按 invocation 审计查询、
+`option_positions.py` 的本地写入门与运行根目录解析。新增有界歧义标识列表和
+upsert 实际写入标志是现有返回数据的补充；不新建终态、并行分类器或配置键。
+
+### 行为与失败语义
+
+1. T1-a：summary 和成功运行结果各给 `ambiguous_provider_result_ids`，
+   最多 20 个按 case_id 排序的
+   `{case_id, invocation_id}`；`ambiguous_provider_result_count` 仍是传入
+   `case_ids` 范围内的完整计数，列表与计数同范围，`count > len(ids)` 表示截断。
+   due 运行结果只覆盖本轮 due candidate；不声称它枚举 source/account 的全部
+   历史歧义行。无库、空范围均返回空列表。运行结果从同次 control summary
+   复制该列表，不再单独查询。此步不改变候选判定。既有结构化错误结果不伪造
+   成功 summary。范围外定位由后续只读运维查询承担，不扩大本次 T1-a 返回契约。
+2. T1-b：新增
+   `./om option-positions lifecycle resolve-ambiguous --account ... --source-id ...`
+   `--case-id ... --invocation-id ... --resolution committed|not-executed`
+   `--provider-evidence-ref ...`。命令默认只读预览；实际写入要求
+   `--apply --confirm`；`not-executed` 另要求 `--worker-quiescence-ref` 记录
+   旧 worker 已排空的人工核证引用。要求 `--config` 确定唯一 source，
+   `--data-config`/`--runtime-root` 沿用既有 ledger 定位，再用
+   `trades/inbox_authority.py::resolve_execution_inbox_path` 绑定账本旁的权威 Inbox，
+   有数据的旧路径冲突时拒绝。预览须在分派前避开会初始化账本的现有打开路径，
+   两个 SQLite 库均用只读连接；缺库或状态表字段不足时报告证据不可用，
+   不建库、不执行 `_ensure_schema_for_read` 的迁移分支。输入绑定同一源、账户、case 和当前 invocation，
+   显示 inbox 状态与账本审计摘要，要求操作员事先核对 provider 结果，并给出可追溯
+   的 provider 证据引用，且账本审计的 account 必须等于指定账户。
+   `committed` 必须有完全匹配且为当前 head 的账本审计；
+   对已有 pending 回执，复用现有 pending→control 投影并转入已有 `ledger_committed`。
+   若歧义起于 `provider_started`、pending 字段尚未持久化，现有审计查询不含重建
+   原始 provider 类目所需的全部字段；此时不得伪造 pending 回执，命令拒绝并报告
+   证据缺口，留待具备完整 provider 结果的专项修复。`not-executed`
+   只接受没有 pending 回执的歧义行；必须无该 invocation 的账本审计且 provider
+   证据确认未执行，才清除旧 invocation，由后续正常扫描决定是否再试。若已有
+   pending 回执，拒绝此分支，避免留下已投影的 outcome/退避。由于 Inbox 先保存
+   provider_finished、账本后记审计，`not-executed` apply 还要求操作员先停止并
+   核实同 source/account 的旧 worker 已排空，提供相应核证引用；apply 再读账本审计。
+   命令不能机械证明 worker 静止，操作员无法核证时必须停止，不把一次无审计读数
+   视为永久无效果。拒绝未知、冲突、缺证据
+   和状态漂移；不在命令中
+   查询 provider 或自动重试。写入以原 invocation 和当前状态 CAS，仅一份
+   durable 处置回执与状态变更同事务提交；回执表以
+   `(source_id, account, case_id, invocation_id)` 为主键，存 resolution、
+   provider_evidence_ref、worker_quiescence_ref、resolved_at_ms、前一 writer epoch、匹配审计的 ordinal/chain
+   （无审计时为 null）。重复同一处置读回同一回执，冲突处置拒绝。
+   处置命令的实现与测试只使用隔离 SQLite/fake provider 证据，不执行真实命令。
+   回归包含缺库/旧 schema 预览零写、旧 worker 迟到审计、错误 Inbox/账户、
+   有 pending 的 not-executed、重复同一处置和异种处置冲突。
+3. T2：三个分类消费点共享 `settlement_attempts.py` 的代码→类目映射及其值导出的
+   可重试集合；未知代码、无类型异常仍保守，退避公式不变。
+4. T3：陈旧 invocation 调和经 `_run_settlement_control_operation`；可读控制库上的
+   `sqlite3.OperationalError` 返回 `control_store_unavailable`，整库不可读仍可能由
+   包装器的可读性检查抛错，不宣称总有结构化结果。
+5. T4–T5：停止新建死索引；trigger 报错改为 epoch 每次相关写入必须递增一。
+   对既有库，`CREATE TRIGGER IF NOT EXISTS` 不会更新旧报错，因此 schema 写路径
+   仅在旧名 trigger SQL 与本次确认的旧定义完全相同时，于同一 schema 事务内
+   drop 旧名并创建新名；未知定义拒绝覆盖。read-ready 检查新名，旧库回退到受控
+   schema 路径；旧库迁移与重复打开都要验收。
+6. T6：upsert 以同一事务的 SQL rowcount 暴露实际写入状态，返回值仍是原 row
+   键集合的 dict 子类，额外用 `.write_applied` 属性承载布尔值；SQL rowcount 和
+   返回行须在同一事务内取得，no-op 不算落库。
+   local、disabled、blocked_static 与批量
+   lease 启动失败调用点均检查标志；后者只在确实落库时追加 provider_results，
+   真实 reason_code 是 `settlement_attempt_lease_guard_failed`。三条普通 no-op
+   分支保留实际存储状态，不把拟写的 local/disabled/blocked_static 计为已持久化，
+   并跳过该 case 后续动作。外部活跃 claim 可令冲突更新 no-op；不因返回了旧行就
+   声称新结果已持久化。
+7. T7–T8：只撤公开导出并登记退役；保留直接导入函数的测试。改准 upsert 报错与
+   本节重规划文案，保留已提交旧 invocation 可清空的刻意行为和原测试名称。
+
+不采用自动释放歧义状态、盲重试或新终态；不把 writer epoch 描述成完整 fencing；
+不为未来到期扫描保留现有无收益索引；不删除可能仍被外部脚本直接导入的函数。
+
+### 切片与验收
+
+| 切片 | 独立行为增量 | 成功信号 / 依赖 | 定向验收 |
+|---|---|---|---|
+| A | 可定位性、分类单源、错误降级、索引与准确文案；owners 为 inbox、settlement_attempts、settlement_observation、lifecycle_runtime 和本节。 | T1-a、T2–T5、T8；无依赖 | 歧义行 ID 在 summary/运行结果且 count 不变；同码三消费点同类目；OperationalError 结构化降级；新库 index_list 无旧索引；trigger 文案与机制一致。 |
+| B | upsert 明确写入回执，所有调用方按落库结果报告；owner 为 inbox 与 lifecycle_runtime。 | T6；依赖 A | 活跃外部 claim 造成 no-op，批量租约失败不上报未落库 provider 结果；既有正常与退避测试通过。 |
+| C | 人工核证的歧义处置与公开面收窄；owners 为 inbox、ledger API/查询、option_positions CLI、退役台账和本节。 | T1-b、T7；依赖 A、B | 预览零写、双分支证据及 CAS、重复/冲突/失败路径、回执读回；公开面闸门通过。 |
+
+最终在工作树根目录用主仓 `.venv/bin/python -m pytest` 跑全量测试，不设置
+`PYTHONPATH=.`；补跑依赖图 `--check`（cycles=0）、公开面、文案/敏感信息闸门、
+`git diff --check`。验证只接触测试临时库。风险 owner：provider“未执行”事实来自
+操作员提供的外部证据，不能由本地账本缺审计推定；归运行操作员在真正 apply 前
+核证。本轮不执行真实处置，生产启用和生产数据修复归后续单独授权。
+
 ## 全局交易识别与策略归属优化设计（未实现）
 
 本节是拟实施设计，不改变上文现行契约。审查基线为本地提交
