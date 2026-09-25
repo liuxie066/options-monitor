@@ -32,6 +32,7 @@ from src.application.trades.state_reconcile import preview_trade_intake_reconcil
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 from src.application.payload_helpers import nested as _nested
+from src.application.payload_helpers import parse_utc as _parse_utc
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -209,6 +210,7 @@ def _trade_intake_reconciliation_summary(
     *,
     state_path: Path,
     ledger_store: dict[str, Any],
+    audit_path: Path | None = None,
 ) -> dict[str, Any]:
     sqlite_path_raw = ledger_store.get("sqlite_path")
     if sqlite_path_raw in (None, ""):
@@ -222,10 +224,13 @@ def _trade_intake_reconciliation_summary(
             "stale_state_count": 0,
         }
     try:
-        preview = preview_trade_intake_reconciliation_from_sqlite(
-            state_path=state_path,
-            sqlite_path=Path(str(sqlite_path_raw)).expanduser(),
-        )
+        kwargs: dict[str, Any] = {
+            "state_path": state_path,
+            "sqlite_path": Path(str(sqlite_path_raw)).expanduser(),
+        }
+        if audit_path is not None:
+            kwargs["audit_path"] = audit_path
+        preview = preview_trade_intake_reconciliation_from_sqlite(**kwargs)
     except Exception as exc:
         return {
             "reconciliation_preview_available": False,
@@ -269,6 +274,20 @@ def _trade_intake_reconciliation_summary(
     }
 
 
+def _trade_intake_audit_reconciliation_summary(
+    *, state_path: Path, audit_path: Path, ledger_store: dict[str, Any],
+) -> dict[str, Any]:
+    summary = _trade_intake_reconciliation_summary(
+        state_path=state_path, audit_path=audit_path, ledger_store=ledger_store,
+    )
+    return {
+        "available": summary["reconciliation_preview_available"],
+        "reason": summary["reconciliation_preview_reason"],
+        "pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
+        "delegated_lifecycle_pending_deal_ids": summary["delegated_lifecycle_pending_deal_ids"],
+    }
+
+
 def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     if not summaries:
         return {"listener_status": None}
@@ -287,11 +306,6 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "stale_state_count",
         "pending_after_reconcile_count",
         "actionable_pending_after_reconcile_count",
-        "last_backfill_deal_count",
-        "last_backfill_applied_count",
-        "last_backfill_skipped_duplicate_count",
-        "last_backfill_failed_count",
-        "last_backfill_unresolved_count",
         "missed_push_backfill_count",
         "fee_actual_count",
         "fee_already_actual_count",
@@ -299,18 +313,10 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "fee_failed_count",
         "fee_failed_source_count",
     )
-    passthrough_keys = (
+    consensus_keys = (
         "listener_stage",
-        "last_heartbeat_utc",
-        "last_push_received_utc",
-        "last_push_deal_id",
-        "last_backfill_check_utc",
-        "last_backfill_window_start_utc",
-        "last_backfill_window_end_utc",
-        "last_backfill_error",
         "reconciliation_preview_reason",
         "last_deal_result",
-        "last_backfill_result",
         "last_receipt_result",
     )
     statuses = [str(item.get("listener_status") or "").strip() for item in summaries if item.get("listener_status")]
@@ -318,8 +324,6 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         listener_status = None
     elif len(set(statuses)) == 1:
         listener_status = statuses[0]
-    elif all(status == "listening" for status in statuses):
-        listener_status = "listening"
     else:
         listener_status = "partial"
 
@@ -352,26 +356,41 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
     }
     for key in count_keys:
         out[key] = sum(int(item.get(key) or 0) for item in summaries)
-    for key in passthrough_keys:
+    def consensus(values: list[Any]) -> Any:
+        return values[0] if values and all(value == values[0] for value in values[1:]) else None
+
+    for key in consensus_keys:
         values = [item.get(key) for item in summaries if item.get(key) not in (None, "")]
-        if values:
-            out[key] = values[-1]
+        out[key] = consensus(values)
+    for timestamp_key, fields in (
+        ("last_heartbeat_utc", ()),
+        ("last_push_received_utc", ("last_push_deal_id",)),
+        ("last_backfill_check_utc", (
+            "last_backfill_window_start_utc", "last_backfill_window_end_utc",
+            "last_backfill_error", "last_backfill_result",
+            "last_backfill_deal_count", "last_backfill_applied_count",
+            "last_backfill_skipped_duplicate_count", "last_backfill_failed_count",
+            "last_backfill_unresolved_count",
+        )),
+    ):
+        timed = [(_parse_utc(item.get(timestamp_key)), item) for item in summaries]
+        timed = [(when, item) for when, item in timed if when is not None]
+        latest = max((when for when, _ in timed), default=None)
+        winners = [item for when, item in timed if when == latest] if latest else []
+        out[timestamp_key] = max((str(item[timestamp_key]) for item in winners), default=None)
+        for key in fields:
+            out[key] = consensus([item.get(key) for item in winners])
     fee_attempts = [
         item
         for item in summaries
         if isinstance(item.get("last_fee_attempted_at_ms"), (int, float))
     ]
     if fee_attempts:
-        latest_fee = max(
-            fee_attempts,
-            key=lambda item: int(item["last_fee_attempted_at_ms"]),
-        )
-        for key in (
-            "last_fee_attempted_at_ms",
-            "last_fee_error",
-            "last_fee_error_type",
-        ):
-            out[key] = latest_fee.get(key)
+        latest_ms = max(item["last_fee_attempted_at_ms"] for item in fee_attempts)
+        latest_fees = [item for item in fee_attempts if item["last_fee_attempted_at_ms"] == latest_ms]
+        out["last_fee_attempted_at_ms"] = latest_ms
+        for key in ("last_fee_error", "last_fee_error_type"):
+            out[key] = consensus([item.get(key) for item in latest_fees])
     return out
 
 
@@ -1163,21 +1182,6 @@ def _upgrade_status_evaluation(
     }
 
 
-def _parse_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        out = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if out.tzinfo is None:
-        return out.replace(tzinfo=timezone.utc)
-    return out.astimezone(timezone.utc)
-
-
 def _tick_health_from_artifacts(
     *,
     shared_state_dir: Path,
@@ -1786,11 +1790,18 @@ def _notification_delivery_health(
         reasons.append("NOTIFICATION_EVIDENCE_UNKNOWN")
     if int(diagnosis.get("duplicate_risk_count") or 0) > 0:
         reasons.append("NOTIFICATION_DUPLICATE_RISK")
-    receipt = _dict(_dict(trade_intake.get("summary")).get("last_receipt_result"))
     receipt_summary = _dict(trade_intake.get("summary"))
+    receipts = [receipt_summary.get("last_receipt_result")]
+    receipts.extend(
+        _dict(_dict(source).get("summary")).get("last_receipt_result")
+        for source in trade_intake.get("sources") or []
+    )
     if (int(receipt_summary.get("receipt_failed_count") or 0) > 0
-            or receipt.get("status") in {"failed", "unconfirmed", "unresolved"}
-            or receipt.get("reason") == "skipped_no_route"):
+            or any(
+                _dict(receipt).get("status") in {"failed", "unconfirmed", "unresolved"}
+                or _dict(receipt).get("reason") == "skipped_no_route"
+                for receipt in receipts
+            )):
         reasons.append("TRADE_RECEIPT_UNCONFIRMED")
     return {
         "status": "degraded" if reasons else "confirmed" if status == "sent" else "unknown",
@@ -2371,6 +2382,11 @@ def private_runtime_status_tool(
                         ledger_store=ledger_store,
                     )
                 )
+                source_summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+                    state_path=source_state_path,
+                    audit_path=source_audit_path,
+                    ledger_store=ledger_store,
+                )
                 source_infos.append(
                     {
                         "id": source.get("id"),
@@ -2436,6 +2452,16 @@ def private_runtime_status_tool(
                     state_path=resolved_legacy_state_path,
                     ledger_store=ledger_store,
                 )
+            )
+            resolved_legacy_audit_path = (
+                _path_from_config(payload.get("trade_intake_audit_path"), base=base)
+                if payload.get("trade_intake_audit_path")
+                else default_intake_audit_path
+            )
+            trade_intake_summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+                state_path=resolved_legacy_state_path,
+                audit_path=resolved_legacy_audit_path,
+                ledger_store=ledger_store,
             )
         trade_intake = {
             "enabled": bool(intake_cfg["enabled"]),

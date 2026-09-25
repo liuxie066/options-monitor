@@ -3,8 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from subprocess import CompletedProcess
 
-from src.application.agent_tools.runtime_status_impl import _tick_health_from_artifacts
+from src.application.agent_tools.runtime_status_impl import _parse_utc, _tick_health_from_artifacts
+from src.application.payload_helpers import parse_utc
 from src.application.quality.runtime_checks import build_runtime_checks
+
+
+def test_runtime_status_uses_shared_utc_parser_for_artifact_formats() -> None:
+    assert _parse_utc is parse_utc
+    expected = datetime(2026, 9, 23, 4, 51, tzinfo=timezone.utc)
+    for value in ("2026-09-23T04:51:00Z", "2026-09-23T05:51:00+01:00", "2026-09-23T04:51:00"):
+        assert _parse_utc(value) == expected
+    assert _parse_utc("bad-time") is None
 
 
 def test_tick_health_reason_is_shared_with_quality_and_recovery(tmp_path) -> None:

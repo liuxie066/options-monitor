@@ -1846,6 +1846,8 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
     runs_root = tmp_path / "output_runs"
     for account in ("lx", "sy"):
         (state_dir / "trade_intake" / account).mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(state_dir / "option_positions.sqlite3"):
+        pass
     report_dir.mkdir(parents=True)
     accounts_root.mkdir(parents=True)
     runs_root.mkdir(parents=True)
@@ -1891,6 +1893,7 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
                 "status": "listening",
                 "last_push_received_utc": "2026-01-01T00:02:00+00:00",
                 "last_push_deal_id": "sy-deal-1",
+                "last_backfill_check_utc": "2026-01-01T00:03:00+00:00",
                 "last_backfill_applied_count": 1,
                 "last_fee_sync": {
                     "attempted_at_ms": 1_767_225_720_000,
@@ -1909,13 +1912,16 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
         json.dumps(
             {
                 "processed_deal_ids": {},
-                "failed_deal_ids": {"sy-deal-1": {}},
+                "failed_deal_ids": {"sy-deal-1": {"reason": "source_classification_pending"}},
                 "unresolved_deal_ids": {},
             }
         ),
         encoding="utf-8",
     )
-    (state_dir / "trade_intake" / "sy" / "audit.jsonl").write_text('{"phase":"sy"}\n', encoding="utf-8")
+    (state_dir / "trade_intake" / "sy" / "audit.jsonl").write_text(
+        json.dumps({"deal_id": "sy-deal-1", "result": {"reason": "not_option_deal"}}) + "\n",
+        encoding="utf-8",
+    )
 
     out = _execute_private_runtime_status(
         {
@@ -1936,6 +1942,8 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
     assert [item["account"] for item in trade["sources"]] == ["lx", "sy"]
     assert trade["sources"][0]["summary"]["last_push_deal_id"] == "lx-deal-1"
     assert trade["sources"][1]["summary"]["last_push_deal_id"] == "sy-deal-1"
+    assert trade["sources"][1]["summary"]["pending_after_reconcile_count"] == 1
+    assert trade["sources"][1]["summary"]["audit_reconciliation"]["pending_after_reconcile_count"] == 0
     assert trade["summary"]["listener_status"] == "listening"
     assert trade["summary"]["source_count"] == 2
     assert trade["summary"]["processed_count"] == 1
@@ -1962,6 +1970,23 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
     assert public["trade_intake"]["summary"]["identity_review_required"] is bool(identity_count)
     assert ("runtime_status:TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED" in warnings) is bool(identity_count)
     assert "lx-deal-1" not in json.dumps(public)
+
+    sy_dir = state_dir / "trade_intake" / "sy"
+    legacy_out = _execute_private_runtime_status({
+        "config_path": str(cfg_path),
+        "state_dir": str(state_dir),
+        "report_dir": str(report_dir),
+        "shared_state_dir": str(state_dir),
+        "accounts_root": str(accounts_root),
+        "runs_root": str(runs_root),
+        "trade_intake_status_path": str(sy_dir / "status.json"),
+        "trade_intake_state_path": str(sy_dir / "state.json"),
+        "trade_intake_audit_path": str(sy_dir / "audit.jsonl"),
+    })
+    legacy_trade = legacy_out["data"]["trade_intake"]
+    assert "sources" not in legacy_trade
+    assert legacy_trade["summary"]["pending_after_reconcile_count"] == 1
+    assert legacy_trade["summary"]["audit_reconciliation"]["pending_after_reconcile_count"] == 0
 
 
 def test_trade_intake_summary_reports_single_fee_failed_source() -> None:

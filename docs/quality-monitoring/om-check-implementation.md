@@ -19,7 +19,7 @@
 |---|---|---|---|
 | `OM-INT-001` | `src/application/quality/intake_checks.py::build_trade_intake_datasets` | service fixture 覆盖 pending/heartbeat/checkpoint facade | `option_position_report`、`lifecycle`、`close_advice` |
 | `OM-INT-002` | 同上 | service fixture 覆盖 failed/unresolved facade | 同上 |
-| `OM-INT-003` | 同上 | service fixture 覆盖 reconciliation preview/window completeness | `option_position_report`、历史成交消费者 |
+| `OM-INT-003` | 同上 | audit 口径 reconciliation 与无 audit 运行预览的差异、缺证据 unknown、显式单源路径回归 | `option_position_report`、历史成交消费者 |
 | `OM-LED-001` | `src/application/quality/ledger_checks.py::build_ledger_datasets` | `test_full_replay_mismatch_blocks_position_consumers` | `option_position_report`、`lifecycle`、`close_advice` |
 | `OM-LED-002` | 同上 | `test_duplicate_broker_identity_with_economic_conflict_is_blocking` | 同上 |
 | `OM-POS-001` | `src/application/quality/position_checks.py::build_position_dataset` | schema-valid service fixture；OpenD completeness 回归 | `option_position_report`、`lifecycle`、`close_advice` |
@@ -27,6 +27,14 @@
 | `OM-LCY-001` | `src/application/quality/lifecycle_checks.py::build_lifecycle_datasets` | 周末/假日 deadline；11 条 stale 固定回归 | `lifecycle`、`close_advice` |
 | `OM-LCY-002` | 同上 | external adjustment 与 legacy gap 分离回归 | 受影响的 `lifecycle`、`close_advice` |
 | `OM-LCY-003` | 同上 | legacy history 独立 dataset 回归 | 受影响历史报告 |
+
+质检读取的私有 `runtime_status.trade_intake` 保留不读取历史 audit 的原有 reconciliation 预览，
+用于运行状态展示。每个分源 `summary.audit_reconciliation`（显式单源路径在顶层
+`summary`）是使用该 source audit 路径的只读预览；`OM-INT-003` 只用这份
+与处置命令同口径的 pending 和 delegated 结果。该字段缺失或预览不可用时，
+检查为 `unknown`，不以无 audit 的数值判 `fail`，也不把未知当零。两次预览
+不是同一个原子快照；坏 JSONL 审计行仍按现有共同解析器跳过，不能把
+`available` 解读为审计文件完整性证明。
 
 ## 发布、读取和门禁边界
 

@@ -66,6 +66,13 @@ Inbox ID、deal ID、来源、首次接收时间、原因、`retryable=false` �
 或另一来源正常而消除。多个来源共享 Inbox 时不累加隔离数量，也不把它归属到某个账户。
 这些是本地日志和读取告警，不主动发送外部通知。
 
+供质检读取的私有 `runtime_status.trade_intake.summary` 在多来源时，以可解析的最新时间选取心跳、
+最近推送及其 deal ID、最近回填及其窗口、结果和五个计数；同一时刻的关联值冲突
+时聚合值为空。`listener_stage`、预览原因及没有独立时间的最近成交/回执结果只在
+非空分源值一致时聚合；私有载荷的分源详情保留原值。最近回填计数不跨来源相加，累计的
+`missed_push_backfill_count` 仍相加。任一分源的失败或未确认回执仍触发运行状态
+的 `TRADE_RECEIPT_UNCONFIRMED` 提示。
+
 已有 recent history backfill 可凭完整券商身份独立恢复成交，并按 canonical execution
 identity 幂等入账；它不会按裸 deal ID、合约或端口绑定原隔离行。原行继续保留，告警也
 继续存在，直到身份复核完成。缺失身份的旧行不能用 `--retry-failed` 强制解封；超出
