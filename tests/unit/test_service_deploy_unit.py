@@ -1190,12 +1190,16 @@ def test_post_upgrade_opend_login_check_is_read_only_and_repeatable(tmp_path: Pa
     profile = {"service_provider": "systemd", "services": [{"name": service}],
                "opend": {"services": [{"service_name": service, "host": "127.0.0.1", "port": 11111}]}}
     probes: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         if "src.infrastructure.opend_watchdog" in command:
             probes.append(list(command))
-            assert kwargs["timeout"] == 35
-            assert "--ensure" not in command and "--retry-enabled" not in command
+            assert kwargs["timeout"] > float(command[command.index("--retry-timeout-sec") + 1])
+            assert "--ensure" not in command and "--retry-enabled" in command
             status = ({"ok": False, "error_code": "OPEND_LOGIN_INVALID"} if len(probes) == 1
                       else {"ok": True})
             return subprocess.CompletedProcess(command, 2 if len(probes) == 1 else 0,
@@ -1203,14 +1207,16 @@ def test_post_upgrade_opend_login_check_is_read_only_and_repeatable(tmp_path: Pa
         assert command[:2] == ["systemctl", "is-active"] or command[:2] == ["systemctl", "is-enabled"]
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
-    first = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
-    assert first["ok"] is False
-    assert first["failed_checks"][0]["reason_code"] == "OPEND_LOGIN_INVALID"
+    first = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[],
+                                         monotonic_fn=lambda: 0.0, sleep_fn=_sleep)
+    assert first["ok"] is True
     for _ in range(2):
-        healthy = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+        healthy = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[],
+                                               monotonic_fn=lambda: 0.0, sleep_fn=_sleep)
         assert healthy["ok"] is True
-    assert len(probes) == 3
-    assert probes[0] == probes[1] == probes[2]
+    assert len(probes) == 4
+    assert len({tuple(p) for p in probes}) == 1
+    assert sleeps == [5]
 
 
 def test_post_upgrade_opend_login_check_requires_profile_endpoint(tmp_path: Path) -> None:
