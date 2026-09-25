@@ -1,0 +1,98 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.4",
+  "base": {
+    "tag": "v3.7.3",
+    "commit": "3c07f9967c6332221ff8b234af45190bb2ddaec8"
+  },
+  "reviewed_head": "68916a944343178cdda0983eb6bbb73f348235be",
+  "commits": [
+    {
+      "sha": "50177bc23d63c839f54dab67b7d966f28951f083",
+      "subject": "fix(settlement): resolve ambiguous attempts and correct control reporting"
+    },
+    {
+      "sha": "393ed3d3e225d90ec8977eb9f13c7f3f3e42ff0d",
+      "subject": "fix(settlement): use plain integer literals inside test SQL"
+    },
+    {
+      "sha": "68916a944343178cdda0983eb6bbb73f348235be",
+      "subject": "Merge pull request #367 from liuxie066/codex/settlement-fixes"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "`claim_settlement_attempt` 撤出结算尝试模块的公开导出面（函数与既有直接导入的测试保留），退役原因登记进 `docs/public_surface_retirements.json`。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复结算尝试的歧义状态既无法定位、也无法安全处置的问题：控制库 summary 与本轮 due 运行结果新增 `ambiguous_provider_result_ids`（最多 20 条按 case_id 排序；`ambiguous_provider_result_count` 仍是该范围内的完整计数），并新增 `om option-positions lifecycle resolve-ambiguous`，供操作员凭 provider 证据把歧义行收敛为 `committed` 或 `not-executed`。命令默认只读预览，写入需 `--apply --confirm`，`not-executed` 另需旧 worker 已排空的人工核证引用；缺证据、状态漂移、重复或冲突处置一律拒绝，命令不查询 provider、不自动重试。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复结算失败分类在代码到错误类目映射与异常回执映射两处重复维护、可能不一致的问题：映射保留唯一来源，可重试类目由映射值导出，未知代码仍保守归入 `unknown`。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复陈旧 invocation 调和在控制库部分不可读时把 SQLite 错误直接抛出的问题：可读控制库上的 `OperationalError` 返回结构化 `control_store_unavailable`。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复结算尝试 upsert 无法区分「确实落库」与「未发生写入」的问题：以同一事务的 SQL rowcount 暴露 `write_applied`，local、disabled、blocked_static 与批量租约启动失败等调用点只在确实落库时上报 provider 结果，外部活跃 claim 造成的 no-op 不再被当成已持久化。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "停止新建不服务任何读取路径的 `idx_lifecycle_settlement_attempt_due` 索引（既有生产库索引不迁移、不删除）；`invocation_writer_epoch` 的 trigger 改名为写计数器语义并按已确认的旧定义同事务迁移，触发错误文案与机制一致。",
+      "commits": [
+        "50177bc23d63c839f54dab67b7d966f28951f083"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "393ed3d3e225d90ec8977eb9f13c7f3f3e42ff0d",
+      "reason": "仅修正新增测试内 SQL 字面量的写法（下划线分隔符在 SQLite 3.46 以下不被接受，本机 3.54 接受而 CI runner 拒绝），不改变产品、配置或运行行为。"
+    },
+    {
+      "commit": "68916a944343178cdda0983eb6bbb73f348235be",
+      "reason": "PR 合并提交，内容由上列开发提交覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "50177bc23d63c839f54dab67b7d966f28951f083",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md#结算尝试控制修复设计2026-09-25",
+        "https://github.com/liuxie066/options-monitor/pull/367"
+      ]
+    },
+    {
+      "commit": "393ed3d3e225d90ec8977eb9f13c7f3f3e42ff0d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/367"
+      ]
+    },
+    {
+      "commit": "68916a944343178cdda0983eb6bbb73f348235be",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/367"
+      ]
+    }
+  ]
+}

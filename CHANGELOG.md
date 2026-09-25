@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 3.7.4 - 2026-09-25
+
+### Improvements
+- `claim_settlement_attempt` 撤出结算尝试模块的公开导出面（函数与既有直接导入的测试保留），退役原因登记进 `docs/public_surface_retirements.json`。
+
+### Bug Fixes
+- 修复结算尝试的歧义状态既无法定位、也无法安全处置的问题：控制库 summary 与本轮 due 运行结果新增 `ambiguous_provider_result_ids`（最多 20 条按 case_id 排序；`ambiguous_provider_result_count` 仍是该范围内的完整计数），并新增 `om option-positions lifecycle resolve-ambiguous`，供操作员凭 provider 证据把歧义行收敛为 `committed` 或 `not-executed`。命令默认只读预览，写入需 `--apply --confirm`，`not-executed` 另需旧 worker 已排空的人工核证引用；缺证据、状态漂移、重复或冲突处置一律拒绝，命令不查询 provider、不自动重试。
+- 修复结算失败分类在代码到错误类目映射与异常回执映射两处重复维护、可能不一致的问题：映射保留唯一来源，可重试类目由映射值导出，未知代码仍保守归入 `unknown`。
+- 修复陈旧 invocation 调和在控制库部分不可读时把 SQLite 错误直接抛出的问题：可读控制库上的 `OperationalError` 返回结构化 `control_store_unavailable`。
+- 修复结算尝试 upsert 无法区分「确实落库」与「未发生写入」的问题：以同一事务的 SQL rowcount 暴露 `write_applied`，local、disabled、blocked_static 与批量租约启动失败等调用点只在确实落库时上报 provider 结果，外部活跃 claim 造成的 no-op 不再被当成已持久化。
+- 停止新建不服务任何读取路径的 `idx_lifecycle_settlement_attempt_due` 索引（既有生产库索引不迁移、不删除）；`invocation_writer_epoch` 的 trigger 改名为写计数器语义并按已确认的旧定义同事务迁移，触发错误文案与机制一致。
+
 ## 3.7.3 - 2026-09-25
 
 ### Improvements
