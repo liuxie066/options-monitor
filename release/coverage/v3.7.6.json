@@ -1,0 +1,49 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.6",
+  "base": {
+    "tag": "v3.7.5",
+    "commit": "7405804144e82f6ba8fa192633993fd508f73396"
+  },
+  "reviewed_head": "353dc1d4aa5f8846a313369f764cee724f156a06",
+  "commits": [
+    {
+      "sha": "34e55693779055f16ec0b6604348c53a6bf33c7e",
+      "subject": "fix(opend): 原子保存指标并复用候选元数据"
+    },
+    {
+      "sha": "353dc1d4aa5f8846a313369f764cee724f156a06",
+      "subject": "Merge pull request #373 from liuxie066/codex/opend-symbol-outputs-fixes"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复 OpenD 符号输出的指标文件在写入中断时可能只剩半个文件、且读取端一旦解析失败就把整段历史静默清空的问题：改为原子替换写入；既有文件解析失败或顶层不是列表时先留档为 `*.corrupt-<时间戳>` 再写新内容；读取报错不再被当作损坏而覆盖文件。",
+      "commits": [
+        "34e55693779055f16ec0b6604348c53a6bf33c7e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "353dc1d4aa5f8846a313369f764cee724f156a06",
+      "reason": "PR #373 合并提交，内容由上列开发提交覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "34e55693779055f16ec0b6604348c53a6bf33c7e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/373",
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "353dc1d4aa5f8846a313369f764cee724f156a06",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/373"
+      ]
+    }
+  ]
+}
