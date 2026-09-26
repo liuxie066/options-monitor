@@ -786,3 +786,119 @@ configuration, command, or service.
   preserving files.
 - The existing numeric-equivalence and multiplier-enrichment validation stays
   unchanged; storage compaction must not weaken those checks.
+
+## 2026-09-26 OpenD symbol output repair (T1–T2)
+
+### Goal, scope, and acceptance
+
+This repair addresses two findings: the manual CLI metrics append must
+preserve evidence from a corrupt old JSON file and replace the
+current file atomically; each call to `validate_required_data_quote_candidate`
+must parse its raw JSON once and use that payload for both content and freshness
+validation. The receipt-commit freshness callback retains its existing check
+against in-memory metadata and, when `now` is omitted, a newly sampled clock.
+The public signatures, JSON array format, reason-code policy, and existing
+freshness functions remain unchanged. Do not combine the two full finalizer
+validation passes, align the separate timestamp policies, or change prefetch's
+full-validation probe. Do not change release metadata or runtime state.
+
+### Current facts and reuse decisions
+
+`append_metrics_json` is called by the manual OpenD symbol CLI; its current
+`Path.write_text` can leave a truncated file, and its parse fallback discards
+history. The same module already imports `atomic_write_text`, which its raw and
+CSV writers use. Reuse that helper and `Path.rename`; add no file schema, logger,
+dependency, or shared storage layer. Archive names use the existing filename
+plus `.corrupt-<UTC YYYYmmddTHHMMSSffffffZ>`; choose a unique suffix without
+overwriting an existing archive in this single-writer CLI (append `-1`, `-2`,
+and so on if needed). An empty file, malformed JSON, or valid JSON whose top
+level is not a list is corrupt. A read/stat `OSError` is not evidence of content
+corruption: abort this append without moving or replacing the old file. If
+archiving fails, likewise leave the old file in place; the existing non-fatal
+metrics boundary still protects fetching. The append is not a concurrent-writer
+protocol; `Path.rename` plus an existence check does not make archive selection
+exclusive against a second writer.
+
+`_validate_required_data_quote_candidate` currently loads raw JSON, then
+`_validate_required_data_quote_content` validates a normalized `meta` through
+`_validate_required_data_payload_candidate`; the public `require_fresh=True`
+branch rereads and reparses the same path. Reuse the validated `meta` return from
+that existing owner, including the `success_empty` branch, and pass it to
+`_validate_payload_freshness_reason_coded`. The earlier payload validator
+converts non-mapping `meta` to `{}` and rejects it as `provider_incomplete`, so
+the later `required-data payload metadata is invalid` branch was reachable
+only if the second read observed different bytes. Keep that message at the
+receipt publication boundary where its own raw read can still encounter it.
+For a single bad candidate payload, the earlier `provider_incomplete` error
+remains the expected result.
+
+The task book's original draft described `_validate_before_receipt_commit` as
+rereading raw JSON. The code at the frozen base actually rechecks freshness
+using only a previously read `raw_meta` and a newly sampled clock when `now` is
+omitted; an explicitly supplied `now` remains the fixed validation time. The task
+book's author corrected §3.3 and §4 (SHA-256 `90df3d41`) and directed this
+round to keep that callback unchanged. A quote that becomes stale during
+publication still prevents the receipt commit.
+
+Rejected alternatives: adding logging or a new metrics store would introduce a
+second evidence path for a manual CLI; running a second content validator or
+adding a receipt-callback disk read would exceed the approved T1–T2 behavior.
+
+The reuse search covered `opend_symbol_outputs.py`, its CLI and prefetch callers,
+`source_receipts.py`, `io_utils.py`, and the relevant required-data tests;
+keywords were `append_metrics_json`, `atomic_write_text`,
+`validate_required_data_quote_candidate`, `before_receipt_commit`, and
+`corrupt-`. No existing metrics archive owner or matching helper was found in
+those declaration points. The new return values stay private to this module.
+
+### Behavior and failure cases
+
+1. Metrics append reads a valid list, appends and truncates it as before, and
+   serializes the replacement JSON before any archive rename. It then calls
+   `atomic_write_text` once. On corrupt old content, rename that exact file to
+   a unique adjacent archive before writing the new one-entry array. On read,
+   serialization, archive, or write errors, swallow the metrics failure so
+   fetching continues; a short comment marks this intent. Read failure and
+   serialization failure do not move the old file.
+2. Candidate validation resolves paths as before. Its content validator
+   returns the already validated metadata. Freshness uses it if requested;
+   `require_fresh=False` does no freshness check. An unreadable JSON file still
+   raises `required-data JSON is unreadable`, and existing reason-code wrapping
+   and CSV validation order remain unchanged.
+3. When `now` is omitted, receipt publication still samples the clock
+   immediately before the receipt commit. Its callback validates the earlier
+   `raw_meta` against that clock; an explicit `now` is reused as before.
+   A stale observation prevents the receipt write; the already-published
+   immutable payload can remain as an orphan, matching the existing retry model.
+
+### Slices and validation
+
+- T1, covering the metrics success signal: change only the metrics append and
+  add assertions for one atomic replacement, corrupt archive plus successful
+  append (empty, malformed and non-list content), preserved format, and
+  non-fatal read, serialization, archive-rename, and write failures. Check that
+  a colliding archive name is not overwritten in the single-writer case.
+- T2, covering the candidate and commit-check success signal, independent of T1:
+  return validated metadata through the existing private validators, remove the
+  call-local second read. Assert exactly one raw read for fresh and non-fresh
+  candidate calls, including `success_empty`; assert a fresh empty payload
+  passes and a stale one is rejected. Assert unreadable JSON keeps its message,
+  bad candidate metadata still yields `provider_incomplete`, and the separate
+  receipt-publication metadata error remains. Retain the existing test that
+  advances `now` during publication and confirms commit-time rejection; this
+  is a behavior assertion, not a raw-read count assertion.
+
+Run the six focused test files, full pytest, staged guardrails, dependency graph
+check, and `git diff --check` from the task worktree with the main repository's
+virtualenv. The commit is local only. The two full finalizer validations and
+timestamp policy remain separate later work owned by required-data storage.
+
+### Risks and open questions
+
+The metrics append is still a read/modify/write operation and does not promise
+concurrent-writer serialization; its current only caller is a manual CLI.
+Archiving creates a retained evidence file that operators can inspect. The
+receipt callback does not reread raw JSON; it guards window expiry using the
+stored metadata and a resampled clock. Owner: receipt publisher. Any stronger
+raw-file TOCTOU protection requires a separately scoped design round. No
+product or permission decision remains open within this scope.

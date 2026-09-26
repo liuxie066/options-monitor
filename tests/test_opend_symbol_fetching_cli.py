@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 import importlib
 from pathlib import Path
 from typing import Any, cast
+
+from src.application import opend_symbol_outputs as outputs
 
 
 def _mod():
@@ -234,3 +237,93 @@ def test_cli_processes_all_symbols_before_nonzero_exit(monkeypatch) -> None:
 
     assert fetched == ["NVDA", "AMD"]
     assert saved == ["NVDA", "AMD"]
+
+
+def test_metrics_append_uses_one_atomic_replacement_and_keeps_format(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    path = tmp_path / "opend_metrics.json"
+    path.write_text('[{"old": 1}]\n', encoding="utf-8")
+    real_write = outputs.atomic_write_text
+    writes: list[Path] = []
+
+    def counted_write(target: Path, content: str, *, encoding: str) -> None:
+        writes.append(target)
+        real_write(target, content, encoding=encoding)
+
+    monkeypatch.setattr(outputs, "atomic_write_text", counted_write)
+    outputs.append_metrics_json(path, {"new": 2}, max_entries=2)
+
+    assert writes == [path]
+    assert path.read_text(encoding="utf-8") == (
+        '[\n  {\n    "old": 1\n  },\n  {\n    "new": 2\n  }\n]\n'
+    )
+
+
+@pytest.mark.parametrize("old", [b"", b"{", b"{}", b"\xff"])
+def test_metrics_append_archives_corruption_and_still_appends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old: bytes,
+) -> None:
+    path = tmp_path / "opend_metrics.json"
+    path.write_bytes(old)
+    real_write = outputs.atomic_write_text
+    writes: list[Path] = []
+
+    def counted_write(target: Path, content: str, *, encoding: str) -> None:
+        writes.append(target)
+        real_write(target, content, encoding=encoding)
+
+    monkeypatch.setattr(outputs, "atomic_write_text", counted_write)
+    outputs.append_metrics_json(path, {"new": 2})
+
+    assert writes == [path]
+    archived = list(tmp_path.glob("opend_metrics.json.corrupt-*"))
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == old
+    assert json.loads(path.read_text(encoding="utf-8")) == [{"new": 2}]
+
+
+def test_metrics_archive_collision_preserves_existing_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return datetime(2026, 9, 26, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(outputs, "datetime", FixedDateTime)
+    path = tmp_path / "opend_metrics.json"
+    path.write_bytes(b"{")
+    archive = tmp_path / "opend_metrics.json.corrupt-20260926T000000000000Z"
+    archive.write_bytes(b"earlier")
+
+    outputs.append_metrics_json(path, {"new": 2})
+
+    assert archive.read_bytes() == b"earlier"
+    assert (tmp_path / f"{archive.name}-1").read_bytes() == b"{"
+    assert json.loads(path.read_text(encoding="utf-8")) == [{"new": 2}]
+
+
+@pytest.mark.parametrize("failure", ["read", "serialize", "rename", "write"])
+def test_metrics_failure_is_nonfatal_and_preserves_old_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str,
+) -> None:
+    path = tmp_path / "opend_metrics.json"
+    old = b"{\n" if failure in {"serialize", "rename"} else b"[]\n"
+    path.write_bytes(old)
+    payload: dict[str, Any] = {"new": object()} if failure == "serialize" else {"new": 2}
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected metrics failure")
+
+    if failure == "read":
+        monkeypatch.setattr(Path, "read_text", fail)
+    elif failure == "rename":
+        monkeypatch.setattr(Path, "rename", fail)
+    elif failure == "write":
+        monkeypatch.setattr(outputs, "atomic_write_text", fail)
+
+    outputs.append_metrics_json(path, payload)
+
+    assert path.read_bytes() == old
+    assert list(tmp_path.glob("opend_metrics.json.corrupt-*")) == []

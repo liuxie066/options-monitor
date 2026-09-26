@@ -18,6 +18,7 @@ from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
     publish_required_data_quote_snapshot,
     save_outputs,
+    validate_required_data_quote_candidate,
     validate_required_data_payload_candidate,
 )
 from src.application.source_receipts import (
@@ -1628,3 +1629,118 @@ def test_blob_projection_accepts_float_last_bit_and_ulp_drift() -> None:
     assert not _equivalent_csv_number("N/A", "N/A")
     assert not _equivalent_csv_number("", "0")
 
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("require_fresh", [False, True])
+def test_quote_candidate_reads_raw_once_for_content_and_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    empty: bool,
+    require_fresh: bool,
+) -> None:
+    payload, contract = _no_expirations_candidate() if empty else (_payload(), _contract())
+    raw_path, csv_path = save_outputs(
+        tmp_path, "NVDA", payload, output_root=tmp_path,
+    )
+    real_read = Path.read_text
+    reads: list[Path] = []
+
+    def counted_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path == raw_path:
+            reads.append(path)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    validate_required_data_quote_candidate(
+        producer_root=tmp_path,
+        raw_path=raw_path,
+        csv_path=csv_path,
+        expected_fetch_contract=contract,
+        now=COMPLETED_AT,
+        require_fresh=require_fresh,
+    )
+    assert reads == [raw_path]
+
+
+def test_empty_quote_candidate_still_rejects_stale_metadata(
+    tmp_path: Path,
+) -> None:
+    payload, contract = _no_expirations_candidate()
+    raw_path, csv_path = save_outputs(
+        tmp_path, "NVDA", payload, output_root=tmp_path,
+    )
+
+    with pytest.raises(SourceReceiptError, match=r"^stale_data:"):
+        validate_required_data_quote_candidate(
+            producer_root=tmp_path,
+            raw_path=raw_path,
+            csv_path=csv_path,
+            expected_fetch_contract=contract,
+            now=NOW + timedelta(minutes=31),
+            require_fresh=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "message"),
+    [
+        (b"{", "required-data JSON is unreadable"),
+        (b'{"symbol":"NVDA","meta":null,"rows":[]}', "provider_incomplete:"),
+    ],
+)
+def test_quote_candidate_keeps_existing_raw_error_messages(
+    tmp_path: Path,
+    raw_bytes: bytes,
+    message: str,
+) -> None:
+    raw_path, csv_path = save_outputs(
+        tmp_path, "NVDA", _payload(), output_root=tmp_path,
+    )
+    raw_path.write_bytes(raw_bytes)
+
+    with pytest.raises(SourceReceiptError, match=message):
+        validate_required_data_quote_candidate(
+            producer_root=tmp_path,
+            raw_path=raw_path,
+            csv_path=csv_path,
+            expected_fetch_contract=_contract(),
+            now=COMPLETED_AT,
+            require_fresh=True,
+        )
+
+
+def test_finalizer_keeps_metadata_error_after_first_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import multiplier_steps
+
+    raw_path, _csv_path = save_outputs(
+        tmp_path, "NVDA", _payload(), output_root=tmp_path,
+    )
+
+    def corrupt_raw_after_validation(**_kwargs: object) -> None:
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        raw["meta"] = None
+        raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    monkeypatch.setattr(
+        multiplier_steps,
+        "apply_multiplier_cache_to_required_data_csv",
+        corrupt_raw_after_validation,
+    )
+    with pytest.raises(
+        SourceReceiptError,
+        match=r"^required-data payload metadata is invalid$",
+    ):
+        finalize_required_data_quote_candidate(
+            base=tmp_path,
+            producer_root=tmp_path,
+            producer_run_id="run-meta-changed",
+            symbol="NVDA",
+            expected_fetch_contract=_contract(),
+            fetch_policy=_policy(),
+            mode="cached",
+            now=COMPLETED_AT,
+        )
+    assert _receipt_paths(tmp_path) == []

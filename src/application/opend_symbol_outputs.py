@@ -385,7 +385,7 @@ def _validate_required_data_quote_candidate(
     raw: Path,
     csv: Path,
     expected_fetch_contract: Mapping[str, Any],
-) -> None:
+) -> dict[str, Any]:
     try:
         raw_payload = json.loads(raw.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -396,7 +396,7 @@ def _validate_required_data_quote_candidate(
         raise SourceReceiptError(
             "required-data CSV is unreadable"
         ) from exc
-    _validate_required_data_quote_content(
+    return _validate_required_data_quote_content(
         raw_payload=raw_payload,
         frame=frame,
         expected_fetch_contract=expected_fetch_contract,
@@ -434,7 +434,7 @@ def _validate_required_data_quote_content(
     frame: pd.DataFrame,
     expected_fetch_contract: Mapping[str, Any],
     csv_path: Path | None,
-) -> None:
+) -> dict[str, Any]:
     meta, rows, source_outcome, contract = _validate_required_data_payload_candidate(
         raw_payload=raw_payload,
         expected_fetch_contract=expected_fetch_contract,
@@ -444,7 +444,7 @@ def _validate_required_data_quote_content(
             raise SourceReceiptError(
                 "success-empty required-data CSV is not header-only"
             )
-        return
+        return meta
     _validate_consumer_csv_projection(
         rows=rows,
         frame=frame,
@@ -462,6 +462,7 @@ def _validate_required_data_quote_content(
             f"{coverage.reason_code or 'internal_contract_error'}: "
             "required-data CSV does not cover expected fetch contract"
         )
+    return meta
 
 
 def validate_required_data_quote_candidate(
@@ -490,27 +491,12 @@ def validate_required_data_quote_candidate(
         raise SourceReceiptError(
             "required-data quote files escape producer root"
         ) from exc
-    _validate_required_data_quote_candidate(
+    meta = _validate_required_data_quote_candidate(
         raw=safe_existing_relative_path(root, raw_relpath),
         csv=safe_existing_relative_path(root, csv_relpath),
         expected_fetch_contract=expected_fetch_contract,
     )
     if require_fresh:
-        try:
-            raw_payload = json.loads(
-                safe_existing_relative_path(root, raw_relpath).read_text(
-                    encoding="utf-8"
-                )
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SourceReceiptError(
-                "required-data JSON is unreadable"
-            ) from exc
-        meta = raw_payload.get("meta") if isinstance(raw_payload, Mapping) else None
-        if not isinstance(meta, Mapping):
-            raise SourceReceiptError(
-                "required-data payload metadata is invalid"
-            )
         _validate_payload_freshness_reason_coded(
             meta=meta,
             now=now,
@@ -1448,18 +1434,34 @@ def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries
     try:
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         arr = []
-        if metrics_path.exists() and metrics_path.stat().st_size > 0:
+        corrupt = False
+        if metrics_path.exists():
             try:
                 obj = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                corrupt = True
+            else:
                 if isinstance(obj, list):
                     arr = obj
-            except Exception:
-                arr = []
+                else:
+                    corrupt = True
         arr.append(payload)
         if len(arr) > int(max_entries):
             arr = arr[-int(max_entries) :]
-        metrics_path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception as exc:
+        content = json.dumps(arr, ensure_ascii=False, indent=2) + "\n"
+        if corrupt:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            archive = metrics_path.with_name(f"{metrics_path.name}.corrupt-{stamp}")
+            suffix = 1
+            while archive.exists():
+                archive = metrics_path.with_name(
+                    f"{metrics_path.name}.corrupt-{stamp}-{suffix}"
+                )
+                suffix += 1
+            metrics_path.rename(archive)
+        atomic_write_text(metrics_path, content, encoding="utf-8")
+    except Exception:
+        # Metrics are best-effort; a metrics failure must not block fetching.
         pass
 
 
