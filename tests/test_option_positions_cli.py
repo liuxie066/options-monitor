@@ -887,6 +887,85 @@ def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch
     assert repo.get_record_fields(lot["record_id"])["contracts_open"] == 2
 
 
+def test_manual_buy_close_replay_selector_uses_nested_lot_identity(tmp_path: Path) -> None:
+    from src.application.ledger.commands import record_manual_position_close
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    _open_position(
+        repo, symbol="0700.HK", contracts=1, currency="HKD", strike=480.0,
+        expiration_ymd="2026-04-29", premium_per_share=3.93, opened_at_ms=1000,
+    )
+    lot = repo.list_position_lots()[0]
+    fields = lot["fields"]
+    assert "broker" not in fields  # Current storage shape is nested.
+    kwargs = {
+        "lot_id": lot["record_id"],
+        "contracts_to_close": 1,
+        "close_price": 1.2,
+        "close_reason": "manual_buy_to_close",
+    }
+    record_manual_position_close(repo, **kwargs, as_of_ms=2000)
+    replay = record_manual_position_close(repo, **kwargs, as_of_ms=3000).to_payload()
+
+    assert replay["result"]["created"] is False
+    assert replay["close_target_resolution"]["selector"] == {
+        "broker": fields["contract_key"]["broker"],
+        "account": fields["contract_key"]["account"],
+        "symbol": fields["contract_key"]["underlying_symbol"],
+        "option_type": fields["contract_key"]["option_type"],
+        "side": fields["position_side"],
+        "strike": float(fields["contract_key"]["strike"]),
+        "expiration_ymd": fields["contract_key"]["expiration_ymd"],
+        "contracts_to_close": 1,
+    }
+
+
+def test_option_positions_cli_buy_close_replay_dry_run_reports_duplicate(
+    monkeypatch, tmp_path: Path, capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(
+        repo, symbol="0700.HK", contracts=1, currency="HKD", strike=480.0,
+        expiration_ymd="2026-04-29", premium_per_share=3.93, opened_at_ms=1000,
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    args = (
+        "buy-close", "--record-id", lot_id, "--contracts", "1",
+        "--close-price", "1.2", "--format", "json",
+    )
+    _set_om_argv(monkeypatch, data_config, *args, "--apply", "--confirm")
+    assert cli_mod.main() == 0
+    applied = json.loads(capsys.readouterr().out)
+    _set_om_argv(monkeypatch, data_config, *args, "--apply", "--confirm")
+    assert cli_mod.main() == 0
+    replayed = json.loads(capsys.readouterr().out)
+    assert replayed["result"]["created"] is False
+    before_events = repo.list_trade_events()
+    before_fields = repo.get_record_fields(lot_id)
+
+    _set_om_argv(monkeypatch, data_config, *args, "--dry-run")
+    assert cli_mod.main() == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["write_applied"] is False
+    assert preview["patch"] == {}
+    assert preview["close_target_resolution"]["status"] == "duplicate"
+    for key in ("status", "read_model", "fail_closed", "target_lot_id", "event_id"):
+        assert preview["ledger_preflight"][key] == replayed["ledger_preflight"][key]
+    assert preview["ledger_preflight"]["event_id"] == applied["result"]["event_id"]
+    assert repo.list_trade_events() == before_events
+    assert repo.get_record_fields(lot_id) == before_fields
+
+    _set_om_argv(monkeypatch, data_config, *(
+        "buy-close", "--record-id", lot_id, "--contracts", "1",
+        "--close-price", "1.3", "--format", "json", "--dry-run",
+    ))
+    with pytest.raises(SystemExit, match="explicit close target lot is not open"):
+        cli_mod.main()
+
+
 def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     data_config, repo = _active_ledger_context(tmp_path)
