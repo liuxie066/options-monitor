@@ -1,0 +1,72 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.7.7",
+  "base": {
+    "tag": "v3.7.6",
+    "commit": "bd78f12e1be4e16f4230bcd70ae000e14349eced"
+  },
+  "reviewed_head": "a20ebb34f0693107693ba0b95a29ebc9a9b42a00",
+  "commits": [
+    {
+      "sha": "2529b96339b7c71dc80e0868a9bc0f76678c004d",
+      "subject": "fix(ledger): align manual close replay preview and selector"
+    },
+    {
+      "sha": "ce3f0de869e8f18257a48df745c28c98434aaf96",
+      "subject": "fix(ledger): use New York date for zero-price expiry close"
+    },
+    {
+      "sha": "a20ebb34f0693107693ba0b95a29ebc9a9b42a00",
+      "subject": "Merge pull request #375 from liuxie066/codex/ledger-commands-m1-m3-delivery"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复重复平仓回执的合约选择器读的是**已退役的扁平字段**、而存储形状为嵌套 `contract_key`/`position_side`，导致回执声称复现了某笔平仓却指不出是哪张合约（七个身份字段全空）的问题：改经既有候选归一化读取，**嵌套优先、扁平字段仅作旧格式回退**。",
+      "commits": [
+        "2529b96339b7c71dc80e0868a9bc0f76678c004d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复手动平仓的重复判定只存在于写入路径、预览路径没有，导致**幂等重放无法预览**的问题：同一 lot 首次成功后重放时，`--dry-run` 原本抛 `target_lot_not_open`，而 `--apply --confirm` 却返回幂等重复。现把重复判定提为预览与写入共用的前置，`--dry-run` 返回 duplicate 预览且不新增事件。（注：仅去掉 `--dry-run` 仍是默认预览，须 `--apply --confirm` 才进入写入路径。）",
+      "commits": [
+        "2529b96339b7c71dc80e0868a9bc0f76678c004d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复零价到期平仓的时区判定被上海日历单方面支配（上海本地日期恒不早于纽约，故纽约分支为死代码），使**美东到期前一交易日 16:00 之后的零价平仓被误判为到期平仓**、并落入 `EXPIRE_AUTO_CLOSE` 分类的问题：改为只按 `America/New_York` 判定，并加注释说明到期是美东日历概念、不与上海并列。",
+      "commits": [
+        "ce3f0de869e8f18257a48df745c28c98434aaf96"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "a20ebb34f0693107693ba0b95a29ebc9a9b42a00",
+      "reason": "PR #375 合并提交，内容由上列开发提交覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "2529b96339b7c71dc80e0868a9bc0f76678c004d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/375"
+      ]
+    },
+    {
+      "commit": "ce3f0de869e8f18257a48df745c28c98434aaf96",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/375"
+      ]
+    },
+    {
+      "commit": "a20ebb34f0693107693ba0b95a29ebc9a9b42a00",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/375"
+      ]
+    }
+  ]
+}
