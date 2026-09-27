@@ -818,6 +818,51 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 `--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
 会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
 
+### 手工 `buy-close` 重放回执修复（M1/M2，2026-09-27）
+
+**目标与验收**：对现行嵌套 lot，重复 `--apply --confirm` 的
+`close_target_resolution.selector` 七个身份字段与源 lot 一致；首次成功后用原
+`--record-id` 和相同 intent 执行 `--dry-run --format json`，返回
+`ledger_preflight.status="duplicate"`，不抛目标已关闭错误且不新增事件。
+无 `--apply --confirm` 时仍默认预览。M3 到期时区口径、M4 并发窗口及 L1–L5 不在本次范围；
+不改公开 API 形状、其它模块或生产状态。完全平仓后仅按合约条件自动匹配的重放，
+会在预览前因无开放 lot 而停止，不在本次修复范围；默认文本回执只展示 patch，
+本次通过 JSON 回执验收 duplicate 状态。
+
+**现状与 owner**：`src/application/positions/workflows.py` 的 `execute_manual_close` 把预览交给
+`commands.preview_manual_position_close`，写入交给 `commands.record_manual_position_close`；
+后者先用 `manual_trades.existing_manual_close_event_result` 判重，前者先解析仅开放的 lot。
+`repository.get_record_fields` 返回原始 `fields_json`，现行身份位于 `contract_key` 和
+`position_side`；`lot_resolver.normalize_close_candidate` 已兼容现行嵌套形状与历史扁平形状。
+
+**复用清单与检索**：在 `commands.py`、`manual_trades.py`、`lot_resolver.py`、
+`results.py`、`positions/workflows.py`、相关 CLI/tests 及本文中检索
+`duplicate`、`selector`、`contract_key`、`preview_manual_position_close`；未发现需新增的
+身份或幂等概念。回执 selector 复用 `lot_resolver.normalize_close_candidate` 和
+`LotCloseSelector`；预览判重复用 `manual_trades.existing_manual_close_event_result`；
+重复预检复用 `LedgerPreflightResult`、空 `PositionLotPatch`、`ManualClosePreviewResult`。
+不新增状态、字段、helper 或平行归一化读法。
+
+**方案与失败语义**：在 `commands.py` 的重复回执构造中，将
+`{"record_id": lot_id, "fields": current_fields}` 交给 `normalize_close_candidate`，再用
+`LotCloseCandidate` 的 broker/account/symbol/option_type/side/strike/expiration_ymd
+组成既有 selector；无法归一化或身份缺失时拒绝成功回执。预览在解析开放 lot 前，
+用当前 fields 及原请求参数调用同一判重函数；
+命中时返回现有预览结果形状，其中 patch 为空、close target 为 duplicate、
+ledger preflight 与写路径一样为 `status="duplicate"`、`read_model="legacy_trade_events"`、
+`fail_closed=False`、原 `target_lot_id` 及已存在 `event_id`。未命中沿现有解析与预检；
+无效身份、不同 intent、无可用 lot 仍按现有路径 fail closed。预览只读；apply 仍在
+写路径重新验证，预览结果不能充当写入授权。拒绝在 CLI 单独吞掉错误或在预览调用写函数，
+因为那会留下其它调用方不一致或产生副作用。
+
+**实现切片与验证**：S1（M1）先在临时 SQLite 的真实 open→close→replay 路径增加红测，
+断言七字段及源 lot 一致，再修重复 selector；S2（M2，依赖 S1）在同一类 fixture
+加入显式 `--record-id` 的 CLI `--apply --confirm` 后 `--dry-run --format json` 红测，
+断言 duplicate 预检的既有字段与 apply 一致、空 patch、事件数和 lot fields 不变，
+且全平后不同 intent 仍报错，再让预览复用判重。两片分别覆盖上述两项成功信号。
+最后跑全量 pytest、Ruff、依赖图 `--check` 与 guardrails；仅在隔离测试库运行写路径。
+风险是预览和 apply 间可能变化，所以 apply 必须继续独立核验；没有新的生产操作。
+
 指派股票出售在同一 SQLite 写事务中读取账户经济事实，按成交时点投影出售前后状态，
 验证剩余股数及同一股票批次的全部 CC 覆盖。回溯写入还须保留后来已有效的出售和覆盖，
 不能因补录而使它们失效；当前投影使用包含后续已存事实的结果，不用成交时点的历史视图覆盖。

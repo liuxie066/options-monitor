@@ -43,6 +43,7 @@ from src.application.ledger.lot_resolver import (
     LotCloseSelector,
     find_unique_open_lot,
     load_close_candidate_records,
+    normalize_close_candidate,
     resolve_explicit_close_target,
     resolve_fifo_close_lots,
     resolve_fifo_close_targets,
@@ -1789,6 +1790,32 @@ def preview_manual_position_close(
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> ManualClosePreviewResult:
+    current_fields = repo.get_record_fields(lot_id)
+    duplicate_result = existing_manual_close_event_result(
+        repo,
+        lot_id=str(lot_id),
+        fields=current_fields,
+        contracts_to_close=int(contracts_to_close),
+        close_price=close_price,
+        close_reason=close_reason,
+    )
+    if duplicate_result is not None:
+        return ManualClosePreviewResult(
+            fields=current_fields,
+            patch=PositionLotPatch(),
+            close_target_resolution=_duplicate_close_target_resolution_payload(
+                lot_id=lot_id,
+                fields=current_fields,
+                contracts_to_close=int(contracts_to_close),
+            ),
+            ledger_preflight=LedgerPreflightResult(
+                status="duplicate",
+                read_model="legacy_trade_events",
+                fail_closed=False,
+                target_lot_id=str(lot_id),
+                event_id=duplicate_result.event_id,
+            ),
+        )
     close_target_resolution = resolve_explicit_close_target(
         repo,
         lot_id=lot_id,
@@ -1883,21 +1910,26 @@ def _duplicate_close_target_resolution_payload(
     fields: dict[str, Any],
     contracts_to_close: int,
 ) -> dict[str, Any]:
+    candidate = normalize_close_candidate({"record_id": lot_id, "fields": fields})
+    if candidate is None:
+        raise ValueError(f"manual close duplicate lot identity unavailable: {lot_id}")
     selector = LotCloseSelector.from_values(
-        broker=fields.get("broker"),
-        account=fields.get("account"),
-        symbol=fields.get("symbol"),
-        option_type=fields.get("option_type"),
-        position_side=fields.get("side"),
-        strike=fields.get("strike"),
-        expiration_ymd=fields.get("expiration_ymd") or fields.get("expiration"),
+        broker=candidate.broker,
+        account=candidate.account,
+        symbol=candidate.symbol,
+        option_type=candidate.option_type,
+        position_side=candidate.side,
+        strike=candidate.strike,
+        expiration_ymd=candidate.expiration_ymd,
         contracts_to_close=contracts_to_close,
-    ).to_dict()
+    )
+    if selector.missing_identity_fields():
+        raise ValueError(f"manual close duplicate lot identity unavailable: {lot_id}")
     return {
         "status": "duplicate",
         "source": "manual_close_explicit",
         "strategy": "duplicate_existing_close_event",
-        "selector": selector,
+        "selector": selector.to_dict(),
         "target_count": 1,
         "record_ids": [str(lot_id)],
         "contracts_to_close": int(contracts_to_close),
