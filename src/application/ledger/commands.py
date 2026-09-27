@@ -588,11 +588,9 @@ def _is_expiration_zero_price_close(deal: Any) -> bool:
         trade_time_ms = int(raw_trade_time_ms)
     except (TypeError, ValueError):
         return False
-    for tz_name in ("America/New_York", "Asia/Shanghai"):
-        trade_date = datetime.fromtimestamp(trade_time_ms / 1000, tz=ZoneInfo(tz_name)).date()
-        if trade_date >= expiration_date:
-            return True
-    return False
+    # 到期是美东日历概念；上海本地日期恒不早于纽约，故不并列两个时区。
+    trade_date = datetime.fromtimestamp(trade_time_ms / 1000, tz=ZoneInfo("America/New_York")).date()
+    return trade_date >= expiration_date
 
 
 def persist_manual_close_event_with_ledger(
