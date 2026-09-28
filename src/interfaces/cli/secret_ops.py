@@ -35,6 +35,7 @@ def add_secret_commands(subparsers: Any) -> None:
     status.add_argument("logical_names", nargs="*")
     status.add_argument("--backend", choices=SUPPORTED_SECRET_BACKENDS, default=None)
     status.add_argument("--store-root", default=str(DEFAULT_ENCRYPTED_STORE))
+    status.add_argument("--format", choices=("json", "text"), default="json")
 
     for name in ("set", "rotate"):
         command = commands.add_parser(name, help=f"{name} one credential using a hidden terminal prompt")
@@ -57,14 +58,13 @@ def run_store_command(
     prompt_fn: Callable[[str], str] = getpass.getpass,
     input_is_tty: Callable[[], bool] = _stdin_is_tty,
 ) -> dict[str, Any]:
+    if args.store_action == "status":
+        return read_credential_readiness(
+            args,
+            provider_factory=provider_factory,
+            provisioner_factory=provisioner_factory,
+        )
     try:
-        if args.store_action == "status":
-            return _status_payload(
-                args,
-                provider_factory=provider_factory,
-                provisioner_factory=provisioner_factory,
-            )
-
         spec = _require_cli_spec(args.logical_name)
         provisioner = provisioner_factory(
             backend=args.backend,
@@ -107,6 +107,24 @@ def run_store_command(
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported secrets command: {args.store_action}")
+
+
+def read_credential_readiness(
+    args: argparse.Namespace,
+    *,
+    provider_factory: Callable[..., SecretProvider] = build_secret_provider,
+    provisioner_factory: Callable[..., SecretProvisioner] = build_secret_provisioner,
+) -> dict[str, Any]:
+    try:
+        return _status_payload(
+            args,
+            provider_factory=provider_factory,
+            provisioner_factory=provisioner_factory,
+        )
+    except AgentToolError:
+        raise
+    except (SecretError, ValueError) as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
 
 def _status_payload(
@@ -167,4 +185,4 @@ def _require_cli_spec(logical_name: str):
         ) from exc
 
 
-__all__ = ["add_secret_commands", "run_store_command"]
+__all__ = ["add_secret_commands", "read_credential_readiness", "run_store_command"]

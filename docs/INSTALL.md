@@ -13,8 +13,10 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
-om setup check
+"$HOME/.local/bin/om" setup init
 ```
+
+`setup init` 需待包含本功能的 Release 发布后才可用；安装器始终安装已发布版本，不安装 `main` 上尚未发布的改动。
 
 安装输出会明确打印解析到的 release tag，例如：
 

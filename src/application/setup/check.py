@@ -5,7 +5,6 @@ import os
 import platform
 import re
 import shutil
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -62,7 +61,7 @@ def run_setup_check(
     add(
         "install.venv",
         "ok" if venv_python.exists() else "warn",
-        "repo-local virtualenv is present" if venv_python.exists() else "repo-local virtualenv is missing; ./om will fall back to system python",
+        "repo-local virtualenv is present" if venv_python.exists() else "repo-local virtualenv is missing; om will fall back to system python",
         {"python": sys.executable, "repo_venv_python": str(venv_python)},
         hint="Run scripts/install.sh or create .venv and install requirements.txt with constraints.txt." if not venv_python.exists() else None,
     )
@@ -207,7 +206,7 @@ def run_setup_check(
             "error_count": int(settings_summary.get("error_count") or 0),
             "warning_count": int(settings_summary.get("warning_count") or 0),
         },
-        hint="./om settings doctor",
+        hint="om settings doctor",
     )
 
     config_ok_markets: list[str] = []
@@ -219,7 +218,7 @@ def run_setup_check(
                 "warn",
                 f"{market.upper()} runtime config is missing",
                 {"config_path": str(config_path)},
-                hint="./om config init --output config.yaml --runtime-output-dir .",
+                hint="om setup init (previews an external config directory before writing)",
             )
             continue
         try:
@@ -240,7 +239,7 @@ def run_setup_check(
                 "error",
                 f"{market.upper()} runtime config is not ready",
                 readiness,
-                hint=f"./om config validate --config-path {config_path} --market {market}",
+                hint=f"om config validate --config-path {config_path} --market {market}",
             )
             continue
         config_ok_markets.append(market)
@@ -358,25 +357,15 @@ def _next_steps(
     steps: list[str] = []
     missing_markets = [market for market in selected_markets if market not in config_ok_markets]
     if missing_markets:
-        steps.append("./om config init --output config.yaml --runtime-output-dir .")
+        steps.append("om setup init")
     settings_summary_raw = settings.get("summary")
     settings_summary: dict[str, Any] = settings_summary_raw if isinstance(settings_summary_raw, dict) else {}
     if int(settings_summary.get("warning_count") or 0) or int(settings_summary.get("error_count") or 0):
-        steps.append("./om settings doctor")
+        steps.append("om settings doctor")
     for market in config_ok_markets:
-        steps.append(f"./om doctor --config-key {market}")
+        steps.append(f"om doctor --config-key {market}")
     if config_ok_markets and profile.service_target != "manual":
-        steps.append(
-            "./om service render "
-            f"--target {profile.service_target} "
-            f"--runtime-root {_quote(profile.default_runtime_root)} "
-            f"--env-file {_quote(profile.default_env_file)} "
-            "--markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service"
-        )
+        steps.append("om service render --help")
     if not steps:
-        steps.append("./om doctor --config-key us")
+        steps.append("om doctor --config-key us")
     return steps
-
-
-def _quote(value: str | Path) -> str:
-    return shlex.quote(str(value))
