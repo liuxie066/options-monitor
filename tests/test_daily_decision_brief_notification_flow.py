@@ -436,11 +436,16 @@ def test_no_send_four_way_matrix_updates_snapshot_without_publishing_envelope(
     assert bundle.commits == [{"lx": FIXED_TARGET if fixed else HALF_TARGET}]
 
 
-def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path) -> None:
+def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path, capsys) -> None:
     _patch_assembler(monkeypatch)
     monkeypatch.setattr(mod, "evaluate_dnd_quiet_hours", lambda **_kwargs: {"is_quiet": True, "quiet_window": "00:00-23:59", "parse_error": None})
-    bundle = _request(tmp_path, run_id="quiet")
+    config = _config()
+    config["notifications"]["target"] = "wechat:private-recipient-test"
+    bundle = _request(tmp_path, run_id="quiet", config=config)
     assert mod.run_tick_notification_flow(bundle.request) == 0
+    stdout = capsys.readouterr().out
+    assert mod.notification_target_reference(config["notifications"]["target"]) in stdout
+    assert config["notifications"]["target"] not in stdout
     retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
     assert retry["reason"] == "pending_fixed"
     assert bundle.commits == [{"lx": FIXED_TARGET}]
