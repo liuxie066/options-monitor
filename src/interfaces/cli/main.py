@@ -24,6 +24,7 @@ from src.interfaces.cli.assistant_ops import (
     handle_assistant_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
+from src.interfaces.cli.home import command_guide, interactive_home, render_secret_status, render_settings_doctor, render_setup_check
 from src.interfaces.cli.inbound_ops import (
     add_inbound_commands,
     build_feishu_ws_settings,
@@ -109,7 +110,7 @@ from src.interfaces.cli.settings_ops import (
     handle_settings_command,
     inspect_effective_settings,
 )
-from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check
+from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check, run_setup_init
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -199,6 +200,14 @@ def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if not actual_argv:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return interactive_home(main)
+        sys.stdout.write(command_guide())
+        return 0
+    if actual_argv == ["help"]:
+        sys.stdout.write(command_guide())
+        return 0
     if argv is None and _should_bootstrap_process_env(actual_argv):
         bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
     if actual_argv and actual_argv[0] == "agent":
@@ -300,16 +309,24 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "settings":
-            return _print(handle_settings_command(
+            result = handle_settings_command(
                 args,
                 repo_base_fn=repo_base,
                 inspect_effective_settings_fn=inspect_effective_settings,
                 diagnose_effective_settings_fn=diagnose_effective_settings,
                 explain_effective_setting_fn=explain_effective_setting,
-            ))
+            )
+            if args.settings_command == "doctor" and args.format == "text":
+                sys.stdout.write(render_settings_doctor(result["data"]))
+                return 0 if result.get("ok", True) else 2
+            return _print(result)
 
         if args.command == "secrets":
-            return _print(run_store_command(args))
+            result = run_store_command(args)
+            if args.store_action == "status" and args.format == "text":
+                sys.stdout.write(render_secret_status(result))
+                return 0
+            return _print(result)
 
         if args.command == "version":
             sys.stdout.write(_dumps(check_version_update()))
@@ -355,11 +372,19 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command in {"setup", "multiplier-cache"}:
-            return _print(handle_setup_command(
+            if args.command == "setup" and args.setup_command == "init":
+                output, _applied = run_setup_init(args, repo_base_fn=repo_base)
+                sys.stdout.write(output)
+                return 0
+            result = handle_setup_command(
                 args,
                 repo_base_fn=repo_base,
                 run_setup_check_fn=run_setup_check,
-            ))
+            )
+            if args.command == "setup" and args.format == "text":
+                sys.stdout.write(render_setup_check(result["data"]))
+                return 0 if result.get("ok", True) else 2
+            return _print(result)
 
         if args.command == "run":
             return handle_run_command(args, run_tick_fn=run_tick, run_tick_cron_fn=run_tick_cron)

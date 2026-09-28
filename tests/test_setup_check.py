@@ -80,8 +80,8 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
     assert checks["install.repo"]["status"] == "ok"
     assert checks["upgrade.uv"]["status"] in {"ok", "info", "warn"}
     assert checks["config.us"]["status"] == "warn"
-    assert "config init" in checks["config.us"]["hint"]
-    assert any(step.startswith("./om config init") for step in out["next_steps"])
+    assert "setup init" in checks["config.us"]["hint"]
+    assert "om setup init" in out["next_steps"]
     assert not (tmp_path / "config.us.json").exists()
 
 
@@ -299,20 +299,12 @@ def test_cli_setup_check_outputs_json(monkeypatch, capsys) -> None:
     assert payload["data"]["markets"] == ["us"]
 
 
-def test_cli_setup_init_subcommand_is_removed(capsys) -> None:
+def test_cli_setup_init_requires_confirmation_when_noninteractive(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "setup",
-            "init",
-            "--market",
-            "us",
-            "--futu-acc-id",
-            "123456",
-            "--account",
-            "lx",
-        ])
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    rc = cli.main(["setup", "init", "--market", "us", "--futu-acc-id", "123456"])
 
-    assert exc.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "CONFIRMATION_REQUIRED"

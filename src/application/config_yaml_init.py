@@ -162,7 +162,7 @@ def _build_commands(*, config_path: Path, outputs: dict[str, Path], markets: lis
     assistant_output = outputs.get("assistant")
     if assistant_output is not None:
         command = [
-            "./om",
+            "om",
             "config",
             "build-assistant",
             "--source",
@@ -175,7 +175,7 @@ def _build_commands(*, config_path: Path, outputs: dict[str, Path], markets: lis
         commands.append(" ".join(shlex.quote(part) for part in command))
     for market in markets:
         command = [
-            "./om",
+            "om",
             "config",
             "build",
             "--source",
@@ -196,6 +196,7 @@ def init_yaml_config(
     repo_root: Path,
     output_config_yaml_path: str | Path | None = None,
     runtime_output_dir: str | Path | None = None,
+    assistant_output_config_path: str | Path | None = None,
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
     account_label: str | None = None,
@@ -217,7 +218,10 @@ def init_yaml_config(
         market: (output_dir / f"config.{market}.json").resolve()
         for market in selected_markets
     }
-    assistant_output = (output_dir / "config.assistant.json").resolve()
+    assistant_output = _resolve_path(
+        assistant_output_config_path,
+        default=output_dir / "config.assistant.json",
+    )
     all_outputs = {"assistant": assistant_output, **runtime_outputs}
 
     if not force:
@@ -319,7 +323,7 @@ def init_yaml_config(
         "build_enabled": bool(build),
         "yaml": yaml_text,
         "next_steps": [
-            *(f"./om config validate --source yaml --market {market} --config-yaml {shlex.quote(str(output_path))}" for market in selected_markets),
+            *(f"om config validate --source yaml --market {market} --config-yaml {shlex.quote(str(output_path))}" for market in selected_markets),
             *(_build_commands(config_path=output_path, outputs=all_outputs, markets=selected_markets) if build else []),
         ],
     }

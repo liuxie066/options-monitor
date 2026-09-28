@@ -35,6 +35,7 @@ def add_secret_commands(subparsers: Any) -> None:
     status.add_argument("logical_names", nargs="*")
     status.add_argument("--backend", choices=SUPPORTED_SECRET_BACKENDS, default=None)
     status.add_argument("--store-root", default=str(DEFAULT_ENCRYPTED_STORE))
+    status.add_argument("--format", choices=("json", "text"), default="json")
 
     for name in ("set", "rotate"):
         command = commands.add_parser(name, help=f"{name} one credential using a hidden terminal prompt")

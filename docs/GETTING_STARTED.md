@@ -11,8 +11,10 @@
 ## 1. 先做只读检查
 
 ```bash
-om setup check
+om setup check --format text
 ```
+
+安装后在交互式终端直接运行 `om` 可打开导航菜单；其中诊断项只读，初始化配置需预览并确认。`om help` 可按场景发现常用与高级命令。下面的 `--format text` 便于人工阅读，不加时保留原有 JSON 输出供脚本使用。
 
 `setup check` 只读。它不会写配置、不会写 env-file、不会启动服务、不会创建定时任务、不会连接 OpenD 或 Feishu。
 
@@ -35,44 +37,20 @@ om setup check --no-local-env-file
 
 ## 2. 初始化配置
 
-推荐先维护 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`。秘密放 Keychain/systemd credentials，普通设置和写入开关放 env-file。
-下面的本地示例以 repo root 为工作目录；installer 安装后可以先 `cd "$HOME/apps/options-monitor/current"`。生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，再显式传 `--config-yaml` / `--output`。
+首次使用推荐运行 `om setup init`。它会询问输出目录、市场、账户标签和富途账户 ID，先预览目标文件，输入 `yes` 才写入。非交互场景用 `om setup init --dry-run --output-dir <path>` 预览，再显式加 `--apply`；已有目标文件默认拒绝覆盖。输出目录在安装的 release 目录外，执行后按提示设置 `OM_RUNTIME_ROOT`。
+
+按引导打印的命令设置 `OM_RUNTIME_ROOT`，再编辑该目录里的 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`。秘密放 Keychain/systemd credentials，普通设置和写入开关放 env-file。YAML 使用空格缩进；港股代码建议加引号，例如 `"0700.HK"`。
+
+编辑后，用所选市场重建并校验运行快照。以下以美股为例；港股把 `us` 换成 `hk`：
 
 ```bash
-om config init --output config.yaml --runtime-output-dir .
-$EDITOR config.yaml
+om config validate --source yaml --market us --config-yaml "$OM_RUNTIME_ROOT/config.yaml"
+om config build --source yaml --market us --config-yaml "$OM_RUNTIME_ROOT/config.yaml" --output "$OM_RUNTIME_ROOT/config.us.json"
+om config validate --config-path "$OM_RUNTIME_ROOT/config.us.json" --market us
+om setup check --market us --format text
 ```
 
-YAML 使用空格缩进，不要用 tab；示例采用 2 个空格。港股代码这类可能被 YAML 误判的值建议加引号，例如 `"0700.HK"`。
-`config init` 默认生成 `config.yaml`，并构建 `config.us.json` / `config.hk.json`。已有文件时会拒绝覆盖；确认要重建 starter 时再加 `--force`。
-`config build` / `config explain` 只读取 YAML；旧 JSON authoring 和迁移命令已退役。
-
-先校验 YAML 合并代码默认值后的结果：
-
-```bash
-om config validate --source yaml --market us
-om config validate --source yaml --market hk
-```
-
-再生成运行时 JSON 快照并校验：
-
-```bash
-om config build --source yaml --market us --output config.us.json
-om config build --source yaml --market hk --output config.hk.json
-om config validate --config-path config.us.json --market us
-om config validate --config-path config.hk.json --market hk
-```
-
-如果是 installer 安装后的空目录首跑，也可以不进入 release 目录：
-
-```bash
-mkdir -p ~/options-monitor-first-run
-cd ~/options-monitor-first-run
-om config init --output config.yaml --runtime-output-dir runtime-config --futu-acc-id <futu-account-id>
-om config validate --source yaml --market us --config-yaml config.yaml
-om config build --source yaml --market hk --config-yaml config.yaml --output runtime-config/config.hk.json --dry-run
-om support bundle --config-path runtime-config/config.us.json --output-dir support --no-local-env-file
-```
+高级初始化参数、assistant 配置构建和单项配置解释见 `om config --help`。旧 JSON authoring 和迁移命令已退役。
 
 ---
 

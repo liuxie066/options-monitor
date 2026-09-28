@@ -22,6 +22,7 @@ def add_settings_commands(subparsers: Any) -> None:
     settings_doctor = settings_sub.add_parser("doctor", help="diagnose env-file, Feishu Bot, and write-gate settings")
     settings_doctor.add_argument("--env-file", default=None)
     settings_doctor.add_argument("--no-local-env-file", action="store_true")
+    settings_doctor.add_argument("--format", choices=("json", "text"), default="json")
     settings_explain = settings_sub.add_parser("explain", help="explain one effective setting source")
     settings_explain.add_argument("--key", required=True)
     settings_explain.add_argument("--env-file", default=None)

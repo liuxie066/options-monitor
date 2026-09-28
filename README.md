@@ -90,18 +90,10 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
-om setup check
+"$HOME/.local/bin/om" setup init
 ```
 
-无参数安装会解析最新 GitHub Release，不跟随浮动 `main`。固定版本或自定义安装目录：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh \
-  -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh \
-  --version <release-tag> \
-  --prefix "$HOME/apps/options-monitor"
-```
+第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；`setup init` 需待包含本功能的 Release 发布后才可用。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
 
 安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper；不会创建生产配置、写入 secrets、安装服务或启动定时任务。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
 
@@ -111,40 +103,19 @@ bash /tmp/options-monitor-install.sh \
 
 ### 1. 初始化配置
 
-`config init` 会在 `--runtime-output-dir` 下生成 US/HK runtime JSON 和
-`config.assistant.json`，同时生成 `config.yaml`。目标已存在时默认拒绝覆盖。
+第一次安装后运行：
 
 ```bash
-om config init --output config.yaml --runtime-output-dir .
-$EDITOR config.yaml
+om setup init
 ```
 
-验证人工编辑源并重新生成市场快照：
+它会询问配置目录、市场、账户标签和富途账户 ID，预览目标文件，输入 `yes` 后才写入。按输出提示设置 `OM_RUNTIME_ROOT`，编辑 `config.yaml`，校验并重建快照，然后检查：
 
 ```bash
-om config validate --source yaml --market us --config-yaml config.yaml
-om config build --source yaml --market us \
-  --config-yaml config.yaml \
-  --output config.us.json
-
-om config validate --source yaml --market hk --config-yaml config.yaml
-om config build --source yaml --market hk \
-  --config-yaml config.yaml \
-  --output config.hk.json
-
-om config build-assistant --source yaml \
-  --config-yaml config.yaml \
-  --output resolved/config.assistant.json
+om setup check --market us --format text
 ```
 
-再验证生成快照和来源指纹：
-
-```bash
-om config validate --config-path config.us.json --market us
-om config validate --config-path config.hk.json --market hk
-```
-
-配置模型、账户类型、环境变量和迁移方式见 [CONFIGS.md](CONFIGS.md) 与 [配置指南](CONFIGURATION_GUIDE.md)。
+非交互预览用 `om setup init --dry-run --output-dir <path>`；完整的初始化参数、YAML 校验与快照重建见 `om config --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时默认拒绝覆盖。
 
 ### 2. 只读检查
 
@@ -178,23 +149,21 @@ om config explain --source yaml --market us \
 先禁发通知：
 
 ```bash
-om run tick --config config.us.json --accounts lx sy --no-send
+om run tick --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx --no-send
 ```
 
 `--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
 
-检查结果后，可继续手工扫描：
+示例中的 `lx` 换成初始化时选择的账户标签。检查结果后，可继续手工扫描：
 
 ```bash
-om run tick --config config.us.json --accounts lx
-om run tick --config config.us.json --accounts lx sy
+om run tick --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx
 ```
 
 计划内扫描和普通通知使用 guarded scheduler：
 
 ```bash
-om run tick-cron --market us --config config.us.json --accounts lx sy --timeout 600
-om run tick-cron --market hk --config config.hk.json --accounts lx sy --timeout 600
+om run tick-cron --market us --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx --timeout 600
 ```
 
 首次运行的完整顺序见 [Getting Started](docs/GETTING_STARTED.md)。
