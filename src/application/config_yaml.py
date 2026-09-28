@@ -31,6 +31,7 @@ from src.application.config_validator import (
     OPENING_STRATEGY_ALLOWED_FIELDS,
     COMBO_YIELD_ALLOWED_FIELDS,
     COMBO_YIELD_CALL_ALLOWED_FIELDS,
+    CLOSE_ADVICE_ALLOWED_FIELDS,
     validate_assistant_config,
     validate_config,
     warn,
@@ -109,6 +110,10 @@ WHEEL_AUTHORING_FIELDS = {
     *WHEEL_LEGACY_POLICY_FIELDS,
 }
 WHEEL_SIDE_AUTHORING_FIELDS = {*WHEEL_POLICY_FIELDS, "dte"}
+SYMBOL_OVERRIDE_AUTHORING_FIELDS = {
+    "broker", "accounts", "fetch", "use", "sell_put", "covered_call", "sell_call", "combo_yield",
+    "symbol", "yield_enhancement", "rebound_combo",
+}
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -362,6 +367,13 @@ def _normalize_strategy(
     return out
 
 
+def _normalize_close_advice(raw: Any, *, path: str) -> dict[str, Any]:
+    out = _normalize_strategy(raw, path=path, allow_ranges=False, allowed_keys=CLOSE_ADVICE_ALLOWED_FIELDS)
+    if "enabled" in out and not isinstance(out["enabled"], bool):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.enabled must be a boolean")
+    return out
+
+
 def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
     out = _normalize_strategy(
         raw,
@@ -486,6 +498,7 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
         return {}
     if not isinstance(raw, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object")
+    _reject_unknown_authoring_keys(raw, allowed=SYMBOL_OVERRIDE_AUTHORING_FIELDS, path=path)
     out: dict[str, Any] = {}
     for raw_key, raw_value in raw.items():
         key = str(raw_key or "").strip()
@@ -529,7 +542,7 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
             out["wheel"] = _normalize_wheel(raw_value, path=f"{path}.wheel")
             continue
         if key == "close_advice":
-            close_advice = _normalize_strategy(raw_value, path=f"{path}.close_advice", allow_ranges=False)
+            close_advice = _normalize_close_advice(raw_value, path=f"{path}.close_advice")
             out["close_advice"] = close_advice
             continue
         if key == COMBO_YIELD_AUTHORING_KEY:
@@ -644,6 +657,8 @@ def _normalize_templates_authoring_keys(raw: Any, *, path: str) -> Any:
 
 
 def _normalize_passthrough_authoring_value(*, key: str, value: Any, path: str) -> Any:
+    if key == "close_advice" and isinstance(value, dict):
+        return _normalize_close_advice(value, path=path)
     if key == "templates":
         return _normalize_templates_authoring_keys(value, path=path)
     if key == "symbol_defaults":
