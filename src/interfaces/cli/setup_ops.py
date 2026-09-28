@@ -10,7 +10,10 @@ from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.setup import run_setup_check
 from src.application.config_yaml_init import init_yaml_config
+from src.application.config_yaml_init import create_starter_config
 from src.application.platform_profile import current_platform_profile
+from src.application.runtime_paths import read_runtime_root_record, runtime_root_record_path
+from src.application.settings import build_effective_env
 
 
 def add_setup_commands(subparsers: Any) -> None:
@@ -55,6 +58,8 @@ def run_setup_init(
     *,
     repo_base_fn: Callable[[], Path] = repo_base,
     init_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
+    create_config_fn: Callable[..., dict[str, Any]] = create_starter_config,
+    user_home: Path | None = None,
     input_fn: Callable[[str], str] = input,
     input_is_tty: Callable[[], bool] = lambda: bool(sys.stdin.isatty()),
 ) -> tuple[str, bool]:
@@ -81,8 +86,10 @@ def run_setup_init(
         except (EOFError, KeyboardInterrupt) as exc:
             raise AgentToolError(code="INPUT_ERROR", message="setup init cancelled before preview") from exc
     output_dir = output_dir.resolve()
+    repo_root = repo_base_fn()
+    record = runtime_root_record_path(user_home=user_home)
     options = {
-        "repo_root": repo_base_fn(),
+        "repo_root": repo_root,
         "output_config_yaml_path": output_dir / "config.yaml",
         "runtime_output_dir": output_dir,
         "assistant_output_config_path": output_dir / "resolved" / "config.assistant.json",
@@ -95,11 +102,30 @@ def run_setup_init(
     selected = preview["markets"]
     paths = [preview["config_yaml_path"], preview["assistant_config_path"]]
     paths.extend(preview["runtime_config_paths"][market] for market in selected)
+    record_exists = record.exists() or record.is_symlink()
+    if record_exists and read_runtime_root_record(record, require_config=False) != output_dir:
+        raise AgentToolError(code="CONFIG_ERROR", message="runtime root record points to another directory",
+                             details={"record_path": str(record)},
+                             hint="Inspect the existing runtime-root record before choosing a new directory.")
+    if not record_exists:
+        paths.append(str(record))
+    effective = build_effective_env(repo_root=repo_root, include_local_env_file=True)
+    active_root = str(effective.get("OM_RUNTIME_ROOT") or "").strip()
+    override = bool(active_root and Path(active_root).expanduser().resolve() != output_dir)
     lines = ["首次配置预览（尚未写入）："]
     lines.extend(f"  {path}" for path in paths)
     lines.append(f"市场：{', '.join(selected)} · 账户标签：{preview['account_label']}")
+    lines.append("默认标的：US NVDA/FUTU/GOOGL；HK 0700.HK/9992.HK；Assistant/Bot 默认启用，需另配凭证。")
+    lines.append(f"运行目录记录：{record}（{'保留已有' if record_exists else '新建'}）")
     if preview.get("futu_account_id_placeholder"):
         lines.append("富途账户 ID 尚未填写；创建后须在 config.yaml 中替换占位符。")
+    else:
+        lines.append("富途账户 ID 已填写（值已隐藏）。")
+    if not record_exists and (repo_root / "config.yaml").exists() and output_dir != repo_root:
+        lines.append("注意：源码目录已有配置；新记录将改变无显式路径命令的默认实例。")
+    if override:
+        source = effective.source_of("OM_RUNTIME_ROOT")
+        lines.append(f"注意：当前 OM_RUNTIME_ROOT 来自 {source.public_value() if source else 'environment'}，仍优先于新记录；请核对或清除该覆盖。")
     preview_text = "\n".join(lines) + "\n"
     if args.dry_run:
         return preview_text + "仅预览，未写入。\n", False
@@ -112,14 +138,13 @@ def run_setup_init(
             approved = False
         if not approved:
             return "已取消，未写入。\n", False
-    applied = init_config_fn(**options, dry_run=False)
+    applied = create_config_fn(**options, record_path=record)
     if not applied.get("write_applied") or not all(Path(path).is_file() for path in paths):
         raise AgentToolError(code="CONFIG_ERROR", message="setup init write could not be verified")
-    quoted_dir = shlex.quote(str(output_dir))
     next_steps = "\n".join(
         (
-            "已写入并回读文件。下一步：",
-            f"  export OM_RUNTIME_ROOT={quoted_dir}",
+            "已写入并回读文件，运行目录已记住。下一步：",
+            *( ["  当前 OM_RUNTIME_ROOT 仍覆盖该记录；请核对或清除覆盖后再检查。"] if override else []),
             f"  $EDITOR {shlex.quote(applied['config_yaml_path'])}",
             "  编辑后校验并重建快照：",
             *(f"    {command}" for command in applied["next_steps"]),

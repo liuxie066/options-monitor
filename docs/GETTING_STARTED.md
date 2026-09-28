@@ -37,20 +37,22 @@ om setup check --no-local-env-file
 
 ## 2. 初始化配置
 
-首次使用推荐运行 `om setup init`。它会询问输出目录、市场、账户标签和富途账户 ID，先预览目标文件，输入 `yes` 才写入。非交互场景用 `om setup init --dry-run --output-dir <path>` 预览，再显式加 `--apply`；已有目标文件默认拒绝覆盖。输出目录在安装的 release 目录外，执行后按提示设置 `OM_RUNTIME_ROOT`。
+首次使用推荐运行 `om setup init`。它会询问输出目录、市场、账户标签和富途账户 ID，预览目标文件、默认标的与 Bot 选择，输入 `yes` 才写入。非交互场景先用 `om setup init --dry-run --output-dir <path>` 预览，再显式加 `--apply`。已有目标文件或并发创建的目标都拒绝覆盖；失败时只清理本次创建且未被修改的文件。若强制中断后留下文件，先核对报出的冲突路径，不要直接覆盖或删除。输出目录应在安装的 release 目录外。
 
-按引导打印的命令设置 `OM_RUNTIME_ROOT`，再编辑该目录里的 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`。秘密放 Keychain/systemd credentials，普通设置和写入开关放 env-file。YAML 使用空格缩进；港股代码建议加引号，例如 `"0700.HK"`。
+初始化成功会将目录写入 `~/.config/options-monitor/runtime-root`，新终端会自动使用它。显式配置路径和有效 `OM_RUNTIME_ROOT`（包括服务设置）优先于该记录；若预览提示存在覆盖，先核对其来源。记录损坏或指向失效目录时命令会报错，不会改读源码目录的配置。编辑新目录里的 `config.yaml`；它只保存用户 override，系统默认来自代码里的 `DEFAULT_CONFIG`。秘密放 Keychain/systemd credentials，普通设置和写入开关放 env-file。YAML 使用空格缩进；港股代码建议加引号，例如 `"0700.HK"`。
 
 编辑后，用所选市场重建并校验运行快照。以下以美股为例；港股把 `us` 换成 `hk`：
 
 ```bash
-om config validate --source yaml --market us --config-yaml "$OM_RUNTIME_ROOT/config.yaml"
-om config build --source yaml --market us --config-yaml "$OM_RUNTIME_ROOT/config.yaml" --output "$OM_RUNTIME_ROOT/config.us.json"
-om config validate --config-path "$OM_RUNTIME_ROOT/config.us.json" --market us
+OM_CONFIG_DIR="$(cat "$HOME/.config/options-monitor/runtime-root")"
+om config validate --source yaml --market us --config-yaml "$OM_CONFIG_DIR/config.yaml"
+om config build --source yaml --market us --config-yaml "$OM_CONFIG_DIR/config.yaml" --output "$OM_CONFIG_DIR/config.us.json"
+om config validate --config-path "$OM_CONFIG_DIR/config.us.json" --market us
 om setup check --market us --format text
 ```
 
 高级初始化参数、assistant 配置构建和单项配置解释见 `om config --help`。旧 JSON authoring 和迁移命令已退役。
+`setup check` 的基本状态只覆盖所选市场的离线配置和安装条件：缺少快照或未替换富途账户 ID 占位符都会报错。Bot 状态单独显示；此检查不证明 OpenD 已登录、真实凭证可用或通知已送达。
 
 ---
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shlex
 import tempfile
+import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,8 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
 from src.application.config_primitives import resolve_config_path as _resolve_path
 from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
+from src.application.config_authoring_transaction import _prepare_generation
+from src.application.runtime_paths import read_runtime_root_record
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
 
@@ -335,4 +339,84 @@ def init_yaml_config(
     )
 
 
-__all__ = ["init_yaml_config"]
+def create_starter_config(*, record_path: Path, **options: Any) -> dict[str, Any]:
+    """Publish a new setup generation without replacing any existing target."""
+    preview = init_yaml_config(**options, dry_run=True)
+    source = Path(preview["config_yaml_path"])
+    runtime = Path(preview["runtime_output_dir"])
+    targets = [source, Path(preview["assistant_config_path"]),
+               *(Path(preview["runtime_config_paths"][m]) for m in preview["markets"])]
+    record_exists = record_path.exists() or record_path.is_symlink()
+    if record_exists and read_runtime_root_record(record_path, require_config=False) != runtime:
+        raise AgentToolError(code="CONFIG_ERROR", message="runtime root record points to another directory",
+                             details={"record_path": str(record_path)},
+                             hint="Inspect the existing runtime-root record before choosing a new directory.")
+    conflicts = [str(path) for path in targets if path.exists() or path.is_symlink()]
+    if conflicts:
+        raise AgentToolError(code="CONFIG_ERROR", message="starter config target already exists",
+                             details={"conflicts": conflicts}, hint="Inspect these files or choose another output directory.")
+
+    source_bytes = preview["yaml"].encode("utf-8")
+    prepared = _prepare_generation(
+        repo_root=Path(options["repo_root"]), source_path=source, source_bytes=source_bytes,
+        runtime_root=runtime, markets=preview["markets"], include_assistant=True,
+    )
+    payloads = [(Path(item["path"]), item["payload"]) for item in prepared["target_payloads"]]
+    payloads.append((source, source_bytes))
+    if not record_exists:
+        payloads.append((record_path, (str(runtime) + "\n").encode("utf-8")))
+
+    created: list[tuple[Path, int, int, str]] = []
+    try:
+        for path, payload in payloads:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(prefix=".om-init-", dir=path.parent, delete=False) as staged:
+                staged_path = Path(staged.name)
+                try:
+                    os.fchmod(staged.fileno(), 0o600)
+                    staged.write(payload)
+                    staged.flush()
+                    os.fsync(staged.fileno())
+                except BaseException:
+                    staged_path.unlink(missing_ok=True)
+                    raise
+            try:
+                identity = staged_path.stat()
+                os.link(staged_path, path)
+                created.append((path, identity.st_dev, identity.st_ino, hashlib.sha256(payload).hexdigest()))
+            finally:
+                staged_path.unlink(missing_ok=True)
+        for path, payload in payloads:
+            if path.read_bytes() != payload:
+                raise OSError(f"published file changed: {path}")
+        if read_runtime_root_record(record_path) != runtime:
+            raise OSError(f"runtime root record changed: {record_path}")
+        from src.application.agent_tool_config import load_runtime_config
+        from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
+        for market in preview["markets"]:
+            path, config = load_runtime_config(config_key=market, config_path=runtime / f"config.{market}.json")
+            readiness = evaluate_runtime_config_readiness(config, repo_root=Path(options["repo_root"]),
+                                                          runtime_config_path=path, explicit_market=market, config_key=market)
+            if not readiness["freshness"]["ok"] or not readiness["identity"]["ok"]:
+                raise OSError(f"published market config is stale or invalid: {path}")
+    except BaseException as exc:
+        preserved: list[str] = []
+        for path, device, inode, digest in reversed(created):
+            try:
+                identity = path.lstat()
+                if (identity.st_dev, identity.st_ino) == (device, inode) and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                    path.unlink()
+                else:
+                    preserved.append(str(path))
+            except OSError:
+                preserved.append(str(path))
+        raise AgentToolError(
+            code="CONFIG_WRITE_FAILED", message="failed to create starter config",
+            details={"error": f"{type(exc).__name__}: {exc}", "preserved": preserved},
+            hint="Inspect preserved files before retrying; setup init never overwrites existing targets.",
+        ) from exc
+    return {**preview, "dry_run": False, "write_applied": True, "rollback_hint": None,
+            "runtime_root_record_path": str(record_path)}
+
+
+__all__ = ["init_yaml_config", "create_starter_config"]

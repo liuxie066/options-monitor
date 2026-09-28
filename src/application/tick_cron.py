@@ -377,6 +377,7 @@ def run_tick_cron(
             repo_root=Path(cwd).resolve() if cwd is not None else Path.cwd(),
             runtime_root=runtime_root,
             environ=env,
+            user_home=Path.home() if environ is None else None,
         ).runtime_root
         run_id = create_run_id()
         env.update(plan.trigger_env)

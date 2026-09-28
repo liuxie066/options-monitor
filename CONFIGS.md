@@ -73,6 +73,35 @@ Symbol 扫描在受支持的 `scan-pipeline` 主线程中串行执行，以保�
 
 ## 生成与验证
 
+### 首次初始化与运行目录（研发设计）
+
+目标是让首次 `om setup init` 的结果在新终端仍可找到，让“可继续扫描配置”不被可选 Bot 项混淆，并让确认前的预览及写入失败后的恢复有可核对结果。本设计只覆盖新建本机配置；不迁移现有配置，不修改生产配置、服务或凭证，不连接 OpenD、发通知或自动运行扫描。
+
+| 验收 | 可观察行为 |
+|---|---|
+| S1 就绪 | 未填写的富途账户 ID 占位符阻断所选市场的配置就绪；缺少所选市场快照同样阻断。Bot 模型或 Session 目录的问题单独显示为可选能力未就绪，不把它算成基本配置失败。`setup check` 不声称已验证实时 OpenD/凭证。 |
+| S2 定位 | 成功初始化后，在没有更高优先级覆盖的新终端，`om setup check`、`om doctor --config-key` 和选定的 `om-agent` 配置及运行记录只读入口能定位同一 runtime root；显式路径和有效 `OM_RUNTIME_ROOT` 优先，已有服务显式配置不被用户级记录覆盖。存在但损坏或指向失效配置的记录不静默回退到 repo。 |
+| S3 预览 | `--dry-run` 与交互确认前显示目标目录、市场、账户标签、富途 ID 是否待填、主要 starter 选择、全部拟创建文件和目录定位效果；不泄露完整账户 ID 或秘密，不写目标或持久文件。确认时仍拒绝覆盖任何已有目标，包括确认后的并发创建。 |
+| S4 恢复 | 所有配置在发布前完成生成和校验；发布中失败时，只恢复本次创建且未被第三方修改的目标。若无法确定或清理，报出具体文件及后续处理方法；重试不覆盖遗留文件。成功后回读目标、目录记录和快照来源新鲜度。 |
+
+现状：`config_yaml_init.py::init_yaml_config` 已产出 starter YAML、做 dry-run 校验并逐个原子写目标；单文件原子写不保证一组文件全部完成。`setup_ops.py::run_setup_init` 只预览路径和占位提示，并打印一次性 `export OM_RUNTIME_ROOT`。`runtime_paths.py::resolve_runtime_root` 及 `agent_tool_config.py::resolve_runtime_config_path` 分别处理根目录，默认回退 repo。`setup/check.py` 把 Bot 检查算入总体错误，所选市场快照缺失却只给 warning。现有 `config_authoring_transaction.py` 是**已有配置**的修改事务，依赖源文件及其 SHA；首次新建没有可恢复的旧源，不把新建硬塞进这条修改事务。
+
+复用清单和检索范围：检索 `src/application/config_yaml_init.py`、`config_yaml.py`、`config_authoring_transaction.py`、`runtime_paths.py`、`agent_tool_config.py`、`setup/check.py`、`src/interfaces/cli/setup_ops.py`、`agent_tools/project.py`、`project_runs.py`、`runtime.py` 及相邻测试，关键词为 `init_yaml_config`、`publish_yaml_config_generation`、`resolve_runtime_root`、`OM_RUNTIME_ROOT`、`REPLACE_WITH_FUTU_ACCOUNT_ID`、`rollback_hint`、`runtime_root_unavailable`。starter 字段与 YAML 生成复用 `init_yaml_config`；快照预备与最终来源元数据复用 `config_authoring_transaction.py` 的现有准备逻辑；检查复用 `evaluate_runtime_config_readiness`；目录解析归并到 `resolve_runtime_root`；Bot 模型和 Session 检查复用 `run_setup_check`。`atomic_write_text` 只可用于暂存文件，不能发布新目标：它会 `replace` 已存在的目标。新增一个窄的原子无覆盖发布步骤及每用户单值的 runtime root 记录；后者必要是因为进程环境和 repo-local env-file 不能在独立终端及版本切换后稳定指向自定义目录。无新的账户、市场、策略或密钥字段。
+
+选择：用户级记录为 `~/.config/options-monitor/runtime-root` 中的一行绝对目录，创建时权限为仅当前用户可写，读取时要求非符号链接的普通文件且属当前用户。解析顺序为显式参数、有效 `OM_RUNTIME_ROOT`、该记录、repo 兼容回退。**没有记录**表示沿用旧版 repo fallback；无法区分从未初始化和用户删除了记录，诊断须显示实际来源。**记录存在但无效**、不安全或指向没有 `config.yaml` 的目录时报错，不读取 repo 的另一份配置。`setup init` 在记录不存在时创建；已有安全记录且内容等于本次目标目录时原样保留并允许创建尚不存在的配置目标，失败补偿不删除它；已有不同或不安全记录属于冲突，显示路径并要求操作者先处理，不自动改写。配置目标有任何一个已存在则仍拒绝覆盖，给出冲突清单。服务生成的 `OM_RUNTIME_ROOT` 是显式值，仍优先于记录。Tool Gateway 的运行记录只读入口把通过上述校验的 `user_record` 来源视为可信根；repo fallback 继续不可信，不放宽账户和 run scope。解析器提供可注入用户目录，显式提供隔离环境时不能偷偷读取真实操作者 HOME，供临时目录测试与服务隔离使用。舍弃自动编辑 shell profile（只影响 shell，且可能重复）；舍弃将用户记录写进 release/repo-local `.env`（版本切换不稳定）；舍弃无条件采用平台默认目录（不能支持交互选择的自定义目录）。
+
+`setup init` 的 dry-run 先生成 starter，再检查全部目标及记录冲突；仅可使用可清理的临时校验文件，不写目标或持久状态。预览以摘要而非完整 YAML 呈现，包含默认 US/HK symbols、Assistant/Bot 默认开关、待填账户 ID 和每个文件的路径。若 repo 已有配置且无用户记录，预览明确说明新记录会改变无显式参数命令的默认实例。还要读取当前有效 `OM_RUNTIME_ROOT` 来源；若它与目标不同，预览和成功提示都明确指出该高优先级覆盖及需要清除/更正的来源，不声称本次记录会胜过它。交互 `yes` 或显式 `--apply` 才允许继续。无需另加迁移开关。apply 再查目标是否仍不存在；发布每个目标时仍使用同目录暂存文件加原子无覆盖链接，任何并发目标冲突即停。所有市场及 Assistant 快照在发布前由 starter 字节生成，但元数据中的来源、重建命令和原始 SHA 必须绑定**最终** `config.yaml` 路径及内容。发布顺序为快照、YAML、最后目录记录；成功后逐项回读并用公共 freshness 检查确认快照可用。若普通 I/O 失败，按本次创建清单反向恢复，须同时核对文件身份（inode/device）和内容指纹才删除；不同内容、身份变化或清理失败均保留并报出，不删除已有目录、其他文件或用户后续编辑。进程被强杀时可能留下文件；下次运行拒绝覆盖并列出具体目标供操作者核对，不能凭路径推断可删除。为这个边界不新增自动恢复命令或后台状态机。
+
+`setup check` 的 `summary.ok` 表示所选市场的**离线配置与安装先决条件**通过；它不证明连接券商或通知可达。所选快照缺失、所选市场关联的任一 Futu 账户使用 starter 占位 ID、无效或过期均为 error。Bot 模型/Session 检查保留在 `checks`，不满足时为 warn，并在摘要中单独给出 `bot_ready`；Bot 只有两项均为 ok 才算就绪。非 repo 默认根的 Bot 快照从该根的 `resolved/config.assistant.json` 读取，不从 repo 偷换来源。文本输出同时写明“基本配置”和“可选 Bot”，不能把前者描述为可直接实盘运行。完整凭证状态仍由 `om secrets status` 负责，未在此处复制秘密判断。
+
+实施切片：① 就绪语义（S1）；② 持久目录定位（S2）；③ 预览、发布与失败恢复（S3、S4，依赖②的目录记录契约）。每片都有其对应的 `setup` facade/应用层测试；第三片加故障注入，证明未覆盖已有目标、失败后只清本次同内容文件、冲突保持可恢复。最后验证 CLI 与 Tool Gateway 新进程、Mac/Linux 路径语义及相关文档，且运行仓库必要门禁。README 的快速开始、Getting Started 和配置指南按最终公开行为同步，不把设计描述冒充已发布版本行为。
+
+四路独立设计建议裁决：采纳原子无覆盖发布、最终 YAML 来源身份、Tool Gateway 来源信任适配、Bot 快照与选定根绑定、占位范围、无记录兼容语义及 dry-run 持久写入措辞。将“repo 已有配置时一律阻断”改为明确预览并要求现有确认，因为操作者可能正从源码目录迁往新目录；此处不能自动迁移旧文件。未采纳额外持久标记来检测用户删除记录，单文件无法识别该情形，增加另一份状态也不在本轮目标内。Planreview 指出的高优先级 env 覆盖和同值记录恢复路径已按上述合同补齐。
+
+风险：同一用户多个独立 OM 安装共享一个记录，显式 `OM_RUNTIME_ROOT` 或显式 config path 可选择其他实例；首次初始化会预览默认实例改变。普通进程失败可补偿，强杀后仍需人工核对遗留文件；不自动猜测文件归属。用户自定义目录若被移动，记录会报错并指向修复位置，不回退 repo。记录被用户删除时会恢复旧版 repo fallback，诊断显示实际来源，但无法自动证明这是有意删除。
+
+---
+
 ```bash
 ./om config validate --source yaml \
   --market us \
