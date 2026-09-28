@@ -5,6 +5,116 @@
 > residual risks and is frozen for implementation. Commit, release, deployment,
 > and any production history cleanup remain separate operator actions.
 
+## Day 7 required-data prefetch repair (2026-09-28)
+
+### Goal, scope, and success signals
+
+Remove the run-scoped prefetch cache probe and its cached-result synthesis, and
+make four source-snapshot event append failures observable without changing
+fetch outcomes. This work changes only
+`src/application/multi_tick/required_data_prefetch.py`, its focused tests, and
+this design. The F7 seal read/hash in `tick_account_execution.py` is an
+authorized investigation: remove it only if the exact-byte contract is proved
+redundant. No production data, config, public schema, concurrency, execution
+mode, timeout, version, or delivery operation is in scope.
+
+Success signals:
+
+1. Every planned unique symbol is dispatched once per run, including a second
+   invocation against the same isolated run root. Zero symbols still return
+   the normal 34-key summary shape; `cached_unique_symbols` remains present
+   and zero, no top-level `cached` is added, and
+   `schema_version` remains `1.0` (`SCHEMA_VERSION_V1`).
+2. Each of the four specified append sites leaves a warning with symbol and
+   exception type when the append fails, while returning the same payload and
+   continuing fetch processing.
+3. The new-seal summary hashes the exact manifest file bytes and passes those
+   same bytes to shadow retirement; an optimization is applied only if that
+   property survives.
+
+### Current facts and ownership
+
+The producer files are under the current run's `required_data/{raw,parsed}`;
+new-seal cleanup retires them. `required_data_prefetch.py:_need_fetch` is called
+only while building `todo_cfgs`. Its cached branch then synthesizes quote
+receipts and a second early-return summary. The normal summary has the
+production-observed 34-key shape, including `cached_unique_symbols` but not
+top-level `cached`. Only the dead early return has `cached`. The planned fetch set already exists as
+`fetch_syms` and drives the global plan. The quote-candidate validator remains
+live in `required_data_snapshot.py` and `opend_symbol_outputs.py` and stays
+untouched.
+
+`required_data_snapshot.py:seal_required_data_snapshot` reads back and
+validates the manifest but returns only its parsed dictionary. Its
+`load_required_data_snapshot_manifest_snapshot` API can return exact bytes,
+but invoking it here would add another validation/read pass. In
+`tick_account_execution.py` the new-seal read supplies the exact file bytes
+for `snapshot_manifest_sha256` and the cleanup argument. Cleanup compares
+those bytes to the parsed manifest and uses them in durability checks. The
+read is therefore **not redundant**. F7 stays unchanged; no before/after
+speed claim is possible for this no-op decision. The historical runlog seal
+timings remain context, not evidence of an optimization.
+
+Reuse check: searched the prefetch owner, seal/cleanup owner, this document,
+and the focused tests for `_need_fetch`, `cached`, `append_source_snapshot_event`,
+`manifest_bytes`, and `sha256_bytes`. Reuse `fetch_syms` as the dispatch set;
+reuse the existing normal summary keys and `SCHEMA_VERSION_V1`; reuse
+`logging` from the standard library for warnings at the four append sites;
+reuse the existing manifest byte read and `sha256_bytes`. No new domain field,
+state, configuration key, module, or dependency is introduced. No matching
+preexisting warning helper was found in the prefetch owner. The absence claim
+is limited to these inspected owners.
+
+### Chosen changes and failure behavior
+
+- Delete `_need_fetch`, its cached result synthesis, and its early return.
+  Build the existing budget plan from all `fetch_syms`. Preserve the normal
+  return keys, with `cached_unique_symbols` fixed at zero. An empty `fetch_syms` list
+  goes through the normal coordinator merge and returns an empty but usable
+  summary. Keep planning and provider failures fail closed.
+- At the four exact append sites, retain the `try` boundary and log a warning
+  with stable event name, symbol (including an explicit empty string), and
+  exception type in the `except` branch. Guard the logging call itself: a
+  failing handler must not turn append failure into fetch failure. A broken
+  log sink cannot preserve the warning, but still must preserve the payload.
+  Do not raise, retry, change payload fields, or alter the other exception
+  handlers in the file. Append success produces no warning. Logging alone is
+  the chosen observable channel; no new counter or summary schema is needed.
+- Keep F7's read and hash. Deriving bytes by serializing the returned dict is
+  rejected because it need not reproduce the exact file bytes, especially on
+  an adopted existing manifest. Changing seal's return contract is rejected
+  because it broadens this narrow repair and does not eliminate seal's own
+  readback requirement.
+
+### Implementation slices and validation
+
+1. **F1, no dependency:** remove the probe and cached path. Covers signal 1.
+   Assert zero-symbol normal summary, exact normal key set and zero
+   `cached_unique_symbols`, fresh dispatch on a repeated invocation using the
+   same isolated run root and existing valid raw/CSV, and no `_need_fetch`
+   references.
+   Inventory every existing test that exercises the cached path and explain
+   every changed or removed assertion.
+2. **F3, depends on F1:** add the four warnings. Covers signal 2. Exercise
+   every append site with a failing repository append and assert unchanged
+   payload plus captured warning. Inject one failing log handler as well and
+   assert the payload still returns. Keep the other eight exception handlers
+   out of scope.
+
+Signal 3 is discharged by the F7 source proof above and one assertion in the
+existing seal barrier test that the persisted summary hash equals the SHA-256
+of the same manifest bytes supplied to cleanup. There is no source-code
+slice because the proposed deletion fails its prerequisite; before/after
+timing is not applicable to an unchanged seal path. After both code slices, run focused tests, the full
+suite, applicable lint and guardrails, and `git diff --check`.
+
+### Open questions and risks
+
+No product decision is open. Production timing and actual log collection are
+only verifiable after separately authorized deployment; this source change
+claims neither. The normal summary's `cached_unique_symbols` key remains for
+compatibility even though the run-scoped cache branch is gone.
+
 ## Goal
 
 Stop scheduled required-data runs from durably retaining the same provider

@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
+import logging
 import multiprocessing
 from pathlib import Path
 import time
@@ -42,7 +43,6 @@ from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
     find_fresh_required_data_quote_receipts,
     validate_required_data_payload_candidate,
-    validate_required_data_quote_candidate,
 )
 from src.application.required_data_observability import (
     summarize_prefetch_fetch_metrics,
@@ -92,6 +92,7 @@ from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
 _gateway_pool = ThreadLocalFutuGatewayPool()
+_logger = logging.getLogger(__name__)
 _DEFAULT_PREFETCH_MAX_WORKERS = 2
 
 # Compatibility surface for older tests and operational monkeypatches.
@@ -1066,8 +1067,15 @@ def _publish_planned_success_empty(
     payload["source_snapshot"] = source_snapshot
     try:
         state_repo.append_source_snapshot_event(base, source_snapshot)
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            _logger.warning(
+                "source_snapshot_event_append_failed symbol=%r error_type=%s",
+                symbol,
+                type(exc).__name__,
+            )
+        except Exception:
+            pass
     return payload
 
 
@@ -1098,8 +1106,15 @@ def _fetch_one_inprocess(
         payload["source_snapshot"] = source_snapshot
         try:
             state_repo.append_source_snapshot_event(base, source_snapshot)
-        except Exception:
-            pass
+        except Exception as exc:
+            try:
+                _logger.warning(
+                    "source_snapshot_event_append_failed symbol=%r error_type=%s",
+                    symbol,
+                    type(exc).__name__,
+                )
+            except Exception:
+                pass
         return payload
 
     fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
@@ -1366,8 +1381,15 @@ def _fetch_one_inprocess(
     payload["source_snapshot"] = source_snapshot
     try:
         state_repo.append_source_snapshot_event(base, source_snapshot)
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            _logger.warning(
+                "source_snapshot_event_append_failed symbol=%r error_type=%s",
+                symbol,
+                type(exc).__name__,
+            )
+        except Exception:
+            pass
     return payload
 
 
@@ -1998,32 +2020,6 @@ def _prefetch_required_data_unlocked(
             return cached
         raise RuntimeError("symbol expected fetch contract is unavailable")
 
-    def _need_fetch(symbol_cfg: dict[str, Any]) -> bool:
-        symbol = str(symbol_cfg.get('symbol')).strip()
-        if not symbol:
-            return True
-        if force_refresh:
-            return True
-        try:
-            validate_required_data_quote_candidate(
-                producer_root=shared_required,
-                raw_path=(
-                    shared_required
-                    / "raw"
-                    / f"{symbol}_required_data.json"
-                ),
-                csv_path=(
-                    shared_required
-                    / "parsed"
-                    / f"{symbol}_required_data.csv"
-                ),
-                expected_fetch_contract=_get_expected_contract(symbol_cfg),
-                require_fresh=True,
-            )
-            return False
-        except Exception:
-            return True
-
     def _fetch_one(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
         symbol = str(symbol_cfg.get('symbol')).strip()
         if not symbol:
@@ -2178,60 +2174,19 @@ def _prefetch_required_data_unlocked(
         payload["source_snapshot"] = source_snapshot
         try:
             state_repo.append_source_snapshot_event(base, source_snapshot)
-        except Exception:
-            pass
+        except Exception as exc:
+            try:
+                _logger.warning(
+                    "source_snapshot_event_append_failed symbol=%r error_type=%s",
+                    symbol,
+                    type(exc).__name__,
+                )
+            except Exception:
+                pass
         return payload
 
-    todo_cfgs = [it for it in fetch_syms if _need_fetch(it)]
-    todo_ids = {id(item) for item in todo_cfgs}
-    cached_failure_result = PrefetchCoordinatorResult()
-    for symbol_cfg in fetch_syms:
-        if id(symbol_cfg) in todo_ids:
-            continue
-        symbol = str(symbol_cfg.get("symbol") or "").strip()
-        fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
-        fetch_plan = _get_fetch_plan(symbol_cfg)
-        source, _decision = resolve_symbol_fetch_source(fetch_cfg)
-        try:
-            finalize_required_data_quote_candidate(
-                base=base,
-                producer_root=shared_required,
-                producer_run_id=producer_run_id,
-                symbol=symbol,
-                expected_fetch_contract=_get_expected_contract(symbol_cfg),
-                fetch_policy={
-                    "source": source,
-                    "host": str(fetch_cfg.get("host") or "127.0.0.1"),
-                    "port": _to_int(fetch_cfg.get("port") or 11111, 11111),
-                    "limit_expirations": _prefetch_limit_expirations(
-                        symbol_cfg,
-                        fetch_plan,
-                    ),
-                    "fetch_kwargs": _prefetch_fetch_kwargs_from_plan(fetch_plan),
-                    "opend_fetch": opend_fetch_cfg,
-                    "execution_mode": "cached",
-                },
-                mode="cached",
-            )
-        except Exception as exc:
-            cached_failure_result.errors += 1
-            cached_failure_result.completed_count += 1
-            cached_failure_result.results[symbol] = str(exc)
-            cached_failure_result.audit_items.append(
-                {
-                    "symbol": symbol,
-                    "status": "error",
-                    "execution_mode": "cached",
-                    "message": str(exc),
-                    "error_type": type(exc).__name__,
-                }
-            )
-    unique_cached_count = max(
-        0,
-        len(fetch_syms) - len(todo_cfgs) - cached_failure_result.errors,
-    )
     budget_plan = build_prefetch_budget_plan(
-        todo_cfgs,
+        fetch_syms,
         option_chain_cfg=option_chain_fetch_cfg,
         fetch_plans_by_config_id=fetch_plan_cache,
     )
@@ -2239,60 +2194,6 @@ def _prefetch_required_data_unlocked(
     option_chain_fetch_cfg["max_calls"] = int(budget_plan.safe_option_chain_calls_per_window)
     opend_fetch_cfg = dict(opend_fetch_cfg)
     opend_fetch_cfg["option_chain"] = option_chain_fetch_cfg
-
-    if not todo_cfgs:
-        fetch_metrics = summarize_prefetch_fetch_metrics(
-            cached_failure_result.audit_items
-        )
-        run_fetch_summary = summarize_required_data_prefetch_run(
-            symbols_total=len(symbols),
-            unique_symbols_total=len(fetch_syms),
-            to_fetch=0,
-            cached_unique_symbols=unique_cached_count,
-            submitted_count=0,
-            completed_count=cached_failure_result.completed_count,
-            skipped_count=0,
-            failed_count=cached_failure_result.errors,
-            fetch_metrics=fetch_metrics,
-            dedupe=symbol_plan.summary(),
-        )
-        return {
-            'schema_version': SCHEMA_VERSION_V1,
-            'symbols_total': len(symbols),
-            'unique_symbols_total': len(fetch_syms),
-            'deduped_count': symbol_plan.deduped_count,
-            'dedupe': symbol_plan.summary(),
-            'to_fetch': 0,
-            'fetched': 0,
-            'fetched_ok': 0,
-            'cached': max(0, len(symbols) - cached_failure_result.errors),
-            'cached_unique_symbols': unique_cached_count,
-            'errors': cached_failure_result.errors,
-            'skipped': 0,
-            'max_workers': 0,
-            'prefetch_max_workers': _resolve_prefetch_max_workers(cfg),
-            'effective_prefetch_workers': 0,
-            'submitted_count': 0,
-            'completed_count': cached_failure_result.completed_count,
-            'skipped_count': 0,
-            'failed_count': cached_failure_result.errors,
-            'execution_mode': _resolve_execution_mode(cfg),
-            'fetch_metrics': fetch_metrics,
-            'run_fetch_summary': run_fetch_summary,
-            'prefetch_budget_plan': budget_plan.summary(),
-            'global_required_data_plan': global_required_data_plan,
-            'earnings_calendar': earnings_calendar,
-            'opend_rate_limit_classes': [],
-            'opend_rate_limit_items': [],
-            'rate_limit_cooldowns': [],
-            'symbols': cached_failure_result.symbol_items,
-            'results': cached_failure_result.results,
-            'audit': cached_failure_result.audit_items,
-            'quote_receipts': find_fresh_required_data_quote_receipts(
-                producer_root=shared_required,
-                symbols=symbols,
-            ),
-        }
 
     configured_max_workers = _resolve_prefetch_max_workers(cfg)
     fail_budget_consecutive, fail_budget_total = _resolve_failure_budget(cfg)
@@ -2311,11 +2212,7 @@ def _prefetch_required_data_unlocked(
             producer_run_id=producer_run_id,
         )
 
-    wave_results: list[PrefetchCoordinatorResult] = (
-        [cached_failure_result]
-        if cached_failure_result.errors
-        else []
-    )
+    wave_results: list[PrefetchCoordinatorResult] = []
     rate_limit_cooldowns: list[dict[str, Any]] = []
     effective_max_workers = 0
     for wave_idx, wave in enumerate(budget_plan.waves):
@@ -2354,8 +2251,8 @@ def _prefetch_required_data_unlocked(
     run_fetch_summary = summarize_required_data_prefetch_run(
         symbols_total=len(symbols),
         unique_symbols_total=len(fetch_syms),
-        to_fetch=len(todo_cfgs),
-        cached_unique_symbols=unique_cached_count,
+        to_fetch=len(fetch_syms),
+        cached_unique_symbols=0,
         submitted_count=coordinator_result.submitted_count,
         completed_count=coordinator_result.completed_count,
         skipped_count=coordinator_result.skipped,
@@ -2373,8 +2270,8 @@ def _prefetch_required_data_unlocked(
         'unique_symbols_total': len(fetch_syms),
         'deduped_count': symbol_plan.deduped_count,
         'dedupe': symbol_plan.summary(),
-        'to_fetch': len(todo_cfgs),
-        'cached_unique_symbols': unique_cached_count,
+        'to_fetch': len(fetch_syms),
+        'cached_unique_symbols': 0,
         'max_workers': max_workers,
         'prefetch_max_workers': configured_max_workers,
         'effective_prefetch_workers': max_workers,

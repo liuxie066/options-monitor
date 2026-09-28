@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -142,6 +143,56 @@ def _silence_source_snapshot_events(monkeypatch) -> None:
         "append_source_snapshot_event",
         lambda *args, **kwargs: None,
     )
+
+
+def _fail_source_snapshot_append(*_args, **_kwargs) -> None:
+    raise OSError("journal unavailable")
+
+
+def test_empty_symbol_append_failure_returns_payload_and_warns(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", _fail_source_snapshot_append)
+
+    payload = mod._fetch_one_inprocess(
+        {"symbol": ""},
+        base=tmp_path,
+        shared_required=tmp_path / "shared_required",
+        opend_fetch_cfg={},
+        batch_cfg=None,
+    )
+
+    assert payload["message"] == "empty_symbol"
+    assert payload["ok"] is False
+    assert "source_snapshot_event_append_failed" in caplog.text
+    assert "symbol=''" in caplog.text
+    assert "error_type=OSError" in caplog.text
+
+
+def test_append_and_logging_failure_still_returns_empty_symbol_payload(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", _fail_source_snapshot_append)
+    emitted = []
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record):
+            emitted.append(record)
+            raise OSError("log unavailable")
+
+    logger = logging.getLogger(mod.__name__)
+    handler = FailingHandler()
+    logger.addHandler(handler)
+    try:
+        payload = mod._fetch_one_inprocess(
+            {"symbol": ""},
+            base=tmp_path,
+            shared_required=tmp_path / "shared_required",
+            opend_fetch_cfg={},
+            batch_cfg=None,
+        )
+    finally:
+        logger.removeHandler(handler)
+
+    assert payload["message"] == "empty_symbol"
+    assert payload["ok"] is False
+    assert len(emitted) == 1
 
 
 def _two_spec_watchlist(
@@ -935,7 +986,7 @@ def test_inprocess_artifact_failure_does_not_poison_healthy_gateway(
     assert result["quote_receipts"] == {}
 
 
-def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_path: Path, monkeypatch) -> None:
+def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_path: Path, monkeypatch, caplog) -> None:
     from src.application.opening_quote_evidence import OpeningUnderlierObservation
 
     watchlist = [
@@ -996,6 +1047,7 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
         },
     )
     monkeypatch.setattr(mod.ToolExecutionService, "execute", fake_execute)
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", _fail_source_snapshot_append)
     finalized: list[dict[str, object]] = []
     _patch_success_finalizer(monkeypatch, finalized)
 
@@ -1006,6 +1058,7 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
 
     assert result["execution_mode"] == "subprocess"
     assert result["fetched_ok"] == 3
+    assert caplog.text.count("source_snapshot_event_append_failed") == 3
     assert len(execute_calls) == 3
     assert all(getattr(intent, "force_refresh") is True for intent in execute_calls)
     assert len(finalized) == 3
@@ -1031,6 +1084,7 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
 def test_prefetch_success_empty_uses_single_frozen_discovery_and_no_chain_fetch(
     tmp_path: Path,
     monkeypatch,
+    caplog,
     execution_mode: str,
 ) -> None:
     import src.application.opend_symbol_chain_fetching as chain_mod
@@ -1106,7 +1160,7 @@ def test_prefetch_success_empty_uses_single_frozen_discovery_and_no_chain_fetch(
         "adapt_opend_tool_payload",
         lambda payload: {"source_name": "opend", "payload": payload},
     )
-    _silence_source_snapshot_events(monkeypatch)
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", _fail_source_snapshot_append)
     required_root = tmp_path / "shared_required"
 
     result = _prefetch(
@@ -1127,6 +1181,8 @@ def test_prefetch_success_empty_uses_single_frozen_discovery_and_no_chain_fetch(
     assert forbidden_calls == []
     assert result["fetched_ok"] == 1
     assert result["errors"] == 0
+    assert "source_snapshot_event_append_failed" in caplog.text
+    assert "symbol='0700.HK'" in caplog.text
     assert result["prefetch_budget_plan"]["estimated_option_chain_calls"] == 0
     plan_item = result["global_required_data_plan"]["symbols"][0]
     assert plan_item["projection_outcome"] == "success_empty"
@@ -2068,9 +2124,25 @@ def test_subprocess_multi_spec_fails_before_execution_or_publication(
     assert [path for path in shared_required.rglob("*") if path.is_file()] == []
 
 
+def test_prefetch_zero_symbols_uses_normal_summary_shape(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: [])
+
+    result = _prefetch(tmp_path)
+
+    assert len(result) == 34
+    assert result["schema_version"] == mod.SCHEMA_VERSION_V1
+    assert result["to_fetch"] == 0
+    assert result["cached_unique_symbols"] == 0
+    assert "cached" not in result
+    assert result["symbols"] == []
+    assert result["results"] == {}
+    assert result["audit"] == []
+
+
 def test_prefetch_shared_required_data_candidate_universe_stable_for_same_account_configs(
     tmp_path: Path,
     monkeypatch,
+    caplog,
 ) -> None:
     _patch_0700_plan_discovery(monkeypatch)
     shared_required = tmp_path / "shared_required"
@@ -2102,7 +2174,7 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
     monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
-    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", _fail_source_snapshot_append)
 
     first = _prefetch(tmp_path, shared_required=shared_required)
     assert first["fetched_ok"] == 1, first["results"]
@@ -2115,8 +2187,12 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
     second_universe = set(pd.read_csv(parsed)["contract_symbol"].dropna().astype(str).tolist())
 
     assert first["fetched_ok"] == 1
-    assert second["cached"] == 1
-    assert fetch_calls == ["0700.HK"]
+    assert second["to_fetch"] == 1
+    assert second["cached_unique_symbols"] == 0
+    assert second["fetched_ok"] == 1
+    assert "cached" not in second
+    assert fetch_calls == ["0700.HK", "0700.HK"]
+    assert caplog.text.count("source_snapshot_event_append_failed") == 2
     assert first_universe == second_universe
     assert any("-call-" in contract for contract in second_universe)
 
@@ -2343,7 +2419,7 @@ def test_prefetch_refetches_legacy_cache_without_strict_completeness_evidence(
     assert fetched == ["0700.HK"]
 
 
-def test_prefetch_reuses_strict_cache_without_resaving_raw_observation(
+def test_prefetch_refetches_strict_candidate_in_same_run_root(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2364,8 +2440,6 @@ def test_prefetch_reuses_strict_cache_without_resaving_raw_observation(
     fetched: list[str] = []
     finalize_calls: list[dict[str, object]] = []
     real_finalize = mod.finalize_required_data_quote_candidate
-    real_validate = mod.validate_required_data_quote_candidate
-    validation_errors: list[str] = []
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         fetched.append(symbol)
@@ -2375,38 +2449,26 @@ def test_prefetch_reuses_strict_cache_without_resaving_raw_observation(
         finalize_calls.append(dict(kwargs))
         return real_finalize(**kwargs)
 
-    def track_validate(**kwargs: object) -> None:
-        try:
-            real_validate(**kwargs)
-        except Exception as exc:
-            validation_errors.append(str(exc))
-            raise
-
     _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(mod, "finalize_required_data_quote_candidate", track_finalize)
-    monkeypatch.setattr(mod, "validate_required_data_quote_candidate", track_validate)
     _silence_source_snapshot_events(monkeypatch)
 
     first = _prefetch(tmp_path, shared_required=shared_required)
     assert first["fetched_ok"] == 1, first["results"]
     raw_path = shared_required / "raw" / "0700.HK_required_data.json"
-    before_bytes = raw_path.read_bytes()
-    before_mtime_ns = raw_path.stat().st_mtime_ns
-    before_raw = json.loads(before_bytes)
+    before_raw = json.loads(raw_path.read_bytes())
 
     second = _prefetch(tmp_path, shared_required=shared_required)
 
     assert first["fetched_ok"] == 1
-    assert second["to_fetch"] == 0, validation_errors
-    assert second["cached"] == 1
-    assert second["fetched"] == 0
-    assert fetched == ["0700.HK"]
-    assert [call["mode"] for call in finalize_calls] == ["fresh", "cached"]
-    assert finalize_calls[0]["payload"] is not None
-    assert finalize_calls[1].get("payload") is None
-    assert raw_path.read_bytes() == before_bytes
-    assert raw_path.stat().st_mtime_ns == before_mtime_ns
+    assert second["to_fetch"] == 1
+    assert second["cached_unique_symbols"] == 0
+    assert second["fetched_ok"] == 1
+    assert "cached" not in second
+    assert fetched == ["0700.HK", "0700.HK"]
+    assert [call["mode"] for call in finalize_calls] == ["fresh", "fresh"]
+    assert all(call["payload"] is not None for call in finalize_calls)
     assert before_raw["meta"]["source_observed_at"]
     assert before_raw["meta"]["completed_at_utc"]
 

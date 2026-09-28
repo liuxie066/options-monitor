@@ -25,14 +25,6 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **_kwargs: ({}, set()),
     )
 
-    def _cache_miss(**_kwargs) -> None:
-        raise FileNotFoundError("fixture cache miss")
-
-    monkeypatch.setattr(
-        prefetch_mod,
-        "validate_required_data_quote_candidate",
-        _cache_miss,
-    )
     monkeypatch.setattr(
         prefetch_mod,
         "finalize_required_data_quote_candidate",
@@ -344,7 +336,7 @@ def test_prefetch_required_data_defaults_to_opend_source(tmp_path: Path) -> None
         mod.ToolExecutionService.execute = old_exec
 
 
-def test_prefetch_required_data_force_refresh_ignores_existing_local_cache(
+def test_prefetch_required_data_force_refresh_dispatches_symbol(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -353,14 +345,6 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache(
     old_exec = mod.ToolExecutionService.execute
 
     seen: list[tuple[str, bool]] = []
-    cache_checks: list[dict[str, object]] = []
-
-    monkeypatch.setattr(
-        mod,
-        "validate_required_data_quote_candidate",
-        lambda **kwargs: cache_checks.append(dict(kwargs)),
-    )
-
     def _fake_execute(self, intent):
         seen.append((str(intent.symbol), bool(intent.force_refresh)))
         return _execution_payload(intent, idempotency_key="k-force-cache")
@@ -375,6 +359,5 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache(
         assert out["fetched_ok"] == 1
         assert out["force_refresh"] is True
         assert seen == [("AAPL", True)]
-        assert cache_checks == []
     finally:
         mod.ToolExecutionService.execute = old_exec
