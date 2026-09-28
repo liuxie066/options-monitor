@@ -59,12 +59,16 @@ def test_settings_and_secret_text_are_redacted(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         cli,
-        "run_store_command",
+        "run_secret_status",
         lambda _args: {
             "summary": {"backend": "keychain"},
             "credentials": [{"logical_name": "llm.deepseek.api_key", "configured": True, "source": "keychain"}],
         },
     )
+    def forbidden_write_path(_args):
+        raise AssertionError("write path called")
+
+    monkeypatch.setattr(cli, "run_store_command", forbidden_write_path)
     assert cli.main(["secrets", "status", "--format", "text"]) == 0
     output = capsys.readouterr().out
     assert "llm.deepseek.api_key" in output

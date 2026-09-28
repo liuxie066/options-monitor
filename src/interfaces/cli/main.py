@@ -86,7 +86,7 @@ from src.interfaces.cli.scheduler_ops import (
     query_sell_put_cash,
     run_scheduler,
 )
-from src.interfaces.cli.secret_ops import add_secret_commands, run_store_command
+from src.interfaces.cli.secret_ops import add_secret_commands, run_secret_status, run_store_command
 from src.interfaces.cli.service_ops import (
     add_service_update_commands,
     capture_preserved_timer_activation_states,
@@ -322,11 +322,10 @@ def main(argv: list[str] | None = None) -> int:
             return _print(result)
 
         if args.command == "secrets":
-            result = run_store_command(args)
             if args.store_action == "status" and args.format == "text":
-                sys.stdout.write(render_secret_status(result))
+                sys.stdout.write(render_secret_status(run_secret_status(args)))
                 return 0
-            return _print(result)
+            return _print(run_store_command(args))
 
         if args.command == "version":
             sys.stdout.write(_dumps(check_version_update()))
