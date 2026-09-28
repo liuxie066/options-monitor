@@ -738,7 +738,7 @@ OM 完成，实际下单继续由用户完成。
 - 当前 `wheel_trade_companions` 已在 trade writer 同一事务中追加 Wheel 事件并校验投影，具有
   event ID 与 payload hash 幂等基础；新设计继续使用该原子边界。
 - 当前扫描、候选快照、Daily Brief 和公开写入口只理解 Wheel Call；配置是单层 `wheel` policy，
-  Delta 只有 `min_delta=0.30`，没有绝对值上限。
+  当时的平铺 Delta 键 `min_delta=0.30` 已退役；当前 Call 只读取 `wheel.call.min_abs_delta`，默认 `0.25`。
 - 已有 Call coverage、普通 CSP 现金容量、assignment stock settlement cash facts、实际费用和
   assigned-stock 成本投影可复用，但当前没有 Wheel Put intent 现金预留或多分支现金 grant。
 - 当前只保存运行时 enabled 布尔值，没有可用于迟到事件判断的账户级持久化启用时间。
