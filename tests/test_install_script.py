@@ -57,7 +57,8 @@ dest=""
 for arg in "$@"; do
   dest="$arg"
 done
-mkdir -p "$dest/requirements" "$dest/constraints" "$dest/agent-runtime" "$dest/scripts"
+mkdir -p "$dest/requirements" "$dest/constraints" "$dest/agent-runtime" "$dest/scripts" "$dest/configs/examples"
+printf 'OM_EXAMPLE=1\n' > "$dest/configs/examples/options-monitor.env.example"
 : > "$dest/VERSION"
 printf '9.9.%s\n' "${FAKE_RELEASE_PATCH:-9}" > "$dest/VERSION"
 : > "$dest/requirements.txt"
@@ -265,6 +266,37 @@ def test_install_script_creates_user_cli_wrappers_by_default(tmp_path: Path) -> 
     assert "Warning:" in result.stdout
 
 
+def test_install_script_mac_next_steps_work_from_other_directory(tmp_path: Path) -> None:
+    env = _installer_env(tmp_path)
+    _write_executable(tmp_path / "fake-bin" / "uname", "#!/usr/bin/env bash\nprintf 'Darwin\\n'\n")
+    result = _run_installer(tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    lines = result.stdout.splitlines()
+    export = next(line.strip() for line in lines if "export OM_RUNTIME_ROOT=" in line)
+    mkdir = next(line.strip() for line in lines if 'mkdir -p "$HOME/Library/Application Support/options-monitor"' in line)
+    create_env = next(line.strip() for line in lines if "install -m 600 /dev/null" in line)
+    assert lines.index("  " + export) < lines.index("  om setup check")
+    assert "  om setup init" in lines
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    copied = subprocess.run(["bash", "-c", f"{export}\n{mkdir}\n{create_env}"], cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert copied.returncode == 0, copied.stderr
+    target = tmp_path / "home" / "Library" / "Application Support" / "options-monitor" / "options-monitor.env"
+    assert target.read_text(encoding="utf-8") == ""
+
+
+def test_install_script_linux_private_env_check_uses_absolute_cli(tmp_path: Path) -> None:
+    env = _installer_env(tmp_path)
+    _write_executable(tmp_path / "fake-bin" / "uname", "#!/usr/bin/env bash\nprintf 'Linux\\n'\n")
+    result = _run_installer(tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    command = f"sudo {tmp_path / 'apps' / 'options-monitor' / 'current' / 'om'} settings doctor --env-file /etc/options-monitor/options-monitor.env"
+    assert command in result.stdout
+
+
 def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) -> None:
     env, first = _installed_baseline(tmp_path)
     second = _run_installer(tmp_path, env=env)
@@ -461,6 +493,7 @@ def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:
     assert not (tmp_path / "home" / ".local" / "bin" / "om").exists()
     assert "cd " in result.stdout
     assert "./om setup check" in result.stdout
+    assert "./om setup init" in result.stdout
 
 
 def test_first_pi_transition_stages_private_target_without_changing_production(

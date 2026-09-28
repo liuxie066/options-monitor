@@ -60,6 +60,32 @@ def test_auto_backend_selects_keychain_on_macos() -> None:
     assert isinstance(provider, MacOSKeychain)
 
 
+def test_keychain_status_distinguishes_absent_from_unavailable() -> None:
+    def reader(returncode: int):
+        return lambda args, **_kwargs: subprocess.CompletedProcess(args, returncode)
+
+    assert MacOSKeychain(run_command=reader(44)).status(LLM_DEEPSEEK_API_KEY).configured is False
+    with pytest.raises(SecretBackendUnavailable, match="status is unavailable"):
+        MacOSKeychain(run_command=reader(36)).status(LLM_DEEPSEEK_API_KEY)
+
+
+def test_systemd_store_status_distinguishes_absent_from_unavailable(monkeypatch, tmp_path: Path) -> None:
+    store = SystemdCredentialProvisioner(store_root=tmp_path)
+    assert store.status(LLM_DEEPSEEK_API_KEY).configured is False
+
+    target = tmp_path / "om-llm-deepseek-api-key"
+    original_lstat = Path.lstat
+
+    def unreadable(path: Path):
+        if path == target:
+            raise PermissionError("denied")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", unreadable)
+    with pytest.raises(SecretBackendUnavailable, match="store is unavailable"):
+        store.status(LLM_DEEPSEEK_API_KEY)
+
+
 def test_systemd_provider_reads_only_fixed_regular_credential(tmp_path: Path) -> None:
     provider = SystemdCredentialProvider(tmp_path)
     target = tmp_path / "om-llm-deepseek-api-key"

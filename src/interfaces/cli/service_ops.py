@@ -142,6 +142,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_drift_cmd.add_argument("--output", default=None, help="write the complete drift details as private JSON")
     service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing/changed units and profile, then reload affected timers")
     service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
+    service_drift_cmd.add_argument("--no-restart-services", action="store_true", help="defer long-running launchd job reloads")
     service_drift_cmd.add_argument(
         "--preserve-activation-state",
         action="store_true",
@@ -372,6 +373,8 @@ def handle_service_update_command(
             "profile_path": args.profile_path,
             "confirm": confirmed,
         }
+        if bool(getattr(args, "no_restart_services", False)):
+            drift_kwargs["restart_services"] = False
         if bool(getattr(args, "preserve_activation_state", False)):
             profile_path = Path(
                 args.profile_path

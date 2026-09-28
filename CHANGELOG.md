@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 修复 Mac 首次安装后的运行目录、配置构建和 env-file 路径提示，避免从其他工作目录执行时找不到模板或把运行文件放进 release；首次检查按启用功能显示凭据的缺失、未知和已保存状态，秘密仍由用户在本机隐藏输入。
+- 补齐 launchd 服务 drift、受控升级和回滚的状态观察、应用与恢复，保留已暂停 job 的状态，并对未能自动重载的 job 给出明确待处理项。
+
+### Documentation
+- 重写 README 为项目概览，整理 Mac 首次使用与 Linux/Mac 部署步骤，明确 Release 与当前源码文档的边界。
+
 ## 3.7.7 - 2026-09-27
 
 ### Bug Fixes

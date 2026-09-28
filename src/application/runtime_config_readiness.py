@@ -5,6 +5,7 @@ from typing import Any
 
 from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
 from src.application.config_validator import validate_config
 from src.application.runtime_config_freshness import (
     check_runtime_config_freshness,
@@ -119,6 +120,15 @@ def _validation_readiness(config: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "errors": [{"code": "validation_failed", "message": f"{type(exc).__name__}: {exc}"}],
         }
+    settings = config.get("account_settings")
+    if isinstance(settings, dict):
+        for account, setting in settings.items():
+            futu = setting.get("futu") if isinstance(setting, dict) else None
+            if isinstance(futu, dict) and str(futu.get("account_id") or "").strip() == DEFAULT_FUTU_ACCOUNT_ID:
+                return {
+                    "ok": False,
+                    "errors": [{"code": "placeholder_futu_account_id", "message": f"account {account} still has the starter Futu ID placeholder"}],
+                }
     return {"ok": True, "errors": []}
 
 

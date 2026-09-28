@@ -12,8 +12,9 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
-
+export PATH="$HOME/.local/bin:$PATH"
 om setup check
+om setup init
 ```
 
 安装输出会明确打印解析到的 release tag，例如：
@@ -72,8 +73,10 @@ brew install python@3.12 git
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
-
+export PATH="$HOME/.local/bin:$PATH"
+export OM_RUNTIME_ROOT="$HOME/Library/Application Support/options-monitor"
 om setup check
+om setup init
 ```
 
 如果这台 Mac 要跑 Feishu long-connection inbound：
@@ -91,27 +94,34 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 如果要渲染 launchd 服务，推荐把 env-file 放在 Mac 的 Application Support：
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/options-monitor"
-cp -n configs/examples/options-monitor.env.example "$HOME/Library/Application Support/options-monitor/options-monitor.env"
-om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"
+REPO="$HOME/apps/options-monitor/current"
+RUNTIME="$HOME/Library/Application Support/options-monitor"
+mkdir -p "$RUNTIME"
+test -f "$RUNTIME/options-monitor.env" || install -m 600 /dev/null "$RUNTIME/options-monitor.env"
+om config edit --runtime-root "$RUNTIME" --env-file "$RUNTIME/options-monitor.env"
+om settings doctor --env-file "$RUNTIME/options-monitor.env"
 ```
+
+不要把示例 env-file 中的 Linux 绝对路径原样复制到 Mac；只填写实际需要的普通设置，密钥用 `om secrets set`。
 
 macOS 服务化使用：
 
 ```bash
 om service render \
   --target launchd \
-  --runtime-root "$HOME/Library/Application Support/options-monitor" \
-  --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \
-  --markets us hk \
-  --accounts lx sy \
-  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
-  --config-us "$HOME/Library/Application Support/options-monitor/config.us.json" \
-  --config-hk "$HOME/Library/Application Support/options-monitor/config.hk.json" \
+  --repo-root "$REPO" \
+  --runtime-root "$RUNTIME" \
+  --env-file "$RUNTIME/options-monitor.env" \
+  --markets us \
+  --accounts lx \
+  --config-yaml "$RUNTIME/config.yaml" \
+  --config-us "$RUNTIME/config.us.json" \
   --output-dir /tmp/options-monitor-service
 ```
 
-如果需要飞书长连接，额外加 `--include-feishu-ws`。launchd 不读取 shell profile，渲染器会把 env-file 通过 `OM_ENV_FILE` 写入 plist。
+这里的 `REPO` 是 installer 默认目录；使用 `--prefix` 时改为实际安装输出的 `current` 路径。
+`om setup init` 会询问运行目录、市场、Futu 账户及初始标的；完成后保存它返回的带路径的检查与编辑命令。首次生成 YAML 和运行快照的步骤见 [Getting Started](GETTING_STARTED.md)，不要在 release 目录里维护配置。
+如果需要飞书长连接，额外加 `--include-feishu-ws --feishu-ws-config-key us`；使用港股配置时将 `us` 改为 `hk`。launchd 不读取 shell profile，渲染器会把 env-file 通过 `OM_ENV_FILE` 写入 plist。
 
 ## Linux
 
@@ -121,7 +131,7 @@ Linux 是推荐的生产长期运行平台。
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3.12 python3.12-venv
+sudo apt-get install -y curl git python3.12 python3.12-venv
 ```
 
 Python 需要 3.12 或更高版本；较旧发行版请先启用提供 Python 3.12 的受信软件源或升级发行版。
@@ -130,8 +140,9 @@ Python 需要 3.12 或更高版本；较旧发行版请先启用提供 Python 3.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
-
+export PATH="$HOME/.local/bin:$PATH"
 om setup check
+om setup init
 ```
 
 如果这台服务器要跑 Feishu long-connection inbound：
@@ -150,8 +161,8 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 ```bash
 sudo install -d -m 700 /etc/options-monitor
-sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 configs/examples/options-monitor.env.example /etc/options-monitor/options-monitor.env
-om settings doctor --env-file /etc/options-monitor/options-monitor.env
+sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 "$HOME/apps/options-monitor/current/configs/examples/options-monitor.env.example" /etc/options-monitor/options-monitor.env
+sudo "$HOME/apps/options-monitor/current/om" settings doctor --env-file /etc/options-monitor/options-monitor.env
 ```
 
 生产 runtime root 推荐放在：
@@ -160,6 +171,8 @@ om settings doctor --env-file /etc/options-monitor/options-monitor.env
 /var/lib/options-monitor
 ```
 
+首次可在 `om setup init` 中选择当前用户可写目录手动运行。要直接使用上述 systemd 目录，请先由管理员创建目录并授予实际部署用户写权限，再以该部署用户运行向导；向导不调用 `sudo`，也不安装服务。它会返回之后 `setup check`、`config edit` 所需的精确路径。[首次使用指南](GETTING_STARTED.md)
+
 systemd 服务化使用：
 
 ```bash
@@ -167,15 +180,14 @@ om service render \
   --target systemd \
   --runtime-root /var/lib/options-monitor \
   --env-file /etc/options-monitor/options-monitor.env \
-  --markets us hk \
-  --accounts lx sy \
+  --markets us \
+  --accounts lx \
   --config-yaml /var/lib/options-monitor/config.yaml \
   --config-us /var/lib/options-monitor/config.us.json \
-  --config-hk /var/lib/options-monitor/config.hk.json \
   --output-dir /tmp/options-monitor-service
 ```
 
-如果需要飞书长连接，额外加 `--include-feishu-ws`。
+如果需要飞书长连接，额外加 `--include-feishu-ws --feishu-ws-config-key us`；使用港股配置时将 `us` 改为 `hk`。
 
 ## Manual Install
 
@@ -253,8 +265,9 @@ installer 禁止做：
 - 连接 OpenD 或 Feishu
 - 修改 `option_positions.sqlite3` 或任何交易/持仓状态
 
-安装完成后的下一步是：
+安装完成后先检查，再在交互终端配置：
 
 ```bash
 om setup check
+om setup init
 ```

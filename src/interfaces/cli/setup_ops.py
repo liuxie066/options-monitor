@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.setup import run_setup_check
+from src.application.platform_profile import current_platform_profile
+from src.interfaces.cli.setup_interactive import run_interactive_setup
 
 
 def add_setup_commands(subparsers: Any) -> None:
@@ -23,8 +26,10 @@ def add_setup_commands(subparsers: Any) -> None:
 
     setup = subparsers.add_parser("setup", help="install-time checks and first-run setup helpers")
     setup_sub = setup.add_subparsers(dest="setup_command", required=True)
+    setup_sub.add_parser("init", help="interactive first-run configuration (terminal only)")
     setup_check = setup_sub.add_parser("check", help="run read-only first-run setup diagnostics")
     setup_check.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
+    setup_check.add_argument("--runtime-root", default=None)
     setup_check.add_argument("--env-file", default=None)
     setup_check.add_argument("--no-local-env-file", action="store_true")
 
@@ -34,11 +39,18 @@ def handle_setup_command(
     *,
     repo_base_fn: Callable[[], Path] = repo_base,
     run_setup_check_fn: Callable[..., dict[str, Any]] = run_setup_check,
+    run_interactive_setup_fn: Callable[..., dict[str, Any]] = run_interactive_setup,
 ) -> dict[str, Any]:
+    if args.command == "setup" and args.setup_command == "init":
+        return build_response(tool_name="setup.init", ok=True, data=run_interactive_setup_fn(repo_root=repo_base_fn()))
     if args.command == "setup" and args.setup_command == "check":
+        selected_root = getattr(args, "runtime_root", None)
+        if not selected_root and not args.env_file and not os.environ.get("OM_RUNTIME_ROOT") and not os.environ.get("OM_ENV_FILE"):
+            selected_root = current_platform_profile().default_runtime_root
         data = run_setup_check_fn(
             repo_root=repo_base_fn(),
             markets=args.market,
+            runtime_root=selected_root,
             env_file=args.env_file,
             include_local_env_file=not bool(args.no_local_env_file),
         )

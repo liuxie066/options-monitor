@@ -18,7 +18,7 @@
 
 ## 开始使用
 
-- [README](../README.md)：产品定位、五分钟开始、常用入口和安全边界。
+- [README](../README.md)：产品定位、核心能力、快速入口和文档导航。
 - [Install](INSTALL.md)：Python 要求、安装器、release 目录和 wrapper。
 - [Getting Started](GETTING_STARTED.md)：安装后的首次配置、检查和首跑。
 - [Deploy](../DEPLOY.md)：部署入口和目录契约。
@@ -29,6 +29,7 @@
 
 - [Config Contract](../CONFIGS.md)：`config.yaml -> build -> runtime JSON` 权威链和迁移边界。
 - [Configuration Guide](../CONFIGURATION_GUIDE.md)：账户、市场、环境变量、通知和验证方法。
+- [Setup CLI Design](SETUP_CLI_DESIGN.md)：Mac/Linux 首次引导、后续设置交互与失败边界。
 - [Security](../SECURITY.md)：漏洞和敏感信息处理。
 - [Secret Storage](SECRET_STORAGE.md)：逻辑凭据、macOS Keychain、systemd credentials、env 兼容和轮换边界。
 

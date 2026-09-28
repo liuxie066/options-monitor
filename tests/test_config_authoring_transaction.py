@@ -85,6 +85,140 @@ def _pending_transaction(
     return manifest
 
 
+def test_first_create_publishes_source_and_snapshots(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    result = _publish(source, _config_doc(), tmp_path, markets=["us", "hk"], create=True, apply=True)
+
+    assert result["write_applied"] is True
+    assert yaml.safe_load(source.read_text(encoding="utf-8")) == _config_doc()
+    assert (tmp_path / "config.us.json").exists()
+    assert (tmp_path / "config.hk.json").exists()
+    assert (tmp_path / "resolved" / "config.assistant.json").exists()
+
+
+def test_first_create_rejects_dangling_source_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    source.symlink_to(tmp_path / "missing.yaml")
+
+    with pytest.raises(AgentToolError, match="symlink"):
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=False)
+
+    assert source.is_symlink()
+    assert not (tmp_path / "missing.yaml").exists()
+
+
+def test_first_create_rejects_dangling_snapshot_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    outside = tmp_path / "outside.json"
+    snapshot = tmp_path / "config.us.json"
+    snapshot.symlink_to(outside)
+
+    with pytest.raises(AgentToolError, match="already exists"):
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=True)
+
+    assert snapshot.is_symlink()
+    assert not outside.exists()
+    assert not source.exists()
+
+
+def test_first_create_rejects_symlinked_snapshot_parent(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "resolved").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(AgentToolError, match="already exists"):
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=True)
+
+    assert not (outside / "config.assistant.json").exists()
+    assert not source.exists()
+    assert not (tmp_path / "config.us.json").exists()
+
+
+def test_first_create_rejects_snapshot_symlink_inserted_after_preflight(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    outside = tmp_path / "outside.json"
+    snapshot = tmp_path / "config.us.json"
+    original_phase = transaction_module._set_manifest_phase
+
+    def inject_symlink(path: Path, phase: str) -> None:
+        original_phase(path, phase)
+        if phase == "committing":
+            snapshot.symlink_to(outside)
+
+    monkeypatch.setattr(transaction_module, "_set_manifest_phase", inject_symlink)
+    with pytest.raises(AgentToolError, match="failed to publish config generation"):
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=True)
+
+    assert snapshot.is_symlink()
+    assert not outside.exists()
+    assert not source.exists()
+
+
+def test_first_create_failure_removes_only_its_new_targets(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    original_create = transaction_module._atomic_create_bytes
+    failed = False
+
+    def fail_hk_once(path: Path, payload: bytes) -> None:
+        nonlocal failed
+        if path.name == "config.hk.json" and not failed:
+            failed = True
+            raise OSError("injected HK write failure")
+        original_create(path, payload)
+
+    monkeypatch.setattr(transaction_module, "_atomic_create_bytes", fail_hk_once)
+    with pytest.raises(AgentToolError, match="failed to publish config generation"):
+        _publish(source, _config_doc(), tmp_path, markets=["us", "hk"], create=True, apply=True)
+
+    assert not source.exists()
+    assert not (tmp_path / "config.us.json").exists()
+    assert not (tmp_path / "config.hk.json").exists()
+    assert not (tmp_path / "resolved" / "config.assistant.json").exists()
+
+
+def test_first_create_never_overwrites_external_target(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    target = tmp_path / "config.us.json"
+    original_phase = transaction_module._set_manifest_phase
+
+    def external_create(path: Path, phase: str) -> None:
+        original_phase(path, phase)
+        if phase == "committing":
+            target.write_text("external\n", encoding="utf-8")
+
+    monkeypatch.setattr(transaction_module, "_set_manifest_phase", external_create)
+    with pytest.raises(AgentToolError):
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=True)
+
+    assert target.read_text(encoding="utf-8") == "external\n"
+    assert not source.exists()
+
+
+def test_first_create_cleanup_failure_keeps_complete_generation(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    original_rmtree = transaction_module.shutil.rmtree
+    failed = False
+
+    def fail_cleanup_once(path, *args, **kwargs):
+        nonlocal failed
+        if "config_authoring_transactions" in str(path) and not failed:
+            failed = True
+            raise OSError("injected cleanup failure")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", fail_cleanup_once)
+    with pytest.raises(AgentToolError) as exc:
+        _publish(source, _config_doc(), tmp_path, markets=["us"], create=True, apply=True)
+
+    assert exc.value.details["write_applied"] is True
+    assert source.exists()
+    assert (tmp_path / "config.us.json").exists()
+    assert (tmp_path / "resolved" / "config.assistant.json").exists()
+    with locked_config_authoring(runtime_root=tmp_path) as lock:
+        assert lock.recovered_transactions[0]["mode"] == "cleanup_committed"
+
+
 def test_config_authoring_rejects_stale_preview_without_writes(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     original = _config_doc()

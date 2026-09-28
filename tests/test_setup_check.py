@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from src.application.setup import run_setup_check
+from src.application.setup.check import _credential_guidance
+from src.application.secret_store.contracts import SecretBackendUnavailable, SecretStatus
 
 
 def _write_executable(path: Path, text: str) -> Path:
@@ -81,8 +83,376 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
     assert checks["upgrade.uv"]["status"] in {"ok", "info", "warn"}
     assert checks["config.us"]["status"] == "warn"
     assert "config init" in checks["config.us"]["hint"]
-    assert any(step.startswith("./om config init") for step in out["next_steps"])
+    assert any(" config init " in step for step in out["next_steps"])
     assert not (tmp_path / "config.us.json").exists()
+
+
+def test_setup_check_mac_advice_uses_installed_and_runtime_paths(monkeypatch, tmp_path: Path) -> None:
+    from src.application.platform_profile import current_platform_profile
+
+    (tmp_path / "installed release").mkdir()
+    repo = _minimal_repo(tmp_path / "installed release")
+    runtime = tmp_path / "Library" / "Application Support" / "options-monitor"
+    profile = current_platform_profile(system="Darwin", home=tmp_path)
+    monkeypatch.setattr("src.application.setup.check.current_platform_profile", lambda: profile)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+
+    missing = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    config_check = next(item for item in missing["checks"] if item["name"] == "config.us")
+    init_command = config_check["hint"]
+    assert init_command == missing["next_steps"][0]
+    assert str(repo / "om") in init_command
+    assert str(runtime / "config.yaml") in init_command
+    assert "--no-build" in init_command
+    assert f"--config-yaml '{runtime / 'config.yaml'}'" in missing["next_steps"][1]
+    assert f"--output '{runtime / 'config.us.json'}'" in missing["next_steps"][1]
+    assert str(runtime / "resolved" / "config.assistant.json") in missing["next_steps"][2]
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT")
+    fresh_shell = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    assert fresh_shell["next_steps"][0].startswith("export OM_RUNTIME_ROOT=")
+    assert str(profile.default_runtime_root) in fresh_shell["next_steps"][0]
+    assert str(profile.default_runtime_root / "config.yaml") in fresh_shell["next_steps"][1]
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+
+    runtime.mkdir(parents=True)
+    (runtime / "config.yaml").write_text("{}\n", encoding="utf-8")
+    partial = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    partial_hint = next(item for item in partial["checks"] if item["name"] == "config.us")["hint"]
+    assert " config build " in partial_hint
+    assert all(" config init " not in step for step in partial["next_steps"])
+    assert partial_hint == partial["next_steps"][0]
+
+    (runtime / "config.us.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "src.application.setup.check.load_runtime_config",
+        lambda **_kwargs: (runtime / "config.us.json", {}),
+    )
+    monkeypatch.setattr(
+        "src.application.setup.check.evaluate_runtime_config_readiness",
+        lambda *_args, **_kwargs: {"ok": False},
+    )
+    invalid = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    invalid_hint = next(item for item in invalid["checks"] if item["name"] == "config.us")["hint"]
+    assert f"'{repo / 'om'}' config validate" in invalid_hint
+    assert f"--config-path '{runtime / 'config.us.json'}'" in invalid_hint
+    monkeypatch.setattr(
+        "src.application.setup.check.evaluate_runtime_config_readiness",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    ready = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    render_command = next(step for step in ready["next_steps"] if " service render " in step)
+    assert f"--repo-root '{repo}'" in render_command
+    assert f"--runtime-root '{runtime}'" in render_command
+    assert f"--config-us '{runtime / 'config.us.json'}'" in render_command
+
+
+def test_setup_check_prefers_runtime_assistant_snapshot_over_legacy_repo_file(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    runtime = tmp_path / "runtime"
+    resolved = runtime / "resolved" / "config.assistant.json"
+    resolved.parent.mkdir(parents=True)
+    (repo / "config.assistant.json").write_text(json.dumps({
+        "assistant": {"enabled": True, "bot": {"enabled": True},
+                      "llm": {"provider": "deepseek", "model": "deepseek-chat",
+                              "context_window_tokens": 24000, "max_output_tokens": 2048}},
+    }), encoding="utf-8")
+    resolved.write_text(json.dumps({
+        "assistant": {"enabled": True, "bot": {"enabled": False},
+                      "llm": {"provider": "ollama", "model": "local-test",
+                              "context_window_tokens": 24000, "max_output_tokens": 2048}},
+    }), encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+
+    out = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["value"]["config_path"] == str(resolved)
+    assert checks["credential_guidance"]["value"]["credentials"] == []
+
+
+def test_setup_check_skips_bot_requirements_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    runtime = tmp_path / "runtime"
+    resolved = runtime / "resolved" / "config.assistant.json"
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text(json.dumps({"assistant": {"enabled": False, "bot": {"enabled": False}}}), encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+
+    out = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["status"] == "info"
+    assert checks["bot.session_path"]["status"] == "info"
+
+
+def test_setup_check_does_not_hide_bot_when_assistant_snapshot_missing(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "config.yaml").write_text("assistant:\n  enabled: true\n  bot:\n    enabled: true\n", encoding="utf-8")
+    (repo / "config.assistant.json").write_text(json.dumps({"assistant": {"enabled": False}}), encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+
+    out = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["status"] == "error"
+    assert checks["bot.model_context"]["value"]["config_path"] == str(runtime / "resolved" / "config.assistant.json")
+
+
+def test_setup_check_uses_explicit_runtime_and_env_paths(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    runtime = tmp_path / "selected-runtime"
+    env_file = tmp_path / "selected.env"
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    result = run_setup_check(
+        repo_root=repo,
+        markets=["us"],
+        runtime_root=runtime,
+        env_file=env_file,
+        include_local_env_file=False,
+    )
+    checks = {item["name"]: item for item in result["checks"]}
+    assert checks["runtime_root"]["value"]["runtime_root"] == str(runtime)
+    assert checks["settings"]["value"]["env_file"] == "<configured-env-file>"
+    assert str(runtime / "config.yaml") in checks["config.us"]["hint"]
+    assert any(str(env_file) in step for step in result["next_steps"])
+
+
+def test_setup_check_next_steps_keep_inherited_env_file(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    env_file = tmp_path / "inherited.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+
+    result = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+
+    assert any(str(env_file) in step for step in result["next_steps"])
+
+
+def test_setup_check_custom_runtime_uses_matching_default_env_path(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _minimal_repo(repo)
+    runtime = tmp_path / "manual-runtime"
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+
+    result = run_setup_check(repo_root=repo, markets=["us"], runtime_root=runtime, include_local_env_file=False)
+
+    assert any(str(runtime / "options-monitor.env") in step for step in result["next_steps"])
+
+
+def test_credential_guidance_deduplicates_confirmed_requirements_without_get(monkeypatch, tmp_path: Path) -> None:
+    assistant = tmp_path / "config.assistant.json"
+    assistant.write_text(json.dumps({
+        "assistant": {
+            "enabled": True,
+            "bot": {"enabled": True},
+            "llm": {
+                "provider": "deepseek", "model": "deepseek-chat",
+                "context_window_tokens": 24000, "max_output_tokens": 2048,
+            },
+        }
+    }), encoding="utf-8")
+    calls: list[str] = []
+
+    class Store:
+        backend_name = "keychain"
+
+        def status(self, name: str) -> SecretStatus:
+            calls.append(name)
+            return SecretStatus(name, name != "feishu.bot.app_secret", "keychain", "test")
+
+        def get(self, _name: str) -> str:
+            raise AssertionError("setup guidance must not read secret values")
+
+    monkeypatch.setattr("src.application.setup.check.build_secret_provisioner", lambda **_kwargs: Store())
+    cfg = {
+        "accounts": ["sy"],
+        "account_settings": {"sy": {"type": "external_holdings"}},
+        "notifications": {"provider": "feishu_app"},
+    }
+    value, steps = _credential_guidance(
+        repo_root=tmp_path,
+        market_configs={"us": cfg, "hk": cfg},
+        unknown_markets=[],
+        assistant_config=assistant,
+        effective_env={"OM_SECRET_BACKEND": "auto"},
+        platform_name="macos",
+    )
+
+    items = {item["logical_name"]: item for item in value["credentials"]}
+    assert set(items) == {"feishu.holdings.app_secret", "feishu.bot.app_secret", "llm.deepseek.api_key"}
+    assert calls == list(items)
+    assert items["feishu.holdings.app_secret"]["features"] == ["holdings:hk", "holdings:us"]
+    assert items["feishu.bot.app_secret"]["storage_status"] == "missing"
+    assert all(item["consumer_verified"] is False for item in items.values())
+    assert steps == ["om secrets set feishu.bot.app_secret"]
+
+
+def test_credential_guidance_unknown_and_bot_disabled_skip_store(monkeypatch, tmp_path: Path) -> None:
+    assistant = tmp_path / "config.assistant.json"
+    assistant.write_text(json.dumps({
+        "assistant": {
+            "enabled": True,
+            "bot": {"enabled": False},
+            "llm": {
+                "provider": "deepseek", "model": "deepseek-chat",
+                "context_window_tokens": 24000, "max_output_tokens": 2048,
+            },
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "src.application.setup.check.build_secret_provisioner",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("zero needs must not probe storage")),
+    )
+
+    value, steps = _credential_guidance(
+        repo_root=tmp_path,
+        market_configs={"us": {"accounts": ["lx"]}},
+        unknown_markets=["hk"],
+        assistant_config=assistant,
+        effective_env={"OM_SECRET_BACKEND": "auto"},
+        platform_name="macos",
+    )
+
+    assert value["credentials"] == []
+    assert "market:hk" in value["unknown_requirements"]
+    assert steps == []
+
+
+def test_credential_guidance_storage_failure_stays_unknown(monkeypatch, tmp_path: Path) -> None:
+    class Store:
+        backend_name = "systemd"
+
+        def status(self, _name: str) -> SecretStatus:
+            raise SecretBackendUnavailable("storage metadata unavailable")
+
+    monkeypatch.setattr("src.application.setup.check.build_secret_provisioner", lambda **_kwargs: Store())
+    value, steps = _credential_guidance(
+        repo_root=tmp_path,
+        market_configs={"us": {"accounts": ["lx"], "notifications": {"provider": "feishu_app"}}},
+        unknown_markets=[],
+        assistant_config=tmp_path / "missing.json",
+        effective_env={"OM_SECRET_BACKEND": "auto"},
+        platform_name="linux",
+    )
+
+    assert value["credentials"][0]["storage_status"] == "unknown"
+    assert "assistant_config" in value["unknown_requirements"]
+    assert steps == []
+
+
+def test_credential_guidance_inbound_gate_and_local_model(monkeypatch, tmp_path: Path) -> None:
+    assistant = tmp_path / "config.assistant.json"
+    assistant.write_text(json.dumps({
+        "assistant": {
+            "enabled": True,
+            "bot": {"enabled": True},
+            "llm": {
+                "provider": "ollama", "model": "local-test",
+                "context_window_tokens": 24000, "max_output_tokens": 2048,
+            },
+        }
+    }), encoding="utf-8")
+    observed: list[str] = []
+
+    class Store:
+        backend_name = "systemd"
+
+        def status(self, name: str) -> SecretStatus:
+            observed.append(name)
+            return SecretStatus(name, False, "systemd", "test")
+
+    monkeypatch.setattr("src.application.setup.check.build_secret_provisioner", lambda **_kwargs: Store())
+    value, steps = _credential_guidance(
+        repo_root=tmp_path,
+        market_configs={"us": {"accounts": ["lx"]}},
+        unknown_markets=[],
+        assistant_config=assistant,
+        effective_env={
+            "OM_SECRET_BACKEND": "auto",
+            "OM_INBOUND_OPERATIONS_ENABLED": "1",
+            "OM_INBOUND_MONITOR_RUN_ENABLED": "1",
+        },
+        platform_name="linux",
+    )
+
+    assert observed == ["inbound.operation_hmac_key"]
+    assert value["credentials"][0]["features"] == ["inbound_operations"]
+    assert steps == [f"sudo {tmp_path / 'om'} secrets set inbound.operation_hmac_key"]
+
+
+def test_credential_guidance_env_compatibility_does_not_claim_storage_state(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "src.application.setup.check.build_secret_provisioner",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("env mode has no storage status")),
+    )
+    value, steps = _credential_guidance(
+        repo_root=tmp_path,
+        market_configs={"us": {"accounts": ["lx"], "notifications": {"provider": "feishu_app"}}},
+        unknown_markets=[],
+        assistant_config=tmp_path / "missing.json",
+        effective_env={"OM_SECRET_BACKEND": "env"},
+        platform_name="macos",
+    )
+
+    assert value["credentials"][0]["storage_status"] == "unknown"
+    assert steps == []
+
+
+def test_setup_check_guidance_uses_effective_runtime_config_and_terminal_command(monkeypatch, tmp_path: Path) -> None:
+    root = _minimal_repo(tmp_path)
+    (root / "config.us.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(root))
+    monkeypatch.setenv("OM_SECRET_BACKEND", "auto")
+    monkeypatch.setattr(
+        "src.application.setup.check.load_runtime_config",
+        lambda **_kwargs: (root / "config.us.json", {
+            "accounts": ["lx"], "notifications": {"provider": "feishu_app"},
+        }),
+    )
+    monkeypatch.setattr(
+        "src.application.setup.check.evaluate_runtime_config_readiness",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "src.application.setup.check.diagnose_effective_settings",
+        lambda **_kwargs: {"summary": {"error_count": 0, "warning_count": 0}},
+    )
+
+    class Store:
+        backend_name = "keychain"
+
+        def status(self, name: str) -> SecretStatus:
+            return SecretStatus(name, False, "keychain", "test")
+
+    monkeypatch.setattr("src.application.setup.check.build_secret_provisioner", lambda **_kwargs: Store())
+
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    check = {item["name"]: item for item in out["checks"]}["credential_guidance"]
+
+    assert check["status"] == "warn"
+    assert check["value"]["credentials"] == [{
+        "logical_name": "feishu.bot.app_secret",
+        "features": ["notifications:us"],
+        "storage_status": "missing",
+        "consumer_verified": False,
+        "runtime_consumer_status": "unknown",
+    }]
+    assert "om secrets set feishu.bot.app_secret" in out["next_steps"]
+    assert out["summary"]["warning_count"] >= 1
 
 
 def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Path) -> None:
@@ -299,20 +669,8 @@ def test_cli_setup_check_outputs_json(monkeypatch, capsys) -> None:
     assert payload["data"]["markets"] == ["us"]
 
 
-def test_cli_setup_init_subcommand_is_removed(capsys) -> None:
+def test_cli_setup_init_requires_interactive_terminal(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "setup",
-            "init",
-            "--market",
-            "us",
-            "--futu-acc-id",
-            "123456",
-            "--account",
-            "lx",
-        ])
-
-    assert exc.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+    assert cli.main(["setup", "init"]) == 2
+    assert "interactive terminal" in capsys.readouterr().out

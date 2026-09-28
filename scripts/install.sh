@@ -312,22 +312,28 @@ print_next_steps() {
     printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
   fi
   printf 'Next steps:\n'
+  if [ "$OS_NAME" = "Darwin" ]; then
+    printf '  export OM_RUNTIME_ROOT="$HOME/Library/Application Support/options-monitor"\n'
+  fi
   if [ "$INSTALL_CLI" -eq 1 ]; then
     if bin_dir_in_path; then
       printf '  om setup check\n'
+      printf '  om setup init\n'
     else
       printf '  export PATH=%s:"$PATH"\n' "$(quote "$BIN_DIR")"
       printf '  om setup check\n'
+      printf '  om setup init\n'
     fi
   else
     printf '  cd %s\n' "$(quote "$CURRENT_LINK")"
     printf '  ./om setup check\n'
+    printf '  ./om setup init\n'
   fi
   case "$OS_NAME" in
     Darwin)
       printf '\nmacOS service env-file, if you later render launchd services:\n'
       printf '  mkdir -p "$HOME/Library/Application Support/options-monitor"\n'
-      printf '  cp -n configs/examples/options-monitor.env.example "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
+      printf '  test -f "$HOME/Library/Application Support/options-monitor/options-monitor.env" || install -m 600 /dev/null "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
       if [ "$INSTALL_CLI" -eq 1 ]; then
         printf '  om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
       else
@@ -337,12 +343,8 @@ print_next_steps() {
     Linux)
       printf '\nLinux production env-file, if you later render systemd services:\n'
       printf '  sudo install -d -m 700 /etc/options-monitor\n'
-      printf '  sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 configs/examples/options-monitor.env.example /etc/options-monitor/options-monitor.env\n'
-      if [ "$INSTALL_CLI" -eq 1 ]; then
-        printf '  om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
-      else
-        printf '  ./om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
-      fi
+      printf '  sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 %s /etc/options-monitor/options-monitor.env\n' "$(quote "${CURRENT_LINK}/configs/examples/options-monitor.env.example")"
+      printf '  sudo %s settings doctor --env-file /etc/options-monitor/options-monitor.env\n' "$(quote "${CURRENT_LINK}/om")"
       ;;
   esac
   if [ "$INSTALL_CLI" -eq 1 ] && ! bin_dir_in_path; then

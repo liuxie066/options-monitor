@@ -175,6 +175,9 @@ class MacOSKeychain:
             )
         except OSError as exc:
             raise SecretBackendUnavailable("macOS Keychain is unavailable") from exc
+        # security exits with the low byte of errSecItemNotFound (-25300).
+        if result.returncode not in (0, 44):
+            raise SecretBackendUnavailable("macOS Keychain status is unavailable")
         return SecretStatus(
             logical_name=logical_name,
             configured=int(result.returncode) == 0,

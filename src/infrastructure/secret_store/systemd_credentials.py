@@ -122,12 +122,16 @@ class SystemdCredentialProvisioner:
 
     def status(self, logical_name: str) -> SecretStatus:
         path = self._path(logical_name)
-        configured = False
         try:
             file_stat = path.lstat()
-            configured = stat.S_ISREG(file_stat.st_mode) and file_stat.st_size > 0
-        except OSError:
+        except FileNotFoundError:
             configured = False
+        except OSError as exc:
+            raise SecretBackendUnavailable("systemd encrypted credential store is unavailable") from exc
+        else:
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size <= 0:
+                raise SecretBackendUnavailable("systemd encrypted credential file is invalid")
+            configured = True
         return SecretStatus(
             logical_name=logical_name,
             configured=configured,

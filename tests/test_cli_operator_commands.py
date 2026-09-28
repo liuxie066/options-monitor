@@ -1107,14 +1107,13 @@ def test_config_authoring_help_hides_legacy_flags(argv: list[str], capsys) -> No
     assert "--user-config" not in out
 
 
-def test_setup_init_command_is_removed(capsys) -> None:
+def test_setup_init_cli_requires_interactive_terminal(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["setup", "init", "--market", "us", "--futu-acc-id", "12345678"])
-
-    assert exc.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+    assert cli.main(["setup", "init"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert "interactive terminal" in payload["error"]["message"]
 
 
 def test_service_render_requires_yaml_authoring_source(capsys, tmp_path: Path) -> None:

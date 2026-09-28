@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -52,6 +54,61 @@ SERVICE_ACTIVATION_POLICIES = frozenset(
         SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
     }
 )
+
+_LAUNCHD_LABEL = re.compile(r"^com\.options-monitor\.[A-Za-z0-9][A-Za-z0-9.-]*$")
+
+
+def _is_launchd_label(name: str) -> bool:
+    return bool(_LAUNCHD_LABEL.fullmatch(name))
+
+
+def _launchd_command(ctx: dict[str, Any], args: list[str]) -> dict[str, Any]:
+    command = ["launchctl", *args]
+    try:
+        proc = (ctx.get("run_cmd") or subprocess.run)(
+            command, capture_output=True, text=True, timeout=30, check=False
+        )
+    except Exception as exc:
+        return {"command": command, "ok": False, "returncode": None,
+                "stdout": "", "stderr": f"{type(exc).__name__}: {exc}"}
+    return {"command": command, "ok": proc.returncode == 0,
+            "returncode": proc.returncode, "stdout": str(proc.stdout or ""),
+            "stderr": str(proc.stderr or "")}
+
+
+def _launchd_observe(ctx: dict[str, Any], labels: set[str]) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    enabled: dict[str, str] = {}
+    loaded: dict[str, str] = {}
+    errors: list[str] = []
+    if not labels:
+        return enabled, loaded, errors
+    domain = f"gui/{os.getuid()}"
+    disabled = _launchd_command(ctx, ["print-disabled", domain])
+    body = str(disabled["stdout"])
+    if not disabled["ok"] or "{" not in body or "}" not in body:
+        return enabled, loaded, [f"launchctl print-disabled {domain}: {disabled['stderr'] or disabled['returncode'] or 'unreadable output'}"]
+    entries = dict(re.findall(r'"(com\.options-monitor\.[^"\n]+)"\s*=>\s*([^\s,;}]+)', body, flags=re.I))
+    for name in sorted(labels):
+        if not _is_launchd_label(name):
+            errors.append(f"unsafe launchd label: {name}")
+            continue
+        value = entries.get(name, "false").lower()
+        if value not in {"true", "false", "enabled", "disabled"}:
+            enabled[name] = "unknown"
+            errors.append(f"launchctl print-disabled {name}: unrecognized state {value}")
+            continue
+        enabled[name] = "disabled" if value in {"true", "disabled"} else "enabled"
+        result = _launchd_command(ctx, ["print", f"{domain}/{name}"])
+        if result["ok"]:
+            loaded[name] = "active"
+        elif result["returncode"] == 113 or "could not find service" in str(result["stderr"]).lower():
+            loaded[name] = "inactive"
+        else:
+            loaded[name] = "unknown"
+            errors.append(f"launchctl print {name}: {result['stderr'] or result['returncode']}")
+    return enabled, loaded, errors
+
+
 def normalize_service_activation_policy(value: str | None) -> str:
     policy = str(value or SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE).strip().lower()
     if policy not in SERVICE_ACTIVATION_POLICIES:
@@ -69,7 +126,7 @@ def _normalize_preserved_activation_states(
     out: dict[str, dict[str, str]] = {}
     for raw_name, raw_state in raw_states.items():
         name = str(raw_name or "").strip()
-        if not name.endswith(".timer") or not isinstance(raw_state, dict):
+        if not (name.endswith(".timer") or _is_launchd_label(name)) or not isinstance(raw_state, dict):
             continue
         state = {
             key: str(raw_state.get(key) or "").strip().lower()
@@ -93,6 +150,7 @@ def service_drift(
     managed_root_gid: int = 0,
     activation_policy: str = SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
     preserved_activation_states: dict[str, Any] | None = None,
+    restart_services: bool = True,
     run_cmd: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
@@ -124,6 +182,7 @@ def service_drift(
     initial["preserved_activation_states"] = _normalize_preserved_activation_states(
         preserved_activation_states
     )
+    initial["restart_services"] = bool(restart_services)
     before = _build_drift(initial)
     operations: list[dict[str, Any]] = []
     apply_errors: list[str] = []
@@ -133,6 +192,8 @@ def service_drift(
         apply_result = _apply_service_drift(initial, before=before, operations=operations, run_cmd=command_runner)
         changed = bool(apply_result.get("changed"))
         apply_errors = [str(item) for item in apply_result.get("errors") or []]
+        if initial.get("provider") == "launchd":
+            initial["deferred_reload_units"] = list(apply_result.get("deferred_reload_units") or [])
         after = _build_drift(initial)
         out = {
             **after,
@@ -1292,12 +1353,27 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         )
     expected_files = _expected_install_files(bundle, provider=provider)
     expected_managed_files = _expected_managed_files(bundle, provider=provider)
+    expected_services = _service_names_from_profile(_bundle_profile(bundle))
+    launchd_observation_errors: list[str] = []
+    unknown_launchd_plists: list[str] = []
+    if provider == "launchd":
+        old_services = _service_names_from_profile(persisted_profile)
+        root = Path.home() / "Library" / "LaunchAgents"
+        owned = set(expected_files) | set(old_services)
+        unknown_launchd_plists = sorted(
+            str(path) for path in root.glob("com.options-monitor.*.plist")
+            if path.name.removesuffix(".plist") not in owned
+        ) if root.exists() else []
+        activation, live, launchd_observation_errors = _launchd_observe(
+            ctx, set(expected_files) | set(old_services)
+        )
+        ctx["launchd_activation_states"] = activation
+        ctx["launchd_live_states"] = live
     installed_managed_files = _installed_managed_files(
         provider=provider,
         expected_files=expected_managed_files,
         ctx=ctx,
     )
-    expected_services = _service_names_from_profile(_bundle_profile(bundle))
     profile_services = _service_names_from_profile(persisted_profile)
     installed_units = _installed_units(provider=provider, expected_files=expected_files, ctx=ctx)
     missing_profile_units = sorted(set(expected_services) - set(profile_services))
@@ -1352,6 +1428,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     )
     activation_drift_units = sorted(
         set(observed_activation_drift_units) - set(preserved_activation_units)
+        - set(ctx.get("deferred_reload_units") or [])
     )
     execution_drift_units = sorted(
         name
@@ -1398,6 +1475,16 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         profile_content_changed=profile_content_changed,
         compatibility_warning_count=len(compatibility_warnings),
     )
+    if launchd_observation_errors:
+        summary = _summary_with_apply_errors(summary, launchd_observation_errors)
+    if unknown_launchd_plists:
+        summary = {**summary,
+                   "status": "warn" if summary["status"] == "ok" else summary["status"],
+                   "warning_count": summary["warning_count"] + len(unknown_launchd_plists)}
+    if provider == "launchd" and summary["error_count"] == 0 and summary["warning_count"] == (
+        int(bool(preserved_activation_units)) + len(unknown_launchd_plists)
+    ):
+        summary["ok"] = True
     return {
         "checked": True,
         "supported": True,
@@ -1423,6 +1510,9 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "activation_states": activation_states,
         "active_states": active_states,
         "execution_states": execution_states,
+        "observation_errors": launchd_observation_errors,
+        "unknown_launchd_plists": unknown_launchd_plists,
+        "deferred_reload_units": sorted(ctx.get("deferred_reload_units") or []),
         "observed_activation_drift_units": observed_activation_drift_units,
         "activation_drift_units": activation_drift_units,
         "preserved_activation_units": preserved_activation_units,
@@ -1736,9 +1826,12 @@ def _installed_units(*, provider: str, expected_files: dict[str, dict[str, Any]]
                 names.add(name)
         return sorted(names)
     names: set[str] = set()
-    for name, item in expected_files.items():
-        if _install_path(item, provider=provider, ctx=ctx).exists():
+    owned = set(expected_files) | set(_service_names_from_profile(ctx.get("profile_on_disk") or ctx["profile"]))
+    root = Path.home() / "Library" / "LaunchAgents"
+    for name in owned:
+        if _is_launchd_label(name) and (root / f"{name}.plist").exists():
             names.add(name)
+    names.update(name for name, state in (ctx.get("launchd_live_states") or {}).items() if state == "active")
     return sorted(names)
 
 
@@ -1847,6 +1940,8 @@ def _activation_states(
     installed_units: list[str],
     ctx: dict[str, Any],
 ) -> dict[str, str]:
+    if provider == "launchd":
+        return dict(ctx.get("launchd_activation_states") or {})
     if provider != "systemd" or not _live_systemctl_enabled(ctx):
         return {}
     installed = set(installed_units)
@@ -1876,6 +1971,8 @@ def _active_states(
     installed_units: list[str],
     ctx: dict[str, Any],
 ) -> dict[str, str]:
+    if provider == "launchd":
+        return dict(ctx.get("launchd_live_states") or {})
     if provider != "systemd" or not _live_systemctl_enabled(ctx):
         return {}
     installed = set(installed_units)
@@ -2135,6 +2232,8 @@ def _apply_service_drift(
     run_cmd: Callable[..., Any],
 ) -> dict[str, Any]:
     provider = str(ctx["provider"])
+    if provider == "launchd":
+        return _apply_launchd_drift(ctx, before=before, operations=operations)
     if provider != "systemd":
         return {
             "changed": False,
@@ -2391,6 +2490,178 @@ def _apply_service_drift(
         "preserved_activation_units": sorted(preserved_activation),
         "deferred_restart_units": deferred_restart_units,
         "retired_units": retired_units,
+        "profile_written": profile_written,
+    }
+
+
+def _launchd_plist_path(name: str, item: dict[str, Any] | None = None) -> Path:
+    if not _is_launchd_label(name):
+        raise ValueError(f"unsafe launchd label: {name}")
+    root = Path.home() / "Library" / "LaunchAgents"
+    path = root / f"{name}.plist"
+    if item is not None and Path(str(item.get("install_path") or "")).expanduser() != path:
+        raise ValueError(f"launchd install path does not match managed label: {name}")
+    if root.resolve() != root or path.is_symlink():
+        raise ValueError(f"launchd managed path must not be a symlink: {path}")
+    return path
+
+
+def _write_launchd_plist(path: Path, content: str, *, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError(f"launchd managed path must not be a symlink: {path}")
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
+            temporary = file.name
+            file.write(content)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            try:
+                Path(temporary).unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _launchd_is_long_running(name: str) -> bool:
+    return (name in {"com.options-monitor.trade-intake", "com.options-monitor.feishu-ws",
+                     "com.options-monitor.wechat-clawbot"}
+            or name == "com.options-monitor.opend" or name.startswith("com.options-monitor.opend."))
+
+
+def _apply_launchd_drift(
+    ctx: dict[str, Any], *, before: dict[str, Any], operations: list[dict[str, Any]]
+) -> dict[str, Any]:
+    errors = list(before.get("observation_errors") or [])
+    written: list[str] = []
+    retired: list[str] = []
+    bootstrapped: list[str] = []
+    enabled_units: list[str] = []
+    deferred: list[str] = []
+    profile_written = False
+    if errors:
+        return {"changed": False, "errors": errors, "written_units": written,
+                "retired_units": retired, "bootstrapped_units": bootstrapped,
+                "enabled_units": enabled_units, "deferred_reload_units": deferred, "profile_written": False}
+    bundle = _expected_bundle_from_profile(
+        ctx.get("effective_profile") or ctx["profile"], provider="launchd",
+        repo_root=ctx["repo_root"], runtime_root=ctx["runtime_root"],
+    )
+    expected = _expected_install_files(bundle, provider="launchd")
+    old_names = set(before.get("profile_services") or [])
+    names = sorted(old_names | set(expected))
+    paths: dict[str, Path] = {}
+    for name in names:
+        try:
+            paths[name] = _launchd_plist_path(name, expected.get(name))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        return {"changed": False, "errors": errors, "written_units": written,
+                "retired_units": retired, "bootstrapped_units": bootstrapped,
+                "enabled_units": enabled_units, "deferred_reload_units": deferred, "profile_written": False}
+
+    domain = f"gui/{os.getuid()}"
+    activation = before.get("activation_states") or {}
+    live = before.get("active_states") or {}
+    preserved = set(before.get("preserved_activation_units") or [])
+
+    def command(args: list[str]) -> None:
+        result = _launchd_command(ctx, args)
+        operations.append({"operation": "launchctl", **result})
+        if not result["ok"]:
+            raise RuntimeError(f"{' '.join(result['command'])}: {result['stderr'] or result['returncode']}")
+
+    for name in names:
+        path = paths[name]
+        target = f"{domain}/{name}"
+        item = expected.get(name)
+        desired = str(item.get("content") or "") if item is not None else None
+        try:
+            old_content = path.read_text(encoding="utf-8") if path.exists() else None
+        except OSError as exc:
+            errors.append(f"read {path}: {type(exc).__name__}: {exc}")
+            continue
+        was_loaded = live.get(name) == "active"
+        was_disabled = activation.get(name) == "disabled"
+        paused = name in preserved
+        needs_file_change = old_content != desired
+        needs_registration = desired is not None and not was_loaded and not paused
+        needs_enable = desired is not None and was_disabled and not paused
+        defer_live = bool(
+            (name == "com.options-monitor.upgrade" and was_loaded and (needs_file_change or desired is None))
+            or (not ctx.get("restart_services", True) and _launchd_is_long_running(name)
+                and (needs_file_change or needs_registration or needs_enable))
+        )
+        if not (needs_file_change or needs_registration or needs_enable or (desired is None and was_loaded)):
+            continue
+        try:
+            if was_loaded and (needs_file_change or desired is None) and not defer_live and not paused:
+                command(["bootout", target])
+            if desired is None:
+                if path.exists():
+                    path.unlink()
+                    operations.append({"operation": "delete_plist", "path": str(path), "ok": True})
+                retired.append(name)
+            elif needs_file_change:
+                _write_launchd_plist(path, desired)
+                written.append(name)
+                operations.append({"operation": "write_plist", "path": str(path), "ok": True})
+            if defer_live:
+                deferred.append(name)
+                continue
+            if desired is not None and not paused:
+                if needs_enable:
+                    command(["enable", target])
+                    enabled_units.append(name)
+                if needs_file_change or needs_registration:
+                    command(["bootstrap", domain, str(path)])
+                    bootstrapped.append(name)
+        except Exception as exc:
+            errors.append(f"apply {name}: {type(exc).__name__}: {exc}")
+            try:
+                current = _launchd_command(ctx, ["print", target])
+                if current["ok"] and not was_loaded:
+                    command(["bootout", target])
+                if old_content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_launchd_plist(path, old_content)
+                if was_loaded and not current["ok"]:
+                    command(["enable", target])
+                    command(["bootstrap", domain, str(path)])
+                command(["disable" if was_disabled else "enable", target])
+                operations.append({"operation": "restore_launchd_job", "unit": name, "ok": True})
+            except Exception as restore_exc:
+                errors.append(f"restore {name}: {type(restore_exc).__name__}: {restore_exc}")
+                operations.append({"operation": "restore_launchd_job", "unit": name, "ok": False})
+
+    if not errors and before.get("profile_content_changed"):
+        try:
+            profile_path = Path(ctx["profile_path"])
+            if profile_path.is_symlink():
+                raise ValueError("service profile must not be a symlink")
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            content = _expected_profile_content(bundle)
+            _write_launchd_plist(profile_path, content, mode=0o600)
+            if profile_path.read_text(encoding="utf-8") != content:
+                raise OSError("service profile readback mismatch")
+            profile_written = True
+            ctx["profile"] = _bundle_profile(bundle)
+            ctx["profile_on_disk"] = dict(ctx["profile"])
+            operations.append({"operation": "write_profile", "path": str(profile_path), "ok": True})
+        except Exception as exc:
+            errors.append(f"write profile: {type(exc).__name__}: {exc}")
+    return {
+        "changed": bool(written or retired or bootstrapped or enabled_units or profile_written),
+        "errors": errors,
+        "written_units": written,
+        "retired_units": retired,
+        "bootstrapped_units": bootstrapped,
+        "enabled_units": enabled_units,
+        "deferred_reload_units": deferred,
         "profile_written": profile_written,
     }
 

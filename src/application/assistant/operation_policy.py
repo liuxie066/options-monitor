@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.operation_signature import require_operation_hmac_key
@@ -23,8 +24,8 @@ class InboundOperationPolicy:
     confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
 
 
-def load_operation_policy_from_env() -> InboundOperationPolicy:
-    env = build_effective_env().values
+def load_operation_policy_from_env(*, environ: Mapping[str, str] | None = None) -> InboundOperationPolicy:
+    env = environ if environ is not None else build_effective_env().values
     return InboundOperationPolicy(
         operations_enabled=_truthy(env.get("OM_INBOUND_OPERATIONS_ENABLED")),
         trade_write_enabled=_truthy(env.get("OM_INBOUND_TRADE_WRITE_ENABLED")),

@@ -16,18 +16,22 @@ from src.application.config_yaml import (
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_readiness import require_runtime_config_readiness
+from src.interfaces.cli.config_interactive import run_interactive_config_edit
 
 
 def add_config_commands(subparsers: Any) -> None:
     config = subparsers.add_parser("config", help="config operations")
     config_sub = config.add_subparsers(dest="config_command", required=True)
+    edit_config = config_sub.add_parser("edit", help="interactive terminal settings and advanced YAML editing")
+    edit_config.add_argument("--runtime-root", default=None)
+    edit_config.add_argument("--env-file", default=None)
     init_config = config_sub.add_parser("init", help="generate starter config.yaml and runtime configs")
     init_config.add_argument("--output", default=None, help="config.yaml path; defaults to repo-local config.yaml")
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
     init_config.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     init_config.add_argument("--futu-acc-id", default=None, help="Futu account id; omitted keeps a placeholder in config.yaml")
     init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
-    init_config.add_argument("--external-holdings-account", default="sy")
+    init_config.add_argument("--external-holdings-account", default=None)
     init_config.add_argument("--no-external-holdings", action="store_true")
     init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None)
     init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None)
@@ -191,7 +195,16 @@ def handle_config_command(
     init_yaml_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
     set_yaml_symbol_config_fn: Callable[..., dict[str, Any]] = set_yaml_symbol_config,
+    run_interactive_config_edit_fn: Callable[..., dict[str, Any]] = run_interactive_config_edit,
 ) -> dict[str, Any]:
+    if args.config_command == "edit":
+        return build_response(
+            tool_name="config.edit",
+            ok=True,
+            data=run_interactive_config_edit_fn(
+                repo_root=repo_base_fn(), runtime_root=args.runtime_root, env_file=args.env_file
+            ),
+        )
     if args.config_command == "validate":
         source = _normalize_config_source(args, allowed=("runtime", "yaml"))
         if source == "yaml":

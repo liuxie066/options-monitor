@@ -4,7 +4,7 @@
 
 ## 需要维护什么
 
-普通安装只需要三类配置：
+普通安装维护三类配置来源；运行快照由 YAML 生成：
 
 | 文件 / 来源 | 内容 |
 |---|---|
@@ -23,7 +23,9 @@
 
 ## 初始化
 
-在源码 checkout 中：
+安装后的推荐入口是在终端运行 `om setup init`；确认后它创建所选市场的配置与快照，并返回以后使用的 `om setup check --runtime-root ... --env-file ...` 和 `om config edit --runtime-root ... --env-file ...` 命令。`config edit` 的基础与高级菜单都编辑同一份 `config.yaml`，保存后经校验和确认发布；密钥仍走 `om secrets set` 的隐藏终端输入。[首次使用](docs/GETTING_STARTED.md)
+
+需要脚本或逐条操作时，可以使用非交互入口。在源码 checkout 中：
 
 ```bash
 ./om config init \
@@ -36,13 +38,14 @@
 `config init` 默认生成：
 
 - `config.yaml`
-- `config.us.json`
-- `config.hk.json`
-- `config.assistant.json`
+- 如果填写数字格式的 `--futu-acc-id`，生成所选市场的 `config.us.json` / `config.hk.json` 和 `resolved/config.assistant.json`；数字格式不证明券商身份；
+- 如果省略 ID，只生成含占位值的 YAML 草稿，`draft=true`，不生成就绪快照。
+
+默认选择 US 与 HK；用 `--market us` 或 `--market hk` 只建对应市场。starter 只有 Futu 账户，Assistant/Bot 关闭，外部持仓需要明确添加。初次创建时请使用 `om setup init` 的可恢复发布路径；非交互 `config init` 仍是较低层的逐步 authoring 命令。
 
 已有目标文件时默认拒绝覆盖；先检查差异，不要直接使用 `--force` 覆盖生产文件。
 
-当前 starter 见 [config.yaml.example](configs/examples/config.yaml.example)。
+[config.yaml.example](configs/examples/config.yaml.example) 展示更多高级功能，不是首装向导生成的最小 starter。
 
 ## 最小 YAML
 
@@ -51,13 +54,10 @@ accounts:
   lx:
     type: futu
     futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
-  sy:
-    type: external_holdings
-    holdings_account: sy
 
 markets:
   us:
-    accounts: [lx, sy]
+    accounts: [lx]
     symbols:
       - NVDA
       - GOOGL
@@ -67,15 +67,10 @@ markets:
           dte: [20, 45]
           strike: [80, 120]
 
-  hk:
-    accounts: [lx]
-    symbols:
-      - "0700.HK"
-      - "9992.HK"
-
-# 仅在同机已安装并启用 portfolio-management 时打开
-portfolio_management:
+assistant:
   enabled: false
+  bot:
+    enabled: false
 ```
 
 约定：
@@ -87,6 +82,7 @@ portfolio_management:
 - 个性化策略配置放在 `overrides.<symbol>`；
 - `portfolio_management.enabled` 是全局开关，不按市场配置；默认关闭；
 - YAML 使用空格缩进，tab 会被拒绝。
+- 这是只选 US 的草稿示例；将账户占位 ID 换成真实数字格式，再运行 `config validate` / `config build`；如需 HK，在 `markets.hk` 添加账户和规范 `.HK` 标的。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
 
@@ -240,11 +236,11 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 
 常见内容包括：
 
-- Feishu App credential 与 recipient env；
-- external holdings table env；
-- LLM provider API key；
+- Feishu recipient、external holdings table 等非秘密路由设置；
 - Tool Gateway 写工具开关；
 - runtime/service 机器级设置。
+
+Feishu App secret、模型 API key 等密钥由 Keychain 或 systemd credentials 管理，使用 `om secrets set <logical-name>` 在终端隐藏输入；不要放进普通 env-file、YAML、命令参数或聊天框。Linux 手动 shell 未获得 `CREDENTIALS_DIRECTORY` 时，即使已保存加密凭据也不能据此宣称运行时已可读取。
 
 只读检查：
 

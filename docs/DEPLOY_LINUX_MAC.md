@@ -8,8 +8,8 @@
 
 | 目录 | 用途 |
 |---|---|
-| `repo_root` | 代码、`./om`、`./om-agent`、canonical config |
-| `runtime_root` | 所有运行时状态、报告、SQLite、日志、锁 |
+| `repo_root` | 代码、`om`、`om-agent`；installer 布局使用 `current` |
+| `runtime_root` | YAML 配置与运行快照、运行时状态、报告、SQLite、日志、锁 |
 
 所有运行时产物都应落在 `runtime_root`：
 
@@ -104,6 +104,7 @@ cd "$REPO"
   --config-us "$RUNTIME/config.us.json" \
   --config-hk "$RUNTIME/config.hk.json" \
   --include-feishu-ws \
+  --feishu-ws-config-key us \
   --include-secret-credentials \
   --output-dir /tmp/options-monitor-service
 ```
@@ -347,19 +348,23 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 推荐 runtime：
 
 ```bash
-REPO="$HOME/workspace/options-monitor"
+REPO="$HOME/apps/options-monitor/current"
 RUNTIME="$HOME/Library/Application Support/options-monitor"
 ENV_FILE="$RUNTIME/options-monitor.env"
 mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks"
-test -f "$ENV_FILE" || install -m 600 configs/examples/options-monitor.env.example "$ENV_FILE"
-$EDITOR "$ENV_FILE"
+test -f "$ENV_FILE" || install -m 600 /dev/null "$ENV_FILE"
+${EDITOR:-vi} "$ENV_FILE"
 ```
+
+这里的 `REPO` 是默认 installer 的 `current` 路径；使用自定义 `--prefix` 或源码 checkout 时改为实际代码目录。
+先按 [Getting Started](GETTING_STARTED.md) 在 `RUNTIME` 下构建 `config.yaml`、所选市场和 resolved assistant 快照；Mac 不要原样复制带 Linux 路径的 env 示例。
+
+下面是已配置 US/HK、`lx`/`sy` 和 Feishu 长连接后的完整示例。只完成默认 US 首装时，按 [Getting Started](GETTING_STARTED.md) 的最小 `us`/`lx` 命令渲染，不传 HK、`sy` 或 Feishu 参数。
 
 渲染：
 
 ```bash
-cd "$REPO"
-./om service render \
+"$REPO/om" service render \
   --target launchd \
   --repo-root "$REPO" \
   --runtime-root "$RUNTIME" \
@@ -370,6 +375,7 @@ cd "$REPO"
   --config-us "$RUNTIME/config.us.json" \
   --config-hk "$RUNTIME/config.hk.json" \
   --include-feishu-ws \
+  --feishu-ws-config-key us \
   --output-dir /tmp/options-monitor-service
 ```
 
@@ -393,11 +399,15 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.f
 
 launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:00 / 09:30，Mac 的系统时区需要设为中国标准时间或等价时区。
 
+`us` 是飞书长连接选用的配置市场；如果实际使用港股配置，请改成 `hk`。双市场渲染必须明确选择一个。
+首次从旧版本进入带 launchd 受控修复的 release，旧版本的升级进程不能自动完成新版本的服务恢复；先在已登录的 Mac 图形会话中按上面的步骤人工安装与检查，取得单独部署授权后再操作。后续 `update apply --confirm` 要使用指向 release 目录的 `current` 符号链接，普通 Git checkout 不适用。
+修复版的 `"$REPO/om" service drift --runtime-root "$RUNTIME"` 默认只读；`--confirm` 才修改本用户 LaunchAgents。`--preserve-activation-state` 保留先前暂停的 job，`--no-restart-services` 只写入长期运行 job 的 plist 并报告待重载项。升级 job 自身的重载也会延后，须在升级任务结束后核对 `deferred_reload_units` 和 `launchctl list com.options-monitor.upgrade`。
+
 检查：
 
 ```bash
-./om service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
-./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
+"$REPO/om" service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
+"$REPO/om-agent" run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
 ```
 
 ## 5. OpenD / Futu 前置条件

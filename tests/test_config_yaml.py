@@ -1359,39 +1359,61 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["assistant"]["enabled"] is True
-    assert payload["assistant"]["bot"]["enabled"] is True
-    assert payload["assistant"]["bot"]["toolsets"]["portfolio"] is False
-    assert payload["assistant"]["context_window_messages"] == 8
-    assert "default_market_scope" not in payload["assistant"]
-    assert payload["assistant"]["active_model"] == "deepseek-default"
-    assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-v4-pro"
-    assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert set(payload["assistant"]["models"]) == {"deepseek-default"}
-    assert "max_output_tokens" not in payload["assistant"]["models"]["deepseek-default"]
-    assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
+    assert payload["assistant"]["enabled"] is False
+    assert payload["assistant"]["bot"]["enabled"] is False
+    assert set(payload["accounts"]) == {"lx"}
+    assert payload["markets"]["us"]["accounts"] == ["lx"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
     hk_cfg = json.loads((runtime_dir / "config.hk.json").read_text(encoding="utf-8"))
-    assistant_cfg = json.loads((runtime_dir / "config.assistant.json").read_text(encoding="utf-8"))
+    assistant_cfg = json.loads((runtime_dir / "resolved" / "config.assistant.json").read_text(encoding="utf-8"))
     assert us_cfg[GENERATED_KEY]["source_format"] == "yaml"
     assert "assistant" not in us_cfg
     assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert us_cfg["runtime"] == hk_cfg["runtime"]
-    assert assistant_cfg["assistant"]["enabled"] is True
-    assert assistant_cfg["assistant"]["bot"]["enabled"] is True
+    assert assistant_cfg["assistant"]["enabled"] is False
+    assert assistant_cfg["assistant"]["bot"]["enabled"] is False
     assert assistant_cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
-    assert assistant_cfg["assistant"]["context_window_messages"] == 8
-    assert "default_market_scope" not in assistant_cfg["assistant"]
-    assert "active_model" not in assistant_cfg["assistant"]
-    assert "models" not in assistant_cfg["assistant"]
-    assert assistant_cfg["assistant"]["llm"]["base_url"] == "https://api.deepseek.com"
-    assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 90
-    assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 1_000_000
-    assert assistant_cfg["assistant"]["llm"].get("max_output_tokens") is None
-    assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+
+
+def test_config_init_selected_market_and_placeholder_stay_draft(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    out = init_yaml_config(
+        repo_root=REPO_ROOT,
+        output_config_yaml_path=root / "config.yaml",
+        runtime_output_dir=root,
+        markets=["us"],
+    )
+    payload = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert set(payload["markets"]) == {"us"}
+    assert out["draft"] is True
+    assert out["build_enabled"] is False
+    assert not (root / "config.us.json").exists()
+    assert not (root / "config.hk.json").exists()
+
+
+def test_runtime_readiness_rejects_starter_futu_id_placeholder(tmp_path: Path) -> None:
+    from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
+
+    root = tmp_path / "runtime"
+    init_yaml_config(
+        repo_root=REPO_ROOT,
+        output_config_yaml_path=root / "config.yaml",
+        runtime_output_dir=root,
+        markets=["us"],
+        futu_acc_id="12345678",
+    )
+    runtime_path = root / "config.us.json"
+    config = json.loads(runtime_path.read_text(encoding="utf-8"))
+    config["account_settings"]["lx"]["futu"]["account_id"] = "REPLACE_WITH_FUTU_ACCOUNT_ID"
+    result = evaluate_runtime_config_readiness(
+        config,
+        repo_root=REPO_ROOT,
+        runtime_config_path=runtime_path,
+        explicit_market="us",
+    )
+    assert any(error.get("code") == "placeholder_futu_account_id" for error in result["errors"])
 
 
 @pytest.mark.parametrize(

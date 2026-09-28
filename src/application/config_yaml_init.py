@@ -69,6 +69,7 @@ def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, defaults: tup
 
 def _starter_yaml_payload(
     *,
+    markets: list[str],
     account_label: str,
     futu_account_id: str,
     external_holdings_account: str | None,
@@ -118,41 +119,19 @@ def _starter_yaml_payload(
             }
         }
 
+    market_payloads = {
+        "us": us_market,
+        "hk": {
+            "accounts": [account_label],
+            "symbols": hk_symbols,
+        },
+    }
     return {
         "accounts": accounts,
-        "markets": {
-            "us": us_market,
-            "hk": {
-                "accounts": [account_label],
-                "symbols": hk_symbols,
-            },
-        },
+        "markets": {market: market_payloads[market] for market in markets},
         "assistant": {
-            "enabled": True,
-            "context_window_messages": 8,
-            "bot": {
-                "enabled": True,
-                "toolsets": {
-                    "portfolio": False,
-                },
-            },
-            "active_model": "deepseek-default",
-            "models": {
-                "deepseek-default": {
-                    "provider": "deepseek",
-                    "base_url": "https://api.deepseek.com",
-                    "model": "deepseek-v4-pro",
-                    "api_key_env": "DEEPSEEK_API_KEY",
-                    "confidence_min": 0.75,
-                    "timeout_seconds": 90,
-                    "context_window_tokens": 1_000_000,
-                },
-            },
-        },
-        "inbound": {
-            "feishu_ws": {
-                "ack_reaction": "THUMBSUP",
-            }
+            "enabled": False,
+            "bot": {"enabled": False},
         },
     }
 
@@ -199,7 +178,7 @@ def init_yaml_config(
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
     account_label: str | None = None,
-    external_holdings_account: str | None = "sy",
+    external_holdings_account: str | None = None,
     us_symbols: list[str] | tuple[str, ...] | None = None,
     hk_symbols: list[str] | tuple[str, ...] | None = None,
     build: bool = True,
@@ -209,6 +188,8 @@ def init_yaml_config(
     selected_markets = _normalize_markets(list(markets) if markets is not None else None)
     account = _normalize_account_label(account_label)
     futu_id = _normalize_futu_account_id(futu_acc_id)
+    draft = futu_id == DEFAULT_FUTU_ACCOUNT_ID
+    build = bool(build and not draft)
     us_symbol_values = _normalize_symbols(us_symbols, defaults=DEFAULT_US_SYMBOLS)
     hk_symbol_values = _normalize_symbols(hk_symbols, defaults=DEFAULT_HK_SYMBOLS)
     output_path = _resolve_path(output_config_yaml_path, default=repo_root / "config.yaml")
@@ -217,7 +198,7 @@ def init_yaml_config(
         market: (output_dir / f"config.{market}.json").resolve()
         for market in selected_markets
     }
-    assistant_output = (output_dir / "config.assistant.json").resolve()
+    assistant_output = (output_dir / "resolved" / "config.assistant.json").resolve()
     all_outputs = {"assistant": assistant_output, **runtime_outputs}
 
     if not force:
@@ -232,6 +213,7 @@ def init_yaml_config(
             )
 
     yaml_payload = _starter_yaml_payload(
+        markets=selected_markets,
         account_label=account,
         futu_account_id=futu_id,
         external_holdings_account=external_holdings_account,
@@ -311,6 +293,7 @@ def init_yaml_config(
         "markets": selected_markets,
         "account_label": account,
         "futu_account_id_placeholder": futu_id == DEFAULT_FUTU_ACCOUNT_ID,
+        "draft": draft,
         "runtime_output_dir": str(output_dir),
         "runtime_config_paths": {market: str(path) for market, path in runtime_outputs.items()},
         "assistant_config_path": str(assistant_output),

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import shlex
 import subprocess
@@ -452,6 +453,7 @@ def _restart_remediation(*, profile: dict[str, Any], service_names: list[str], c
 
 
 def _restart_service_names(profile: dict[str, Any]) -> list[str]:
+    provider = str(profile.get("service_provider") or "").strip().lower()
     restart = _restart_profile(profile)
     raw_restart_services = restart.get("services") or restart.get("restart_services") or profile.get("restart_services")
     explicit = isinstance(raw_restart_services, list) and bool(raw_restart_services)
@@ -463,7 +465,10 @@ def _restart_service_names(profile: dict[str, Any]) -> list[str]:
         names = [str(item.get("name") if isinstance(item, dict) else item or "").strip() for item in services]
     out: list[str] = []
     for name in names:
-        if not name.endswith(".service"):
+        if provider == "launchd":
+            if not name.startswith("com.options-monitor."):
+                continue
+        elif not name.endswith(".service"):
             continue
         if (
             not explicit
@@ -679,18 +684,22 @@ def _restart_services_from_loaded_profile(
     profile: dict[str, Any],
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    preserved_activation_states: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
     if not profile:
         return []
     provider = str(profile.get("service_provider") or "").strip().lower()
     restarted: list[str] = []
-    if provider != "systemd":
+    if provider not in {"systemd", "launchd"}:
         return restarted
-    command_prefix, command_source = _restart_command_policy(profile)
+    command_prefix, command_source = _restart_command_policy(profile) if provider == "systemd" else (["launchctl"], "launchd")
     failed: list[str] = []
     command_by_service: dict[str, list[str]] = {}
     for name in _restart_service_names(profile):
-        command = [*command_prefix, "restart", name]
+        if provider == "launchd" and name in (preserved_activation_states or {}):
+            continue
+        command = (["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{name}"]
+                   if provider == "launchd" else [*command_prefix, "restart", name])
         command_by_service[name] = command
         result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=60)
         result["command_source"] = command_source
@@ -700,11 +709,14 @@ def _restart_services_from_loaded_profile(
             continue
         restarted.append(name)
     if failed:
+        remediation = ([f"manual_restart: {' '.join(command_by_service[name])}" for name in failed]
+                       if provider == "launchd" else
+                       _restart_remediation(profile=profile, service_names=failed, command_by_service=command_by_service))
         raise ServiceRestartError(
             f"failed to restart services: {', '.join(failed)}",
             failed_services=failed,
             restarted_services=restarted,
-            remediation=_restart_remediation(profile=profile, service_names=failed, command_by_service=command_by_service),
+            remediation=remediation,
         )
     return restarted
 
@@ -717,21 +729,35 @@ def _post_upgrade_service_health(
     operations: list[dict[str, Any]],
     monotonic_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
+    preserved_activation_states: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if not profile:
         return {"ok": True, "status": "skipped", "reason": "service_profile_missing", "checks": [], "failed_checks": []}
     provider = str(profile.get("service_provider") or "").strip().lower()
-    if provider != "systemd":
+    if provider not in {"systemd", "launchd"}:
         return {"ok": True, "status": "skipped", "reason": f"unsupported_provider:{provider or 'missing'}", "checks": [], "failed_checks": []}
 
-    services = _restart_service_names(profile)
+    services = [name for name in _restart_service_names(profile)
+                if name not in (preserved_activation_states or {})]
     checks: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
 
     for service_name in services:
-        for action in ("is-active", "is-enabled"):
-            command = ["systemctl", action, service_name]
-            result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=30)
+        for action in (("launchd-running-pid",) if provider == "launchd" else ("is-active", "is-enabled")):
+            if provider == "launchd":
+                command = ["launchctl", "list", service_name]
+                result = {}
+                for attempt in range(5):
+                    result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=30)
+                    if result["ok"] and re.search(r'(?im)^\s*"?PID"?\s*=\s*[1-9][0-9]*;?\s*$', str(result.get("stdout") or "")):
+                        break
+                    if attempt < 4:
+                        sleep_fn(1.0)
+                result["ok"] = bool(result["ok"] and re.search(r'(?im)^\s*"?PID"?\s*=\s*[1-9][0-9]*;?\s*$', str(result.get("stdout") or "")))
+                result["attempts"] = attempt + 1
+            else:
+                command = ["systemctl", action, service_name]
+                result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=30)
             result["operation"] = "post_upgrade_service_health"
             result["check"] = action
             result["service"] = service_name
@@ -812,16 +838,17 @@ def _post_upgrade_service_health(
         if not public["ok"]:
             failed.append(public)
 
-    if "options-monitor-feishu-ws.service" in services:
+    feishu_service = "com.options-monitor.feishu-ws" if provider == "launchd" else "options-monitor-feishu-ws.service"
+    if feishu_service in services:
         command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
         result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "feishu-ws-check"
-        result["service"] = "options-monitor-feishu-ws.service"
+        result["service"] = feishu_service
         operations.append(result)
         public = {
-            "service": "options-monitor-feishu-ws.service",
+            "service": feishu_service,
             "check": "feishu-ws-check",
             "ok": bool(result.get("ok")),
             "stdout": str(result.get("stdout") or "").strip(),
@@ -831,16 +858,17 @@ def _post_upgrade_service_health(
         if not result.get("ok"):
             failed.append(public)
 
-    if "options-monitor-wechat-clawbot.service" in services:
+    wechat_service = "com.options-monitor.wechat-clawbot" if provider == "launchd" else "options-monitor-wechat-clawbot.service"
+    if wechat_service in services:
         command = _wechat_clawbot_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
         result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "wechat-clawbot-check"
-        result["service"] = "options-monitor-wechat-clawbot.service"
+        result["service"] = wechat_service
         operations.append(result)
         public = {
-            "service": "options-monitor-wechat-clawbot.service",
+            "service": wechat_service,
             "check": "wechat-clawbot-check",
             "ok": bool(result.get("ok")),
             "stdout": str(result.get("stdout") or "").strip(),
@@ -1007,6 +1035,9 @@ def _service_health_remediation(
         if service_name.endswith(".service"):
             remediation.append(f"manual_enable: sudo systemctl enable --now {service_name}")
             remediation.append(f"manual_restart: sudo systemctl restart {service_name}")
+        elif service_name.startswith("com.options-monitor."):
+            remediation.append(f"manual_check: launchctl list {service_name}")
+            remediation.append(f"manual_restart: launchctl kickstart -k gui/{os.getuid()}/{service_name}")
     if any(item.get("check") == "feishu-ws-check" for item in failed_checks):
         env_file = str((profile or {}).get("env_file") or "").strip()
         if env_file:
@@ -1030,13 +1061,34 @@ def _service_health_remediation(
     return remediation
 
 
-def _service_reconcile_failed(service_reconcile: dict[str, Any]) -> bool:
+def _service_reconcile_failed(service_reconcile: dict[str, Any], *, expected_provider: str | None = None) -> bool:
+    provider = str(expected_provider or service_reconcile.get("provider") or "").strip().lower()
+    if provider == "launchd" and str(service_reconcile.get("provider") or "").strip().lower() != "launchd":
+        return True
     if not service_reconcile:
         return False
     if service_reconcile.get("apply_errors"):
         return True
+    if provider == "launchd":
+        if service_reconcile.get("checked") is not True or service_reconcile.get("supported") is not True:
+            return True
+        if service_reconcile.get("confirmed") is not True:
+            return True
+        if service_reconcile.get("observation_errors"):
+            return True
+        if any(service_reconcile.get(key) for key in (
+            "missing_installed_units", "extra_installed_units", "mismatched_units",
+            "missing_profile_units", "extra_profile_units", "profile_content_changed",
+            "activation_preservation_conflicts",
+        )):
+            return True
+        deferred = set((service_reconcile.get("applied") or {}).get("deferred_reload_units") or [])
+        if set(service_reconcile.get("activation_drift_units") or []) - deferred:
+            return True
     summary_raw = service_reconcile.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
+    if provider == "launchd" and (summary.get("status") in {None, "skipped", "error"} or summary.get("ok") is not True):
+        return True
     return str(summary.get("status") or "").strip().lower() == "error"
 
 
@@ -1068,6 +1120,7 @@ def _reconcile_services_from_current_release(
     target_dir: Path,
     runtime: Path,
     activation_policy: str,
+    restart_services: bool = True,
     run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     """Reconcile the service bundle using the code of the release now current.
@@ -1102,11 +1155,13 @@ def _reconcile_services_from_current_release(
     # purpose, which is the state the preserve policy exists to carry across.
     if normalize_service_activation_policy(activation_policy) == SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING:
         command.append("--preserve-activation-state")
+    if not restart_services:
+        command.append("--no-restart-services")
     # `om` prints the whole response, and the drift details list every expected and
     # installed unit, so read stdout whole rather than through the usual tail.
     result = _run_command(command, cwd=repo_link, run_cmd=run_cmd, timeout=300, stdout_limit=None)
     reconcile = _parse_drift_response(str(result.get("stdout") or ""))
-    if reconcile is None:
+    if not result["ok"] or reconcile is None:
         raise ServiceTransitionError(
             "service drift reconciliation after upgrade produced no readable result",
             status="upgraded_service_reconcile_failed",
@@ -1134,6 +1189,7 @@ def capture_preserved_timer_activation_states(
         confirm=False,
         run_cmd=run_cmd,
     )
+    provider = str(profile.get("service_provider") or "").strip().lower()
     if observed.get("checked") is False or observed.get("supported") is False:
         reason = str(observed.get("reason") or "service drift status unavailable")
         raise ServiceTransitionError(
@@ -1165,12 +1221,12 @@ def capture_preserved_timer_activation_states(
     timer_names = {
         str(name)
         for name in set(activation_states) | set(active_states)
-        if str(name).endswith(".timer")
+        if str(name).endswith(".timer") or (provider == "launchd" and str(name).startswith("com.options-monitor."))
     }
     timer_names.update(
         name
         for name in expected_services & installed_units
-        if name.endswith(".timer")
+        if name.endswith(".timer") or (provider == "launchd" and name.startswith("com.options-monitor."))
     )
     snapshot: dict[str, dict[str, str]] = {}
     unknown_timer_states: list[str] = []
@@ -2660,12 +2716,13 @@ def _compensate_service_transition(
                 confirm=True,
                 activation_policy=activation_policy,
                 preserved_activation_states=preserved_activation_states,
+                restart_services=restart_services,
                 run_cmd=run_cmd,
             )
         except Exception as exc:
             errors.append(f"restore services: {type(exc).__name__}: {exc}")
         else:
-            if _service_reconcile_failed(service_reconcile):
+            if _service_reconcile_failed(service_reconcile, expected_provider=previous_profile.get("service_provider")):
                 errors.extend(f"restore services: {item}" for item in _service_reconcile_remediation(service_reconcile))
 
     restarted: list[str] = []
@@ -2676,6 +2733,7 @@ def _compensate_service_transition(
                 profile=previous_profile,
                 run_cmd=run_cmd,
                 operations=operations,
+                preserved_activation_states=preserved_activation_states,
             )
         except ServiceRestartError as exc:
             restarted = exc.restarted_services
@@ -2687,6 +2745,7 @@ def _compensate_service_transition(
                 repo_root=repo_link,
                 run_cmd=run_cmd,
                 operations=operations,
+                preserved_activation_states=preserved_activation_states,
             )
         except Exception as exc:
             errors.append(f"restore health: {type(exc).__name__}: {exc}")
@@ -3032,9 +3091,10 @@ def service_upgrade(
                     target_dir=target_dir,
                     runtime=runtime,
                     activation_policy=activation_policy,
+                    restart_services=restart_services,
                     run_cmd=run_cmd,
                 )
-                if _service_reconcile_failed(service_reconcile):
+                if _service_reconcile_failed(service_reconcile, expected_provider=pre_upgrade_profile.get("service_provider")):
                     raise ServiceTransitionError(
                         "service drift reconciliation failed after upgrade",
                         status="upgraded_service_reconcile_failed",
@@ -3042,7 +3102,8 @@ def service_upgrade(
                     )
             restart_profile = _load_service_profile(runtime) or pre_upgrade_profile
             restarted = (
-                _restart_services_from_loaded_profile(profile=restart_profile, run_cmd=run_cmd, operations=operations)
+                _restart_services_from_loaded_profile(profile=restart_profile, run_cmd=run_cmd, operations=operations,
+                                                      preserved_activation_states=preserved_activation_states)
                 if restart_services
                 else []
             )
@@ -3052,6 +3113,7 @@ def service_upgrade(
                     repo_root=repo_link,
                     run_cmd=run_cmd,
                     operations=operations,
+                    preserved_activation_states=preserved_activation_states,
                 )
                 if restart_services
                 else {"ok": True, "status": "skipped", "reason": "service_restart_disabled", "checks": [], "failed_checks": []}
@@ -3229,6 +3291,9 @@ def service_upgrade(
         "runtime_config_commit": runtime_config_commit,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "service_reconcile": service_reconcile,
+        "deferred_reload_units": sorted((service_reconcile.get("applied") or {}).get("deferred_reload_units") or []),
+        "manual_remediation": [f"review_deferred_launchd_reload: {name}" for name in
+                               (service_reconcile.get("applied") or {}).get("deferred_reload_units") or []],
         "service_health": service_health,
         "pi_storage_readiness": pi_storage_readiness,
         "restarted_services": restarted,
@@ -3427,9 +3492,10 @@ def service_rollback(
                     confirm=True,
                     activation_policy=activation_policy,
                     preserved_activation_states=preserved_activation_states,
+                    restart_services=restart_services,
                     run_cmd=run_cmd,
                 )
-                if _service_reconcile_failed(service_reconcile):
+                if _service_reconcile_failed(service_reconcile, expected_provider=previous_profile.get("service_provider")):
                     raise ServiceTransitionError(
                         "service drift reconciliation failed during rollback",
                         status="rollback_service_reconcile_failed",
@@ -3441,6 +3507,7 @@ def service_rollback(
                     profile=rollback_profile,
                     run_cmd=run_cmd,
                     operations=operations,
+                    preserved_activation_states=preserved_activation_states,
                 )
                 if restart_services
                 else []
@@ -3451,6 +3518,7 @@ def service_rollback(
                     repo_root=repo_link,
                     run_cmd=run_cmd,
                     operations=operations,
+                    preserved_activation_states=preserved_activation_states,
                 )
                 if restart_services
                 else {"ok": True, "status": "skipped", "reason": "service_restart_disabled", "checks": [], "failed_checks": []}
@@ -3525,6 +3593,9 @@ def service_rollback(
         "runtime_config_commit": runtime_config_commit,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "service_reconcile": service_reconcile,
+        "deferred_reload_units": sorted((service_reconcile.get("applied") or {}).get("deferred_reload_units") or []),
+        "manual_remediation": [f"review_deferred_launchd_reload: {name}" for name in
+                               (service_reconcile.get("applied") or {}).get("deferred_reload_units") or []],
         "service_health": service_health,
         "pi_storage_readiness": pi_storage_readiness,
         "restarted_services": restarted,

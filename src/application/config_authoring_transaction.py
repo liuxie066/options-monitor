@@ -37,6 +37,14 @@ def config_source_sha256(path: str | Path) -> str:
     return _bytes_sha256(source.read_bytes())
 
 
+def _source_sha_for_publish(path: Path, *, create: bool) -> str:
+    if create:
+        if path.exists() or path.is_symlink():
+            raise AgentToolError(code="CONFIG_ERROR", message=f"starter config target already exists: {path}")
+        return ""
+    return config_source_sha256(path)
+
+
 def validate_config_target_access_identity(paths: list[Path]) -> None:
     for path in dict.fromkeys(path.expanduser().resolve() for path in paths):
         if not path.exists():
@@ -82,6 +90,7 @@ def publish_yaml_config_generation(
     apply: bool = False,
     backup: bool = True,
     expected_source_sha256: str | None = None,
+    create: bool = False,
 ) -> dict[str, Any]:
     target_runtime_root = Path(runtime_root).expanduser().resolve()
     if not apply:
@@ -95,6 +104,7 @@ def publish_yaml_config_generation(
             apply=False,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
+            create=create,
             recovered_transactions=[],
         )
 
@@ -109,6 +119,7 @@ def publish_yaml_config_generation(
             include_assistant=include_assistant,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
+            create=create,
         )
 
 
@@ -123,6 +134,7 @@ def publish_yaml_config_generation_locked(
     include_assistant: bool = True,
     backup: bool = True,
     expected_source_sha256: str | None = None,
+    create: bool = False,
 ) -> dict[str, Any]:
     target_runtime_root = Path(runtime_root).expanduser().resolve()
     _require_live_authoring_lock(lock, runtime_root=target_runtime_root)
@@ -137,6 +149,7 @@ def publish_yaml_config_generation_locked(
             apply=True,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
+            create=create,
             recovered_transactions=lock.recovered_transactions,
         )
     except AgentToolError as exc:
@@ -169,11 +182,17 @@ def _publish_yaml_config_generation(
     apply: bool,
     backup: bool,
     expected_source_sha256: str | None,
+    create: bool,
     recovered_transactions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    source_path = Path(config_yaml_path).expanduser().resolve()
+    requested_source = Path(config_yaml_path).expanduser()
+    if create and (requested_source.is_symlink() or requested_source.parent.is_symlink()):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"starter config target is a symlink: {requested_source}")
+    source_path = Path(os.path.abspath(requested_source)) if create else requested_source.resolve()
+    if create:
+        backup = False
     normalized_markets = _normalize_markets(markets)
-    observed_source_sha = config_source_sha256(source_path)
+    observed_source_sha = _source_sha_for_publish(source_path, create=create)
     expected_source_sha = str(expected_source_sha256 or "").strip() or observed_source_sha
     if observed_source_sha != expected_source_sha:
         _raise_stale_source(
@@ -191,7 +210,7 @@ def _publish_yaml_config_generation(
         markets=normalized_markets,
         include_assistant=include_assistant,
     )
-    source_sha_after_prepare = config_source_sha256(source_path)
+    source_sha_after_prepare = _source_sha_for_publish(source_path, create=create)
     if source_sha_after_prepare != expected_source_sha:
         _raise_stale_source(
             source_path=source_path,
@@ -218,7 +237,7 @@ def _publish_yaml_config_generation(
         return result
 
     state_root = runtime_root / "output_shared" / "state"
-    before_source_sha = config_source_sha256(source_path)
+    before_source_sha = _source_sha_for_publish(source_path, create=create)
     if before_source_sha != expected_source_sha:
         _raise_stale_source(
             source_path=source_path,
@@ -237,6 +256,10 @@ def _publish_yaml_config_generation(
             "source": True,
         },
     ]
+    if create:
+        conflicts = [str(item["path"]) for item in targets if Path(item["path"]).exists() or Path(item["path"]).is_symlink() or Path(item["path"]).parent.is_symlink()]
+        if conflicts:
+            raise AgentToolError(code="CONFIG_ERROR", message="starter config target already exists", details={"conflicts": conflicts})
     transaction_dir = state_root / "config_authoring_transactions" / audit_id
     manifest_path = transaction_dir / "manifest.json"
     published_targets: list[dict[str, Any]] = []
@@ -255,6 +278,7 @@ def _publish_yaml_config_generation(
             before_source_sha=before_source_sha,
             after_source_sha=after_source_sha,
             targets=targets,
+            create_source=create,
         )
         transaction_write_applied = True
         failure_stage = "commit"
@@ -272,7 +296,10 @@ def _publish_yaml_config_generation(
                 "write_applied": None,
             }
             published_targets.append(effect)
-            _atomic_write_bytes(Path(str(item["path"])), item["desired_payload"])
+            if create:
+                _atomic_create_bytes(Path(str(item["path"])), item["desired_payload"])
+            else:
+                _atomic_write_bytes(Path(str(item["path"])), item["desired_payload"])
             effect["write_applied"] = True
         _set_manifest_phase(manifest_path, "committed")
     except Exception as exc:
@@ -686,12 +713,18 @@ def _prepare_transaction_manifest(
     before_source_sha: str,
     after_source_sha: str,
     targets: list[dict[str, Any]],
+    create_source: bool = False,
 ) -> Path:
     transaction_dir.mkdir(parents=True, exist_ok=False)
     _fsync_directory(transaction_dir.parent)
     manifest_targets: list[dict[str, Any]] = []
     for index, item in enumerate(targets):
-        target = Path(item["path"]).expanduser().resolve()
+        target = (
+            Path(os.path.abspath(Path(item["path"]).expanduser()))
+            if create_source else Path(item["path"]).expanduser().resolve()
+        )
+        if create_source and (target.is_symlink() or target.parent.is_symlink()):
+            raise ValueError(f"first-create target is a symlink: {target}")
         desired_path = transaction_dir / f"{index:02d}.desired"
         desired_payload = bytes(item["payload"])
         _write_journal_artifact(desired_path, desired_payload)
@@ -721,6 +754,7 @@ def _prepare_transaction_manifest(
         "source_path": str(source_path),
         "before_source_sha256": before_source_sha,
         "after_source_sha256": after_source_sha,
+        "create_source": create_source,
         "targets": manifest_targets,
     }
     manifest_path = transaction_dir / "manifest.json"
@@ -834,9 +868,10 @@ def _recover_incomplete_transactions(*, state_root: Path) -> list[dict[str, Any]
 def _recover_transaction(manifest_path: Path) -> dict[str, Any]:
     manifest = _read_manifest(manifest_path)
     source_path = Path(str(manifest["source_path"]))
+    create_source = bool(manifest.get("create_source"))
     audit = _recovery_audit(manifest=manifest, mode="unresolved")
     try:
-        current_source_sha = config_source_sha256(source_path)
+        current_source_sha = _recovery_source_sha(source_path, create_source=create_source)
     except Exception as exc:
         raise _recovery_error(
             manifest_path=manifest_path,
@@ -877,7 +912,10 @@ def _recover_transaction(manifest_path: Path) -> dict[str, Any]:
             stage="journal_validation",
         ) from exc
     for item in targets:
-        target = Path(str(item["path"])).expanduser().resolve()
+        target = (
+            Path(os.path.abspath(Path(str(item["path"])).expanduser()))
+            if create_source else Path(str(item["path"])).expanduser().resolve()
+        )
         action = "write_desired" if mode == "roll_forward" else "restore"
         effect = {
             "role": str(item.get("role") or ""),
@@ -887,7 +925,28 @@ def _recover_transaction(manifest_path: Path) -> dict[str, Any]:
         }
         audit["targets"].append(effect)
         try:
-            if mode == "roll_forward":
+            if create_source and (target.is_symlink() or target.parent.is_symlink()):
+                raise ValueError(f"first-create target is a symlink: {target}")
+            if create_source and mode == "roll_forward":
+                if target.exists():
+                    if target.read_bytes() != item["desired_payload"]:
+                        raise ValueError(f"first-create target changed outside transaction: {target}")
+                    effect["write_applied"] = False
+                else:
+                    _atomic_create_bytes(target, item["desired_payload"])
+                    effect["write_applied"] = True
+            elif create_source and bool(item.get("before_exists")):
+                raise ValueError(f"first-create target existed before transaction: {target}")
+            elif create_source and target.exists():
+                if target.read_bytes() != item["desired_payload"]:
+                    raise ValueError(f"first-create target changed outside transaction: {target}")
+                effect["action"] = "delete"
+                target.unlink()
+                effect["write_applied"] = True
+            elif create_source:
+                effect["action"] = "already_absent"
+                effect["write_applied"] = False
+            elif mode == "roll_forward":
                 effect["write_applied"] = _write_if_changed(target, item["desired_payload"])
             elif bool(item.get("before_exists")):
                 effect["write_applied"] = _write_if_changed(target, item["before_payload"])
@@ -909,7 +968,7 @@ def _recover_transaction(manifest_path: Path) -> dict[str, Any]:
         [item.get("write_applied") for item in audit["targets"]]
     )
     try:
-        audit["observed_source_sha256_after"] = config_source_sha256(source_path)
+        audit["observed_source_sha256_after"] = _recovery_source_sha(source_path, create_source=create_source)
         expected_source_sha = after_source_sha if mode == "roll_forward" else before_source_sha
         if audit["observed_source_sha256_after"] != expected_source_sha:
             raise ValueError(
@@ -981,6 +1040,12 @@ def _write_if_changed(path: Path, payload: bytes) -> bool:
     return True
 
 
+def _recovery_source_sha(path: Path, *, create_source: bool) -> str:
+    if create_source and not path.exists() and not path.is_symlink():
+        return ""
+    return config_source_sha256(path)
+
+
 def _merge_write_effects(values: list[Any]) -> bool | None:
     if any(value is True for value in values):
         return True
@@ -1036,6 +1101,25 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     finally:
         if temp_path.exists():
             temp_path.unlink()
+
+
+def _atomic_create_bytes(path: Path, payload: bytes) -> None:
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError(f"first-create target is a symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError(f"first-create target parent is a symlink: {path.parent}")
+    fd, raw_temp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(raw_temp_path)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temp_path, path, follow_symlinks=False)
+        _fsync_directory(path.parent)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _fsync_directory(path: Path) -> None:
