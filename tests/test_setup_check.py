@@ -38,7 +38,9 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
     (root / "agent-runtime" / "node_modules").mkdir(parents=True)
     (root / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (root / "VERSION").write_text("9.9.9\n", encoding="utf-8")
-    (root / "config.assistant.json").write_text(
+    runtime = tmp_path / "runtime"
+    (runtime / "resolved").mkdir(parents=True)
+    (runtime / "resolved" / "config.assistant.json").write_text(
         json.dumps(
             {
                 "assistant": {
@@ -56,7 +58,6 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
         ),
         encoding="utf-8",
     )
-    runtime = tmp_path / "runtime"
     state = runtime / "output_shared" / "state"
     state.mkdir(parents=True)
     fake_bin = tmp_path / "bin"
@@ -79,10 +80,34 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
     assert out["platform_profile"]["default_env_file"]
     assert checks["install.repo"]["status"] == "ok"
     assert checks["upgrade.uv"]["status"] in {"ok", "info", "warn"}
-    assert checks["config.us"]["status"] == "warn"
+    assert checks["config.us"]["status"] == "error"
     assert "setup init" in checks["config.us"]["hint"]
     assert "om setup init" in out["next_steps"]
     assert not (tmp_path / "config.us.json").exists()
+
+
+def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch, tmp_path: Path) -> None:
+    from src.application.config_yaml_init import init_yaml_config
+
+    repo = Path(__file__).resolve().parents[1]
+    init_yaml_config(
+        repo_root=repo,
+        output_config_yaml_path=tmp_path / "config.yaml",
+        runtime_output_dir=tmp_path,
+        assistant_output_config_path=tmp_path / "resolved" / "config.assistant.json",
+        markets=["us"],
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+
+    out = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert out["summary"]["ok"] is False
+    assert out["summary"]["bot_ready"] is False
+    assert checks["config.us"]["status"] == "error"
+    assert "REPLACE_WITH_FUTU_ACCOUNT_ID" in checks["config.us"]["message"]
+    assert checks["bot.model_context"]["status"] == "ok"
+    assert checks["bot.session_path"]["status"] == "warn"
 
 
 def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Path) -> None:
@@ -162,7 +187,7 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
 
 def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) -> None:
     root, node, npm = _prepare_pi_setup_root(tmp_path, context_window_tokens=4_096)
-    config_path = root / "config.assistant.json"
+    config_path = tmp_path / "runtime" / "resolved" / "config.assistant.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["assistant"]["llm"]["max_output_tokens"] = 4_096
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -172,7 +197,7 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
-    assert checks["bot.model_context"]["status"] == "error"
+    assert checks["bot.model_context"]["status"] == "warn"
     assert checks["bot.model_context"]["value"]["error"] == "invalid_assistant_config"
 
 
@@ -184,7 +209,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     missing_check = {item["name"]: item for item in missing["checks"]}["bot.session_path"]
-    assert missing_check["status"] == "error"
+    assert missing_check["status"] == "warn"
     assert missing_check["value"]["parent_exists"] is False
     assert not missing_audit.parent.exists()
 
@@ -198,7 +223,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
     )
     unwritable = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.session_path"]
-    assert unwritable_check["status"] == "error"
+    assert unwritable_check["status"] == "warn"
     assert unwritable_check["value"]["parent_exists"] is True
     assert not (existing_parent / "pi_sessions.sqlite3").exists()
 
@@ -219,7 +244,7 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     check = {item["name"]: item for item in out["checks"]}["bot.session_path"]
 
-    assert check["status"] == "error"
+    assert check["status"] == "warn"
     assert check["value"]["parent"] == str(lexical_parent)
     assert check["value"]["session_path"] == str(lexical_parent / "inbound_control.sqlite3")
     assert check["value"]["parent_is_symlink"] is True

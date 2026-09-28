@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
 from src.application.platform_profile import PlatformProfile, current_platform_profile
 from src.application.bot.model_config import ModelSettings, load_assistant_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
@@ -112,13 +113,14 @@ def run_setup_check(
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
-    runtime = resolve_runtime_root(repo_root=root, environ=effective_env.values)
+    runtime = resolve_runtime_root(repo_root=root, environ=effective_env.values, user_home=Path.home())
 
     repo_assistant_config = root / "config.assistant.json"
+    resolved_assistant_config = runtime.runtime_root / "resolved" / "config.assistant.json"
     assistant_config = (
         repo_assistant_config
-        if repo_assistant_config.exists()
-        else runtime.runtime_root / "resolved" / "config.assistant.json"
+        if runtime.source == "repo_default" and repo_assistant_config.exists()
+        else resolved_assistant_config
     )
     model_raw, model_error = load_assistant_llm_config(
         config_path=assistant_config,
@@ -133,7 +135,7 @@ def run_setup_check(
     model_context_ok = model_settings is not None
     add(
         "bot.model_context",
-        "ok" if model_context_ok else "error",
+        "ok" if model_context_ok else "warn",
         "active Bot model context is valid" if model_context_ok else "active Bot model context is missing or invalid",
         {
             "config_path": str(assistant_config),
@@ -159,7 +161,7 @@ def run_setup_check(
     )
     add(
         "bot.session_path",
-        "ok" if session_parent_ok else "error",
+        "ok" if session_parent_ok else "warn",
         "Bot Host parent exists and is writable" if session_parent_ok else "Bot Host parent is missing or not writable",
         {
             "host_audit_db": str(audit_db),
@@ -215,7 +217,7 @@ def run_setup_check(
         if not config_path.exists():
             add(
                 f"config.{market}",
-                "warn",
+                "error",
                 f"{market.upper()} runtime config is missing",
                 {"config_path": str(config_path)},
                 hint="om setup init (previews an external config directory before writing)",
@@ -225,6 +227,24 @@ def run_setup_check(
             _path, cfg = load_runtime_config(config_key=market, config_path=config_path)
         except AgentToolError as exc:
             add(f"config.{market}", "error", exc.message, {"config_path": str(config_path)}, hint=exc.hint)
+            continue
+        account_settings = cfg.get("account_settings") if isinstance(cfg, dict) else None
+        placeholder_accounts = [
+            account
+            for account, settings in (account_settings or {}).items()
+            if isinstance(settings, dict)
+            and settings.get("type") == "futu"
+            and isinstance(settings.get("futu"), dict)
+            and settings["futu"].get("account_id") == DEFAULT_FUTU_ACCOUNT_ID
+        ] if isinstance(account_settings, dict) else []
+        if placeholder_accounts:
+            add(
+                f"config.{market}",
+                "error",
+                f"{market.upper()} Futu account ID is still {DEFAULT_FUTU_ACCOUNT_ID}",
+                {"config_path": str(config_path), "accounts": placeholder_accounts},
+                hint="Set the Futu account ID in config.yaml, then rebuild the selected market config.",
+            )
             continue
         readiness = evaluate_runtime_config_readiness(
             dict(cfg),
@@ -283,6 +303,7 @@ def run_setup_check(
     return {
         "summary": {
             "ok": error_count == 0,
+            "bot_ready": model_context_ok and session_parent_ok,
             "error_count": error_count,
             "warning_count": warning_count,
         },
