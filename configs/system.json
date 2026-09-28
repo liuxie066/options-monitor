@@ -73,7 +73,6 @@
       "accounts": [],
       "min_dte": 30,
       "max_dte": 45,
-      "min_delta": 0.3,
       "min_annualized_net_premium_return": 0.1,
       "min_net_premium_cny": 50,
       "max_spread_ratio": 0.4,

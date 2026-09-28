@@ -73,7 +73,6 @@ WHEEL_DEFAULTS: dict[str, Any] = {
         for key, value in WHEEL_CALL_DEFAULTS.items()
         if key in WHEEL_LEGACY_POLICY_FIELDS
     },
-    "min_delta": 0.30,
     "call": deepcopy(WHEEL_CALL_DEFAULTS),
     "put": deepcopy(WHEEL_PUT_DEFAULTS),
     "activation_by_account": {},

@@ -16,7 +16,6 @@ from domain.domain import (
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import (
     ACCOUNT_TYPES,
-    account_settings_from_config,
     accounts_from_config,
     normalize_account_label,
     normalize_accounts,
@@ -44,7 +43,6 @@ from src.application.wheel.config import (
     WHEEL_ACTIVATION_DESCRIPTOR_FIELDS,
     WHEEL_LEGACY_POLICY_FIELDS,
     WHEEL_POLICY_FIELDS,
-    build_wheel_policy_hash,
     normalize_wheel_activation_descriptor,
     resolve_wheel_policy,
 )
@@ -77,6 +75,19 @@ WHEEL_ALLOWED_FIELDS = {
     'put',
     'activation_by_account',
     *WHEEL_LEGACY_POLICY_FIELDS,
+}
+CLOSE_ADVICE_ACTIVE_FIELDS = {'enabled', 'quote_source', 'max_items_per_account'}
+CLOSE_ADVICE_IGNORED_STRICT_POLICY_FIELDS = {
+    'notify_levels',
+    'max_spread_ratio',
+    'strong_remaining_annualized_max',
+    'medium_remaining_annualized_max',
+    'quote_max_age_sec',
+}
+CLOSE_ADVICE_ALLOWED_FIELDS = CLOSE_ADVICE_ACTIVE_FIELDS | CLOSE_ADVICE_IGNORED_STRICT_POLICY_FIELDS
+SYMBOL_RUNTIME_FIELDS = {
+    'symbol', 'broker', 'accounts', 'fetch', 'use', 'sell_put', 'sell_call', 'combo_yield',
+    'yield_enhancement', 'rebound_combo',
 }
 COMBO_YIELD_REMOVED_TARGET_FIELDS = (
     'target_price',
@@ -339,7 +350,6 @@ def _validate_wheel_activation_by_account(
     *,
     path: str,
     market_accounts: list[str],
-    wheel_config: dict,
 ) -> None:
     if raw is None:
         return
@@ -378,11 +388,6 @@ def _validate_wheel_activation_by_account(
             normalize_wheel_activation_descriptor(descriptor)
         except ValueError as exc:
             die(f'{descriptor_path}: {exc}')
-        build_wheel_policy_hash(
-            {'wheel': wheel_config},
-            market='us',
-            account=account,
-        )
 
 
 def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
@@ -409,6 +414,7 @@ def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
         value = _finite_number(raw.get('min_delta'), f'{path}.min_delta')
         if value <= 0 or value > 1:
             die(f'{path}.min_delta must be within (0, 1]')
+        warn(f'{path}.min_delta is retired and ignored; use {path}.call.min_abs_delta')
     for side, resolved in resolve_wheel_policy(raw).items():
         supplied = raw.get(side)
         if supplied is not None and not isinstance(supplied, dict):
@@ -418,7 +424,6 @@ def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
         raw.get('activation_by_account'),
         path=f'{path}.activation_by_account',
         market_accounts=market_accounts,
-        wheel_config=raw,
     )
 
 
@@ -1319,18 +1324,15 @@ def validate_config(cfg: dict):
             )
         if 'optimizer' in close_advice:
             die('close_advice.optimizer has been removed')
+        _reject_unknown_keys(close_advice, CLOSE_ADVICE_ALLOWED_FIELDS, 'close_advice')
+        if 'enabled' in close_advice and not isinstance(close_advice['enabled'], bool):
+            die('close_advice.enabled must be a boolean')
         quote_source = str(close_advice.get('quote_source') or '').strip().lower()
         if quote_source and quote_source not in {'auto', 'required_data'}:
             die('close_advice.quote_source must be auto or required_data')
         ignored_strict_policy_keys = sorted(
             key
-            for key in (
-                'notify_levels',
-                'max_spread_ratio',
-                'strong_remaining_annualized_max',
-                'medium_remaining_annualized_max',
-                'quote_max_age_sec',
-            )
+            for key in CLOSE_ADVICE_IGNORED_STRICT_POLICY_FIELDS
             if key in close_advice
         )
         if ignored_strict_policy_keys:
@@ -1432,7 +1434,6 @@ def validate_config(cfg: dict):
                     die(f'account_settings.{account}.futu.host must be set when multiple futu accounts are configured')
                 if futu_cfg.get('port') in (None, ''):
                     die(f'account_settings.{account}.futu.port must be set when multiple futu accounts are configured')
-        account_settings_from_config(cfg)
 
     trade_intake = cfg.get('trade_intake') or {}
     if trade_intake and not isinstance(trade_intake, dict):
@@ -1548,6 +1549,7 @@ def validate_config(cfg: dict):
     for i, item in enumerate(cfg['symbols']):
         if not isinstance(item, dict):
             die(f"symbols[{i}] must be an object")
+        _reject_unknown_keys(item, SYMBOL_RUNTIME_FIELDS, f'symbols[{i}]')
         sym = item.get('symbol')
         if not sym or not isinstance(sym, str):
             die(f"symbols[{i}].symbol is required")
@@ -1610,7 +1612,7 @@ def validate_config(cfg: dict):
                 templates=templates,
             )
             for k in ('min_dte', 'max_dte'):
-                if k not in sp:
+                if k not in sp or sp[k] is None:
                     die(f"{sym}.sell_put enabled but missing {k}")
             if sp['min_dte'] > sp['max_dte']:
                 die(f"{sym}.sell_put min_dte > max_dte")
@@ -1654,7 +1656,7 @@ def validate_config(cfg: dict):
             # - Therefore, do not require them in config validation.
             # - If portfolio_context is unavailable for an account, pipeline will skip sell_call for that account.
             for k in ('min_dte', 'max_dte'):
-                if k not in sc:
+                if k not in sc or sc[k] is None:
                     die(f"{sym}.sell_call enabled but missing {k}")
 
             if sc['min_dte'] > sc['max_dte']:

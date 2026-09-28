@@ -78,7 +78,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "accounts": [],
             "min_dte": 30,
             "max_dte": 45,
-            "min_delta": 0.30,
             "min_annualized_net_premium_return": 0.10,
             "min_net_premium_cny": 50.0,
             "max_spread_ratio": 0.40,
