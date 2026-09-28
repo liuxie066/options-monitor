@@ -24,7 +24,7 @@ from src.interfaces.cli.assistant_ops import (
     handle_assistant_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
-from src.interfaces.cli.home import command_guide, interactive_home, render_secret_status, render_settings_doctor, render_setup_check
+from src.interfaces.cli.home import command_guide, interactive_home, render_credential_readiness, render_settings_doctor, render_setup_check
 from src.interfaces.cli.inbound_ops import (
     add_inbound_commands,
     build_feishu_ws_settings,
@@ -86,7 +86,7 @@ from src.interfaces.cli.scheduler_ops import (
     query_sell_put_cash,
     run_scheduler,
 )
-from src.interfaces.cli.secret_ops import add_secret_commands, run_secret_status, run_store_command
+from src.interfaces.cli.secret_ops import add_secret_commands, read_credential_readiness, run_store_command
 from src.interfaces.cli.service_ops import (
     add_service_update_commands,
     capture_preserved_timer_activation_states,
@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "secrets":
             if args.store_action == "status" and args.format == "text":
-                sys.stdout.write(render_secret_status(run_secret_status(args)))
+                sys.stdout.write(render_credential_readiness(read_credential_readiness(args)))
                 return 0
             return _print(run_store_command(args))
 

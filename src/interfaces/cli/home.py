@@ -101,7 +101,7 @@ def render_settings_doctor(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_secret_status(data: dict[str, Any]) -> str:
+def render_credential_readiness(data: dict[str, Any]) -> str:
     summary = data.get("summary") or {}
     purposes = {spec.logical_name: spec.purpose for spec in credential_specs()}
     lines = [f"凭证状态（后端：{summary.get('backend', 'unknown')}；不显示值）"]

@@ -59,7 +59,7 @@ def run_store_command(
     input_is_tty: Callable[[], bool] = _stdin_is_tty,
 ) -> dict[str, Any]:
     if args.store_action == "status":
-        return run_secret_status(
+        return read_credential_readiness(
             args,
             provider_factory=provider_factory,
             provisioner_factory=provisioner_factory,
@@ -109,7 +109,7 @@ def run_store_command(
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported secrets command: {args.store_action}")
 
 
-def run_secret_status(
+def read_credential_readiness(
     args: argparse.Namespace,
     *,
     provider_factory: Callable[..., SecretProvider] = build_secret_provider,
@@ -185,4 +185,4 @@ def _require_cli_spec(logical_name: str):
         ) from exc
 
 
-__all__ = ["add_secret_commands", "run_secret_status", "run_store_command"]
+__all__ = ["add_secret_commands", "read_credential_readiness", "run_store_command"]

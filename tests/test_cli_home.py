@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from src.interfaces.cli import main as cli
-from src.interfaces.cli.home import interactive_home, render_secret_status
+from src.interfaces.cli.home import interactive_home, render_credential_readiness
 
 
 def test_noninteractive_home_shows_global_command_and_advanced_entry(monkeypatch, capsys) -> None:
@@ -59,7 +59,7 @@ def test_settings_and_secret_text_are_redacted(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         cli,
-        "run_secret_status",
+        "read_credential_readiness",
         lambda _args: {
             "summary": {"backend": "keychain"},
             "credentials": [{"logical_name": "llm.deepseek.api_key", "configured": True, "source": "keychain"}],
@@ -77,7 +77,7 @@ def test_settings_and_secret_text_are_redacted(monkeypatch, capsys) -> None:
 
 
 def test_secret_text_ignores_unexpected_value_field() -> None:
-    output = render_secret_status(
+    output = render_credential_readiness(
         {
             "summary": {"backend": "keychain"},
             "credentials": [{"logical_name": "llm.deepseek.api_key", "configured": True, "value": "do-not-print"}],
