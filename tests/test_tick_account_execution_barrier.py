@@ -430,6 +430,9 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     ]
     assert len(set(summaries)) == 1
     persisted = json.loads(summaries[0])
+    assert persisted["snapshot_manifest_sha256"] == hashlib.sha256(
+        cleanup_calls[0]["manifest_bytes"]
+    ).hexdigest()
     full_persisted = dict(prefetch_payload)
     for field in (
         "snapshot_manifest_relpath",
