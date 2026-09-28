@@ -11,6 +11,7 @@ from src.application.portfolio_management import (
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env
 
 
@@ -42,21 +43,8 @@ def resolve_runtime_config_path(
             message="config_key must be us or hk when config_path is omitted",
         )
 
-    runtime_root = _runtime_root_from_env()
-    if runtime_root is not None:
-        return (runtime_root / DEFAULT_CONFIGS[key]).resolve()
-
-    return (repo_base() / DEFAULT_CONFIGS[key]).resolve()
-
-
-def _runtime_root_from_env() -> Path | None:
-    raw = str(build_effective_env().get("OM_RUNTIME_ROOT") or "").strip()
-    if not raw:
-        return None
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    return path
+    runtime = resolve_runtime_root(repo_root=repo_base())
+    return (runtime.runtime_root / DEFAULT_CONFIGS[key]).resolve()
 
 def load_runtime_config(
     *,

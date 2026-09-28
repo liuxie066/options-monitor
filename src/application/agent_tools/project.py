@@ -97,7 +97,7 @@ def _files(payload):
             from src.application.agent_tools.project_runs import project_run_files
 
             resolution = resolve_runtime_root(repo_root=repo_base(), runtime_root=payload.get("runtime_root"))
-            if resolution.source not in {"argument", "env:OM_RUNTIME_ROOT"}:
+            if resolution.source not in {"argument", "env:OM_RUNTIME_ROOT", "user_record"}:
                 raise AgentToolError(code="DEPENDENCY_MISSING", message="runtime_root_unavailable", hint="可信运行数据根未配置；不能用源码目录代替运行证据。")
             value = project_run_files(resolution, scope=scope, account=payload.get("account"), run_id=payload.get("run_id"), deadline_monotonic=deadline, cancelled=cancelled, **kwargs)
     except project_reader.ProjectReaderError as exc:

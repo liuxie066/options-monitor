@@ -36,7 +36,7 @@ def _check(deadline: float | None, cancelled: Callable[[], bool] | None) -> None
 
 def _scope(root: RuntimeRootResolution, accounts: list[str] | tuple[str, ...],
            account: str | None, market: str) -> list[str]:
-    if root.source not in {"argument", "env:OM_RUNTIME_ROOT"}:
+    if root.source not in {"argument", "env:OM_RUNTIME_ROOT", "user_record"}:
         raise ProjectReaderError("runtime_root_unavailable")
     allowed = sorted(set(accounts))
     if not allowed or any(not re.fullmatch(r"[a-z0-9_-]+", item) for item in allowed):
@@ -573,7 +573,7 @@ def project_run_files(runtime_root: RuntimeRootResolution, **kwargs: Any) -> dic
     """Pin the trusted root and share one transient retry across the logical query."""
     from src.application.agent_tools.project_reader import _directory, reader_query_context
 
-    if runtime_root.source not in {"argument", "env:OM_RUNTIME_ROOT"}:
+    if runtime_root.source not in {"argument", "env:OM_RUNTIME_ROOT", "user_record"}:
         raise ProjectReaderError("runtime_root_unavailable")
     with reader_query_context():
         descriptor = _directory(runtime_root.runtime_root, "", kwargs.get("deadline_monotonic"), kwargs.get("cancelled"))

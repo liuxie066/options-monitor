@@ -72,7 +72,8 @@ def interactive_home(run: Callable[[list[str]], int], *, input_fn: Callable[[str
 def render_setup_check(data: dict[str, Any]) -> str:
     summary = data.get("summary") or {}
     lines = [
-        "首次运行检查：" + ("可继续下一步" if summary.get("ok") else "需要处理问题"),
+        "首次运行离线配置检查：" + ("基本条件通过" if summary.get("ok") else "需要处理问题"),
+        "可选 Bot：" + ("就绪" if summary.get("bot_ready") else "未就绪或未配置"),
         f"错误：{summary.get('error_count', 0)} · 提醒：{summary.get('warning_count', 0)}",
     ]
     for item in data.get("checks") or []:

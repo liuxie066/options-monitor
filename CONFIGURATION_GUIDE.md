@@ -23,7 +23,9 @@
 
 ## 初始化
 
-在源码 checkout 中：
+首次安装使用 `om setup init`（源码 checkout 用 `./om setup init`）。它先预览，确认后创建 YAML、所选市场快照、Assistant 快照，并在 `~/.config/options-monitor/runtime-root` 记住目录。已有目标拒绝覆盖；默认目录只在没有显式配置路径或有效 `OM_RUNTIME_ROOT` 时使用。已有记录损坏或指向失效目录时会报错，需由操作者核对；从未建立记录则沿用源码目录的兼容默认值。
+
+下列 `config init` 是完整参数入口，不会建立上述用户级目录记录。在源码 checkout 中：
 
 ```bash
 ./om config init \
@@ -40,7 +42,7 @@
 - `config.hk.json`
 - `config.assistant.json`
 
-已有目标文件时默认拒绝覆盖；先检查差异，不要直接使用 `--force` 覆盖生产文件。
+已有目标文件时默认拒绝覆盖；先检查差异，不要直接使用 `--force` 覆盖生产文件。首次运行检查用 `om setup check --market us --format text`；占位富途账户 ID 和缺少市场快照阻断离线配置就绪，Bot 就绪单独显示。
 
 当前 starter 见 [config.yaml.example](configs/examples/config.yaml.example)。
 
