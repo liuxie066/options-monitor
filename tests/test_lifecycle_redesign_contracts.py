@@ -4,6 +4,7 @@ from tests.ledger_sqlite_test_support import connect_ledger_fixture
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -46,8 +47,10 @@ from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
 from src.application.positions.context_builder import (
+    build_context,
     build_lifecycle_read_models_from_decision_snapshot,
 )
+from src.application.daily_decision_brief_service import _build_funds
 from src.application.trades.lifecycle_outbox import (
     CLAIM_LEASE_MS,
     QUIET_WINDOW_MS,
@@ -1272,6 +1275,21 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         "lifecycle_generation_token",
     ):
         assert frozen_model[field] == live_model[field]
+    context = build_context(
+        snapshot["account_position_lots"],
+        broker="富途",
+        account="lx",
+        rates={"rates": {"USDCNY": 7.2}},
+        decision_snapshot=snapshot,
+        observed_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc),
+    )
+    assert context["cash_secured_total_cny"] == 0
+    funds, _ = _build_funds(
+        portfolio_context={"cash_by_currency": {"USD": 1000}, "as_of_utc": context["as_of_utc"]},
+        option_positions_context=context,
+        data_gaps=[],
+    )
+    assert funds["option_opening_available_cny"] == 7200
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(

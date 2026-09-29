@@ -620,6 +620,56 @@ trade-intake audit 只记录 `portfolio_refresh_hint_accepted` 或
 成交。`resolution_revision` 只随业务结论变化，通知重发只增加
 `delivery_revision`。
 
+### 已确认期权平仓的风险占用设计
+
+目标：账户级期权上下文在已接受的平仓事实出现后，按仍实际未平仓的合约数计算
+CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金再次被旧期权占用。
+本次不推断平仓原因、不改 canonical `position_lots.contracts_open`、不修生产账本，
+也不更改券商现金或通知金额公式。
+
+成功信号：完整平仓且原因待确认的合约不再占用风险容量；部分平仓只保留未平仓
+部分的占用；没有可信平仓事实、快照不可信或生命周期冲突时不凭猜测释放占用；
+账户级日报使用修正后的担保汇总，原始持仓行仍可追溯。
+
+事实与约束：`domain/domain/option_lifecycle.py::derive_lifecycle_read_model` 已从
+可信账户快照派生 `closure_fact` 和按 lot 的 `reserved_contracts_by_lot`；
+`src/application/positions/context_builder.py::build_context` 已把它们附在持仓行，
+但风险汇总仍直接使用账本 `contracts_open`。`daily_decision_brief_service._build_funds`
+读取该汇总，现金本身来自独立的券商持仓快照。日报管线将可信账户快照传给
+`build_context`，而 `cash_headroom_query.py`、`wheel/capacity.py` 的直接调用
+目前没有传该快照，不在本次“日报金额已修正”的验收内。原因未定时保留账本
+数量是两阶段状态的既有合同，不能为了资金展示提前写 terminal event。
+
+复用清单：复用 `derive_lifecycle_read_model` 的平仓事实与预留数量，复用
+`build_context` 作为账户风险汇总 owner，复用 `risk_capacity.py` 的 Put/Call 按数量
+缩放计算及日报现有汇总读取；不新增字段、状态、计算 owner 或数据来源。
+检索范围为上述 owner、`daily_decision_brief_service.py`、`sell_put_cash.py`、
+`cash_headroom_query.py`、`wheel/capacity.py` 及其相关测试；未发现另一个负责
+把已接受期权平仓预留量扣出账户风险汇总的 owner。
+
+方案：`build_context` 仅在可信快照中的同账户、同 lot，且经
+`position_lot_risk_view` 标准化后的 `fields` 与本次汇总行一致，
+`lifecycle_state`、`reason_state` 均非 `conflict`、
+`closure_fact` 为 `option_leg_closed` 或 `partial_close_observed`、该 lot 预留量
+为 0 到 `contracts_open` 的整数时，令有效数量为
+`contracts_open - reserved_contracts_by_lot[lot_id]`；Put 现金担保与 Call 锁定股数
+均使用有效数量。快照不可信、跨代持仓行、冲突或数量越界时沿用账本数量，
+不把冲突当零占用。`open_positions_min` 保留账本数量与生命周期字段，
+使后续平仓原因核对和自动操作仍有原始事实。拒绝在日报中单独减一笔现金、
+直接改账本，或用股票增量推断每张期权的指派原因；这些做法会重复计算或越过
+交收证据边界。账户切片之外的全账户汇总没有可信的账户生命周期快照，不能
+用本方案声称它已修正；缺快照的直接现金/Wheel 容量入口仍按账本占用，
+需另行接入可信账户快照才能与日报同口径。
+
+实现切片：一片，在 `build_context` 统一应用有效数量并覆盖完整、部分、无证据、
+冲突和跨代快照行为。验证先用最小测试复现旧金额，再验证 Put/Call 汇总及
+可信账户快照到日报资金的读取链；检查相关消费者测试、格式和文档引用。失败语义沿用
+既有不可用/冲突状态，不写持久账本、不连券商、不发送通知。
+
+风险与待核事项：历史已生成简报不会自动重算；上线后的金额仍是 OM 模型头寸，
+不是券商可下单额度。全账户汇总及缺快照的直接容量入口由各入口 owner 后续
+接入可信账户快照，当前账户级简报不读取这些结果。
+
 Lifecycle discovery 只冻结到期 lot 并创建 immutable case，不刷新已有 case 的
 `status` 或 `derived_summary`。既有 case 的派生状态由 canonical lifecycle read model
 计算，并只由 account-scoped `reconcile-due` 通过 ledger 原子 transition writer 推进。
