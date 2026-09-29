@@ -83,6 +83,12 @@ def build_scene_manifest(
     if unsupported:
         raise ValueError(f"om_chat scene has unsupported read-only tools: {unsupported}")
     descriptions = bot_tools.tool_descriptions(allowed_tools)
+    for description in descriptions:
+        if description["name"] == "option_positions_read":
+            description["description"] = "Read paginated local trade events for one market and account. Use action=events and a market or canonical symbol. event_type=assignment is a local ledger event, not broker confirmation."
+            description["input_schema"]["properties"]["action"]["enum"] = ["events"]
+            description["input_schema"]["properties"]["action"]["default"] = "events"
+            description["input_schema"].setdefault("required", []).append("action")
     history = contract.input.get("messages")
     messages = [dict(item) for item in history if isinstance(item, dict)] if isinstance(history, list) else []
     if not messages:

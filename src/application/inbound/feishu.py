@@ -56,6 +56,7 @@ def prepare_feishu_ack_target(
 def prepare_feishu_analysis_control(
     payload: dict[str, Any], *, allowed_senders: str | None, config_key: str | None,
     config_path: str | None, audit_db: str | None, received_monotonic: float,
+    assistant_config_path: str | None = None,
 ) -> dict[str, Any] | None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis
@@ -64,7 +65,8 @@ def prepare_feishu_analysis_control(
         return None
     try:
         request = feishu_payload_to_inbound_request(payload, config_key=config_key,
-            config_path=config_path, audit_db=audit_db, received_monotonic=received_monotonic)
+            config_path=config_path, audit_db=audit_db, assistant_config_path=assistant_config_path,
+            received_monotonic=received_monotonic)
     except AgentToolError:
         return None
     if analysis_control_replacement(request.text) is None:

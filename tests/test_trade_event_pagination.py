@@ -286,6 +286,9 @@ def test_market_effect_and_authority_are_applied_before_paging(tmp_path: Path) -
         "sy-close",
     }
     assert all(row["position_effect"] == "close" for row in page["rows"])
+    from src.application.agent_tools.operations_impl import _event_row
+    assignment = next(row for row in page["rows"] if row["event_id"] == "lx-assignment")
+    assert _event_row(assignment, normalize_broker=str, normalize_account=str)["event_type"] == "assignment"
 
 
 def test_cursor_rejects_tampering_expiry_and_scope_changes(tmp_path: Path) -> None:
