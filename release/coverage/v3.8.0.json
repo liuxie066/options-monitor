@@ -1,0 +1,274 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.0",
+  "base": {
+    "tag": "v3.7.7",
+    "commit": "15a0348591dbe352ffa7403f36836246b0f24050"
+  },
+  "reviewed_head": "27fd9850ef090a2012c200e5b178d2abd595afb9",
+  "commits": [
+    {
+      "sha": "ea83a7df395ea477e30e2bd61af883c660694cab",
+      "subject": "feat(cli): guide first-run setup"
+    },
+    {
+      "sha": "e2218b0742e747214b62e70be8446161183bdf1e",
+      "subject": "fix(cli): isolate redacted secret status output"
+    },
+    {
+      "sha": "b1cd41f9a1bd87d71c331a02faef380dc45e2048",
+      "subject": "fix(config): reject unknown close_advice/symbol keys, retire flat wheel.min_delta"
+    },
+    {
+      "sha": "8fba8d51c2291da7c5fa2b6be66824577d0ffced",
+      "subject": "Merge pull request #378 from liuxie066/codex/day8-config-repair"
+    },
+    {
+      "sha": "2886763404216c4f299216735cf193924bb9006d",
+      "subject": "fix(cli): name redacted credential readiness boundary"
+    },
+    {
+      "sha": "29619abb1a7fe0341b9cbb97da9a23afbb56fc23",
+      "subject": "chore(merge): sync main into CLI experience"
+    },
+    {
+      "sha": "527177f04f14f5dde9c45378db6b2e97ff8c806e",
+      "subject": "Merge pull request #377 from liuxie066/codex/om-cli-experience"
+    },
+    {
+      "sha": "58006f5301176e54b28963b5f8a137ff3bd53842",
+      "subject": "fix(prefetch): drop dead run-scoped cache probe, log snapshot append failures"
+    },
+    {
+      "sha": "18f7ff06364c663cacf9ac84eef591171131b687",
+      "subject": "Merge pull request #379 from liuxie066/codex/required-data-prefetch-fixes"
+    },
+    {
+      "sha": "c9ee4f4a61fc32126cd18c5c0c0288055d758a57",
+      "subject": "fix(notify): redact quiet-hours target in stdout"
+    },
+    {
+      "sha": "2b8a60acc6ad36b7ef55b271743df1ac877705ed",
+      "subject": "feat(config): improve first-run readiness and recovery"
+    },
+    {
+      "sha": "5e1329fffbb424ea94a887fc65596ae425ff1877",
+      "subject": "Merge pull request #382 from liuxie066/codex/first-run-readiness"
+    },
+    {
+      "sha": "a4ccf15c03fa3421426223a6b63ed5cd0a996d3c",
+      "subject": "Merge branch 'main' into codex/quiet-hours-target-redaction"
+    },
+    {
+      "sha": "e728bcd601f6ec068a5971275c723353cf198568",
+      "subject": "Merge pull request #380 from liuxie066/codex/quiet-hours-target-redaction"
+    },
+    {
+      "sha": "e4901a514fb9c8eede9435e339dd6e9b9d24186b",
+      "subject": "fix(required-data): carry plan underlier observation into success-empty payload"
+    },
+    {
+      "sha": "daf5242c9dc566c2b5a0951e2240abaff89bb20b",
+      "subject": "chore(merge): sync main into success-empty observation"
+    },
+    {
+      "sha": "27fd9850ef090a2012c200e5b178d2abd595afb9",
+      "subject": "Merge pull request #383 from liuxie066/codex/success-empty-observation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "`om` 增加交互式命令引导和预览优先的 `setup init`，并提供易读的配置、设置与凭据就绪状态；凭据值只显示脱敏信息。",
+      "commits": [
+        "ea83a7df395ea477e30e2bd61af883c660694cab",
+        "e2218b0742e747214b62e70be8446161183bdf1e",
+        "2886763404216c4f299216735cf193924bb9006d"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "首次运行的 `om setup init` 增加完整写入预览、并发目标保护与失败恢复，并记住运行配置目录供新终端使用；`om setup check` 会阻断所选市场的缺失快照和占位富途账户 ID，Bot 就绪单独报告。",
+      "commits": [
+        "2b8a60acc6ad36b7ef55b271743df1ac877705ed"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "必需数据预取移除无法命中的本轮缓存探测，每次按计划重新抓取；来源快照事件追加失败会留下警告，抓取流程保持原样。",
+      "commits": [
+        "58006f5301176e54b28963b5f8a137ff3bd53842"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "默认配置不再写入扁平 `wheel.min_delta`；显式保留的旧键仍通过校验并提示迁移，Covered Call 的有效 Delta 下限保持 0.25。",
+      "commits": [
+        "b1cd41f9a1bd87d71c331a02faef380dc45e2048"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "配置校验现在对启用策略的空 DTE 边界、`close_advice.enabled` 类型，以及 `close_advice` 和标的覆盖项中的未知键给出明确错误。",
+      "commits": [
+        "b1cd41f9a1bd87d71c331a02faef380dc45e2048"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "静默时段跳过通知的日志不再输出原始通知目标。",
+      "commits": [
+        "c9ee4f4a61fc32126cd18c5c0c0288055d758a57"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "必需数据无可执行请求时，将计划中的标的观测值带入空结果，避免合法结果被误判为范围身份不一致。",
+      "commits": [
+        "e4901a514fb9c8eede9435e339dd6e9b9d24186b"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "8fba8d51c2291da7c5fa2b6be66824577d0ffced",
+      "reason": "PR #378 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "29619abb1a7fe0341b9cbb97da9a23afbb56fc23",
+      "reason": "PR #377 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "527177f04f14f5dde9c45378db6b2e97ff8c806e",
+      "reason": "PR #377 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "18f7ff06364c663cacf9ac84eef591171131b687",
+      "reason": "PR #379 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "5e1329fffbb424ea94a887fc65596ae425ff1877",
+      "reason": "PR #382 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "a4ccf15c03fa3421426223a6b63ed5cd0a996d3c",
+      "reason": "PR #380 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "e728bcd601f6ec068a5971275c723353cf198568",
+      "reason": "PR #380 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "daf5242c9dc566c2b5a0951e2240abaff89bb20b",
+      "reason": "PR #383 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "27fd9850ef090a2012c200e5b178d2abd595afb9",
+      "reason": "PR #383 的同步或合并提交，实际变化已由同一 PR 的开发提交说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "ea83a7df395ea477e30e2bd61af883c660694cab",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/377"
+      ]
+    },
+    {
+      "commit": "e2218b0742e747214b62e70be8446161183bdf1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/377"
+      ]
+    },
+    {
+      "commit": "b1cd41f9a1bd87d71c331a02faef380dc45e2048",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/378"
+      ]
+    },
+    {
+      "commit": "8fba8d51c2291da7c5fa2b6be66824577d0ffced",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/378"
+      ]
+    },
+    {
+      "commit": "2886763404216c4f299216735cf193924bb9006d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/377"
+      ]
+    },
+    {
+      "commit": "29619abb1a7fe0341b9cbb97da9a23afbb56fc23",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/377"
+      ]
+    },
+    {
+      "commit": "527177f04f14f5dde9c45378db6b2e97ff8c806e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/377"
+      ]
+    },
+    {
+      "commit": "58006f5301176e54b28963b5f8a137ff3bd53842",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/379"
+      ]
+    },
+    {
+      "commit": "18f7ff06364c663cacf9ac84eef591171131b687",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/379"
+      ]
+    },
+    {
+      "commit": "c9ee4f4a61fc32126cd18c5c0c0288055d758a57",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/380"
+      ]
+    },
+    {
+      "commit": "2b8a60acc6ad36b7ef55b271743df1ac877705ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/382"
+      ]
+    },
+    {
+      "commit": "5e1329fffbb424ea94a887fc65596ae425ff1877",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/382"
+      ]
+    },
+    {
+      "commit": "a4ccf15c03fa3421426223a6b63ed5cd0a996d3c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/380"
+      ]
+    },
+    {
+      "commit": "e728bcd601f6ec068a5971275c723353cf198568",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/380"
+      ]
+    },
+    {
+      "commit": "e4901a514fb9c8eede9435e339dd6e9b9d24186b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/383"
+      ]
+    },
+    {
+      "commit": "daf5242c9dc566c2b5a0951e2240abaff89bb20b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/383"
+      ]
+    },
+    {
+      "commit": "27fd9850ef090a2012c200e5b178d2abd595afb9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/383"
+      ]
+    }
+  ]
+}
