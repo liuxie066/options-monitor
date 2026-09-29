@@ -475,9 +475,8 @@ rollback is removal of the compact consumer/call, not a history rewrite or runti
 Prepared portfolio payloads use content-addressed names and a write-once/adopt manifest. The parent retains the manifest
 SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
 anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks
-the account-config SHA-256, and verifies the resolved portfolio source account against `filters.account` and any account
-declared by holding rows. External-holdings contexts bind to the configured `holdings_account`, not implicitly to the OM
-account label. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
+the account-config SHA-256, and verifies that Futu portfolio context and `filters.account` match the OM account label.
+Global Holdings risk uses a separate all-accounts context with source and observation evidence. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
 shared planning and required-data prefetch.
 Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
 written as Tick input authority.

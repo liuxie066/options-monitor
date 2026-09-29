@@ -13,22 +13,19 @@ def add_account_commands(subparsers: Any) -> None:
     add = account_sub.add_parser("add", help="add account")
     add.add_argument("--market", required=True, choices=("us", "hk"))
     add.add_argument("--account-label", required=True)
-    add.add_argument("--account-type", required=True, choices=("futu", "external_holdings"))
+    add.add_argument("--account-type", required=True, choices=("futu",))
     _add_common_write_args(add)
     add.add_argument("--futu-acc-id", default=None)
     add.add_argument("--futu-host", default=None)
     add.add_argument("--futu-port", type=int, default=None)
-    add.add_argument("--holdings-account", default=None)
     edit = account_sub.add_parser("edit", help="edit account")
     edit.add_argument("--market", required=True, choices=("us", "hk"))
     edit.add_argument("--account-label", required=True)
     _add_common_write_args(edit)
-    edit.add_argument("--account-type", choices=("futu", "external_holdings"), default=None)
+    edit.add_argument("--account-type", choices=("futu",), default=None)
     edit.add_argument("--futu-acc-id", default=None)
     edit.add_argument("--futu-host", default=None)
     edit.add_argument("--futu-port", type=int, default=None)
-    edit.add_argument("--holdings-account", default=None)
-    edit.add_argument("--clear-holdings-account", action="store_true")
     remove = account_sub.add_parser("remove", help="remove account")
     remove.add_argument("--market", required=True, choices=("us", "hk"))
     remove.add_argument("--account-label", required=True)
@@ -81,7 +78,6 @@ def handle_account_command(
                 futu_acc_id=args.futu_acc_id,
                 futu_host=args.futu_host,
                 futu_port=args.futu_port,
-                holdings_account=args.holdings_account,
                 rebuild_runtime_root=rebuild_runtime_root,
                 apply=apply,
             ),
@@ -99,8 +95,6 @@ def handle_account_command(
                 futu_acc_id=args.futu_acc_id,
                 futu_host=args.futu_host,
                 futu_port=args.futu_port,
-                holdings_account=args.holdings_account,
-                clear_holdings_account=bool(args.clear_holdings_account),
                 rebuild_runtime_root=rebuild_runtime_root,
                 apply=apply,
             ),

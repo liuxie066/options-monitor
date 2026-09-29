@@ -5,11 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from src.application.account_config import build_account_portfolio_source_plan
-import src.application.portfolio_context_builder as holdings_context
-
-load_holdings_portfolio_context = holdings_context.load_holdings_portfolio_context
-load_holdings_portfolio_shared_context = holdings_context.load_holdings_portfolio_shared_context
-slice_shared_context_for_account = holdings_context.slice_shared_context_for_account
+from src.application.portfolio_context_builder import load_holdings_portfolio_shared_context
 
 
 JsonLoader = Callable[[Path], Optional[dict]]
@@ -81,18 +77,6 @@ def _validate_portfolio_context_account(
     return False
 
 
-def expected_portfolio_context_account(
-    *,
-    source_name: str,
-    account: str | None,
-    holdings_account: str | None,
-) -> str | None:
-    source_norm = str(source_name or "").strip().lower()
-    if source_norm == "futu":
-        return str(account or "").strip().lower() or None
-    return str(holdings_account or account or "").strip().lower() or None
-
-
 def load_account_portfolio_context(
     *,
     base: Path,
@@ -111,11 +95,7 @@ def load_account_portfolio_context(
     write_cache: bool = True,
 ) -> dict[str, Any]:
     port_path = (state_dir / "portfolio_context.json").resolve()
-    plan = build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
-    holdings_source_name = "external_holdings" if plan.primary_source == "external_holdings" else "holdings"
-    allow_holdings_fallback = (
-        plan.primary_source in {"futu", "external_holdings"} and str(plan.requested_source or "").strip().lower() == "auto"
-    ) or plan.primary_source == "external_holdings"
+    build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
 
     cached = None
     try:
@@ -126,140 +106,28 @@ def load_account_portfolio_context(
 
     cached_source = str((cached or {}).get("portfolio_source_name") or "").strip().lower() if isinstance(cached, dict) else ""
     if isinstance(cached, dict):
-        if cached_source == plan.primary_source:
-            expected_account = expected_portfolio_context_account(
-                source_name=cached_source,
-                account=account,
-                holdings_account=plan.holdings_account,
-            )
-            if _validate_portfolio_context_account(cached, requested_account=expected_account, log=log, source="account_cache"):
+        cached_filters = cached.get("filters")
+        if cached_source == "futu":
+            expected_account = str(account or "").strip().lower() or None
+            if _validate_portfolio_context_account(cached, requested_account=expected_account, log=log, source="account_cache") and isinstance(cached_filters, dict) and str(cached_filters.get("account") or "").strip().lower() == str(account or "").strip().lower():
                 cached = with_context_source(cached, "account_cache")
                 log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
                 return cached
-        if plan.primary_source == "external_holdings" and cached_source in {"holdings", "external_holdings"}:
-            expected_account = expected_portfolio_context_account(
-                source_name=cached_source,
-                account=account,
-                holdings_account=plan.holdings_account,
-            )
-            if _validate_portfolio_context_account(cached, requested_account=expected_account, log=log, source="account_cache"):
-                cached = with_context_source(cached, "account_cache")
-                log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
-                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                return cached
-
     portfolio_cfg = (runtime_config.get("portfolio") or {}) if isinstance(runtime_config, dict) else {}
-    if plan.primary_source == "futu":
-        try:
-            ctx = fetch_futu_portfolio_context_fn(
-                cfg=(runtime_config or {}),
-                account=account,
-                market=str(market),
-                base_currency=str(portfolio_cfg.get("base_currency") or "CNY"),
-                )
-            ctx = dict(ctx)
-            ctx["portfolio_source_name"] = "futu"
-            expected_account = expected_portfolio_context_account(
-                source_name="futu",
-                account=account,
-                holdings_account=plan.holdings_account,
-            )
-            if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source="futu_direct"):
-                raise ValueError("futu_direct account mismatch")
-            ctx = with_context_source(ctx, "futu_direct")
-            if write_cache:
-                port_path.parent.mkdir(parents=True, exist_ok=True)
-                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-            log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
-            return ctx
-        except Exception as exc:
-            if not allow_holdings_fallback:
-                raise
-            log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} error={exc}")
-
-    holdings_account = plan.holdings_account
-    shared_root = (shared_state_dir or state_dir).resolve()
+    ctx = fetch_futu_portfolio_context_fn(
+        cfg=(runtime_config or {}),
+        account=account,
+        market=str(market),
+        base_currency=str(portfolio_cfg.get("base_currency") or "CNY"),
+    )
+    ctx = dict(ctx)
+    ctx["portfolio_source_name"] = "futu"
+    expected_account = str(account or "").strip().lower() or None
+    if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source="futu_direct"):
+        raise ValueError("futu_direct account mismatch")
+    ctx = with_context_source(ctx, "futu_direct")
     if write_cache:
-        shared_root.mkdir(parents=True, exist_ok=True)
-    shared_path = (shared_root / "portfolio_context.shared.json").resolve()
-
-    try:
-        if ttl_sec > 0 and is_fresh_fn(shared_path, ttl_sec):
-            shared_cached = load_json_fn(shared_path)
-            if isinstance(shared_cached, dict):
-                sliced = slice_shared_context_for_account(shared_cached, holdings_account)
-                if isinstance(sliced, dict):
-                    expected_account = expected_portfolio_context_account(
-                        source_name=holdings_source_name,
-                        account=account,
-                        holdings_account=holdings_account,
-                    )
-                    if not _validate_portfolio_context_account(sliced, requested_account=expected_account, log=log, source="shared_slice"):
-                        raise ValueError("shared slice account mismatch")
-                    sliced = dict(sliced)
-                    sliced["portfolio_source_name"] = holdings_source_name
-                    sliced = with_context_source(sliced, "shared_slice")
-                    if write_cache:
-                        port_path.parent.mkdir(parents=True, exist_ok=True)
-                        port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding="utf-8")
-                    log(f"[CTX] portfolio_context source=shared_slice account={holdings_account or '-'}")
-                    return sliced
-    except Exception:
-        pass
-
-    refresh_sources = ((shared_path, "shared_refresh"), (None, "direct_fetch")) if write_cache else ((None, "direct_fetch"),)
-    for shared_out, context_source in refresh_sources:
-        try:
-            if shared_out is not None:
-                shared_ctx = load_holdings_portfolio_shared_context(
-                    data_config_path=Path(data_config),
-                    broker=str(market),
-                )
-                if write_cache:
-                    shared_out.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-                ctx = dict(slice_shared_context_for_account(shared_ctx, holdings_account) or {})
-            else:
-                ctx = load_holdings_portfolio_context(
-                    data_config_path=Path(data_config),
-                    broker=str(market),
-                    account=holdings_account,
-                )
-            if not ctx:
-                ctx = dict(_load_json_payload(load_json_fn, port_path))
-            expected_account = expected_portfolio_context_account(
-                source_name=holdings_source_name,
-                account=account,
-                holdings_account=holdings_account,
-            )
-            if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source=context_source):
-                raise ValueError(f"{context_source} account mismatch")
-            ctx["portfolio_source_name"] = holdings_source_name
-            ctx = with_context_source(ctx, context_source)
-            if write_cache:
-                port_path.parent.mkdir(parents=True, exist_ok=True)
-                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-            log(f"[CTX] portfolio_context source={context_source} account={holdings_account or '-'}")
-            return ctx
-        except Exception:
-            if shared_out is None:
-                if allow_holdings_fallback:
-                    cached_fallback = _load_json_payload(load_json_fn, port_path)
-                    expected_account = expected_portfolio_context_account(
-                        source_name=holdings_source_name,
-                        account=account,
-                        holdings_account=holdings_account,
-                    )
-                    if not _validate_portfolio_context_account(
-                        cached_fallback,
-                        requested_account=expected_account,
-                        log=log,
-                        source="account_cache",
-                    ):
-                        raise
-                    cached_fallback["portfolio_source_name"] = holdings_source_name
-                    cached_fallback = with_context_source(cached_fallback, "account_cache")
-                    log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
-                    log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                    return cached_fallback
-                raise
-    raise RuntimeError("unreachable")
+        port_path.parent.mkdir(parents=True, exist_ok=True)
+        port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
+    return ctx

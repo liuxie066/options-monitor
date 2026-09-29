@@ -270,7 +270,8 @@ def test_assistant_model_list_text_does_not_print_credential_env_name(tmp_path: 
     config_path = _write_config(tmp_path, """\
 accounts:
   lx:
-    type: external_holdings
+    type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -313,7 +314,8 @@ def test_assistant_model_check_forwards_live_flag(tmp_path: Path, monkeypatch, c
     config_path = _write_config(tmp_path, """\
 accounts:
   lx:
-    type: external_holdings
+    type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -348,7 +350,8 @@ def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsy
     config_path = _write_config(tmp_path, """\
 accounts:
   lx:
-    type: external_holdings
+    type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -448,7 +451,8 @@ def test_assistant_model_use_apply_switches_active_model_and_writes_backup(tmp_p
     config_path = _write_config(tmp_path, """\
 accounts:
   lx:
-    type: external_holdings
+    type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]

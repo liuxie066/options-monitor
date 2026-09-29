@@ -102,19 +102,15 @@ def test_holdings_explicit_zero_cash_row_remains_reliable() -> None:
     assert portfolio["cash_balance_unavailable_by_row"] == {}
 
 
-def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> None:
+def test_query_sell_put_cash_uses_futu_context_for_second_account() -> None:
     import src.application.cash_headroom_query as m
-
-    def fake_fetch_futu_portfolio_context(**_kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("futu portfolio context should not run for holdings override")
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "sy"
-        return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
+        return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
 
     with _patched(
         m,
-        fetch_futu_portfolio_context=fake_fetch_futu_portfolio_context,
         load_account_portfolio_context=fake_load_account_portfolio_context,
         open_position_ledger=lambda *_a, **_k: object(),
         _load_option_position_records=lambda *_a, **_k: [],
@@ -124,7 +120,7 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
             "cash_secured_total_cny": 12000.0,
         },
     ):
-        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_holdings_override"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_futu_second"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",
@@ -135,24 +131,23 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
             runtime_config={
                 "portfolio": {
                     "source": "auto",
-                    "source_by_account": {"sy": "holdings"},
                     "base_currency": "CNY",
                 },
             },
             no_exchange_rates=True,
         )
 
-    assert result["portfolio_source_name"] == "holdings"
+    assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 90000.0
     assert result["cash_free_cny"] == 78000.0
 
 
-def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account() -> None:
+def test_query_sell_put_cash_uses_configured_futu_account() -> None:
     import src.application.cash_headroom_query as m
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs.get("account") == "ext1"
-        return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
+        assert kwargs.get("account") == "sy"
+        return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
 
     with _patched(
         m,
@@ -165,29 +160,28 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
             "cash_secured_total_cny": 8000.0,
         },
     ):
-        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_external_holdings"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_configured_futu"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",
             market="富途",
-            account="ext1",
+            account="sy",
             out_dir=str(out_dir),
             base_dir=BASE,
             runtime_config={
-                "accounts": ["user1", "ext1"],
+                "accounts": ["user1", "sy"],
                 "account_settings": {
-                    "ext1": {"type": "external_holdings", "holdings_account": "Feishu EXT"},
+                    "sy": {"type": "futu", "futu": {"account_id": "REAL_87654321"}},
                 },
                 "portfolio": {
                     "source": "auto",
-                    "source_by_account": {"ext1": "holdings"},
                     "base_currency": "CNY",
                 },
             },
             no_exchange_rates=True,
         )
 
-    assert result["portfolio_source_name"] == "holdings"
+    assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 50000.0
     assert result["cash_free_cny"] == 42000.0
 
@@ -197,7 +191,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "lx"
-        return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
+        return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
 
     with _patched(
         m,
