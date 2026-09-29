@@ -75,7 +75,6 @@ def _starter_yaml_payload(
     *,
     account_label: str,
     futu_account_id: str,
-    external_holdings_account: str | None,
     us_symbols: list[str],
     hk_symbols: list[str],
 ) -> dict[str, Any]:
@@ -85,31 +84,8 @@ def _starter_yaml_payload(
             "futu_account_id": futu_account_id,
         }
     }
-    us_accounts = [account_label]
-    external_raw = str(external_holdings_account or "").strip()
-    external_account = ""
-    if external_raw:
-        try:
-            external_account = normalize_account_label(external_raw)
-        except ValueError as exc:
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message=f"external holdings account is invalid: {exc}",
-            ) from exc
-    if external_account == account_label:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="account_label and external_holdings_account must use different labels",
-        )
-    if external_account:
-        accounts[external_account] = {
-            "type": "external_holdings",
-            "holdings_account": external_account,
-        }
-        us_accounts.append(external_account)
-
     us_market: dict[str, Any] = {
-        "accounts": us_accounts,
+        "accounts": [account_label],
         "symbols": us_symbols,
     }
     if "FUTU" in us_symbols:
@@ -204,7 +180,6 @@ def init_yaml_config(
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
     account_label: str | None = None,
-    external_holdings_account: str | None = "sy",
     us_symbols: list[str] | tuple[str, ...] | None = None,
     hk_symbols: list[str] | tuple[str, ...] | None = None,
     build: bool = True,
@@ -242,7 +217,6 @@ def init_yaml_config(
     yaml_payload = _starter_yaml_payload(
         account_label=account,
         futu_account_id=futu_id,
-        external_holdings_account=external_holdings_account,
         us_symbols=us_symbol_values,
         hk_symbols=hk_symbol_values,
     )

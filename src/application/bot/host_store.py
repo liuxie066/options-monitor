@@ -348,19 +348,38 @@ class BotHostStore:
             raise ValueError("analysis cancellation requires the same inbound database transaction")
         if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_runs'").fetchone() is None:
             return {"status": "not_ready", "target_run_id": None}
-        rows = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
-            WHERE session_key = ? AND status IN ('running', 'waiting_model', 'waiting_tool')
-            ORDER BY started_at DESC LIMIT 2""", (session_key,)).fetchall()
-        if len(rows) != 1:
-            return {"status": "not_ready" if rows else "no_active_run", "target_run_id": None}
-        row = rows[0]
-        source = json.loads(row["contract_json"]).get("input", {})
-        if any(str(source.get(key) or "") != value for key, value in trusted_identity.items()):
-            return {"status": "not_ready", "target_run_id": None}
-        cancelled = self.request_cancel(row["run_id"], connection=connection)
-        status = ("cancelled" if cancelled or row["admission_state"] == "cancel"
-                  else "completed" if row["admission_state"] == "commit" else "not_ready")
-        return {"status": status, "target_run_id": row["run_id"]}
+        if set(trusted_identity) == {
+            "authenticated_channel", "authenticated_sender_id", "authenticated_conversation_id",
+            "authority_scope", "config_path",
+        }:
+            # ponytail: scan active runs across generations; index trusted identity if this grows large.
+            def matches_identity(row):
+                try:
+                    source = json.loads(row["contract_json"]).get("input", {})
+                    return isinstance(source, dict) and all(
+                        str(source.get(key) or "") == value for key, value in trusted_identity.items())
+                except (TypeError, ValueError, AttributeError):
+                    return False
+
+            active = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
+                WHERE status IN ('running', 'waiting_model', 'waiting_tool')
+                ORDER BY started_at DESC, run_id DESC""").fetchall()
+            rows = [row for row in active if matches_identity(row)]
+        else:
+            rows = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
+                WHERE session_key = ? AND status IN ('running', 'waiting_model', 'waiting_tool')
+                ORDER BY started_at DESC, run_id DESC""", (session_key,)).fetchall()
+            if any(any(str(json.loads(row["contract_json"]).get("input", {}).get(key) or "") != value
+                       for key, value in trusted_identity.items()) for row in rows):
+                return {"status": "not_ready", "target_run_id": None}
+        if not rows:
+            return {"status": "no_active_run", "target_run_id": None}
+        outcomes = [(row, self.request_cancel(row["run_id"], connection=connection)) for row in rows]
+        winner = next(((row, "cancelled") for row, cancelled in outcomes
+                       if cancelled or row["admission_state"] == "cancel"), None)
+        if winner is None:
+            winner = (rows[0], "completed" if rows[0]["admission_state"] == "commit" else "not_ready")
+        return {"status": winner[1], "target_run_id": winner[0]["run_id"]}
 
     def claim_admission_decision(self, run_id: str, desired: str) -> str:
         if desired not in {"commit", "discard"}:

@@ -248,12 +248,9 @@ def _normalize_account_setting(raw: Any, *, account: str, path: str) -> dict[str
         futu["account_id"] = shorthand_account_id
         item["futu"] = futu
 
-    account_type = str(item.get("type") or "").strip().lower()
-    if not account_type:
-        account_type = "external_holdings" if str(item.get("holdings_account") or "").strip() else "futu"
-    item["type"] = account_type
-    if account_type == "external_holdings" and not str(item.get("holdings_account") or "").strip():
-        item["holdings_account"] = account
+    if "holdings_account" in item:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.holdings_account is retired")
+    item["type"] = str(item.get("type") or "futu").strip().lower()
     return item
 
 

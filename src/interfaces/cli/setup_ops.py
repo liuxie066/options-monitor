@@ -40,7 +40,6 @@ def add_setup_commands(subparsers: Any) -> None:
     setup_init.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_init.add_argument("--account-label", default=None)
     setup_init.add_argument("--futu-acc-id", default=None)
-    setup_init.add_argument("--external-holdings-account", default=None)
     mode = setup_init.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="preview only; never write")
     mode.add_argument("--apply", action="store_true", help="write after preview without a terminal prompt")
@@ -96,7 +95,6 @@ def run_setup_init(
         "markets": markets,
         "futu_acc_id": futu_acc_id,
         "account_label": account_label,
-        "external_holdings_account": args.external_holdings_account,
     }
     preview = init_config_fn(**options, dry_run=True)
     selected = preview["markets"]

@@ -16,7 +16,6 @@ from src.application.ledger.api import ledger_store_payload
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.secret_resolver import (
     resolve_feishu_bot_config,
-    resolve_feishu_holdings_config,
 )
 from src.application.service_deploy import load_service_profile, service_status_from_profile
 from src.application.payload_helpers import as_dict as _dict
@@ -140,10 +139,6 @@ def run_healthcheck_tool(
         if data_config_ref:
             warnings.append("Configured portfolio.data_config is missing.")
 
-    data_cfg = read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
-    feishu_holdings = resolve_feishu_holdings_config(data_cfg, environ=effective_env.values, metadata_only=True)
-    feishu_ready = bool(feishu_holdings.app_id and feishu_holdings.app_secret)
-    holdings_ready = feishu_holdings.ready
     symbol_names = {
         str(item.get("symbol") or "").strip().upper()
         for item in (cfg.get("symbols") or [])
@@ -383,41 +378,24 @@ def run_healthcheck_tool(
             "trade_intake_enabled": trade_intake_enabled,
             "futu_account_ids": [mask_account_id(x) for x in mapped_ids],
         }
-        if account_type == "futu":
-            if not mapped_ids:
-                mapping_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
-                primary_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
-                continue
-            for acc_id in mapped_ids:
-                if str(acc_id).startswith("REAL_"):
-                    mapping_errors.append(f"{account}: placeholder futu acc_id {acc_id}")
-                    primary_errors.append(f"{account}: placeholder futu acc_id {acc_id}")
-                elif not str(acc_id).isdigit():
-                    mapping_errors.append(f"{account}: futu acc_id must be digits only")
-                    primary_errors.append(f"{account}: futu acc_id must be digits only")
-            primary_preview[account]["futu_account_ids"] = [mask_account_id(x) for x in mapped_ids]
-            host = str(getattr(runtime_plan, "futu_host", "") or "").strip()
-            port = getattr(runtime_plan, "futu_port", None)
-            if host and port:
-                mapping_preview[account]["opend"] = {"host": host, "port": int(port)}
-                primary_preview[account]["opend"] = {"host": host, "port": int(port)}
-            primary_preview[account]["ready"] = not any(msg.startswith(f"{account}:") for msg in primary_errors)
+        if not mapped_ids:
+            mapping_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
+            primary_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
             continue
-
-        if not feishu_ready:
-            mapping_errors.append(
-                f"{account}: external_holdings requires "
-                f"{feishu_holdings.app_id_env}/{feishu_holdings.app_secret_credential_name}"
-            )
-            primary_errors.append(
-                f"{account}: external_holdings requires "
-                f"{feishu_holdings.app_id_env}/{feishu_holdings.app_secret_credential_name}"
-            )
-        if "/" not in feishu_holdings.holdings_ref:
-            mapping_errors.append(f"{account}: external_holdings requires {feishu_holdings.holdings_env}")
-            primary_errors.append(f"{account}: external_holdings requires {feishu_holdings.holdings_env}")
-        primary_preview[account]["holdings_account"] = source_plan.holdings_account
-        primary_preview[account]["ready"] = bool(holdings_ready)
+        for acc_id in mapped_ids:
+            if str(acc_id).startswith("REAL_"):
+                mapping_errors.append(f"{account}: placeholder futu acc_id {acc_id}")
+                primary_errors.append(f"{account}: placeholder futu acc_id {acc_id}")
+            elif not str(acc_id).isdigit():
+                mapping_errors.append(f"{account}: futu acc_id must be digits only")
+                primary_errors.append(f"{account}: futu acc_id must be digits only")
+        primary_preview[account]["futu_account_ids"] = [mask_account_id(x) for x in mapped_ids]
+        host = str(getattr(runtime_plan, "futu_host", "") or "").strip()
+        port = getattr(runtime_plan, "futu_port", None)
+        if host and port:
+            mapping_preview[account]["opend"] = {"host": host, "port": int(port)}
+            primary_preview[account]["opend"] = {"host": host, "port": int(port)}
+        primary_preview[account]["ready"] = not any(msg.startswith(f"{account}:") for msg in primary_errors)
 
     checks.append(
         {
@@ -436,7 +414,7 @@ def run_healthcheck_tool(
         }
     )
     if mapping_errors:
-        warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching account settings.")
+        warnings.append("Use `./om-agent add-account --account-type futu` and complete the account settings.")
     elif any(str(value) == "user1" for value in accounts):
         warnings.append("You are still using the starter account label 'user1'; rename it before long-term use if this is not intentional.")
 
@@ -799,7 +777,7 @@ def run_healthcheck_tool(
         primary = dict(primary_preview.get(account) or {})
         primary_source = str(primary.get("source") or "").strip()
         account_type = str(primary.get("type") or "").strip()
-        primary_ok = bool(primary.get("ready")) and bool(opend_ready_by_account.get(account)) if account_type == "futu" else bool(primary.get("ready"))
+        primary_ok = bool(primary.get("ready")) and bool(opend_ready_by_account.get(account))
 
         account_paths[account] = {
             "type": account_type,
@@ -810,7 +788,6 @@ def run_healthcheck_tool(
                 **({"trade_intake_enabled": primary.get("trade_intake_enabled")} if primary.get("trade_intake_enabled") is not None else {}),
                 **({"futu_account_ids": primary.get("futu_account_ids")} if primary.get("futu_account_ids") is not None else {}),
                 **({"opend": primary.get("opend")} if primary.get("opend") is not None else {}),
-                **({"holdings_account": primary.get("holdings_account")} if primary.get("holdings_account") is not None else {}),
             },
         }
 

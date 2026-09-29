@@ -18,6 +18,7 @@ from src.application.bot.model_config import ModelSettings
 from src.application.bot.result_admission import admit_result_with_decision
 from src.application.bot.runtime import RunStopped, bounded_call, check_run, request_model, run_agent
 from src.application.bot.scene import build_scene_manifest, scene_policy_rejection_reason
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.research.redaction import redact_value
 
 _SESSION_LOCK = Lock()
@@ -80,7 +81,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         try:
             if session_key != session_key_for_contract(contract):
                 raise ValueError("session_scope_mismatch")
-        except (ValueError, OSError):
+        except (ValueError, OSError, AgentToolError):
             return AppResult(status="not_ready", user_response="渠道身份或会话范围未通过校验。",
                              error={"code": "SCENE_PREPARATION_FAILED"}, ok=False,
                              request_id=contract.request_id, contract_id=contract.contract_id)
@@ -96,6 +97,20 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
     history: list[dict] = []
     control_request = None
 
+    def read_scope_current() -> bool:
+        generation = str(contract.input.get("read_generation") or "")
+        if not generation:
+            return True
+        from src.application.bot.model_config import load_bot_read_scope
+        try:
+            markets, current = load_bot_read_scope(
+                config_path=str(contract.input.get("assistant_config_path") or ""),
+                primary_market=str(contract.input.get("config_key") or ""),
+            )
+            return current == generation and sorted(markets) == contract.input.get("read_markets")
+        except Exception:
+            return False
+
     def cancelled():
         if is_cancelled and is_cancelled():
             if host_store:
@@ -104,6 +119,8 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         return bool(host_store and host_store.is_cancel_requested(run_id))
 
     def finish(status, text, error=None):
+        if not read_scope_current():
+            status, text, error = "failed", "只读市场授权已变化，本次结果未提交。", {"code": "SCOPE_REVOKED"}
         result = AppResult(status=status, user_response=text, error=error, ok=status in {"answered", "control_requested"},
                            control_request=control_request if status == "control_requested" else None,
                            request_id=contract.request_id, contract_id=contract.contract_id, run_id=run_id,
@@ -186,6 +203,8 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         def tool_call(name, arguments):
             nonlocal memory_failed, control_request
             check_run(deadline, cancelled)
+            if not read_scope_current():
+                raise RunStopped("SCOPE_REVOKED", "trusted Bot read authorization changed")
             ref = new_id("obv")
             log.record("tool_call", {"tool_name": name, "tool_input": bot_tools.audit_tool_input(name, arguments)})
             payload = None
@@ -229,6 +248,14 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                             deadline=deadline, cancelled=cancelled)
                 check_run(deadline, cancelled)
                 observation = bot_tools.model_observation(name, response)
+                if payload and contract.input.get("read_generation"):
+                    query = payload.get("query")
+                    observation["host_scope"] = {
+                        "tool": name,
+                        "market": ("" if name == "project_files" and payload.get("resource") != "run"
+                                   else str(payload.get("config_key") or payload.get("market") or "").lower()),
+                        "account": payload.get("account") or (query.get("account") if isinstance(query, dict) else None),
+                    }
             except RunStopped:
                 raise
             except (Exception, SystemExit):

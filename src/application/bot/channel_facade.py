@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -8,11 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tool_config import (
-    DEFAULT_CONFIGS,
-    load_runtime_config,
-    repo_base,
-    resolve_runtime_config_path,
+from src.application.bot.config_scope import (
+    BotConfigScopeError,
+    config_scope_error_message,
+    resolve_trusted_config_scope,
 )
 from src.application.bot.contracts import (
     AppResult,
@@ -24,20 +22,9 @@ from src.application.bot.contracts import (
 from src.application.bot.host import host_lane_slot, session_run_slot
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.local_harness import _budget_exhausted, run_prepared_contract
-from src.application.bot.model_config import load_assistant_llm_config, model_api_key_configured
+from src.application.bot.model_config import load_assistant_llm_config, load_bot_read_scope, model_api_key_configured
 from src.application.bot.service import prepare_contract
-from src.application.runtime_config_freshness import (
-    RuntimeConfigFreshnessError,
-    ensure_runtime_config_freshness,
-    infer_runtime_config_market,
-)
 from src.application.bot.session import derive_session_id
-
-
-class BotConfigScopeError(ValueError):
-    def __init__(self, reason: str):
-        self.reason = reason
-        super().__init__(reason)
 
 
 def analysis_control_replacement(text: str) -> str | None:
@@ -54,14 +41,18 @@ def cancel_channel_analysis(*, request: Any, audit_store: Any) -> dict[str, Any]
     if not request.message_id or not request.sender_id or request.channel != "feishu":
         raise AgentToolError(code="INPUT_ERROR", message="analysis control identity unavailable")
     try:
-        _, resolved_path, authority_scope = resolve_trusted_config_scope(
+        primary_market, resolved_path, authority_scope = resolve_trusted_config_scope(
             config_key=request.config_key, config_path=request.config_path)
     except BotConfigScopeError as exc:
         raise AgentToolError(code="CHANNEL_NOT_READY", message=config_scope_error_message(exc.reason)) from exc
+    try:
+        _markets, generation = _channel_read_scope(request.assistant_config_path, primary_market)
+    except (OSError, RuntimeError, ValueError, AgentToolError):
+        generation = ""  # Exact trusted identity below can still cancel one older active run.
     conversation = (None if request.conversation_id == f"{request.channel}:{request.sender_id}"
                     else request.conversation_id)
     session_key = _channel_session_key(channel=request.channel, sender_id=request.sender_id,
-        conversation_id=conversation, authority_scope=authority_scope)
+        conversation_id=conversation, authority_scope=_session_authority(authority_scope, generation))
     identity = {"authenticated_channel": request.channel, "authenticated_sender_id": request.sender_id,
         "authenticated_conversation_id": str(conversation or ""), "authority_scope": authority_scope,
         "config_path": resolved_path}
@@ -102,11 +93,12 @@ def run_channel_request(
             config_key=config_key,
             config_path=config_path,
         )
+        read_markets, read_generation = _channel_read_scope(assistant_config_path, resolved_key)
         session_key = _channel_session_key(
             channel=channel,
             sender_id=sender_id,
             conversation_id=conversation_id,
-            authority_scope=authority_scope,
+            authority_scope=_session_authority(authority_scope, read_generation),
         )
     except BotConfigScopeError as exc:
         return _request_not_ready(
@@ -152,6 +144,9 @@ def run_channel_request(
             sender_id=sender_id,
             conversation_id=conversation_id,
             authority_scope=authority_scope,
+            read_markets=read_markets,
+            read_generation=read_generation,
+            assistant_config_path=assistant_config_path,
         )
         try:
             prepared = prepare_contract(
@@ -221,80 +216,6 @@ def _channel_model_gate(assistant_config_path: str | None) -> str | None:
     return None
 
 
-def resolve_trusted_config_scope(
-    *,
-    config_key: str | None,
-    config_path: str | None,
-) -> tuple[str, str, str]:
-    key = str(config_key or "").strip().lower()
-    raw_path = str(config_path or "").strip()
-    if bool(key) == bool(raw_path):
-        raise BotConfigScopeError("channel_identity_or_scope_invalid")
-    if key and key not in DEFAULT_CONFIGS:
-        raise BotConfigScopeError("channel_identity_or_scope_invalid")
-
-    requested_path = resolve_runtime_config_path(
-        config_key=key or None,
-        config_path=raw_path or None,
-    )
-    try:
-        if not requested_path.exists():
-            raise BotConfigScopeError("config_missing")
-        if not requested_path.is_file():
-            raise BotConfigScopeError("channel_identity_or_scope_invalid")
-        resolved, cfg = load_runtime_config(
-            config_key=key or None,
-            config_path=raw_path or None,
-        )
-    except BotConfigScopeError:
-        raise
-    except AgentToolError as exc:
-        details = exc.details if isinstance(exc.details, dict) else {}
-        errors = details.get("errors")
-        reason = (
-            "config_identity_mismatch"
-            if isinstance(errors, list) and errors
-            else "config_unreadable"
-        )
-        raise BotConfigScopeError(reason) from exc
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise BotConfigScopeError("config_unreadable") from exc
-
-    canonical_path = str(resolved.resolve())
-    actual_market = infer_runtime_config_market(
-        config_key=key or None,
-        config_path=resolved,
-        config=cfg,
-    )
-    if actual_market not in DEFAULT_CONFIGS:
-        raise BotConfigScopeError("config_identity_mismatch")
-    try:
-        ensure_runtime_config_freshness(
-            cfg,
-            repo_root=repo_base(),
-            market=actual_market,
-            runtime_config_path=resolved,
-        )
-    except RuntimeConfigFreshnessError as exc:
-        raise BotConfigScopeError("config_stale") from exc
-    except OSError as exc:
-        raise BotConfigScopeError("config_unreadable") from exc
-
-    if key:
-        return actual_market, canonical_path, f"key:{key}"
-    path_digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
-    return actual_market, canonical_path, f"path:{path_digest}"
-
-
-def config_scope_error_message(reason: str) -> str:
-    return {
-        "config_missing": "已授权市场的运行配置缺失，请先生成运行配置",
-        "config_stale": "已授权市场的运行配置已过期，请重新生成运行配置",
-        "config_unreadable": "已授权市场的运行配置当前无法读取",
-        "config_identity_mismatch": "运行配置与已授权市场身份不一致",
-    }.get(reason, "渠道身份或数据作用域不可用")
-
-
 def _channel_session_key(
     *,
     channel: str | None,
@@ -315,6 +236,17 @@ def _channel_session_key(
     )
 
 
+def _channel_read_scope(config_path: str | None, primary_market: str) -> tuple[frozenset[str], str]:
+    # Missing model configuration is rejected by _channel_model_gate for real runs.
+    if not str(config_path or "").strip():
+        return frozenset({primary_market}), ""
+    return load_bot_read_scope(config_path=config_path, primary_market=primary_market)
+
+
+def _session_authority(authority_scope: str, generation: str) -> str:
+    return f"{authority_scope}|{generation}" if generation else authority_scope
+
+
 def _channel_request(
     *,
     user_message: str,
@@ -326,6 +258,9 @@ def _channel_request(
     sender_id: str | None,
     conversation_id: str | None,
     authority_scope: str,
+    read_markets: frozenset[str] = frozenset(),
+    read_generation: str = "",
+    assistant_config_path: str | None = None,
     received_monotonic: float | None = None,
     deadline_monotonic: float | None = None,
     authenticated_sender_id: str | None = None,
@@ -347,6 +282,9 @@ def _channel_request(
             "authenticated_sender_id": (normalized_sender if authenticated_sender_id == normalized_sender else ""),
             "authenticated_conversation_id": normalized_conversation,
             "authority_scope": authority_scope,
+            "read_markets": sorted(read_markets),
+            "read_generation": read_generation,
+            "assistant_config_path": str(assistant_config_path or ""),
         },
     )
 

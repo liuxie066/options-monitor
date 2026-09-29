@@ -52,7 +52,7 @@ trade_events -> projection -> position_lots
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
-| 本地 Bot | `om bot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
+| 本地 Bot（受控 US/HK 只读） | `om bot` | [Inbound Control](docs/INBOUND_CONTROL.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
@@ -260,6 +260,7 @@ om-agent run --tool portfolio_assignment_scenario \
 - 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
 Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Bot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
+渠道 Bot 默认只读本渠道市场；只有显式配置 `assistant.bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
 
 ### Close Advice
 
@@ -352,11 +353,11 @@ om-agent run --tool healthcheck \
 | 共享状态与报告 | `<runtime_root>/output_shared/` |
 | 账户级输出 | `<runtime_root>/output_accounts/<account>/` |
 
-账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu` 或 `external_holdings`；数据源和 trade-intake 能力从账户设置派生，不能把一个账户的现金、持仓或状态 fallback 到另一个账户。
+账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu`；账户现金与股票持仓来自对应富途账户，trade-intake 能力从账户设置派生。富途失败时不使用 Holdings 回填账户数据。
 
 Feishu 有三种彼此独立的角色：
 
-- 可选的 `external_holdings` 数据源；
+- 可选的全局 Holdings 持仓风险数据源；
 - `feishu_app` 出站通知；
 - Feishu long-connection 入站消息。
 

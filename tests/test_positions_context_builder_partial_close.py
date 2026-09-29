@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -469,6 +470,104 @@ def test_build_context_derives_missing_cash_secured_then_scales_partial_close() 
 
     assert ctx["cash_secured_by_symbol_by_ccy"]["AAPL"]["USD"] == 10000.0
     assert ctx["cash_secured_total_cny"] == 72000.0
+
+
+def test_closed_option_leg_does_not_reserve_cash_while_reason_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        lambda *_args, **_kwargs: {
+            "closed": {
+                "lifecycle_state": "settlement_pending",
+                "reason_state": "cause_pending",
+                "closure_fact": "option_leg_closed",
+                "reserved_contracts_by_lot": {"closed": 1},
+            },
+            "partial": {
+                "lifecycle_state": "settlement_pending",
+                "reason_state": "cause_pending",
+                "closure_fact": "partial_close_observed",
+                "reserved_contracts_by_lot": {"partial": 2},
+            },
+            "closed-call": {
+                "lifecycle_state": "settlement_pending",
+                "reason_state": "cause_pending",
+                "closure_fact": "option_leg_closed",
+                "reserved_contracts_by_lot": {"closed-call": 1},
+            },
+            "partial-call": {
+                "lifecycle_state": "settlement_pending",
+                "reason_state": "cause_pending",
+                "closure_fact": "partial_close_observed",
+                "reserved_contracts_by_lot": {"partial-call": 1},
+            },
+        },
+    )
+    records = [
+        _lot(record_id="closed", symbol="3690.HK", strike=80, multiplier=500, currency="HKD"),
+        _lot(record_id="partial", symbol="9992.HK", contracts=3, contracts_open=3,
+             strike=140, multiplier=200, currency="HKD"),
+        _lot(record_id="closed-call", symbol="0700.HK", option_type="call", multiplier=100),
+        _lot(record_id="partial-call", symbol="AAPL", option_type="call",
+             contracts=3, contracts_open=3, multiplier=100),
+    ]
+    snapshot_rows = deepcopy(records)
+    for record in records:
+        is_call = record["fields"]["option_type"] == "call"
+        record["fields"]["strategy"] = "covered_call" if is_call else "sell_put"
+        record["fields"]["leg_role"] = "short_call" if is_call else "short_put"
+
+    ctx = build_context(
+        records,
+        broker="富途",
+        account="lx",
+        rates={"HKDCNY": 0.8547},
+        decision_snapshot={"snapshot_status": "trusted", "normalized_account": "lx", "account_position_lots": snapshot_rows},
+    )
+
+    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 28_000.0}
+    assert ctx["cash_secured_total_cny"] == 28_000.0 * 0.8547
+    assert ctx["locked_shares_by_symbol"] == {"AAPL": 200}
+    assert ctx["cash_secured_unavailable_by_symbol"] == {
+        "3690.HK": "option_close_settlement_pending",
+        "9992.HK": "option_close_settlement_pending",
+    }
+    assert ctx["locked_shares_unavailable_by_symbol"] == {
+        "0700.HK": "option_close_settlement_pending",
+        "AAPL": "option_close_settlement_pending",
+    }
+    assert ctx["open_positions_min"][0]["contracts_open"] == 1
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_closed_option_leg_keeps_cash_reserved_on_conflict_or_stale_lot(
+    monkeypatch: pytest.MonkeyPatch, mismatch: bool,
+) -> None:
+    monkeypatch.setattr(
+        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        lambda *_args, **_kwargs: {
+            "lot": {
+                "lifecycle_state": "settlement_pending" if mismatch else "conflict",
+                "reason_state": "cause_pending" if mismatch else "conflict",
+                "closure_fact": "option_leg_closed",
+                "reserved_contracts_by_lot": {"lot": 1},
+            },
+        },
+    )
+    records = [_lot(record_id="lot", symbol="3690.HK", strike=80, multiplier=500, currency="HKD")]
+    snapshot_lot = _lot(record_id="lot", symbol="3690.HK", strike=80, multiplier=500, currency="HKD")
+    if mismatch:
+        snapshot_lot["fields"]["contracts_open"] = 2
+
+    ctx = build_context(
+        records,
+        broker="富途",
+        account="lx",
+        rates={"HKDCNY": 0.8547},
+        decision_snapshot={"snapshot_status": "trusted", "normalized_account": "lx", "account_position_lots": [snapshot_lot]},
+    )
+
+    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 40_000.0}
+    assert ctx["cash_secured_unavailable_by_symbol"] == {}
 
 
 def test_build_context_excludes_closed_or_zero_open_records() -> None:

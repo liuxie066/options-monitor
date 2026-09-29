@@ -49,6 +49,9 @@ def prepare_contract(
             "authenticated_sender_id",
             "authenticated_conversation_id",
             "authority_scope",
+            "read_markets",
+            "read_generation",
+            "assistant_config_path",
         }
         and value not in (None, "")
     }

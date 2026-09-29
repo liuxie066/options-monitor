@@ -15,6 +15,7 @@ from src.application.ledger.api import (
     ledger_store_write_guard, open_wheel_activation_repository, enable_trade_attribution_policy,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
     read_trade_attribution_snapshot, trade_attribution_facts_from_events,
+    encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
     with_sqlite_repo_transaction, adopt_post_trade_combo_pair,
     read_trade_attribution_policy, record_trade_attribution_conflict,
@@ -24,7 +25,7 @@ from src.application.write_contract import write_control
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from domain.domain.strategy_membership import resolve_trade_attribution
 from domain.domain.combo_reconciliation import delivered_combo_exposures_for_lot
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
 from domain.domain.wheel.intents import resolve_wheel_fill_intent
 from domain.domain.wheel import effective_wheel_events
 from domain.domain.ledger.position_fields import effective_contracts_open
@@ -514,24 +515,49 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
         config_key=payload.get("config_key"), config_path=payload.get("config_path"), account=payload.get("account"))
     account = str(payload["account"]).strip().lower()
     market = runtime_config_market(config).lower()
+    cursor_key = canonical_sha256({"tool": "trade_attribution_read", "account": account, "market": market,
+                                   "runtime_root": authority["runtime_root"], "config_path": authority.get("config_path")})
+    execution = str(payload.get("execution_key") or "").strip()
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    identity = resolve_symbol_identity(raw_symbol) if raw_symbol else None
+    if raw_symbol and identity is None:
+        raise AgentToolError(code="INPUT_ERROR", message="无法识别该标的。")
+    if identity and identity.market.lower() != market:
+        raise AgentToolError(code="INPUT_ERROR", message="标的与所选市场不一致。")
+    status = str(payload.get("status") or "").strip()
+    if status and status not in {"linked", "ordinary", "pending", "conflict", "not_applicable"}:
+        raise AgentToolError(code="INPUT_ERROR", message="无效的归属状态。")
+    filters = {"execution_key": execution, "symbol": identity.canonical if identity else "", "status": status}
+    cursor = ""
+    if payload.get("cursor"):
+        try:
+            state = decode_evidence_cursor(str(payload["cursor"]), cursor_key)
+            if (state.get("tool") != "trade_attribution_read" or not isinstance(state.get("filters"), dict)
+                    or set(state["filters"]) != set(filters)
+                    or not all(isinstance(value, str) for value in state["filters"].values())
+                    or not isinstance(state.get("last_open_event_id"), str)):
+                raise TradeEventPaginationError("invalid attribution cursor")
+            if any(value and value != state["filters"].get(key) for key, value in filters.items()):
+                raise TradeEventPaginationError("attribution cursor filters changed")
+            filters = state["filters"]
+            cursor = state["last_open_event_id"]
+        except TradeEventPaginationError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=f"归属分页 cursor 无效或已过期，请重新查询：{exc}") from exc
     snapshot = read_trade_attribution_snapshot(repo, account=account, market=market)
     now = int(time.time() * 1000)
     evidence = read_attribution_combo_evidence(snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now)
     view = build_trade_attribution_view(snapshot, config=config, account=account, market=market, now_ms=now, combo_evidence=evidence,
         combo_mode=combo_reconciliation_mode_for_account(config, account=account))
     rows = view["rows"]
-    execution = str(payload.get("execution_key") or "").strip()
-    status = str(payload.get("status") or "").strip()
-    cursor = str(payload.get("cursor") or "")
-    if status and status not in {"linked", "ordinary", "pending", "conflict", "not_applicable"}:
-        raise AgentToolError(code="INPUT_ERROR", message="无效的归属状态。")
-    rows = [row for row in rows if (not execution or row["execution_key"] == execution)
-            and (not status or row["status"] == status) and row["open_event_id"] > cursor]
+    rows = [row for row in rows if (not filters["execution_key"] or row["execution_key"] == filters["execution_key"])
+            and (not filters["symbol"] or row["contract_key"]["underlying_symbol"] == filters["symbol"])
+            and (not filters["status"] or row["status"] == filters["status"]) and row["open_event_id"] > cursor]
     rows.sort(key=lambda row: row["open_event_id"])
     limit = max(1, min(int(payload.get("limit") or 50), 100))
     page = rows[:limit]
-    return {"account": account, "rows": page, "returned_count": len(page),
-            "next_cursor": page[-1]["open_event_id"] if len(rows) > limit else None,
+    return {"account": account, "market": market, "rows": page, "returned_count": len(page),
+            "next_cursor": encode_evidence_cursor({"tool": "trade_attribution_read", "filters": filters,
+                "last_open_event_id": page[-1]["open_event_id"]}, cursor_key) if len(rows) > limit else None,
             "evidence_scope": "canonical_ledger_and_local_candidates", "evidence_complete": all(row["evidence_complete"] for row in page),
             "capacity_observed": False}, [], {}
 

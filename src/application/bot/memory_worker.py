@@ -18,6 +18,23 @@ def configured_memory_scope(contract: Any) -> Any:
         # Older generated snapshots used an account->settings mapping; the
         # current canonical shape is a validated list of labels.
         accounts = list(raw_accounts) if isinstance(raw_accounts, dict) else accounts_from_config(config, fallback=())
+        markets = contract.input.get("read_markets") or []
+        if len(markets) > 1:
+            from pathlib import Path
+            from src.application.agent_tool_config import DEFAULT_CONFIGS, repo_base
+            from src.application.bot.config_scope import resolve_trusted_config_scope
+            from src.application.runtime_paths import resolve_runtime_root
+
+            root = Path(str(contract.input["config_path"])).parent
+            if root.resolve() != resolve_runtime_root(repo_root=repo_base()).runtime_root.resolve():
+                raise ValueError("MEMORY_RUNTIME_ROOT_MISMATCH")
+            scoped = []
+            for market in markets:
+                _, sibling, _ = resolve_trusted_config_scope(
+                    config_key=None, config_path=str(root / DEFAULT_CONFIGS[market]))
+                _, market_config = load_runtime_config(config_key=market, config_path=sibling)
+                scoped.extend(f"{market}:{account}" for account in accounts_from_config(market_config, fallback=()))
+            accounts = scoped
     except (TypeError, ValueError):
         raise ValueError("MEMORY_ACCOUNT_CONFIG_INVALID")
     return scope_from_contract(contract, accounts)
@@ -63,9 +80,17 @@ def verified_sources_from_run(run: dict, *, scope: Any = None) -> dict:
         collect_accounts(value)
         collect_accounts(metadata.get("coverage", {}).get("scope"))
         collect_accounts(observation.get("tool_input"))
-        if len(accounts) != 1 or not accounts <= scope.allowed_accounts:
+        if len(accounts) != 1:
             continue
         account = next(iter(accounts))
+        if contract.input.get("read_generation") and len(contract.input.get("read_markets") or []) > 1:
+            host_scope = observation.get("host_scope") or {}
+            market = str(host_scope.get("market") or "").lower()
+            if market not in {"us", "hk"}:
+                continue
+            account = f"{market}:{account}"
+        if account not in scope.allowed_accounts:
+            continue
         source_time = metadata.get("as_of") or metadata.get("freshness", {}).get("as_of") or event.get("timestamp")
         if not isinstance(source_time, str) or not source_time:
             continue

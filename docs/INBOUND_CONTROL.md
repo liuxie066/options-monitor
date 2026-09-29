@@ -49,6 +49,17 @@ Messages that are not explicit Control protocol enter Bot when both
 Portfolio-management access is a separate fail-closed projection: `portfolio_query`
 is available to Bot only when `assistant.bot.toolsets.portfolio` is also
 true. Missing values mean disabled.
+Bot reads the channel market by default. A validated
+`assistant.bot.read_markets: [us, hk]` grant can add the other market for
+authenticated senders. The Host resolves each requested market to a fresh
+runtime config in the same runtime root and checks the account in that market;
+the model cannot supply a config path or expand this grant. Dual-market reads
+without a market or recognizable symbol require clarification. Revoking or
+changing the grant stops an active answer before it is persisted.
+Each controlled rebuild of `config.assistant.json`, including a version upgrade,
+creates a new read generation even if `read_markets` is unchanged. Channel
+sessions and personal memory start in that new generation; old records remain
+stored but are not automatically carried into it.
 
 Bot uses:
 
@@ -143,7 +154,9 @@ Do not add:
 
 ### 已入账成交的策略归属
 
-`trade_attribution_read` 只读当前配置账户内的成交归属。自然语言选择由 Bot 的
+`trade_attribution_read` 只读所选市场配置账户内的成交归属；
+`option_positions_read.events` 提供独立的本地交易事件证据，`assignment`
+事件不等于券商确认。自然语言选择由 Bot 的
 `request_control_preview` 交给 Control；也可输入：
 
 ```text

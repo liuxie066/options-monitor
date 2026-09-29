@@ -26,7 +26,7 @@ def _runtime(**extra):
 
 def _yaml_config(tmp_path, *, override=None, close_advice=None, features=None, market_close_advice=None, market_features=None):
     doc = {
-        "accounts": {"lx": {"type": "external_holdings", "holdings_account": "lx"}},
+        "accounts": {"lx": {"type": "futu", "futu_account_id": "REAL_12345678"}},
         "markets": {"us": {"accounts": ["lx"], "symbols": ["NVDA"], "overrides": {"NVDA": override or {}}}},
     }
     if close_advice is not None:
@@ -161,7 +161,7 @@ def test_layered_wheel_policy_stays_same_after_flat_default_removal(market, symb
     new_system = default_config()
     old_system = deepcopy(new_system)
     old_system["defaults"]["wheel"]["min_delta"] = 0.3
-    user = {"accounts": ["lx"], "account_settings": {"lx": {"type": "external_holdings", "holdings_account": "lx"}}, "symbols": [{"symbol": symbol}]}
+    user = {"accounts": ["lx"], "account_settings": {"lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}}}, "symbols": [{"symbol": symbol}]}
     configs = [
         build_layered_runtime_config_from_user_config(
             repo_root=REPO_ROOT,
@@ -182,7 +182,7 @@ def test_layered_wheel_policy_stays_same_after_flat_default_removal(market, symb
 def test_isolated_config_build_changes_bytes_but_not_wheel_policy(tmp_path):
     source = tmp_path / "config.yaml"
     source.write_text(yaml.safe_dump({
-        "accounts": {"lx": {"type": "external_holdings", "holdings_account": "lx"}},
+        "accounts": {"lx": {"type": "futu", "futu_account_id": "REAL_12345678"}},
         "markets": {"us": {"accounts": ["lx"], "symbols": ["NVDA"]}},
     }), encoding="utf-8")
     system_path = tmp_path / "system.json"

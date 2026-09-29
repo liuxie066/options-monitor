@@ -13,7 +13,7 @@ from src.infrastructure.io_utils import (
     utc_now,
 )
 from src.infrastructure.run_log import RunLogger
-from src.application.account_config import resolve_configured_accounts
+from src.application.account_config import build_account_portfolio_source_plan, resolve_configured_accounts
 from src.application.config_sections import resolve_watchlist_config
 from src.application.config_validator import (
     validate_config,
@@ -301,6 +301,11 @@ def main(argv: list[str] | None = None) -> int:
         validate_config(deepcopy(base_cfg))
     else:
         validate_retired_symbol_worker_config(base_cfg)
+    try:
+        for configured_account in resolve_configured_accounts(base_cfg):
+            build_account_portfolio_source_plan(base_cfg, account=configured_account)
+    except ValueError as exc:
+        raise SystemExit(f"[CONFIG_ERROR] {exc}") from exc
     try:
         args.accounts = resolve_configured_accounts(base_cfg, args.accounts)
     except ValueError as exc:

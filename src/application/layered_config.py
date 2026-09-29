@@ -6,7 +6,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-from src.application.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
+from src.application.account_config import ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
 from src.application.config_loader import normalize_portfolio_broker_config
 from src.application.config_sections import set_watchlist_config
 from src.application.agent_tool_contracts import AgentToolError
@@ -119,8 +119,8 @@ def _normalized_account_settings(raw: Any) -> dict[str, dict[str, Any]]:
                 message=f"account_settings.{account}.type must be one of: {', '.join(ACCOUNT_TYPES)}",
             )
         item["type"] = account_type
-        if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS and not str(item.get("holdings_account") or "").strip():
-            item["holdings_account"] = account
+        if "holdings_account" in item:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"account_settings.{account}.holdings_account is retired")
         out[account] = item
     return out
 
@@ -159,18 +159,6 @@ def _derive_portfolio(cfg: dict[str, Any], *, accounts: list[str]) -> None:
     portfolio.setdefault("source", "futu")
     portfolio.setdefault("base_currency", "CNY")
     portfolio["account"] = str(portfolio.get("account") or accounts[0]).strip().lower()
-
-    raw_account_settings = cfg.get("account_settings")
-    account_settings = raw_account_settings if isinstance(raw_account_settings, dict) else {}
-    source_by_account = portfolio.get("source_by_account")
-    if not isinstance(source_by_account, dict):
-        source_by_account = {}
-    for account in accounts:
-        raw_setting = account_settings.get(account)
-        setting = raw_setting if isinstance(raw_setting, dict) else {}
-        account_type = str(setting.get("type") or ACCOUNT_TYPE_FUTU).strip().lower()
-        source_by_account.setdefault(account, "holdings" if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else "futu")
-    portfolio["source_by_account"] = source_by_account
 
     cfg["portfolio"] = portfolio
 

@@ -243,6 +243,8 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   `next_cursor` 用于下一次调用；后续页可改变 `limit`，不需要重复筛选条件。
 - cursor 固定首次查询的 market、账户权限、筛选条件和事件成员边界。首次查询后写入的事件，
   即使业务时间更早，也不会进入该 cursor 流。
+- `symbol` 先按标的身份规范化；例如 HK 查询中的 `700.HK` 会匹配账本里的 `0700.HK`。
+  无法识别或不属于所选市场的代码会报输入错误，不会返回看似完整的空页。
 - `include_total=true` 才计算冻结成员集合的 `total_count`。cursor 有效期为 30 分钟；过期、
   签名错误、权限或筛选条件变化都会明确失败，不会自动从头查询。
 - cursor 签名子密钥由运行服务从既有 `inbound.operation_hmac_key` 做固定域派生，不需要
@@ -377,7 +379,10 @@ Bot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细�
 ### `trade_attribution_read`
 
 只读当前配置账户的成交策略归属、候选身份、原因和数量覆盖。输入 `account`（必填），可选
-`execution_key`、`status`、`cursor`、`limit`（1–100）及配置选择。响应返回 `rows`、`next_cursor` 和证据完整性。
+`execution_key`、`symbol`、`status`、`cursor`、`limit`（1–100）及配置选择。响应返回 `market`、`rows`、
+`next_cursor` 和证据完整性。`symbol` 使用规范化标的身份；无法识别或与所选市场不符会报输入错误。
+`next_cursor` 是不透明的续页值，绑定首次查询的账户、市场和筛选条件；续页可省略筛选条件，
+但显式改动会报错。游标有效期为 30 分钟；旧版仅含事件 ID 的游标须重新查询。
 账户、物理 broker 身份与配置不一致时不能确认；查询不更新 Inbox 或 Control operation。
 人工操作见 [Inbound Control](INBOUND_CONTROL.md#已入账成交的策略归属)。
 

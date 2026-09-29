@@ -82,7 +82,20 @@ def build_scene_manifest(
     unsupported = sorted(set(allowed_tools) - active_read_tools)
     if unsupported:
         raise ValueError(f"om_chat scene has unsupported read-only tools: {unsupported}")
-    descriptions = bot_tools.tool_descriptions(allowed_tools)
+    descriptions = bot_tools.tool_descriptions(allowed_tools, static_payloads={"option_positions_read": {"action": "events"}})
+    for description in descriptions:
+        if description["name"] == "option_positions_read":
+            description["description"] = "Read paginated local trade events for one market and account. Use action=events and a market or canonical symbol. event_type=assignment is a local ledger event, not broker confirmation."
+            schema = description["input_schema"]
+            fields = {"config_key", "action", "broker", "account", "limit", "cursor", "include_total",
+                      "position_effect", "symbol", "option_type", "strike", "exp"}
+            schema["properties"] = {key: value for key, value in schema["properties"].items() if key in fields}
+            schema["properties"]["action"]["enum"] = ["events"]
+            schema["properties"]["action"]["default"] = "events"
+            schema["properties"]["limit"]["maximum"] = 20
+            schema.pop("allOf", None)
+            schema["required"] = ["action"]
+            description["examples"] = [{"input": {"action": "events", "symbol": "0700.HK", "limit": 10}}]
     history = contract.input.get("messages")
     messages = [dict(item) for item in history if isinstance(item, dict)] if isinstance(history, list) else []
     if not messages:

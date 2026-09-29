@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names
@@ -67,24 +68,37 @@ def build_tool_payload(
             explicit_payload = definition.bot_input_normalizer(explicit_payload)
         except (TypeError, ValueError) as exc:
             return None, str(exc)
+    trusted_fixed = dict(fixed_input or {})
+    if trusted_fixed.get("read_generation"):
+        trusted_fixed, route_error = _route_read_market(tool_name, explicit_payload, trusted_fixed)
+        if route_error:
+            return None, route_error
     payload = {
         name: value
         for name, value in definition.safe_default_input.items()
         if value is not None
     }
     payload.update(explicit_payload)
+    if tool_name == "option_positions_read" and fixed_input and fixed_input.get("read_generation") and payload.get("action") != "events":
+        return None, "Bot option_positions_read only permits action=events"
     for name in fields:
-        if name not in (fixed_input or {}):
+        if name not in trusted_fixed:
             continue
-        value = (fixed_input or {}).get(name)
+        value = trusted_fixed.get(name)
         if value in (None, ""):
             continue
         explicit = explicit_payload.get(name)
         if explicit not in (None, "") and explicit != value:
             return None, f"tool input conflicts with trusted scope: {name}"
         payload[name] = value.strip() if isinstance(value, str) else value
+    dual_market_events = (
+        tool_name == "option_positions_read" and payload.get("action") == "events"
+        and len(trusted_fixed.get("read_markets") or []) > 1
+    )
+    nested_query = payload.get("query")
     needs_account_scope = "account" in fields and payload.get("account") not in (None, "")
-    if tool_name == "receipt_read" or needs_account_scope:
+    needs_nested_account_scope = isinstance(nested_query, dict) and nested_query.get("account") not in (None, "")
+    if tool_name == "receipt_read" or needs_account_scope or needs_nested_account_scope or dual_market_events:
         from src.application.account_config import accounts_from_config, normalize_account_label
         from src.application.agent_tool_config import load_runtime_config
         from src.application.agent_tool_contracts import AgentToolError
@@ -92,8 +106,8 @@ def build_tool_payload(
 
         trusted = dict(payload)
         for key in ("config_key", "config_path"):
-            if (fixed_input or {}).get(key) not in (None, ""):
-                trusted[key] = fixed_input[key]
+            if trusted_fixed.get(key) not in (None, ""):
+                trusted[key] = trusted_fixed[key]
         try:
             path, config = load_runtime_config(config_key=trusted.get("config_key"), config_path=trusted.get("config_path"))
             if tool_name == "receipt_read":
@@ -103,20 +117,86 @@ def build_tool_payload(
                 requested_market = payload.get("market")
                 if requested_market and str(requested_market).lower() != market:
                     return None, ("receipt_read market argument conflicts with trusted scope; this does not establish "
-                                  "the receipt's market. If the user did not request another market, retry without market.")
+                                  "the receipt's market. Keep the requested market and clarify the available scope.")
                 deal_id = payload.get("deal_id")
                 if isinstance(deal_id, str) and ("..." in deal_id or "…" in deal_id):
                     return None, "receipt_read needs the complete deal_id from the user; masked IDs cannot identify a receipt."
+            if needs_account_scope or needs_nested_account_scope or dual_market_events:
+                allowed = accounts_from_config(config, fallback=())
+            if dual_market_events and not needs_account_scope:
+                if len(allowed) != 1:
+                    return None, "specify an account for this market's trade events"
+                payload["account"] = allowed[0]
+                needs_account_scope = True
             if needs_account_scope:
                 account = normalize_account_label(payload["account"])
-                allowed = accounts_from_config(config, fallback=())
         except (AgentToolError, ValueError, OSError):
             return None, "无法验证账户或回执配置；先使用 project_context 确认有效范围。"
         if needs_account_scope:
             if account not in allowed:
                 return None, "account is outside the configured scope; use project_context to discover valid scope"
             payload["account"] = account
+        if needs_nested_account_scope:
+            nested_account = normalize_account_label(nested_query["account"])
+            if nested_account not in allowed or (needs_account_scope and nested_account != account):
+                return None, "query.account is outside or conflicts with the configured scope"
+            payload["query"] = {**nested_query, "account": nested_account}
     return payload, None
+
+
+def _route_read_market(tool_name: str, explicit: dict[str, Any], fixed: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    from domain.domain.symbol_identity import symbol_market
+    from src.application.agent_tool_config import DEFAULT_CONFIGS, repo_base
+    from src.application.bot.model_config import load_bot_read_scope
+    from src.application.runtime_paths import resolve_runtime_root
+
+    primary_path = Path(str(fixed.get("config_path") or ""))
+    primary = str(fixed.get("config_key") or "").lower()
+    try:
+        markets, generation = load_bot_read_scope(
+            config_path=str(fixed.get("assistant_config_path") or ""), primary_market=primary)
+    except Exception:
+        return fixed, "trusted Bot read authorization is unavailable"
+    if generation != fixed.get("read_generation") or sorted(markets) != fixed.get("read_markets"):
+        return fixed, "trusted Bot read authorization changed; stop this turn"
+    if tool_name == "project_files" and explicit.get("resource") != "run":
+        return fixed, None
+    choices: set[str] = set()
+    for field in ("config_key", "market"):
+        if explicit.get(field):
+            choices.add(str(explicit[field]).strip().lower())
+    query = explicit.get("query")
+    symbols = [explicit.get("symbol")]
+    if isinstance(query, dict):
+        symbols.append(query.get("symbol"))
+    for symbol in symbols:
+        if symbol:
+            market = symbol_market(symbol)
+            if market in {"US", "HK"}:
+                choices.add(market.lower())
+    if len(choices) > 1:
+        return fixed, "market selectors in this tool call conflict"
+    if not choices and len(markets) > 1:
+        return fixed, "specify the market for this dual-market read, including cursor continuation"
+    target = next(iter(choices), primary)
+    if target not in markets:
+        return fixed, "requested market is outside the trusted Bot read scope"
+    if len(markets) > 1:
+        runtime_root = resolve_runtime_root(repo_root=repo_base()).runtime_root.resolve()
+        if primary_path.parent.resolve() != runtime_root:
+            return fixed, "channel config and runtime data roots differ"
+    if target != primary:
+        target_path = runtime_root / DEFAULT_CONFIGS[target]
+    else:
+        target_path = primary_path
+    from src.application.bot.config_scope import BotConfigScopeError, resolve_trusted_config_scope
+    try:
+        actual, canonical, _authority = resolve_trusted_config_scope(config_key=None, config_path=str(target_path))
+    except (BotConfigScopeError, OSError, RuntimeError, ValueError):
+        return fixed, "selected market config is unavailable or stale"
+    if actual != target:
+        return fixed, "selected market config identity differs from the requested market"
+    return {**fixed, "config_key": target, "config_path": canonical}, None
 
 
 def call_read_tool(

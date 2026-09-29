@@ -25,8 +25,8 @@ def _activation_environment(
     source = tmp_path / "config.yaml"
     doc = {
         "accounts": {
-            "lx": {"type": "futu", "futu_account_id": "12345678"},
-            "sy": {"type": "external_holdings", "holdings_account": "sy"},
+            "lx": {"type": "futu", "futu_account_id": "12345678", "futu": {"host": "127.0.0.1", "port": 11111}},
+            "sy": {"type": "futu", "futu_account_id": "REAL_87654321", "futu": {"host": "127.0.0.1", "port": 11112}},
         },
         "markets": {
             "us": {
