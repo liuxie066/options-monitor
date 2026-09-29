@@ -313,6 +313,7 @@ def _broker_assigned_stock_sale_match(
     *,
     assigned_stock_events: list[dict[str, Any]] | None = None,
     assigned_stock_report: dict[str, Any] | None = None,
+    assignment_trade_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     account = normalize_account(getattr(deal, "internal_account", None))
     broker = normalize_broker(getattr(deal, "broker", None))
@@ -512,8 +513,25 @@ def _broker_assigned_stock_sale_match(
 
     viable: list[dict[str, Any]] = []
     candidate_summaries: list[dict[str, Any]] = []
+    assignment_events = {
+        str(row.get("event_id") or ""): row
+        for row in (
+            assignment_trade_events
+            if assignment_trade_events is not None
+            else repo.list_trade_events()
+        )
+        if isinstance(row, dict)
+    }
     for lot in identity_candidates:
         reject_reasons: list[str] = []
+        source_event = assignment_events.get(
+            str(lot.get("source_assignment_event_id") or ""), {}
+        )
+        source_raw = source_event.get("raw_payload") or {}
+        source_settlement = source_raw.get("stock_settlement") or {}
+        source_physical = str(source_settlement.get("futu_account_id") or "").strip()
+        if source_physical and source_physical != physical_account:
+            reject_reasons.append("source_physical_account_mismatch")
         if int(lot.get("shares_remaining") or 0) < int(shares or 0):
             reject_reasons.append("insufficient_shares_remaining")
         try:
@@ -538,10 +556,21 @@ def _broker_assigned_stock_sale_match(
     # Selling the complete inventory determines every allocation; partial sales still require a unique lot.
     if (not viable and len(identity_candidates) > 1
             and sum(int(row["shares_remaining"]) for row in identity_candidates) == shares
-            and all(0 < int(row.get("opened_at_ms") or 0) <= trade_time_ms for row in identity_candidates)):
+            and all(0 < int(row.get("opened_at_ms") or 0) <= trade_time_ms for row in identity_candidates)
+            and all("source_physical_account_mismatch" not in item["reject_reasons"]
+                    for item in candidate_summaries)):
         allocation_lots = sorted(identity_candidates, key=lambda row: row["stock_lot_id"])
         viable = [allocation_lots[0]]
     if not viable:
+        if candidate_summaries and all(
+            "source_physical_account_mismatch" in item["reject_reasons"]
+            for item in candidate_summaries
+        ):
+            raise BrokerAssignedStockSaleMatchError(
+                "physical_account_unverified",
+                "assigned stock lot belongs to another physical Futu account",
+                diagnostics=diagnostics,
+            )
         raise BrokerAssignedStockSaleMatchError(
             "no_safe_match",
             "assigned stock sale has candidate lots but no safe unique match",
@@ -1220,7 +1249,7 @@ def _execute_assigned_stock_sale(
         account=account,
         target_lot_id=lot_id,
         trade_time_ms=trade_time_ms,
-        prepare_sale=lambda report, events: _prepare_sale(
+        prepare_sale=lambda report, events, _trade_events: _prepare_sale(
             report,
             events,
             project_after=False,
@@ -1365,12 +1394,14 @@ def _execute_broker_assigned_stock_sale_locked(
     def _prepare_in_transaction(
         before_report: dict[str, Any],
         existing_events: list[dict[str, Any]],
+        trade_events: list[dict[str, Any]],
     ) -> dict[str, Any]:
         match = _broker_assigned_stock_sale_match(
             repo,
             deal,
             assigned_stock_events=existing_events,
             assigned_stock_report=before_report,
+            assignment_trade_events=trade_events,
         )
         return _prepared_payload(match, project_after=False)
 

@@ -717,6 +717,8 @@ def reconcile_lifecycle_evidence(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: tuple[Any, ...] = (),
     notification_transition_type: str | None = None,
+    notification_status: str = "pending",
+    broker_ownership_validator: Any = None,
     refresh_read_model: bool = True,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
@@ -965,6 +967,8 @@ def reconcile_lifecycle_evidence(
                 notification_transition_type=(
                     notification_transition_type
                 ),
+                notification_status=notification_status,
+                broker_ownership_validator=broker_ownership_validator,
                 attempt_evidence=attempt_evidence,
                 attempt_audit=attempt_audit,
                 wheel_start_enabled=wheel_start_enabled,
@@ -1104,6 +1108,8 @@ def reconcile_lifecycle_evidence(
         ),
         correction_void_events=list(correction_void_events),
         notification_transition_type=notification_transition_type,
+        notification_status=notification_status,
+        broker_ownership_validator=broker_ownership_validator,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,

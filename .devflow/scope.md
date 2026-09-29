@@ -1,84 +1,91 @@
-goal: "Wheel 已开启时，身份与交割验证通过的外部 Combo 卖腿指派自动进入 Wheel；Wheel 内部指派仍待决策"
+goal: "修复富途期权被指派时股票成交与零价期权腿乱序匹配、同合约多 lot 漏接及旧案例误匹配，并提供受控历史 skipped 恢复"
 non_goals:
-  - "自动交易、通知发送、生产数据写入或升级"
-  - "增加 Wheel 开关或启用 CC+LP 开仓扫描"
-  - "自动回填启用前或旧版本漏建的历史分支"
-scope: "SP+LC funding Put 与 CC+LP short Call 的外部指派、组合身份证明及 Wheel 生命周期接入"
+  - "不把价内状态或人工通知文本当作实际指派证明"
+  - "不新建提前指派候选池表、平行账本或通用重放框架"
+  - "不改写生产账本、不发送真实通知、不停止服务、不提交或交付源码、不发布或升级"
+scope: "本地 trades lifecycle/resolver/intake/Inbox、既有 ledger writer 合同、相关 CLI 受控恢复及测试和 canonical 设计文档"
 success_signals:
-  - "S1: SP+LC 精确身份和真实接货成立时只创建一个 active Wheel Call 分支，长 Call 独立"
-  - "S2: CC+LP 精确身份和真实交股成立时只创建一个 active Wheel Put 分支，长 Put 独立"
-  - "S3: Wheel 内部指派仅转换父分支并创建 pending_decision 子分支，不重复 bootstrap"
-  - "S4: 身份、交割、账户、市场、历史窗口、void、覆盖或数量冲突时不误建；原因可审阅"
-  - "S5: 重放与事务失败不重复或半写；分支可见与候选可推荐分别验证"
+  - "S1: 77.5P 三个 500 股 lot 匹配一笔 1500 股成交，75P 既有结果保持幂等"
+  - "S2: 当日 80P 不被三月同价旧终态争抢，成交时间与 writer 冻结截止一致"
+  - "S3: 到期与提前指派均支持股票先到和期权先到，不以价内为硬门槛；唯一证据后才产生一次经济效果与 Outbox"
+  - "S4: 普通已指派股票卖出与期权交收双候选待核实，不因分支顺序误消费"
+  - "S5: 已 handled/skipped/not_option_deal 的精确 broker 成交可预览、审计和安全恢复，重复及崩溃重试不重复记账或通知"
 authorized_slices:
-  - slice: "组合身份与结构证明"
-    design_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
-    success_signal: ["S1", "S2", "S4"]
-    depends_on: []
-  - slice: "外部指派接入与生命周期验收"
-    design_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
-    success_signal: ["S1", "S2", "S3", "S4", "S5"]
-    depends_on: ["组合身份与结构证明"]
+  - {slice: "matching", design_doc_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md#股票成交先到与提前指派配对2026-09-29-设计", success_signal: "S1,S2,S3", depends_on: []}
+  - {slice: "stock-ownership", design_doc_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md#股票成交先到与提前指派配对2026-09-29-设计", success_signal: "S4", depends_on: ["matching"]}
+  - {slice: "skipped-recovery", design_doc_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md#股票成交先到与提前指派配对2026-09-29-设计", success_signal: "S5", depends_on: ["matching", "stock-ownership"]}
 slice_checkpoints:
-  - {slice: "组合身份与结构证明", diff_fingerprint: "sha256:6bf2acf9fd8e0251d82e997ab56bd2167b13fbc592bf4748c82c1bfce4123ce1", validation: "tests/test_combo_membership.py in 82-pass target suite", done: true}
-  - {slice: "外部指派接入与生命周期验收", diff_fingerprint: "sha256:b9932aac494d4d293f6826dd1cc014a30861c556095afbfd00e62d6e83caedf9", validation: "199 focused and adjacent tests passed; ruff, diff check and guardrails passed; review 1 void regression repaired", done: true}
-  - {slice: "CC+LP lifecycle allocation 入口补测", diff_fingerprint: "sha256:2ecbcdf9f87c7069eb0a6bf7ffd34f7546fce39eaf93e07e736a923e972dcf13", validation: "79 touched-file tests passed; stale observation rejected without duplicate Wheel branch", done: true}
-  - {slice: "Astra Review F1-F3 返工", diff_fingerprint: "sha256:47861042efa18683f9ede9cc2374f5a45d2c1b0e5a8207ba3fa331e5e5d3dfde+ab76a8e129f2e8644acdfd4d3711902c6d5c4d49af318f5613d7065886204935", validation: "red-before-green: 5 failed then 5 passed; 148 touched tests and 168 adjacent tests passed; ruff, diff check, guardrails passed", done: true}
-  - {slice: "Review 4 F4 生命周期更正", diff_fingerprint: "sha256:8cd2d8d3550e61e8e02395559ba56f3f795f3667db8faa5c728b28a89bed0ecc+f85efd2ae60c28bcdf85359f619824a59d84bd01145130b09e9bdb5bbd7f20b7", validation: "real lifecycle writer test red then green; 244 related tests passed; ruff, diff check, guardrails passed", done: true}
+  - {slice: "matching", diff_fingerprint: "170bcfe11dc4c0bcd348ffbef5aaa24d973ec62a31d5352f9a512952d7d7b3ef", validation: "historical checkpoint 259 passed; final 9-file 440 passed covers competing sources, partial settlement and idempotent replay", done: true}
+  - {slice: "stock-ownership", diff_fingerprint: "d5c8d9402fffd47fa08b7961760315eaa0b77bcaaf1a8b973d75ee1f89bab500", validation: "historical checkpoint 259 passed; final 9-file 440 passed covers transaction-time dual candidate exclusion", done: true}
+  - {slice: "skipped-recovery", diff_fingerprint: "a73a00dc704de95e825269251c54e69b6fca8b047bdd6c3cf7b31bccb29d7491", validation: "historical checkpoint 259 passed; final 9-file 440 passed covers ordinary claim/resume isolation", done: true}
 user_confirmation:
-  - "Wheel 已开启时，就代表身份和交割均验证通过的外部 Combo 卖腿指派可以自动进入 Wheel"
-  - "完成后续环节；选择完整链路 Save Design → Improve Design → Impl → Review"
-  - "本次同时实现 SP+LC 与 CC+LP"
-prd_doc: "docs/WHEEL_STRATEGY_PRD.md"
-prd_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
-design_doc: "docs/WHEEL_STRATEGY_PRD.md"
-design_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
-implementation_workspace: "/Users/<user>/.codex/worktrees/combo-wheel-assignment/options-monitor"
-review_base: "b199beab282a0b1460e769213703945dec1c2e6c"
-authorization_diffs:
-  - {when: "2026-09-30T00:21:57+0800", what: "Devflow 简单模式补齐 CC+LP lifecycle allocation 业务入口端到端测试", ref: "本次用户明确请求"}
-  - {when: "2026-09-30", what: "Devflow 修复独立 Astra Review F1-F3，随后重跑 DeepReview", ref: "本轮用户明确请求"}
+  - "用devflow 修复问题，先定位问题的原因，再确定验收方案，最后实现方案"
+  - "先读整个期权交易处理+股票交易处理的代码，看看两者是不是有冲突和逻辑矛盾"
+  - "好的，认可你的方案"
+  - "选 full"
+prd_doc: "not-applicable"
+prd_doc_ref: "not-applicable"
+design_doc: "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+design_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md sha256:c2a4ebf33cceed1a4653b3725849b07cb55192730fbeb233c3668a85c82b9590"
+implementation_workspace: "<task-worktree>/options-monitor"
+review_base: "origin/main@975351a4e50781aa5dd3483d3805e4270705e839"
+authorization_diffs: []
 workflow_version: 2
 mode: workflow
-workflow_path: simple
-node_sequence: ["Save Design", "Improve Design", "Impl", "Review"]
-current_node: "Review"
-internal_step: null
+workflow_path: full
+node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
+current_node: Review
+internal_step: Astra findings repaired and second Deepreview complete
 status: completed
-next_action: "本轮源码修复与 Review 完成；交付阶段仅在用户另行明确要求后执行"
-approved_scope_ref: "authorization_diffs latest entry and user_confirmation above"
-path_approval_ref: "simple-mode follow-up request in authorization_diffs"
+next_action: "本地修复和 440 项相关测试已完成；远端生产恢复须重新核证并单独授权"
+approved_scope_ref: "本对话用户消息：用devflow 修复问题；好的，认可你的方案"
+path_approval_ref: "本对话用户消息：选 full"
 implementation_baseline:
-  design_doc: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
-  implementation_workspace: "/Users/<user>/.codex/worktrees/combo-wheel-assignment/options-monitor"
-  review_base: "b199beab282a0b1460e769213703945dec1c2e6c"
-  head: "b199beab282a0b1460e769213703945dec1c2e6c"
-  git_status: [" M .devflow/scope.md", " M docs/WHEEL_STRATEGY_PRD.md", " M src/application/ledger/wheel_trade_companions.py", " M tests/test_wheel_assignment_recovery.py", " M tests/test_wheel_workflows.py"]
+  design_doc: "docs/FUTU_TRADE_HOLDINGS_SYNC.md sha256:cbf667f0d33499370a21eb4ba2b45a3b4cb6840886a20e23761e2917d1daa43d"
+  implementation_workspace: "<task-worktree>/options-monitor"
+  review_base: "origin/main@975351a4e50781aa5dd3483d3805e4270705e839"
+  head: "975351a4e50781aa5dd3483d3805e4270705e839"
+  git_status: " M .devflow/scope.md; M docs/FUTU_TRADE_HOLDINGS_SYNC.md"
   staged: []
   unstaged:
-    - {path: ".devflow/scope.md", hash: "107d5503a19fb6fc27669def03b1d220ddcada03f491971e43690d1bb5afa13f", size: 3537}
-    - {path: "docs/WHEEL_STRATEGY_PRD.md", hash: "f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5", size: 116821}
-    - {path: "src/application/ledger/wheel_trade_companions.py", hash: "f11c7a267a3377d63a5ef7034e6041d3700268fe0eee7b14528ab2e3725484f8", size: 32424}
-    - {path: "tests/test_wheel_assignment_recovery.py", hash: "fdb80d479ef171039f723c6cc6648de9813bb89eba3777c24f9647695c9a9d74", size: 18903}
-    - {path: "tests/test_wheel_workflows.py", hash: "7a25a08cdbcf6370f8e8ad9f8c72e4c316b4c60d02be5727b907a0c3716b5416", size: 48642}
+    - {path: ".devflow/scope.md", sha256: "3018fb56dcc280ebadd048916c7041459df3cd0022d5b054a5f2f07bf26b4fd9", size: 3989}
+    - {path: "docs/FUTU_TRADE_HOLDINGS_SYNC.md", sha256: "cbf667f0d33499370a21eb4ba2b45a3b4cb6840886a20e23761e2917d1daa43d", size: 143588}
   untracked: []
 inventory:
-  - {path: "docs/WHEEL_STRATEGY_PRD.md", status: modified, hash: "f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5", size: 116821, type: file, mode: "100644", classification: design, evidence_ref: "design_ref"}
-  - {path: "src/application/ledger/combo_membership.py", status: modified, hash: "47861042efa18683f9ede9cc2374f5a45d2c1b0e5a8207ba3fa331e5e5d3dfde", size: 32486, type: file, mode: "100644", classification: implementation, evidence_ref: "F2/F3 tests passed"}
-  - {path: "src/application/ledger/wheel_trade_companions.py", status: modified, hash: "8cd2d8d3550e61e8e02395559ba56f3f795f3667db8faa5c728b28a89bed0ecc", size: 35539, type: file, mode: "100644", classification: implementation, evidence_ref: "F1/F4 tests passed"}
-  - {path: "src/application/ledger/writer_lifecycle_allocation.py", status: modified, hash: "f85efd2ae60c28bcdf85359f619824a59d84bd01145130b09e9bdb5bbd7f20b7", size: 34316, type: file, mode: "100644", classification: implementation, evidence_ref: "F4 lifecycle correction test passed"}
-  - {path: "tests/test_combo_membership.py", status: modified, hash: "9d9f14ae905d01d67933d12864bee2f22adf1dec4248d03723a0a514ae5bd64e", size: 13808, type: file, mode: "100644", classification: tests, evidence_ref: "red then green; 148 and 168 passed"}
-  - {path: "tests/test_wheel_assignment_companions.py", status: modified, hash: "dccb1bacbbc6aaac136375cbd3df65b990f135f352402fffa4ffda41ed48279f", size: 35620, type: file, mode: "100644", classification: tests, evidence_ref: "F4 red then green; 244 passed"}
-  - {path: "tests/test_settlement_observation.py", status: modified, hash: "86884715848eae28dbf6318ed07ec6ac5305a933c41ce272934d0e0ad0634ae4", size: 125544, type: file, mode: "100644", classification: tests, evidence_ref: "79 touched-file tests passed"}
-  - {path: "tests/test_wheel_assignment_recovery.py", status: modified, hash: "5dee8619fb888ca61c6b7675114b32e09120f09c486cc387beb3d2885dbcdbd2", size: 19570, type: file, mode: "100644", classification: tests, evidence_ref: "real writer invalid pair tests passed"}
-  - {path: "tests/test_wheel_workflows.py", status: modified, hash: "7a25a08cdbcf6370f8e8ad9f8c72e4c316b4c60d02be5727b907a0c3716b5416", size: 48642, type: file, mode: "100644", classification: tests, evidence_ref: "199 passed"}
-  - {path: ".devflow/scope.md", status: modified, hash: "self-referential", type: file, mode: "100644", classification: workflow, evidence_ref: "Review 5"}
-content_revision: "sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+  - {path: ".devflow/scope.md", status: "M", hash: "self-referential", size: 0, type: "scope", mode: "100644", classification: "planned", evidence_ref: "process contract; self-hash cannot be embedded"}
+  - {path: "docs/FUTU_TRADE_HOLDINGS_SYNC.md", status: "M", hash: "c2a4ebf33cceed1a4653b3725849b07cb55192730fbeb233c3668a85c82b9590", size: 144428, type: "design", mode: "100644", classification: "planned", evidence_ref: "design review and remote readback"}
+  - {path: "src/application/ledger/commands.py", status: "M", hash: "a0069e33f0f3e627a00fe5d6e005e4b6becdfa2ac9fb647120fa513ec23d9226", size: 89624, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/ledger/writer_lifecycle_allocation.py", status: "M", hash: "e3b006d433b2ccfa923d4d905b0b2be6a4d0641e9e1e013d63d6fd980d091f80", size: 35544, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff; Deepreview resolved P1"}
+  - {path: "src/application/ledger/writer_lifecycle_evidence.py", status: "M", hash: "499f07df06d501017f24e445d23eabd6204fd1e52734b60c9c529612b995818d", size: 74830, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff; Deepreview resolved P1"}
+  - {path: "src/application/positions/workflows.py", status: "M", hash: "885c081132bac6b6a14a650e3743b79889aff24d3cd93ef4301c47719e082683", size: 56081, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/trades/auto_intake.py", status: "M", hash: "dc6bb78bf5c86e1659478530d16c858a19537e359682b39a204b330e2c3d82e6", size: 170213, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/trades/inbox.py", status: "M", hash: "7d182b62e68c7d217f2efaa8cf2dd414f36162f84e07044d7c9c102a0236ef26", size: 170148, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/trades/lifecycle.py", status: "M", hash: "a4716c2409562a0feb8812d0d33330ba3836ac64598aa3f6e84586072ee80a32", size: 72909, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/trades/lifecycle_reconciliation.py", status: "M", hash: "c1b603a87204c8a9686fdf1dd91455e3c3aca24b4c15cf59bcf20cbb589617d7", size: 60099, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/application/trades/resolver.py", status: "M", hash: "1bb131a8b3776add3edec7f6912e92d77735a538806d6d0570ee6b4e0deda41e", size: 38806, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "src/interfaces/cli/run_ops.py", status: "M", hash: "af5080b644ae3eefe22d60c98a7d737745a2189adf166c948680bbbf8fd491e1", size: 11747, type: "source", mode: "100644", classification: "planned", evidence_ref: "259 passed; Ruff"}
+  - {path: "tests/test_assigned_stock_sale_intake.py", status: "M", hash: "da22b856cc86ff94fd0ed19c8f6908a61b3ab8c50fa0a80a5a462d6d5a91b83c", size: 52062, type: "test", mode: "100644", classification: "planned", evidence_ref: "structured-source red-before-green; 259 passed"}
+  - {path: "tests/test_trades_auto_intake_cli.py", status: "M", hash: "f1b4cae838258b7bff6c7e32e56ffc048b0db507a75af21c8aa03c3971fb351c", size: 84242, type: "test", mode: "100644", classification: "planned", evidence_ref: "259 passed"}
+  - {path: "tests/test_trades_resolver_close.py", status: "M", hash: "fd2f009c4362474d8bf912b22f6b331e6e41736ab1fdd31b63f2ff9816332a2e", size: 84602, type: "test", mode: "100644", classification: "planned", evidence_ref: "259 passed"}
+content_revision: "sha256:c2a4ebf33cceed1a4653b3725849b07cb55192730fbeb233c3668a85c82b9590"
 planreview_round: 2
-deepreview_round: 5
+deepreview_round: 2
 in_flight: []
-evidence_paths: ["docs/WHEEL_STRATEGY_PRD.md", "docs/reviews/design-panel-20260929-234005.md", "docs/reviews/plan-review-20260929-234112.md", "docs/reviews/plan-review-20260929-234330.md", "docs/reviews/code-review-20260930-000312.md", "docs/reviews/code-review-20260930-000637.md", "docs/reviews/code-review-20260930-001658.md", "docs/reviews/code-review-20260930-002446.md", "docs/reviews/code-review-20260930-003312.md", "docs/reviews/code-review-20260930-004658.md"]
+evidence_paths:
+  - "docs/reviews/plan-review-20260929-215140.md"
+  - "docs/reviews/plan-review-20260929-215443.md"
+  - "docs/reviews/code-review-20260929-232446.md"
+  - "docs/reviews/code-review-20260929-233845.md"
+  - "docs/reviews/code-review-20260930-003122.md"
+  - "Improve Design Panel: four native-subagent fallback reviews of initial sha256:34197151e920171dfa6511bd15346a2c81cf967cf523d2dd69899a53c81b527c; reviewer_model unknown; cross-family independence unverified"
 blocking_findings: []
+resolved_findings:
+  - {item: "结构化 Futu 成交在 stock-sale 与 lifecycle writer 的排他检查中使用不同 source key", severity: "P1", evidence: "新增反例先红后绿；docs/reviews/code-review-20260929-232446.md", resolution: "两种 writer 共用 futu_compatibility_source_key"}
+  - {item: "两个股票来源竞争时股票重试仍可落账", severity: "P1", evidence: "docs/reviews/code-review-20260929-233845.md；Inbox 重试和直接 writer 回归先红后绿", resolution: "事务快照核对未消费的股票来源，已消费来源不妨碍部分交收和幂等读回"}
+  - {item: "期权后到未重查已指派股票卖出候选", severity: "P1", evidence: "docs/reviews/code-review-20260929-233845.md；股票先到后补库存的反例先红后绿", resolution: "最终 ledger 事务调用 trades 所有权校验，双候选拒绝落账"}
+  - {item: "普通重放领取恢复专属 pending Inbox", severity: "P2", evidence: "docs/reviews/code-review-20260929-233845.md；push/backfill/CLI 回归先红后绿", resolution: "claim 和普通 resume 依据恢复标记隔离，只允许显式恢复领取"}
 residual_risks:
-  - {item: "CC+LP post-open adoption has no controlled writer", classification: "assigned-to-later-work-unit", owner: "Combo reconciliation", destination: "separate controlled adoption design"}
-  - {item: "historical CC+LP missing branches remain unrecovered", classification: "assigned-to-later-work-unit", owner: "Wheel recovery", destination: "separate explicit recovery design"}
+  - {item: "富途结构化股票成交缺少已验证的指派因果标记", classification: "needs-new-issue-or-user-decision", owner: "交易录入操作者", destination: "双归属及不完整来源保持人工核实"}
+  - {item: "目标远端恢复需重新核证并获生产写入授权", classification: "assigned-to-later-work-unit", owner: "目标环境操作者", destination: "本地研发通过后单独安排受控远端恢复"}
+  - {item: "旧手工指派 lot 无物理账户证据，既有股票卖出路径仍按内部账户处理", classification: "needs-new-issue-or-user-decision", owner: "账本/交易录入负责人", destination: "增加手工指派物理账户来源或单独复核旧 lot"}
+  - {item: "本地缓存 origin/main 已前进至 569c2fe6，远端 DNS 暂不可用，包含同一设计文档的改动", classification: "assigned-to-later-work-unit", owner: "交付操作者", destination: "交付授权时检查最新远端 main、设计文档重叠与本次完整 diff"}

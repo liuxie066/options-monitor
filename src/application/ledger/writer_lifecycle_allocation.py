@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+from src.application.ledger.external_event_key import futu_compatibility_source_key
 
 from .writer_common import (
     Any,
@@ -65,6 +66,8 @@ def apply_lifecycle_allocation_atomically(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: Sequence[Any] = (),
     notification_transition_type: str | None = None,
+    notification_status: str = "pending",
+    broker_ownership_validator: Any = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
@@ -408,6 +411,25 @@ def apply_lifecycle_allocation_atomically(
                     "clearing_date": stock.get("clearing_date"),
                 },
             )
+            if stock_source_key and any(
+                futu_compatibility_source_key(
+                    account=row.get("account"),
+                    futu_account_id=row.get("futu_account_id"),
+                    source_deal_id=row.get("source_deal_id"),
+                    execution_input=row.get("execution_input"),
+                ) == stock_source_key
+                for row in sqlite_repo.list_assigned_stock_events(conn=conn)
+            ):
+                raise ValueError("broker_stock_source_already_consumed")
+            if (
+                str(evidence_payload.get("source_type") or "") == "broker_settlement_pair"
+                and not existing_evidence_allocations
+            ):
+                if not callable(broker_ownership_validator):
+                    raise ValueError("broker_ownership_validation_required")
+                broker_ownership_validator(
+                    sqlite_repo, conn=conn, case=lifecycle_case, evidence=evidence_payload,
+                )
         if terminal_type == "close" and requires_broker_claims:
             broker_close = (
                 dict(evidence_payload.get("broker_close") or {})
@@ -734,6 +756,7 @@ def apply_lifecycle_allocation_atomically(
                     ),
                 ),
             },
+            status=notification_status,
         )
         notification_audit_codes = list(
             current_summary.get("notification_audit_codes") or []

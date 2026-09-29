@@ -709,6 +709,147 @@ date cash flow、交易日历和合约元数据的查询输入、返回码、覆
 payload hash。任一来源不完整、日历 hash 变化、零价锚点无法在历史成交中
 唯一复核、source claim 不匹配或数量超出冻结余量，统一进入人工复核。
 
+### 股票成交先到与提前指派配对（2026-09-29 设计）
+
+目标：修复同合约多 lot 的股票交收成交被逐 lot 数量门槛漏接、旧 lifecycle case
+跨期争抢股票成交，以及普通股票卖出与期权交收分支的归属冲突。成功信号：
+
+- 2026-09-29 美团 3690.HK 的 77.5P 三张（各一张、乘数 500）可由一笔
+  1500 股、77.5 港元的富途买入成交匹配；80P 一张的当日案例不被
+  2026-03-30 同价旧终态案例阻塞；75P 已完成的处理保持幂等。
+- 到期及未到期的股票先到、期权先到都只在完整且唯一的 broker 证据配对后
+  产生一次 assignment/exercise 与对应 Outbox 意图。提前指派不以价内为硬门槛；
+  到期日价内只提高观察优先级，不能证明实际指派。
+- 普通股票成交不因恰好等于行权价和数量而被预先写为交收；若一笔卖出同时
+  可归属已有 assigned-stock lot 与期权交收，保持 unresolved，待人工核实。
+- 旧 `handled/skipped/not_option_deal` 股票成交可按精确 broker source、原始
+  payload hash 和操作人受控预览及恢复；重复恢复不产生第二次经济效果。
+
+非目标：解析富途人工通知文本、以行情预测实际指派、新增候选池表或生命周期
+状态、自动改写生产账本、真实发送通知、发布或升级。此处的远端成交与案例是
+2026-09-29 诊断快照；执行恢复前须重新核对远端 broker、Inbox、ledger 和
+通知 Outbox，且生产写入另需明确授权。`7973` 通知账户尾号尚未独立映射到
+物理 Futu account ID，不据此代替 source 身份。
+
+当前事实与约束：富途结构化期权和股票成交已经进入 Inbox。77.5P 的股票
+成交 `8819493529739285424` 因 1500 股大于每个 500 股 lot，在 lifecycle
+admission 被当成 `not_option_deal`，随后以 `skipped` 写入 state 并标记 Inbox
+`handled`；普通 `--inbox-id` 无法重领。80P 的股票成交
+`3940217024375863831` 同时匹配当日待处理案例和三月旧终态案例，返回
+`ambiguous_lifecycle_case_match`。intake 的旧终态“截止后任意股票成交”兜底
+与 writer 拒绝 `stock_settlement_after_deadline` 冲突。已有单 lot 提前指派
+双顺序测试通过，故不重建提前指派状态机。远端只读核对表明 77.5P
+零价期权证据是一条 3 张成交，80P Inbox 行的 `receipt_kind` 为
+`manual_required`，可使用现有 `--inbox-id` 手工重领入口；两者都须在
+实际恢复前重新读回确认。
+
+复用与归属（检索范围：`src/application/trades/{normalizer,resolver,lifecycle,
+intake,inbox,auto_intake}.py`、`src/application/positions/workflows.py`、
+`src/application/ledger/writer_lifecycle_support.py` 和本节相邻合同；检索词
+`stock_settlement`、`assigned_stock_sale`、`option_zero_price_close`、
+`settlement_deadline`、`not_option_deal`；未发现可直接重领已处理 skipped 的
+公开恢复入口）：
+
+| 本次概念或改动 | owner 裁定 |
+| --- | --- |
+| 原始成交、broker deal key、Inbox payload 与 claim | 复用 `trades/inbox.py`、`trades/intake.py`；不新建队列或 source ID |
+| 未归属股票证据、期权零价锚点、case 唯一配对 | 复用 `trades/lifecycle.py` 的 `stock_settlement_leg`、`option_zero_price_close` 和 v2 case |
+| 同合约多 lot 总量与 allocation | 复用 `accept_option_close_evidence` 的 `target_contracts_by_lot`、source claim 及 ledger writer；admission 按同合约合计判断，写入前校验一条零价锚点和目标 manifest 数量守恒 |
+| 已指派股票卖出 | 复用 `positions/workflows.py` 和 `resolver.py` 的 `_resolve_broker_assigned_stock_sale` |
+| 交收截止与可写案例 | 复用冻结的 `lifecycle_timing_policy.v1` 及 writer 校验；intake 不另定义宽松截止 |
+| 历史 skipped 精确恢复 | 在现有 `run trade-intake --inbox-id` 增加显式恢复选择；原因是通用 resume 只接受 pending/manual_required |
+| 历史通知抑制 | 复用 lifecycle Outbox 的 `suppressed` 状态和 Inbox 的历史回执抑制；不增加另一套投递状态 |
+
+处理顺序：
+
+1. 归一化并核对 account/Futu account/source key、broker 成交时间及幂等状态。
+   对正股成交，从现有受支持的实物交割股票期权 lot（包括可提前行权的
+   short assignment 与 long exercise）或 lifecycle case 按需查候选；
+   不预先扫描行情建表。无 case 时按同账户、同完整合约的 lot 合计可用股数，
+   物理账户无法由 lot 证明或多个合约组均可能命中时只留未归属线索。
+   股票先到只持久化未归属
+   `stock_settlement_leg`，不产生 terminal event、assigned-stock lot 或
+   `resolution_confirmed`。没有可信 option anchor 时，数量及执行价相符仍
+   只是线索。到期日前的价外合约不能仅因行情被排除。
+2. 期权零价平仓建立或读取同一完整合约的 v2 case 和 option anchor，目标
+   manifest 可含多个 lot；到达次序不改变
+   source claim 或 lot allocation。只在 account、物理 Futu account、标的、
+   期权方向/仓位方向、到期日、行权价、成交方向、乘数与 broker 成交时间
+   窗口一致，且 case、单条 option anchor、股票 source 三者的配对唯一时写入。
+   本次按远端真实形状处理一条 3 张 option anchor 对三个 lot 和一笔 1500 股
+   股票成交；多个 option anchor 或股票 source 暂不自动拼单，待人工核实。
+   逐笔循环不能先写一个再以最后一个结果代表整组。`received_at` 晚于截止
+   可以；股票成交本身晚于冻结截止不能靠旧
+   final case 兜底。截止后的观察规则不放宽 writer 的成交时间校验。
+3. 股票卖出先做无写入的 assigned-stock-sale 与 lifecycle 双候选检查。
+   assigned-stock-sale 候选必须核对物理 Futu account：从
+   `source_assignment_event_id` 回查原指派事件；有 broker 物理账户记录时
+   必须与股票成交一致。既有手工指派事件没有该字段，保留原有股票卖出
+   路径，并把这类旧 lot 的跨物理账户归属列为待补来源证据的风险。
+   两者均可解释、任一身份/数量不完整或多案例
+   竞争时，返回可见的 unresolved，不让分支顺序决定归属；没有冲突才走
+   现有 writer。正股买入同样需唯一的期权证据。正价正常期权平仓仍走原路径。
+4. assigned-stock-sale 和 lifecycle 两种 writer 在最终同一 ledger 锁/事务
+   中各自重查另一类候选及 canonical broker source 的消费归属；预览检查
+   不能代替提交时排他门。writer 同时核验完整合约、冻结时间、目标 manifest、
+   source claim 和 allocation，再生成终态及 Outbox。重复、崩溃读回和晚到证据沿已有幂等
+   机制收敛；证据冲突失败关闭，不猜测普通交易还是指派。
+
+历史恢复只针对已保存且 `handled/skipped/not_option_deal`，或带
+`manual_required` 的 `handled/unresolved/ambiguous_lifecycle_case_match` 的精确股票 Inbox 行：
+`--recover-skipped --inbox-id` 默认 `--mode dry-run` 展示原始 broker source、
+Inbox 经济 hash、原 state 条目、账户 ledger 证据行数和外部副作用抑制策略；
+预览 hash 绑定原 Inbox 行、state 文件及账户内 lot、交易、case、evidence、
+source claim、allocation、通知 Outbox 的读回快照。富途 source 可是
+`futu:<account>:<physical>:<deal>` 或 `execution:v1:<hash>`；后一种仍须由
+保存的可信 source 与当前账户映射共同证明 account 和物理账户。已有回执
+或尚未尝试的 PM 刷新意图时拒绝自动恢复；已尝试的历史 PM 意图保留，
+本次不重新请求。
+`--mode apply` 必须显式确认、操作人和预览 hash，且只在交易 intake writer
+停止、同一 writer lock 下按原 source 重领。重领前在锁内重算预览并 CAS
+核对原 Inbox 为 skipped、经济 hash、state 原版本、候选及 Outbox 摘要均未
+改变，且该 source 未有 terminal allocation；仅此精确恢复请求可让 resolver
+越过原 `processed_deal_ids/skipped` gate，保留旧记录及审计，不普遍放宽
+duplicate。重处理由原 resolver/writer 执行，成功后更新原 state/Inbox 并
+读回。跨 Inbox/state 提交崩溃或不确定写入先
+按 source claim 和 terminal event 读回，禁止盲目重放或直接删除 skipped
+标记。历史恢复在终态写入事务内把新 lifecycle Outbox 意图持久化为
+`suppressed`，重启前读回确保无 pending 意图；普通即时回执和新增 PM 刷新
+提示也默认抑制。重领到 pending 的 Inbox 行保存 `skipped_stock` 恢复标记，
+普通自动重试和回执恢复扫描跳过它；共享 Inbox claim 与普通 resume 也拒绝
+领取该标记，仅显式 `--recover-skipped` 可继续，中断后仍须通过同一预览/操作入口继续。
+恢复交易与真实通知/PM 外部请求分别授权。
+80P 现存 `handled/unresolved/ambiguous_lifecycle_case_match` 行也经由上述
+受控预览、哈希和 writer lock 恢复。原 state 与 Inbox 必须一致，且旧行无
+已发回执；新终态通知、即时回执与 PM 刷新同样抑制。
+
+拒绝方案：价内作为指派证明（可能漏掉主动提前行权）、股票先到立即记指派
+（普通股票成交误归属）、为候选池新建表和状态机（已有 Inbox/证据 owner）、
+只从 state 删除 skipped 后重播（缺少幂等与审计）。
+
+实现切片与验收：
+
+1. `matching`：统一 intake/writer 时间与完整合约身份，按目标 manifest 总量
+   接纳无 case 的股票先到；用三 lot 1500 股、单条 3 张 option
+   anchor、多条 anchor 保持 unresolved、双股票 source 冲突、当日 80P 与三月旧案例、截止前成交晚收／
+   截止后成交、提前指派不看价内、long exercise 双顺序及重复消息验证。
+2. `stock-ownership`：无写入双候选加两条 writer 内的排他重查；用正常卖出、
+   双候选、物理 Futu account 冲突、无候选、已有指派股票多 lot 全量卖出
+   和两个连接并发竞争测试验证，依赖 `matching`。
+3. `skipped-recovery`：精确 Inbox/source/hash 的预览、受控重领、幂等读回；
+   用隔离 SQLite fixture 验证旧 skipped、80P 既有 `manual_required` 重领、
+   预览后候选/hash 漂移、writer 并发、
+   重复 apply、中断后读回，以及 lifecycle Outbox、普通回执、PM 提示均不
+   对外发送，依赖前两片。生产恢复另需授权。
+
+风险与未决事实：结构化成交没有经验证的“本笔由指派产生”标记；经济条件
+配对仍可能与普通交易相撞，因此双归属与不完整来源都需人工复核。用户认可
+“股票先留线索、期权平仓后完成唯一配对”的自动化策略；这证明证据相关，
+不等于证明券商逐笔因果，普通股票买入恰好撞上全部经济条件是残余误配风险，
+由交易录入操作者在异常对账时复核。富途人工
+通知不能作为逐笔 deal ID 的自动映射。恢复时的停写与服务路径须在目标环境
+独立核证；本设计不授权该动作。
+
 ## 通知 Outbox 与批量回执
 
 ### Combo Yield 自动归组

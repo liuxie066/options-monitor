@@ -146,6 +146,7 @@ def _resolve_broker_assigned_stock_sale(
             "missing_required_fields": "assigned_stock_sale_missing_required_fields",
             "no_safe_match": "assigned_stock_sale_no_safe_match",
             "ambiguous_match": "ambiguous_assigned_stock_sale",
+            "physical_account_unverified": "assigned_stock_sale_physical_account_unverified",
         }
         reason = reason_by_code.get(exc.code, f"assigned_stock_sale_{exc.code}")
         return _failure(
@@ -314,8 +315,10 @@ def resolve_trade_deal(
     apply_changes: bool,
     persist_trade_event_fn=None,
     retry_failed_deal: bool = False,
+    retry_skipped_deal: bool = False,
     retry_with_new_associations: bool = False,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
     execution = deal.execution_input
@@ -449,6 +452,20 @@ def resolve_trade_deal(
     can_retry_existing_deal = _state_entry_is_retryable_unresolved(state_entry) or (
         retry_failed_deal and _state_entry_is_failed(state_entry)
     ) or (
+        retry_skipped_deal
+        and state_entry is not None
+        and (
+            (state_entry[0] == "processed_deal_ids"
+             and state_entry[1].get("status") == "skipped"
+             and state_entry[1].get("reason") == "not_option_deal")
+            or (state_entry[0] == "unresolved_deal_ids"
+                and state_entry[1].get("status") == "unresolved"
+                and state_entry[1].get("reason") == "ambiguous_lifecycle_case_match")
+        )
+        and bool(economic_hash)
+        and state_entry[1].get("economic_payload_hash") == economic_hash
+        and state_entry[1].get("futu_account_id") == deal.futu_account_id
+    ) or (
         retry_with_new_associations
         and broker_deal_key(deal).startswith("execution:v1:")
         and state_entry is not None
@@ -492,11 +509,50 @@ def resolve_trade_deal(
                 ],
             },
         )
+    if deal.symbol and not deal.option_type and str(deal.side or "").lower() == "sell":
+        lifecycle_preview = resolve_lifecycle_trade_deal(
+            deal, repo=repo, apply_changes=False,
+            wheel_start_enabled=wheel_start_enabled,
+        )
+        assigned_preview = _resolve_broker_assigned_stock_sale(
+            deal, repo=repo, apply_changes=False,
+        )
+        if lifecycle_preview is not None and assigned_preview is not None:
+            return _failure(
+                status="unresolved", action=None,
+                reason="ambiguous_stock_trade_ownership", deal=deal,
+                diagnostics={
+                    "lifecycle_reason": lifecycle_preview.reason,
+                    "assigned_stock_sale_reason": assigned_preview.reason,
+                },
+            )
+        if assigned_preview is not None:
+            if not apply_changes or assigned_preview.status != "dry_run":
+                return assigned_preview
+            return _resolve_broker_assigned_stock_sale(
+                deal, repo=repo, apply_changes=True,
+            )
+        if lifecycle_preview is not None:
+            if not apply_changes:
+                return _from_lifecycle_resolution(deal, lifecycle_preview)
+            lifecycle_applied = resolve_lifecycle_trade_deal(
+                deal,
+                repo=repo, apply_changes=True,
+                wheel_start_enabled=wheel_start_enabled,
+                notification_status=notification_status,
+            )
+            if lifecycle_applied is None:
+                return _failure(
+                    status="unresolved", action=None,
+                    reason="stock_trade_candidate_changed", deal=deal,
+                )
+            return _from_lifecycle_resolution(deal, lifecycle_applied)
     lifecycle_result = resolve_lifecycle_trade_deal(
         deal,
         repo=repo,
         apply_changes=apply_changes,
         wheel_start_enabled=wheel_start_enabled,
+        notification_status=notification_status,
     )
     if lifecycle_result is not None and lifecycle_result.handled:
         return _from_lifecycle_resolution(deal, lifecycle_result)
