@@ -6,9 +6,14 @@ from typing import Any, Iterable, Mapping, Sequence
 from domain.domain.combo_identity import (
     FUNDING_PUT_ROLES,
     PARTICIPATION_CALL_ROLES,
+    validate_combo_identity,
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.ledger import TradeEvent
+from domain.domain.ledger.projection import _valid_combo_pair
+from domain.domain.strategy_membership import resolve_strategy_metadata
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.queries import project_trade_event_log
 from src.application.payload_helpers import text as _group_id
 
 
@@ -153,10 +158,11 @@ def resolve_combo_group_membership(
     if len(current_account_ids) != 2 or len(bindings) != 2:
         reasons.add("combo_group_account_binding_count_invalid")
     roles = {item["role"] for item in bindings}
-    if not (
+    sp_lc_roles = (
         len(roles.intersection(FUNDING_PUT_ROLES)) == 1
         and len(roles.intersection(PARTICIPATION_CALL_ROLES)) == 1
-    ):
+    )
+    if not sp_lc_roles and roles != {"short_call", "long_put"}:
         reasons.add("combo_group_roles_invalid")
     if any(item["strategy"] != "combo_yield" for item in bindings):
         reasons.add("combo_group_strategy_invalid")
@@ -303,6 +309,7 @@ def validate_combo_group_membership(
     if not _canonical_text_list(reason_codes):
         reasons.add("combo_group_reason_codes_noncanonical")
     binding_rows: list[dict[str, Any]] = []
+    cc_lp_roles = False
     if not isinstance(bindings, list) or bindings != sorted(
         bindings,
         key=lambda binding: (
@@ -355,6 +362,9 @@ def validate_combo_group_membership(
         binding_lot_ids = [
             binding["record_id"] for binding in canonical_bindings
         ]
+        cc_lp_roles = {
+            binding.get("role") for binding in binding_rows
+        } == {"short_call", "long_put"}
         if (
             not isinstance(lot_ids, list)
             or binding_lot_ids != lot_ids
@@ -420,8 +430,11 @@ def validate_combo_group_membership(
             or len(lot_ids) != 2
             or not isinstance(bindings, list)
             or len(bindings) != 2
-            or len(funding_bindings) != 1
-            or len(participation_bindings) != 1
+            or not (
+                len(funding_bindings) == 1
+                and len(participation_bindings) == 1
+                or cc_lp_roles
+            )
             or any(
                 binding.get("strategy") != "combo_yield"
                 for binding in binding_rows
@@ -711,11 +724,150 @@ def _nonnegative_integer(value: Any) -> int | None:
     return parsed if parsed is not None and parsed >= 0 else None
 
 
+def resolve_combo_assignment_proof(
+    *,
+    assignment: TradeEvent,
+    group_id: str,
+    trade_events: Iterable[Mapping[str, Any]],
+    identities: Iterable[Mapping[str, Any]],
+) -> tuple[str | None, str | None]:
+    """Prove the pair as it existed before a short-leg assignment."""
+    instant = assignment.event_time_ms
+    if instant <= 0 or not assignment.target_lot_id:
+        return None, "combo_assignment_source_invalid"
+    rows = [dict(row) for row in trade_events]
+    prefix = [
+        row for row in rows
+        if _text(row.get("event_type"), lower=True) != "void"
+        and (_integer(row.get("event_time_ms")) or 0) < instant
+    ]
+    prefix_ids = {_text(row.get("event_id")) for row in prefix}
+    prefix.extend(
+        row for row in rows
+        if valid_void_target_event_id(row) in prefix_ids
+    )
+    try:
+        projected = project_trade_event_log(prefix)
+        membership = resolve_combo_group_membership(
+            group_id=group_id,
+            account=assignment.contract_key.account,
+            expected_symbol=assignment.contract_key.underlying_symbol,
+            trade_events=prefix,
+            projected_position_lots=projected.lots,
+        )
+    except (TypeError, ValueError):
+        return None, "combo_assignment_projection_invalid"
+    if membership.fact["status"] != "exact":
+        return None, "combo_assignment_membership_unresolved"
+
+    bindings = membership.fact["member_bindings_for_current_account"]
+    role_to_binding = {item["role"]: item for item in bindings}
+    if len(role_to_binding) != 2:
+        return None, "combo_assignment_roles_invalid"
+    if set(role_to_binding) == {"short_call", "long_put"}:
+        variant = "cc_lp"
+        put_binding = role_to_binding["long_put"]
+        call_binding = role_to_binding["short_call"]
+        short_binding = call_binding
+    else:
+        variant = "csp_lc"
+        put_binding = next((item for item in bindings if item["role"] in FUNDING_PUT_ROLES), None)
+        call_binding = next((item for item in bindings if item["role"] in PARTICIPATION_CALL_ROLES), None)
+        short_binding = put_binding
+    if put_binding is None or call_binding is None or short_binding is None:
+        return None, "combo_assignment_roles_invalid"
+    if short_binding["record_id"] != assignment.target_lot_id:
+        return None, "combo_assignment_short_leg_mismatch"
+
+    lots = {lot.lot_id: lot for lot in projected.ledger_projection.lots}
+    opens = {
+        _text(row.get("event_id")): row
+        for row in prefix
+        if _text(row.get("event_type"), lower=True) == "open"
+    }
+    leg_events: dict[str, TradeEvent] = {}
+    for label, binding in (("put", put_binding), ("call", call_binding)):
+        lot = lots.get(binding["record_id"])
+        raw_open = opens.get(binding["open_event_id"])
+        if lot is None or raw_open is None or lot.open_event_id != binding["open_event_id"]:
+            return None, "combo_assignment_open_binding_invalid"
+        try:
+            opening = TradeEvent.from_dict(raw_open)
+        except (TypeError, ValueError):
+            return None, "combo_assignment_open_binding_invalid"
+        if (
+            opening.contract_key != lot.contract_key
+            or opening.currency != lot.currency
+            or opening.multiplier != lot.multiplier
+            or opening.contracts != lot.contracts_opened
+            or opening.position_side != lot.position_side
+        ):
+            return None, "combo_assignment_open_binding_invalid"
+        leg_events[label] = opening
+    put_lot, call_lot = lots[put_binding["record_id"]], lots[call_binding["record_id"]]
+    if not _valid_combo_pair(put_lot, call_lot, kind=variant):
+        return None, "combo_assignment_structure_invalid"
+    short_open = leg_events["put" if variant == "csp_lc" else "call"]
+    if (
+        short_open.contract_key != assignment.contract_key
+        or short_open.currency != assignment.currency
+        or short_open.multiplier != assignment.multiplier
+    ):
+        return None, "combo_assignment_short_leg_mismatch"
+
+    expected_roles = (
+        (("put", frozenset({"long_put"})), ("call", frozenset({"short_call"})))
+        if variant == "cc_lp" else
+        (("put", FUNDING_PUT_ROLES), ("call", PARTICIPATION_CALL_ROLES))
+    )
+    for label, roles in expected_roles:
+        opening = leg_events[label]
+        metadata = resolve_strategy_metadata(
+            opening.raw_payload, source_id=opening.event_id,
+        )
+        if (
+            metadata.issues
+            or metadata.metadata.strategy != "combo_yield"
+            or metadata.metadata.strategy_group_id != group_id
+            or metadata.metadata.leg_role not in roles
+        ):
+            return None, "combo_assignment_open_identity_unproven"
+    if variant == "csp_lc":
+        matching = [
+            dict(item) for item in identities
+            if _group_id(item.get("group_id")) == group_id
+        ]
+        if len(matching) != 1:
+            return None, "combo_assignment_identity_missing"
+        identity = matching[0]
+        validated = validate_combo_identity(identity)
+        expected = {
+            "strategy": "combo_yield",
+            "account": assignment.contract_key.account,
+            "symbol": assignment.contract_key.underlying_symbol,
+            "funding_put_record_id": put_binding["record_id"],
+            "funding_put_open_event_id": put_binding["open_event_id"],
+            "funding_put_contract_key": leg_events["put"].contract_key.to_dict(),
+            "participation_call_record_id": call_binding["record_id"],
+            "participation_call_open_event_id": call_binding["open_event_id"],
+            "participation_call_contract_key": leg_events["call"].contract_key.to_dict(),
+            "original_contracts": put_lot.contracts_opened,
+        }
+        if (
+            validated.status != "valid"
+            or validated.identity_hash != identity.get("identity_hash")
+            or any(identity.get(key) != value for key, value in expected.items())
+        ):
+            return None, "combo_assignment_identity_mismatch"
+    return variant, None
+
+
 __all__ = [
     "COMBO_GROUP_MEMBERSHIP_SCHEMA",
     "ComboMembershipResolution",
     "ComboMembershipValidation",
     "resolve_account_combo_memberships",
+    "resolve_combo_assignment_proof",
     "resolve_combo_group_membership",
     "validate_combo_group_membership",
 ]
