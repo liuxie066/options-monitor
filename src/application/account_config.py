@@ -195,6 +195,8 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
             raise ValueError(f"account_settings.{account}.type must be one of: {', '.join(ACCOUNT_TYPES)}")
         if "holdings_account" in item:
             raise ValueError(f"account_settings.{account}.holdings_account is retired")
+        if "bitable" in item:
+            raise ValueError(f"account_settings.{account}.bitable is retired")
         normalized: dict[str, Any] = {"type": acct_type}
         market = str(item.get("market") or "").strip().lower()
         if market in {"us", "hk"}:
@@ -227,15 +229,6 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
                 futu_out["trd_env"] = trd_env
             if futu_out:
                 normalized["futu"] = futu_out
-        bitable_cfg = item.get("bitable")
-        if isinstance(bitable_cfg, dict):
-            bitable_out: dict[str, Any] = {}
-            for key in ("app_token", "table_id", "view_name"):
-                value = str(bitable_cfg.get(key) or "").strip()
-                if value:
-                    bitable_out[key] = value
-            if bitable_out:
-                normalized["bitable"] = bitable_out
         out[account] = normalized
     return out
 

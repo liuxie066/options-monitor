@@ -1233,7 +1233,7 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 - 价内、平值或缺少 spot 时进入 review；
 - option leg 与 stock settlement leg 可以异步到达；
 - assignment / exercise 必须有匹配的交割事实；
-- 缺少 broker lifecycle evidence 时默认要求人工复核，包括历史外部账户的未结 lot。
+- 缺少 broker lifecycle evidence 时，当前配置账户的到期流程要求人工复核。已移出配置的历史外部账户不会被自动到期流程枚举；其未结 lot 须在账户迁移前单独清点并确定归属和处理方案。
 
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
 

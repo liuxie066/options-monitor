@@ -559,6 +559,47 @@ def test_worker_keeps_futu_context_when_global_holdings_unavailable(monkeypatch,
     assert risk.unavailable_reasons == ("holdings_context_missing",)
 
 
+def test_worker_attaches_global_holdings_with_unknown_observation(monkeypatch, tmp_path: Path) -> None:
+    from src.application import prepared_portfolio_context as mod
+    from src.application.portfolio_context_builder import build_shared_context
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-global-unknown",
+        account="lx",
+        config={"portfolio": {"account": "lx"}, "symbols": []},
+    )
+    request_path = tmp_path / "worker-request.json"
+    result_path = tmp_path / "worker-result.json"
+    _write_worker_request(
+        tmp_path, authority=authority, run_id="run-global-unknown",
+        token="token-global-unknown", request_path=request_path, result_path=result_path,
+    )
+    monkeypatch.setattr(mod, "load_account_portfolio_context", lambda **_kwargs: {
+        "filters": {"account": "lx"}, "cash_by_currency": {"CNY": 1.0},
+        "stocks_by_symbol": {},
+    })
+    monkeypatch.setattr(mod, "wants_global_path_risk_context", lambda _cfg: True)
+    row = {"fields": {
+        "broker": "富途", "account": "lx", "asset_type": "cash",
+        "asset_id": "CNY-CASH", "currency": "CNY", "quantity": 100,
+    }}
+    monkeypatch.setattr(mod, "load_holdings_portfolio_shared_context", lambda **_kwargs:
+                        build_shared_context([row], portfolio_source_name="holdings_global"))
+
+    assert mod.run_worker(request_path) == 0
+    context = json.loads(result_path.read_text(encoding="utf-8"))["portfolio_context"]
+    assert context["_global_portfolio_ctx"]["source_observation_status"] == "unknown"
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert risk.nav_cny == 100.0
+    assert risk.warnings == ("holdings_observation_unknown",)
+
+
 def test_worker_fails_closed_when_config_changes_after_spawn(
     monkeypatch,
     tmp_path: Path,

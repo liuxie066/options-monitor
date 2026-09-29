@@ -2104,6 +2104,29 @@ def test_yaml_market_fingerprint_rejects_nonfinite_values_on_build_and_check(tmp
     assert not check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
 
 
+def test_account_setting_builder_never_returns_null_for_unsupported_type() -> None:
+    from src.application.config_yaml_accounts import _build_account_setting
+
+    with pytest.raises(AgentToolError, match="unsupported account type"):
+        _build_account_setting(
+            current=None, account="lx", account_type="other", futu_acc_id=None,
+            market_label=None, enabled=None, trade_intake_enabled=None,
+            futu_host=None, futu_port=None,
+        )
+
+
+def test_account_setting_builder_rejects_retired_bitable_instead_of_dropping_it() -> None:
+    from src.application.config_yaml_accounts import _build_account_setting
+
+    with pytest.raises(AgentToolError, match=r"accounts\.lx\.bitable is retired"):
+        _build_account_setting(
+            current={"type": "futu", "futu": {"account_id": "1"}, "bitable": {"app_token": "old"}},
+            account="lx", account_type="futu", futu_acc_id=None,
+            market_label=None, enabled=None, trade_intake_enabled=None,
+            futu_host=None, futu_port=None,
+        )
+
+
 def test_yaml_mapping_order_does_not_change_combo_policy_or_fingerprint() -> None:
     from src.application.combo_yield_config import derive_combo_yield_policy
 

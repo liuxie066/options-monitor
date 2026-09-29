@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 
@@ -87,6 +89,19 @@ def test_account_settings_rejects_retired_holdings_binding() -> None:
     cfg = {"accounts": ["user1"], "account_settings": {"user1": {"type": "futu", "holdings_account": "LX"}}}
     with pytest.raises(ValueError, match="holdings_account is retired"):
         account_settings_from_config(cfg)
+
+
+@pytest.mark.parametrize("setting", [{"type": "external_holdings"}, {"type": "futu", "holdings_account": "LX"}, {"type": "futu", "bitable": {"app_token": "old"}}])
+def test_agent_config_rejects_retired_account_fields_without_portfolio_account(tmp_path, setting: dict) -> None:
+    from src.application.agent_tool_config import load_runtime_config
+    from src.application.agent_tool_contracts import AgentToolError
+
+    path = tmp_path / "config.us.json"
+    path.write_text(json.dumps({"accounts": ["lx"], "account_settings": {"lx": setting}}), encoding="utf-8")
+
+    with pytest.raises(AgentToolError) as caught:
+        load_runtime_config(config_path=path, require_identity=False)
+    assert caught.value.code == "CONFIG_ERROR"
 
 
 def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:

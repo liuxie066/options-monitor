@@ -116,9 +116,6 @@ def _record_source_observation(record: dict) -> tuple[datetime | None, str | Non
     ):
         if key in fields:
             return _source_timestamp(fields.get(key)), f"holdings_field:{key}"
-    for key in ("last_modified_time", "updated_at_utc"):
-        if key in record:
-            return _source_timestamp(record.get(key)), f"feishu_record:{key}"
     return None, None
 
 
@@ -405,10 +402,18 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
     return (dict(out) if isinstance(out, dict) else None)
 
 
-def is_trusted_global_holdings_context(ctx: object) -> bool:
+def is_valid_global_holdings_context(ctx: object) -> bool:
     if not isinstance(ctx, dict) or ctx.get("portfolio_source_name") != "holdings_global":
         return False
     filters = ctx.get("filters")
+    observation_status = ctx.get("source_observation_status")
+    observation_valid = (
+        observation_status == "unknown" and ctx.get("source_observed_at") is None
+    ) or (
+        observation_status == "trusted"
+        and _source_timestamp(ctx.get("source_observed_at")) is not None
+        and not str(ctx.get("source_observation_basis") or "").startswith("feishu_record:")
+    )
     return (
         isinstance(filters, dict)
         and filters.get("account") is None
@@ -416,11 +421,11 @@ def is_trusted_global_holdings_context(ctx: object) -> bool:
         and isinstance(ctx.get("source_account_identifiers"), list)
         and bool(ctx["source_account_identifiers"])
         and all(isinstance(item, str) and item.strip() for item in ctx["source_account_identifiers"])
-        and ctx.get("source_observation_status") == "trusted"
-        and _source_timestamp(ctx.get("source_observed_at")) is not None
+        and observation_valid
         and _source_timestamp(ctx.get("retrieved_at_utc")) is not None
         and isinstance(ctx.get("cash_by_currency"), dict)
         and isinstance(ctx.get("stocks_by_symbol"), dict)
+        and bool(ctx["cash_by_currency"] or ctx["stocks_by_symbol"])
     )
 
 

@@ -1,6 +1,6 @@
 # `external_holdings` 账户退役设计
 
-状态：Devflow full 已完成 Impl 与 Review；运行环境切换另行授权。事实基线为 `origin/main@975351a4e50781aa5dd3483d3805e4270705e839`。产品输入是另一工作树的 `docs/CLI_REFACTOR_PRD.md` 草案中「Holdings 数据边界」与 CLI-04、CLI-06、CLI-07；当前快照 SHA-256 为 `1020b936b1efc0f740d39ac10f182f1eb7320dbbda7c303b1b44f739e77f3a97`，保存设计时的旧快照仍记录在 `.devflow/scope.md`。PRD 仍是草案，且包含本任务未授权的其它 CLI 改动；本设计只覆盖下面列出的账户退役范围。
+状态：原 Devflow full 已完成 Impl 与 Review；PR #387 复审后的 F2 设计修订及本地修复进行中，运行环境切换另行授权。原设计的事实基线为 `origin/main@975351a4e50781aa5dd3483d3805e4270705e839`；本轮修复工作树以 `ef75a799af4ea1e921a4a1be88cecb7a4a849b77` 为基线。产品输入是另一工作树的 `docs/CLI_REFACTOR_PRD.md` 草案中「Holdings 数据边界」与 CLI-04、CLI-06、CLI-07；原设计快照 SHA-256 为 `1020b936b1efc0f740d39ac10f182f1eb7320dbbda7c303b1b44f739e77f3a97`。PRD 仍是草案，且包含本任务未授权的其它 CLI 改动；本设计只覆盖下面列出的账户退役范围。
 
 ## 目标、非目标与成功信号
 
@@ -13,7 +13,7 @@
 1. 新建配置、账户增改 CLI 和 Tool Gateway 只提供富途账户；市场共用 symbols 的现有结构不因退役而改变。（PRD 验收 3）
 2. YAML 人工来源与生成配置中的旧账户类型、任意账户级 `holdings_account` 及整项 `portfolio.source_by_account` 均走现有配置错误路径，包括映射值为 `futu` 或 `auto` 的情况；新生成配置不再输出该映射。账户级 `portfolio.source=holdings` 无效，`auto` 仅保留为富途路径的现有别名，不触发回退。不新增专门的拒绝状态。（CLI-07；用户确认的简化取舍）
 3. 富途账户只接受同账户富途上下文及匹配缓存；富途失败、缓存来源不匹配和预备上下文来源不匹配均不会转向 Holdings。（PRD 验收 4）
-4. 策略需要全局持仓风险时，仍可经原 Holdings 读取器获得全账户上下文，并保留来源、范围、取数及观察时间；直接和预备运行遇到缺失、读取失败或观察证据不足时，账户富途结果仍可用，全局风险按现有 `unavailable_reasons` 标为不可用，不能用账户上下文或零持仓替代。（CLI-06）
+4. 策略需要全局持仓风险时，仍可经原 Holdings 读取器获得全账户上下文，并保留来源、范围、取数时间及可得的源观察时间；源观察时间未知须如实标记，但单凭这一点不关闭全局风险。直接和预备运行遇到来源、范围或数据结构不符，以及读取失败时，账户富途结果仍可用，全局风险按现有 `unavailable_reasons` 标为不可用，不能用账户上下文或零持仓替代。（CLI-06；F2 修订）
 5. 旧配置切换可用现有配置操作预览、备份、构建和回读；迁移前后分别核对账户范围、全局风险及账本记录，不自动转移账户归属。（PRD 验收 5）
 
 ## 当前事实与 owner 复用
@@ -35,17 +35,21 @@
 
 账户链：CLI/Tool Gateway 或 YAML → 配置生成与校验 → 账户来源规划 → 富途账户上下文/同账户富途缓存 → 扫描或查询。账户类型只剩 `futu`。旧类型、账户级 `holdings_account`、整项 `source_by_account`、`portfolio.source=holdings` 由既有验证入口报普通配置错误，不按字段值、账户类型或空值放行；`portfolio.source=auto` 只选富途。内部读取器也不得把不认识的类型或来源静默降为富途。富途读取失败应沿现有错误边界暴露，不读取 Holdings 的账户切片、旧缓存或表数据。现金、股票取富途，期权 lot 权威仍在 SQLite 账本。
 
-全局风险链：仅在 `strategy_policy.py::wants_global_path_risk_context` 命中时，`pipeline_context.py` / `prepared_portfolio_context.py` 才通过 `load_holdings_portfolio_shared_context` 取 `all_accounts`。保留 `source_account_identifiers`、`filters`、`retrieved_at_utc`、`source_observed_at`、`source_observation_status` 及 `context_source`。新读取与缓存均核对 `portfolio_source_name=holdings_global`、`filters.account/broker` 为空及可信观察状态和时间；TTL 只控制缓存年龄，不充当源观察证据，不新增任意新鲜度阈值。读取失败、缺失或证据不可信时，直接和预备运行的账户结果保留，风险消费端给出 `holdings_context_missing` 等现有不可用原因，相关风险判断按既有 `unavailable_reasons` 路径收口。不得把账户级富途上下文当作全局覆盖，也不得把没有选中记录等同于已证实的零风险。
+全局风险链：仅在 `strategy_policy.py::wants_global_path_risk_context` 命中时，`pipeline_context.py` / `prepared_portfolio_context.py` 才通过 `load_holdings_portfolio_shared_context` 取 `all_accounts`。保留 `source_account_identifiers`、`filters`、`retrieved_at_utc`、`source_observed_at`、`source_observation_status` 及 `context_source`。只有显式源观察字段或调用方提供的源时间可填 `source_observed_at` 并标 `trusted`；飞书记录 `last_modified_time` / `updated_at_utc` 是编辑时间，不能充当持仓观察时间。`unknown` 对应空观察时间；旧缓存若标 `feishu_record:*`，拒绝并重新读取，不能保留假 `trusted`。新读取与缓存核对 `portfolio_source_name=holdings_global`、未按账户/券商过滤、非空账户标识、取数时间及现金/股票字典至少有一项可用；这些是范围和最小结构证据，不证明覆盖所有应有账户或每行持仓值有效。观察状态 `unknown` 本身不拒绝，风险结果沿现有 `portfolio_risk_warnings` 标出未知；`as_of_utc` 是取数时间，不冒充源观察时间。TTL 只控制缓存年龄，不充当源观察证据，也不新增任意新鲜度阈值。读取失败、来源或范围不符、结构不完整时，直接和预备运行的账户结果保留，风险消费端给出 `holdings_context_missing` 等现有不可用原因。不得把账户级富途上下文当作全局覆盖，也不得把没有选中记录等同于已证实的零风险。
 
-健康检查移除“外部 Holdings 账户就绪”分支，保留全局风险来源的独立可用性表达。`positions/maintenance.py` 的旧账户特例随账户类型退役，但历史账本不被重写；若目标环境仍有该账户待处理 lot，切换前单独确认归属和操作方案。
+F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` 的同一张 Feishu Holdings 表做单次只读 POC，`records/search` 加 `automatic_fields=true` 后 65/65 条返回 `last_modified_time`，无一条显式源观察字段；最早编辑时间为 2026-03-19。该参数解决“能否取得编辑时间”，不能证明持仓在该时刻被观察。现有风险门只检验时间存在，不检验年龄，既会误称 `trusted`，又会在缺字段时使全局 NAV/集中度永久不可用。因此撤回本轮未落地的 `automatic_fields` 请求改动，以现有 `portfolio_context_builder.py::_record_source_observation` 为观察字段 owner，将 `is_trusted_global_holdings_context` 更名为 `is_valid_global_holdings_context` 并检验来源、范围、最小结构和观察元数据的一致性；直接、预备及风险消费端复用该检查，不增加配置键、状态或风险算法。Feishu 分页若未完整结束必须报读取失败，不得把已取前缀当作全局覆盖。若未来业务需要保证真实持仓新鲜度，须另行约定上游观察批次、覆盖证明和最大允许年龄。
+
+健康检查移除“外部 Holdings 账户就绪”分支；全局风险读取失败仅在风险消费端记录警告并给出 `holdings_context_missing`，健康检查目前不单独探测该来源。`positions/maintenance.py` 的旧账户特例随账户类型退役，但历史账本不被重写；若目标环境仍有该账户待处理 lot，切换前单独确认归属和操作方案，自动到期维护不会枚举已移出配置的账户。
 
 ## 旧配置切换
 
 不提供新的拒绝功能、兼容窗口或迁移命令。每个目标环境切换前，由操作者在**旧版仍可运行时**确认实际 runtime root、市场、账户和有效快照，做只读清单：旧账户定义、各市场引用、per-symbol 账户选择、账户来源映射、通知引用及既有账本中该账户的未结记录；另列出将保留的全局 Holdings 表引用及凭据是否配置，只显示脱敏标识，不输出 secret。此清单不把仓库样例配置当成目标环境事实。
 
-对可用现有 `om accounts remove` 处理的账户，在仍支持旧配置的版本上先预览，对比完整候选 YAML 与受影响市场生成配置差异，再经该入口显式应用；跨市场引用逐市场处理。新版校验不能解析旧配置时，不依赖新版删除命令迁移。其余明确的账户级旧字段由操作者在人工来源 `config.yaml` 的候选副本中审阅并移除，不自动改写为富途账户，也不移入全局风险集合。操作前备份来源文件，应用后对受影响市场使用现有 `om config validate` / `om config build`，回读来源和生成快照并核对指纹；不直接编辑 JSON。若待处理 lot 的归属不明，停止环境切换，保留账本与源配置。配置和服务变更均另需目标、动作与范围明确授权。
+对可用现有 `om accounts remove` 处理的账户，在仍支持旧配置的版本上先预览，对比完整候选 YAML 与受影响市场生成配置差异，再经该入口显式应用；跨市场引用逐市场处理。新版校验不能解析旧配置时，不依赖新版删除命令迁移。其余明确的账户级旧字段由操作者在人工来源 `config.yaml` 的候选副本中审阅并移除，不自动改写为富途账户，也不移入全局风险集合。操作前备份来源文件，应用后对受影响市场使用现有 `om config validate` / `om config build`，回读来源和生成快照并核对指纹；不直接编辑 JSON。若待处理 lot 的归属不明，停止环境切换，保留账本与源配置。
 
-源代码实现可以先形成独立变更供验证；**新版本在目标环境启用前**，该环境必须完成上述配置切换与回读。新代码遇到未迁移旧输入只报普通无效配置，不能静默修正或运行。配置切换失败保留旧版运行条件，按备份恢复并重新核对生成快照；不靠旧版源码继续兼容新语义。
+已安装的 tick 与 auto-close systemd 单元在 `ExecStart` 中固化了渲染时的 `--accounts`。配置移除旧账户到新 release 完成 service reconcile 之间，必须在授权维护窗口内保持受影响 timer 不触发；受控升级和必要的 `service drift --confirm` 均传 `--preserve-activation-state` 保留暂停状态。升级后先用 `./om service drift --runtime-root <runtime-root>` 核对账户参数，必要时按受控流程 `--confirm` 重渲染，再回读 `systemctl cat options-monitor-tick-<market>.service` 和 `options-monitor-auto-close-<market>.service` 的 `--accounts` 与生成快照的账户集合一致，最后恢复定时任务。不得在旧单元仍引用已删除账户时恢复调度。配置、timer、服务和升级各自需要明确的目标、动作与范围授权。
+
+源代码实现可以先形成独立变更供验证；**新版本在目标环境启用前**，该环境必须完成上述配置切换与回读，并只读核对实际全局 Holdings 快照的来源、未过滤范围、账户标识及 `source_observation_status`；与独立清单比对预期账户覆盖，无法证明的范围如实报告未知。若观察状态为 `unknown`，如实报告观察时间未知，不声称数据新鲜。新代码遇到未迁移旧输入只报普通无效配置，不能静默修正或运行。配置切换失败保留旧版运行条件，按备份恢复并重新核对生成快照；不靠旧版源码继续兼容新语义。
 
 ## 实现切片与验证
 
@@ -54,11 +58,13 @@
 | A. 账户配置只认富途 | 新建、增改、YAML 生成、校验和健康检查不产生旧类型；普通无效配置错误可见 | 1、2 | 无 |
 | B. 账户与全局风险分流 | 账户富途失败不回填，缓存/预备来源校验严格；全局 Holdings 保留且缺失明确不可用 | 3、4 | A |
 | C. 迁移及公共契约核对 | 用隔离旧配置 fixture 走既有预览/构建路径；文档、CLI/Tool Gateway 帮助、账本不改写的验证与切换说明一致 | 5，复核 1–4 | A、B |
+| D. F2 观察证据纠正（本轮） | 未知观察时间不独自挡住全局风险且有 warning；编辑时间及旧缓存不冒充观察时间；错误来源、范围、空结果和分页未完仍不可用 | 4 | B |
 
-最小回归证据：`om setup init` / `om config init`、账户配置与 CLI/Tool Gateway facade 测试；YAML 生成及普通配置校验测试覆盖旧字段/映射的空值、`futu`/`auto` 值；富途失败、错误来源缓存、预备来源和 Holdings 缺失/失败的上下文测试；直接与预备路径的全局风险成功、错误范围缓存、观察证据不足及不可用策略测试；旧配置 fixture 在旧版可用入口下的预览、完整差异、备份/生成/回读验证以及账本记录不变的只读断言。共享契约影响的其他消费者按实际 diff 扩展；文档做链接、事实、格式与项目 guardrails 检查。测试 fixture 不接触真实 Feishu、OpenD、运行配置或账本。
+最小回归证据：`om setup init` / `om config init`、账户配置与 CLI/Tool Gateway facade 测试；YAML 生成及普通配置校验测试覆盖旧字段/映射的空值、`futu`/`auto` 值；富途失败、错误来源缓存、预备来源和 Holdings 缺失/失败的上下文测试；直接与预备路径验证观察时间未知仍使用全局风险并写出 warning、错误范围与旧编辑时间缓存不可用、空结果与分页未完不可用、编辑时间不冒充源观察时间；旧配置 fixture 在旧版可用入口下的预览、完整差异、备份/生成/回读验证以及账本记录不变的只读断言。共享契约影响的其他消费者按实际 diff 扩展；文档做链接、事实、格式与项目 guardrails 检查。测试 fixture 不接触真实 Feishu、OpenD、运行配置或账本。
 
 ## 风险与待核实事实
 
 - `config.yaml` 和 PRD 草案来自不同工作树；设计冻结前核对两者内容 hash 与实际实现 base。PRD 中的“启动拒绝或只读兼容”待定句已被用户的“删除配置、绑定入口”取舍替代，本设计不声称 PRD 草案已更新。
-- 目标主机的有效配置、全局 Holdings 覆盖和账本未结情况未在此阶段读取。配置切换的 owner 是各目标环境操作者；必须在获准的环境切换中清点并处理，不能据仓库文件推断生产状态。
+- 原设计阶段未读取目标主机。F2 修订已获准读取 `liuxie-incus` 的既有快照并做上述一次 Feishu 元数据 POC，但未验证表中每行持仓值、所有预期账户覆盖、账本未结情况或新版运行；配置切换的 owner 仍是各目标环境操作者，须在获准切换中另行清点。
+- 本轮最小结构检查不能证明每个股票行数值有效；`portfolio_context_builder.py::build_context` 对不支持的资产种类和无效数量仍可能跳过，风险消费端也会跳过畸形股票映射。是否将所有非标准资产计入全局 NAV、哪些行应使风险整体不可用，须由持仓/风险 owner 另行定义并在目标环境只读抽样后实现，不能用本轮 F2 时间语义修复代替。
 - 如果 `om accounts remove` 的现有预览不能覆盖某个旧配置的全部引用，先用候选副本与差异展示精确改动；不得为省步骤静默删除或把不完整预览视为批准。

@@ -198,7 +198,7 @@ def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     if not actual_argv:
         if sys.stdin.isatty() and sys.stdout.isatty():
@@ -391,6 +391,14 @@ def main(argv: list[str] | None = None) -> int:
         return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
 
     raise SystemExit(f"unsupported command: {args.command}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except ValueError as exc:
+        err = AgentToolError(code="CONFIG_ERROR", message=str(exc))
+        return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
 
 
 if __name__ == "__main__":

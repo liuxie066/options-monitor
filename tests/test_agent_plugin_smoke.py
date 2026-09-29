@@ -989,102 +989,46 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
     assert out["data"]["portfolio_source_name"] == "futu"
 
 
-def test_get_portfolio_context_rejects_external_holdings_runtime_config(monkeypatch, tmp_path: Path) -> None:
+def test_get_portfolio_context_materializes_futu_account(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.pipeline_context as pipeline_context
-    import src.application.portfolio_context_service as pcs
 
-    monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
-    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
-    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
-    cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
-    cfg["accounts"] = ["lx", "sy"]
-    cfg["account_settings"]["lx"] = {"type": "futu"}
-    cfg["account_settings"]["sy"] = {"type": "external_holdings", "holdings_account": "sy"}
-    cfg["portfolio"]["account"] = "sy"
-    cfg["portfolio"]["source"] = "auto"
-    cfg["portfolio"]["source_by_account"] = {"lx": "futu", "sy": "holdings"}
-    cfg_path = _write_healthcheck_config(
-        tmp_path,
-        cfg=cfg,
-        data_config={
-            "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
-            "feishu": {
-                "app_id_env": "OM_FEISHU_APP_ID",
-                "app_secret_env": "OM_FEISHU_APP_SECRET",
-                "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=_public_cfg_with_futu("portfolio.runtime.json", market="hk"), file_name="config.hk.json")
+    monkeypatch.setattr(pipeline_context, "_persist_source_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline_context,
+        "fetch_futu_portfolio_context",
+        lambda **_kwargs: {
+            "filters": {"broker": "富途", "account": "user1"},
+            "cash_by_currency": {"HKD": 10000.0},
+            "stocks_by_symbol": {
+                "0700.HK": {"symbol": "0700.HK", "shares": 100, "currency": "HKD", "account": "user1"},
             },
         },
-        file_name="config.hk.json",
     )
 
-    shared_ctx = {
-        "as_of_utc": "2026-04-14T00:00:00+00:00",
-        "filters": {"broker": "富途", "account": None},
-        "all_accounts": {
-            "filters": {"broker": "富途", "account": None},
-            "cash_by_currency": {},
-            "stocks_by_symbol": {},
-            "raw_selected_count": 0,
-        },
-        "by_account": {
-            "sy": {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"broker": "富途", "account": "sy"},
-                "cash_by_currency": {"HKD": 10000.0},
-                "stocks_by_symbol": {
-                    "0700.HK": {
-                        "symbol": "0700.HK",
-                        "shares": 1100,
-                        "avg_cost": 420.0,
-                        "currency": "HKD",
-                        "account": "sy",
-                    }
-                },
-                "raw_selected_count": 1,
-            }
-        },
-    }
-
-    def _is_fresh(path: Path, ttl_sec: int) -> bool:
-        return path.name in {"portfolio_context.json", "portfolio_context.shared.json"}
-
-    def _load_cached(path: Path):  # type: ignore[no-untyped-def]
-        if path.name == "portfolio_context.json":
-            return {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"broker": "富途", "account": "lx"},
-                "cash_by_currency": {"HKD": 8000.0},
-                "stocks_by_symbol": {
-                    "0700.HK": {
-                        "symbol": "0700.HK",
-                        "shares": 100,
-                        "avg_cost": 410.0,
-                        "currency": "HKD",
-                        "account": "lx",
-                    }
-                },
-                "raw_selected_count": 1,
-                "portfolio_source_name": "external_holdings",
-            }
-        if path.name == "portfolio_context.shared.json":
-            return shared_ctx
-        return None
-
-    monkeypatch.setattr(pipeline_context, "is_fresh", _is_fresh)
-    monkeypatch.setattr(pipeline_context, "load_cached_json", _load_cached)
-    monkeypatch.setattr(pcs, "load_holdings_portfolio_shared_context", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse shared cache")))  # type: ignore[assignment]
-
-    out_root = tmp_path / "output_shared" / "agent_tools"
+    out_root = tmp_path / "agent_tools"
     out = run_tool(
         "get_portfolio_context",
-        {
-            "config_path": str(cfg_path),
-            "account": "sy",
-            "output_dir": str(out_root),
-            "ttl_sec": 3600,
-        },
+        {"config_path": str(cfg_path), "account": "user1", "output_dir": str(out_root)},
     )
+
+    assert out["ok"] is True
+    assert out["data"]["filters"]["account"] == "user1"
+    cached = json.loads((out_root / "portfolio_context_state" / "portfolio_context.json").read_text(encoding="utf-8"))
+    assert cached["filters"]["account"] == "user1"
+    assert cached["stocks_by_symbol"]["0700.HK"]["account"] == "user1"
+
+
+def test_get_portfolio_context_rejects_external_holdings_runtime_config(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
+    cfg["account_settings"]["user1"] = {"type": "external_holdings", "holdings_account": "sy"}
+    cfg["portfolio"]["source_by_account"] = {"user1": "holdings"}
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg, file_name="config.hk.json")
+
+    out = run_tool("get_portfolio_context", {"config_path": str(cfg_path), "account": "user1"})
 
     assert out["ok"] is False
     assert out["error"]["code"] == "CONFIG_ERROR"

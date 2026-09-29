@@ -92,6 +92,11 @@
       "reason": "Account-scoped Holdings context loading was retired; only the global Holdings risk reader remains."
     },
     {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "is_trusted_global_holdings_context",
+      "reason": "The trusted-only Holdings risk gate was replaced by is_valid_global_holdings_context, which accepts an explicitly unknown observation time while validating source, scope, and holdings structure."
+    },
+    {
       "module": "src/application/portfolio_context_service.py",
       "name": "expected_portfolio_context_account",
       "reason": "Portfolio context account binding now directly uses the Futu account label; Holdings account mapping no longer exists."

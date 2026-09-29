@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.account_config import build_account_portfolio_source_plan
+from src.application.account_config import account_settings_from_config, build_account_portfolio_source_plan
 from src.application.config_loader import normalize_portfolio_broker_config
 from src.application.portfolio_management import (
     normalize_portfolio_management_config,
@@ -100,6 +100,7 @@ def load_runtime_config(
             ) from exc
     portfolio = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     try:
+        account_settings_from_config(cfg)
         build_account_portfolio_source_plan(cfg, account=portfolio.get("account"))
     except ValueError as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
