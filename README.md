@@ -353,11 +353,11 @@ om-agent run --tool healthcheck \
 | 共享状态与报告 | `<runtime_root>/output_shared/` |
 | 账户级输出 | `<runtime_root>/output_accounts/<account>/` |
 
-账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu` 或 `external_holdings`；数据源和 trade-intake 能力从账户设置派生，不能把一个账户的现金、持仓或状态 fallback 到另一个账户。
+账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu`；账户现金与股票持仓来自对应富途账户，trade-intake 能力从账户设置派生。富途失败时不使用 Holdings 回填账户数据。
 
 Feishu 有三种彼此独立的角色：
 
-- 可选的 `external_holdings` 数据源；
+- 可选的全局 Holdings 持仓风险数据源；
 - `feishu_app` 出站通知；
 - Feishu long-connection 入站消息。
 

@@ -295,11 +295,7 @@ def query_sell_put_cash(
         account=account,
         rates=exchange_rate_payload,
     )
-    portfolio_source_name = (
-        str((portfolio or {}).get('portfolio_source_name') or 'holdings').strip().lower() or 'holdings'
-        if isinstance(portfolio, dict)
-        else 'holdings'
-    )
+    portfolio_source_name = str(portfolio['portfolio_source_name'])
 
     cash_by_ccy = portfolio.get('cash_by_currency') or {}
     cash_balance_unavailable_by_row = (

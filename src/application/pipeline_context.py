@@ -36,6 +36,7 @@ from src.application.portfolio_context_service import (
     load_holdings_portfolio_shared_context,
     with_context_source,
 )
+from src.application.portfolio_context_builder import is_trusted_global_holdings_context
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
@@ -315,7 +316,7 @@ def load_global_holdings_risk_context(
         path = (shared_root / "portfolio_context.global.json").resolve()
         if ttl_sec > 0 and is_fresh(path, ttl_sec):
             cached = load_cached_json(path)
-            if isinstance(cached, dict):
+            if is_trusted_global_holdings_context(cached):
                 cached = with_context_source(cached, "global_cache")
                 log("[CTX] portfolio_context source=global_cache account=all broker=all")
                 return cached
@@ -329,6 +330,8 @@ def load_global_holdings_risk_context(
             raise ValueError("global holdings context missing all_accounts")
         out = dict(all_accounts)
         out["portfolio_source_name"] = "holdings_global"
+        if not is_trusted_global_holdings_context(out):
+            raise ValueError("global holdings context lacks trusted all-account observation")
         out = with_context_source(out, "global_refresh")
         path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         log("[CTX] portfolio_context source=global_refresh account=all broker=all")
@@ -568,6 +571,7 @@ def build_pipeline_context(
 
     if portfolio_ctx is not None and wants_global_path_risk_context(cfg):
         portfolio_ctx = dict(portfolio_ctx)
+        portfolio_ctx["_global_risk_required"] = True
         if prepared_portfolio_context_manifest is None:
             global_portfolio_ctx = load_global_holdings_risk_context(
                 base=base,

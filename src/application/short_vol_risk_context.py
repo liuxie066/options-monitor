@@ -7,6 +7,7 @@ import pandas as pd
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from src.application.portfolio_context_builder import is_trusted_global_holdings_context
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
 
@@ -29,7 +30,16 @@ def build_portfolio_risk_context(
         )
 
     global_portfolio = portfolio_ctx.get("_global_portfolio_ctx")
-    holdings_ctx = global_portfolio if isinstance(global_portfolio, dict) else portfolio_ctx
+    global_required = bool(portfolio_ctx.get("_global_risk_required")) or global_portfolio is not None
+    if global_required and not is_trusted_global_holdings_context(global_portfolio):
+        return PortfolioRiskContext(
+            nav_cny=None,
+            stock_value_cny_by_symbol={},
+            short_put_assignment_cny_by_symbol={},
+            short_put_assignment_total_cny=None,
+            unavailable_reasons=("holdings_context_missing",),
+        )
+    holdings_ctx = global_portfolio if global_required else portfolio_ctx
     option_ctx = portfolio_ctx.get("_global_option_ctx")
     if not isinstance(option_ctx, dict):
         option_ctx = portfolio_ctx.get("option_ctx") if isinstance(portfolio_ctx.get("option_ctx"), dict) else {}
@@ -209,5 +219,3 @@ def _first_float(row: dict[str, Any], *keys: str) -> float | None:
         if value is not None:
             return value
     return None
-
-

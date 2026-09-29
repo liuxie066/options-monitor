@@ -63,59 +63,30 @@ def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> N
     ) == ["beta", "gamma"]
 
 
-def test_resolve_portfolio_source_prefers_account_override_then_global_then_auto() -> None:
+def test_resolve_portfolio_source_uses_global_futu_or_auto_only() -> None:
     from src.application.account_config import resolve_portfolio_source
 
-    cfg = {
-        "portfolio": {
-            "source": "holdings",
-            "source_by_account": {
-                "lx": "futu",
-                "sy": "auto",
-            },
-        }
-    }
-
+    cfg = {"portfolio": {"source": "futu"}}
     assert resolve_portfolio_source(cfg, account="LX") == "futu"
-    assert resolve_portfolio_source(cfg, account="sy") == "auto"
-    assert resolve_portfolio_source(cfg, account="unknown") == "holdings"
     assert resolve_portfolio_source({}, account="lx") == "auto"
+    with pytest.raises(ValueError, match="source_by_account is retired"):
+        resolve_portfolio_source({"portfolio": {"source_by_account": {"lx": "futu"}}}, account="lx")
 
 
-def test_resolve_account_type_uses_account_settings_then_legacy_holdings_override() -> None:
+def test_resolve_account_type_rejects_retired_type() -> None:
     from src.application.account_config import resolve_account_type
 
-    cfg = {
-        "accounts": ["user1", "ext1", "ext2"],
-        "account_settings": {
-            "user1": {"type": "futu"},
-            "ext1": {"type": "external_holdings", "holdings_account": "feishu-ext1"},
-        },
-        "portfolio": {
-            "source_by_account": {
-                "ext2": "holdings",
-            }
-        },
-    }
-
-    assert resolve_account_type(cfg, account="user1") == "futu"
-    assert resolve_account_type(cfg, account="ext1") == "external_holdings"
-    assert resolve_account_type(cfg, account="ext2") == "external_holdings"
+    cfg = {"accounts": ["user1", "ext1"], "account_settings": {"user1": {"type": "futu"}, "ext1": {"type": "external_holdings"}}}
+    with pytest.raises(ValueError, match="account_settings.ext1.type"):
+        resolve_account_type(cfg, account="user1")
 
 
-def test_resolve_holdings_account_uses_explicit_mapping_then_account_label() -> None:
-    from src.application.account_config import resolve_holdings_account
+def test_account_settings_rejects_retired_holdings_binding() -> None:
+    from src.application.account_config import account_settings_from_config
 
-    cfg = {
-        "accounts": ["user1", "ext1"],
-        "account_settings": {
-            "user1": {"type": "futu", "holdings_account": "LX"},
-            "ext1": {"type": "external_holdings", "holdings_account": "Feishu EXT"},
-        },
-    }
-
-    assert resolve_holdings_account(cfg, account="ext1") == "Feishu EXT"
-    assert resolve_holdings_account(cfg, account="user1") == "LX"
+    cfg = {"accounts": ["user1"], "account_settings": {"user1": {"type": "futu", "holdings_account": "LX"}}}
+    with pytest.raises(ValueError, match="holdings_account is retired"):
+        account_settings_from_config(cfg)
 
 
 def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
@@ -124,11 +95,10 @@ def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
     cfg = {
         "accounts": ["lx"],
         "account_settings": {
-            "lx": {"type": "futu", "holdings_account": "lx"},
+            "lx": {"type": "futu"},
         },
         "portfolio": {
             "source": "auto",
-            "source_by_account": {"lx": "auto"},
         },
     }
 
@@ -138,25 +108,20 @@ def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
 def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
     from src.application.account_config import build_account_portfolio_source_plan
 
-    cfg = _source_plan_cfg("lx", {"type": "futu", "holdings_account": "LX"}, "auto")
+    cfg = _source_plan_cfg("lx", {"type": "futu"}, "auto")
 
     out = build_account_portfolio_source_plan(cfg, account="lx")
     assert out.account_type == "futu"
     assert out.requested_source == "auto"
     assert out.primary_source == "futu"
-    assert out.holdings_account == "LX"
 
 
-def test_build_account_portfolio_source_plan_for_external_holdings_account() -> None:
+def test_build_account_portfolio_source_plan_rejects_external_holdings_account() -> None:
     from src.application.account_config import build_account_portfolio_source_plan
 
     cfg = _source_plan_cfg("ext1", {"type": "external_holdings", "holdings_account": "Feishu EXT"}, "futu")
-
-    out = build_account_portfolio_source_plan(cfg, account="ext1")
-    assert out.account_type == "external_holdings"
-    assert out.requested_source == "holdings"
-    assert out.primary_source == "external_holdings"
-    assert out.holdings_account == "Feishu EXT"
+    with pytest.raises(ValueError, match="account_settings.ext1.type"):
+        build_account_portfolio_source_plan(cfg, account="ext1")
 
 
 def test_build_account_config_view_exposes_futu_runtime_plan() -> None:
@@ -273,10 +238,9 @@ def test_sole_futu_account_can_use_legacy_projection_with_warning() -> None:
 
     cfg = {
         "_generated": {"market": "us"},
-        "accounts": ["lx", "sy"],
+        "accounts": ["lx"],
         "account_settings": {
             "lx": {"type": "futu", "futu": {"account_id": "1001"}},
-            "sy": {"type": "external_holdings"},
         },
         "portfolio": {"futu": {"host": "broker", "port": 11112}},
         "symbols": [{"symbol": "S", "fetch": {"source": "futu", "host": "quote", "port": 11111}}],

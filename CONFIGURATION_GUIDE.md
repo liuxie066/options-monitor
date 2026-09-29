@@ -19,7 +19,7 @@
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-只有 `external_holdings` 账户需要 Feishu holdings 数据源；这不会让 Feishu 成为期权账本。
+全局持仓风险可读取 Feishu Holdings；账户现金和股票持仓只读取对应富途账户，期权账本仍以本地 SQLite 为准。
 
 ## 初始化
 
@@ -53,13 +53,9 @@ accounts:
   lx:
     type: futu
     futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
-  sy:
-    type: external_holdings
-    holdings_account: sy
-
 markets:
   us:
-    accounts: [lx, sy]
+    accounts: [lx]
     symbols:
       - NVDA
       - GOOGL
@@ -103,7 +99,7 @@ Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真�
 
 ## 账户
 
-支持两种账户类型：
+账户类型为 `futu`：
 
 ### `futu`
 
@@ -116,16 +112,7 @@ accounts:
 
 `futu` 账户的现金、股票持仓和可用 trade-intake 能力从账户设置派生。多 OpenD endpoint、host、port 和服务配置应通过当前示例、`config explain` 和 service preflight 核对，不要从历史 redesign plan 复制。
 
-### `external_holdings`
-
-```yaml
-accounts:
-  ext1:
-    type: external_holdings
-    holdings_account: "Feishu EXT"
-```
-
-`external_holdings` 从 holdings 数据源读取现金和普通持仓，交易默认人工录入。它不应启动 Futu trade-intake，也不应把 Feishu option position 当 canonical lot。
+旧 `external_holdings` 账户、账户级 `holdings_account`、`portfolio.source_by_account` 和 `portfolio.source: holdings` 需在升级前从人工配置中迁出；这些输入在新版配置校验中报普通配置错误。全局 Holdings 风险读取保留。迁移顺序与账本核对见 [退役设计](docs/EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md#旧配置切换)。
 
 账户增删改应直接修改 `config.yaml`，然后 validate 并重建受影响的
 runtime snapshot：
@@ -137,10 +124,9 @@ runtime snapshot：
   --output config.us.json
 ```
 
-`./om-agent add-account` / `edit-account` / `remove-account` 是受控的
-runtime-JSON 兼容 facade，不是 YAML authoring 入口；其结果会被下一次
-`config build` 覆盖。只有明确需要该兼容路径时才先 `--dry-run`，再通过
-`OM_AGENT_ENABLE_WRITE_TOOLS=true` 与 `--confirm` 写入精确目标。
+`./om-agent add-account` / `edit-account` / `remove-account` 是受控账户入口；
+先 `--dry-run` 检查候选改动，再通过 `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+与 `--confirm` 写入精确目标。
 
 ## 市场与 symbol override
 

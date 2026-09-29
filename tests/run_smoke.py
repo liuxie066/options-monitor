@@ -53,7 +53,6 @@ def _init_yaml_authoring_config(*, output_dir: Path) -> tuple[Path, Path]:
         markets=["us", "hk"],
         futu_acc_id="999000000000000001",
         account_label="user1",
-        external_holdings_account=None,
         us_symbols=["NVDA"],
         hk_symbols=["0700.HK"],
         build=True,
@@ -354,120 +353,7 @@ def test_agent_yaml_init_builds_markets_from_shared_authoring() -> None:
             assert cfg["symbols"][0]["broker"] == market.upper()
 
 
-def test_agent_launcher_add_external_holdings_account() -> None:
-    base = _ensure_repo_on_path()
-    om_agent = (base / "om-agent").resolve()
-    with tempfile.TemporaryDirectory() as td:
-        output_dir = Path(td)
-        config_yaml_path, runtime_path = _init_yaml_authoring_config(output_dir=output_dir)
-        write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
-
-        add_p = subprocess.run(
-            [
-                str(om_agent),
-                "add-account",
-                "--market",
-                "us",
-                "--config-yaml",
-                str(config_yaml_path),
-                "--rebuild-runtime-root",
-                str(output_dir),
-                "--account-label",
-                "ext1",
-                "--account-type",
-                "external_holdings",
-                "--holdings-account",
-                "Feishu EXT",
-                "--confirm",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-            env=write_env,
-        )
-        payload = json.loads(add_p.stdout)
-        source = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8"))
-        current = json.loads(runtime_path.read_text(encoding="utf-8"))
-        assert payload["ok"] is True
-        assert source["accounts"]["ext1"] == {
-            "type": "external_holdings",
-            "enabled": True,
-            "trade_intake_enabled": False,
-            "market": "us",
-            "holdings_account": "Feishu EXT",
-        }
-        assert source["markets"]["us"]["accounts"] == ["user1", "ext1"]
-        assert current["account_settings"]["ext1"]["type"] == "external_holdings"
-        assert current["account_settings"]["ext1"]["holdings_account"] == "Feishu EXT"
-        assert current["portfolio"]["source_by_account"]["ext1"] == "holdings"
-
-
-def test_agent_launcher_account_write_gate_and_dry_run() -> None:
-    base = _ensure_repo_on_path()
-    om_agent = (base / "om-agent").resolve()
-    with tempfile.TemporaryDirectory() as td:
-        output_dir = Path(td)
-        config_yaml_path, _runtime_path = _init_yaml_authoring_config(output_dir=output_dir)
-        before = config_yaml_path.read_bytes()
-
-        blocked = subprocess.run(
-            [
-                str(om_agent),
-                "add-account",
-                "--market",
-                "us",
-                "--config-yaml",
-                str(config_yaml_path),
-                "--rebuild-runtime-root",
-                str(output_dir),
-                "--account-label",
-                "ext1",
-                "--account-type",
-                "external_holdings",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=False,
-            env={**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": ""},
-        )
-        assert blocked.returncode == 2
-        blocked_payload = json.loads(blocked.stdout)
-        assert blocked_payload["error"]["code"] == "PERMISSION_DENIED"
-
-        dry_run = subprocess.run(
-            [
-                str(om_agent),
-                "add-account",
-                "--market",
-                "us",
-                "--config-yaml",
-                str(config_yaml_path),
-                "--rebuild-runtime-root",
-                str(output_dir),
-                "--account-label",
-                "ext1",
-                "--account-type",
-                "external_holdings",
-                "--dry-run",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-            env={**os.environ},
-        )
-        payload = json.loads(dry_run.stdout)
-        source = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8"))
-        assert payload["ok"] is True
-        assert payload["data"]["dry_run"] is True
-        assert payload["data"]["write_applied"] is False
-        assert config_yaml_path.read_bytes() == before
-        assert "ext1" not in source["accounts"]
-
-
-def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
+def test_agent_launcher_add_futu_account() -> None:
     base = _ensure_repo_on_path()
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
@@ -495,8 +381,6 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
                 "127.0.0.1",
                 "--futu-port",
                 "11112",
-                "--holdings-account",
-                "sy",
                 "--confirm",
             ],
             cwd=str(base),
@@ -509,19 +393,121 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
         source = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8"))
         current = json.loads(runtime_path.read_text(encoding="utf-8"))
         assert payload["ok"] is True
-        assert payload["data"]["holdings_account"] == "sy"
         assert source["accounts"]["sy"]["type"] == "futu"
         assert source["accounts"]["sy"]["futu"]["account_id"] == "381756479859383816"
-        assert source["accounts"]["sy"]["holdings_account"] == "sy"
+        assert source["markets"]["us"]["accounts"] == ["user1", "sy"]
         assert current["account_settings"]["sy"]["type"] == "futu"
         assert current["account_settings"]["sy"]["futu"]["account_id"] == "381756479859383816"
-        assert current["account_settings"]["sy"]["futu"]["host"] == "127.0.0.1"
-        assert current["account_settings"]["sy"]["futu"]["port"] == 11112
-        assert current["account_settings"]["sy"]["holdings_account"] == "sy"
-        assert current["portfolio"]["source_by_account"]["sy"] == "futu"
+        assert "source_by_account" not in current["portfolio"]
 
 
-def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
+def test_agent_launcher_account_write_gate_and_dry_run() -> None:
+    base = _ensure_repo_on_path()
+    om_agent = (base / "om-agent").resolve()
+    with tempfile.TemporaryDirectory() as td:
+        output_dir = Path(td)
+        config_yaml_path, _runtime_path = _init_yaml_authoring_config(output_dir=output_dir)
+        before = config_yaml_path.read_bytes()
+
+        blocked = subprocess.run(
+            [
+                str(om_agent),
+                "add-account",
+                "--market",
+                "us",
+                "--config-yaml",
+                str(config_yaml_path),
+                "--rebuild-runtime-root",
+                str(output_dir),
+                "--account-label",
+                "ext1",
+                "--account-type",
+                "futu",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": ""},
+        )
+        assert blocked.returncode == 2
+        blocked_payload = json.loads(blocked.stdout)
+        assert blocked_payload["error"]["code"] == "PERMISSION_DENIED"
+
+        dry_run = subprocess.run(
+            [
+                str(om_agent),
+                "add-account",
+                "--market",
+                "us",
+                "--config-yaml",
+                str(config_yaml_path),
+                "--rebuild-runtime-root",
+                str(output_dir),
+                "--account-label",
+                "ext1",
+                "--account-type",
+                "futu",
+                "--futu-acc-id",
+                "381756479859383816",
+                "--futu-host",
+                "127.0.0.1",
+                "--futu-port",
+                "11112",
+                "--dry-run",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ},
+        )
+        payload = json.loads(dry_run.stdout)
+        source = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8"))
+        assert payload["ok"] is True
+        assert payload["data"]["dry_run"] is True
+        assert payload["data"]["write_applied"] is False
+        assert config_yaml_path.read_bytes() == before
+        assert "ext1" not in source["accounts"]
+
+
+def test_agent_launcher_rejects_retired_account_options() -> None:
+    base = _ensure_repo_on_path()
+    om_agent = (base / "om-agent").resolve()
+    with tempfile.TemporaryDirectory() as td:
+        output_dir = Path(td)
+        config_yaml_path, runtime_path = _init_yaml_authoring_config(output_dir=output_dir)
+        add_p = subprocess.run(
+            [
+                str(om_agent),
+                "add-account",
+                "--market",
+                "us",
+                "--config-yaml",
+                str(config_yaml_path),
+                "--rebuild-runtime-root",
+                str(output_dir),
+                "--account-label",
+                "sy",
+                "--account-type",
+                "futu",
+                "--holdings-account",
+                "sy",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert add_p.returncode != 0
+        assert "unrecognized arguments" in add_p.stderr
+        source = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8"))
+        current = json.loads(runtime_path.read_text(encoding="utf-8"))
+        assert "sy" not in source["accounts"]
+        assert "sy" not in current["account_settings"]
+
+
+def test_agent_launcher_edit_futu_account() -> None:
     base = _ensure_repo_on_path()
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
@@ -534,9 +520,11 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
                 "--market", "us",
                 "--config-yaml", str(config_yaml_path),
                 "--rebuild-runtime-root", str(output_dir),
-                "--account-label", "ext1",
-                "--account-type", "external_holdings",
-                "--holdings-account", "Feishu EXT",
+                "--account-label", "sy",
+                "--account-type", "futu",
+                "--futu-acc-id", "381756479859383815",
+                "--futu-host", "127.0.0.1",
+                "--futu-port", "11112",
                 "--confirm",
             ],
             cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
@@ -548,12 +536,11 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
                 "--market", "us",
                 "--config-yaml", str(config_yaml_path),
                 "--rebuild-runtime-root", str(output_dir),
-                "--account-label", "ext1",
+                "--account-label", "sy",
                 "--account-type", "futu",
                 "--futu-acc-id", "381756479859383816",
                 "--futu-host", "127.0.0.1",
                 "--futu-port", "11112",
-                "--holdings-account", "sy",
                 "--confirm",
             ],
             cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
@@ -563,17 +550,14 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
         current = json.loads(runtime_path.read_text(encoding="utf-8"))
         assert payload["ok"] is True
         assert payload["data"]["account_type"] == "futu"
-        assert payload["data"]["holdings_account"] == "sy"
-        assert source["accounts"]["ext1"]["type"] == "futu"
-        assert source["accounts"]["ext1"]["futu"]["account_id"] == "381756479859383816"
-        assert source["accounts"]["ext1"]["holdings_account"] == "sy"
-        assert current["account_settings"]["ext1"]["type"] == "futu"
-        assert current["account_settings"]["ext1"]["futu"]["account_id"] == "381756479859383816"
-        assert current["account_settings"]["ext1"]["futu"]["host"] == "127.0.0.1"
-        assert current["account_settings"]["ext1"]["futu"]["port"] == 11112
-        assert current["account_settings"]["ext1"]["holdings_account"] == "sy"
-        assert current["trade_intake"]["account_mapping"]["futu"]["381756479859383816"] == "ext1"
-        assert current["portfolio"]["source_by_account"]["ext1"] == "futu"
+        assert source["accounts"]["sy"]["type"] == "futu"
+        assert source["accounts"]["sy"]["futu"]["account_id"] == "381756479859383816"
+        assert current["account_settings"]["sy"]["type"] == "futu"
+        assert current["account_settings"]["sy"]["futu"]["account_id"] == "381756479859383816"
+        assert current["account_settings"]["sy"]["futu"]["host"] == "127.0.0.1"
+        assert current["account_settings"]["sy"]["futu"]["port"] == 11112
+        assert current["trade_intake"]["account_mapping"]["futu"]["381756479859383816"] == "sy"
+        assert "source_by_account" not in current["portfolio"]
 
 
 def test_agent_launcher_remove_account_updates_runtime_config() -> None:
@@ -647,10 +631,10 @@ def main() -> None:
     test_agent_launcher_spec_prefers_broker_field()
     test_agent_yaml_init_minimal_config()
     test_agent_yaml_init_builds_markets_from_shared_authoring()
-    test_agent_launcher_add_external_holdings_account()
+    test_agent_launcher_add_futu_account()
     test_agent_launcher_account_write_gate_and_dry_run()
-    test_agent_launcher_add_futu_account_with_holdings_fallback()
-    test_agent_launcher_edit_account_updates_type_and_mappings()
+    test_agent_launcher_rejects_retired_account_options()
+    test_agent_launcher_edit_futu_account()
     test_agent_launcher_remove_account_updates_runtime_config()
     print('OK (smoke)')
 

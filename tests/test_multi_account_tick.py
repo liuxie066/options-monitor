@@ -290,6 +290,43 @@ def test_tick_rejects_retired_config_before_run_artifacts(
     assert not (tmp_path / "output_runs").exists()
 
 
+@pytest.mark.parametrize(
+    ("account_settings", "portfolio", "error"),
+    [
+        ({"lx": {"type": "external_holdings"}}, {}, "account_settings.lx.type"),
+        ({"lx": {"type": "futu"}}, {"source_by_account": {"lx": "futu"}}, "source_by_account is retired"),
+        ({"lx": {"type": "futu"}}, {"source": "holdings"}, "unsupported account portfolio source"),
+    ],
+)
+def test_tick_rejects_retired_account_source_before_run_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+    account_settings: dict,
+    portfolio: dict,
+    error: str,
+) -> None:
+    from src.application import multi_account_tick as mod
+
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(
+        json.dumps({"accounts": ["lx"], "account_settings": account_settings, "portfolio": portfolio, "symbols": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_runtime_root",
+        lambda **_kwargs: SimpleNamespace(runtime_root=tmp_path, source="test"),
+    )
+    _patch_config_bootstrap(monkeypatch, mod, schedule_market="us")
+    monkeypatch.setattr(mod, "ensure_runtime_config_freshness", lambda *_args, **_kwargs: {"fresh": True})
+    monkeypatch.setattr(mod, "RunLogger", _reject_run_logger)
+
+    with pytest.raises(SystemExit, match=error):
+        mod.main(["--config", str(config_path), "--market-config", "us"])
+
+    assert not (tmp_path / "output_runs").exists()
+
+
 def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> None:
     from src.application import tick_account_execution as mod
 

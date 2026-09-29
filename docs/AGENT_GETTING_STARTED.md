@@ -54,7 +54,7 @@ python3.12 -m venv .venv
 默认最小配置下：
 
 - `option_positions` 只需要本地 SQLite
-- Feishu 只在你启用 holdings / external_holdings 或 inbound Bot 时才需要通过 env-file 配置
+- Feishu 只在你启用全局 Holdings 风险、Feishu 出站通知或 inbound Bot 时才需要配置相应凭据
 
 ---
 

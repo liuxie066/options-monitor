@@ -18,6 +18,7 @@ from src.application.bot.model_config import ModelSettings
 from src.application.bot.result_admission import admit_result_with_decision
 from src.application.bot.runtime import RunStopped, bounded_call, check_run, request_model, run_agent
 from src.application.bot.scene import build_scene_manifest, scene_policy_rejection_reason
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.research.redaction import redact_value
 
 _SESSION_LOCK = Lock()
@@ -80,7 +81,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         try:
             if session_key != session_key_for_contract(contract):
                 raise ValueError("session_scope_mismatch")
-        except (ValueError, OSError):
+        except (ValueError, OSError, AgentToolError):
             return AppResult(status="not_ready", user_response="渠道身份或会话范围未通过校验。",
                              error={"code": "SCENE_PREPARATION_FAILED"}, ok=False,
                              request_id=contract.request_id, contract_id=contract.contract_id)

@@ -321,8 +321,8 @@ def _write_symbols_runtime_config(tmp_path: Path) -> Path:
         f"""\
 accounts:
   sy:
-    type: external_holdings
-    holdings_account: sy
+    type: futu
+    futu_account_id: "REAL_87654321"
 portfolio:
   account: sy
   data_config: {data_cfg_path}
@@ -550,8 +550,8 @@ def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
         """
 accounts:
   lx:
-    type: external_holdings
-    holdings_account: lx
+    type: futu
+    futu_account_id: "REAL_12345678"
 assistant:
   enabled: true
   bot:

@@ -59,7 +59,7 @@ def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> Non
         "trade_intake": {"account_mapping": {"futu": {"REAL_1": "ext1"}}},
     }
 
-    assert "not a futu account" in _raises_message(resolve_futu_account_mapping, cfg)
+    assert "account_settings.ext1.type" in _raises_message(resolve_futu_account_mapping, cfg)
 
 
 def test_resolve_trade_intake_config_uses_defaults() -> None:
@@ -165,14 +165,14 @@ def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() ->
         "accounts": ["lx", "sy"],
         "account_settings": {
             "lx": {"type": "futu", "futu": {"account_id": "222"}},
-            "sy": {"type": "external_holdings", "holdings_account": "sy"},
+            "sy": {"type": "futu", "futu": {"account_id": "333"}},
         },
         "trade_intake": {"account_mapping": {"futu": {"111": "lx"}}},
     }
 
     out = resolve_futu_lookup_account_ids(cfg)
 
-    assert out == ["111", "222"]
+    assert out == ["111", "222", "333"]
 
 
 def test_resolve_futu_account_mapping_derives_from_enabled_account_settings() -> None:

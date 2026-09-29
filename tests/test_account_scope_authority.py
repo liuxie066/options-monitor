@@ -270,20 +270,18 @@ def test_position_read_rejects_unknown_account_before_opening_ledger(
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
-def test_config_init_rejects_same_account_roles_before_writes(tmp_path: Path, dry_run: bool) -> None:
+def test_config_init_creates_only_futu_account(tmp_path: Path, dry_run: bool) -> None:
     from src.application.config_yaml_init import init_yaml_config
 
     output = tmp_path / "config.yaml"
     runtime = tmp_path / "runtime"
-    with pytest.raises(AgentToolError, match="must use different labels") as exc_info:
-        init_yaml_config(
-            repo_root=Path(__file__).resolve().parents[1],
-            output_config_yaml_path=output,
-            runtime_output_dir=runtime,
-            account_label="lx",
-            external_holdings_account="LX",
-            dry_run=dry_run,
-        )
-    assert exc_info.value.code == "INPUT_ERROR"
-    assert not output.exists()
-    assert not runtime.exists()
+    result = init_yaml_config(
+        repo_root=Path(__file__).resolve().parents[1],
+        output_config_yaml_path=output,
+        runtime_output_dir=runtime,
+        account_label="lx",
+        dry_run=dry_run,
+    )
+    assert result["ok"] is True
+    if not dry_run:
+        assert "external_holdings" not in output.read_text(encoding="utf-8")
