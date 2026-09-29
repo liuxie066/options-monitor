@@ -15,6 +15,7 @@ from src.application.config_yaml import (
 )
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.config_yaml_holdings import set_yaml_holdings_inclusion
 from src.application.runtime_config_readiness import require_runtime_config_readiness
 
 
@@ -85,6 +86,16 @@ def add_config_commands(subparsers: Any) -> None:
     symbol_set.add_argument("--rebuild-runtime-root", default=None)
     symbol_set.add_argument("--apply", action="store_true")
     symbol_set.add_argument("--no-backup", action="store_true")
+    holdings = config_sub.add_parser("holdings", help="manage optional Portfolio Exposure Holdings inclusion")
+    holdings_sub = holdings.add_subparsers(dest="config_holdings_command", required=True)
+    holdings_set = holdings_sub.add_parser("set", help="preview or apply Holdings inclusion")
+    holdings_set.add_argument("--enabled", required=True, type=_parse_bool_value)
+    holdings_set.add_argument("--config-yaml", default=None)
+    holdings_set.add_argument("--runtime-root", default=None)
+    holdings_set.add_argument("--apply", action="store_true")
+    holdings_set.add_argument("--confirm", action="store_true")
+    holdings_set.add_argument("--expected-source-sha256", default=None)
+    holdings_set.add_argument("--expected-preview-sha256", default=None)
 
 
 def _parse_bool_value(raw: str) -> bool:
@@ -313,5 +324,17 @@ def handle_config_command(
                 apply=bool(args.apply),
                 backup=not bool(args.no_backup),
             )
+
+    if args.config_command == "holdings" and args.config_holdings_command == "set":
+        return set_yaml_holdings_inclusion(
+            repo_root=repo_base_fn(),
+            enabled=args.enabled,
+            config_path=args.config_yaml,
+            runtime_root=args.runtime_root,
+            apply=bool(args.apply),
+            confirm=bool(args.confirm),
+            expected_source_sha256=args.expected_source_sha256,
+            expected_preview_sha256=args.expected_preview_sha256,
+        )
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported config command: {args.config_command}")

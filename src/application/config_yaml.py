@@ -731,6 +731,12 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     if not isinstance(market_cfg, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{normalized_market} must be an object")
     _reject_unknown_keys(market_cfg, allowed=MARKET_KEYS, path=f"markets.{normalized_market}")
+    market_portfolio = market_cfg.get("portfolio")
+    if isinstance(market_portfolio, dict) and "holdings" in market_portfolio:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"markets.{normalized_market}.portfolio.holdings must be configured globally",
+        )
 
     accounts = _normalize_market_accounts(market_cfg.get("accounts"), path=f"markets.{normalized_market}.accounts")
     account_settings: dict[str, dict[str, Any]] = {}
