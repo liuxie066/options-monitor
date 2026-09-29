@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- 首次运行的 `om setup init` 增加完整写入预览、并发目标保护与失败恢复，并记住运行配置目录供新终端使用；`om setup check` 会阻断所选市场的缺失快照和占位富途账户 ID，Bot 就绪单独报告。
+
 ## 3.7.7 - 2026-09-27
 
 ### Bug Fixes

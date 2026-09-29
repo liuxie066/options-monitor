@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1079 (`src`: 537, `domain`: 87, `scripts`: 14, `tests`: 441)
-- Internal import edges: 7586 total, 3330 production/script edges excluding tests
+- Internal import edges: 7606 total, 3340 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -39,14 +39,14 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|160| application
+  interfaces -->|163| application
   interfaces -->|1| domain
   interfaces -->|4| infrastructure
   scripts -->|39| application
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3237| application
+  tests -->|3247| application
   tests -->|409| domain
   tests -->|2| domain_services
   tests -->|220| infrastructure
@@ -61,7 +61,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 527 |
 | application | infrastructure | 164 |
-| interfaces | application | 160 |
+| interfaces | application | 163 |
 | application | storage | 53 |
 | scripts | application | 39 |
 | infrastructure | application | 9 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3237 |
+| tests | application | 3247 |
 | tests | domain | 409 |
 | tests | interfaces | 249 |
 | tests | infrastructure | 220 |
@@ -94,7 +94,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 230 |
-| src.interfaces | src.application | 126 |
+| src.interfaces | src.application | 128 |
 | src.application | src.infrastructure | 114 |
 | src.application.ledger | domain.domain | 114 |
 | src.application.ledger | domain.domain.ledger | 56 |
@@ -128,17 +128,17 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.research | 7 |
 | src.application.positions | domain.domain.ledger | 7 |
 | src.application.positions | src.infrastructure | 7 |
+| src.application.setup | src.application | 7 |
 | src.application.multi_tick | domain.domain | 6 |
-| src.application.setup | src.application | 6 |
 | src.infrastructure | domain.domain | 6 |
 | src.interfaces | src.application.ledger | 6 |
 | src.interfaces | src.application.research | 6 |
 | domain.services | domain.domain | 6 |
+| src.interfaces | src.application.settings | 5 |
 | domain.domain | domain.domain.engine | 5 |
 | scripts | src.application.ledger | 5 |
 | src.application.positions | src.application.ledger | 4 |
 | src.application.settings | src.application | 4 |
-| src.interfaces | src.application.settings | 4 |
 | src.interfaces | src.infrastructure | 4 |
 | src.application.inbound | src.infrastructure | 3 |
 | src.application | domain.services | 3 |
@@ -179,20 +179,20 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 106 |
+| src.application.agent_tool_contracts | 107 |
 | src.application.payload_helpers | 96 |
 | domain.domain.symbol_identity | 78 |
 | src.application.ledger.api | 73 |
-| src.application.agent_tool_config | 68 |
+| src.application.agent_tool_config | 69 |
 | src.infrastructure.io_utils | 57 |
 | domain.domain.trade_contract_identity | 52 |
 | src.application.account_config | 51 |
 | domain.domain.ledger.position_fields | 50 |
 | domain.domain.option_position_identity | 48 |
 | domain.domain.decision_state_fingerprint | 47 |
+| src.application.runtime_paths | 28 |
+| src.application.settings | 28 |
 | domain.domain.ledger | 28 |
-| src.application.settings | 27 |
-| src.application.runtime_paths | 25 |
 | src.infrastructure.futu_gateway | 25 |
 
 ### Highest Fan-Out Production Modules

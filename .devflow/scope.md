@@ -1,265 +1,82 @@
-# Close Advice v3 Devflow Impl scope
-
-下方 JSON 是实施完成时的检查点。其 hash、文件清单、验证结果与 next_action 不代表后续 DeepReview 修复后的工作树现值；当前结果以最新 review artifact 和工作树为准。
-
-```json
-{
-  "goal": "Implement single Close Advice v3 policy with independently sealed trading-calendar evidence and near-expiry hold",
-  "design_doc": "docs/CLOSE_ADVICE_CONTRACT.md",
-  "design_sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
-  "implementation_workspace": "<task-worktree>/options-monitor",
-  "review_base": "origin/main@915095650316a6e9d5d82c0e8924046528d19f91",
-  "head": "915095650316a6e9d5d82c0e8924046528d19f91",
-  "baseline_git_status": [
-    " M docs/CLOSE_ADVICE_CONTRACT.md",
-    " M domain/domain/close_advice.py",
-    " M src/application/close_advice_runner.py",
-    " M src/application/config_validator.py",
-    " M tests/test_agent_plugin_smoke.py",
-    " M tests/test_assistant_runtime.py",
-    " M tests/test_close_advice_runner.py",
-    " M tests/test_daily_decision_brief_service.py",
-    " M tests/test_strict_close_advice.py"
-  ],
-  "implementation_baseline": {
-    "staged": [],
-    "unstaged": [
-      {
-        "path": "docs/CLOSE_ADVICE_CONTRACT.md",
-        "status": " M",
-        "sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
-        "size": 24869
-      },
-      {
-        "path": "domain/domain/close_advice.py",
-        "status": " M",
-        "sha256": "774fb2d97d13af71f99f93bc456ef7150fa72a1c83e33b5b49cd9bd6551f36df",
-        "size": 15333
-      },
-      {
-        "path": "src/application/close_advice_runner.py",
-        "status": " M",
-        "sha256": "3d4ff0a5078d812a1a6552dc755f06bc44de2bd13462659f0d060c4e3ba1e3ed",
-        "size": 86371
-      },
-      {
-        "path": "src/application/config_validator.py",
-        "status": " M",
-        "sha256": "5980793d5066dcaac906f99f1066b5fe16cebff36b7215ef436a7b6b52215c4a",
-        "size": 75588
-      },
-      {
-        "path": "tests/test_agent_plugin_smoke.py",
-        "status": " M",
-        "sha256": "99545ba08957aa725bd866b52f5f9863532339e2e0b8fa76ed719b408b13d537",
-        "size": 207295
-      },
-      {
-        "path": "tests/test_assistant_runtime.py",
-        "status": " M",
-        "sha256": "a1747f45f2572d241f826647c1c71a68b370025a64b63f620708eebc433816c6",
-        "size": 9446
-      },
-      {
-        "path": "tests/test_close_advice_runner.py",
-        "status": " M",
-        "sha256": "1f0a155b01f4efe79a6bc87c33f80584041a2ece4c94446f3b94322cb8dc1758",
-        "size": 20495
-      },
-      {
-        "path": "tests/test_daily_decision_brief_service.py",
-        "status": " M",
-        "sha256": "b92c531ba254ace7a950c4957bc457a2417dd4f7fee21c1febc261de2adedc8b",
-        "size": 102311
-      },
-      {
-        "path": "tests/test_strict_close_advice.py",
-        "status": " M",
-        "sha256": "5441046123e782e8f0491f3d993e91f8f85d012ead755d0ee8e5c627d9823735",
-        "size": 10124
-      }
-    ],
-    "untracked": []
-  },
-  "success_signals": {
-    "S1": "Each eligible lot has one row; economic failure holds; valid near expiry low delta holds; otherwise close only with sufficient evidence",
-    "S2": "Independent market calendar handles holidays, half days, market-local dates, current session boundary and sealed receipt/hash",
-    "S3": "Scheduled and manual entries use same v3 policy; missing evidence is not_evaluable and does not notify; old reports fail closed"
-  },
-  "authorized_slices": [
-    {
-      "slice": "calendar",
-      "signals": [
-        "S1",
-        "S2",
-        "S3"
-      ],
-      "depends_on": [],
-      "owners": [
-        "src/application/close_advice_required_data.py",
-        "src/application/tick_account_execution.py",
-        "src/application/opend_symbol_fetching.py",
-        "src/application/opend_symbol_outputs.py",
-        "src/application/close_advice_runner.py",
-        "relevant tests"
-      ]
-    },
-    {
-      "slice": "decision_consumers",
-      "signals": [
-        "S1",
-        "S3"
-      ],
-      "depends_on": [
-        "calendar"
-      ],
-      "owners": [
-        "domain/domain/close_advice.py",
-        "src/application/close_advice_runner.py",
-        "readers and Daily Brief",
-        "relevant tests"
-      ]
-    }
-  ],
-  "scope_note": "Pre-existing nine task edits migrated byte-for-byte from older worktree. The prior clean .devflow/scope.md belonged to completed Bot work and remains in Git history at review_base.",
-  "slice_checkpoints": [
-    {
-      "slice": "calendar",
-      "diff_fingerprint": "f4d2211c7604b073fad01383fbfbbf2264355c73d138fc2572d5055122a93275",
-      "validation": "tests/test_close_advice_required_data.py: 26 passed; frozen v3 close/hold and calendar timeout/cross-year evidence",
-      "done": true,
-      "checkpoint_note": "Final restricted-diff fingerprint; no earlier temporal checkpoint was preserved"
-    },
-    {
-      "slice": "decision_consumers",
-      "diff_fingerprint": "df8a9e9d5ab64d0d27a9742454b504d8a4a9debf4894977cce2d8ee874b20ba1",
-      "validation": "Related pytest suite: 313 passed; Ruff --no-cache passed; git diff --check passed",
-      "done": true
-    }
-  ],
-  "status": "implementation_completed",
-  "inventory": [
-    {
-      "path": "docs/CLOSE_ADVICE_CONTRACT.md",
-      "sha256": "0f025583a76086eccb3807d90ffc123b8bc52f1a6563262691c926f0ca9a1a0e",
-      "size": 24869,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "domain/domain/close_advice.py",
-      "sha256": "99db3a8336c9273c2c9a86a56d8b9c04d73a6798c8c5c010aeb1e9e4d5807ea5",
-      "size": 16471,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/agent_tools/close_advice_read_impl.py",
-      "sha256": "a9b2f2221e3679b7e5cbd6b2f185ec62f6ea5b013136a9d97a30f52752000ef6",
-      "size": 34911,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/close_advice_required_data.py",
-      "sha256": "330363823d227fa2940e194d339a9b68c6f0bbd12ef06431141055c38eb81122",
-      "size": 32258,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/close_advice_runner.py",
-      "sha256": "5029cac45955c3dc92fd295d7d3fbbfefaa04fe4d385dbef6274be53867dff20",
-      "size": 94197,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/config_validator.py",
-      "sha256": "46a7c502c1a27224c8cc61fe79c86d2698054c4ea93fcbf84324389b91860ee6",
-      "size": 75588,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/daily_decision_brief_service.py",
-      "sha256": "1250603987cb4fc288c0c3af97720498e3a616ee1a72b1646a16dd46bfb18588",
-      "size": 103920,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "src/application/tick_account_execution.py",
-      "sha256": "c36befd137a1aa324ad13f5ba52b9c5fe176a09f9fba9e972f73c55813b2280f",
-      "size": 71596,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_agent_plugin_smoke.py",
-      "sha256": "ffcc6358df900236d771372ddf433ff06e4acfcbf5e4e27e209e0c1293f5dc9e",
-      "size": 207421,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_assistant_runtime.py",
-      "sha256": "3260cf96ea0516fea48e9672d90d5f5358d4fc01f92af2ce145aabefddd72a14",
-      "size": 9446,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_close_advice_required_data.py",
-      "sha256": "42e520f84e38c73cbe91450cec22f7a3f945e67ba6550701c916448d93535db8",
-      "size": 53304,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_close_advice_runner.py",
-      "sha256": "31256a599567c0c14d1c9e55dddc92c5c25cae8020af74d5bfc5d9fececb81a5",
-      "size": 22875,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_daily_decision_brief_service.py",
-      "sha256": "920941a1f6e0437061972d5946d02b7c4f275799ea538ee1855f3b9db374e35b",
-      "size": 102311,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_strict_close_advice.py",
-      "sha256": "9fd6af713ed0c4e0446f8e27ac94314b4302141ec862731a7a90303f73927169",
-      "size": 10782,
-      "status": "M",
-      "classification": "planned"
-    },
-    {
-      "path": "tests/test_tick_account_execution_barrier.py",
-      "sha256": "d091ee711566e687a9c5d3a5556a5755d115bef207d20c25b2948e4ac12c520e",
-      "size": 59124,
-      "status": "M",
-      "classification": "planned"
-    }
-  ],
-  "content_revision": "08302a129b6b1787621bc8cbbacebe8bd4a25c1b838a0e2139dbe013e0ebcad7",
-  "evidence_paths": [
-    "docs/CLOSE_ADVICE_CONTRACT.md",
-    "tests/test_close_advice_required_data.py",
-    "tests/test_close_advice_runner.py",
-    "tests/test_strict_close_advice.py"
-  ],
-  "residual_risks": [
-    {
-      "item": "No local historical Close Advice reports available for v2/v3 per-lot replay",
-      "classification": "needs-new-issue-or-user-decision",
-      "owner": "Close Advice strategy owner",
-      "destination": "Read-only historical replay before production activation"
-    }
-  ],
-  "next_action": "Await separately authorized Review or Delivery"
-}
-```
+goal: "修复 OM 首次配置的离线就绪判断、跨终端目录定位、预览与失败恢复"
+non_goals:
+  - "不迁移或修改已有生产配置、服务或凭证"
+  - "不运行扫描、不连接 OpenD、不发送通知"
+  - "不提交、推送、建 PR、合并、发布或部署"
+scope: "om setup init/check、公共 runtime root 解析、相关 CLI/Tool Gateway 只读消费及文档"
+success_signals:
+  - "S1: 占位账户 ID 或所选市场快照缺失阻断离线配置就绪；Bot 单独报告"
+  - "S2: 无高优先级覆盖时新终端定位新建目录，显式环境与服务路径优先"
+  - "S3: dry-run/确认前展示完整目标与关键设置，不写持久目标、不覆盖并发目标"
+  - "S4: 预备内容绑定最终 YAML；写入失败只恢复本次未变化的文件；成功回读可用"
+authorized_slices:
+  - {slice: "offline-readiness", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S1", depends_on: []}
+  - {slice: "durable-runtime-root", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S2", depends_on: []}
+  - {slice: "preview-and-recovery", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S3,S4", depends_on: ["durable-runtime-root"]}
+slice_checkpoints:
+  - {slice: "offline-readiness", diff_fingerprint: "sha256:e6a124b902ef3f25d376e456011b45056b01fb6d1ad014cc39c74ad4471855da", validation: "tests/test_setup_check.py: 12 passed", done: true}
+  - {slice: "durable-runtime-root", diff_fingerprint: "sha256:9c85a198f3678637de6ad7e0e3bfc8cc3c3e72896d417aa547497b0ddf818dd2", validation: "new-process resolver/tool scope and tick-cron: passed", done: true}
+  - {slice: "preview-and-recovery", diff_fingerprint: "sha256:8ce75051b073c9d3d0ef2c4b293da6b25fa3befc900a960dc3e17f44b1f037ef", validation: "setup-init faults, new-process setup check, config suite: passed", done: true}
+user_confirmation:
+  - "先修2、3项"
+  - "再处理预览与恢复"
+  - "full"
+prd_doc: "not-applicable"
+prd_doc_ref: "not-applicable"
+design_doc: "CONFIGS.md"
+design_ref: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
+implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
+review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
+authorization_diffs: []
+workflow_version: 2
+mode: workflow
+workflow_path: full
+node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
+current_node: Review
+internal_step: deepreview
+status: completed
+next_action: "研发已完成；如需源码交付，另行授权提交或推送"
+approved_scope_ref: "本对话用户消息: 先修2、3项; 再处理预览与恢复"
+path_approval_ref: "本对话用户消息: full"
+implementation_baseline:
+  design_doc: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
+  implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
+  review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
+  head: "18f7ff06364c663cacf9ac84eef591171131b687"
+  git_status: " M CONFIGS.md"
+  staged: []
+  unstaged:
+    - {path: "CONFIGS.md", hash: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786}
+  untracked: []
+inventory:
+  - {path: ".devflow/scope.md", status: " M", hash: "sha256:self-reference", size: 3143, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "CONFIGS.md", status: " M", hash: "sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "CONFIGURATION_GUIDE.md", status: " M", hash: "sha256:e5ab0fdb2d6ee9e11719ba76327f3b5d433c78c344d54319a007f11f8d300aa6", size: 11145, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "README.md", status: " M", hash: "sha256:652f4fc8493bbe2656a81f175c9adc9cd248425045465e07d88473d2ce002295", size: 19898, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "docs/DEPENDENCY_GRAPH.md", status: " M", hash: "sha256:11c3a6282ce7ecf32f4b43c8708afcdf2952042146a514675100b7727e061fe7", size: 8918, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "docs/GETTING_STARTED.md", status: " M", hash: "sha256:62fa3a59fa549e1e6fdffbbcb33a3dea730e5bf13fb4a4f1ecfe845c644761a3", size: 7147, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "docs/dependency_graph.mmd", status: " M", hash: "sha256:2de75e2f11184c6dc90f64b05363437e95582c3a2dbc8ce14cc830eb8974d68c", size: 6805, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/agent_tool_config.py", status: " M", hash: "sha256:e0a12fc02c4ed2556709f756162ff7fb0ff15119aab6c8ab03e686e769bb63de", size: 4441, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/agent_tools/project.py", status: " M", hash: "sha256:15bc0a76e41b9066108c7a304631c869c9aab5dab19342c38923df4d77aefcb7", size: 11808, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/agent_tools/project_runs.py", status: " M", hash: "sha256:619ca98ee71e4b371fad031aa1fa92711ee36c10ceb90bd3457b4a65cb4fa39a", size: 32406, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/agent_tools/runtime.py", status: " M", hash: "sha256:8e89a265f2aa48e90612899bf6c7fea43685b14334f1f90c417b0f7f8acbcde5", size: 26533, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/config_yaml_init.py", status: " M", hash: "sha256:382ebbcf74db4c684469f98a61e252a6643fe23712e405f380d609cd4e0bb6ca", size: 16955, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/runtime_paths.py", status: " M", hash: "sha256:bb7257c0a1530ca8c2db06affe36c441370d0636ac5751ac84231fdb61087b13", size: 3415, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/setup/check.py", status: " M", hash: "sha256:49838c11a2f35f496ec21b7eb6468e6f100afec0fe3ca078bacfe8596d6c30cb", size: 16690, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/application/tick_cron.py", status: " M", hash: "sha256:5f018be587e1cf712753d0f3c6bb5a52a70f804c4e6768fbfafbba7225491c34", size: 17959, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/interfaces/cli/home.py", status: " M", hash: "sha256:8ae7ae6ba76620aa5667e4ea6d7c56904a967ee61b9984437a4c460ddb08d851", size: 4682, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "src/interfaces/cli/setup_ops.py", status: " M", hash: "sha256:e6a0d4bcedda97f865f5975d9d5f00036bb8326a6d011b6614678a7b6df23dcb", size: 10298, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "tests/test_runtime_paths.py", status: " M", hash: "sha256:cbde4a7942a76c38a658ab0c17b2e4e1c36502415d29af0157917a567d573042", size: 4254, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "tests/test_setup_check.py", status: " M", hash: "sha256:f24292359c44442055a798fa7464265afdf07c7b4b3f0283cb0b034eed8ab487", size: 14057, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+  - {path: "tests/test_setup_init_cli.py", status: " M", hash: "sha256:2407e2918029c1542ff058c0c4c534909d23227f4513b09c1337914c8760741c", size: 8651, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
+content_revision: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
+planreview_round: 2
+deepreview_round: 1
+in_flight: []
+evidence_paths:
+  - "docs/reviews/plan-review-20260929-005839.md"
+  - "docs/reviews/plan-review-20260929-010001.md"
+  - "docs/reviews/code-review-20260929-012144.md"
+blocking_findings: []
+residual_risks:
+  - {item: "强杀后可能留下新建文件", classification: "needs-new-issue-or-user-decision", owner: "首次配置操作者", destination: "当前手动核对见 Getting Started；若需自动恢复再定需求"}

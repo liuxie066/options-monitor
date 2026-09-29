@@ -109,13 +109,13 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup init
 ```
 
-它会询问配置目录、市场、账户标签和富途账户 ID，预览目标文件，输入 `yes` 后才写入。按输出提示设置 `OM_RUNTIME_ROOT`，编辑 `config.yaml`，校验并重建快照，然后检查：
+它会询问配置目录、市场、账户标签和富途账户 ID，预览目标文件与默认选择，输入 `yes` 后才写入。成功时会把目录记在 `~/.config/options-monitor/runtime-root`，新终端无需再次设置 `OM_RUNTIME_ROOT`。编辑生成的 `config.yaml` 后，按输出命令校验并重建快照，然后检查：
 
 ```bash
 om setup check --market us --format text
 ```
 
-非交互预览用 `om setup init --dry-run --output-dir <path>`；完整的初始化参数、YAML 校验与快照重建见 `om config --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时默认拒绝覆盖。
+非交互预览用 `om setup init --dry-run --output-dir <path>`；完整的初始化参数、YAML 校验与快照重建见 `om config --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时拒绝覆盖；中断后若留下文件，先核对冲突清单再重试。`om setup check` 检查所选市场的离线配置与安装条件，Bot 单独报告；它不验证券商登录或通知可达。已有 `OM_RUNTIME_ROOT` 或服务显式目录仍优先于用户记录。
 
 ### 2. 只读检查
 
@@ -149,7 +149,8 @@ om config explain --source yaml --market us \
 先禁发通知：
 
 ```bash
-om run tick --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx --no-send
+OM_CONFIG_DIR="$(cat "$HOME/.config/options-monitor/runtime-root")"
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send
 ```
 
 `--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
@@ -157,13 +158,13 @@ om run tick --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx --no-send
 示例中的 `lx` 换成初始化时选择的账户标签。检查结果后，可继续手工扫描：
 
 ```bash
-om run tick --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx
 ```
 
 计划内扫描和普通通知使用 guarded scheduler：
 
 ```bash
-om run tick-cron --market us --config "$OM_RUNTIME_ROOT/config.us.json" --accounts lx --timeout 600
+om run tick-cron --market us --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --timeout 600
 ```
 
 首次运行的完整顺序见 [Getting Started](docs/GETTING_STARTED.md)。
