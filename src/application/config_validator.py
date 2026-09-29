@@ -184,7 +184,7 @@ ASSISTANT_CONFIG_KEYS = {
     'models',
 }
 BOT_TOOLSET_KEYS = {'portfolio'}
-BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode'}
+BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode', 'read_markets'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -562,6 +562,12 @@ def _validate_assistant_config(cfg: dict) -> None:
         mode = str(bot.get('tool_loading_mode') or '').strip().lower()
         if mode not in {'eager', 'directory'}:
             die('assistant.bot.tool_loading_mode must be one of: eager, directory')
+    if 'read_markets' in bot:
+        markets = bot['read_markets']
+        if (not isinstance(markets, list) or not markets
+                or any(not isinstance(market, str) or market not in {'us', 'hk'} for market in markets)
+                or len(markets) != len(set(markets))):
+            die('assistant.bot.read_markets must be a non-empty list of unique us/hk markets')
     toolsets = bot.get('toolsets')
     if toolsets is None:
         toolsets = {}

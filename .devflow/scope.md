@@ -1,82 +1,81 @@
-goal: "修复 OM 首次配置的离线就绪判断、跨终端目录定位、预览与失败恢复"
+goal: "让已通过渠道鉴权的 Bot 用户在受控只读权限内查询 US/HK，并按实际市场与账户解释 3690.HK 等记录"
 non_goals:
-  - "不迁移或修改已有生产配置、服务或凭证"
-  - "不运行扫描、不连接 OpenD、不发送通知"
-  - "不提交、推送、建 PR、合并、发布或部署"
-scope: "om setup init/check、公共 runtime root 解析、相关 CLI/Tool Gateway 只读消费及文档"
+  - "不扩大交易、通知、Control 或账本写权限"
+  - "不修改实时 config.yaml、生成的 config.us.json/config.hk.json、服务或生产状态"
+  - "不提交、推送、建 PR、合并、发布或升级"
+scope: "Bot 渠道可信市场授权、Host 工具选择、会话/记忆隔离、只读持仓事件工具、提示词和相关文档测试"
 success_signals:
-  - "S1: 占位账户 ID 或所选市场快照缺失阻断离线配置就绪；Bot 单独报告"
-  - "S2: 无高优先级覆盖时新终端定位新建目录，显式环境与服务路径优先"
-  - "S3: dry-run/确认前展示完整目标与关键设置，不写持久目标、不覆盖并发目标"
-  - "S4: 预备内容绑定最终 YAML；写入失败只恢复本次未变化的文件；成功回读可用"
+  - "S1: 已配置双市场授权时 3690.HK 可明确选择 HK 只读工具；未授权、冲突或缺失配置均在 Host 拒绝"
+  - "S2: 每次读取按所选市场核验账户，不能借 US 的 lx 身份读取未授权 HK 数据；结果与回复标注实际市场、账户、数据来源"
+  - "S3: assignment 与 trade attribution 两类记录能分别查询；无法证明的事实明确为未知，不将空结果或参数冲突推断成事实"
+  - "S4: 授权集变化不复用旧会话与个人记忆；旧单市场部署默认保持原行为"
 authorized_slices:
-  - {slice: "offline-readiness", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S1", depends_on: []}
-  - {slice: "durable-runtime-root", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S2", depends_on: []}
-  - {slice: "preview-and-recovery", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S3,S4", depends_on: ["durable-runtime-root"]}
-slice_checkpoints:
-  - {slice: "offline-readiness", diff_fingerprint: "sha256:e6a124b902ef3f25d376e456011b45056b01fb6d1ad014cc39c74ad4471855da", validation: "tests/test_setup_check.py: 12 passed", done: true}
-  - {slice: "durable-runtime-root", diff_fingerprint: "sha256:9c85a198f3678637de6ad7e0e3bfc8cc3c3e72896d417aa547497b0ddf818dd2", validation: "new-process resolver/tool scope and tick-cron: passed", done: true}
-  - {slice: "preview-and-recovery", diff_fingerprint: "sha256:8ce75051b073c9d3d0ef2c4b293da6b25fa3befc900a960dc3e17f44b1f037ef", validation: "setup-init faults, new-process setup check, config suite: passed", done: true}
+  - {slice: "trusted-market-routing", design_doc_ref: "docs/BOT_DESIGN.md#跨市场只读查询设计2026-09-29", success_signal: "S1,S2", depends_on: []}
+  - {slice: "records-and-isolation", design_doc_ref: "docs/BOT_DESIGN.md#跨市场只读查询设计2026-09-29", success_signal: "S3,S4", depends_on: ["trusted-market-routing"]}
 user_confirmation:
-  - "先修2、3项"
-  - "再处理预览与恢复"
+  - "/devflow 按这个方向优化"
   - "full"
+  - "确认：当前 allowlist 用户可读 US/HK；本轮仅源代码只读能力"
 prd_doc: "not-applicable"
 prd_doc_ref: "not-applicable"
-design_doc: "CONFIGS.md"
-design_ref: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
-authorization_diffs: []
+design_doc: "docs/BOT_DESIGN.md"
+design_ref: "docs/BOT_DESIGN.md sha256:ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd"
+implementation_workspace: "<task-worktree>/options-monitor"
+review_base: "origin/main"
 workflow_version: 2
 mode: workflow
 workflow_path: full
 node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
-current_node: Review
-internal_step: deepreview
-status: completed
-next_action: "研发已完成；如需源码交付，另行授权提交或推送"
-approved_scope_ref: "本对话用户消息: 先修2、3项; 再处理预览与恢复"
-path_approval_ref: "本对话用户消息: full"
+progress: "completed"
+review_counts: {panel: 4, planreview: 2, deepreview: 1}
+review_artifact: "docs/reviews/code-review-20260929-222907.md"
+review_verdict: "pass; no material findings; residual risks assigned in artifact"
+panel_backend: "native-subagent"
+panel_model: "unknown (default Codex; DeepSeek backend unavailable)"
+panel_independence: "unverified"
+panel_snapshot: "docs/BOT_DESIGN.md sha256:c5a822bc1dfc34728a0866163fb38ef8572422c747a59c8ced2db1a4dcab6019"
+panel_decisions: "accepted: explicit assistant source, tool routing, market/account evidence, event type, attribution filter, grant generation, same-account memory; rejected: exposing unfiltered position list; deferred: manual byte-and-metadata restore epoch hardening"
+planreview_artifact: "docs/reviews/plan-review-20260929-215242.md"
 implementation_baseline:
-  design_doc: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-  implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-  review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
-  head: "18f7ff06364c663cacf9ac84eef591171131b687"
-  git_status: " M CONFIGS.md"
+  design_doc: "docs/BOT_DESIGN.md sha256:ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd"
+  workspace: "<task-worktree>/options-monitor"
+  review_base: "origin/main@975351a4e50781aa5dd3483d3805e4270705e839"
+  head: "975351a4e50781aa5dd3483d3805e4270705e839"
+  status_short: [" M .devflow/scope.md", " M docs/BOT_DESIGN.md"]
   staged: []
   unstaged:
-    - {path: "CONFIGS.md", hash: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786}
+    - {path: ".devflow/scope.md", sha256: "ea81433eee0e30eb7196f88fa78f63a9187aa3e3995b8f77f73c2f8e573d87a1", size: 2682}
+    - {path: "docs/BOT_DESIGN.md", sha256: "ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd", size: 17080}
   untracked: []
+slice_checkpoints:
+  - {slice: "trusted-market-routing", diff_fingerprint: "final combined code diff sha256:16e12fef054cfbd9c5c1ac6eb6ca461a2b05318589407811d7e4ea1bc63feb09 + tests/test_bot_cross_market_read.py sha256:6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", validation: "360 passed; ruff --no-cache and git diff --check passed", done: true}
+  - {slice: "records-and-isolation", diff_fingerprint: "final combined code diff sha256:16e12fef054cfbd9c5c1ac6eb6ca461a2b05318589407811d7e4ea1bc63feb09 + tests/test_bot_cross_market_read.py sha256:6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", validation: "360 passed; ruff --no-cache and git diff --check passed", done: true}
+checkpoint_limit: "两片实现交错，只有最终合并快照，未记录独立可 bisect 的片边界；不把相同指纹称为两个独立版本。"
+scope_closure: "S1,S2->trusted-market-routing; S3,S4->records-and-isolation; no uncovered signal or orphan slice"
+scope_guard_extra: "取消入口和 Host 存储修复属于 S4 必要正确性：原飞书预检未传 assistant_config_path，授权代际会使活跃会话取消失效；tests/test_feishu_analysis_cancellation.py 覆盖。"
+inventory_self: ".devflow/scope.md is this tracked workflow record; self hash omitted to avoid recursive mismatch"
 inventory:
-  - {path: ".devflow/scope.md", status: " M", hash: "sha256:self-reference", size: 3143, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGS.md", status: " M", hash: "sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGURATION_GUIDE.md", status: " M", hash: "sha256:e5ab0fdb2d6ee9e11719ba76327f3b5d433c78c344d54319a007f11f8d300aa6", size: 11145, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "README.md", status: " M", hash: "sha256:652f4fc8493bbe2656a81f175c9adc9cd248425045465e07d88473d2ce002295", size: 19898, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/DEPENDENCY_GRAPH.md", status: " M", hash: "sha256:11c3a6282ce7ecf32f4b43c8708afcdf2952042146a514675100b7727e061fe7", size: 8918, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/GETTING_STARTED.md", status: " M", hash: "sha256:62fa3a59fa549e1e6fdffbbcb33a3dea730e5bf13fb4a4f1ecfe845c644761a3", size: 7147, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/dependency_graph.mmd", status: " M", hash: "sha256:2de75e2f11184c6dc90f64b05363437e95582c3a2dbc8ce14cc830eb8974d68c", size: 6805, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tool_config.py", status: " M", hash: "sha256:e0a12fc02c4ed2556709f756162ff7fb0ff15119aab6c8ab03e686e769bb63de", size: 4441, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project.py", status: " M", hash: "sha256:15bc0a76e41b9066108c7a304631c869c9aab5dab19342c38923df4d77aefcb7", size: 11808, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project_runs.py", status: " M", hash: "sha256:619ca98ee71e4b371fad031aa1fa92711ee36c10ceb90bd3457b4a65cb4fa39a", size: 32406, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/runtime.py", status: " M", hash: "sha256:8e89a265f2aa48e90612899bf6c7fea43685b14334f1f90c417b0f7f8acbcde5", size: 26533, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/config_yaml_init.py", status: " M", hash: "sha256:382ebbcf74db4c684469f98a61e252a6643fe23712e405f380d609cd4e0bb6ca", size: 16955, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/runtime_paths.py", status: " M", hash: "sha256:bb7257c0a1530ca8c2db06affe36c441370d0636ac5751ac84231fdb61087b13", size: 3415, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/setup/check.py", status: " M", hash: "sha256:49838c11a2f35f496ec21b7eb6468e6f100afec0fe3ca078bacfe8596d6c30cb", size: 16690, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/tick_cron.py", status: " M", hash: "sha256:5f018be587e1cf712753d0f3c6bb5a52a70f804c4e6768fbfafbba7225491c34", size: 17959, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/home.py", status: " M", hash: "sha256:8ae7ae6ba76620aa5667e4ea6d7c56904a967ee61b9984437a4c460ddb08d851", size: 4682, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/setup_ops.py", status: " M", hash: "sha256:e6a0d4bcedda97f865f5975d9d5f00036bb8326a6d011b6614678a7b6df23dcb", size: 10298, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_runtime_paths.py", status: " M", hash: "sha256:cbde4a7942a76c38a658ab0c17b2e4e1c36502415d29af0157917a567d573042", size: 4254, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_check.py", status: " M", hash: "sha256:f24292359c44442055a798fa7464265afdf07c7b4b3f0283cb0b034eed8ab487", size: 14057, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_init_cli.py", status: " M", hash: "sha256:2407e2918029c1542ff058c0c4c534909d23227f4513b09c1337914c8760741c", size: 8651, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-content_revision: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-planreview_round: 2
-deepreview_round: 1
-in_flight: []
-evidence_paths:
-  - "docs/reviews/plan-review-20260929-005839.md"
-  - "docs/reviews/plan-review-20260929-010001.md"
-  - "docs/reviews/code-review-20260929-012144.md"
-blocking_findings: []
-residual_risks:
-  - {item: "强杀后可能留下新建文件", classification: "needs-new-issue-or-user-decision", owner: "首次配置操作者", destination: "当前手动核对见 Getting Started；若需自动恢复再定需求"}
+  - {path: "docs/BOT_DESIGN.md", status: " M", sha256: "ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd", size: 17080, classification: "planned"}
+  - {path: "src/application/agent_tools/operations_impl.py", status: " M", sha256: "0e2cecd2e5d454c836eb9f3dcf63951cf8360372b20fdfd227d86228676a2634", size: 49087, classification: "planned"}
+  - {path: "src/application/agent_tools/positions.py", status: " M", sha256: "34edb182e33bca4599dec3ca828f3abace4c87b7a8a45a4ede1777c1c9139874", size: 73000, classification: "planned"}
+  - {path: "src/application/agent_tools/runtime.py", status: " M", sha256: "329f31d4a04f2aa92256e0a277ab17eec77a0179bc43c38ad54aec47fb5fc83a", size: 26561, classification: "planned"}
+  - {path: "src/application/bot/channel_facade.py", status: " M", sha256: "64eb204eb7dfec54a128a287cf3720ba91e44b348c4c36e6f8ce9346d7041645", size: 16708, classification: "planned"}
+  - {path: "src/application/bot/host.py", status: " M", sha256: "b0376d69eef81d94cf05d7d41b9792054a3c4e06cfbd51870d6d85ea2b7586b6", size: 17287, classification: "planned"}
+  - {path: "src/application/bot/host_store.py", status: " M", sha256: "ea122440037c0f307ee32486ef4e3fa72ce27dc8c2d7154bcdec431299d68727", size: 38531, classification: "required-correctness/safety"}
+  - {path: "src/application/bot/memory.py", status: " M", sha256: "2749b04fc4bd7d5bb25648b8472fdf814ccec54e14a98f8ec6ea699342da6930", size: 23260, classification: "planned"}
+  - {path: "src/application/bot/memory_worker.py", status: " M", sha256: "4a55f0368c3c8f4ae7e3ad2762c0469192e32184600698aab9a9de23be366fee", size: 5584, classification: "planned"}
+  - {path: "src/application/bot/model_config.py", status: " M", sha256: "b9da0c15d71f3e0f374755ef09a0b98c279e1b96ed25eeaf552871e4fb31865a", size: 10267, classification: "planned"}
+  - {path: "src/application/bot/om_chat.scene.json", status: " M", sha256: "03729d61edd136e8223067403898e06e460b7fdcd93695bc3c265bf6df1eaebf", size: 1826, classification: "planned"}
+  - {path: "src/application/bot/prompts/tool_rules.md", status: " M", sha256: "635934ff60bfd02a48c02186782e8e07c41df95003eb1b4ce6e0a2db33d77dce", size: 2985, classification: "planned"}
+  - {path: "src/application/bot/scene.py", status: " M", sha256: "eabba5bf754c736d6c5c5a3e971c96eb3dfec87e94e131fbc6d1761502dcc09a", size: 8574, classification: "planned"}
+  - {path: "src/application/bot/service.py", status: " M", sha256: "87e5837460ea858e7b789da1cd36878328ed92c11ce4c5cfbbf72a26395a708a", size: 4479, classification: "planned"}
+  - {path: "src/application/bot/session.py", status: " M", sha256: "9b410bbcdcf5d26243ed3ea8cb16d501a0ebeab9425990bc6eca5f096d04967f", size: 1539, classification: "planned"}
+  - {path: "src/application/bot/tools.py", status: " M", sha256: "699a93bc82a71387591ff038efeae8e46ec943641ada17071aed24ae3a3fc95f", size: 38080, classification: "planned"}
+  - {path: "src/application/config_validator.py", status: " M", sha256: "aaa31e928730ddede8b3b2fe29495d06844df70ad27b108d5b747813261fa1f9", size: 76484, classification: "planned"}
+  - {path: "src/application/inbound/feishu.py", status: " M", sha256: "f5f12c37a2de997068967cbf474f82e5b0b1bc8e652af9e615572a356033f131", size: 9752, classification: "required-correctness/safety"}
+  - {path: "src/application/inbound/feishu_ws.py", status: " M", sha256: "ac038cd7de3bce4518d548d9ce1aedd2ccd3694124a9556b8897223b725264c5", size: 47368, classification: "required-correctness/safety"}
+  - {path: "src/application/trades/attribution.py", status: " M", sha256: "743c803df319761f4ec93fc9ec5d2583928d629a6612a8cf711e74044c75b899", size: 43091, classification: "planned"}
+  - {path: "tests/test_bot_phase1.py", status: " M", sha256: "576fc4a1d101ccfe3d4cb0f398092fb92ecb81bb3da64cabe95de8b0b88a26d6", size: 31423, classification: "planned"}
+  - {path: "tests/test_feishu_analysis_cancellation.py", status: " M", sha256: "f79a524d71933007fab1829d063da4ddbf5078cbf1998b00639fd29007dece41", size: 22487, classification: "required-correctness/safety"}
+  - {path: "tests/test_trade_event_pagination.py", status: " M", sha256: "720f5e52f20316250fca0618db6e9ef02fc953127edf9973cb0ba0939458c3d1", size: 45951, classification: "planned"}
+  - {path: "tests/test_bot_cross_market_read.py", status: "??", sha256: "6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", size: 13471, classification: "planned"}

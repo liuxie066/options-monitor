@@ -19,6 +19,7 @@ from src.infrastructure.io_utils import utc_now as _now
 class MemoryScope:
     owner_scope: str
     allowed_accounts: frozenset[str] = frozenset()
+    read_generation: str = ""
 
 
 def scope_from_contract(contract: Any, allowed_accounts: Any = ()) -> MemoryScope:
@@ -49,8 +50,18 @@ def scope_from_contract(contract: Any, allowed_accounts: Any = ()) -> MemoryScop
         authority = key_authority or "path:" + canonical_path
         if declared_authority and declared_authority not in {key_authority, path_authority}:
             raise ValueError("MEMORY_UNAUTHENTICATED")
-    owner = hashlib.sha256(json.dumps([channel, sender, authority], ensure_ascii=False).encode()).hexdigest()
-    return MemoryScope(owner, frozenset(str(a).lower() for a in allowed_accounts))
+    generation = str(data.get("read_generation") or "").strip()
+    assistant_path = str(data.get("assistant_config_path") or "").strip()
+    if generation or assistant_path:
+        from src.application.bot.model_config import load_bot_read_scope
+
+        primary = key or ("hk" if path.lower().endswith("config.hk.json") else "us")
+        markets, expected = load_bot_read_scope(config_path=assistant_path, primary_market=primary)
+        if generation != expected or sorted(markets) != data.get("read_markets"):
+            raise ValueError("MEMORY_UNAUTHENTICATED")
+    owner_parts = [channel, sender, authority, generation] if generation else [channel, sender, authority]
+    owner = hashlib.sha256(json.dumps(owner_parts, ensure_ascii=False).encode()).hexdigest()
+    return MemoryScope(owner, frozenset(str(a).lower() for a in allowed_accounts), generation)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:

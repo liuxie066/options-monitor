@@ -28,6 +28,18 @@
       "authority": "host_only_tool_scope"
     },
     {
+      "name": "read_markets",
+      "authority": "fixed_tool_scope"
+    },
+    {
+      "name": "read_generation",
+      "authority": "host_only_tool_scope"
+    },
+    {
+      "name": "assistant_config_path",
+      "authority": "host_only_tool_scope"
+    },
+    {
       "name": "symbol",
       "authority": "fixed_tool_scope"
     },
@@ -58,6 +70,7 @@
       "runtime_logs",
       "runtime_status",
       "receipt_read",
+      "option_positions_read",
       "trade_attribution_read"
     ]
   },
