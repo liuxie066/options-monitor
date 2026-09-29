@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import queue
+import sqlite3
 import sys
 import threading
 import time
@@ -92,6 +93,7 @@ from src.application.trades.inbox import (
     read_trade_payloads_for_reconciliation,
     settle_reconciled_trade_payload,
     resume_trade_payload,
+    resume_skipped_trade_payload,
     save_trade_payload_result,
     trade_payload_commit_scope,
     claim_trade_payload_refresh_intent,
@@ -108,6 +110,7 @@ from src.application.trades.inbox import (
     trade_inbox_revision,
     trade_inbox_summary,
 )
+from src.application.ledger.api import with_sqlite_repo_writer_lock
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import (
@@ -190,6 +193,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
     ap.add_argument("--execution-file", help="Import bounded UTF-8 trade_execution.v1 JSONL; preview by default")
     ap.add_argument("--inbox-id", help="Preview or resume one saved Inbox entry; no broker history query")
+    ap.add_argument("--recover-skipped", action="store_true", help="Review or recover one historical stock skip")
+    ap.add_argument("--expected-recovery-hash", help="Exact hash from --recover-skipped preview")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
     ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
     ap.add_argument(
@@ -215,6 +220,97 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--apply", action="store_true", help="Apply state reconciliation or confirmed receipt compensation; dry-run by default")
     ap.add_argument("--dry-run", action="store_true", help="Preview state reconciliation or receipt compensation without writing or sending")
     return ap.parse_args(argv)
+
+
+def _skipped_recovery_snapshot(
+    *, inbox_path: Path, inbox_id: str, state_path: Path, ledger_path: Path,
+    account_mapping: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    saved = read_trade_payload(inbox_path, inbox_id=inbox_id, read_only=True)
+    prior_skip = bool(saved and (
+        saved.get("status"), saved.get("result_status"), saved.get("result_reason")
+    ) == ("handled", "skipped", "not_option_deal"))
+    interrupted = bool(saved and saved.get("status") == "pending"
+                       and (saved.get("result") or {}).get("recovery_mode") == "skipped_stock")
+    if not (prior_skip or interrupted) or saved.get("identity_status") != "bound":
+        raise ValueError("Inbox entry is not an exact skipped stock recovery source")
+    key = str(saved.get("broker_deal_key") or "")
+    parts = key.split(":", 3)
+    payload = saved["payload"]
+    trusted_source = payload.get("_trade_intake_source") or {}
+    physical = str(extract_primary_account_id(payload) or "").strip()
+    if len(parts) == 4 and parts[0] == "futu" and all(parts[1:]):
+        account = parts[1]
+        if physical != parts[2]:
+            raise ValueError("saved Futu source physical account differs from payload")
+    elif key.startswith("execution:v1:") and len(key) == len("execution:v1:") + 64:
+        account = str(trusted_source.get("account") or "").strip()
+        result_account = str((saved.get("result") or {}).get("account") or "").strip()
+        if (not account or not physical or
+                str(trusted_source.get("futu_account_id") or "").strip() != physical
+                or (result_account and result_account != account)
+                or str(payload.get("environment") or payload.get("trd_env") or "").upper() != "REAL"
+                or str(payload.get("external_id_namespace") or "") != "futu.deal"):
+            raise ValueError("structured Futu source lacks trusted account binding")
+    else:
+        raise ValueError("recovery requires one canonical Futu source")
+    if account_mapping is not None and (
+        account_mapping.get(physical) != account
+        or broker_deal_key_from_payload(payload, account_mapping=account_mapping) != key
+    ):
+        raise ValueError("current account mapping differs from saved Futu source")
+    economic_hash = str(saved.get("economic_payload_hash") or "")
+    if not economic_hash:
+        raise ValueError("saved economic payload hash is missing")
+    if saved.get("receipt") or (saved.get("portfolio_refresh_intent_json")
+                                and not saved.get("portfolio_refresh_attempted_at_ms")):
+        raise ValueError("existing receipt or pending PM refresh intent requires separate reconciliation")
+    state_bytes = state_path.read_bytes() if state_path.is_file() else b""
+    state = load_trade_intake_state(state_path)
+    entries = {identity: {
+        bucket: (state.get(bucket) or {}).get(identity)
+        for bucket in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids")
+    } for identity in (key, str(saved.get("deal_id") or ""))}
+    if prior_skip and not any(
+        (entry := item.get("processed_deal_ids") or {}).get("status") == "skipped"
+        and entry.get("reason") == "not_option_deal"
+        and bool(entry.get("economic_payload_hash"))
+        and entry.get("futu_account_id") == physical
+        for item in entries.values()
+    ):
+        raise ValueError("original processed stock skip differs from Inbox source")
+    digest = hashlib.sha256()
+    digest.update(json.dumps(saved, sort_keys=True, ensure_ascii=False, default=str).encode())
+    digest.update(state_bytes)
+    counts: dict[str, int] = {}
+    queries = {
+        "position_lots": "SELECT * FROM position_lots WHERE account=? ORDER BY lot_id",
+        "trade_events": "SELECT * FROM trade_events WHERE account=? ORDER BY event_id",
+        "assigned_stock_events": "SELECT * FROM assigned_stock_events WHERE account=? ORDER BY stock_event_id",
+        "trade_lifecycle_cases": "SELECT * FROM trade_lifecycle_cases WHERE account=? ORDER BY case_id",
+        "trade_lifecycle_evidence": "SELECT * FROM trade_lifecycle_evidence WHERE account=? ORDER BY evidence_id",
+        "trade_lifecycle_source_consumptions": "SELECT c.* FROM trade_lifecycle_source_consumptions c JOIN trade_lifecycle_cases t ON t.case_id=c.case_id WHERE t.account=? ORDER BY c.source_key",
+        "trade_lifecycle_allocations": "SELECT a.* FROM trade_lifecycle_allocations a JOIN trade_lifecycle_cases t ON t.case_id=a.case_id WHERE t.account=? ORDER BY a.allocation_id",
+        "trade_lifecycle_notification_outbox": "SELECT o.* FROM trade_lifecycle_notification_outbox o JOIN trade_lifecycle_cases t ON t.case_id=o.case_id WHERE t.account=? ORDER BY o.outbox_id",
+    }
+    with contextlib.closing(sqlite3.connect(f"{ledger_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        for name, sql in queries.items():
+            rows = conn.execute(sql, (account,))
+            counts[name] = 0
+            digest.update(name.encode())
+            for row in rows:
+                digest.update(json.dumps(dict(row), sort_keys=True, ensure_ascii=False, default=str).encode())
+                counts[name] += 1
+    return {
+        "inbox_id": inbox_id, "broker_deal_key": key, "account": account,
+        "economic_payload_hash": economic_hash, "state_entries": entries,
+        "ledger_row_counts": counts, "recovery_hash": digest.hexdigest(),
+        "receipt_suppressed": True, "portfolio_refresh_suppressed": True,
+        "prior_portfolio_refresh_attempted": bool(saved.get("portfolio_refresh_attempted_at_ms")),
+        "lifecycle_outbox_status": "suppressed", "dry_run": True,
+    }
 
 
 def _log(message: str) -> None:
@@ -462,6 +558,7 @@ def _process_payload(
     before_receipt_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
+    recover_skipped: bool = False,
     source: str = "push",
     allow_external_lookup: bool = True,
     inbox_path: Path | None = None,
@@ -512,7 +609,8 @@ def _process_payload(
         if retry_failed_deal:
             resume_trade_payload(inbox_path, inbox_id=inbox_id, operator="manual-retry", repo=repo)
         claim = claim_trade_payload(inbox_path, inbox_id=inbox_id, repo=repo,
-                                    owner=f"listener:{os.getpid()}")
+                                    owner=f"listener:{os.getpid()}",
+                                    recover_skipped=recover_skipped)
         if claim is None:
             status = str((stored or {}).get("status") or "identity_needs_review")
             saved = dict((stored or {}).get("result") or {})
@@ -520,6 +618,10 @@ def _process_payload(
                     "reason": "duplicate" if status == "handled" else f"inbox_{status}",
                     "deal_id": payload_deal_id(payload),
                     "inbox_id": inbox_id, "diagnostics": {"retryable": status == "pending"}}
+        if recover_skipped and (json.loads(claim.get("result_json") or "null") or {}).get(
+            "recovery_mode"
+        ) != "skipped_stock":
+            raise ValueError("recovery claim is not the original skipped stock source")
         retry_failed_deal = retry_failed_deal or (
             str(claim.get("result_status") or "").strip().lower() == "failed"
             and str(claim.get("result_reason") or "").startswith("exception:")
@@ -581,6 +683,8 @@ def _process_payload(
         )
         resolve_kwargs = {**kwargs, "wheel_start_enabled": wheel_start_enabled,
                           "retry_with_new_associations": bool((claim or {}).get("new_associations"))}
+        if recover_skipped:
+            resolve_kwargs.update(retry_skipped_deal=True, notification_status="suppressed")
         from src.application.trades.attribution import trade_attribution_enabled_for_execution
         from domain.domain.symbol_identity import symbol_market
         new_attribution = trade_attribution_enabled_for_execution(kwargs["repo"],
@@ -641,6 +745,10 @@ def _process_payload(
                 current = {**current, "attribution_error": type(exc).__name__}
         if _lifecycle_notification_is_outbox_owned({"deal": normalized_deal, "result": current}):
             current = {**current, "receipt_notification_owner": "lifecycle_outbox"}
+        if recover_skipped:
+            current = {**current, "receipt_notification_owner": "lifecycle_outbox",
+                       "receipt_suppression_reason": "historical_recovery",
+                       "recovery_mode": "skipped_stock"}
         if claim is not None:
             with _receipt_preparation_scope(source={"state_path": state_path,
                     "account": getattr(normalized_deal, "internal_account", None)},
@@ -677,6 +785,8 @@ def _process_payload(
                 enriched = save_trade_payload_result(inbox_path, claim=claim, result={
                     **prepared, "_receipt_payload": _receipt_deal_snapshot(context.get("deal"))})
             context["result"].update(enriched)
+        if recover_skipped:
+            return {"status": "skipped", "reason": "historical_recovery", "delivery_confirmed": False}
         if claim is not None and claim.get("association_enrichment"):
             return {"status": "skipped", "reason": "execution_association_enrichment", "delivery_confirmed": False}
         if claim is not None and claim["delivery_purpose"] == "historical":
@@ -706,6 +816,8 @@ def _process_payload(
         before_receipt_fn=_before_receipt,
         on_result_fn=_receipt,
         portfolio_management_enabled=(
+            not recover_skipped
+            and
             is_portfolio_management_enabled(config)
             and (claim is None or (claim["delivery_purpose"] == "live"
                                    and not claim.get("association_enrichment")))
@@ -894,7 +1006,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
         return 0
-    if any((args.effective_from_ms is not None, args.actor, args.request_id, args.manifest, args.backup_path, args.writers_stopped)):
+    if any((args.effective_from_ms is not None, args.request_id, args.manifest, args.backup_path)) or (
+        not args.recover_skipped and (args.actor or args.writers_stopped)
+    ):
         print("attribution administration flags require attribution-enable or attribution-migrate")
         return 2
     intake_cfg = resolve_trade_intake_config(
@@ -934,6 +1048,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.retry_failed and not (args.deal_json or args.inbox_id):
         print("--retry-failed requires --deal-json or --inbox-id replay")
+        return 2
+    if args.recover_skipped and (not args.inbox_id or args.deal_json or args.execution_file
+                                 or args.retry_failed or args.reconcile_state or args.compensate_receipts
+                                 or args.once):
+        print("--recover-skipped requires only one --inbox-id source")
+        return 2
+    if args.expected_recovery_hash and not args.recover_skipped:
+        print("--expected-recovery-hash requires --recover-skipped")
         return 2
     state_operation = bool(args.reconcile_state or args.compensate_receipts)
     if args.expected_payload_hash and not args.compensate_receipts:
@@ -1106,6 +1228,12 @@ def main(argv: list[str] | None = None) -> int:
             "and may send receipts; use --confirm or --yes"
         )
         return 2
+    if args.recover_skipped and apply_changes and (
+        not str(args.actor or "").strip() or not args.writers_stopped
+        or not str(args.expected_recovery_hash or "").strip()
+    ):
+        print("skipped recovery apply requires --actor, --writers-stopped and --expected-recovery-hash")
+        return 2
     if args.execution_file:
         from src.application.trades.file_intake import run_execution_file
         if apply_changes:
@@ -1161,6 +1289,22 @@ def main(argv: list[str] | None = None) -> int:
             print("saved Inbox entry must resolve to exactly one configured source")
             return 2
         saved_inbox_path, saved_inbox = matches[0]
+        if args.recover_skipped and not apply_changes:
+            try:
+                selected = _select_source_for_payload(
+                    sources, payload=saved_inbox["payload"],
+                    account_mapping=intake_cfg["account_mapping"], require_match=True,
+                )
+                preview = _skipped_recovery_snapshot(
+                    inbox_path=saved_inbox_path, inbox_id=args.inbox_id,
+                    state_path=Path(selected["state_path"]), ledger_path=ledger_path,
+                    account_mapping=dict(selected.get("account_mapping") or intake_cfg["account_mapping"]),
+                )
+            except (ValueError, OSError, sqlite3.DatabaseError) as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+                return 2
+            print(json.dumps({"ok": True, **preview}, ensure_ascii=False, indent=2))
+            return 0
         if not apply_changes:
             from src.application.notification_delivery_adapter import notification_target_reference
             preview = dict(saved_inbox)
@@ -1190,11 +1334,32 @@ def main(argv: list[str] | None = None) -> int:
         manual_state_path = Path(manual_source.get("state_path") or state_path)
         manual_audit_path = Path(manual_source.get("audit_path") or audit_path)
         manual_status_path = Path(manual_source.get("status_path") or status_path)
-        with contextlib.redirect_stdout(sys.stderr):
-            if apply_changes:
-                _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
-            else:
-                repo = _ReplayRepo()
+        if apply_changes:
+            _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+        else:
+            repo = _ReplayRepo()
+        with contextlib.redirect_stdout(sys.stderr), (
+            with_sqlite_repo_writer_lock(repo) if args.recover_skipped and apply_changes
+            else contextlib.nullcontext()
+        ):
+            if args.recover_skipped:
+                try:
+                    latest = _skipped_recovery_snapshot(
+                        inbox_path=saved_inbox_path, inbox_id=args.inbox_id,
+                        state_path=manual_state_path,
+                        ledger_path=Path(getattr(getattr(repo, "primary_repo", repo), "db_path")),
+                        account_mapping=manual_account_mapping,
+                    )
+                    if latest["recovery_hash"] != args.expected_recovery_hash:
+                        raise ValueError("recovery preview hash changed; review a fresh preview")
+                    if not resume_skipped_trade_payload(
+                        saved_inbox_path, inbox_id=args.inbox_id, operator=args.actor,
+                        economic_payload_hash=latest["economic_payload_hash"], repo=repo,
+                    ):
+                        raise ValueError("skipped Inbox source changed before reclaim")
+                except (ValueError, OSError, sqlite3.DatabaseError) as exc:
+                    print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+                    return 2
             receipt_callback = _build_receipt_callback(
                 base=base,
                 cfg=cfg,
@@ -1218,7 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=cfg,
                 config_path=cfg_path,
                 runtime_root=runtime_root,
-                before_receipt_fn=lambda current: _attach_combo_reconciliation_after_open(
+                before_receipt_fn=None if args.recover_skipped else lambda current: _attach_combo_reconciliation_after_open(
                     current,
                     apply_changes=apply_changes,
                     mode=combo_mode,
@@ -1237,12 +1402,13 @@ def main(argv: list[str] | None = None) -> int:
                         mode=combo_mode,
                     ),
                 ),
-                on_result_fn=receipt_callback,
-                retry_failed_deal=bool(args.retry_failed or args.inbox_id),
+                on_result_fn=None if args.recover_skipped else receipt_callback,
+                retry_failed_deal=bool(args.retry_failed or (args.inbox_id and not args.recover_skipped)),
+                recover_skipped=bool(args.recover_skipped),
                 source=str(saved_inbox["source"]) if saved_inbox else "manual",
                 allow_external_lookup=bool(apply_changes and not args.inbox_id),
             )
-            if (apply_changes and saved_inbox and saved_inbox["delivery_purpose"] == "live"
+            if (apply_changes and saved_inbox and not args.recover_skipped and saved_inbox["delivery_purpose"] == "live"
                     and is_portfolio_management_enabled(cfg)):
                 _dispatch_portfolio_refresh_intent(
                     claim_trade_payload_refresh_intent(saved_inbox_path, inbox_id=args.inbox_id),
@@ -1265,7 +1431,10 @@ def main(argv: list[str] | None = None) -> int:
             rollback_hint="void created trade events or restore option_positions SQLite from backup",
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+        return (0 if not args.recover_skipped or result.get("status") == "applied"
+                or (result.get("action") in {"assignment", "exercise"}
+                    and result.get("reason") in {"ledger_recorded", "lifecycle_already_written_v2"})
+                else 2)
 
     _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
     receipt_callback = _build_receipt_callback(

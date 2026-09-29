@@ -23,6 +23,7 @@ from src.application.trades.resolver import (
     resolve_trade_deal,
 )
 from src.application.trades.lifecycle import (
+    _stock_matches_lifecycle_close,
     lifecycle_deal_economic_hash,
     resolve_lifecycle_expired_unassigned,
 )
@@ -1974,3 +1975,411 @@ def test_unknown_effect_cannot_close_a_lot_opened_after_the_fill():
     assert result.status == "unresolved"
     assert result.reason == "unknown_position_effect:close_history_unproven"
     assert result.operations == []
+
+@pytest.mark.parametrize("first_leg", ["stock", "option"])
+def test_lifecycle_three_hk_put_lots_match_one_1500_share_settlement(tmp_path, first_leg):
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    for index in range(3):
+        _persist_lot(
+            repo,
+            symbol="3690.HK",
+            contracts=1,
+            strike=77.5,
+            expiration_ymd="2026-09-29",
+            currency="HKD",
+            multiplier=500,
+            opened_at_ms=1790000000000 + index,
+        )
+    lot_ids = [row["record_id"] for row in repo.list_position_lots()]
+    assert len(lot_ids) == 3
+    legs = {
+        "option": _deal(
+            deal_id="meituan-option-3",
+            symbol="3690.HK",
+            contracts=3,
+            price=0,
+            strike=77.5,
+            multiplier=500,
+            expiration_ymd="2026-09-29",
+            currency="HKD",
+            trade_time_ms=1790683024000,
+            raw_payload={"deal_id": "meituan-option-3", "code": "HK.03690"},
+        ),
+        "stock": _deal(
+            deal_id="meituan-stock-1500",
+            symbol="3690.HK",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1500,
+            price=77.5,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="HKD",
+            trade_time_ms=1790683025000,
+            raw_payload={"deal_id": "meituan-stock-1500", "code": "HK.03690"},
+        ),
+    }
+    other_leg = "option" if first_leg == "stock" else "stock"
+    first = resolve_trade_deal(legs[first_leg], repo=repo, state={}, apply_changes=True)
+    assert first.status == "unresolved"
+    second = resolve_trade_deal(legs[other_leg], repo=repo, state={}, apply_changes=True)
+    assert second.status == "applied", second.to_dict()
+    assert second.action == "assignment"
+    assert all(repo.get_record_fields(lot_id)["contracts_open"] == 0 for lot_id in lot_ids)
+    assignments = [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]
+    assert len(assignments) == 3
+
+
+def test_final_lifecycle_case_cannot_claim_stock_after_its_deadline():
+    old_case = {
+        "status": "ledger_written",
+        "account": "lx",
+        "symbol": "3690.HK",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 80,
+        "contracts": 1,
+        "multiplier": 500,
+        "futu_account_id": "REAL_1",
+        "observation_start_ms": 1770000000000,
+        "settlement_deadline_ms": 1771000000000,
+        "event_time_ms": 1770999999000,
+    }
+    stock = {
+        "side": "buy",
+        "futu_account_id": "REAL_1",
+        "stock_qty": 500,
+        "stock_price": 80,
+        "trade_time_ms": 1790683025000,
+    }
+    assert not _stock_matches_lifecycle_close(old_case, stock)
+    assert not _stock_matches_lifecycle_close(
+        {**old_case, "event_time_ms": stock["trade_time_ms"]}, stock
+    )
+
+
+def test_option_anchor_does_not_choose_between_two_waiting_stock_sources(tmp_path):
+    repo = _open_lot(
+        tmp_path,
+        symbol="3690.HK",
+        contracts=1,
+        strike=80,
+        expiration_ymd="2026-09-29",
+        currency="HKD",
+        multiplier=500,
+        opened_at_ms=1790000000000,
+    )
+    for index in range(2):
+        result = resolve_trade_deal(
+            _deal(
+                deal_id=f"stock-candidate-{index}",
+                symbol="3690.HK",
+                option_type=None,
+                side="buy",
+                position_effect=None,
+                contracts=500,
+                price=80,
+                strike=None,
+                multiplier=None,
+                expiration_ymd=None,
+                currency="HKD",
+                trade_time_ms=1790683025000 + index,
+                raw_payload={"deal_id": f"stock-candidate-{index}", "code": "HK.03690"},
+            ),
+            repo=repo,
+            state={},
+            apply_changes=True,
+        )
+        assert result.status == "unresolved"
+    option = resolve_trade_deal(
+        _deal(
+            deal_id="option-after-two-stocks",
+            symbol="3690.HK",
+            contracts=1,
+            price=0,
+            strike=80,
+            multiplier=500,
+            expiration_ymd="2026-09-29",
+            currency="HKD",
+            trade_time_ms=1790683024000,
+            raw_payload={"deal_id": "option-after-two-stocks", "code": "HK.03690"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert option.status == "unresolved"
+    assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]
+    retry = resolve_trade_deal(
+        _deal(
+            deal_id="stock-candidate-0", symbol="3690.HK", option_type=None,
+            side="buy", position_effect=None, contracts=500, price=80,
+            strike=None, multiplier=None, expiration_ymd=None, currency="HKD",
+            trade_time_ms=1790683025000,
+            raw_payload={"deal_id": "stock-candidate-0", "code": "HK.03690"},
+        ), repo=repo, state={}, apply_changes=True,
+    )
+    assert (retry.status, retry.reason) == ("unresolved", "ambiguous_stock_settlement_evidence")
+    assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]
+    assert repo.list_trade_lifecycle_notifications() == []
+    from src.application.trades.lifecycle import _write_v2_lifecycle_close_from_case
+    case = repo.list_trade_lifecycle_cases()[0]
+    evidences = repo.list_trade_lifecycle_evidence()
+    option_evidence = next(row for row in evidences if row["evidence_type"] == "option_zero_price_close")
+    stock_evidence = next(row for row in evidences if row.get("raw", {}).get("deal_id") == "stock-candidate-0")
+    with pytest.raises(ValueError, match="ambiguous_stock_settlement_evidence"):
+        _write_v2_lifecycle_close_from_case(
+            repo, case=case, decision_type="assignment",
+            option_evidence=option_evidence, stock_evidence=stock_evidence,
+            event_time_ms=stock_evidence["trade_time_ms"],
+        )
+
+
+def test_inbox_retry_cannot_choose_between_two_waiting_stock_sources(tmp_path):
+    from src.application.trades.auto_intake import _process_payload
+
+    repo = _open_lot(
+        tmp_path, symbol="3690.HK", contracts=1, strike=80,
+        expiration_ymd="2026-09-29", currency="HKD", multiplier=500,
+        opened_at_ms=1790000000000,
+    )
+    kwargs = dict(
+        repo=repo, state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"}, futu_account_ids=["REAL_1"],
+        apply_changes=True, host="127.0.0.1", port=11111,
+        source="push", allow_external_lookup=False,
+    )
+    stocks = [
+        {
+            "deal_id": f"raw-stock-{index}", "code": "HK.03690",
+            "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 500,
+            "price": 80, "trade_time_ms": 1790683025000 + index,
+            "external_id_namespace": "futu.deal", "environment": "REAL",
+            "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"},
+        }
+        for index in range(2)
+    ]
+    for stock in stocks:
+        assert _process_payload(stock, **kwargs)["status"] == "unresolved"
+    option = _deal(
+        deal_id="option-after-inbox-stocks", symbol="3690.HK", contracts=1,
+        price=0, strike=80, multiplier=500, expiration_ymd="2026-09-29",
+        currency="HKD", trade_time_ms=1790683024000,
+        raw_payload={"deal_id": "option-after-inbox-stocks", "code": "HK.03690"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).reason == "ambiguous_stock_settlement_evidence"
+    retry = _process_payload(stocks[0], retry_failed_deal=True, **kwargs)
+    assert (retry["status"], retry["reason"]) == ("unresolved", "ambiguous_stock_settlement_evidence")
+    assert not [row for row in repo.list_trade_events() if row["event_type"] == "assignment"]
+    assert repo.list_trade_lifecycle_notifications() == []
+
+
+def test_option_retry_can_use_one_unconsumed_stock_after_partial_assignment(tmp_path):
+    from src.application.trades.lifecycle import _evidence_from_deal
+
+    repo = _open_lot(tmp_path, contracts=2)
+    start = expiration_observation_start_ms("2026-05-22", "US")
+    assert start is not None
+    option = _deal(
+        deal_id="partial-option-retry", symbol="TIGR", contracts=2, price=0,
+        strike=6, expiration_ymd="2026-05-22", currency="USD",
+        trade_time_ms=start + 1000,
+        raw_payload={"deal_id": "partial-option-retry", "code": "US.TIGR260522P6000"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+
+    def stock(index):
+        return _deal(
+            deal_id=f"partial-stock-retry-{index}", symbol="TIGR",
+            option_type=None, side="buy", position_effect=None,
+            contracts=100, price=6, strike=None, multiplier=None,
+            expiration_ymd=None, currency="USD", trade_time_ms=start + 2000 + index,
+            raw_payload={"deal_id": f"partial-stock-retry-{index}", "code": "US.TIGR"},
+        )
+
+    assert resolve_trade_deal(stock(0), repo=repo, state={}, apply_changes=True).status == "applied"
+    assert repo.insert_trade_lifecycle_evidence_once(
+        _evidence_from_deal(stock(1), evidence_type="stock_settlement_leg", case_id=None)
+    )
+    retry = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+    assert retry.status == "applied"
+    assert len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"]) == 2
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "skipped"
+
+
+def test_broker_assigned_stock_sale_keeps_assignment_physical_account(tmp_path):
+    repo = _open_lot(
+        tmp_path,
+        symbol="3690.HK",
+        contracts=1,
+        strike=80,
+        expiration_ymd="2026-09-29",
+        currency="HKD",
+        multiplier=500,
+        opened_at_ms=1790000000000,
+    )
+    option = _deal(
+        deal_id="physical-option",
+        symbol="3690.HK",
+        contracts=1,
+        price=0,
+        strike=80,
+        multiplier=500,
+        expiration_ymd="2026-09-29",
+        currency="HKD",
+        trade_time_ms=1790683024000,
+        raw_payload={"deal_id": "physical-option", "code": "HK.03690"},
+    )
+    stock = _deal(
+        deal_id="physical-stock",
+        symbol="3690.HK",
+        option_type=None,
+        side="buy",
+        position_effect=None,
+        contracts=500,
+        price=80,
+        strike=None,
+        multiplier=None,
+        expiration_ymd=None,
+        currency="HKD",
+        trade_time_ms=1790683025000,
+        raw_payload={"deal_id": "physical-stock", "code": "HK.03690"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True).status == "applied"
+    sale = _deal(
+        deal_id="wrong-physical-sale",
+        futu_account_id="REAL_2",
+        symbol="3690.HK",
+        option_type=None,
+        side="sell",
+        position_effect=None,
+        contracts=500,
+        price=85,
+        strike=None,
+        multiplier=None,
+        expiration_ymd=None,
+        currency="HKD",
+        trade_time_ms=1790683125000,
+        raw_payload={"deal_id": "wrong-physical-sale", "code": "HK.03690"},
+    )
+    result = resolve_trade_deal(sale, repo=repo, state={}, apply_changes=True)
+    assert result.status == "unresolved"
+    assert result.reason == "assigned_stock_sale_physical_account_unverified"
+    assert repo.list_assigned_stock_events() == []
+
+
+def test_historical_stock_recovery_suppresses_new_lifecycle_outbox(tmp_path):
+    repo = _open_lot(
+        tmp_path,
+        symbol="3690.HK", contracts=1, strike=80,
+        expiration_ymd="2026-09-29", currency="HKD", multiplier=500,
+        opened_at_ms=1790000000000,
+    )
+    option = _deal(
+        deal_id="suppressed-option", symbol="3690.HK", contracts=1,
+        price=0, strike=80, multiplier=500, expiration_ymd="2026-09-29",
+        currency="HKD", trade_time_ms=1790683024000,
+        raw_payload={"deal_id": "suppressed-option", "code": "HK.03690"},
+    )
+    stock = _deal(
+        deal_id="suppressed-stock", symbol="3690.HK", option_type=None,
+        side="buy", position_effect=None, contracts=500, price=80,
+        strike=None, multiplier=None, expiration_ymd=None, currency="HKD",
+        trade_time_ms=1790683025000,
+        raw_payload={"deal_id": "suppressed-stock", "code": "HK.03690"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    result = resolve_trade_deal(
+        stock, repo=repo, state={}, apply_changes=True,
+        notification_status="suppressed",
+    )
+    assert result.status == "applied"
+    outbox = repo.list_trade_lifecycle_notifications()
+    assert outbox
+    assert all(row["status"] == "suppressed" for row in outbox)
+
+
+def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(tmp_path, monkeypatch):
+    import src.application.trades.auto_intake as auto_intake
+    from src.application.trades.auto_intake import _process_payload, _skipped_recovery_snapshot
+    from src.application.trades.inbox import (read_trade_payload, resume_skipped_trade_payload,
+                                              list_retryable_trade_payloads,
+                                              list_trade_receipt_recovery_rows)
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    raw_stock = {"deal_id": "recovered-stock", "code": "HK.03690",
+                 "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 1500,
+                 "price": 77.5, "trade_time_ms": 1790683025000,
+                 "external_id_namespace": "futu.deal", "environment": "REAL",
+                 "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"}}
+    state_path = tmp_path / "state.json"
+    kwargs = dict(repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",
+                  account_mapping={"REAL_1": "lx"}, futu_account_ids=["REAL_1"],
+                  apply_changes=True, host="127.0.0.1", port=11111,
+                  source="push", allow_external_lookup=False)
+    skipped = _process_payload(raw_stock, **kwargs)
+    assert (skipped["status"], skipped["reason"]) == ("skipped", "not_option_deal")
+    for index in range(3):
+        _persist_lot(
+            repo, symbol="3690.HK", contracts=1, strike=77.5,
+            expiration_ymd="2026-09-29", currency="HKD", multiplier=500,
+            opened_at_ms=1790000000000 + index,
+        )
+    option = _deal(
+        deal_id="recovered-option", symbol="3690.HK", contracts=3,
+        price=0, strike=77.5, multiplier=500, expiration_ymd="2026-09-29",
+        currency="HKD", trade_time_ms=1790683024000,
+        raw_payload={"deal_id": "recovered-option", "code": "HK.03690"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    preview = _skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=skipped["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path,
+    )
+    assert resume_skipped_trade_payload(
+        inbox, inbox_id=skipped["inbox_id"], operator="operator",
+        economic_payload_hash=preview["economic_payload_hash"], repo=repo,
+    )
+    assert list_retryable_trade_payloads(inbox, retry_delay_sec=0) == []
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["REAL_1"]) == []
+    assert _skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=skipped["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path,
+    )["recovery_hash"] != preview["recovery_hash"]
+    original_update = auto_intake.update_trade_intake_state_entries
+    class SimulatedCrash(BaseException):
+        pass
+    monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(SimulatedCrash()))
+    with pytest.raises(SimulatedCrash):
+        _process_payload(raw_stock, recover_skipped=True, **kwargs)
+    monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", original_update)
+    assert list_retryable_trade_payloads(inbox, retry_delay_sec=0) == []
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["REAL_1"]) == []
+    assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 3
+    interrupted = _skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=skipped["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path,
+    )
+    assert resume_skipped_trade_payload(
+        inbox, inbox_id=skipped["inbox_id"], operator="operator",
+        economic_payload_hash=interrupted["economic_payload_hash"], repo=repo,
+    )
+    recovered = _process_payload(raw_stock, recover_skipped=True, **kwargs)
+    assert recovered["reason"] == "lifecycle_already_written_v2", recovered
+    assert recovered["receipt_notification_owner"] == "lifecycle_outbox"
+    assert recovered["receipt_suppression_reason"] == "historical_recovery"
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["REAL_1"]) == []
+    assert all(row["status"] == "suppressed" for row in repo.list_trade_lifecycle_notifications())
+    assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 3
+    assert read_trade_payload(inbox, inbox_id=skipped["inbox_id"])["status"] == "handled"
+    duplicate = _process_payload(raw_stock, recover_skipped=True, **kwargs)
+    assert (duplicate["status"], duplicate["reason"]) == ("skipped", "duplicate")
+    assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 3

@@ -69,6 +69,114 @@ def _run_auto_intake(*args: str, env: dict[str, str] | None = None) -> subproces
     )
 
 
+def test_skipped_stock_recovery_requires_exact_snapshot_and_does_not_send(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from src.application.trades.inbox import (read_trade_payload, resume_skipped_trade_payload,
+                                              record_trade_payload_refresh_intent,
+                                              claim_trade_payload_refresh_intent)
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    state_path = tmp_path / "state.json"
+    payload = {
+        "deal_id": "stock-before-option", "code": "HK.03690",
+        "futu_account_id": "REAL_LX", "trd_side": "BUY", "qty": 1500,
+        "price": 77.5, "create_time": "2026-09-29 16:00:00",
+        "external_id_namespace": "futu.deal", "environment": "REAL",
+        "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_LX"},
+    }
+    result = auto_intake._process_payload(
+        payload, repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_LX": "lx"}, futu_account_ids=["REAL_LX"],
+        apply_changes=True, host="127.0.0.1", port=11111, source="backfill",
+        allow_external_lookup=False,
+    )
+    assert (result["status"], result["reason"]) == ("skipped", "not_option_deal")
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    record_trade_payload_refresh_intent(
+        inbox, inbox_id=result["inbox_id"],
+        intent={"request_id": "previous-pm-refresh", "account": "lx"},
+    )
+    with pytest.raises(ValueError, match="pending PM refresh intent"):
+        auto_intake._skipped_recovery_snapshot(
+            inbox_path=inbox, inbox_id=result["inbox_id"], state_path=state_path,
+            ledger_path=repo.db_path,
+        )
+    assert claim_trade_payload_refresh_intent(inbox, inbox_id=result["inbox_id"])
+    preview = auto_intake._skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=result["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path,
+    )
+    assert len(preview["recovery_hash"]) == 64
+    assert preview["receipt_suppressed"] and preview["portfolio_refresh_suppressed"]
+    assert preview["prior_portfolio_refresh_attempted"] is True
+    source = _listener_source(tmp_path, "lx", 11111)
+    source["state_path"] = state_path
+    source["audit_path"] = tmp_path / "audit.jsonl"
+    cfg = {"enabled": True, "mode": "apply", "state_path": state_path,
+           "audit_path": tmp_path / "audit.jsonl", "status_path": tmp_path / "status.json",
+           "receipt": {"enabled": False}, "backfill": {"enabled": False},
+           "account_mapping": {"REAL_LX": "lx"}, "futu_account_ids": ["REAL_LX"],
+           "sources": [source]}
+    monkeypatch.setattr(auto_intake, "load_config", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "resolve_trade_intake_config",
+                        lambda *_, **kwargs: {**cfg, "mode": kwargs.get("mode_override") or "apply"})
+    monkeypatch.setattr(auto_intake, "resolve_position_ledger_sqlite_path", lambda **_: repo.db_path)
+    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", lambda **_: (None, repo))
+    args = ["--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path),
+            "--inbox-id", result["inbox_id"], "--recover-skipped"]
+    assert auto_intake.main(args) == 0
+    cli_preview = json.loads(capsys.readouterr().out)
+    assert cli_preview["recovery_hash"] == preview["recovery_hash"]
+    apply_args = [*args, "--mode", "apply", "--confirm", "--actor", "operator",
+                  "--writers-stopped", "--expected-recovery-hash"]
+    assert auto_intake.main([*apply_args, "wrong"]) == 2
+    capsys.readouterr()
+    assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["status"] == "handled"
+    original_state = state_path.read_bytes()
+    state_path.write_bytes(original_state + b" ")
+    assert auto_intake.main([*apply_args, preview["recovery_hash"]]) == 2
+    capsys.readouterr()
+    assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["status"] == "handled"
+    state_path.write_bytes(original_state)
+    assert resume_skipped_trade_payload(inbox, inbox_id=result["inbox_id"], operator="operator",
+                                        economic_payload_hash="wrong", repo=repo) is False
+    assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["status"] == "handled"
+    assert auto_intake.main([*apply_args, preview["recovery_hash"]]) == 2
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["receipt_notification_owner"] == "lifecycle_outbox", applied
+    assert applied["receipt_suppression_reason"] == "historical_recovery"
+    assert repo.list_trade_lifecycle_notifications() == []
+    assert resume_skipped_trade_payload(inbox, inbox_id=result["inbox_id"], operator="operator",
+                                        economic_payload_hash=preview["economic_payload_hash"], repo=repo)
+    assert resume_skipped_trade_payload(inbox, inbox_id=result["inbox_id"], operator="operator",
+                                        economic_payload_hash=preview["economic_payload_hash"], repo=repo)
+    from src.application.trades.inbox import claim_trade_payload, resume_trade_payload
+    assert claim_trade_payload(inbox, inbox_id=result["inbox_id"], repo=repo) is None
+    assert not resume_trade_payload(inbox, inbox_id=result["inbox_id"], operator="ordinary", repo=repo)
+    for source_name in ("push", "backfill"):
+        ordinary = auto_intake._process_payload(
+            payload, repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",
+            account_mapping={"REAL_LX": "lx"}, futu_account_ids=["REAL_LX"],
+            apply_changes=True, host="127.0.0.1", port=11111, source=source_name,
+            allow_external_lookup=False,
+        )
+        assert ordinary["status"] != "applied"
+        assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["result"]["recovery_mode"] == "skipped_stock"
+    assert auto_intake.main([
+        "--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path),
+        "--inbox-id", result["inbox_id"], "--mode", "apply", "--confirm",
+    ]) in {0, 2}
+    capsys.readouterr()
+    assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["result"]["recovery_mode"] == "skipped_stock"
+    assert auto_intake._skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=result["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path,
+    )["recovery_hash"]
+
+
 def _write_runtime_config(tmp_path: Path) -> Path:
     user_path = BASE / "configs" / "examples" / "user.example.us.json"
     user_config = json.loads(user_path.read_text(encoding="utf-8"))

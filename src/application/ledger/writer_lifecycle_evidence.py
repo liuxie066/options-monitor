@@ -16,7 +16,10 @@ from src.application.ledger.assigned_stock_projection import (
 from src.application.ledger.current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
-from src.application.ledger.external_event_key import execution_identity_from_input
+from src.application.ledger.external_event_key import (
+    execution_identity_from_input,
+    futu_compatibility_source_key,
+)
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
     lot_contract_value,
@@ -275,7 +278,11 @@ def record_assigned_stock_event_atomically(
         assert before_rows is not None and before_report is not None
 
         prepared = (
-            prepare_sale(before_report, list(before_rows["account_assigned_stock_events"]))
+            prepare_sale(
+                before_report,
+                list(before_rows["account_assigned_stock_events"]),
+                list(before_rows["trade_events"]),
+            )
             if prepare_sale is not None
             else {"sale_event": event_seed}
         )
@@ -376,6 +383,27 @@ def record_assigned_stock_event_atomically(
         )
         identity_enriched = False
         created = existing is None
+        if created and str(event.get("source") or "").strip().lower() == "broker":
+            source_key = futu_compatibility_source_key(
+                account=selected_account,
+                futu_account_id=event.get("futu_account_id"),
+                source_deal_id=event.get("source_deal_id"),
+                execution_input=event.get("execution_input"),
+            )
+            if (not event.get("futu_account_id") or not event.get("source_deal_id")):
+                raise ValueError("broker_stock_source_identity_missing")
+            if (
+                sqlite_repo.get_trade_lifecycle_source_consumption(source_key, conn=conn)
+                or any(
+                    str(row.get("source_event_id") or "").strip() == source_key
+                    and str(row.get("evidence_type") or "").strip().lower()
+                    == "stock_settlement_leg"
+                    for row in sqlite_repo.list_trade_lifecycle_evidence(
+                        account=selected_account, conn=conn,
+                    )
+                )
+            ):
+                raise ValueError("broker_stock_source_already_consumed")
         if created and event.get("price") is not None and event.get("currency"):
             storage_event = attach_assigned_stock_sale_cash_conversions(
                 storage_event,

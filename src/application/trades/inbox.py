@@ -537,7 +537,8 @@ def _has_persisted_execution(repo: Any, execution_id: str, payload: dict[str, An
 
 
 def claim_trade_payload(path: str | Path, *, inbox_id: str, repo: Any = None,
-                        lease_ms: int = 120_000, owner: str = "worker") -> dict[str, Any] | None:
+                        lease_ms: int = 120_000, owner: str = "worker",
+                        recover_skipped: bool = False) -> dict[str, Any] | None:
     now_ms = int(time.time() * 1000)
     token = uuid.uuid4().hex
     with with_sqlite_repo_writer_lock(repo), closing(_connect(Path(path))) as conn, conn:
@@ -548,11 +549,14 @@ def claim_trade_payload(path: str | Path, *, inbox_id: str, repo: Any = None,
             WHERE inbox_id = ? AND status = 'pending' AND attempt_count < 20
               AND (claim_id IS NULL OR claim_until_ms <= ?)
               AND next_attempt_at_ms <= ?
+              AND COALESCE(json_extract(result_json, '$.recovery_mode'), '') = ?
               AND (result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
                    OR json_extract(result_json, '$.receipt_kind') = 'pending_retry'
+                   OR json_extract(result_json, '$.recovery_mode') = 'skipped_stock'
                    OR (last_error = 'execution_association_enrichment'
                        AND json_extract(result_json, '$.receipt_kind') IN ('recorded', 'manual_required')))""",
-            (token, now_ms + max(1, int(lease_ms)), str(owner), now_ms + 60_000, inbox_id, now_ms, now_ms),
+            (token, now_ms + max(1, int(lease_ms)), str(owner), now_ms + 60_000,
+             inbox_id, now_ms, now_ms, "skipped_stock" if recover_skipped else ""),
         ).rowcount
         if not changed:
             return None
@@ -818,6 +822,10 @@ def _prepare_trade_receipt_result(conn: sqlite3.Connection, row: Mapping[str, An
                        or (result.get("diagnostics") or {}).get("notification_authority") == "lifecycle_outbox")
     if lifecycle_owned:
         kind = None
+        if result.get("receipt_suppression_reason") == "historical_recovery":
+            enriched["receipt_suppression_reason"] = "historical_recovery"
+            enriched["receipt_kind"] = None
+            enriched["receipt_result_key"] = None
         if envelope and envelope.get("schema_version") == 2:
             previous = envelope["receipts"][envelope["current_result_key"]]
             previous.update(superseded_by="lifecycle_outbox", stop_reason="lifecycle_outbox_handoff")
@@ -1069,13 +1077,46 @@ def resume_trade_payload(path: str | Path, *, inbox_id: str, operator: str, repo
                last_error = ?, updated_at_ms = ?, result_json = CASE WHEN result_json IS NULL THEN NULL
                    WHEN json_extract(result_json, '$.receipt_kind') = 'verification_pending' THEN result_json
                    ELSE json_set(result_json, '$.receipt_kind', 'pending_retry', '$.retry_policy.retryable', json('true')) END
-               WHERE inbox_id = ? AND (status = 'pending' OR (status = 'handled'
+               WHERE inbox_id = ?
+                 AND COALESCE(json_extract(result_json, '$.recovery_mode'), '') != 'skipped_stock'
+                 AND (status = 'pending' OR (status = 'handled'
                    AND json_extract(result_json, '$.receipt_kind') = 'manual_required'))""",
             (f"resumed_by:{operator}", int(time.time() * 1000), inbox_id),
         ).rowcount
         if changed:
             conn.execute("INSERT INTO trade_inbox_recovery (inbox_id, operator, resumed_at_ms) VALUES (?, ?, ?)",
                          (inbox_id, operator, int(time.time() * 1000)))
+        return bool(changed)
+
+
+def resume_skipped_trade_payload(
+    path: str | Path, *, inbox_id: str, operator: str,
+    economic_payload_hash: str, repo: Any,
+) -> bool:
+    """Reclaim only the exact historical stock skip after a reviewed snapshot."""
+    if not str(operator).strip() or not str(economic_payload_hash).strip():
+        raise ValueError("operator and economic_payload_hash are required")
+    with with_sqlite_repo_writer_lock(repo), closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        now_ms = int(time.time() * 1000)
+        changed = conn.execute(
+            """UPDATE trade_inbox SET status = 'pending', attempt_count = 0,
+               next_attempt_at_ms = 0, claim_id = NULL, claim_until_ms = NULL,
+               last_error = ?, updated_at_ms = ?, receipt_recovery_allowed = 0,
+               result_json = json_set(result_json, '$.recovery_mode', 'skipped_stock')
+               WHERE inbox_id = ? AND (
+                   (status = 'handled' AND result_status = 'skipped'
+                    AND result_reason = 'not_option_deal')
+                   OR (status = 'pending' AND json_extract(result_json, '$.recovery_mode') = 'skipped_stock')
+               ) AND identity_status = 'bound'
+                 AND economic_payload_hash = ?""",
+            (f"skipped_recovery_by:{operator}", now_ms, inbox_id, economic_payload_hash),
+        ).rowcount
+        if changed:
+            conn.execute(
+                "INSERT INTO trade_inbox_recovery (inbox_id, operator, resumed_at_ms) VALUES (?, ?, ?)",
+                (inbox_id, operator, now_ms),
+            )
         return bool(changed)
 
 
@@ -1105,6 +1146,7 @@ def list_retryable_trade_payloads(
                        received_at_ms, updated_at_ms, last_error
                 FROM trade_inbox
                 WHERE status = 'pending'
+                  AND COALESCE(json_extract(result_json, '$.recovery_mode'), '') != 'skipped_stock'
                   AND attempt_count < ?
                   AND (claim_id IS NULL OR claim_until_ms <= ?)
                   AND (result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
@@ -1359,7 +1401,8 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
                         "reason": receipt.get("stop_reason") or "delivery_requires_verification",
                         "next_action": "verify_delivery_before_explicit_compensation"})
             eligibility = conn.execute(
-                """SELECT SUM(status = 'pending' AND attempt_count < 20 AND (
+                """SELECT SUM(status = 'pending' AND attempt_count < 20
+                              AND COALESCE(json_extract(result_json, '$.recovery_mode'), '') != 'skipped_stock' AND (
                               result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
                               OR json_extract(result_json, '$.receipt_kind') = 'pending_retry'
                               OR (last_error = 'execution_association_enrichment'

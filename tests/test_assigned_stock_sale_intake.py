@@ -22,6 +22,7 @@ from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import enqueue_trade_payload, read_trade_payload
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.lifecycle import resolve_lifecycle_trade_deal
 from src.application.trades.order_fee_sync import recover_order_fee_targets
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state_reconcile import reconciled_source_matches_deal
@@ -127,6 +128,165 @@ def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> No
         result.diagnostics["assigned_stock_sale"]["stock_lot_after"]["assigned_stock_realized_pnl"]
         == "497.4739"
     )
+
+
+def test_stock_sale_with_lifecycle_and_assigned_stock_candidates_waits_for_review(tmp_path: Path) -> None:
+    repo, _ = _repo_with_assigned_stock(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="call",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=105,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2,
+        opened_at_ms=2500,
+    )
+    before = repo.list_trade_lifecycle_evidence()
+    result = _resolve(repo, _stock_sale_deal())
+    assert result.status == "unresolved"
+    assert result.reason == "ambiguous_stock_trade_ownership"
+    assert repo.list_trade_lifecycle_evidence() == before
+    assert repo.list_assigned_stock_events() == []
+
+
+def test_option_anchor_cannot_consume_stock_that_became_assigned_sale_candidate(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo, broker="富途", account="lx", symbol="NVDA", option_type="call",
+        side="short", contracts=1, currency="USD", strike=105, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=2500,
+    )
+    stock = _stock_sale_deal()
+    assert _resolve(repo, stock).reason == "stock_settlement_waiting_option_leg"
+    existing_lots = {row["record_id"] for row in repo.list_position_lots()}
+    ledger_manual_trades.persist_manual_open_event(
+        repo, broker="富途", account="lx", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=1000,
+    )
+    put = next(row for row in repo.list_position_lots() if row["record_id"] not in existing_lots)
+    record_manual_assignment(
+        repo, lot_id=put["record_id"], contracts_to_close=1,
+        stock_side="buy", stock_qty=100, stock_price=100, as_of_ms=2000,
+    )
+    assert _resolve(repo, stock, apply=False).reason == "ambiguous_stock_trade_ownership"
+    option = replace(
+        stock, deal_id="option-zero", option_type="call", side="buy",
+        position_effect="close", contracts=1, price=0, strike=105,
+        multiplier=100, expiration_ymd="2026-06-19",
+        raw_payload={"deal_id": "option-zero", "code": "US.NVDA"},
+    )
+    before = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
+    result = _resolve(repo, option)
+    after = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
+    assert (result.status, result.reason) == ("unresolved", "ambiguous_stock_trade_ownership")
+    assert after == before
+    assert repo.list_trade_lifecycle_notifications() == []
+    from src.application.trades.lifecycle import _write_v2_lifecycle_close_from_case
+    case = next(row for row in repo.list_trade_lifecycle_cases() if row["option_type"] == "call")
+    evidences = repo.list_trade_lifecycle_evidence()
+    option_evidence = next(row for row in evidences if row["evidence_type"] == "option_zero_price_close")
+    stock_evidence = next(row for row in evidences if row["evidence_type"] == "stock_settlement_leg")
+    with pytest.raises(ValueError, match="ambiguous_stock_trade_ownership"):
+        _write_v2_lifecycle_close_from_case(
+            repo, case=case, decision_type="assignment",
+            option_evidence=option_evidence, stock_evidence=stock_evidence,
+            event_time_ms=stock_evidence["trade_time_ms"],
+        )
+
+
+def test_committed_option_assignment_replay_ignores_later_backfilled_sale_candidate(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo, broker="富途", account="lx", symbol="NVDA", option_type="call",
+        side="short", contracts=1, currency="USD", strike=105, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=2500,
+    )
+    stock = _stock_sale_deal()
+    assert _resolve(repo, stock).reason == "stock_settlement_waiting_option_leg"
+    option = replace(
+        stock, deal_id="option-zero", option_type="call", side="buy",
+        position_effect="close", contracts=1, price=0, strike=105,
+        multiplier=100, expiration_ymd="2026-06-19",
+        raw_payload={"deal_id": "option-zero", "code": "US.NVDA"},
+    )
+    assert _resolve(repo, option).status == "applied"
+    before = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
+    existing_lots = {row["record_id"] for row in repo.list_position_lots()}
+    ledger_manual_trades.persist_manual_open_event(
+        repo, broker="富途", account="lx", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=1000,
+    )
+    put = next(row for row in repo.list_position_lots() if row["record_id"] not in existing_lots)
+    record_manual_assignment(
+        repo, lot_id=put["record_id"], contracts_to_close=1,
+        stock_side="buy", stock_qty=100, stock_price=100, as_of_ms=2000,
+    )
+    assert _resolve(repo, option).status == "skipped"
+    after = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
+    assert after == before + 1
+
+
+@pytest.mark.parametrize("structured_source", [False, True])
+def test_assigned_stock_writer_rechecks_stock_source_reserved_by_lifecycle(
+    tmp_path: Path, structured_source: bool,
+) -> None:
+    repo, _ = _repo_with_assigned_stock(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        broker="富途", account="lx", symbol="NVDA", option_type="call",
+        side="short", contracts=1, currency="USD", strike=105,
+        multiplier=100, expiration_ymd="2026-06-19",
+        premium_per_share=2, opened_at_ms=2500,
+    )
+    deal = _stock_sale_deal()
+    if structured_source:
+        standard = _standard_stock_sale_deal()
+        deal = replace(standard, execution_input={
+            **standard.execution_input,
+            "external_id_namespace": "verified.partition.deal",
+        })
+    observed = resolve_lifecycle_trade_deal(deal, repo=repo, apply_changes=True)
+    assert observed is not None and observed.reason == "stock_settlement_waiting_option_leg"
+    with pytest.raises(ValueError, match="broker_stock_source_already_consumed"):
+        execute_broker_assigned_stock_sale(repo, deal, dry_run=False)
+    assert repo.list_assigned_stock_events() == []
+
+
+def test_lifecycle_writer_rechecks_structured_stock_source_used_by_sale(tmp_path: Path) -> None:
+    repo, _ = _repo_with_assigned_stock(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo, broker="富途", account="lx", symbol="NVDA", option_type="call",
+        side="short", contracts=1, currency="USD", strike=105,
+        multiplier=100, expiration_ymd="2026-06-19",
+        premium_per_share=2, opened_at_ms=2500,
+    )
+    standard = _standard_stock_sale_deal()
+    stock = replace(standard, execution_input={
+        **standard.execution_input,
+        "external_id_namespace": "verified.partition.deal",
+    })
+    assert execute_broker_assigned_stock_sale(repo, stock, dry_run=False)
+    assert resolve_lifecycle_trade_deal(
+        stock, repo=repo, apply_changes=True,
+    ).reason == "stock_settlement_waiting_option_leg"
+    option = replace(
+        _stock_sale_deal(), deal_id="short-call-option-close", option_type="call",
+        side="buy", position_effect="close", contracts=1, price=0,
+        strike=105, multiplier=100, expiration_ymd="2026-06-19",
+        raw_payload={"deal_id": "short-call-option-close", "code": "US.NVDA"},
+    )
+    with pytest.raises(ValueError, match="broker_stock_source_already_consumed"):
+        resolve_lifecycle_trade_deal(option, repo=repo, apply_changes=True)
+    assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"
+                and (row.get("raw_payload") or {}).get("source_deal_id") == stock.deal_id]
 
 
 def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> None:

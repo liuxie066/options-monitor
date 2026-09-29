@@ -88,6 +88,8 @@ def add_run_commands(subparsers: Any) -> None:
     trade_intake.add_argument("--deal-json", default=None)
     trade_intake.add_argument("--execution-file", default=None)
     trade_intake.add_argument("--inbox-id", default=None)
+    trade_intake.add_argument("--recover-skipped", action="store_true")
+    trade_intake.add_argument("--expected-recovery-hash", default=None)
     trade_intake.add_argument("--retry-failed", action="store_true")
     trade_intake.add_argument("--reconcile-state", action="store_true")
     trade_intake.add_argument("--compensate-receipts", action="store_true")
@@ -167,6 +169,10 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
         intake_argv.extend(["--execution-file", str(args.execution_file)])
     if args.inbox_id:
         intake_argv.extend(["--inbox-id", str(args.inbox_id)])
+    if args.recover_skipped:
+        intake_argv.append("--recover-skipped")
+    if args.expected_recovery_hash:
+        intake_argv.extend(["--expected-recovery-hash", str(args.expected_recovery_hash)])
     if args.retry_failed:
         intake_argv.append("--retry-failed")
     if args.reconcile_state:

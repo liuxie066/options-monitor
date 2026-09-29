@@ -2322,6 +2322,8 @@ def record_lifecycle_allocation(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: list[Any] | None = None,
     notification_transition_type: str | None = None,
+    notification_status: str = "pending",
+    broker_ownership_validator: Any = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
@@ -2342,6 +2344,8 @@ def record_lifecycle_allocation(
             correction_void_events or []
         ),
         notification_transition_type=notification_transition_type,
+        notification_status=notification_status,
+        broker_ownership_validator=broker_ownership_validator,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,
