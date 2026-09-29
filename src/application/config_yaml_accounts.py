@@ -12,7 +12,7 @@ from src.application.account_config import (
 )
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import normalize_config_market, resolve_config_path
+from src.application.config_primitives import configured_markets, normalize_config_market, resolve_config_path
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
 from src.application.write_contract import attach_write_contract
 
@@ -84,7 +84,7 @@ def mutate_yaml_account_config(
         config_yaml_path=config_yaml_path,
         config_doc=after_doc,
         runtime_root=runtime_root,
-        markets=_markets_in_doc(after_doc),
+        markets=configured_markets(after_doc),
         include_assistant=True,
         apply=bool(apply),
         backup=bool(backup),
@@ -228,7 +228,7 @@ def _remove_account(config_doc: dict[str, Any], *, market: str, account: str) ->
         )
     market_accounts[:] = remaining
     _remove_account_from_market_overrides(config_doc, market=market, account=account)
-    still_referenced = any(account in _market_accounts(config_doc, market=item) for item in _markets_in_doc(config_doc))
+    still_referenced = any(account in _market_accounts(config_doc, market=item) for item in configured_markets(config_doc))
     removed_global = not still_referenced
     if removed_global:
         accounts.pop(account, None)
@@ -406,13 +406,6 @@ def _remove_explicit_account_references(config_doc: dict[str, Any], *, account: 
             for item in normalize_accounts(notifications.get("cash_footer_accounts"), fallback=())
             if item != account
         ]
-
-
-def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
-    markets = config_doc.get("markets")
-    if not isinstance(markets, dict):
-        return []
-    return [market for market in ("us", "hk") if isinstance(markets.get(market), dict)]
 
 
 __all__ = ["mutate_yaml_account_config"]

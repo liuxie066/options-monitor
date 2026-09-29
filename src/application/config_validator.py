@@ -1134,6 +1134,12 @@ def validate_config(cfg: dict):
     if portfolio_cfg and not isinstance(portfolio_cfg, dict):
         die('portfolio must be an object')
     if isinstance(portfolio_cfg, dict):
+        holdings_cfg = portfolio_cfg.get('holdings')
+        if 'holdings' in portfolio_cfg:
+            if not isinstance(holdings_cfg, dict) or set(holdings_cfg) - {'enabled'}:
+                die('portfolio.holdings must contain only enabled')
+            if not isinstance(holdings_cfg.get('enabled'), bool):
+                die('portfolio.holdings.enabled must be a boolean')
         portfolio_futu = portfolio_cfg.get('futu')
         if portfolio_futu is not None and not isinstance(portfolio_futu, dict):
             die('portfolio.futu must be an object')

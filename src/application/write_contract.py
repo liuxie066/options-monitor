@@ -41,12 +41,13 @@ def write_contract_payload(
     backup_path: str | Path | None = None,
     audit_id: str | None = None,
     rollback_hint: str | None = None,
+    generate_audit_id: bool = True,
 ) -> dict[str, Any]:
     return {
         "dry_run": bool(dry_run),
         "write_applied": bool(write_applied),
         "backup_path": str(backup_path) if backup_path else None,
-        "audit_id": audit_id or make_audit_id(),
+        "audit_id": audit_id or (make_audit_id() if generate_audit_id else None),
         "rollback_hint": rollback_hint,
     }
 
@@ -59,6 +60,7 @@ def attach_write_contract(
     backup_path: str | Path | None = None,
     audit_id: str | None = None,
     rollback_hint: str | None = None,
+    generate_audit_id: bool = True,
 ) -> dict[str, Any]:
     out = dict(payload)
     out.update(
@@ -68,6 +70,7 @@ def attach_write_contract(
             backup_path=backup_path,
             audit_id=audit_id,
             rollback_hint=rollback_hint,
+            generate_audit_id=generate_audit_id,
         )
     )
     return out
