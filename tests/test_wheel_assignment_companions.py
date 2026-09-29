@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 from unittest.mock import patch
 
@@ -346,6 +347,145 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
     assert scan["capacity_claims"][0]["wheel_branch_id"] == branch["wheel_branch_id"]
 
 
+def _cc_lp_events(*, long_at: int = 1_100) -> tuple[TradeEvent, TradeEvent, TradeEvent]:
+    group_id = "combo_yield:lx:cc-lp"
+    call_key = _call_key()
+    put_key = ContractKey.from_values(
+        broker="富途", account="lx", underlying_symbol="NVDA",
+        option_type="put", strike=100, expiration_ymd="2026-09-18",
+    )
+    metadata = {"strategy": "combo_yield", "strategy_group_id": group_id}
+    call = TradeEvent(
+        event_id="combo-call-open", event_type="open", event_time_ms=1_000,
+        contract_key=call_key, contracts=1, price=2, currency="USD",
+        source="test", multiplier=10, lot_id="combo-call-lot",
+        raw_payload={**_trusted_multiplier_payload("combo-call-open"), **metadata,
+                     "leg_role": "short_call", "side": "sell"},
+    )
+    put = TradeEvent(
+        event_id="combo-put-open", event_type="open", event_time_ms=long_at,
+        contract_key=put_key, contracts=1, price=1, currency="USD",
+        source="test", multiplier=10, lot_id="combo-put-lot",
+        raw_payload={**metadata, "leg_role": "long_put", "side": "buy"},
+    )
+    assignment = TradeEvent(
+        event_id="combo-call-assignment", event_type="assignment", event_time_ms=2_000,
+        contract_key=call_key, contracts=1, price=0, currency="USD", source="test",
+        multiplier=10, target_lot_id="combo-call-lot",
+        raw_payload={"side": "buy", "target_lot_id": "combo-call-lot", "stock_settlement": {
+            "side": "sell", "shares": 10, "price": 110, "fees": 0,
+            "currency": "USD", "fee_provenance": {"basis": "actual", "source": "test"},
+        }},
+    )
+    return call, put, assignment
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_external_cc_lp_short_call_assignment_starts_put_branch(tmp_path, batched):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, put, assignment = _cc_lp_events()
+    if batched:
+        persist_trade_event_objects_atomically(repo, [call, put, assignment])
+    else:
+        persist_trade_event_objects_atomically(repo, [call, put])
+        persist_trade_event_objects_atomically(repo, [assignment])
+    branches = repo.list_wheel_events(account="lx")
+    assert len(branches) == 1
+    assert branches[0]["source_trade_event_id"] == assignment.event_id
+    model = build_wheel_read_model(repo, "lx", 3_000)
+    assert model["wheel_branches"][0]["direction"] == "put"
+    assert model["wheel_branches"][0]["lifecycle_status"] == "active"
+    assert next(row for row in repo.list_position_lots() if row["record_id"] == "combo-put-lot")["fields"]["status"] == "open"
+    assert persist_trade_event_objects_atomically(repo, [assignment])[0].created is False
+    assert len(repo.list_wheel_events(account="lx")) == 1
+
+
+def test_external_cc_lp_late_long_put_does_not_backdate_identity(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, put, assignment = _cc_lp_events(long_at=3_000)
+    persist_trade_event_objects_atomically(repo, [call, put])
+    result = persist_trade_event_objects_atomically(repo, [assignment])[0].to_dict()
+    assert not repo.list_wheel_events(account="lx")
+    assert result["wheel_manual_review_reason"] == "combo_assignment_membership_unresolved"
+
+
+def test_external_cc_lp_same_batch_known_void_blocks_assignment(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, put, assignment = _cc_lp_events()
+    void = TradeEvent(
+        event_id="void-combo-put", event_type="void", event_time_ms=3_000,
+        contract_key=put.contract_key, contracts=0, price=0, currency="USD",
+        source="test", target_event_id=put.event_id,
+    )
+    result = persist_trade_event_objects_atomically(
+        repo, [call, put, assignment, void],
+    )
+    assert not repo.list_wheel_events(account="lx")
+    assert result[2].to_dict()["wheel_manual_review_reason"] == "combo_assignment_membership_unresolved"
+
+
+def test_external_cc_lp_does_not_reuse_active_wheel_stock(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _persist_put_open(repo, multiplier=10, raw_payload=_trusted_multiplier_payload("put-open"))
+    _open_activation(repo)
+    _persist_put_assignment(repo, multiplier=10, raw_payload=_assignment_payload(10))
+    call, put, assignment = _cc_lp_events()
+    call = replace(call, event_time_ms=3_000)
+    put = replace(put, event_time_ms=3_100)
+    assignment = replace(assignment, event_time_ms=4_000)
+    persist_trade_event_objects_atomically(repo, [call, put])
+    result = persist_trade_event_objects_atomically(repo, [assignment])[0].to_dict()
+    assert result["wheel_manual_review_reason"] == "combo_cc_overlaps_active_wheel_stock"
+    assert len(repo.list_wheel_events(account="lx")) == 1
+
+
+@pytest.mark.parametrize("reverse_input", [False, True])
+def test_cc_lp_same_batch_checks_earlier_assignment_wheel_stock(tmp_path, reverse_input):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    put_open = _put_event(
+        event_id="put-open", event_type="open", multiplier=10,
+        raw_payload=_trusted_multiplier_payload("put-open"),
+    )
+    put_assignment = _put_event(
+        event_id="put-assignment", event_type="assignment", multiplier=10,
+        raw_payload=_assignment_payload(10),
+    )
+    call, long_put, call_assignment = _cc_lp_events()
+    call = replace(call, event_time_ms=3_000)
+    long_put = replace(long_put, event_time_ms=3_100)
+    call_assignment = replace(call_assignment, event_time_ms=4_000)
+    events = [put_open, put_assignment, call, long_put, call_assignment]
+    results = persist_trade_event_objects_atomically(
+        repo, list(reversed(events)) if reverse_input else events,
+    )
+    reasons = {item.event_id: item.to_dict().get("wheel_manual_review_reason")
+               for item in results}
+    assert reasons[call_assignment.event_id] == "combo_cc_overlaps_active_wheel_stock"
+    assert len(repo.list_wheel_events(account="lx")) == 1
+
+
+def test_external_cc_lp_rejects_wrong_stock_side_even_without_fee(tmp_path):
+    from src.application.ledger.wheel_trade_companions import plan_wheel_assignment_companion
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, put, assignment = _cc_lp_events()
+    persist_trade_event_objects_atomically(repo, [call, put])
+    raw = dict(assignment.raw_payload)
+    raw["stock_settlement"] = {**raw["stock_settlement"], "side": "buy", "fees": None}
+    assignment = replace(assignment, raw_payload=raw)
+    rows = repo.read_lifecycle_account_rows(account="lx")
+    fields = repo.get_position_lot_fields("combo-call-lot")
+    window = repo.get_wheel_activation_window_for_event(market="us", account="lx", occurred_at_ms=2_000)
+    assert plan_wheel_assignment_companion(
+        assignment, fields, rows, window, recorded_at_ms=2_100,
+    ) == (None, "stock_settlement_side_mismatch")
+
+
 def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     _persist_put_open(repo, multiplier=10, raw_payload=_trusted_multiplier_payload("put-open"))
@@ -672,3 +812,112 @@ def test_lifecycle_allocation_writer_creates_blocked_assignment_branch(tmp_path)
     assert branch["phase"] == "data_unavailable"
     assert branch["reason_codes"] == ["assignment_cash_facts_unavailable"]
     assert len(repo.list_wheel_events()) == 1
+
+
+def test_lifecycle_allocation_writer_enters_wheel_from_cc_lp_assignment(tmp_path):
+    from tests.test_settlement_observation import (
+        _Gateway, _collect_broker_observation, _repo_with_pending_case,
+        reconcile_lifecycle_close_reason,
+    )
+    from src.application.trades.settlement_observation import (
+        LifecycleObservationGenerationChanged,
+    )
+    from src.application.trades.manual_lifecycle_resolution import resolve_lifecycle_manually
+
+    call, put, _ = _cc_lp_events()
+    call = replace(
+        call, event_time_ms=1_700_000_000_000, multiplier=100,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="call", strike=110, expiration_ymd="2026-08-21",
+        ),
+    )
+    put = replace(
+        put, event_time_ms=1_700_000_000_100, multiplier=100,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=100, expiration_ymd="2026-08-21",
+        ),
+    )
+    repo, lifecycle_case, policy, _ = _repo_with_pending_case(
+        tmp_path, opening_event=call, option_code="US.NVDA260821C110000",
+    )
+    persist_trade_event_objects_atomically(repo, [put])
+    _open_activation(repo)
+    stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
+    now_ms = stock_time_ms + 2
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=lifecycle_case, case_id=lifecycle_case["case_id"],
+        now_ms=now_ms,
+        gateway=_Gateway(history_deals=[
+            {"deal_id": "option-close-1", "acc_id": "1001",
+             "code": "US.NVDA260821C110000", "price": "0", "qty": 1},
+            {"deal_id": "combo-cc-stock-settlement", "acc_id": "1001",
+             "code": "US.NVDA", "price": "110", "qty": 100,
+             "trd_side": "SELL", "trade_time_ms": stock_time_ms,
+             "order_id": "combo-cc-stock-order"},
+        ]),
+    )
+    assert observation["stock_settlement_present"] is True
+    result = reconcile_lifecycle_close_reason(
+        repo, case_id=lifecycle_case["case_id"], now_ms=now_ms,
+        observation=observation, apply_changes=True,
+    )
+    assert result["poll_settlement_results"][0]["status"] == "applied"
+    wheel_events = repo.list_wheel_events(account="lx")
+    assert len(wheel_events) == 1
+    assert wheel_events[0]["event_type"] == "wheel_branch_created"
+    assignment = next(
+        event for event in repo.list_trade_events()
+        if event["event_id"] == wheel_events[0]["source_trade_event_id"]
+    )
+    assert assignment["event_type"] == "assignment"
+    assert assignment["contract_key"]["option_type"] == "call"
+    branch = build_wheel_read_model(repo, "lx", now_ms)["wheel_branches"][0]
+    assert branch["direction"] == "put"
+    assert branch["lifecycle_status"] == "active"
+    assert next(row for row in repo.list_position_lots()
+                if row["record_id"] == "combo-put-lot")["fields"]["status"] == "open"
+    with pytest.raises(LifecycleObservationGenerationChanged):
+        reconcile_lifecycle_close_reason(
+            repo, case_id=lifecycle_case["case_id"], now_ms=now_ms,
+            observation=observation, apply_changes=True,
+        )
+    assert len(repo.list_wheel_events(account="lx")) == 1
+
+    replacement_ref = "futu:lx:1001:replacement-stock"
+    repo.insert_trade_lifecycle_evidence_once({
+        "evidence_id": "replacement-stock-evidence",
+        "case_id": None,
+        "source_type": "futu_broker_deal",
+        "source_event_id": replacement_ref,
+        "evidence_type": "stock_settlement_leg",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "side": "sell",
+        "stock_qty": 100,
+        "stock_price": 110,
+        "trade_time_ms": stock_time_ms + 10,
+        "order_id": "replacement-stock-order",
+    })
+    revision = repo.get_trade_lifecycle_case(lifecycle_case["case_id"])["derived_summary"]["resolution_revision"]
+    corrected = resolve_lifecycle_manually(
+        repo, case_id=lifecycle_case["case_id"], expected_revision=revision,
+        reason="assignment", broker_ref=replacement_ref, note="correct stock deal",
+        void_terminal_event_id=assignment["event_id"], apply_changes=True,
+        now_ms=stock_time_ms + 20,
+    )
+    assert corrected["status"] == "applied"
+    assert len(repo.list_wheel_events(account="lx")) == 2
+    branches = build_wheel_read_model(repo, "lx", stock_time_ms + 20)["wheel_branches"]
+    assert len([branch for branch in branches
+                if branch["lifecycle_status"] == "active"
+                and "wheel_branch_source_invalid" not in branch["reason_codes"]]) == 1
+    assert resolve_lifecycle_manually(
+        repo, case_id=lifecycle_case["case_id"], expected_revision=revision,
+        reason="assignment", broker_ref=replacement_ref, note="correct stock deal",
+        void_terminal_event_id=assignment["event_id"], apply_changes=True,
+        now_ms=stock_time_ms + 20,
+    )["status"] == "idempotent"
+    assert len(repo.list_wheel_events(account="lx")) == 2
