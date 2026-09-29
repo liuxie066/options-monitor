@@ -460,6 +460,15 @@ def _success_empty_payload_from_plan(
             "snapshot_returned_code_set": [],
             "snapshot_missing_code_set": [],
             "snapshot_unexpected_code_set": [],
+            # The plan's own observation must ride along: `_validate_raw_underlier_binding`
+            # compares this against `contract["fetch_plan"]["underlier_observation"]` and
+            # rejects the payload when the contract carries one and this differs. The
+            # scheduled sibling in `multi_tick/required_data_prefetch.py` already carries it.
+            "underlier_observation": (
+                fetch_plan.underlier_observation.to_dict()
+                if fetch_plan.underlier_observation is not None
+                else None
+            ),
             "realized_volatility": {
                 "status": "not_applicable_no_contracts",
                 "reason": "not_applicable_no_contracts",
