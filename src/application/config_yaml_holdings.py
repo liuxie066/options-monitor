@@ -12,12 +12,14 @@ from typing import Any
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
+from src.application.config_primitives import configured_markets, resolve_config_path
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file, resolve_yaml_runtime_config
 from src.application.portfolio_management import (
     PORTFOLIO_MANAGEMENT_DISABLED,
     resolve_portfolio_management_client,
 )
 from src.application.portfolio_assignment_scenario import read_portfolio_valuation_evidence
+from src.application.write_contract import attach_write_contract
 
 
 def holdings_included(config: dict[str, Any]) -> bool:
@@ -32,30 +34,25 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("portfolio_management.enabled is false")
     response = client.read_view("accounts", query={"include_default": "false"}, timeout=10.0)
     freshness = response.get("freshness")
-    sources = response.get("sources")
-    accounts = sources.get("holdings") if isinstance(sources, dict) else None
-    warnings = response.get("warnings") or []
-    holdings_warning = not isinstance(warnings, list) or any(
-        not isinstance(item, dict) or item.get("source") == "holdings" for item in warnings
-    )
+    accounts = response.get("accounts")
+    if response.get("success") is not True or not isinstance(accounts, list) or not accounts:
+        raise ValueError("PM account discovery has no usable accounts")
     if (
-        response.get("success") is not True
-        or holdings_warning
-        or not isinstance(freshness, dict)
+        not isinstance(freshness, dict)
         or freshness.get("status") != "fresh"
         or freshness.get("trust_status") != "trusted"
-        or not isinstance(accounts, list)
-        or not accounts
     ):
-        raise ValueError("PM Holdings account discovery is unavailable or stale")
-    observed_accounts = sorted({str(account).strip().lower() for account in accounts if str(account).strip()})
-    declared = response.get("accounts")
-    if not observed_accounts or not isinstance(declared, list) or not set(observed_accounts).issubset(
-        {str(account).strip().lower() for account in declared}
+        raise ValueError("PM account discovery is stale or untrusted")
+    warnings = response.get("warnings")
+    if isinstance(warnings, list) and any(
+        isinstance(item, dict) and item.get("source") == "holdings" for item in warnings
     ):
-        raise ValueError("PM Holdings account discovery has inconsistent scope")
+        raise ValueError("PM Holdings account discovery reported a holdings warning")
+    candidate_accounts = sorted({str(account).strip().lower() for account in accounts if str(account).strip()})
+    if not candidate_accounts:
+        raise ValueError("PM account discovery has no usable accounts")
     evidence = read_portfolio_valuation_evidence(
-        accounts=observed_accounts,
+        accounts=candidate_accounts,
         supplemental_codes=[],
         price_timeout=10,
         client=client,
@@ -72,12 +69,21 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("PM Holdings valuation evidence is incomplete or stale")
     rows = [row for row in evidence.get("holdings", []) if isinstance(row, dict)]
+    observed_accounts = sorted(
+        {str(row.get("account") or "").strip().lower() for row in rows if str(row.get("account") or "").strip()}
+    )
+    if not observed_accounts:
+        raise ValueError("PM Holdings valuation evidence has no observed holdings")
     return {
         "status": "ready_observed",
         "scope": "observed_only",
         "accounts_observed": observed_accounts,
-        "brokers_observed": sorted({str(row.get("broker") or "").strip() for row in rows if str(row.get("broker") or "").strip()}),
-        "markets_observed": sorted({str(market).upper() for row in rows if (market := symbol_market(str(row.get("code") or "")))}),
+        "brokers_observed": sorted(
+            {str(row.get("broker") or "").strip() for row in rows if str(row.get("broker") or "").strip()}
+        ),
+        "markets_observed": sorted(
+            {str(market).upper() for row in rows if (market := symbol_market(str(row.get("code") or "")))}
+        ),
         "source_observed_at": quality.get("observed_at_utc"),
         "warnings": [],
     }
@@ -145,7 +151,7 @@ def set_yaml_holdings_inclusion(
     expected_source_sha256: str | None = None,
     expected_preview_sha256: str | None = None,
 ) -> dict[str, Any]:
-    source = Path(config_path).expanduser().resolve() if config_path else default_yaml_config_path(repo_root=repo_root)
+    source = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
     before_sha = config_source_sha256(source)
     if apply and (not confirm or expected_source_sha256 != before_sha):
         raise AgentToolError(
@@ -161,14 +167,7 @@ def set_yaml_holdings_inclusion(
     if not isinstance(holdings, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="portfolio.holdings must be an object")
     holdings["enabled"] = enabled
-    markets_doc = doc.get("markets")
-    markets = [market for market in ("us", "hk") if isinstance(markets_doc, dict) and isinstance(markets_doc.get(market), dict)]
-    if not markets:
-        raise AgentToolError(code="CONFIG_ERROR", message="config.yaml has no us or hk market")
-    for market in markets:
-        market_portfolio = markets_doc[market].get("portfolio")
-        if isinstance(market_portfolio, dict) and "holdings" in market_portfolio:
-            raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.portfolio.holdings overrides the global setting")
+    markets = configured_markets(doc)
     target_root = Path(runtime_root).expanduser().resolve() if runtime_root else source.parent
 
     preview = publish_yaml_config_generation(
@@ -193,7 +192,9 @@ def set_yaml_holdings_inclusion(
     preflight = None
     if enabled:
         current, _meta = resolve_yaml_runtime_config(
-            repo_root=repo_root, market=markets[0], config_path=source,
+            repo_root=repo_root,
+            market=markets[0],
+            config_path=source,
         )
         try:
             preflight = _probe_holdings(current)
@@ -222,30 +223,34 @@ def set_yaml_holdings_inclusion(
         verified_targets = _readback_generation(transaction, enabled=enabled)
     else:
         verified_targets = []
-    return {
-        "ok": True,
-        "product": "Portfolio Exposure",
-        "setting": "portfolio.holdings.enabled",
-        "enabled": enabled,
-        "current_enabled": current_enabled,
-        "target_enabled": enabled,
-        "effect_scope": "configuration_only",
-        "effect_note": "The current assignment-scenario query does not consume this setting.",
-        "preview_sha256": preview_sha,
-        "preflight": preflight,
-        "config_yaml_path": str(source),
-        "runtime_root": str(target_root),
-        "source_revision": transaction["source_revision"],
-        "validation": transaction["markets"],
-        "assistant": transaction["assistant"],
-        "verified_targets": verified_targets,
-        "audit_id": transaction["audit_id"],
-        "dry_run": not apply,
-        "write_applied": apply,
-        "backup_path": transaction["backup_path"],
-        "rollback_hint": (
+    return attach_write_contract(
+        {
+            "ok": True,
+            "product": "Portfolio Exposure",
+            "setting": "portfolio.holdings.enabled",
+            "enabled": enabled,
+            "current_enabled": current_enabled,
+            "target_enabled": enabled,
+            "effect_scope": "configuration_only",
+            "effect_note": "The current assignment-scenario query does not consume this setting.",
+            "preview_sha256": preview_sha,
+            "preflight": preflight,
+            "config_yaml_path": str(source),
+            "runtime_root": str(target_root),
+            "source_revision": transaction["source_revision"],
+            "validation": transaction["markets"],
+            "assistant": transaction["assistant"],
+            "verified_targets": verified_targets,
+        },
+        dry_run=not apply,
+        write_applied=apply,
+        backup_path=transaction["backup_path"],
+        audit_id=transaction["audit_id"],
+        generate_audit_id=False,
+        rollback_hint=(
             f"先将 {transaction['backup_path']} 恢复到 {source}，再用 om config build 和 "
             "om config build-assistant 重建 validation/assistant 列出的全部目标并读回。"
-            if apply else None
+            if apply
+            else None
         ),
-    }
+    )

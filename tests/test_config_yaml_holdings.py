@@ -12,6 +12,7 @@ from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.config_validator import validate_config
 from src.application.config_yaml import resolve_yaml_runtime_config
 from src.application.config_yaml_holdings import set_yaml_holdings_inclusion
+from src.infrastructure.portfolio_management_client import API_VERSION, PortfolioManagementClient
 import src.application.config_yaml_holdings as inclusion
 
 
@@ -154,19 +155,23 @@ def test_holdings_confirmation_binds_target(monkeypatch, tmp_path: Path) -> None
     assert source.read_bytes() == before
 
 
-def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch) -> None:
+@pytest.mark.parametrize("account_warnings", (None, ["cash flow is stale"]))
+def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch, account_warnings) -> None:
     class Client:
         def read_view(self, view, *, query, timeout):
             assert view == "accounts"
             assert query == {"include_default": "false"}
             assert timeout == 10.0
-            return {
+            result = {
                 "success": True,
                 "accounts": ["lx"],
-                "sources": {"holdings": ["lx"]},
+                "count": 1,
+                "retrieved_at_utc": "2026-09-29T00:00:00Z",
                 "freshness": {"status": "fresh", "trust_status": "trusted"},
-                "warnings": [{"source": "cash_flow", "error": "unavailable"}],
             }
+            if account_warnings is not None:
+                result["warnings"] = account_warnings
+            return result
 
     monkeypatch.setattr(inclusion, "resolve_portfolio_management_client", lambda *_args, **_kwargs: Client())
     monkeypatch.setattr(inclusion, "read_portfolio_valuation_evidence", lambda **_kwargs: {
@@ -177,8 +182,18 @@ def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch) ->
     })
     scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
     assert scope["accounts_observed"] == ["lx"]
+    assert scope["source_observed_at"] == "2026-09-29T00:00:00Z"
     assert scope["brokers_observed"] == ["富途"]
     assert scope["markets_observed"] == ["US"]
+
+    monkeypatch.setattr(inclusion, "read_portfolio_valuation_evidence", lambda **_kwargs: {
+        "status": "complete", "warnings": [],
+        "freshness": {"status": "fresh", "trust_status": "trusted"},
+        "account_status": [{"account": "lx", "status": "complete"}],
+        "holdings": [],
+    })
+    with pytest.raises(ValueError, match="no observed holdings"):
+        inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
 
     monkeypatch.setattr(inclusion, "read_portfolio_valuation_evidence", lambda **_kwargs: {
         "status": "partial", "warnings": ["stale"], "freshness": {"status": "stale"},
@@ -188,13 +203,68 @@ def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch) ->
         inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
 
 
+def test_holdings_probe_accepts_contract_response_through_pm_client(monkeypatch) -> None:
+    seen = []
+
+    class Response:
+        status = 200
+        headers = {"X-PM-API-Version": API_VERSION}
+
+        def __init__(self, payload):
+            self.body = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return self.body
+
+    freshness = {
+        "status": "fresh", "trust_status": "trusted",
+        "observed_at_utc": "2026-09-29T00:00:00Z",
+        "dataset_ids": ["pm.holdings_quantity"], "reason_codes": [],
+    }
+
+    def open_pm(request, *, timeout):
+        seen.append((request.method, request.full_url, timeout))
+        if request.method == "GET":
+            return Response({
+                "success": True, "freshness": freshness,
+                "retrieved_at_utc": "2026-09-29T00:00:01Z",
+                "accounts": ["lx"], "count": 1,
+            })
+        assert json.loads(request.data)["accounts"] == ["lx"]
+        return Response({
+            "success": True, "freshness": freshness,
+            "retrieved_at_utc": "2026-09-29T00:00:01Z",
+            "schema_version": "portfolio.valuation_evidence.v1",
+            "status": "complete", "scope": {"accounts": ["lx"]},
+            "snapshot": {"snapshot_id": "valuation-1", "observed_at": "2026-09-29T00:00:00Z"},
+            "holdings": [{"account": "lx", "broker": "富途", "code": "NVDA"}],
+            "quotes": [], "account_status": [{"account": "lx", "status": "complete"}],
+            "warnings": [],
+        })
+
+    monkeypatch.setattr(
+        inclusion, "resolve_portfolio_management_client",
+        lambda *_args, **_kwargs: PortfolioManagementClient(urlopen_fn=open_pm),
+    )
+    scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
+    assert scope["accounts_observed"] == ["lx"]
+    assert scope["markets_observed"] == ["US"]
+    assert [method for method, _url, _timeout in seen] == ["GET", "POST"]
+
+
 def test_holdings_switch_cannot_be_overridden_per_market(tmp_path: Path) -> None:
     source = _source(tmp_path)
     doc = yaml.safe_load(source.read_text(encoding="utf-8"))
     doc["markets"]["us"]["portfolio"] = {"holdings": {"enabled": True}}
     source.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
     with pytest.raises(AgentToolError, match="must be configured globally"):
-        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=source)
+        _set(source, False)
 
 
 def test_holdings_cli_preview_and_apply_off_in_isolated_runtime(tmp_path: Path) -> None:

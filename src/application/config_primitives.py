@@ -36,6 +36,13 @@ def resolve_config_path(raw: str | Path | None, *, default: Path) -> Path:
     return path
 
 
+def configured_markets(config_doc: dict[str, Any]) -> list[str]:
+    markets = config_doc.get("markets")
+    if not isinstance(markets, dict):
+        return []
+    return [market for market in MARKETS if isinstance(markets.get(market), dict)]
+
+
 def deep_merge_config(base: Any, override: Any) -> Any:
     if isinstance(base, dict) and isinstance(override, dict):
         out = deepcopy(base)

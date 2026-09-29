@@ -100,7 +100,8 @@ PM 故障时仍可得到预览和预检失败原因，但 apply 不放行。确�
 市场集合和生成后 YAML 的 SHA 确定性计算；apply 重算并拒绝与预览不一致的目标。
 市场和 Assistant 快照含生成时间，预览与 apply 的文件 SHA 可以不同，不纳入确认摘要；
 源 SHA 另行保护并发编辑。
-PM `sources.holdings` 中的账户只代表 PM 已观测来源；本轮查询尚未接线，
+PM Accounts 契约提供候选账户；估值证据中的 Holdings 行决定已观测账户与 broker/market。
+本轮查询尚未接线，
 不以 OM/PM 标签交集设门禁，也不宣称这些账户已可由当前情景查询使用。
 YAML 与市场快照读回 Holdings 值；
 全部目标按事务返回的 SHA 核对文件内容，Assistant 只核对生成身份和摘要，因为它不含 Holdings 值。
