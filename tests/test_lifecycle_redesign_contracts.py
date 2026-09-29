@@ -33,6 +33,7 @@ from src.application.ledger.notification_outbox import (
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
 )
+from src.application.ledger.read_model import load_position_lot_records
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
 )
@@ -1076,7 +1077,10 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
     )
-    persist_trade_event_object(repo, _open_event())
+    open_event = _open_event()
+    open_event.raw_payload["strategy"] = "sell_put"
+    open_event.raw_payload["leg_role"] = "short_put"
+    persist_trade_event_object(repo, open_event)
     observed_at_ms = expiration_observation_start_ms(
         EXPIRATION_YMD,
         "US",
@@ -1275,8 +1279,11 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         "lifecycle_generation_token",
     ):
         assert frozen_model[field] == live_model[field]
+    records = load_position_lot_records(repo)
+    assert records[0]["fields"]["strategy"] == "sell_put"
+    assert "strategy" not in snapshot["account_position_lots"][0]["fields"]
     context = build_context(
-        snapshot["account_position_lots"],
+        records,
         broker="富途",
         account="lx",
         rates={"rates": {"USDCNY": 7.2}},
@@ -1284,12 +1291,19 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         observed_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc),
     )
     assert context["cash_secured_total_cny"] == 0
+    gaps: list[dict] = []
     funds, _ = _build_funds(
-        portfolio_context={"cash_by_currency": {"USD": 1000}, "as_of_utc": context["as_of_utc"]},
+        portfolio_context={
+            "cash_by_currency": {"USD": 1000},
+            "as_of_utc": datetime.fromtimestamp((now_ms - 3_600_000) / 1000, tz=timezone.utc).isoformat(),
+        },
         option_positions_context=context,
-        data_gaps=[],
+        data_gaps=gaps,
     )
-    assert funds["option_opening_available_cny"] == 7200
+    assert context["cash_secured_unavailable_by_symbol"] == {"NVDA": "option_close_settlement_pending"}
+    assert funds["option_opening_available_cny"] is None
+    assert funds["available"] is False
+    assert gaps == [{"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"}]
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(

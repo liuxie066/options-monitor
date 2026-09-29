@@ -629,15 +629,17 @@ CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金
 
 成功信号：完整平仓且原因待确认的合约不再占用风险容量；部分平仓只保留未平仓
 部分的占用；没有可信平仓事实、快照不可信或生命周期冲突时不凭猜测释放占用；
-账户级日报使用修正后的担保汇总，原始持仓行仍可追溯。
+账户级日报只在担保和券商资金证据均可靠时展示可开仓金额；原因待交收时显示
+“暂不可用”，原始持仓行仍可追溯。
 
 事实与约束：`domain/domain/option_lifecycle.py::derive_lifecycle_read_model` 已从
 可信账户快照派生 `closure_fact` 和按 lot 的 `reserved_contracts_by_lot`；
-`src/application/positions/context_builder.py::build_context` 已把它们附在持仓行，
-但风险汇总仍直接使用账本 `contracts_open`。`daily_decision_brief_service._build_funds`
-读取该汇总，现金本身来自独立的券商持仓快照。日报管线将可信账户快照传给
+`src/application/positions/context_builder.py::build_context` 从事件补齐持仓行的
+策略家族，而可信快照保留原始存储行；这族可重建字段不能参与两侧持仓代次比较。
+`daily_decision_brief_service._build_funds` 读取担保汇总，现金本身来自独立的
+券商持仓快照，观察时间不能单独证明交收完成。日报管线将可信账户快照传给
 `build_context`，而 `cash_headroom_query.py`、`wheel/capacity.py` 的直接调用
-目前没有传该快照，不在本次“日报金额已修正”的验收内。原因未定时保留账本
+目前没有传该快照，不在本次账户级日报验收内。原因未定时保留账本
 数量是两阶段状态的既有合同，不能为了资金展示提前写 terminal event。
 
 复用清单：复用 `derive_lifecycle_read_model` 的平仓事实与预留数量，复用
@@ -648,13 +650,17 @@ CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金
 把已接受期权平仓预留量扣出账户风险汇总的 owner。
 
 方案：`build_context` 仅在可信快照中的同账户、同 lot，且经
-`position_lot_risk_view` 标准化后的 `fields` 与本次汇总行一致，
+`position_lot_risk_view` 标准化后的原始持仓字段与本次汇总行一致（仅从汇总行
+排除事件层补齐的 `STRATEGY_METADATA_KEYS`），
 `lifecycle_state`、`reason_state` 均非 `conflict`、
 `closure_fact` 为 `option_leg_closed` 或 `partial_close_observed`、该 lot 预留量
 为 0 到 `contracts_open` 的整数时，令有效数量为
 `contracts_open - reserved_contracts_by_lot[lot_id]`；Put 现金担保与 Call 锁定股数
 均使用有效数量。快照不可信、跨代持仓行、冲突或数量越界时沿用账本数量，
-不把冲突当零占用。`open_positions_min` 保留账本数量与生命周期字段，
+不把冲突当零占用。预留平仓量仍待交收时，沿用现有
+`cash_secured_unavailable_by_symbol` / `locked_shares_unavailable_by_symbol` 标记对应
+策略容量不可用；日报不会将减少的担保直接解释为可开仓现金。
+`open_positions_min` 保留账本数量与生命周期字段，
 使后续平仓原因核对和自动操作仍有原始事实。拒绝在日报中单独减一笔现金、
 直接改账本，或用股票增量推断每张期权的指派原因；这些做法会重复计算或越过
 交收证据边界。账户切片之外的全账户汇总没有可信的账户生命周期快照，不能
@@ -666,7 +672,9 @@ CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金
 可信账户快照到日报资金的读取链；检查相关消费者测试、格式和文档引用。失败语义沿用
 既有不可用/冲突状态，不写持久账本、不连券商、不发送通知。
 
-风险与待核事项：历史已生成简报不会自动重算；上线后的金额仍是 OM 模型头寸，
+风险与待核事项：历史已生成简报不会自动重算；在缺少可验证的券商交收事实时，
+本设计只能确认期权腿已平仓，不能确认资金或正股可立即用于新交易，因此
+原因待交收的可开仓金额保持不可用。后续可靠金额仍是 OM 模型头寸，
 不是券商可下单额度。全账户汇总及缺快照的直接容量入口由各入口 owner 后续
 接入可信账户快照，当前账户级简报不读取这些结果。
 
