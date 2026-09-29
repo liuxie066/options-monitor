@@ -90,7 +90,8 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
                     "as_of_utc": "2026-04-12T00:00:00+00:00",
                     "stocks_by_symbol": {"AAPL": {"shares": 100}},
                     "cash_by_currency": {"USD": 100.0},
-                    "portfolio_source_name": "holdings",
+                    "portfolio_source_name": "futu",
+                    "filters": {"account": None},
                 }
             return {
                 "as_of_utc": "2026-04-12T00:00:00+00:00",

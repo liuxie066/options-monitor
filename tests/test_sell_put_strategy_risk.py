@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 
 import pandas as pd
+import pytest
 
 from candidate_evidence_helpers import earnings_evidence
 
@@ -55,6 +57,12 @@ def _candidate(**overrides):
 def _global_nvda_context() -> dict:
     return {
         "_global_portfolio_ctx": {
+            "portfolio_source_name": "holdings_global",
+            "filters": {"account": None, "broker": None},
+            "source_account_identifiers": ["lx"],
+            "source_observation_status": "trusted",
+            "source_observed_at": "2026-05-20T00:00:00Z",
+            "retrieved_at_utc": "2026-05-20T00:00:01Z",
             "cash_by_currency": {"CNY": 800_000.0},
             "stocks_by_symbol": {
                 "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
@@ -144,6 +152,31 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert abs(risk.short_put_assignment_cny_by_symbol["NVDA"] - 50_000.0) < 0.000001
     assert risk.short_put_assignment_total_cny == 50_000.0
     assert risk.unavailable_reasons == ()
+
+
+@pytest.mark.parametrize("invalid", ["missing", "account_scope", "missing_observation", "missing_holdings_shape"])
+def test_global_risk_never_uses_account_cash_when_holdings_evidence_is_invalid(invalid: str) -> None:
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = {"cash_by_currency": {"CNY": 1_000_000.0}, "_global_risk_required": True}
+    if invalid != "missing":
+        global_ctx = deepcopy(_global_nvda_context()["_global_portfolio_ctx"])
+        if invalid == "account_scope":
+            global_ctx["filters"]["account"] = "lx"
+        elif invalid == "missing_holdings_shape":
+            global_ctx.pop("stocks_by_symbol")
+        else:
+            global_ctx.pop("source_observed_at")
+        context["_global_portfolio_ctx"] = global_ctx
+
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+
+    assert risk.nav_cny is None
+    assert risk.unavailable_reasons == ("holdings_context_missing",)
 
 
 def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() -> None:
@@ -329,6 +362,12 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
 
     portfolio_ctx = {
         "_global_portfolio_ctx": {
+            "portfolio_source_name": "holdings_global",
+            "filters": {"account": None, "broker": None},
+            "source_account_identifiers": ["lx"],
+            "source_observation_status": "trusted",
+            "source_observed_at": "2026-05-20T00:00:00Z",
+            "retrieved_at_utc": "2026-05-20T00:00:01Z",
             "cash_by_currency": {"CNY": 500_000.0},
             "stocks_by_symbol": {
                 "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},

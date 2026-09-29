@@ -22,12 +22,12 @@ from src.application.account_config import (
 from src.application.config_loader import resolve_data_config_path
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.portfolio_context_service import (
-    expected_portfolio_context_account,
     load_account_portfolio_context,
     load_holdings_portfolio_shared_context,
     portfolio_context_account_mismatch_reason,
     with_context_source,
 )
+from src.application.portfolio_context_builder import is_trusted_global_holdings_context
 from src.application.strategy_policy import wants_global_path_risk_context
 from src.infrastructure.io_utils import (
     atomic_write_json,
@@ -735,17 +735,21 @@ def run_worker(request_path: Path) -> int:
             write_cache=False,
         )
         if wants_global_path_risk_context(cfg):
-            shared = load_holdings_portfolio_shared_context(
-                data_config_path=Path(data_config),
-                broker=None,
-            )
-            all_accounts = shared.get("all_accounts") if isinstance(shared, dict) else None
-            if isinstance(all_accounts, dict):
-                context = dict(context)
-                context["_global_portfolio_ctx"] = with_context_source(
-                    dict(all_accounts),
-                    "global_prepared",
+            context = dict(context)
+            context["_global_risk_required"] = True
+            try:
+                shared = load_holdings_portfolio_shared_context(
+                    data_config_path=Path(data_config),
+                    broker=None,
                 )
+                all_accounts = shared.get("all_accounts") if isinstance(shared, dict) else None
+                if isinstance(all_accounts, dict):
+                    global_ctx = {**all_accounts, "portfolio_source_name": "holdings_global"}
+                    if is_trusted_global_holdings_context(global_ctx):
+                        context = dict(context)
+                        context["_global_portfolio_ctx"] = with_context_source(global_ctx, "global_prepared")
+            except Exception as exc:
+                logs.append(f"[WARN] global holdings risk context not available: {exc}")
         source_name, source_account = _resolve_context_source_binding(
             config=cfg,
             account=account,
@@ -910,11 +914,7 @@ def _resolve_context_source_binding(
         raise PreparedPortfolioContextError(
             "prepared portfolio context source is not allowed by account config"
         )
-    source_account = expected_portfolio_context_account(
-        source_name=source_name,
-        account=account,
-        holdings_account=plan.holdings_account,
-    )
+    source_account = account
     if not source_account:
         raise PreparedPortfolioContextError(
             "prepared portfolio context source account is unavailable"
@@ -931,13 +931,7 @@ def _resolve_context_source_binding(
 
 
 def _allowed_context_sources(plan: Any) -> set[str]:
-    if str(plan.account_type).strip().lower() == "external_holdings":
-        return {"external_holdings", "holdings"}
-    if str(plan.requested_source).strip().lower() == "auto":
-        return {"futu", "holdings", "external_holdings"}
-    if str(plan.primary_source).strip().lower() == "futu":
-        return {"futu"}
-    return {"holdings", "external_holdings"}
+    return {"futu"}
 
 
 def _validate_prepared_source_binding(

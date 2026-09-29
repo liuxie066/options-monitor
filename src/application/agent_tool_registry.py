@@ -114,7 +114,7 @@ def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, An
         "description": "Local Tool Gateway tools for options-monitor. Read-first by default; write tools require explicit enablement and confirmation.",
         "launcher": {
             "command": ["./om-agent", "run", "--tool", "<tool-name>", "--input-json", "<json>"],
-            "add_account_command": ["./om-agent", "add-account", "--market", "us|hk", "--account-label", "<label>", "--account-type", "futu|external_holdings", "--dry-run"],
+            "add_account_command": ["./om-agent", "add-account", "--market", "us|hk", "--account-label", "<label>", "--account-type", "futu", "--dry-run"],
             "edit_account_command": ["./om-agent", "edit-account", "--market", "us|hk", "--account-label", "<label>", "--dry-run"],
             "remove_account_command": ["./om-agent", "remove-account", "--market", "us|hk", "--account-label", "<label>", "--dry-run"],
         },

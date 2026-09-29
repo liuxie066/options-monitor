@@ -515,6 +515,50 @@ def test_worker_consumes_published_config_bytes_and_hash(
     assert observed["runtime"]["marker"] == "exact-published-bytes"
 
 
+def test_worker_keeps_futu_context_when_global_holdings_unavailable(monkeypatch, tmp_path: Path) -> None:
+    from src.application import prepared_portfolio_context as mod
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-global-unavailable",
+        account="lx",
+        config={"portfolio": {"account": "lx"}, "symbols": []},
+    )
+    request_path = tmp_path / "worker-request.json"
+    result_path = tmp_path / "worker-result.json"
+    _write_worker_request(
+        tmp_path,
+        authority=authority,
+        run_id="run-global-unavailable",
+        token="token-global",
+        request_path=request_path,
+        result_path=result_path,
+    )
+    monkeypatch.setattr(mod, "load_account_portfolio_context", lambda **_kwargs: {
+        "filters": {"account": "lx"},
+        "cash_by_currency": {"CNY": 100_000.0},
+        "stocks_by_symbol": {},
+    })
+    monkeypatch.setattr(mod, "wants_global_path_risk_context", lambda _cfg: True)
+    monkeypatch.setattr(mod, "load_holdings_portfolio_shared_context", lambda **_kwargs: (_ for _ in ()).throw(OSError("offline")))
+
+    assert mod.run_worker(request_path) == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["status"] == "ready"
+    context = result["portfolio_context"]
+    assert context["cash_by_currency"] == {"CNY": 100_000.0}
+    assert context["_global_risk_required"] is True
+    assert "_global_portfolio_ctx" not in context
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert risk.nav_cny is None
+    assert risk.unavailable_reasons == ("holdings_context_missing",)
+
+
 def test_worker_fails_closed_when_config_changes_after_spawn(
     monkeypatch,
     tmp_path: Path,

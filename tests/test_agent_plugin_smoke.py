@@ -136,8 +136,8 @@ def _write_manage_symbols_generation(tmp_path: Path, *, market: str = "us") -> t
         """\
 accounts:
   user1:
-    type: external_holdings
-    holdings_account: user1
+    type: futu
+    futu_account_id: "999000000000000001"
 templates:
   put_base:
     sell_put: {}
@@ -183,7 +183,6 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
         }
     }
     cfg["portfolio"]["account"] = "user1"
-    cfg["portfolio"]["source_by_account"] = {"user1": "futu"}
     cfg["portfolio"]["data_config"] = data_config_ref
     cfg["trade_intake"] = {
         "enabled": True,
@@ -205,9 +204,7 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
 
 def _public_cfg_with_futu_auto_source(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
     cfg = _public_cfg_with_futu(data_config_ref, market=market)
-    cfg["account_settings"]["user1"]["holdings_account"] = "lx"
     cfg["portfolio"]["source"] = "auto"
-    cfg["portfolio"]["source_by_account"]["user1"] = "auto"
     return cfg
 
 
@@ -218,7 +215,7 @@ def _public_cfg_with_external_holdings(data_config_ref: str, *, market: str = "u
         "type": "external_holdings",
         "holdings_account": "Feishu EXT",
     }
-    cfg["portfolio"]["source_by_account"]["ext1"] = "holdings"
+    cfg["portfolio"]["source_by_account"] = {"ext1": "holdings"}
     return cfg
 
 
@@ -795,7 +792,7 @@ def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapp
     assert mapping["value"]["user1"]["trade_source"] == "api"
 
 
-def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_rejects_external_holdings_account(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
@@ -818,16 +815,8 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
-    assert out["ok"] is True
-    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "holdings"
-    assert out["data"]["account_paths"]["ext1"]["primary"]["ok"] is True
-    assert "fallback" not in out["data"]["account_paths"]["ext1"]
-    primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    assert primary["status"] == "ok"
-    assert primary["value"]["ext1"]["type"] == "external_holdings"
-    assert primary["value"]["ext1"]["holdings_account"] == "Feishu EXT"
-    assert primary["value"]["ext1"]["ready"] is True
-    assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
 
 
 def test_healthcheck_missing_ledger_is_read_only_and_never_bootstraps(monkeypatch, tmp_path: Path) -> None:
@@ -1000,7 +989,7 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
     assert out["data"]["portfolio_source_name"] == "futu"
 
 
-def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_account(monkeypatch, tmp_path: Path) -> None:
+def test_get_portfolio_context_rejects_external_holdings_runtime_config(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.pipeline_context as pipeline_context
     import src.application.portfolio_context_service as pcs
@@ -1097,14 +1086,8 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
         },
     )
 
-    assert out["ok"] is True
-    assert out["data"]["filters"]["account"] == "sy"
-    assert out["data"]["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
-    assert out["data"]["stocks_by_symbol"]["0700.HK"]["shares"] == 1100
-    state_path = out_root / "portfolio_context_state" / "portfolio_context.json"
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
-    assert payload["filters"]["account"] == "sy"
-    assert payload["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
 
 
 def test_spec_exposes_broker_as_public_field() -> None:
