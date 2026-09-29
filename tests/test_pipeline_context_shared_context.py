@@ -75,6 +75,84 @@ def _load_portfolio_ctx(
     return out, logs
 
 
+def test_global_holdings_risk_keeps_unknown_observation_from_real_search(monkeypatch, tmp_path: Path) -> None:
+    import src.application.pipeline_context as pc
+    import src.application.portfolio_context_builder as producer
+    import src.infrastructure.feishu_bitable as bitable
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    record = {
+        "record_id": "rec-cash",
+        "fields": {
+            "broker": "富途", "account": "lx", "asset_type": "cash",
+            "asset_id": "CNY-CASH", "currency": "CNY", "quantity": 100,
+        },
+    }
+    def fake_http_json(_method, _url, payload=None, **_kwargs):
+        return {"code": 0, "data": {"items": [{**record, "last_modified_time": 1700000000000}], "has_more": False}}
+
+    monkeypatch.setattr(bitable, "http_json", fake_http_json)
+    monkeypatch.setattr(producer, "load_holdings_records", lambda _path: bitable.bitable_search_records("token", "app", "table"))
+    monkeypatch.setattr(pc, "_persist_source_snapshot", lambda *_args: None)
+    logs: list[str] = []
+
+    context = pc.load_global_holdings_risk_context(
+        base=tmp_path,
+        data_config=str(tmp_path / "portfolio.runtime.json"),
+        ttl_sec=0,
+        shared_state_dir=tmp_path / "shared",
+        state_dir=tmp_path / "state",
+        log=logs.append,
+    )
+
+    cache = tmp_path / "shared" / "portfolio_context.global.json"
+    assert context is not None
+    assert context["source_observation_status"] == "unknown"
+    assert context["source_observed_at"] is None
+    assert context["source_account_identifiers"] == ["lx"]
+    assert cache.exists()
+    risk = build_portfolio_risk_context(
+        portfolio_ctx={"_global_risk_required": True, "_global_portfolio_ctx": context},
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert risk.nav_cny == 100.0
+    assert risk.unavailable_reasons == ()
+    assert risk.warnings == ("holdings_observation_unknown",)
+
+
+def test_global_holdings_risk_rejects_legacy_edit_time_cache(monkeypatch, tmp_path: Path) -> None:
+    import src.application.pipeline_context as pc
+    from src.application.portfolio_context_builder import build_shared_context
+
+    row = {"fields": {
+        "broker": "富途", "account": "lx", "asset_type": "cash",
+        "asset_id": "CNY-CASH", "currency": "CNY", "quantity": 100,
+    }}
+    refreshed = build_shared_context([row], portfolio_source_name="holdings_global")
+    old = {
+        **refreshed["all_accounts"],
+        "source_observed_at": "2023-11-14T22:13:20Z",
+        "source_observation_status": "trusted",
+        "source_observation_basis": "feishu_record:last_modified_time",
+    }
+    cache = tmp_path / "shared" / "portfolio_context.global.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(pc, "load_holdings_portfolio_shared_context", lambda **_kwargs: (calls.append(True), refreshed)[1])
+    monkeypatch.setattr(pc, "_persist_source_snapshot", lambda *_args: None)
+
+    context = pc.load_global_holdings_risk_context(
+        base=tmp_path, data_config=str(tmp_path / "runtime.json"), ttl_sec=3600,
+        shared_state_dir=cache.parent, state_dir=tmp_path / "state", log=lambda _msg: None,
+    )
+    assert calls == [True]
+    assert context is not None
+    assert context["context_source"] == "global_refresh"
+    assert context["source_observation_status"] == "unknown"
+
+
 def test_build_pipeline_context_uses_futu_account_source(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 

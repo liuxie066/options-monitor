@@ -17,6 +17,34 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.mark.parametrize("operation", ["search", "list"])
+@pytest.mark.parametrize("failure", ["missing_cursor", "page_limit", "missing_has_more", "missing_items"])
+def test_record_reads_reject_incomplete_pagination(monkeypatch, operation: str, failure: str) -> None:
+    from src.infrastructure import feishu_bitable as fb
+
+    calls = 0
+    def fake_http_json(_method, _url, payload=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if failure == "missing_items" and calls > 1:
+            return {"code": 0, "data": {"items": [{"record_id": "later"}], "has_more": False}}
+        data = {
+            "items": [{"record_id": "partial"}],
+            "has_more": True,
+            "page_token": None if failure == "missing_cursor" else "next",
+        }
+        if failure == "missing_has_more":
+            data.pop("has_more")
+        if failure == "missing_items":
+            data.pop("items")
+        return {"code": 0, "data": data}
+
+    monkeypatch.setattr(fb, "http_json", fake_http_json)
+    read = fb.bitable_search_records if operation == "search" else fb.bitable_list_records
+    with pytest.raises(fb.FeishuPermanentError, match="pagination incomplete"):
+        read("token", "app", "table", max_pages=1 if failure == "page_limit" else 2)
+
+
 def _make_http_error(status: int, body: str | bytes | None):
     import urllib.error
 

@@ -262,13 +262,10 @@ def query_sell_put_cash(
         out_dir_path.mkdir(parents=True, exist_ok=True)
 
     portfolio = load_account_portfolio_context(
-        base=base,
-        data_config=str(data_config_path),
         market=market,
         account=account,
         ttl_sec=0,
         state_dir=out_dir_path,
-        shared_state_dir=None,
         log=lambda _message: None,
         runtime_config=runtime_cfg,
         portfolio_source=None,

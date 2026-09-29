@@ -36,7 +36,7 @@ from src.application.portfolio_context_service import (
     load_holdings_portfolio_shared_context,
     with_context_source,
 )
-from src.application.portfolio_context_builder import is_trusted_global_holdings_context
+from src.application.portfolio_context_builder import is_valid_global_holdings_context
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
@@ -102,13 +102,10 @@ def load_portfolio_context(
     """Best-effort load portfolio context to dict."""
     try:
         ctx = load_account_portfolio_context(
-            base=base,
-            data_config=data_config,
             market=market,
             account=account,
             ttl_sec=ttl_sec,
             state_dir=state_dir,
-            shared_state_dir=shared_state_dir,
             log=log,
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
@@ -316,7 +313,7 @@ def load_global_holdings_risk_context(
         path = (shared_root / "portfolio_context.global.json").resolve()
         if ttl_sec > 0 and is_fresh(path, ttl_sec):
             cached = load_cached_json(path)
-            if is_trusted_global_holdings_context(cached):
+            if is_valid_global_holdings_context(cached):
                 cached = with_context_source(cached, "global_cache")
                 log("[CTX] portfolio_context source=global_cache account=all broker=all")
                 return cached
@@ -330,8 +327,8 @@ def load_global_holdings_risk_context(
             raise ValueError("global holdings context missing all_accounts")
         out = dict(all_accounts)
         out["portfolio_source_name"] = "holdings_global"
-        if not is_trusted_global_holdings_context(out):
-            raise ValueError("global holdings context lacks trusted all-account observation")
+        if not is_valid_global_holdings_context(out):
+            raise ValueError("global holdings context lacks valid source, scope, or holdings data")
         out = with_context_source(out, "global_refresh")
         path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         log("[CTX] portfolio_context source=global_refresh account=all broker=all")

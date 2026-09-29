@@ -27,7 +27,7 @@ from src.application.portfolio_context_service import (
     portfolio_context_account_mismatch_reason,
     with_context_source,
 )
-from src.application.portfolio_context_builder import is_trusted_global_holdings_context
+from src.application.portfolio_context_builder import is_valid_global_holdings_context
 from src.application.strategy_policy import wants_global_path_risk_context
 from src.infrastructure.io_utils import (
     atomic_write_json,
@@ -719,13 +719,10 @@ def run_worker(request_path: Path) -> int:
         )
         source = source_plan.requested_source
         context = load_account_portfolio_context(
-            base=base,
-            data_config=str(data_config),
             market=broker,
             account=account,
             ttl_sec=int(runtime.get("portfolio_context_ttl_sec", 900) or 0),
             state_dir=state_dir,
-            shared_state_dir=shared_state_dir,
             log=logs.append,
             runtime_config=cfg,
             portfolio_source=str(source),
@@ -745,7 +742,7 @@ def run_worker(request_path: Path) -> int:
                 all_accounts = shared.get("all_accounts") if isinstance(shared, dict) else None
                 if isinstance(all_accounts, dict):
                     global_ctx = {**all_accounts, "portfolio_source_name": "holdings_global"}
-                    if is_trusted_global_holdings_context(global_ctx):
+                    if is_valid_global_holdings_context(global_ctx):
                         context = dict(context)
                         context["_global_portfolio_ctx"] = with_context_source(global_ctx, "global_prepared")
             except Exception as exc:
@@ -910,7 +907,7 @@ def _resolve_context_source_binding(
     source_name = str(
         context.get("portfolio_source_name") or plan.primary_source
     ).strip().lower()
-    if source_name not in _allowed_context_sources(plan):
+    if source_name != "futu":
         raise PreparedPortfolioContextError(
             "prepared portfolio context source is not allowed by account config"
         )
@@ -928,10 +925,6 @@ def _resolve_context_source_binding(
             f"prepared portfolio context account mismatch: {mismatch}"
         )
     return source_name, source_account
-
-
-def _allowed_context_sources(plan: Any) -> set[str]:
-    return {"futu"}
 
 
 def _validate_prepared_source_binding(

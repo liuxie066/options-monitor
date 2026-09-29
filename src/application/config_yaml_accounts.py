@@ -259,6 +259,8 @@ def _build_account_setting(
     futu_port: int | None,
 ) -> dict[str, Any]:
     existing = deepcopy(current) if isinstance(current, dict) else {}
+    if "bitable" in existing:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"accounts.{account}.bitable is retired")
     setting: dict[str, Any] = {"type": account_type}
     for key in ("enabled", "trade_intake_enabled", "market"):
         if key in existing:
@@ -295,6 +297,8 @@ def _build_account_setting(
             futu["port"] = int(futu_port)
         setting["futu"] = futu
         return setting
+
+    raise AgentToolError(code="CONFIG_ERROR", message=f"unsupported account type: {account_type}")
 
 
 def _account_defs(config_doc: dict[str, Any]) -> dict[str, Any]:

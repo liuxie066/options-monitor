@@ -462,14 +462,19 @@ def bitable_search_records(tenant_token: str, app_token: str, table_id: str, pag
             raise FeishuPermanentError(f"bitable search records failed: {res}", code=res.get("code"), response=res)
 
         data = res.get("data", {}) or {}
-        out.extend(data.get("items", []) or [])
-        if not data.get("has_more"):
-            break
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise FeishuPermanentError("bitable search pagination incomplete: missing items")
+        out.extend(items)
+        if data.get("has_more") is False:
+            return out
+        if data.get("has_more") is not True:
+            raise FeishuPermanentError("bitable search pagination incomplete: missing has_more")
         page_token = data.get("page_token")
         if not page_token:
-            break
+            raise FeishuPermanentError("bitable search pagination incomplete: missing page token")
 
-    return out
+    raise FeishuPermanentError("bitable search pagination incomplete: page limit reached")
 
 
 def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500, *, max_pages: int = 50) -> list[dict]:
@@ -484,14 +489,19 @@ def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_
             raise FeishuPermanentError(f"bitable list records failed: {res}", code=res.get("code"), response=res)
 
         data = res.get("data", {}) or {}
-        out.extend(data.get("items", []) or [])
-        if not data.get("has_more"):
-            break
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise FeishuPermanentError("bitable list pagination incomplete: missing items")
+        out.extend(items)
+        if data.get("has_more") is False:
+            return out
+        if data.get("has_more") is not True:
+            raise FeishuPermanentError("bitable list pagination incomplete: missing has_more")
         page_token = data.get("page_token")
         if not page_token:
-            break
+            raise FeishuPermanentError("bitable list pagination incomplete: missing page token")
 
-    return out
+    raise FeishuPermanentError("bitable list pagination incomplete: page limit reached")
 
 
 # -----------------

@@ -79,13 +79,10 @@ def _validate_portfolio_context_account(
 
 def load_account_portfolio_context(
     *,
-    base: Path,
-    data_config: str,
     market: str,
     account: str | None,
     ttl_sec: int,
     state_dir: Path,
-    shared_state_dir: Path | None,
     log: Logger,
     runtime_config: dict[str, Any] | None,
     portfolio_source: str | None,

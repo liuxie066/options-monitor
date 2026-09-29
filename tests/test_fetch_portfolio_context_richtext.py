@@ -128,7 +128,7 @@ def test_build_context_does_not_apply_partial_cost_basis_to_all_shares() -> None
     assert stock["cost_unknown_shares"] == 50
 
 
-def test_feishu_record_update_time_is_business_observation_not_read_time() -> None:
+def test_feishu_record_update_time_is_not_holdings_observation() -> None:
     records = [
         _timed_rec(
             "1785110400000", broker="富途", account="lx", asset_type="cash",
@@ -143,14 +143,11 @@ def test_feishu_record_update_time_is_business_observation_not_read_time() -> No
     first = build_context(records, broker="富途", account="lx")
     second = build_context(records, broker="富途", account="lx")
 
-    assert first["source_observed_at"] == "2026-07-27T00:00:00Z"
-    assert second["source_observed_at"] == first["source_observed_at"]
-    assert first["retrieved_at_utc"] != first["source_observed_at"]
-    assert first["source_observation_status"] == "trusted"
-    assert (
-        first["source_observation_basis"]
-        == "feishu_record:last_modified_time"
-    )
+    assert first["source_observed_at"] is None
+    assert second["source_observed_at"] is None
+    assert first["source_observation_status"] == "unknown"
+    assert first["source_observation_basis"] == "record_observation_missing"
+    assert first["retrieved_at_utc"]
 
 
 def test_missing_or_invalid_record_observation_is_unknown() -> None:

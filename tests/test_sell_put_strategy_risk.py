@@ -154,7 +154,7 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert risk.unavailable_reasons == ()
 
 
-@pytest.mark.parametrize("invalid", ["missing", "account_scope", "missing_observation", "missing_holdings_shape"])
+@pytest.mark.parametrize("invalid", ["missing", "account_scope", "missing_holdings_shape"])
 def test_global_risk_never_uses_account_cash_when_holdings_evidence_is_invalid(invalid: str) -> None:
     from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
@@ -166,8 +166,6 @@ def test_global_risk_never_uses_account_cash_when_holdings_evidence_is_invalid(i
             global_ctx["filters"]["account"] = "lx"
         elif invalid == "missing_holdings_shape":
             global_ctx.pop("stocks_by_symbol")
-        else:
-            global_ctx.pop("source_observed_at")
         context["_global_portfolio_ctx"] = global_ctx
 
     risk = build_portfolio_risk_context(
@@ -177,6 +175,22 @@ def test_global_risk_never_uses_account_cash_when_holdings_evidence_is_invalid(i
 
     assert risk.nav_cny is None
     assert risk.unavailable_reasons == ("holdings_context_missing",)
+
+
+def test_global_risk_reports_unknown_observation_without_losing_nav() -> None:
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = _global_nvda_context()
+    global_ctx = context["_global_portfolio_ctx"]
+    global_ctx["source_observation_status"] = "unknown"
+    global_ctx["source_observed_at"] = None
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert risk.nav_cny == 850_000.0
+    assert risk.warnings == ("holdings_observation_unknown",)
 
 
 def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() -> None:

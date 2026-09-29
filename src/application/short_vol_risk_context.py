@@ -7,7 +7,7 @@ import pandas as pd
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
-from src.application.portfolio_context_builder import is_trusted_global_holdings_context
+from src.application.portfolio_context_builder import is_valid_global_holdings_context
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
 
@@ -31,7 +31,7 @@ def build_portfolio_risk_context(
 
     global_portfolio = portfolio_ctx.get("_global_portfolio_ctx")
     global_required = bool(portfolio_ctx.get("_global_risk_required")) or global_portfolio is not None
-    if global_required and not is_trusted_global_holdings_context(global_portfolio):
+    if global_required and not is_valid_global_holdings_context(global_portfolio):
         return PortfolioRiskContext(
             nav_cny=None,
             stock_value_cny_by_symbol={},
@@ -46,6 +46,8 @@ def build_portfolio_risk_context(
 
     unavailable: list[str] = []
     warnings: list[str] = []
+    if global_required and global_portfolio["source_observation_status"] == "unknown":
+        warnings.append("holdings_observation_unknown")
     nav_cny = 0.0
 
     cash_by_currency = holdings_ctx.get("cash_by_currency") if isinstance(holdings_ctx, dict) else {}
