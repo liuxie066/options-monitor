@@ -249,6 +249,18 @@ def build_context(
         decision_snapshot,
         now_ms=lifecycle_now_ms,
     )
+    snapshot_lots_by_id: dict[str, RiskPositionView] = {}
+    if (
+        account_norm
+        and (decision_snapshot or {}).get("snapshot_status") == "trusted"
+        and normalize_account((decision_snapshot or {}).get("normalized_account")) == account_norm
+    ):
+        snapshot_lots_by_id = {
+            view.lot_id: view
+            for raw in (decision_snapshot or {}).get("account_position_lots") or []
+            if isinstance(raw, dict)
+            if (view := position_lot_risk_view(raw)).lot_id
+        }
 
     for it in selected_items:
         if not it.is_open:
@@ -265,6 +277,20 @@ def build_context(
         if lifecycle is not None:
             position_row.update(lifecycle)
         open_positions_min.append(position_row)
+        effective_contracts_open = contracts_open
+        if (
+            lifecycle
+            and lifecycle.get("lifecycle_state") != "conflict"
+            and lifecycle.get("reason_state") != "conflict"
+            and lifecycle.get("closure_fact") in {"option_leg_closed", "partial_close_observed"}
+            and (snapshot_lot := snapshot_lots_by_id.get(it.lot_id)) is not None
+            and snapshot_lot.fields == it.fields
+        ):
+            reserved = (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id)
+            if type(reserved) is int and 0 <= reserved <= contracts_open:
+                effective_contracts_open -= reserved
+        if effective_contracts_open <= 0:
+            continue
         if not symbol:
             continue
 
@@ -274,7 +300,7 @@ def build_context(
 
         if side == "short" and option_type == "call":
             locked = compute_short_call_locked_shares(
-                contracts_open=contracts_open,
+                contracts_open=effective_contracts_open,
                 contracts_total=contracts_total,
                 multiplier=it.multiplier,
                 underlying_share_locked=it.underlying_share_locked,
@@ -291,7 +317,7 @@ def build_context(
             ):
                 continue
             cash_secured = compute_short_put_cash_secured(
-                contracts_open=contracts_open,
+                contracts_open=effective_contracts_open,
                 contracts_total=contracts_total,
                 cash_secured_amount=it.cash_secured_amount,
                 strike=it.strike,

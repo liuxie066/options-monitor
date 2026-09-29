@@ -1,82 +1,86 @@
-goal: "修复 OM 首次配置的离线就绪判断、跨终端目录定位、预览与失败恢复"
+goal: "修复已确认期权腿平仓但原因待定时账户级风险占用仍按旧合约数计入的问题"
 non_goals:
-  - "不迁移或修改已有生产配置、服务或凭证"
-  - "不运行扫描、不连接 OpenD、不发送通知"
-  - "不提交、推送、建 PR、合并、发布或部署"
-scope: "om setup init/check、公共 runtime root 解析、相关 CLI/Tool Gateway 只读消费及文档"
+  - "不推断指派原因，不写生产账本或券商数据"
+  - "不提交、推送、建 PR、合并、发布或升级"
+  - "不把无账户生命周期快照的全账户汇总用于本次决策"
+scope: "带可信快照的账户级期权上下文 Put 现金担保和 Call 锁股、下游日报资金读取；复用既有生命周期模型"
 success_signals:
-  - "S1: 占位账户 ID 或所选市场快照缺失阻断离线配置就绪；Bot 单独报告"
-  - "S2: 无高优先级覆盖时新终端定位新建目录，显式环境与服务路径优先"
-  - "S3: dry-run/确认前展示完整目标与关键设置，不写持久目标、不覆盖并发目标"
-  - "S4: 预备内容绑定最终 YAML；写入失败只恢复本次未变化的文件；成功回读可用"
+  - "S1: 已接受完整平仓的 Put/Call 不再占用账户风险容量"
+  - "S2: 部分平仓仅保留实际未平仓比例；无可信事实或冲突不推断释放"
+  - "S3: 日报读取修正后的账户汇总；原始账本持仓和原因状态不改"
 authorized_slices:
-  - {slice: "offline-readiness", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S1", depends_on: []}
-  - {slice: "durable-runtime-root", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S2", depends_on: []}
-  - {slice: "preview-and-recovery", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S3,S4", depends_on: ["durable-runtime-root"]}
+  - {slice: "account-risk-capacity", design_doc_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md#已确认期权平仓的风险占用设计", success_signal: "S1,S2,S3", depends_on: []}
 slice_checkpoints:
-  - {slice: "offline-readiness", diff_fingerprint: "sha256:e6a124b902ef3f25d376e456011b45056b01fb6d1ad014cc39c74ad4471855da", validation: "tests/test_setup_check.py: 12 passed", done: true}
-  - {slice: "durable-runtime-root", diff_fingerprint: "sha256:9c85a198f3678637de6ad7e0e3bfc8cc3c3e72896d417aa547497b0ddf818dd2", validation: "new-process resolver/tool scope and tick-cron: passed", done: true}
-  - {slice: "preview-and-recovery", diff_fingerprint: "sha256:8ce75051b073c9d3d0ef2c4b293da6b25fa3befc900a960dc3e17f44b1f037ef", validation: "setup-init faults, new-process setup check, config suite: passed", done: true}
+  - {slice: "account-risk-capacity", diff_fingerprint: "sha256:f0e4e59b055319d7b16d209e75a2a01fe9b50652168d5478bdfaa33d1b4dfbab", validation: "3 red before fix; 3 green after fix; 143 affected tests passed; ruff and diff check passed", done: true}
 user_confirmation:
-  - "先修2、3项"
-  - "再处理预览与恢复"
-  - "full"
+  - "用 devflow 修这个 bug"
+  - "完整链路（推荐）"
 prd_doc: "not-applicable"
 prd_doc_ref: "not-applicable"
-design_doc: "CONFIGS.md"
-design_ref: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
+design_doc: "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+design_ref: "docs/FUTU_TRADE_HOLDINGS_SYNC.md sha256:2d7069739945f615212754c888338ea116aeace15ba7df7a0b3ab57bc8523315"
+implementation_workspace: "<workspace>/brief-closed-put-collateral/options-monitor"
+review_base: "HEAD@975351a4e50781aa5dd3483d3805e4270705e839; origin/main@b199beab282a0b1460e769213703945dec1c2e6c, ahead by 3 commits, overlap only .devflow/scope.md workflow metadata"
 authorization_diffs: []
 workflow_version: 2
 mode: workflow
 workflow_path: full
 node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
 current_node: Review
-internal_step: deepreview
+internal_step: null
 status: completed
-next_action: "研发已完成；如需源码交付，另行授权提交或推送"
-approved_scope_ref: "本对话用户消息: 先修2、3项; 再处理预览与恢复"
-path_approval_ref: "本对话用户消息: full"
+next_action: "研发已完成；如需提交推送或生产升级，分别另行授权"
+approved_scope_ref: "本对话用户消息: 用 devflow 修这个 bug"
+path_approval_ref: "本对话用户回复: 完整链路（推荐）"
 implementation_baseline:
-  design_doc: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-  implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-  review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
-  head: "18f7ff06364c663cacf9ac84eef591171131b687"
-  git_status: " M CONFIGS.md"
+  design_doc: "docs/FUTU_TRADE_HOLDINGS_SYNC.md sha256:2d7069739945f615212754c888338ea116aeace15ba7df7a0b3ab57bc8523315"
+  implementation_workspace: "<workspace>/brief-closed-put-collateral/options-monitor"
+  review_base: "HEAD@975351a4e50781aa5dd3483d3805e4270705e839"
+  head: "975351a4e50781aa5dd3483d3805e4270705e839"
+  git_status: |
+     M .devflow/scope.md
+     M docs/FUTU_TRADE_HOLDINGS_SYNC.md
+     M src/application/positions/context_builder.py
+     M tests/test_lifecycle_redesign_contracts.py
+     M tests/test_positions_context_builder_partial_close.py
   staged: []
   unstaged:
-    - {path: "CONFIGS.md", hash: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786}
+    - {path: ".devflow/scope.md", hash: "58ade5c6297b0b7d94ac1158868400fe237c6b670d97f758ec36fd7797c4f697", size: 3549}
+    - {path: "docs/FUTU_TRADE_HOLDINGS_SYNC.md", hash: "2d7069739945f615212754c888338ea116aeace15ba7df7a0b3ab57bc8523315", size: 137081}
+    - {path: "src/application/positions/context_builder.py", hash: "61dabf8c19e063027b601918c34391f0f6cf190521cfc06f5858490c253901b7", size: 29671}
+    - {path: "tests/test_lifecycle_redesign_contracts.py", hash: "07426db27c7ba1ebc5780f7e64637f3d3711e4c3b5d3b4f12f0f8f3114aeeccc", size: 68757}
+    - {path: "tests/test_positions_context_builder_partial_close.py", hash: "62b7e768feef4cccfd3ec515c07e731694b20b0e8ecc9f0ef8ed14e17a1fb2aa", size: 25586}
   untracked: []
 inventory:
-  - {path: ".devflow/scope.md", status: " M", hash: "sha256:self-reference", size: 3143, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGS.md", status: " M", hash: "sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGURATION_GUIDE.md", status: " M", hash: "sha256:e5ab0fdb2d6ee9e11719ba76327f3b5d433c78c344d54319a007f11f8d300aa6", size: 11145, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "README.md", status: " M", hash: "sha256:652f4fc8493bbe2656a81f175c9adc9cd248425045465e07d88473d2ce002295", size: 19898, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/DEPENDENCY_GRAPH.md", status: " M", hash: "sha256:11c3a6282ce7ecf32f4b43c8708afcdf2952042146a514675100b7727e061fe7", size: 8918, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/GETTING_STARTED.md", status: " M", hash: "sha256:62fa3a59fa549e1e6fdffbbcb33a3dea730e5bf13fb4a4f1ecfe845c644761a3", size: 7147, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/dependency_graph.mmd", status: " M", hash: "sha256:2de75e2f11184c6dc90f64b05363437e95582c3a2dbc8ce14cc830eb8974d68c", size: 6805, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tool_config.py", status: " M", hash: "sha256:e0a12fc02c4ed2556709f756162ff7fb0ff15119aab6c8ab03e686e769bb63de", size: 4441, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project.py", status: " M", hash: "sha256:15bc0a76e41b9066108c7a304631c869c9aab5dab19342c38923df4d77aefcb7", size: 11808, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project_runs.py", status: " M", hash: "sha256:619ca98ee71e4b371fad031aa1fa92711ee36c10ceb90bd3457b4a65cb4fa39a", size: 32406, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/runtime.py", status: " M", hash: "sha256:8e89a265f2aa48e90612899bf6c7fea43685b14334f1f90c417b0f7f8acbcde5", size: 26533, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/config_yaml_init.py", status: " M", hash: "sha256:382ebbcf74db4c684469f98a61e252a6643fe23712e405f380d609cd4e0bb6ca", size: 16955, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/runtime_paths.py", status: " M", hash: "sha256:bb7257c0a1530ca8c2db06affe36c441370d0636ac5751ac84231fdb61087b13", size: 3415, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/setup/check.py", status: " M", hash: "sha256:49838c11a2f35f496ec21b7eb6468e6f100afec0fe3ca078bacfe8596d6c30cb", size: 16690, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/tick_cron.py", status: " M", hash: "sha256:5f018be587e1cf712753d0f3c6bb5a52a70f804c4e6768fbfafbba7225491c34", size: 17959, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/home.py", status: " M", hash: "sha256:8ae7ae6ba76620aa5667e4ea6d7c56904a967ee61b9984437a4c460ddb08d851", size: 4682, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/setup_ops.py", status: " M", hash: "sha256:e6a0d4bcedda97f865f5975d9d5f00036bb8326a6d011b6614678a7b6df23dcb", size: 10298, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_runtime_paths.py", status: " M", hash: "sha256:cbde4a7942a76c38a658ab0c17b2e4e1c36502415d29af0157917a567d573042", size: 4254, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_check.py", status: " M", hash: "sha256:f24292359c44442055a798fa7464265afdf07c7b4b3f0283cb0b034eed8ab487", size: 14057, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_init_cli.py", status: " M", hash: "sha256:2407e2918029c1542ff058c0c4c534909d23227f4513b09c1337914c8760741c", size: 8651, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-content_revision: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-planreview_round: 2
+  - {path: ".devflow/scope.md", status: " M", hash: "sha256:self-reference", size: 4877, type: file, mode: "0644", classification: planned, evidence_ref: "scope contract and slice checkpoint"}
+  - {path: "docs/FUTU_TRADE_HOLDINGS_SYNC.md", status: " M", hash: "sha256:2d7069739945f615212754c888338ea116aeace15ba7df7a0b3ab57bc8523315", size: 137081, type: file, mode: "0644", classification: planned, evidence_ref: "design_ref and doc hygiene"}
+  - {path: "src/application/positions/context_builder.py", status: " M", hash: "sha256:3bc07723293d75b91c0ccffd8673701bb7fc312e4126bf1dcefd45df2d3e6cc9", size: 30552, type: file, mode: "0644", classification: planned, evidence_ref: "143 passed and ruff"}
+  - {path: "tests/test_lifecycle_redesign_contracts.py", status: " M", hash: "sha256:ade969483128ca62ba68563eb6a03e6294e19523db9f449af0b042dab2dfa340", size: 69092, type: file, mode: "0644", classification: planned, evidence_ref: "trusted snapshot to Daily Brief"}
+  - {path: "tests/test_positions_context_builder_partial_close.py", status: " M", hash: "sha256:780a634fe2bc2946a72fd732b932d7fc5f06296357277c79d033c4b4b2846fe9", size: 27965, type: file, mode: "0644", classification: planned, evidence_ref: "3 red and 3 green targeted tests"}
+content_revision: "sha256:2d7069739945f615212754c888338ea116aeace15ba7df7a0b3ab57bc8523315"
+panel:
+  reviewer_backend: native-subagent
+  reviewer_model: unknown
+  independence: unverified
+  original_design_sha256: "476abc8b666e2336ff122ff1f2a65e787464d971c855a834a8a7a3c2cd714208"
+  reports: [panel_a, panel_b, panel_c, panel_d]
+  accepted:
+    - "所有 reviewer: 重叠 case 的 conflict 不覆盖 closure_fact；增加状态门与反例"
+    - "所有 reviewer: 限定只保证有可信快照的日报；直接现金和 Wheel 入口列后续风险"
+    - "所有 reviewer: 绑定快照与持仓行代次；不一致保守计入"
+    - "panel_c: Put/Call 统一有效数量，避免现有草稿只修 Put"
+  rejected_with_reason:
+    - "直接现金/Wheel 入口本轮接线：用户报错入口为日报，扩大到其它入口需单独范围和入口验证"
+planreview_round: 1
 deepreview_round: 1
 in_flight: []
 evidence_paths:
-  - "docs/reviews/plan-review-20260929-005839.md"
-  - "docs/reviews/plan-review-20260929-010001.md"
-  - "docs/reviews/code-review-20260929-012144.md"
+  - "docs/FUTU_TRADE_HOLDINGS_SYNC.md#已确认期权平仓的风险占用设计"
+  - "docs/reviews/plan-review-20260929-225815.md"
+  - "docs/reviews/code-review-20260929-230518.md"
+  - "pytest: 143 passed in 2.70s"
 blocking_findings: []
 residual_risks:
-  - {item: "强杀后可能留下新建文件", classification: "needs-new-issue-or-user-decision", owner: "首次配置操作者", destination: "当前手动核对见 Getting Started；若需自动恢复再定需求"}
+  - {item: "全账户汇总缺账户生命周期快照", classification: "needs-new-issue-or-user-decision", owner: "期权上下文 owner", destination: "后续单独设计可信账户隔离聚合"}
+  - {item: "直接现金查询及 Wheel 容量入口未传可信账户快照", classification: "needs-new-issue-or-user-decision", owner: "现金查询和 Wheel 容量 owner", destination: "后续单独接入可信账户快照并验收"}
+  - {item: "账本快照与独立券商现金/正股快照可能存在交收时序差", classification: "needs-new-issue-or-user-decision", owner: "日报资金和组合上下文 owner", destination: "若需可下单额度，另行设计跨来源交收证据和券商容量验收"}
