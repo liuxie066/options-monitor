@@ -39,6 +39,15 @@ def test_public_api_exposes_trade_event_page_limit() -> None:
     assert MAX_TRADE_EVENT_PAGE_ROWS == 20
 
 
+def test_hk_symbol_alias_matches_canonical_stored_event(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_event(_event("hk-open", event_time_ms=1, symbol="0700.HK"))
+    page = _page(repo, {"symbol": "700.HK", "limit": 10}, market="HK")
+    assert [row["event_id"] for row in page["rows"]] == ["hk-open"]
+    with pytest.raises(TradeEventPaginationError, match="outside the selected market"):
+        _page(repo, {"symbol": "NVDA", "limit": 10}, market="HK")
+
+
 def test_fresh_exhausted_page_covers_full_query_but_continuation_does_not(
     tmp_path: Path,
 ) -> None:

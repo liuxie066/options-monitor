@@ -76,6 +76,30 @@ def test_cancel_targets_active_read_generation_after_assistant_change(tmp_path, 
     assert store.is_cancel_requested("active")
 
 
+def test_cancel_targets_all_matching_active_generations(tmp_path, example_config_path):
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "older")
+    store.start_run("newer", contract=contract, session_key=session + ":new-generation")
+    store.start_run("unrelated-damaged", contract=contract, session_key=session + ":other")
+    with sqlite3.connect(settings.audit_db) as conn:
+        conn.execute("UPDATE bot_runs SET contract_json='not-json' WHERE run_id='unrelated-damaged'")
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-both"), settings)
+    assert outcome["status"] == "cancelled"
+    assert store.is_cancel_requested("older")
+    assert store.is_cancel_requested("newer")
+    assert not store.is_cancel_requested("unrelated-damaged")
+
+
+def test_cancel_fallback_targets_multiple_old_generations(tmp_path, example_config_path):
+    settings = _settings(tmp_path, example_config_path)
+    contract, session = _contract(settings)
+    store = BotHostStore(settings.audit_db)
+    store.start_run("generation-a", contract=contract, session_key=session + ":a")
+    store.start_run("generation-b", contract=contract, session_key=session + ":b")
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-old-generations"), settings)
+    assert outcome["status"] == "cancelled"
+    assert all(store.is_cancel_requested(run_id) for run_id in ("generation-a", "generation-b"))
+
+
 @pytest.mark.parametrize("text", ["再看一下", "为什么说取消分析", "‘取消分析’", '"停止分析"',
     "取消执行", "取消交易", "停止分析后会怎样", "不要取消分析", "> 取消分析"])
 def test_only_explicit_analysis_control_is_recognized(text):
