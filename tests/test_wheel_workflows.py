@@ -693,7 +693,7 @@ def test_manual_end_rejects_cross_market_without_effects(
     assert repo.list_wheel_events(account="lx") == before
 
 
-def test_combo_funding_put_assignment_does_not_bootstrap_wheel_and_preserves_combo_tail(
+def test_combo_funding_put_without_persisted_identity_preserves_combo_tail_without_wheel(
     tmp_path: Path,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")

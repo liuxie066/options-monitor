@@ -1,81 +1,84 @@
-goal: "让已通过渠道鉴权的 Bot 用户在受控只读权限内查询 US/HK，并按实际市场与账户解释 3690.HK 等记录"
+goal: "Wheel 已开启时，身份与交割验证通过的外部 Combo 卖腿指派自动进入 Wheel；Wheel 内部指派仍待决策"
 non_goals:
-  - "不扩大交易、通知、Control 或账本写权限"
-  - "不修改实时 config.yaml、生成的 config.us.json/config.hk.json、服务或生产状态"
-  - "不提交、推送、建 PR、合并、发布或升级"
-scope: "Bot 渠道可信市场授权、Host 工具选择、会话/记忆隔离、只读持仓事件工具、提示词和相关文档测试"
+  - "自动交易、通知发送、生产数据写入或升级"
+  - "增加 Wheel 开关或启用 CC+LP 开仓扫描"
+  - "自动回填启用前或旧版本漏建的历史分支"
+scope: "SP+LC funding Put 与 CC+LP short Call 的外部指派、组合身份证明及 Wheel 生命周期接入"
 success_signals:
-  - "S1: 已配置双市场授权时 3690.HK 可明确选择 HK 只读工具；未授权、冲突或缺失配置均在 Host 拒绝"
-  - "S2: 每次读取按所选市场核验账户，不能借 US 的 lx 身份读取未授权 HK 数据；结果与回复标注实际市场、账户、数据来源"
-  - "S3: assignment 与 trade attribution 两类记录能分别查询；无法证明的事实明确为未知，不将空结果或参数冲突推断成事实"
-  - "S4: 授权集变化不复用旧会话与个人记忆；旧单市场部署默认保持原行为"
+  - "S1: SP+LC 精确身份和真实接货成立时只创建一个 active Wheel Call 分支，长 Call 独立"
+  - "S2: CC+LP 精确身份和真实交股成立时只创建一个 active Wheel Put 分支，长 Put 独立"
+  - "S3: Wheel 内部指派仅转换父分支并创建 pending_decision 子分支，不重复 bootstrap"
+  - "S4: 身份、交割、账户、市场、历史窗口、void、覆盖或数量冲突时不误建；原因可审阅"
+  - "S5: 重放与事务失败不重复或半写；分支可见与候选可推荐分别验证"
 authorized_slices:
-  - {slice: "trusted-market-routing", design_doc_ref: "docs/BOT_DESIGN.md#跨市场只读查询设计2026-09-29", success_signal: "S1,S2", depends_on: []}
-  - {slice: "records-and-isolation", design_doc_ref: "docs/BOT_DESIGN.md#跨市场只读查询设计2026-09-29", success_signal: "S3,S4", depends_on: ["trusted-market-routing"]}
+  - slice: "组合身份与结构证明"
+    design_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+    success_signal: ["S1", "S2", "S4"]
+    depends_on: []
+  - slice: "外部指派接入与生命周期验收"
+    design_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+    success_signal: ["S1", "S2", "S3", "S4", "S5"]
+    depends_on: ["组合身份与结构证明"]
+slice_checkpoints:
+  - {slice: "组合身份与结构证明", diff_fingerprint: "sha256:6bf2acf9fd8e0251d82e997ab56bd2167b13fbc592bf4748c82c1bfce4123ce1", validation: "tests/test_combo_membership.py in 82-pass target suite", done: true}
+  - {slice: "外部指派接入与生命周期验收", diff_fingerprint: "sha256:b9932aac494d4d293f6826dd1cc014a30861c556095afbfd00e62d6e83caedf9", validation: "199 focused and adjacent tests passed; ruff, diff check and guardrails passed; review 1 void regression repaired", done: true}
+  - {slice: "CC+LP lifecycle allocation 入口补测", diff_fingerprint: "sha256:2ecbcdf9f87c7069eb0a6bf7ffd34f7546fce39eaf93e07e736a923e972dcf13", validation: "79 touched-file tests passed; stale observation rejected without duplicate Wheel branch", done: true}
+  - {slice: "Astra Review F1-F3 返工", diff_fingerprint: "sha256:47861042efa18683f9ede9cc2374f5a45d2c1b0e5a8207ba3fa331e5e5d3dfde+ab76a8e129f2e8644acdfd4d3711902c6d5c4d49af318f5613d7065886204935", validation: "red-before-green: 5 failed then 5 passed; 148 touched tests and 168 adjacent tests passed; ruff, diff check, guardrails passed", done: true}
+  - {slice: "Review 4 F4 生命周期更正", diff_fingerprint: "sha256:8cd2d8d3550e61e8e02395559ba56f3f795f3667db8faa5c728b28a89bed0ecc+f85efd2ae60c28bcdf85359f619824a59d84bd01145130b09e9bdb5bbd7f20b7", validation: "real lifecycle writer test red then green; 244 related tests passed; ruff, diff check, guardrails passed", done: true}
 user_confirmation:
-  - "/devflow 按这个方向优化"
-  - "full"
-  - "确认：当前 allowlist 用户可读 US/HK；本轮仅源代码只读能力"
-prd_doc: "not-applicable"
-prd_doc_ref: "not-applicable"
-design_doc: "docs/BOT_DESIGN.md"
-design_ref: "docs/BOT_DESIGN.md sha256:ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd"
-implementation_workspace: "<task-worktree>/options-monitor"
-review_base: "origin/main"
+  - "Wheel 已开启时，就代表身份和交割均验证通过的外部 Combo 卖腿指派可以自动进入 Wheel"
+  - "完成后续环节；选择完整链路 Save Design → Improve Design → Impl → Review"
+  - "本次同时实现 SP+LC 与 CC+LP"
+prd_doc: "docs/WHEEL_STRATEGY_PRD.md"
+prd_doc_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+design_doc: "docs/WHEEL_STRATEGY_PRD.md"
+design_ref: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+implementation_workspace: "/Users/<user>/.codex/worktrees/combo-wheel-assignment/options-monitor"
+review_base: "b199beab282a0b1460e769213703945dec1c2e6c"
+authorization_diffs:
+  - {when: "2026-09-30T00:21:57+0800", what: "Devflow 简单模式补齐 CC+LP lifecycle allocation 业务入口端到端测试", ref: "本次用户明确请求"}
+  - {when: "2026-09-30", what: "Devflow 修复独立 Astra Review F1-F3，随后重跑 DeepReview", ref: "本轮用户明确请求"}
 workflow_version: 2
 mode: workflow
-workflow_path: full
-node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
-progress: "completed"
-review_counts: {panel: 4, planreview: 2, deepreview: 1}
-review_artifact: "docs/reviews/code-review-20260929-222907.md"
-review_verdict: "pass; no material findings; residual risks assigned in artifact"
-panel_backend: "native-subagent"
-panel_model: "unknown (default Codex; DeepSeek backend unavailable)"
-panel_independence: "unverified"
-panel_snapshot: "docs/BOT_DESIGN.md sha256:c5a822bc1dfc34728a0866163fb38ef8572422c747a59c8ced2db1a4dcab6019"
-panel_decisions: "accepted: explicit assistant source, tool routing, market/account evidence, event type, attribution filter, grant generation, same-account memory; rejected: exposing unfiltered position list; deferred: manual byte-and-metadata restore epoch hardening"
-planreview_artifact: "docs/reviews/plan-review-20260929-215242.md"
+workflow_path: simple
+node_sequence: ["Save Design", "Improve Design", "Impl", "Review"]
+current_node: "Review"
+internal_step: null
+status: completed
+next_action: "本轮源码修复与 Review 完成；交付阶段仅在用户另行明确要求后执行"
+approved_scope_ref: "authorization_diffs latest entry and user_confirmation above"
+path_approval_ref: "simple-mode follow-up request in authorization_diffs"
 implementation_baseline:
-  design_doc: "docs/BOT_DESIGN.md sha256:ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd"
-  workspace: "<task-worktree>/options-monitor"
-  review_base: "origin/main@975351a4e50781aa5dd3483d3805e4270705e839"
-  head: "975351a4e50781aa5dd3483d3805e4270705e839"
-  status_short: [" M .devflow/scope.md", " M docs/BOT_DESIGN.md"]
+  design_doc: "docs/WHEEL_STRATEGY_PRD.md@sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+  implementation_workspace: "/Users/<user>/.codex/worktrees/combo-wheel-assignment/options-monitor"
+  review_base: "b199beab282a0b1460e769213703945dec1c2e6c"
+  head: "b199beab282a0b1460e769213703945dec1c2e6c"
+  git_status: [" M .devflow/scope.md", " M docs/WHEEL_STRATEGY_PRD.md", " M src/application/ledger/wheel_trade_companions.py", " M tests/test_wheel_assignment_recovery.py", " M tests/test_wheel_workflows.py"]
   staged: []
   unstaged:
-    - {path: ".devflow/scope.md", sha256: "ea81433eee0e30eb7196f88fa78f63a9187aa3e3995b8f77f73c2f8e573d87a1", size: 2682}
-    - {path: "docs/BOT_DESIGN.md", sha256: "ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd", size: 17080}
+    - {path: ".devflow/scope.md", hash: "107d5503a19fb6fc27669def03b1d220ddcada03f491971e43690d1bb5afa13f", size: 3537}
+    - {path: "docs/WHEEL_STRATEGY_PRD.md", hash: "f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5", size: 116821}
+    - {path: "src/application/ledger/wheel_trade_companions.py", hash: "f11c7a267a3377d63a5ef7034e6041d3700268fe0eee7b14528ab2e3725484f8", size: 32424}
+    - {path: "tests/test_wheel_assignment_recovery.py", hash: "fdb80d479ef171039f723c6cc6648de9813bb89eba3777c24f9647695c9a9d74", size: 18903}
+    - {path: "tests/test_wheel_workflows.py", hash: "7a25a08cdbcf6370f8e8ad9f8c72e4c316b4c60d02be5727b907a0c3716b5416", size: 48642}
   untracked: []
-slice_checkpoints:
-  - {slice: "trusted-market-routing", diff_fingerprint: "final combined code diff sha256:16e12fef054cfbd9c5c1ac6eb6ca461a2b05318589407811d7e4ea1bc63feb09 + tests/test_bot_cross_market_read.py sha256:6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", validation: "360 passed; ruff --no-cache and git diff --check passed", done: true}
-  - {slice: "records-and-isolation", diff_fingerprint: "final combined code diff sha256:16e12fef054cfbd9c5c1ac6eb6ca461a2b05318589407811d7e4ea1bc63feb09 + tests/test_bot_cross_market_read.py sha256:6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", validation: "360 passed; ruff --no-cache and git diff --check passed", done: true}
-checkpoint_limit: "两片实现交错，只有最终合并快照，未记录独立可 bisect 的片边界；不把相同指纹称为两个独立版本。"
-scope_closure: "S1,S2->trusted-market-routing; S3,S4->records-and-isolation; no uncovered signal or orphan slice"
-scope_guard_extra: "取消入口和 Host 存储修复属于 S4 必要正确性：原飞书预检未传 assistant_config_path，授权代际会使活跃会话取消失效；tests/test_feishu_analysis_cancellation.py 覆盖。"
-inventory_self: ".devflow/scope.md is this tracked workflow record; self hash omitted to avoid recursive mismatch"
 inventory:
-  - {path: "docs/BOT_DESIGN.md", status: " M", sha256: "ab715ab44cba86181c921e34b3460b4ae5cca090a7aba257fde6ada19eea8fcd", size: 17080, classification: "planned"}
-  - {path: "src/application/agent_tools/operations_impl.py", status: " M", sha256: "0e2cecd2e5d454c836eb9f3dcf63951cf8360372b20fdfd227d86228676a2634", size: 49087, classification: "planned"}
-  - {path: "src/application/agent_tools/positions.py", status: " M", sha256: "34edb182e33bca4599dec3ca828f3abace4c87b7a8a45a4ede1777c1c9139874", size: 73000, classification: "planned"}
-  - {path: "src/application/agent_tools/runtime.py", status: " M", sha256: "329f31d4a04f2aa92256e0a277ab17eec77a0179bc43c38ad54aec47fb5fc83a", size: 26561, classification: "planned"}
-  - {path: "src/application/bot/channel_facade.py", status: " M", sha256: "64eb204eb7dfec54a128a287cf3720ba91e44b348c4c36e6f8ce9346d7041645", size: 16708, classification: "planned"}
-  - {path: "src/application/bot/host.py", status: " M", sha256: "b0376d69eef81d94cf05d7d41b9792054a3c4e06cfbd51870d6d85ea2b7586b6", size: 17287, classification: "planned"}
-  - {path: "src/application/bot/host_store.py", status: " M", sha256: "ea122440037c0f307ee32486ef4e3fa72ce27dc8c2d7154bcdec431299d68727", size: 38531, classification: "required-correctness/safety"}
-  - {path: "src/application/bot/memory.py", status: " M", sha256: "2749b04fc4bd7d5bb25648b8472fdf814ccec54e14a98f8ec6ea699342da6930", size: 23260, classification: "planned"}
-  - {path: "src/application/bot/memory_worker.py", status: " M", sha256: "4a55f0368c3c8f4ae7e3ad2762c0469192e32184600698aab9a9de23be366fee", size: 5584, classification: "planned"}
-  - {path: "src/application/bot/model_config.py", status: " M", sha256: "b9da0c15d71f3e0f374755ef09a0b98c279e1b96ed25eeaf552871e4fb31865a", size: 10267, classification: "planned"}
-  - {path: "src/application/bot/om_chat.scene.json", status: " M", sha256: "03729d61edd136e8223067403898e06e460b7fdcd93695bc3c265bf6df1eaebf", size: 1826, classification: "planned"}
-  - {path: "src/application/bot/prompts/tool_rules.md", status: " M", sha256: "635934ff60bfd02a48c02186782e8e07c41df95003eb1b4ce6e0a2db33d77dce", size: 2985, classification: "planned"}
-  - {path: "src/application/bot/scene.py", status: " M", sha256: "eabba5bf754c736d6c5c5a3e971c96eb3dfec87e94e131fbc6d1761502dcc09a", size: 8574, classification: "planned"}
-  - {path: "src/application/bot/service.py", status: " M", sha256: "87e5837460ea858e7b789da1cd36878328ed92c11ce4c5cfbbf72a26395a708a", size: 4479, classification: "planned"}
-  - {path: "src/application/bot/session.py", status: " M", sha256: "9b410bbcdcf5d26243ed3ea8cb16d501a0ebeab9425990bc6eca5f096d04967f", size: 1539, classification: "planned"}
-  - {path: "src/application/bot/tools.py", status: " M", sha256: "699a93bc82a71387591ff038efeae8e46ec943641ada17071aed24ae3a3fc95f", size: 38080, classification: "planned"}
-  - {path: "src/application/config_validator.py", status: " M", sha256: "aaa31e928730ddede8b3b2fe29495d06844df70ad27b108d5b747813261fa1f9", size: 76484, classification: "planned"}
-  - {path: "src/application/inbound/feishu.py", status: " M", sha256: "f5f12c37a2de997068967cbf474f82e5b0b1bc8e652af9e615572a356033f131", size: 9752, classification: "required-correctness/safety"}
-  - {path: "src/application/inbound/feishu_ws.py", status: " M", sha256: "ac038cd7de3bce4518d548d9ce1aedd2ccd3694124a9556b8897223b725264c5", size: 47368, classification: "required-correctness/safety"}
-  - {path: "src/application/trades/attribution.py", status: " M", sha256: "743c803df319761f4ec93fc9ec5d2583928d629a6612a8cf711e74044c75b899", size: 43091, classification: "planned"}
-  - {path: "tests/test_bot_phase1.py", status: " M", sha256: "576fc4a1d101ccfe3d4cb0f398092fb92ecb81bb3da64cabe95de8b0b88a26d6", size: 31423, classification: "planned"}
-  - {path: "tests/test_feishu_analysis_cancellation.py", status: " M", sha256: "f79a524d71933007fab1829d063da4ddbf5078cbf1998b00639fd29007dece41", size: 22487, classification: "required-correctness/safety"}
-  - {path: "tests/test_trade_event_pagination.py", status: " M", sha256: "720f5e52f20316250fca0618db6e9ef02fc953127edf9973cb0ba0939458c3d1", size: 45951, classification: "planned"}
-  - {path: "tests/test_bot_cross_market_read.py", status: "??", sha256: "6a036e2f963775a897be097acfa9be4c65f4240f91a2d409269a7b72206fab60", size: 13471, classification: "planned"}
+  - {path: "docs/WHEEL_STRATEGY_PRD.md", status: modified, hash: "f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5", size: 116821, type: file, mode: "100644", classification: design, evidence_ref: "design_ref"}
+  - {path: "src/application/ledger/combo_membership.py", status: modified, hash: "47861042efa18683f9ede9cc2374f5a45d2c1b0e5a8207ba3fa331e5e5d3dfde", size: 32486, type: file, mode: "100644", classification: implementation, evidence_ref: "F2/F3 tests passed"}
+  - {path: "src/application/ledger/wheel_trade_companions.py", status: modified, hash: "8cd2d8d3550e61e8e02395559ba56f3f795f3667db8faa5c728b28a89bed0ecc", size: 35539, type: file, mode: "100644", classification: implementation, evidence_ref: "F1/F4 tests passed"}
+  - {path: "src/application/ledger/writer_lifecycle_allocation.py", status: modified, hash: "f85efd2ae60c28bcdf85359f619824a59d84bd01145130b09e9bdb5bbd7f20b7", size: 34316, type: file, mode: "100644", classification: implementation, evidence_ref: "F4 lifecycle correction test passed"}
+  - {path: "tests/test_combo_membership.py", status: modified, hash: "9d9f14ae905d01d67933d12864bee2f22adf1dec4248d03723a0a514ae5bd64e", size: 13808, type: file, mode: "100644", classification: tests, evidence_ref: "red then green; 148 and 168 passed"}
+  - {path: "tests/test_wheel_assignment_companions.py", status: modified, hash: "dccb1bacbbc6aaac136375cbd3df65b990f135f352402fffa4ffda41ed48279f", size: 35620, type: file, mode: "100644", classification: tests, evidence_ref: "F4 red then green; 244 passed"}
+  - {path: "tests/test_settlement_observation.py", status: modified, hash: "86884715848eae28dbf6318ed07ec6ac5305a933c41ce272934d0e0ad0634ae4", size: 125544, type: file, mode: "100644", classification: tests, evidence_ref: "79 touched-file tests passed"}
+  - {path: "tests/test_wheel_assignment_recovery.py", status: modified, hash: "5dee8619fb888ca61c6b7675114b32e09120f09c486cc387beb3d2885dbcdbd2", size: 19570, type: file, mode: "100644", classification: tests, evidence_ref: "real writer invalid pair tests passed"}
+  - {path: "tests/test_wheel_workflows.py", status: modified, hash: "7a25a08cdbcf6370f8e8ad9f8c72e4c316b4c60d02be5727b907a0c3716b5416", size: 48642, type: file, mode: "100644", classification: tests, evidence_ref: "199 passed"}
+  - {path: ".devflow/scope.md", status: modified, hash: "self-referential", type: file, mode: "100644", classification: workflow, evidence_ref: "Review 5"}
+content_revision: "sha256:f4de943e5cccb91ccf04d52ffcc96c05950c7ac9b14181dca19b10778d9930d5"
+planreview_round: 2
+deepreview_round: 5
+in_flight: []
+evidence_paths: ["docs/WHEEL_STRATEGY_PRD.md", "docs/reviews/design-panel-20260929-234005.md", "docs/reviews/plan-review-20260929-234112.md", "docs/reviews/plan-review-20260929-234330.md", "docs/reviews/code-review-20260930-000312.md", "docs/reviews/code-review-20260930-000637.md", "docs/reviews/code-review-20260930-001658.md", "docs/reviews/code-review-20260930-002446.md", "docs/reviews/code-review-20260930-003312.md", "docs/reviews/code-review-20260930-004658.md"]
+blocking_findings: []
+residual_risks:
+  - {item: "CC+LP post-open adoption has no controlled writer", classification: "assigned-to-later-work-unit", owner: "Combo reconciliation", destination: "separate controlled adoption design"}
+  - {item: "historical CC+LP missing branches remain unrecovered", classification: "assigned-to-later-work-unit", owner: "Wheel recovery", destination: "separate explicit recovery design"}

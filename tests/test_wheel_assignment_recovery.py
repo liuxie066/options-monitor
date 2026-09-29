@@ -13,6 +13,7 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import recover_wheel_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
+from src.application.wheel.read_model import build_wheel_read_model
 from test_wheel_assignment_companions import _put_event, _assignment_payload, _open_activation
 
 
@@ -29,7 +30,8 @@ def _missing_branch(tmp_path, **payload):
     return repo, assignment
 
 
-def _combo_missing_branch(tmp_path, *, close_call: bool = True):
+def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_assignment: bool = False,
+                          call_strike: int = 110, call_payload_extra: dict | None = None):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     group_id = "combo_yield:lx:pair"
     metadata = {
@@ -48,7 +50,7 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        strike=110,
+        strike=call_strike,
         expiration_ymd="2026-08-21",
         )
     call = TradeEvent(
@@ -64,7 +66,8 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
         lot_id="call-lot",
         # §9.2 step 3: the contract key no longer carries the position side; the
         # combo's participation leg is a long call, so it opens with a buy.
-        raw_payload={"side": "buy", **metadata, "leg_role": "participation_call"},
+        raw_payload={"side": "buy", **metadata, "leg_role": "participation_call",
+                     **(call_payload_extra or {})},
     )
     persist_trade_event_objects_atomically(repo, [opening, call])
     identity = build_combo_identity(
@@ -82,7 +85,8 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
             "original_contracts": 1,
         }
     )
-    repo.insert_strategy_group_identity(identity)
+    if identity_before_assignment:
+        repo.insert_strategy_group_identity(identity)
     _open_activation(repo)
     assignment = _put_event(
         event_id="put-assignment",
@@ -91,6 +95,8 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
         raw_payload=_assignment_payload(10),
     )
     persist_trade_event_objects_atomically(repo, [assignment])
+    if not identity_before_assignment:
+        repo.insert_strategy_group_identity(identity)
     if close_call:
         persist_trade_event_objects_atomically(
             repo,
@@ -109,8 +115,44 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
                 raw_payload={"side": "sell"},
             )],
         )
-    assert not repo.list_wheel_events(account="lx")
+    if not identity_before_assignment:
+        assert not repo.list_wheel_events(account="lx")
     return repo
+
+
+def test_valid_combo_funding_put_assignment_starts_wheel_with_long_call_open(tmp_path):
+    repo = _combo_missing_branch(tmp_path, close_call=False, identity_before_assignment=True)
+    branch_events = repo.list_wheel_events(account="lx")
+    assert len(branch_events) == 1
+    assert branch_events[0]["event_type"] == "wheel_branch_created"
+    assert branch_events[0]["source_trade_event_id"] == "put-assignment"
+    model = build_wheel_read_model(repo, "lx", 3_000)
+    assert len(model["wheel_branches"]) == 1
+    assert model["wheel_branches"][0]["direction"] == "call"
+    assert model["wheel_branches"][0]["lifecycle_status"] == "active"
+    assert any(row["fields"]["status"] == "open" and row["record_id"] == "call-lot"
+               for row in repo.list_position_lots())
+    assignment = next(
+        TradeEvent.from_dict(item)
+        for item in repo.list_trade_events()
+        if item["event_id"] == "put-assignment"
+    )
+    assert persist_trade_event_objects_atomically(repo, [assignment])[0].created is False
+    assert len(repo.list_wheel_events(account="lx")) == 1
+
+
+@pytest.mark.parametrize("call_strike,call_payload_extra", [
+    (1, {"leg_role": "enhancement_call"}),
+    (110, {"strategy_snapshot": {"strategy": "wheel"}}),
+])
+def test_invalid_combo_pair_or_open_metadata_does_not_start_wheel(
+    tmp_path, call_strike, call_payload_extra,
+):
+    repo = _combo_missing_branch(
+        tmp_path, close_call=False, identity_before_assignment=True,
+        call_strike=call_strike, call_payload_extra=call_payload_extra,
+    )
+    assert repo.list_wheel_events(account="lx") == []
 
 
 def _recover(repo, **kwargs):

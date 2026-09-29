@@ -570,8 +570,8 @@ def apply_lifecycle_allocation_atomically(
         wheel_companions, wheel_companion_review_reasons = append_wheel_trade_companions(
             sqlite_repo,
             conn=conn,
-            events=projection_rows[correction_count:],
-            created_flags=terminal_event_created,
+            events=projection_rows,
+            created_flags=runtime.created_flags,
             context=wheel_context,
             recorded_at_ms=utc_now_ms(),
         )

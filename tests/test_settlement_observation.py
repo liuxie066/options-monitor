@@ -90,6 +90,9 @@ def _calendar_rows() -> list[dict[str, str]]:
 
 def _repo_with_pending_case(
     tmp_path: Path,
+    *,
+    opening_event: TradeEvent | None = None,
+    option_code: str = OPTION_CODE,
 ) -> tuple[
     SQLiteOptionPositionsRepository,
     dict,
@@ -99,7 +102,7 @@ def _repo_with_pending_case(
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
     )
-    contract = ContractKey.from_values(
+    contract = opening_event.contract_key if opening_event is not None else ContractKey.from_values(
         broker="futu",
         account="lx",
         underlying_symbol="NVDA",
@@ -107,9 +110,10 @@ def _repo_with_pending_case(
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
         )
+    lot_id = opening_event.lot_id if opening_event is not None else "lot-1"
     persist_trade_event_object(
         repo,
-        TradeEvent(
+        opening_event or TradeEvent(
             event_id="open-1",
             event_type="open",
             event_time_ms=1_700_000_000_000,
@@ -171,17 +175,17 @@ def _repo_with_pending_case(
         "account": "lx",
         "futu_account_id": "1001",
         "symbol": "NVDA",
-        "option_type": "put",
+        "option_type": contract.option_type,
         "position_side": "short",
-        "strike": 100,
+        "strike": int(contract.strike),
         "expiration_ymd": EXPIRATION_YMD,
         "contracts": 1,
         "price": 0,
         "event_time_ms": anchor_time_ms,
         "received_at_ms": anchor_time_ms + 100,
         "order_id": "option-order-1",
-        "target_contracts_by_lot": {"lot-1": 1},
-        "raw": {"raw_payload": {"code": OPTION_CODE}},
+        "target_contracts_by_lot": {lot_id: 1},
+        "raw": {"raw_payload": {"code": option_code}},
     }
     assert repo.insert_trade_lifecycle_evidence_once(evidence)
     assert repo.bind_trade_lifecycle_case_futu_account_once(
