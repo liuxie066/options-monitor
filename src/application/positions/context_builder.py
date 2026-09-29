@@ -24,6 +24,7 @@ from domain.domain.risk_capacity import (
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
 )
+from domain.domain.wheel.projection import STRATEGY_METADATA_KEYS
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.ledger.api import (
     RiskPositionView,
@@ -284,11 +285,19 @@ def build_context(
             and lifecycle.get("reason_state") != "conflict"
             and lifecycle.get("closure_fact") in {"option_leg_closed", "partial_close_observed"}
             and (snapshot_lot := snapshot_lots_by_id.get(it.lot_id)) is not None
-            and snapshot_lot.fields == it.fields
+            and snapshot_lot.fields == {
+                key: value for key, value in it.fields.items()
+                if key not in STRATEGY_METADATA_KEYS
+            }
         ):
             reserved = (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id)
             if type(reserved) is int and 0 <= reserved <= contracts_open:
                 effective_contracts_open -= reserved
+                if reserved and symbol:
+                    if it.side == "short" and it.option_type == "put":
+                        cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+                    elif it.side == "short" and it.option_type == "call":
+                        locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
         if effective_contracts_open <= 0:
             continue
         if not symbol:
