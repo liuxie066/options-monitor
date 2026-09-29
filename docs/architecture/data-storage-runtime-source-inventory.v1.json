@@ -32,6 +32,14 @@
           "later_phase": "phase_3"
         },
         {
+          "path_glob": "src/application/positions/workflows.py",
+          "owner": "position_workflows",
+          "operation": "read",
+          "history_dimension": "trade_event_lifetime",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_3"
+        },
+        {
           "path_glob": "src/application/agent_tools/**",
           "owner": "agent_read_surfaces",
           "operation": "read",

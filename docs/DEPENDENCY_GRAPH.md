@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1081 (`src`: 538, `domain`: 87, `scripts`: 14, `tests`: 442)
-- Internal import edges: 7668 total, 3364 production/script edges excluding tests
+- Internal import edges: 7672 total, 3365 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|530| domain
+  application -->|531| domain
   application -->|4| domain_services
   application -->|164| infrastructure
   application -->|53| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3282| application
+  tests -->|3285| application
   tests -->|408| domain
   tests -->|2| domain_services
   tests -->|222| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 530 |
+| application | domain | 531 |
 | application | infrastructure | 164 |
 | interfaces | application | 163 |
 | application | storage | 53 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3282 |
+| tests | application | 3285 |
 | tests | domain | 408 |
 | tests | interfaces | 249 |
 | tests | infrastructure | 222 |
@@ -98,7 +98,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | domain.domain | 115 |
 | src.application | src.infrastructure | 114 |
 | src.application.ledger | domain.domain.ledger | 56 |
-| src.application.trades | domain.domain | 47 |
+| src.application.trades | domain.domain | 48 |
 | src.application.trades | src.application | 44 |
 | src.application | domain.storage | 41 |
 | src.application.research | src.application | 32 |
@@ -199,7 +199,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
-| src.application.trades.auto_intake | 48 |
+| src.application.trades.auto_intake | 49 |
 | src.application.ledger.api | 44 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.agent_tools.runtime_status_impl | 29 |

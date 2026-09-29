@@ -1093,7 +1093,7 @@ def resume_skipped_trade_payload(
     path: str | Path, *, inbox_id: str, operator: str,
     economic_payload_hash: str, repo: Any,
 ) -> bool:
-    """Reclaim only the exact historical stock skip after a reviewed snapshot."""
+    """Reclaim one exact historical stock skip or manual-required ambiguity."""
     if not str(operator).strip() or not str(economic_payload_hash).strip():
         raise ValueError("operator and economic_payload_hash are required")
     with with_sqlite_repo_writer_lock(repo), closing(_connect(Path(path))) as conn, conn:
@@ -1107,6 +1107,9 @@ def resume_skipped_trade_payload(
                WHERE inbox_id = ? AND (
                    (status = 'handled' AND result_status = 'skipped'
                     AND result_reason = 'not_option_deal')
+                   OR (status = 'handled' AND result_status = 'unresolved'
+                    AND result_reason = 'ambiguous_lifecycle_case_match'
+                    AND json_extract(result_json, '$.receipt_kind') = 'manual_required')
                    OR (status = 'pending' AND json_extract(result_json, '$.recovery_mode') = 'skipped_stock')
                ) AND identity_status = 'bound'
                  AND economic_payload_hash = ?""",

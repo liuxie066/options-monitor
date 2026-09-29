@@ -795,7 +795,8 @@ intake,inbox,auto_intake}.py`、`src/application/positions/workflows.py`、
    source claim 和 allocation，再生成终态及 Outbox。重复、崩溃读回和晚到证据沿已有幂等
    机制收敛；证据冲突失败关闭，不猜测普通交易还是指派。
 
-历史恢复只针对已保存且 `handled/skipped/not_option_deal` 的精确 Inbox 行：
+历史恢复只针对已保存且 `handled/skipped/not_option_deal`，或带
+`manual_required` 的 `handled/unresolved/ambiguous_lifecycle_case_match` 的精确股票 Inbox 行：
 `--recover-skipped --inbox-id` 默认 `--mode dry-run` 展示原始 broker source、
 Inbox 经济 hash、原 state 条目、账户 ledger 证据行数和外部副作用抑制策略；
 预览 hash 绑定原 Inbox 行、state 文件及账户内 lot、交易、case、evidence、
@@ -818,9 +819,9 @@ duplicate。重处理由原 resolver/writer 执行，成功后更新原 state/In
 普通自动重试和回执恢复扫描跳过它；共享 Inbox claim 与普通 resume 也拒绝
 领取该标记，仅显式 `--recover-skipped` 可继续，中断后仍须通过同一预览/操作入口继续。
 恢复交易与真实通知/PM 外部请求分别授权。
-80P 现存 `handled/unresolved/ambiguous_lifecycle_case_match` 行采用既有
-`manual_required` 重领入口；预览必须证明原 source、state、case 归属和
-通知意图，重领后按相同的 source claim 与终态读回，不扩展新恢复门槛。
+80P 现存 `handled/unresolved/ambiguous_lifecycle_case_match` 行也经由上述
+受控预览、哈希和 writer lock 恢复。原 state 与 Inbox 必须一致，且旧行无
+已发回执；新终态通知、即时回执与 PM 刷新同样抑制。
 
 拒绝方案：价内作为指派证明（可能漏掉主动提前行权）、股票先到立即记指派
 （普通股票成交误归属）、为候选池新建表和状态机（已有 Inbox/证据 owner）、

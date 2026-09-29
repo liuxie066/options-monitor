@@ -22,6 +22,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain.trade_account_identity import extract_primary_account_id
+from domain.domain.trade_execution import _futu_asset_type, _parse_futu_option_code
 from src.application.config_loader import load_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -193,7 +194,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
     ap.add_argument("--execution-file", help="Import bounded UTF-8 trade_execution.v1 JSONL; preview by default")
     ap.add_argument("--inbox-id", help="Preview or resume one saved Inbox entry; no broker history query")
-    ap.add_argument("--recover-skipped", action="store_true", help="Review or recover one historical stock skip")
+    ap.add_argument("--recover-skipped", action="store_true", help="Review or recover one historical skipped or manual-required stock deal")
     ap.add_argument("--expected-recovery-hash", help="Exact hash from --recover-skipped preview")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
     ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
@@ -230,10 +231,20 @@ def _skipped_recovery_snapshot(
     prior_skip = bool(saved and (
         saved.get("status"), saved.get("result_status"), saved.get("result_reason")
     ) == ("handled", "skipped", "not_option_deal"))
+    execution = (saved.get("payload") or {}).get("execution_input") if saved else None
+    instrument = execution.get("instrument_ref") if isinstance(execution, dict) else None
+    raw_payload = (saved or {}).get("payload") or {}
+    asset_type = (instrument.get("asset_type") if isinstance(instrument, dict) else
+                  _futu_asset_type(raw_payload, _parse_futu_option_code(raw_payload.get("code"))))
+    prior_manual = bool(saved and (
+        saved.get("status"), saved.get("result_status"), saved.get("result_reason"),
+        (saved.get("result") or {}).get("receipt_kind"),
+    ) == ("handled", "unresolved", "ambiguous_lifecycle_case_match", "manual_required")
+        and asset_type == "stock")
     interrupted = bool(saved and saved.get("status") == "pending"
                        and (saved.get("result") or {}).get("recovery_mode") == "skipped_stock")
-    if not (prior_skip or interrupted) or saved.get("identity_status") != "bound":
-        raise ValueError("Inbox entry is not an exact skipped stock recovery source")
+    if not (prior_skip or prior_manual or interrupted) or saved.get("identity_status") != "bound":
+        raise ValueError("Inbox entry is not an exact historical stock recovery source")
     key = str(saved.get("broker_deal_key") or "")
     parts = key.split(":", 3)
     payload = saved["payload"]
@@ -279,6 +290,14 @@ def _skipped_recovery_snapshot(
         for item in entries.values()
     ):
         raise ValueError("original processed stock skip differs from Inbox source")
+    if prior_manual and not any(
+        (entry := item.get("unresolved_deal_ids") or {}).get("status") == "unresolved"
+        and entry.get("reason") == "ambiguous_lifecycle_case_match"
+        and bool(entry.get("economic_payload_hash"))
+        and entry.get("futu_account_id") == physical
+        for item in entries.values()
+    ):
+        raise ValueError("original unresolved stock deal differs from Inbox source")
     digest = hashlib.sha256()
     digest.update(json.dumps(saved, sort_keys=True, ensure_ascii=False, default=str).encode())
     digest.update(state_bytes)

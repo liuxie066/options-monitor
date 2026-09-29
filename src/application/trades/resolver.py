@@ -454,9 +454,14 @@ def resolve_trade_deal(
     ) or (
         retry_skipped_deal
         and state_entry is not None
-        and state_entry[0] == "processed_deal_ids"
-        and state_entry[1].get("status") == "skipped"
-        and state_entry[1].get("reason") == "not_option_deal"
+        and (
+            (state_entry[0] == "processed_deal_ids"
+             and state_entry[1].get("status") == "skipped"
+             and state_entry[1].get("reason") == "not_option_deal")
+            or (state_entry[0] == "unresolved_deal_ids"
+                and state_entry[1].get("status") == "unresolved"
+                and state_entry[1].get("reason") == "ambiguous_lifecycle_case_match")
+        )
         and bool(economic_hash)
         and state_entry[1].get("economic_payload_hash") == economic_hash
         and state_entry[1].get("futu_account_id") == deal.futu_account_id

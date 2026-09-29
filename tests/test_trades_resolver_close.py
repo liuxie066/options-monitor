@@ -2383,3 +2383,66 @@ def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(t
     duplicate = _process_payload(raw_stock, recover_skipped=True, **kwargs)
     assert (duplicate["status"], duplicate["reason"]) == ("skipped", "duplicate")
     assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 3
+
+
+def test_manual_required_stock_ambiguity_uses_guarded_recovery_without_delivery(tmp_path):
+    import json
+    from src.application.trades.auto_intake import _process_payload, _skipped_recovery_snapshot
+    from src.application.trades.inbox import _connect, read_trade_payload, resume_skipped_trade_payload
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    stock = {"deal_id": "old-ambiguous-stock", "code": "HK.03690",
+             "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 500,
+             "price": 80, "trade_time_ms": 1790682392448,
+             "external_id_namespace": "futu.deal", "environment": "REAL",
+             "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"}}
+    state_path = tmp_path / "state.json"
+    kwargs = dict(repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",
+                  account_mapping={"REAL_1": "lx"}, futu_account_ids=["REAL_1"],
+                  apply_changes=True, host="127.0.0.1", port=11111,
+                  source="backfill", allow_external_lookup=False)
+    original = _process_payload(stock, **kwargs)
+    _persist_lot(repo, symbol="3690.HK", contracts=1, strike=80,
+                 expiration_ymd="2026-09-29", currency="HKD", multiplier=500,
+                 opened_at_ms=1790000000000)
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    saved = read_trade_payload(inbox, inbox_id=original["inbox_id"])
+    key = saved["broker_deal_key"]
+    state = json.loads(state_path.read_text())
+    entry = (state.get("unresolved_deal_ids") or {}).get(key)
+    if entry is None:
+        entry = state["processed_deal_ids"].pop(key)
+    entry.update(status="unresolved", reason="ambiguous_lifecycle_case_match", retryable=False)
+    state.setdefault("unresolved_deal_ids", {})[key] = entry
+    state_path.write_text(json.dumps(state))
+    with _connect(inbox) as conn:
+        conn.execute("""UPDATE trade_inbox SET status='handled', result_status='unresolved',
+            result_reason='ambiguous_lifecycle_case_match',
+            result_json=json_set(result_json, '$.status', 'unresolved',
+                                 '$.reason', 'ambiguous_lifecycle_case_match',
+                                 '$.receipt_kind', 'manual_required') WHERE inbox_id=?""",
+                     (original["inbox_id"],))
+    option = _deal(deal_id="old-ambiguous-option", symbol="3690.HK", contracts=1,
+                   price=0, strike=80, multiplier=500, expiration_ymd="2026-09-29",
+                   currency="HKD", trade_time_ms=1790682391907,
+                   raw_payload={"deal_id": "old-ambiguous-option", "code": "HK.MET260929P80000"})
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    preview = _skipped_recovery_snapshot(
+        inbox_path=inbox, inbox_id=original["inbox_id"], state_path=state_path,
+        ledger_path=repo.db_path, account_mapping={"REAL_1": "lx"},
+    )
+    assert preview["receipt_suppressed"] and preview["portfolio_refresh_suppressed"]
+    before_outbox = {row["outbox_id"] for row in repo.list_trade_lifecycle_notifications()}
+    assert resume_skipped_trade_payload(
+        inbox, inbox_id=original["inbox_id"], operator="operator",
+        economic_payload_hash=preview["economic_payload_hash"], repo=repo,
+    )
+    recovered = _process_payload(stock, recover_skipped=True, **kwargs)
+    assert (recovered["status"], recovered["action"]) == ("applied", "assignment")
+    assert recovered["receipt_suppression_reason"] == "historical_recovery"
+    new_outbox = [row for row in repo.list_trade_lifecycle_notifications()
+                  if row["outbox_id"] not in before_outbox]
+    assert new_outbox and all(row["status"] == "suppressed" for row in new_outbox)
+    assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 1
+    assert _process_payload(stock, recover_skipped=True, **kwargs)["reason"] == "duplicate"
