@@ -436,6 +436,146 @@ def test_pipeline_success_empty_payload_binds_discovery_trading_date() -> None:
     ]
 
 
+def test_pipeline_success_empty_payload_carries_plan_underlier_observation() -> None:
+    """A success-empty plan that owns an observation must not self-reject.
+
+    `_validate_raw_underlier_binding` compares the payload's
+    `meta.underlier_observation` against the contract's
+    `fetch_plan.underlier_observation` whenever the latter is present. The plan
+    resolves its observation off the frozen trading date, independently of
+    expiration discovery, so a no-expirations plan can still own one.
+    """
+    import src.application.required_data_steps as mod
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.opend_symbol_outputs import (
+        _validate_raw_underlier_binding,
+    )
+    from src.application.opening_quote_evidence import (
+        OpeningUnderlierObservation,
+    )
+    from src.application.required_data_plan_identity import (
+        build_required_data_expected_fetch_contract,
+    )
+    from src.application.required_data_planning import (
+        RequiredDataFetchPlanBundle,
+    )
+
+    observation = OpeningUnderlierObservation(
+        schema_version="opening_underlier_observation.v1",
+        code="US.NVDA",
+        market="US",
+        last_price=123.45,
+        update_time=None,
+        observed_at_utc=_TEST_EVIDENCE_OBSERVED_AT.isoformat(),
+        age_seconds=1.5,
+        market_state=None,
+        sec_status=None,
+        suspension=None,
+        status="ready",
+        reason_code=None,
+    )
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_empty",
+        reason_code="no_expirations",
+        expirations=[],
+        observed_at_utc=_TEST_EVIDENCE_OBSERVED_AT.isoformat(),
+        completed_at_utc=_TEST_EVIDENCE_COMPLETED_AT.isoformat(),
+        request_identity={
+            "symbol": "NVDA",
+            "underlier": "US.NVDA",
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "trading_date": _TEST_TRADING_DATE,
+        },
+    )
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol="NVDA",
+        spot_reference=123.45,
+        side_plans=[],
+        merged_specs=[],
+        underlier_observation=observation,
+        expiration_discovery=discovery,
+        projection_outcome="success_empty",
+        projected_expirations=[],
+        require_realized_volatility=False,
+    )
+
+    payload = mod._success_empty_payload_from_plan(
+        symbol="NVDA",
+        fetch_plan=fetch_plan,
+        fetch_source="opend",
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=fetch_plan.to_debug_dict(),
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
+
+    expected = contract["fetch_plan"]["underlier_observation"]
+    assert expected == observation.to_dict()
+    assert payload["meta"]["underlier_observation"] == expected
+    # The binding check is the real consumer: it must accept this payload.
+    assert _validate_raw_underlier_binding(
+        raw_payload=payload,
+        contract=contract,
+    ) == "US.NVDA"
+
+
+def test_pipeline_success_empty_payload_binds_absent_observation_as_null() -> None:
+    """No observation on the plan keeps the key present and null."""
+    import src.application.required_data_steps as mod
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_planning import (
+        RequiredDataFetchPlanBundle,
+    )
+
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_empty",
+        reason_code="no_expirations",
+        expirations=[],
+        observed_at_utc=_TEST_EVIDENCE_OBSERVED_AT.isoformat(),
+        completed_at_utc=_TEST_EVIDENCE_COMPLETED_AT.isoformat(),
+        request_identity={
+            "symbol": "NVDA",
+            "underlier": "US.NVDA",
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "trading_date": _TEST_TRADING_DATE,
+        },
+    )
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol="NVDA",
+        spot_reference=None,
+        side_plans=[],
+        merged_specs=[],
+        expiration_discovery=discovery,
+        projection_outcome="success_empty",
+        projected_expirations=[],
+        require_realized_volatility=False,
+    )
+
+    payload = mod._success_empty_payload_from_plan(
+        symbol="NVDA",
+        fetch_plan=fetch_plan,
+        fetch_source="opend",
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert "underlier_observation" in payload["meta"]
+    assert payload["meta"]["underlier_observation"] is None
+
+
 def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
     from src.application import pipeline_fetch_models as models
     import src.application.required_data_steps as mod
