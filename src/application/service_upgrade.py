@@ -1050,16 +1050,20 @@ def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[st
 
 
 def _parse_drift_response(stdout: str) -> dict[str, Any] | None:
-    """Unwrap the drift result the child CLI printed, or None if it printed none."""
+    """Unwrap only a successful drift response from the child CLI."""
     try:
         payload = json.loads(stdout)
     except (TypeError, ValueError):
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("tool_name") == "service.drift" and isinstance(payload.get("data"), dict):
+    if (
+        payload.get("tool_name") == "service.drift"
+        and payload.get("ok") is True
+        and isinstance(payload.get("data"), dict)
+    ):
         return payload["data"]
-    return payload or None
+    return None
 
 
 def _reconcile_services_from_current_release(
@@ -1081,9 +1085,9 @@ def _reconcile_services_from_current_release(
     run from the new release by hand. Handing this step to `<target_dir>/om` keeps
     the desired state in step with whatever `current` now points at.
 
-    Only the forward path uses this: the rollback and compensation paths restore
-    the symlink to an earlier release, where the desired state is that release's
-    bundle rather than this one's.
+    Both forward upgrade and explicit rollback delegate to the release now
+    current. Failure compensation restores the release already running this
+    process, so it can reconcile in process.
     """
     command = [
         str(target_dir / "om"),
@@ -1105,18 +1109,34 @@ def _reconcile_services_from_current_release(
     # `om` prints the whole response, and the drift details list every expected and
     # installed unit, so read stdout whole rather than through the usual tail.
     result = _run_command(command, cwd=repo_link, run_cmd=run_cmd, timeout=300, stdout_limit=None)
-    reconcile = _parse_drift_response(str(result.get("stdout") or ""))
-    if reconcile is None:
-        raise ServiceTransitionError(
-            "service drift reconciliation after upgrade produced no readable result",
-            status="upgraded_service_reconcile_failed",
-            remediation=[
-                f"command failed: {' '.join(shlex.quote(part) for part in command)}",
-                f"returncode: {result.get('returncode')}",
-                f"stderr: {str(result.get('stderr') or '').strip()[-400:]}",
-            ],
-        )
-    return reconcile
+    stdout = str(result.get("stdout") or "")
+    if result.get("ok") is True and result.get("returncode") == 0:
+        reconcile = _parse_drift_response(stdout)
+        if reconcile is not None:
+            return reconcile
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        payload = None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    error = error if isinstance(error, dict) else {}
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    raw_remediation = details.get("remediation")
+    child_remediation = [str(item) for item in raw_remediation] if isinstance(raw_remediation, list) else []
+    reason = str(error.get("message") or result.get("stderr") or "unreadable child response").strip()[-400:]
+    if child_remediation:
+        reason += f"; {child_remediation[0][:400]}"
+    raise ServiceTransitionError(
+        f"service drift reconciliation produced no successful result: {reason}",
+        status="upgraded_service_reconcile_failed",
+        remediation=[
+            f"command failed: {' '.join(shlex.quote(part) for part in command)}",
+            f"returncode: {result.get('returncode')}",
+            f"stderr: {str(result.get('stderr') or '').strip()[-400:]}",
+            f"stdout: {stdout.strip()[-400:]}",
+            *child_remediation,
+        ],
+    )
 
 
 def capture_preserved_timer_activation_states(
@@ -3415,26 +3435,38 @@ def service_rollback(
                 operations=operations,
             )
             if previous_profile:
-                # In process for the same reason as the compensation above: the
-                # symlink now points at the release this process is running, so it
-                # renders the right bundle without a child that could fail on the
-                # restore path.
-                service_reconcile = service_drift(
-                    repo_root=repo_link,
-                    runtime_root=runtime,
-                    profile_path=runtime / "service.profile.json",
-                    profile=previous_profile,
-                    confirm=True,
-                    activation_policy=activation_policy,
-                    preserved_activation_states=preserved_activation_states,
-                    run_cmd=run_cmd,
-                )
+                try:
+                    service_reconcile = _reconcile_services_from_current_release(
+                        repo_link=repo_link,
+                        target_dir=target_dir,
+                        runtime=runtime,
+                        activation_policy=activation_policy,
+                        run_cmd=run_cmd,
+                    )
+                except ServiceTransitionError as exc:
+                    raise ServiceTransitionError(
+                        f"service drift reconciliation failed during rollback: {exc}",
+                        status="rollback_service_reconcile_failed",
+                        remediation=exc.remediation,
+                    ) from exc
                 if _service_reconcile_failed(service_reconcile):
                     raise ServiceTransitionError(
                         "service drift reconciliation failed during rollback",
                         status="rollback_service_reconcile_failed",
                         remediation=_service_reconcile_remediation(service_reconcile),
                     )
+                if preserve_activation_state:
+                    child_snapshot = service_reconcile.get("preserved_activation_states")
+                    if not isinstance(child_snapshot, dict):
+                        raise ServiceTransitionError(
+                            "rollback service reconcile did not report its activation snapshot",
+                            status="rollback_service_reconcile_failed",
+                        )
+                    if child_snapshot != preserved_activation_states:
+                        status_base["preserved_activation_state_difference"] = {
+                            "before_switch": preserved_activation_states,
+                            "reconcile": child_snapshot,
+                        }
             rollback_profile = _load_service_profile(runtime) or previous_profile
             restarted = (
                 _restart_services_from_loaded_profile(

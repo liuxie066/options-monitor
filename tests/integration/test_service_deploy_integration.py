@@ -3084,9 +3084,11 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["post_upgrade_cleanup"]["status"] == "cleaned"
 
+@pytest.mark.parametrize("child_error", [False, True])
 def test_service_rollback_preserves_paused_timer_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    child_error: bool,
 ) -> None:
     import src.application.service_upgrade as service_upgrade_module
 
@@ -3109,6 +3111,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
         json.dumps(profile), encoding="utf-8"
     )
     drift_calls: list[dict[str, object]] = []
+    child_calls: list[list[str]] = []
     transition_events: list[str] = []
 
     def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
@@ -3145,6 +3148,30 @@ def test_service_rollback_preserves_paused_timer_snapshot(
     )
     monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
 
+    child_snapshot = {
+        "options-monitor-target-only.timer": {
+            "activation_state": "disabled", "active_state": "inactive",
+        }
+    }
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        child_calls.append(list(command))
+        if child_error:
+            return subprocess.CompletedProcess(command, 2, stdout=json.dumps({
+                "tool_name": "om", "ok": False,
+                "error": {"message": "target release cannot capture timer activation state"},
+            }), stderr="unknown option --preserve-activation-state")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+            "tool_name": "service.drift", "ok": True,
+            "data": {"summary": {"status": "ok"}, "preserved_activation_states": child_snapshot},
+        }), stderr="")
+
+    if child_error:
+        monkeypatch.setattr(
+            service_upgrade_module, "_compensate_service_transition",
+            lambda **_kwargs: {"ok": False, "remediation": []},
+        )
+
     out = service_upgrade_module.service_rollback(
         repo_root=current,
         runtime_root=runtime,
@@ -3153,24 +3180,39 @@ def test_service_rollback_preserves_paused_timer_snapshot(
         confirm=True,
         restart_services=False,
         preserve_activation_state=True,
-        run_cmd=lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 0, stdout="", stderr=""
-        ),
+        run_cmd=_run_cmd,
     )
 
     confirmed_calls = [item for item in drift_calls if item.get("confirm")]
-    assert out["status"] == "rolled_back"
-    assert current.resolve() == v100.resolve()
+    assert transition_events[:2] == ["capture", "prepare"]
+    assert confirmed_calls == []
+    assert child_calls == [[
+        str(v100 / "om"), "service", "drift",
+        "--repo-root", str(current),
+        "--runtime-root", str(runtime),
+        "--profile-path", str(runtime / "service.profile.json"),
+        "--confirm", "--preserve-activation-state",
+    ]]
     assert out["activation_policy"] == "preserve-existing"
     assert out["preserved_activation_units"] == [target]
-    assert transition_events[:2] == ["capture", "prepare"]
-    assert len(confirmed_calls) == 1
-    assert confirmed_calls[0]["activation_policy"] == "preserve-existing"
-    assert confirmed_calls[0]["preserved_activation_states"] == {
-        target: {
-            "activation_state": "enabled",
-            "active_state": "inactive",
-        }
+    if child_error:
+        assert out["ok"] is False
+        assert out["failure_status"] == "rollback_service_reconcile_failed"
+        assert "target release cannot capture" in out["error"]
+        assert any("returncode: 2" in item for item in out["remediation"])
+        assert any("--preserve-activation-state" in item for item in out["remediation"])
+        return
+
+    assert out["status"] == "rolled_back"
+    assert current.resolve() == v100.resolve()
+    assert out["preserved_activation_state_difference"] == {
+        "before_switch": {
+            target: {
+                "activation_state": "enabled",
+                "active_state": "inactive",
+            }
+        },
+        "reconcile": child_snapshot,
     }
 
 
@@ -3248,6 +3290,8 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
         encoding="utf-8",
     )
 
+    drift_commands: list[list[str]] = []
+
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "us"]:
             assert current.resolve() == v101.resolve()
@@ -3255,6 +3299,12 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
             Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
         elif command[:4] == ["./om", "config", "build-assistant", "--source"]:
             Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
+        elif command[:3] == [str(v100 / "om"), "service", "drift"]:
+            drift_commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                "tool_name": "service.drift", "ok": True,
+                "data": {"summary": {"status": "ok"}},
+            }), stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_rollback(
@@ -3272,6 +3322,14 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
     assert current.resolve() == v100.resolve()
     assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"release": "1.0.0"}
     assert out["runtime_config_commit"]["status"] == "committed"
+    assert drift_commands == [[
+        str(v100 / "om"), "service", "drift",
+        "--repo-root", str(current),
+        "--runtime-root", str(runtime),
+        "--profile-path", str(runtime / "service.profile.json"),
+        "--confirm",
+    ]]
+
 
 def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool
