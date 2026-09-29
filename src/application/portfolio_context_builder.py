@@ -405,6 +405,25 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
     return (dict(out) if isinstance(out, dict) else None)
 
 
+def is_trusted_global_holdings_context(ctx: object) -> bool:
+    if not isinstance(ctx, dict) or ctx.get("portfolio_source_name") != "holdings_global":
+        return False
+    filters = ctx.get("filters")
+    return (
+        isinstance(filters, dict)
+        and filters.get("account") is None
+        and filters.get("broker") is None
+        and isinstance(ctx.get("source_account_identifiers"), list)
+        and bool(ctx["source_account_identifiers"])
+        and all(isinstance(item, str) and item.strip() for item in ctx["source_account_identifiers"])
+        and ctx.get("source_observation_status") == "trusted"
+        and _source_timestamp(ctx.get("source_observed_at")) is not None
+        and _source_timestamp(ctx.get("retrieved_at_utc")) is not None
+        and isinstance(ctx.get("cash_by_currency"), dict)
+        and isinstance(ctx.get("stocks_by_symbol"), dict)
+    )
+
+
 def load_holdings_records(data_config_path: Path) -> list[dict]:
     cfg: dict = {}
     if data_config_path.exists():
@@ -428,22 +447,6 @@ def load_holdings_records(data_config_path: Path) -> list[dict]:
     return with_tenant_token_retry(feishu.app_id, feishu.app_secret, _list_records)
 
 
-def load_holdings_portfolio_context(
-    *,
-    data_config_path: Path,
-    broker: str | None = None,
-    account: str | None = None,
-) -> dict:
-    records = load_holdings_records(data_config_path)
-    return build_context(
-        records,
-        broker=broker,
-        account=account,
-        portfolio_source_name="external_holdings",
-        source_account_identifiers=([account] if account else []),
-    )
-
-
 def load_holdings_portfolio_shared_context(
     *,
     data_config_path: Path,
@@ -453,7 +456,7 @@ def load_holdings_portfolio_shared_context(
     return build_shared_context(
         records,
         broker=broker,
-        portfolio_source_name="external_holdings",
+        portfolio_source_name="holdings_global",
     )
 
 

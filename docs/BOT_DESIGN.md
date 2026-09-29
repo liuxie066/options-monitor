@@ -38,6 +38,43 @@
 
 复用归属：可信市场推导复用 `runtime_config_freshness.infer_runtime_config_market` 与 `agent_tool_config.load_runtime_config`；参数汇合和报错复用 `bot.tools.build_tool_payload`、`host.py` 的 `INPUT_ERROR` 观察；数据与权限复用 `agent_tools.receipts._receipt_read`；提示词更新 `bot/prompts/tool_rules.md`。不新增市场字段、状态、权限或查询工具。检索范围为上述 owner、`bot/scene.py`、`bot/channel_facade.py` 及相关 Bot/回执测试；关键词为 `receipt_read`、`market`、`deal_id`、`SCOPE_DENIED`、`build_tool_payload`。这些位置已有所需 owner，无新增领域结构。
 
+## 跨市场只读查询设计（2026-09-29）
+
+目标：经渠道 sender allowlist 鉴权的 Bot 用户，在显式配置的只读市场集合内查询 US/HK；例如「3690.HK 的被指派」可选择 HK，并分别查询本地期权交易事件与成交归属记录。保留每次读取的市场、账户和证据来源。此处是源码设计，生产配置和服务变更另行授权。
+
+非目标：不改 Control、交易/账本写入、通知、券商连接，也不把行情或标的代码当成真实指派证明。不让模型决定授权。旧单市场配置默认维持单市场。
+
+现状与依据：渠道入口只接受一个 `config_key` 或 `config_path`，`resolve_trusted_config_scope` 校验身份和新鲜度；Scene 把它作为全部工具的固定输入，Host 遇到冲突拒绝。`assistant.default_market_scope=all` 仅是 Control 默认市场语义，不是 Bot 读权限。现有 `receipt_read` 有 market 字段，`trade_attribution_read` 和 `option_positions_read` 有 config_key；后者是纯读工具但尚未放入 Scene。`symbol_market` 已提供标的身份判断。个人记忆当前以 sender 和单配置权限隔离，旧会话不能在授权扩张或撤销后直接继承。
+
+选择的合同：
+
+1. 在经验证的独立 `config.assistant.json` 的 `assistant.bot` 中增加显式 `read_markets: [us, hk]`；缺省为渠道原有单市场。只接受无重复的 `us`/`hk` 非空列表，必须包含渠道主市场；非法值阻断 Bot 启动。主市场快照提供市场和账户身份，不提供读权限。渠道从同一运行目录解析另一个标准市场文件，不接受模型路径；每次选中后核验文件身份、新鲜度、账户集合及其与实际数据 runtime root 的对应关系。当前 allowlist 用户可配置双市场，生产启用仍遵守配置变更授权。
+2. 渠道把市场集合和 assistant 配置代际传入 Host 的可信合同。所有市场选择器（顶层 `config_key`/`market`/`symbol`，嵌套 `query.symbol`，cursor 绑定的查询条件）须先规范化并互相一致；`symbol_market` 的大写值转为小写比较。省略时单市场沿用原行为，双市场且无可判定标的的查询要求明确市场，不能默选 US。Host 只为选中市场注入可信配置，工具 owner 仍作最终验证；模型永远不能传 `config_path`。
+3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。每次成功、部分或失败的工具观察附独立的 Host 路由标签（实际 market/account/tool）；保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。跨市场一次只读一个目标，不合并两份记录为单一事实。
+4. Scene 加入已有 `option_positions_read` 的 `events` 查询，限制可见字段为只读必要筛选；暂不开放 `list`，因为它的共享账本读取尚无市场谓词。现有事件投影补 `event_type`，据此区分本地 assignment 与普通 close，不把它称为券商确认。`trade_attribution_read` 保留独立入口并在现有 owner 增加规范化 `symbol` 筛选，分页前过滤。用户说「被指派」时按 HK 标的定位并分别核验可用证据；缺账户时仅在可信 HK 配置有唯一账户时可默认，否则请用户给账户。未读尽分页只能报告已查页，不能作否定结论。旧 `receipt_read` 的完整 ID 和不降级广泛查询规则继续适用。
+5. 会话键、取消键和个人记忆 owner 绑定渠道、sender、conversation、主配置身份与 assistant 配置代际。代际取已校验 assistant 文件的规范路径、完整字节 SHA-256、`_generated.generated_at` 及文件 `mtime_ns`；受控构建的 A→B→A 得到新代际。渠道只从可信 assistant 路径生成并写入合同，`session_key_for_contract` 和 `scope_from_contract` 从同一路径重算并比对，不能信任模型或序列化字段。业务证据记忆在现有 `account_scope` 使用 `us:lx`/`hk:lx`，只从工具的可信实际市场和账户生成；无市场的个人偏好保持独立。旧单市场业务记忆不自动升级成双市场事实；首次升级此代际会隔离旧记忆。每次工具读取前以及回答/outbox 持久化前复核代际，变化即中止本轮，不返回旧授权下的结果。不可读取的配置、冲突、撤权和工具异常均失败关闭，不以空结果返回。
+
+| Scene 工具 | 模型可选市场 | Host 行为 |
+| --- | --- | --- |
+| `receipt_read` | `market`，双市场 cursor 续页仍必填 | 可信目标配置与回执根目录一致，显式冲突拒绝 |
+| `option_positions_read.events`、`trade_attribution_read` | `config_key`；有 `symbol` 时可由标的推导，双市场 cursor 续页仍必填 | 只注入目标市场配置；账户和标的按目标核验 |
+| `project_context`、`candidate_filter_explain`、`runtime_status` | 已有 `config_key`；候选工具也可由 `symbol` 推导 | 只注入目标市场配置；无市场且双市场时要求澄清 |
+| `runtime_runs`、`runtime_logs` | 在现有 Bot 可见 schema 增加已有 `config_key` 字段 | 只注入目标市场配置；无市场且双市场时要求澄清 |
+| `project_files` | `resource=project` 不表示市场；`resource=run` 使用已有 `config_key` | 项目源码不作为市场事实；运行证据按目标市场核验 |
+
+所有显式字段须在一次调用内一致。双市场 cursor 不单独作为授权或市场选择器，续页重复原 `market`/`config_key`；原工具的 cursor 签名和筛选校验仍有效。Host 的路由标签与工具自身来源分列，未注入目标配置的工具不得声明目标市场事实。
+
+复用归属：可信配置身份/新鲜度由 `bot.config_scope.resolve_trusted_config_scope` 统一提供给渠道、工具和记忆，授权代际由 `bot.model_config` 提供；市场解析复用 `symbol_identity.symbol_market`；Tool 参数校验复用 `bot.tools.build_tool_payload`；账户集合复用 `account_config.accounts_from_config`；只读数据复用 `agent_tools.positions`、`agent_tools.receipts`、`trades.attribution`；会话/记忆分别复用 `bot.session` / `bot.memory`。唯一新增配置名为 `assistant.bot.read_markets`，因为现有 `default_market_scope` 没有授权含义；事件 `event_type` 与归属 `symbol` 是既有 owner 的读投影/过滤扩展。检索范围：上述 owner、`config_validator.py`、`config_yaml.py`、Scene、`agent_tools.project`、Bot/channel 测试；关键词 `config_key`, `config_path`, `market`, `account`, `authority_scope`, `read_markets`。未找到可复用的 Bot 多市场权限集合；未引入第二套账本、路由器或持久状态。
+
+拒绝方案：把固定 `us` 改为默认 `all`（扩大所有部署读取面）；让模型直接改 `config_path`（越过可信边界）；按用户问题中的 `.HK` 直接授予权限（标的身份不是授权）；在 assistant.default_market_scope 上叠加 Bot ACL（混淆 Control 与只读权限）。
+
+实现切片与验收：
+
+1. `trusted-market-routing` 对应 S1/S2：assistant 配置解析、会话可信集合、Host 选择、数据根/账户校验、结果来源。先写失败测试：US 单市场拒绝 HK；双市场 3690.HK 选 HK；冲突 market/config_key/嵌套筛选、缺失/过期 HK 配置、未配置 HK 账户均零读取；省略市场的单/双市场行为不同；取消键一致，非默认 runtime root 不串读。
+2. `records-and-isolation` 对应 S3/S4，依赖前片：Scene 事件入口、`event_type`/归属 `symbol` 读扩展、提示词、会话/记忆代际。测试 assignment 与 trade attribution 的不同来源、未证实回答、分页未尽、A→B→A 会话/记忆隔离和运行中撤权；端到端 Host fixture 验证无真实券商和通知调用。
+
+风险：标的能提示市场，不能证明交易类型；本地事件可能滞后于券商，回答必须写证据时点。`config_path` 的兄弟运行文件只有在同一受控 runtime root 且通过身份/新鲜度校验时可用。受控构建会产生新代际；若外部手工恢复旧文件及完全相同元数据，代际可能重用，需运维禁止该恢复方式或另行设计持久代际。首次使用代际身份会隔离旧单市场个人记忆，旧数据保留但不自动迁移。真实模型措辞仍需模型级验收；脚本模型测试只能证明 Host 合同与指定脚本行为。
+
 ## 保留边界
 
 交易、账本、配置、通知与服务操作仍由原有业务模块和 deterministic Control 管理。模型没有修改这些状态的工具。既有渠道权限、去重、取消、Host 租约、outbox 和真实数据保持独立。

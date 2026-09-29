@@ -1802,13 +1802,14 @@ TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
     requires=(),
     pure_read=True,
     allow_additional_input=False,
-    bot_input_fields=("config_key", "account", "execution_key", "status", "cursor", "limit"),
+    bot_input_fields=("config_key", "account", "symbol", "execution_key", "status", "cursor", "limit"),
     capabilities=("positions", "local_read"),
     input_schema={
         "config_key": {"type": "string", "enum": ["us", "hk"]},
         "config_path": "host supplied runtime config path",
         "account": {"type": "string", "required": True, "minLength": 1},
         "execution_key": "optional canonical execution identity",
+        "symbol": "optional canonical underlying symbol",
         "status": "optional attribution status", "cursor": "optional last open_event_id",
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
     },
@@ -1816,8 +1817,8 @@ TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
                      "bounded_projection": "contract_fields", "coverage": "source_declared",
                      "freshness": "source_declared", "pagination": {"mode": "keyset"},
                      "primary_rows": "rows", "row_count_field": "returned_count",
-                     "model_preview_fields": ["account", "rows", "next_cursor", "evidence_complete"],
-                     "model_value_fields": ["account", "rows", "next_cursor", "evidence_complete"],
+                     "model_preview_fields": ["account", "market", "rows", "next_cursor", "evidence_complete"],
+                     "model_value_fields": ["account", "market", "rows", "next_cursor", "evidence_complete"],
                      "fact_fields": ["rows"], "missing_data_fields": ["rows[].reason_codes"]},
 )
 

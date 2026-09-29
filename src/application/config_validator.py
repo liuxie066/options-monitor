@@ -184,7 +184,7 @@ ASSISTANT_CONFIG_KEYS = {
     'models',
 }
 BOT_TOOLSET_KEYS = {'portfolio'}
-BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode'}
+BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode', 'read_markets'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -562,6 +562,12 @@ def _validate_assistant_config(cfg: dict) -> None:
         mode = str(bot.get('tool_loading_mode') or '').strip().lower()
         if mode not in {'eager', 'directory'}:
             die('assistant.bot.tool_loading_mode must be one of: eager, directory')
+    if 'read_markets' in bot:
+        markets = bot['read_markets']
+        if (not isinstance(markets, list) or not markets
+                or any(not isinstance(market, str) or market not in {'us', 'hk'} for market in markets)
+                or len(markets) != len(set(markets))):
+            die('assistant.bot.read_markets must be a non-empty list of unique us/hk markets')
     toolsets = bot.get('toolsets')
     if toolsets is None:
         toolsets = {}
@@ -1085,6 +1091,13 @@ def validate_config(cfg: dict):
     if 'ai_decision_advice' in cfg:
         die('ai_decision_advice is retired and must be removed')
 
+    portfolio = cfg.get('portfolio')
+    if isinstance(portfolio, dict):
+        if 'source_by_account' in portfolio:
+            die('portfolio.source_by_account is retired')
+        if str(portfolio.get('source') or '').strip().lower() == 'holdings':
+            die('portfolio.source=holdings is retired')
+
     for retired_key in RETIRED_AI_ADVICE_CONFIG_KEYS:
         if retired_key in cfg:
             die(
@@ -1405,9 +1418,8 @@ def validate_config(cfg: dict):
                 die(f'account_settings.{account}.type must be one of: {", ".join(ACCOUNT_TYPES)}')
             if 'trade_intake_enabled' in raw_value and not isinstance(raw_value.get('trade_intake_enabled'), bool):
                 die(f'account_settings.{account}.trade_intake_enabled must be a boolean')
-            holdings_account = raw_value.get('holdings_account')
-            if holdings_account is not None and not str(holdings_account).strip():
-                die(f'account_settings.{account}.holdings_account must be a non-empty string when set')
+            if 'holdings_account' in raw_value:
+                die(f'account_settings.{account}.holdings_account is retired')
             if acct_type == 'futu':
                 futu_cfg = raw_value.get('futu')
                 if not isinstance(futu_cfg, dict):

@@ -351,6 +351,16 @@ class BotHostStore:
         rows = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
             WHERE session_key = ? AND status IN ('running', 'waiting_model', 'waiting_tool')
             ORDER BY started_at DESC LIMIT 2""", (session_key,)).fetchall()
+        if not rows and set(trusted_identity) == {
+            "authenticated_channel", "authenticated_sender_id", "authenticated_conversation_id",
+            "authority_scope", "config_path",
+        }:
+            # Authorization changed while the old run was active; its session hash is no longer derivable.
+            active = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
+                WHERE status IN ('running', 'waiting_model', 'waiting_tool')""").fetchall()
+            rows = [row for row in active if all(
+                str(json.loads(row["contract_json"]).get("input", {}).get(key) or "") == value
+                for key, value in trusted_identity.items())]
         if len(rows) != 1:
             return {"status": "not_ready" if rows else "no_active_run", "target_run_id": None}
         row = rows[0]

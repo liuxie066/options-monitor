@@ -11,7 +11,7 @@ state. Current entry and layer terminology is defined in
 
 It exposes a stable JSON contract intended for local machine usage:
 
-- `./om-agent add-account --market us|hk --account-label <label> --account-type futu|external_holdings --dry-run`
+- `./om-agent add-account --market us|hk --account-label <label> --account-type futu --dry-run`
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 

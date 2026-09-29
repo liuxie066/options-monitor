@@ -75,7 +75,7 @@ def _load_portfolio_ctx(
     return out, logs
 
 
-def test_build_pipeline_context_resolves_portfolio_source_by_account(tmp_path: Path) -> None:
+def test_build_pipeline_context_uses_futu_account_source(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     captured: dict[str, object] = {}
@@ -106,7 +106,6 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account(tmp_path: P
                     "broker": "富途",
                     "account": "sy",
                     "source": "auto",
-                    "source_by_account": {"sy": "holdings"},
                 }
             },
             report_dir=(root / "reports").resolve(),
@@ -119,11 +118,11 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account(tmp_path: P
             no_context=False,
             want_scan=True,
         )
-        assert portfolio_ctx == {"portfolio_source_name": "holdings"}
+        assert portfolio_ctx == {"portfolio_source_name": "auto"}
         assert option_ctx is None
         assert usd_per_cny_exchange_rate is None
         assert cny_per_hkd_exchange_rate is None
-        assert captured == {"portfolio_source": "holdings", "account": "sy"}
+        assert captured == {"portfolio_source": "auto", "account": "sy"}
     finally:
         pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
@@ -219,7 +218,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
 
     counts = {"portfolio": 0, "option": 0}
     old_is_fresh = pc.is_fresh
-    old_load_holdings_portfolio_context = pcs.load_holdings_portfolio_context
+    old_fetch_futu_portfolio_context = pc.fetch_futu_portfolio_context
     old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
     old_open_position_ledger = pc.open_position_ledger
     old_load_option_position_records = pc._load_option_position_records
@@ -230,15 +229,11 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
 
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).exists()  # type: ignore[assignment]
-        def _fake_load_holdings_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
-            counts["portfolio"] += 1
-            return dict(shared_portfolio["by_account"].get(str(kwargs.get("account") or ""), shared_portfolio["all_accounts"]))
-
+        pc.fetch_futu_portfolio_context = lambda **kwargs: (counts.__setitem__("portfolio", counts["portfolio"] + 1) or dict(shared_portfolio["by_account"][kwargs["account"]]))  # type: ignore[assignment]
         def _fake_load_holdings_portfolio_shared_context(**_kwargs):  # type: ignore[no-untyped-def]
             counts["portfolio"] += 1
             return shared_portfolio
 
-        pcs.load_holdings_portfolio_context = _fake_load_holdings_portfolio_context  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = _fake_load_holdings_portfolio_shared_context  # type: ignore[assignment]
         pc.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
         pc._load_option_position_records = lambda *_a, **_k: (object(), [])  # type: ignore[assignment]
@@ -301,14 +296,14 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
             shared_state_dir=shared_dir,
             log=logs.append,
         )
-        assert counts["portfolio"] == 1
+        assert counts["portfolio"] == 2
         assert counts["option"] == 1
         assert p1 and p2
         assert o1 and o2
         assert r1 is True
         assert r2 is True
-        assert p1["context_source"] == "shared_refresh"
-        assert p2["context_source"] == "shared_slice"
+        assert p1["context_source"] == "futu_direct"
+        assert p2["context_source"] == "futu_direct"
         assert o1["context_source"] == "shared_refresh"
         assert o2["context_source"] == "shared_slice"
         assert p1["cash_by_currency"]["USD"] == 1000.0
@@ -317,11 +312,11 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
         assert o2["locked_shares_by_symbol"]["NVDA"] == 200
         assert o1["current_decision_shadow"]["status"] == "matched"
         assert o2["current_decision_shadow"]["status"] == "matched"
-        assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
+        assert any("portfolio_context source=futu_direct account=sy" in x for x in logs)
         assert any("option_positions_context source=shared_slice account=sy" in x for x in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_context = old_load_holdings_portfolio_context  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch_futu_portfolio_context  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
         pc.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         pc._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
@@ -598,7 +593,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu(tm
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable(tmp_path: Path) -> None:
+def test_load_portfolio_context_auto_does_not_fall_back_when_futu_unavailable(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
@@ -629,16 +624,14 @@ def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailabl
         }
 
         out, logs = _load_portfolio_ctx(tmp_path, ttl_sec=0)
-        assert out is not None
-        assert out["portfolio_source_name"] == "holdings"
-        assert out["context_source"] == "shared_refresh"
-        assert any("fallback to holdings" in x for x in logs)
+        assert out is None
+        assert any("opend down" in line for line in logs)
     finally:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail(tmp_path: Path) -> None:
+def test_load_portfolio_context_auto_ignores_local_holdings_cache_when_futu_fails(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -663,11 +656,8 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
 
         out, logs = _load_portfolio_ctx(tmp_path)
-        assert out is not None
-        assert out["portfolio_source_name"] == "holdings"
-        assert out["context_source"] == "account_cache"
-        assert any("fallback to holdings" in x for x in logs)
-        assert any("portfolio_context source=account_cache account=lx" in x for x in logs)
+        assert out is None
+        assert any("opend down" in line for line in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
@@ -679,6 +669,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
+    old_fetch = pc.fetch_futu_portfolio_context
     try:
         shared_ctx = {
             "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -695,31 +686,33 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
         def _load_cached(path: Path):  # type: ignore[no-untyped-def]
             if path.name == "portfolio_context.json":
                 stale = _portfolio_ctx("lx", usd_cash=800.0, shares=100)
-                stale["portfolio_source_name"] = "external_holdings"
+                stale["portfolio_source_name"] = "futu"
                 return stale
             if path.name == "portfolio_context.shared.json":
                 return shared_ctx
             return None
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: _portfolio_ctx("sy", usd_cash=1500.0, shares=200)  # type: ignore[assignment]
 
         runtime_cfg = {
             "accounts": ["sy"],
-            "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
-            "portfolio": {"source_by_account": {"sy": "holdings"}},
+            "account_settings": {"sy": {"type": "futu"}},
+            "portfolio": {"source": "auto"},
         }
         out, logs = _load_portfolio_ctx(
-            tmp_path, account="sy", runtime_config=runtime_cfg, portfolio_source="holdings"
+            tmp_path, account="sy", runtime_config=runtime_cfg, portfolio_source="auto"
         )
         assert out is not None
         assert out["filters"]["account"] == "sy"
         assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
-        assert out["context_source"] == "shared_slice"
+        assert out["context_source"] == "futu_direct"
         assert any("cache rejected due to account mismatch source=account_cache filters.account requested=sy cached=lx" in x for x in logs)
-        assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
+        assert any("portfolio_context source=futu_direct account=sy" in x for x in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account(tmp_path: Path) -> None:
@@ -728,6 +721,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
+    old_fetch = pc.fetch_futu_portfolio_context
     old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
@@ -736,7 +730,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
             if path.name == "portfolio_context.json":
                 stale = _portfolio_ctx("sy", usd_cash=1500.0, shares=200)
                 stale["stocks_by_symbol"]["NVDA"]["account"] = "lx"
-                stale["portfolio_source_name"] = "external_holdings"
+                stale["portfolio_source_name"] = "futu"
                 return stale
             return None
 
@@ -750,29 +744,31 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
         }
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: _portfolio_ctx("sy", usd_cash=1500.0, shares=200)  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = lambda **_kwargs: shared_ctx  # type: ignore[assignment]
 
         runtime_cfg = {
             "accounts": ["sy"],
-            "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
-            "portfolio": {"source_by_account": {"sy": "holdings"}},
+            "account_settings": {"sy": {"type": "futu"}},
+            "portfolio": {"source": "auto"},
         }
         out, logs = _load_portfolio_ctx(
-            tmp_path, account="sy", runtime_config=runtime_cfg, portfolio_source="holdings"
+            tmp_path, account="sy", runtime_config=runtime_cfg, portfolio_source="auto"
         )
         assert out is not None
         assert out["filters"]["account"] == "sy"
         assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
-        assert out["context_source"] == "shared_refresh"
+        assert out["context_source"] == "futu_direct"
         assert any("cache rejected due to account mismatch source=account_cache stocks_by_symbol[NVDA].account requested=sy cached=lx" in x for x in logs)
-        assert any("portfolio_context source=shared_refresh account=sy" in x for x in logs)
+        assert any("portfolio_context source=futu_direct account=sy" in x for x in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdings_alias_exists(tmp_path: Path) -> None:
+def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -806,8 +802,8 @@ def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdi
 
         runtime_cfg = {
             "accounts": ["user1"],
-            "account_settings": {"user1": {"type": "futu", "holdings_account": "lx"}},
-            "portfolio": {"source": "auto", "base_currency": "CNY", "source_by_account": {"user1": "auto"}},
+            "account_settings": {"user1": {"type": "futu"}},
+            "portfolio": {"source": "auto", "base_currency": "CNY"},
         }
         out, logs = _load_portfolio_ctx(tmp_path, account="user1", runtime_config=runtime_cfg)
         assert out is not None
