@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1081 (`src`: 538, `domain`: 87, `scripts`: 14, `tests`: 442)
-- Internal import edges: 7647 total, 3358 production/script edges excluding tests
+- Internal import edges: 7651 total, 3360 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|529| domain
+  application -->|530| domain
   application -->|4| domain_services
   application -->|164| infrastructure
   application -->|53| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3267| application
+  tests -->|3269| application
   tests -->|408| domain
   tests -->|2| domain_services
   tests -->|222| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 529 |
+| application | domain | 530 |
 | application | infrastructure | 164 |
 | interfaces | application | 163 |
 | application | storage | 53 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3267 |
+| tests | application | 3269 |
 | tests | domain | 408 |
 | tests | interfaces | 249 |
 | tests | infrastructure | 222 |
@@ -95,8 +95,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 231 |
 | src.interfaces | src.application | 128 |
+| src.application.ledger | domain.domain | 115 |
 | src.application | src.infrastructure | 114 |
-| src.application.ledger | domain.domain | 114 |
 | src.application.ledger | domain.domain.ledger | 56 |
 | src.application.trades | domain.domain | 47 |
 | src.application.trades | src.application | 43 |
@@ -179,9 +179,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 109 |
+| src.application.agent_tool_contracts | 110 |
 | src.application.payload_helpers | 96 |
-| domain.domain.symbol_identity | 79 |
+| domain.domain.symbol_identity | 80 |
 | src.application.ledger.api | 73 |
 | src.application.agent_tool_config | 71 |
 | src.infrastructure.io_utils | 57 |

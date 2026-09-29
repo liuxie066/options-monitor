@@ -117,7 +117,7 @@ def build_tool_payload(
                 requested_market = payload.get("market")
                 if requested_market and str(requested_market).lower() != market:
                     return None, ("receipt_read market argument conflicts with trusted scope; this does not establish "
-                                  "the receipt's market. If the user did not request another market, retry without market.")
+                                  "the receipt's market. Keep the requested market and clarify the available scope.")
                 deal_id = payload.get("deal_id")
                 if isinstance(deal_id, str) and ("..." in deal_id or "…" in deal_id):
                     return None, "receipt_read needs the complete deal_id from the user; masked IDs cannot identify a receipt."
