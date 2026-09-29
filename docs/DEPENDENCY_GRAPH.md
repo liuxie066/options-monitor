@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1081 (`src`: 538, `domain`: 87, `scripts`: 14, `tests`: 442)
-- Internal import edges: 7645 total, 3357 production/script edges excluding tests
+- Internal import edges: 7647 total, 3358 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|528| domain
+  application -->|529| domain
   application -->|4| domain_services
   application -->|164| infrastructure
   application -->|53| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3266| application
+  tests -->|3267| application
   tests -->|408| domain
   tests -->|2| domain_services
   tests -->|222| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 528 |
+| application | domain | 529 |
 | application | infrastructure | 164 |
 | interfaces | application | 163 |
 | application | storage | 53 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3266 |
+| tests | application | 3267 |
 | tests | domain | 408 |
 | tests | interfaces | 249 |
 | tests | infrastructure | 222 |
@@ -115,8 +115,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | src.application | 18 |
 | src.application | domain.domain.ledger | 17 |
 | src.application | src.application.multi_tick | 16 |
+| src.application.positions | domain.domain | 16 |
 | src.application.ledger | src.infrastructure | 15 |
-| src.application.positions | domain.domain | 15 |
 | src.application | src.application.trades | 14 |
 | src.application.trades | src.infrastructure | 13 |
 | src.interfaces | src.application.trades | 13 |
