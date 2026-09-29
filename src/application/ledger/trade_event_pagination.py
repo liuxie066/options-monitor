@@ -11,6 +11,8 @@ import time
 import uuid
 from typing import Any, Mapping
 
+from domain.domain.symbol_identity import resolve_symbol_identity
+
 
 CURSOR_VERSION = 1
 CURSOR_TTL_SECONDS = 30 * 60
@@ -113,10 +115,15 @@ def normalize_event_query(
                 code="invalid_query",
             )
 
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    identity = resolve_symbol_identity(raw_symbol) if raw_symbol else None
+    if raw_symbol and (identity is None or identity.market != normalized_market):
+        raise TradeEventPaginationError("symbol is invalid or outside the selected market", code="invalid_query")
+
     return {
         "account": str(account or "").strip().lower() or None,
         "broker": str(payload.get("broker") or "").strip() or None,
-        "symbol": str(payload.get("symbol") or "").strip().upper() or None,
+        "symbol": identity.canonical if identity else None,
         "option_type": option_type,
         "strike": strike,
         "expiration_ymd": str(payload.get("exp") or payload.get("expiration_ymd") or "").strip() or None,

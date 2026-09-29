@@ -1810,7 +1810,7 @@ TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
         "account": {"type": "string", "required": True, "minLength": 1},
         "execution_key": "optional canonical execution identity",
         "symbol": "optional canonical underlying symbol",
-        "status": "optional attribution status", "cursor": "optional last open_event_id",
+        "status": "optional attribution status", "cursor": "optional opaque filter-bound continuation cursor",
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
     },
     output_contract={"schema_version": "trade_attribution_read.v1", "evidence_type": "collection",

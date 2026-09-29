@@ -56,6 +56,10 @@ runtime config in the same runtime root and checks the account in that market;
 the model cannot supply a config path or expand this grant. Dual-market reads
 without a market or recognizable symbol require clarification. Revoking or
 changing the grant stops an active answer before it is persisted.
+Each controlled rebuild of `config.assistant.json`, including a version upgrade,
+creates a new read generation even if `read_markets` is unchanged. Channel
+sessions and personal memory start in that new generation; old records remain
+stored but are not automatically carried into it.
 
 Bot uses:
 
