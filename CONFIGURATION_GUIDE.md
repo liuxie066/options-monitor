@@ -84,9 +84,37 @@ portfolio_management:
 - `symbols` 保持字符串列表；
 - 个性化策略配置放在 `overrides.<symbol>`；
 - `portfolio_management.enabled` 是全局开关，不按市场配置；默认关闭；
+- `portfolio.holdings.enabled` 是可选 Holdings 来源的独立配置，默认关闭；
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
+
+## Portfolio Exposure 的 Holdings 来源配置
+
+Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。当前这轮只增加
+`portfolio.holdings.enabled` 的配置、PM 来源预检和读回；现有情景查询尚未按该字段扩展持仓来源。
+开启预检只列出 PM Holdings 已观测账户，不宣称覆盖全部 broker 或 market，也不把 Holdings
+写入 Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由 `portfolio_management.enabled` 开启。
+PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
+
+通过 YAML authoring/build 事务预览和写入：
+
+```bash
+./om config holdings set --enabled true
+./om config holdings set --enabled true --apply --confirm \
+  --expected-source-sha256 <预览中的 before_sha256> \
+  --expected-preview-sha256 <预览中的 preview_sha256>
+./om config holdings set --enabled false
+./om config holdings set --enabled false --apply --confirm \
+  --expected-source-sha256 <关闭预览中的 before_sha256> \
+  --expected-preview-sha256 <关闭预览中的 preview_sha256>
+```
+
+预览摘要绑定目标值、配置路径和 runtime root；apply 改动这些目标时需重新预览。
+写入后会核对 `config.yaml`、所有已配置市场 runtime JSON 和 Assistant 快照的摘要；
+如果写入后读回失败，错误会给出已写入状态、审计 ID 与备份路径，须先核对目标再重试。
+如需回滚，恢复 YAML 备份后，还须用 `om config build` 和 `om config build-assistant`
+重建返回结果中列出的市场与 Assistant 目标，并核对读回；只恢复 YAML 不会撤销生成快照。
 
 ## Symbol 扫描并发
 

@@ -10,6 +10,10 @@ trade_intake:
     default_mode: off
     accounts: {}
 
+portfolio:
+  holdings:
+    enabled: false
+
 templates:
   put_base:
     sell_put:
