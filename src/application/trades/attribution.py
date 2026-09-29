@@ -24,7 +24,7 @@ from src.application.write_contract import write_control
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from domain.domain.strategy_membership import resolve_trade_attribution
 from domain.domain.combo_reconciliation import delivered_combo_exposures_for_lot
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
 from domain.domain.wheel.intents import resolve_wheel_fill_intent
 from domain.domain.wheel import effective_wheel_events
 from domain.domain.ledger.position_fields import effective_contracts_open
@@ -521,16 +521,21 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
         combo_mode=combo_reconciliation_mode_for_account(config, account=account))
     rows = view["rows"]
     execution = str(payload.get("execution_key") or "").strip()
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    identity = resolve_symbol_identity(raw_symbol) if raw_symbol else None
+    if raw_symbol and (identity is None or identity.market.lower() != market):
+        raise AgentToolError(code="INPUT_ERROR", message="标的与所选市场不一致。")
     status = str(payload.get("status") or "").strip()
     cursor = str(payload.get("cursor") or "")
     if status and status not in {"linked", "ordinary", "pending", "conflict", "not_applicable"}:
         raise AgentToolError(code="INPUT_ERROR", message="无效的归属状态。")
     rows = [row for row in rows if (not execution or row["execution_key"] == execution)
+            and (identity is None or row["contract_key"]["underlying_symbol"] == identity.canonical)
             and (not status or row["status"] == status) and row["open_event_id"] > cursor]
     rows.sort(key=lambda row: row["open_event_id"])
     limit = max(1, min(int(payload.get("limit") or 50), 100))
     page = rows[:limit]
-    return {"account": account, "rows": page, "returned_count": len(page),
+    return {"account": account, "market": market, "rows": page, "returned_count": len(page),
             "next_cursor": page[-1]["open_event_id"] if len(rows) > limit else None,
             "evidence_scope": "canonical_ledger_and_local_candidates", "evidence_complete": all(row["evidence_complete"] for row in page),
             "capacity_observed": False}, [], {}
