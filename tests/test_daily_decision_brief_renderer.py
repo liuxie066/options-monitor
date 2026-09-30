@@ -370,6 +370,110 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
     assert "暂未形成推荐" not in message
 
 
+def _hk_assigned_wheel_brief() -> dict:
+    brief = _brief()
+    brief["market"] = "HK"
+    brief["wheel_batches"] = []
+    for index, price in enumerate((77.5, 77.5, 77.5, 75, 80), start=1):
+        brief["wheel_batches"].append({
+            "account": "lx",
+            "wheel_branch_id": f"meituan-{index:08d}",
+            "direction": "call",
+            "symbol": "3690.HK",
+            "broker": "富途",
+            "currency": "HKD",
+            "assignment_price": price,
+            "assigned_at_ms": 1_000 if price == 77.5 else index * 1_000,
+            "shares_remaining": 500,
+            "has_final_candidate": False,
+            "recommended_contracts": 0,
+            "status": "linkage_unresolved",
+            "reason_codes": ["linkage_unresolved"],
+            "coverage": {
+                "status": "unavailable",
+                "target_shares": 500,
+                "committed_shares": 0,
+                "reserved_shares": 0,
+                "available_shares": 500,
+                "reason_codes": ["linkage_unresolved"],
+            },
+        })
+    brief["wheel_batches"].append({
+        **brief["wheel_batches"][0],
+        "wheel_branch_id": "tencent-00000001",
+        "symbol": "0700.HK",
+        "shares_remaining": 100,
+        "coverage": {
+            "status": "full", "target_shares": 100,
+            "committed_shares": 100, "reserved_shares": 0,
+            "available_shares": 0, "reason_codes": [],
+        },
+        "status": "ready", "reason_codes": [],
+    })
+    return brief
+
+
+def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
+    brief = _hk_assigned_wheel_brief()
+    for blocked in (False, True):
+        current = deepcopy(brief)
+        if blocked:
+            current["actionability"] = current["status"] = "blocked"
+        view = build_daily_brief_user_view(
+            current, delivery_kind="fixed_report", context=_scheduled_context(),
+        )
+        wheel = view["wheel_batches"]
+        assert len(wheel) == (3 if blocked else 4)
+        assert sum("3690.HK" in item["title"] for item in wheel) == 3
+        if not blocked:
+            assert any("0700.HK" in item["title"] for item in wheel)
+        grouped = next(item for item in wheel if "77.5P" in item["title"])
+        assert "3 批" in grouped["title"]
+        assert "1,500 股" in " ".join(grouped["details"])
+        assert "成交归属待人工确认" in " ".join(grouped["details"])
+        assert "可开数量以账户容量检查为准" in " ".join(grouped["details"])
+        assert all(f"{index:08d}" in " ".join(grouped["details"]) for index in (1, 2, 3))
+        for render in (render_fixed_report, render_fixed_report_card_markdown):
+            message = render(current, context=_scheduled_context())
+            assert "77.5P" in message
+            assert "1,500 股" in message
+            assert "成交归属待人工确认" in message
+    full = build_daily_brief_user_view(
+        brief, delivery_kind="full", context=_scheduled_context(),
+    )
+    assert len(full["wheel_batches"]) == 6
+    for row in brief["wheel_batches"][:3]:
+        row["reason_codes"] = ["no_candidate"]
+    grouped = next(item for item in build_daily_brief_user_view(
+        brief, delivery_kind="fixed_report", context=_scheduled_context(),
+    )["wheel_batches"] if "77.5P" in item["title"])
+    assert "成交归属待人工确认" in " ".join(grouped["details"])
+
+
+@pytest.mark.parametrize("change", ("missing", "warning", "candidate", "quantity", "malformed"))
+def test_fixed_report_keeps_unsafe_assignment_batches_separate(change: str) -> None:
+    brief = _hk_assigned_wheel_brief()
+    row = brief["wheel_batches"][1]
+    if change == "missing":
+        row.pop("assigned_at_ms")
+    elif change == "warning":
+        row["coverage"]["reason_codes"].append("coverage_quantity_unavailable")
+    elif change == "candidate":
+        row["has_final_candidate"] = True
+    elif change == "malformed":
+        row["reason_codes"] = [{"bad": "shape"}]
+    else:
+        row["coverage"]["available_shares"] = None
+    view = build_daily_brief_user_view(
+        brief, delivery_kind="fixed_report", context=_scheduled_context(),
+    )
+    assert len(view["wheel_batches"]) == 6
+    if change == "malformed":
+        message = render_fixed_report(brief, context=_scheduled_context())
+        assert "状态原因待核实" in message
+        assert "bad" not in message
+
+
 def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
     brief = _brief()
     brief["wheel_batches"] = [

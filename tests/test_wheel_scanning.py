@@ -9,6 +9,7 @@ import pytest
 
 from conftest import phase2_opening_row
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.daily_decision_brief_service import _load_wheel_snapshot_family
 from src.application.wheel import (
     build_shared_coverage_facts,
     finalize_wheel_capacity,
@@ -57,6 +58,7 @@ def _read_model() -> dict:
                     "symbol": "NVDA",
                     "currency": "USD",
                     "assigned_at_ms": 1_000,
+                    "assignment_price": 100,
                     "remaining_stock_cost_basis": 10_010,
                     "option_premium_attribution": 250,
                     "covered_call_realized_pnl": 100,
@@ -165,6 +167,20 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     source = result["raw_candidates"]["stock-1"][0]
     expected_key = json.loads(json.dumps(source["rank_key"], allow_nan=False))
     batch = payload["batches"][0]
+    assert {key: batch[key] for key in (
+        "broker", "currency", "assignment_price", "assigned_at_ms"
+    )} == {
+        "broker": "富途", "currency": "USD",
+        "assignment_price": 100, "assigned_at_ms": 1_000,
+    }
+    views, _, available = _load_wheel_snapshot_family(
+        run_id="finite-rank", account="lx", market="US",
+        source_artifacts=[], data_gaps=[], snapshot=payload,
+    )
+    assert available
+    assert views[0]["assignment_price"] == 100
+    assert views[0]["assigned_at_ms"] == 1_000
+    assert views[0]["has_final_candidate"] is True
     assert batch["granted_contracts"] == 1
     for candidate in (batch["raw_candidates"][0], batch["final_candidate"]):
         assert "_grant_evaluations" not in candidate
@@ -176,6 +192,28 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     captured["batches"][0]["raw_candidates"][0]["rank_key"]["sort_tuple"] = (float("inf"),)
     with pytest.raises(WheelCandidateSnapshotError, match="non-finite"):
         seal_wheel_candidate_snapshot(**{**seal_args, "run_id": "invalid-rank"})
+
+
+def test_wheel_snapshot_omits_ambiguous_assignment_facts() -> None:
+    scan = {
+        "scope_results": [{"stock_lot_id": "stock-1", "symbol": "NVDA", "status": "completed"}],
+        "capacity_claims": [], "raw_candidates": {},
+    }
+    for change in ("duplicate", "wrong_account", "missing_price"):
+        model = _read_model()
+        rows = model["assigned_stock_projection"]["_all_assigned_stock_lots"]
+        if change == "duplicate":
+            rows.append(dict(rows[0]))
+        elif change == "wrong_account":
+            rows[0]["account"] = "sy"
+        else:
+            rows[0].pop("assignment_price")
+        batch = finalize_wheel_capacity(
+            account="lx", wheel_read_model=model, wheel_scan=scan,
+            opening_call_candidates=[], coverage_facts=[],
+        )["batches"][0]
+        assert "assignment_price" not in batch
+        assert "assigned_at_ms" not in batch
 
 
 def test_wheel_scan_uses_decision_time_and_ignores_ineligible_sibling() -> None:
