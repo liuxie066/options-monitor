@@ -4,6 +4,7 @@ from typing import Any
 
 import pandas as pd
 
+from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
@@ -69,6 +70,7 @@ def build_portfolio_risk_context(
 
     short_put_by_symbol, short_put_total, short_put_unavailable = _short_put_assignment_from_option_ctx(
         option_ctx,
+        portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
     )
     unavailable.extend(short_put_unavailable)
@@ -157,6 +159,7 @@ def _stock_value_cny(
 def _short_put_assignment_from_option_ctx(
     option_ctx: dict[str, Any],
     *,
+    portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
 ) -> tuple[dict[str, float], float | None, list[str]]:
     unavailable: list[str] = []
@@ -193,8 +196,9 @@ def _short_put_assignment_from_option_ctx(
                 total_cny += float(converted)
     if total_cny is None and by_symbol:
         total_cny = sum(by_symbol.values())
-    if isinstance(option_ctx.get("cash_secured_unavailable_by_symbol"), dict):
-        for raw_symbol, reason in option_ctx.get("cash_secured_unavailable_by_symbol", {}).items():
+    unresolved = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
+    if isinstance(unresolved, dict):
+        for raw_symbol, reason in unresolved.items():
             unavailable.append(f"{canonical_symbol(raw_symbol) or raw_symbol}:{reason}")
     return by_symbol, total_cny, unavailable
 

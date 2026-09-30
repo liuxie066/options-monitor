@@ -24,7 +24,10 @@ from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
 )
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
-from domain.domain.cash_secured_utils import read_cash_secured_total_cny
+from domain.domain.cash_secured_utils import (
+    cash_secured_unavailable_for_cash_snapshot,
+    read_cash_secured_total_cny,
+)
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application.cash_totals import sum_by_currency_to_cny
@@ -1552,7 +1555,9 @@ def _build_funds(
 
     secured = _currency_amounts(option_positions_context.get("cash_secured_total_by_ccy"))
     option_as_of = _parse_datetime(option_positions_context.get("as_of_utc"))
-    unavailable = option_positions_context.get("cash_secured_unavailable_by_symbol")
+    unavailable = cash_secured_unavailable_for_cash_snapshot(
+        dict(option_positions_context), dict(portfolio_context)
+    )
     ledger = option_positions_context.get("ledger")
     unavailable_reliable = unavailable is None or (isinstance(unavailable, Mapping) and not unavailable)
     ledger_reliable = ledger is None or (

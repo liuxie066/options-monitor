@@ -92,9 +92,11 @@ def test_query_sell_put_cash_domain_minimal() -> None:
 
     old_load_portfolio = m.load_account_portfolio_context
     old_load_option_position_records = m._load_option_position_records
+    old_decision_state_snapshot = m.decision_state_snapshot
     old_build_context = m.build_option_positions_context
     m.load_account_portfolio_context = fake_load_account_portfolio_context
-    m._load_option_position_records = lambda *_a, **_k: []
+    m._load_option_position_records = lambda *_a, **_k: (object(), [])
+    m.decision_state_snapshot = lambda *_a, **_k: {}
     m.build_option_positions_context = lambda *_a, **_k: {
         'cash_secured_by_symbol_by_ccy': {'AAPL': {'USD': 200.0}},
         'cash_secured_total_by_ccy': {'USD': 200.0},
@@ -113,6 +115,7 @@ def test_query_sell_put_cash_domain_minimal() -> None:
     finally:
         m.load_account_portfolio_context = old_load_portfolio
         m._load_option_position_records = old_load_option_position_records
+        m.decision_state_snapshot = old_decision_state_snapshot
         m.build_option_positions_context = old_build_context
 
 

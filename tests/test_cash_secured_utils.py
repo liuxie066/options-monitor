@@ -4,6 +4,7 @@ import unittest
 
 
 from domain.domain.cash_secured_utils import (
+    cash_secured_unavailable_for_cash_snapshot,
     cash_secured_symbol_by_ccy,
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
@@ -13,6 +14,53 @@ from domain.domain.cash_secured_utils import (
 
 
 class TestCashSecuredUtils(unittest.TestCase):
+    def test_closed_put_uses_newer_direct_cash_snapshot(self) -> None:
+        option_ctx = {
+            "cash_secured_unavailable_by_symbol": {
+                "0700.HK": "option_close_settlement_pending",
+                "NVDA": "short_put_cash_secured_basis_missing",
+            },
+            "open_positions_min": [
+                {
+                    "lot_id": f"lot-{index}",
+                    "symbol": "0700.HK",
+                    "side": "short",
+                    "option_type": "put",
+                    "closure_fact": "option_leg_closed",
+                    "reserved_contracts_by_lot": {f"lot-{index}": 1},
+                    "first_option_close_received_at_ms": 1_790_682_868_000,
+                    "last_option_close_received_at_ms": 1_790_682_868_000,
+                }
+                for index in range(4)
+            ],
+        }
+        cash = {
+            "context_source": "futu_direct",
+            "source_observed_at": "2026-09-30T03:00:48+00:00",
+            "cash_balance_reliable": True,
+        }
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(option_ctx, cash),
+            {"NVDA": "short_put_cash_secured_basis_missing"},
+        )
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(
+                option_ctx, {**cash, "source_observed_at": "2026-09-29T10:00:00+00:00"}
+            ),
+            option_ctx["cash_secured_unavailable_by_symbol"],
+        )
+        option_ctx["open_positions_min"][0]["closure_fact"] = "partial_close_observed"
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(option_ctx, cash),
+            option_ctx["cash_secured_unavailable_by_symbol"],
+        )
+        option_ctx["open_positions_min"][0]["closure_fact"] = "option_leg_closed"
+        option_ctx["open_positions_min"][0]["last_option_close_received_at_ms"] = 1_800_000_000_000
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(option_ctx, cash),
+            option_ctx["cash_secured_unavailable_by_symbol"],
+        )
+
     def test_cash_secured_utils_only_by_ccy(self) -> None:
         ctx = {
             'cash_secured_by_symbol_by_ccy': {
