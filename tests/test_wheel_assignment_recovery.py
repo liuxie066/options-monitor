@@ -34,6 +34,7 @@ def _missing_branch(tmp_path, **payload):
 def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_assignment: bool = False,
                           call_strike: int = 110, call_payload_extra: dict | None = None,
                           later_disjoint_assignment: bool = False,
+                          later_disjoint_expiry: bool = False,
                           adopted_after_open: bool = False):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     group_id = "combo_yield:lx:pair"
@@ -108,7 +109,7 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_
         broker="富途", account="lx", underlying_symbol="NVDA", option_type="put",
         strike=95, expiration_ymd="2026-08-21",
     )
-    if later_disjoint_assignment:
+    if later_disjoint_assignment or later_disjoint_expiry:
         persist_trade_event_objects_atomically(repo, [replace(
             opening, event_id="other-put-open", lot_id="other-put-lot",
             contract_key=other_key, raw_payload={"side": "sell"},
@@ -142,6 +143,13 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_
         persist_trade_event_objects_atomically(repo, [replace(
             assignment, event_id="other-put-assignment", event_time_ms=2_500,
             target_lot_id="other-put-lot", contract_key=other_key,
+        )])
+    if later_disjoint_expiry:
+        persist_trade_event_objects_atomically(repo, [TradeEvent(
+            event_id="other-put-expiry", event_type="expire_close", event_time_ms=2_500,
+            contract_key=other_key, contracts=1, price=0, currency="USD",
+            source="test", multiplier=10, target_lot_id="other-put-lot",
+            raw_payload={"side": "buy"},
         )])
     if not identity_before_assignment:
         repo.insert_strategy_group_identity(identity)
@@ -489,3 +497,13 @@ def test_completed_combo_recovery_allows_later_disjoint_assignment(tmp_path):
         event for event in repo.list_wheel_events(account="lx")
         if event["source_trade_event_id"] == "put-assignment"
     ]) == 1
+
+
+def test_completed_combo_recovery_allows_later_disjoint_short_put_expiry(tmp_path):
+    repo = _combo_missing_branch(tmp_path, later_disjoint_expiry=True, adopted_after_open=True)
+    preview = _recover(repo, allow_completed_combo_yield=True)
+    assert preview["status"] == "preview"
+    result = _recover(repo, allow_completed_combo_yield=True, apply=True, confirm=True,
+                      expected_preview_hash=preview["preview_hash"])
+    assert result["status"] == "applied"
+    assert len(repo.list_wheel_events(account="lx")) == 1
