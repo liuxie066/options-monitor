@@ -387,3 +387,45 @@ def test_assignment_proof_rejects_known_void_of_long_open() -> None:
         assignment=assignment, group_id=GROUP_ID,
         trade_events=[*events, known_void], identities=identities,
     )[0] is None
+
+
+def test_sp_lc_assignment_proof_accepts_exact_pre_assignment_controlled_adoption() -> None:
+    assignment, events, identities = _assignment_pair("csp_lc")
+    inference_id = "combo-inference:v1:verified-pair"
+    adoptions = []
+    for opening in events:
+        role = opening["raw_payload"]["leg_role"]
+        for key in ("strategy", "strategy_group_id", "leg_role"):
+            opening["raw_payload"].pop(key)
+        event_id = "combo-adopt:v1:" + canonical_sha256(
+            {"inference_id": inference_id, "role": role}
+        )
+        adoptions.append(TradeEvent(
+            event_id=event_id, event_type="adjust", event_time_ms=1_500,
+            contract_key=ContractKey.from_values(**opening["contract_key"]),
+            contracts=0, price=0, currency="USD", source="post_trade_combo_reconciliation",
+            multiplier=100, target_lot_id=opening["lot_id"],
+            raw_payload={
+                "source": "post_trade_combo_reconciliation",
+                "source_type": "combo_pair_inference",
+                "mode": "post_trade_combo_adoption",
+                "inference_id": inference_id,
+                "record_id": opening["lot_id"],
+                "target_lot_id": opening["lot_id"],
+                "adjust_target_source_event_id": opening["event_id"],
+                "idempotency_key": event_id,
+                "patch": {
+                    "strategy": "combo_yield", "strategy_group_id": GROUP_ID,
+                    "leg_role": role, "last_action_at": 1_500,
+                },
+            },
+        ).to_dict())
+    assert resolve_combo_assignment_proof(
+        assignment=assignment, group_id=GROUP_ID,
+        trade_events=[*events, *adoptions], identities=identities,
+    ) == ("csp_lc", None)
+    altered = [*events, {**adoptions[0], "source": "test"}, adoptions[1]]
+    assert resolve_combo_assignment_proof(
+        assignment=assignment, group_id=GROUP_ID,
+        trade_events=altered, identities=identities,
+    )[0] is None

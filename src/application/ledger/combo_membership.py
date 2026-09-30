@@ -724,6 +724,63 @@ def _nonnegative_integer(value: Any) -> int | None:
     return parsed if parsed is not None and parsed >= 0 else None
 
 
+def _controlled_pair_adoption(
+    rows: list[dict[str, Any]], *, binding: Mapping[str, Any],
+    opening: TradeEvent, group_id: str, role: str, instant: int,
+    voided_ids: set[str],
+) -> tuple[str, int] | None:
+    """Recognize an exact pre-assignment post-trade Combo adoption."""
+    candidates = [
+        row for row in rows
+        if row.get("event_type") == "adjust"
+        and row.get("target_lot_id") == binding["record_id"]
+        and opening.event_time_ms < (_integer(row.get("event_time_ms")) or 0) < instant
+        and row.get("source") == "post_trade_combo_reconciliation"
+    ]
+    if len(candidates) != 1:
+        return None
+    row = candidates[0]
+    raw = row.get("raw_payload")
+    if not isinstance(raw, Mapping):
+        return None
+    inference_id = _text(raw.get("inference_id"))
+    event_id = "combo-adopt:v1:" + canonical_sha256(
+        {"inference_id": inference_id, "role": role}
+    )
+    patch = raw.get("patch")
+    if (
+        not inference_id.startswith("combo-inference:v1:")
+        or row.get("event_id") != event_id
+        or event_id in voided_ids
+        or raw.get("source") != "post_trade_combo_reconciliation"
+        or raw.get("source_type") != "combo_pair_inference"
+        or raw.get("mode") != "post_trade_combo_adoption"
+        or raw.get("idempotency_key") != event_id
+        or raw.get("record_id") != binding["record_id"]
+        or raw.get("target_lot_id") != binding["record_id"]
+        or raw.get("adjust_target_source_event_id") != opening.event_id
+        or not isinstance(patch, Mapping)
+        or set(patch) != {"strategy", "strategy_group_id", "leg_role", "last_action_at"}
+        or patch.get("strategy") != "combo_yield"
+        or patch.get("strategy_group_id") != group_id
+        or patch.get("leg_role") != role
+        or _integer(patch.get("last_action_at")) != row.get("event_time_ms")
+    ):
+        return None
+    try:
+        adoption = TradeEvent.from_dict(row)
+    except (TypeError, ValueError):
+        return None
+    if (
+        adoption.contract_key != opening.contract_key
+        or adoption.currency != opening.currency
+        or adoption.multiplier != opening.multiplier
+        or adoption.contracts != 0
+    ):
+        return None
+    return inference_id, adoption.event_time_ms
+
+
 def resolve_combo_assignment_proof(
     *,
     assignment: TradeEvent,
@@ -820,17 +877,43 @@ def resolve_combo_assignment_proof(
         if variant == "cc_lp" else
         (("put", FUNDING_PUT_ROLES), ("call", PARTICIPATION_CALL_ROLES))
     )
+    adopted_roles = []
     for label, roles in expected_roles:
         opening = leg_events[label]
         metadata = resolve_strategy_metadata(
             opening.raw_payload, source_id=opening.event_id,
         )
         if (
-            metadata.issues
-            or metadata.metadata.strategy != "combo_yield"
-            or metadata.metadata.strategy_group_id != group_id
-            or metadata.metadata.leg_role not in roles
+            not metadata.issues
+            and metadata.metadata.strategy == "combo_yield"
+            and metadata.metadata.strategy_group_id == group_id
+            and metadata.metadata.leg_role in roles
         ):
+            continue
+        if (
+            variant != "csp_lc" or metadata.issues
+            or any((metadata.metadata.strategy, metadata.metadata.strategy_group_id,
+                    metadata.metadata.leg_role))
+        ):
+            return None, "combo_assignment_open_identity_unproven"
+        adopted_roles.append((label, (put_binding if label == "put" else call_binding)["role"]))
+    if adopted_roles:
+        if len(adopted_roles) != 2:
+            return None, "combo_assignment_open_identity_unproven"
+        voided_ids = {
+            target for row in rows
+            for target in [valid_void_target_event_id(row)]
+            if target
+        }
+        proofs = [
+            _controlled_pair_adoption(
+                rows, binding=put_binding if label == "put" else call_binding,
+                opening=leg_events[label], group_id=group_id, role=role,
+                instant=instant, voided_ids=voided_ids,
+            )
+            for label, role in adopted_roles
+        ]
+        if any(proof is None for proof in proofs) or len(set(proofs)) != 1:
             return None, "combo_assignment_open_identity_unproven"
     if variant == "csp_lc":
         matching = [

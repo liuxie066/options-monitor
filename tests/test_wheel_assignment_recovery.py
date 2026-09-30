@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from domain.domain.combo_identity import build_combo_identity
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import recover_wheel_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -31,7 +32,9 @@ def _missing_branch(tmp_path, **payload):
 
 
 def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_assignment: bool = False,
-                          call_strike: int = 110, call_payload_extra: dict | None = None):
+                          call_strike: int = 110, call_payload_extra: dict | None = None,
+                          later_disjoint_assignment: bool = False,
+                          adopted_after_open: bool = False):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     group_id = "combo_yield:lx:pair"
     metadata = {
@@ -69,7 +72,47 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_
         raw_payload={"side": "buy", **metadata, "leg_role": "participation_call",
                      **(call_payload_extra or {})},
     )
+    if adopted_after_open:
+        opening = replace(opening, raw_payload={"side": "sell"})
+        call = replace(call, raw_payload={"side": "buy"})
     persist_trade_event_objects_atomically(repo, [opening, call])
+    if adopted_after_open:
+        inference_id = "combo-inference:v1:verified-pair"
+        adoptions = []
+        for source, role in ((opening, "funding_put"), (call, "participation_call")):
+            event_id = "combo-adopt:v1:" + canonical_sha256(
+                {"inference_id": inference_id, "role": role}
+            )
+            adoptions.append(TradeEvent(
+                event_id=event_id, event_type="adjust", event_time_ms=1_500,
+                contract_key=source.contract_key, contracts=0, price=0,
+                currency="USD", source="post_trade_combo_reconciliation",
+                multiplier=10, target_lot_id=source.lot_id,
+                raw_payload={
+                    "source": "post_trade_combo_reconciliation",
+                    "source_type": "combo_pair_inference",
+                    "mode": "post_trade_combo_adoption",
+                    "inference_id": inference_id,
+                    "record_id": source.lot_id,
+                    "target_lot_id": source.lot_id,
+                    "adjust_target_source_event_id": source.event_id,
+                    "idempotency_key": event_id,
+                    "patch": {
+                        "strategy": "combo_yield", "strategy_group_id": group_id,
+                        "leg_role": role, "last_action_at": 1_500,
+                    },
+                },
+            ))
+        persist_trade_event_objects_atomically(repo, adoptions)
+    other_key = ContractKey.from_values(
+        broker="富途", account="lx", underlying_symbol="NVDA", option_type="put",
+        strike=95, expiration_ymd="2026-08-21",
+    )
+    if later_disjoint_assignment:
+        persist_trade_event_objects_atomically(repo, [replace(
+            opening, event_id="other-put-open", lot_id="other-put-lot",
+            contract_key=other_key, raw_payload={"side": "sell"},
+        )])
     identity = build_combo_identity(
         {
             "group_id": group_id,
@@ -95,6 +138,11 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_
         raw_payload=_assignment_payload(10),
     )
     persist_trade_event_objects_atomically(repo, [assignment])
+    if later_disjoint_assignment:
+        persist_trade_event_objects_atomically(repo, [replace(
+            assignment, event_id="other-put-assignment", event_time_ms=2_500,
+            target_lot_id="other-put-lot", contract_key=other_key,
+        )])
     if not identity_before_assignment:
         repo.insert_strategy_group_identity(identity)
     if close_call:
@@ -116,7 +164,8 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True, identity_before_
             )],
         )
     if not identity_before_assignment:
-        assert not repo.list_wheel_events(account="lx")
+        assert not any(event["source_trade_event_id"] == "put-assignment"
+                       for event in repo.list_wheel_events(account="lx"))
     return repo
 
 
@@ -423,3 +472,20 @@ def test_close_does_not_mask_conflicting_stored_window(tmp_path, field, value):
     _close_activation(repo)
     with pytest.raises(ValueError, match="activation window conflict"):
         _recover(repo)
+
+def test_completed_combo_recovery_allows_later_disjoint_assignment(tmp_path):
+    repo = _combo_missing_branch(
+        tmp_path, later_disjoint_assignment=True, adopted_after_open=True,
+    )
+    preview = _recover(repo, allow_completed_combo_yield=True)
+    assert preview["status"] == "preview"
+    assert preview["branch"]["stock_lot_id"] == "assigned-stock-put-assignment"
+    applied = _recover(
+        repo, allow_completed_combo_yield=True, apply=True, confirm=True,
+        expected_preview_hash=preview["preview_hash"],
+    )
+    assert applied["status"] == "applied"
+    assert len([
+        event for event in repo.list_wheel_events(account="lx")
+        if event["source_trade_event_id"] == "put-assignment"
+    ]) == 1
