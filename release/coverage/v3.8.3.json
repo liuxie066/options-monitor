@@ -1,0 +1,40 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.3",
+  "base": {
+    "tag": "v3.8.2",
+    "commit": "8c79698406575088e6db2d776f4223751a8fba62"
+  },
+  "reviewed_head": "936a2867fbe25e4899bdd678288a1972f86a2b27",
+  "commits": [
+    {
+      "sha": "9ac24498d9ab59318b721ca8eb9dd5cc5b6b6a1b",
+      "subject": "fix(wheel): accept stored Combo open contract keys"
+    },
+    {
+      "sha": "936a2867fbe25e4899bdd678288a1972f86a2b27",
+      "subject": "Merge pull request #401 from liuxie066/codex/combo-identity-key"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复历史 Combo Yield 身份保存原始开仓合约键时，75P 等已指派卖腿的 Wheel 恢复被误判为身份不匹配的问题。",
+      "commits": [
+        "9ac24498d9ab59318b721ca8eb9dd5cc5b6b6a1b",
+        "936a2867fbe25e4899bdd678288a1972f86a2b27"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "9ac24498d9ab59318b721ca8eb9dd5cc5b6b6a1b",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/401"]
+    },
+    {
+      "commit": "936a2867fbe25e4899bdd678288a1972f86a2b27",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/401"]
+    }
+  ]
+}
