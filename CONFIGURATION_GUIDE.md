@@ -93,8 +93,10 @@ portfolio_management:
 
 Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。当前这轮只增加
 `portfolio.holdings.enabled` 的配置、PM 来源预检和读回；现有情景查询尚未按该字段扩展持仓来源。
-开启预检只列出 PM Holdings 已观测账户，不宣称覆盖全部 broker 或 market，也不把 Holdings
-写入 Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由 `portfolio_management.enabled` 开启。
+开启预检以 Portfolio Exposure 当前使用的 OM 运行账户为范围：这些账户须由 PM 发现，且估值证据
+新鲜可信；PM 的额外账户不阻止开启。结果只列出该范围内已观测的 Holdings，不宣称覆盖全部 broker
+或 market，也不把 Holdings 写入 Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
+`portfolio_management.enabled` 开启。
 PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
 
 通过 YAML authoring/build 事务预览和写入：

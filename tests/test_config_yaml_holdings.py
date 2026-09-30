@@ -180,7 +180,7 @@ def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch, ac
         "account_status": [{"account": "lx", "status": "complete"}],
         "holdings": [{"account": "lx", "code": "NVDA", "broker": "富途"}],
     })
-    scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
+    scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
     assert scope["accounts_observed"] == ["lx"]
     assert scope["source_observed_at"] == "2026-09-29T00:00:00Z"
     assert scope["brokers_observed"] == ["富途"]
@@ -193,14 +193,14 @@ def test_holdings_probe_reports_observed_scope_and_rejects_stale(monkeypatch, ac
         "holdings": [],
     })
     with pytest.raises(ValueError, match="no observed holdings"):
-        inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
+        inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
 
     monkeypatch.setattr(inclusion, "read_portfolio_valuation_evidence", lambda **_kwargs: {
         "status": "partial", "warnings": ["stale"], "freshness": {"status": "stale"},
         "account_status": [], "holdings": [],
     })
     with pytest.raises(ValueError, match="incomplete or stale"):
-        inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
+        inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
 
 
 def test_holdings_probe_accepts_contract_response_through_pm_client(monkeypatch) -> None:
@@ -234,7 +234,7 @@ def test_holdings_probe_accepts_contract_response_through_pm_client(monkeypatch)
             return Response({
                 "success": True, "freshness": freshness,
                 "retrieved_at_utc": "2026-09-29T00:00:01Z",
-                "accounts": ["lx"], "count": 1,
+                "accounts": ["hb", "lx"], "count": 2,
             })
         assert json.loads(request.data)["accounts"] == ["lx"]
         return Response({
@@ -252,10 +252,24 @@ def test_holdings_probe_accepts_contract_response_through_pm_client(monkeypatch)
         inclusion, "resolve_portfolio_management_client",
         lambda *_args, **_kwargs: PortfolioManagementClient(urlopen_fn=open_pm),
     )
-    scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}})
+    scope = inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
     assert scope["accounts_observed"] == ["lx"]
     assert scope["markets_observed"] == ["US"]
     assert [method for method, _url, _timeout in seen] == ["GET", "POST"]
+
+
+def test_holdings_probe_rejects_missing_om_account(monkeypatch) -> None:
+    class Client:
+        def read_view(self, _view, *, query, timeout):
+            return {
+                "success": True,
+                "accounts": ["hb"],
+                "freshness": {"status": "fresh", "trust_status": "trusted"},
+            }
+
+    monkeypatch.setattr(inclusion, "resolve_portfolio_management_client", lambda *_args, **_kwargs: Client())
+    with pytest.raises(ValueError, match="missing configured OM accounts: lx"):
+        inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
 
 
 def test_holdings_switch_cannot_be_overridden_per_market(tmp_path: Path) -> None:

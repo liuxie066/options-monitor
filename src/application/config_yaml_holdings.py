@@ -48,9 +48,18 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
         isinstance(item, dict) and item.get("source") == "holdings" for item in warnings
     ):
         raise ValueError("PM Holdings account discovery reported a holdings warning")
-    candidate_accounts = sorted({str(account).strip().lower() for account in accounts if str(account).strip()})
+    configured = config.get("accounts")
+    if not isinstance(configured, list) or not configured:
+        raise ValueError("OM configured accounts are unavailable")
+    candidate_accounts = sorted(
+        {account.strip().lower() for account in configured if isinstance(account, str) and account.strip()}
+    )
     if not candidate_accounts:
-        raise ValueError("PM account discovery has no usable accounts")
+        raise ValueError("OM configured accounts are unavailable")
+    discovered = {account.strip().lower() for account in accounts if isinstance(account, str) and account.strip()}
+    missing = sorted(set(candidate_accounts) - discovered)
+    if missing:
+        raise ValueError("PM account discovery is missing configured OM accounts: " + ", ".join(missing))
     evidence = read_portfolio_valuation_evidence(
         accounts=candidate_accounts,
         supplemental_codes=[],

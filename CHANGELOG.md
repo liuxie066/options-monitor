@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 修复 Portfolio Exposure 开启 Holdings 时把 PM 额外账户也纳入质量预检、导致已配置的 OM 账户证据可信却仍无法开启的问题。
+
 ## 3.8.4 - 2026-09-30
 
 ### Bug Fixes
