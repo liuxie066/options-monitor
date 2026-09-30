@@ -1291,6 +1291,9 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         observed_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc),
     )
     assert context["cash_secured_total_cny"] == 0
+    assert context["open_positions_min"][0]["last_option_close_received_at_ms"] == frozen_model[
+        "last_option_close_received_at_ms"
+    ]
     gaps: list[dict] = []
     funds, _ = _build_funds(
         portfolio_context={
@@ -1304,6 +1307,23 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert funds["option_opening_available_cny"] is None
     assert funds["available"] is False
     assert gaps == [{"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"}]
+
+    refreshed_at = datetime.fromtimestamp(
+        (max(now_ms, frozen_model["last_option_close_received_at_ms"]) + 1000) / 1000,
+        tz=timezone.utc,
+    ).isoformat()
+    refreshed_funds, _ = _build_funds(
+        portfolio_context={
+            "cash_by_currency": {"USD": 1000},
+            "as_of_utc": refreshed_at,
+            "source_observed_at": refreshed_at,
+            "context_source": "futu_direct",
+        },
+        option_positions_context=context,
+        data_gaps=[],
+    )
+    assert refreshed_funds["available"] is True
+    assert refreshed_funds["option_opening_available_cny"] == 7200.0
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(

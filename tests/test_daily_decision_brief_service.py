@@ -1296,6 +1296,31 @@ def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
     assert brief["funds"]["reason"] == "option_cash_secured_unavailable"
 
 
+def test_closed_put_with_newer_futu_cash_does_not_hide_opening_funds(tmp_path: Path) -> None:
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    state_dir = account_dir / "state"
+    portfolio_path = state_dir / "portfolio_context.json"
+    portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+    portfolio.update(context_source="futu_direct", source_observed_at="2026-07-17T13:59:00+00:00")
+    portfolio_path.write_text(json.dumps(portfolio), encoding="utf-8")
+    option_path = state_dir / "option_positions_context.json"
+    option_ctx = json.loads(option_path.read_text(encoding="utf-8"))
+    option_ctx["cash_secured_unavailable_by_symbol"] = {"0700.HK": "option_close_settlement_pending"}
+    option_ctx["open_positions_min"] = [{
+        "lot_id": "closed-put", "symbol": "0700.HK", "side": "short", "option_type": "put",
+        "closure_fact": "option_leg_closed", "reserved_contracts_by_lot": {"closed-put": 1},
+        "first_option_close_received_at_ms": int(datetime(2026, 7, 17, 12, tzinfo=timezone.utc).timestamp() * 1000),
+        "last_option_close_received_at_ms": int(datetime(2026, 7, 17, 12, tzinfo=timezone.utc).timestamp() * 1000),
+    }]
+    option_path.write_text(json.dumps(option_ctx), encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["funds"]["available"] is True
+    assert brief["funds"]["option_opening_available_cny"] == 307_500.0
+    assert not any(item.get("kind") == "option_opening_available" for item in brief["data_gaps"])
+
+
 def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path: Path) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     (account_dir / "state" / "option_positions_context.json").write_text(

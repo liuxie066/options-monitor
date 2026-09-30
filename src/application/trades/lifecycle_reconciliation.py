@@ -606,6 +606,11 @@ def build_lifecycle_case_read_model_from_resolved_facts(
             if effective_timing is not None
             else None
         ),
+        "last_option_close_received_at_ms": (
+            int(effective_timing["last_option_close_received_at_ms"])
+            if effective_timing is not None
+            else None
+        ),
         "timing_policy_hash": (
             str(effective_timing["timing_policy_hash"])
             if effective_timing is not None

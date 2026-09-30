@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.cash_secured_utils import (
+    cash_secured_unavailable_for_cash_snapshot,
     cash_secured_symbol_by_ccy,
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
@@ -31,13 +32,14 @@ log = logging.getLogger(__name__)
 
 def _cash_secured_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
+    portfolio_ctx: dict[str, Any] | None,
 ) -> str:
     if not isinstance(option_ctx, dict):
         return "option_positions_cash_secured_context_unavailable"
     context_status = str(option_ctx.get("context_status") or "").strip().lower()
     if context_status and context_status != "available":
         return "option_positions_cash_secured_context_unavailable"
-    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
+    unavailable = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
     if unavailable is not None and not isinstance(unavailable, dict):
         return "option_positions_cash_secured_context_unavailable"
     if isinstance(unavailable, dict) and unavailable:
@@ -118,7 +120,7 @@ def sell_put_opening_capacity_inputs(
 
     option_ctx = portfolio_ctx.get("option_ctx")
     cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
-        option_ctx if isinstance(option_ctx, dict) else None
+        option_ctx if isinstance(option_ctx, dict) else None, portfolio_ctx
     )
     if cash_secured_unavailable_reason:
         return {
@@ -263,7 +265,7 @@ def enrich_sell_put_candidates_with_cash(
     used_total_cny = None
     used_symbol_cny = None
     cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
-        option_ctx
+        option_ctx, portfolio_ctx
     )
     total_by_ccy_norm: dict[str, float] = {}
 

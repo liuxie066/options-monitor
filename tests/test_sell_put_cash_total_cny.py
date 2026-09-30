@@ -94,6 +94,34 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
     )
 
 
+def test_sell_put_opening_capacity_uses_closed_put_and_newer_direct_cash() -> None:
+    result = sell_put_opening_capacity_inputs(
+        symbol="NVDA", strike=100.0, multiplier=100, currency="CNY",
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        portfolio_ctx={
+            "portfolio_source_name": "futu",
+            "context_source": "futu_direct",
+            "source_observed_at": "2026-09-30T03:00:48+00:00",
+            "capacity_authority": {"status": "available"},
+            "cash_by_currency": {"CNY": 20000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {"CNY": 2000.0},
+                "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 2000.0}},
+                "cash_secured_unavailable_by_symbol": {"0700.HK": "option_close_settlement_pending"},
+                "open_positions_min": [{
+                    "lot_id": "closed-put", "symbol": "0700.HK", "side": "short", "option_type": "put",
+                    "closure_fact": "option_leg_closed", "reserved_contracts_by_lot": {"closed-put": 1},
+                    "first_option_close_received_at_ms": 1_790_682_868_000,
+                    "last_option_close_received_at_ms": 1_790_682_868_000,
+                }],
+            },
+        },
+    )
+
+    assert result["put_cash_capacity_available"] is True
+    assert result["put_cash_free"] == 18000.0
+
+
 def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing() -> None:
     candidate = {
         "symbol": "NVDA",

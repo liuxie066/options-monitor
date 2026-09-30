@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from domain.domain.cash_secured_utils import (
+    cash_secured_unavailable_for_cash_snapshot,
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
 from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
@@ -23,7 +25,7 @@ from src.infrastructure.exchange_rates import (
 )
 from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
-from src.application.ledger.api import list_position_lot_snapshots, open_position_ledger
+from src.application.ledger.api import decision_state_snapshot, list_position_lot_snapshots, open_position_ledger
 from src.application.portfolio_context_service import load_account_portfolio_context
 
 
@@ -85,13 +87,15 @@ def _load_runtime_config(
     return _normalize_runtime_config(cfg)
 
 
-def _load_option_position_records(data_config_path: Path) -> list[dict]:
+def _load_option_position_records(data_config_path: Path) -> tuple[object, list[dict]]:
     option_repo = open_position_ledger(data_config_path)
-    return list(list_position_lot_snapshots(option_repo))
+    return option_repo, list(list_position_lot_snapshots(option_repo))
 
 
-def _cash_secured_unavailable_reason(option_ctx: dict | None) -> tuple[dict[str, str], str | None]:
-    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol") if isinstance(option_ctx, dict) else None
+def _cash_secured_unavailable_reason(
+    option_ctx: dict | None, portfolio_ctx: dict | None,
+) -> tuple[dict[str, str], str | None]:
+    unavailable = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
     if not isinstance(unavailable, dict) or not unavailable:
         return {}, None
 
@@ -275,7 +279,7 @@ def query_sell_put_cash(
         write_cache=write_cache,
     )
 
-    option_records = _load_option_position_records(data_config_path)
+    option_repo, option_records = _load_option_position_records(data_config_path)
     exchange_rate_payload: dict[str, Any] = {}
     if not no_exchange_rates:
         cache_file = (out_dir_path / "rate_cache.json").resolve()
@@ -286,11 +290,21 @@ def query_sell_put_cash(
         )
         if exchange_rate_observation_status(candidate, max_age_hours=24) == "ready":
             exchange_rate_payload = dict(candidate or {})
+    normalized_account = str(account or "").strip().lower()
+    decision_snapshot = (
+        decision_state_snapshot(
+            option_repo,
+            account=normalized_account,
+            portfolio_scope_id=portfolio_scope_id(normalized_account),
+        )
+        if normalized_account else None
+    )
     opt = build_option_positions_context(
         option_records,
         broker=market,
         account=account,
         rates=exchange_rate_payload,
+        decision_snapshot=decision_snapshot,
     )
     portfolio_source_name = str(portfolio['portfolio_source_name'])
 
@@ -318,7 +332,7 @@ def query_sell_put_cash(
 
     norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(opt)
     total_by_ccy_norm = normalize_cash_secured_total_by_ccy(opt, by_symbol_by_ccy=norm_by_ccy)
-    cash_secured_unavailable_by_symbol, cash_secured_unavailable_reason = _cash_secured_unavailable_reason(opt)
+    cash_secured_unavailable_by_symbol, cash_secured_unavailable_reason = _cash_secured_unavailable_reason(opt, portfolio)
     cash_secured_reliable = not cash_secured_unavailable_by_symbol
     cash_secured_total_cny = read_cash_secured_total_cny(opt) if cash_secured_reliable else None
 
