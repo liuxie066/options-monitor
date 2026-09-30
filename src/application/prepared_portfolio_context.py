@@ -23,12 +23,9 @@ from src.application.config_loader import resolve_data_config_path
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
-    load_holdings_portfolio_shared_context,
     portfolio_context_account_mismatch_reason,
     with_context_source,
 )
-from src.application.portfolio_context_builder import is_valid_global_holdings_context
-from src.application.strategy_policy import wants_global_path_risk_context
 from src.infrastructure.io_utils import (
     atomic_write_json,
     is_fresh,
@@ -731,22 +728,6 @@ def run_worker(request_path: Path) -> int:
             load_json_fn=load_cached_json,
             write_cache=False,
         )
-        if wants_global_path_risk_context(cfg):
-            context = dict(context)
-            context["_global_risk_required"] = True
-            try:
-                shared = load_holdings_portfolio_shared_context(
-                    data_config_path=Path(data_config),
-                    broker=None,
-                )
-                all_accounts = shared.get("all_accounts") if isinstance(shared, dict) else None
-                if isinstance(all_accounts, dict):
-                    global_ctx = {**all_accounts, "portfolio_source_name": "holdings_global"}
-                    if is_valid_global_holdings_context(global_ctx):
-                        context = dict(context)
-                        context["_global_portfolio_ctx"] = with_context_source(global_ctx, "global_prepared")
-            except Exception as exc:
-                logs.append(f"[WARN] global holdings risk context not available: {exc}")
         source_name, source_account = _resolve_context_source_binding(
             config=cfg,
             account=account,

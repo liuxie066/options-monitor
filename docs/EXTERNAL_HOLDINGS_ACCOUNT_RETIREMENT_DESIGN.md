@@ -1,5 +1,7 @@
 # `external_holdings` 账户退役设计
 
+当前全局扫描风险合同见文末「全局 Holdings 扫描分支退役（2026-09-30）」；前文保留当时的设计和迁移依据。其中要求核对全局 Holdings 扫描风险、表引用和凭据的旧操作步骤已被文末取代，不再作为升级前置条件；账户配置、systemd 单元和账本的迁移步骤仍适用。
+
 状态：原 Devflow full 已完成 Impl 与 Review；PR #387 复审后的 F2 设计修订及本地修复进行中，运行环境切换另行授权。原设计的事实基线为 `origin/main@975351a4e50781aa5dd3483d3805e4270705e839`；本轮修复工作树以 `ef75a799af4ea1e921a4a1be88cecb7a4a849b77` 为基线。产品输入是另一工作树的 `docs/CLI_REFACTOR_PRD.md` 草案中「Holdings 数据边界」与 CLI-04、CLI-06、CLI-07；原设计快照 SHA-256 为 `1020b936b1efc0f740d39ac10f182f1eb7320dbbda7c303b1b44f739e77f3a97`。PRD 仍是草案，且包含本任务未授权的其它 CLI 改动；本设计只覆盖下面列出的账户退役范围。
 
 ## 目标、非目标与成功信号
@@ -68,3 +70,27 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 - 原设计阶段未读取目标主机。F2 修订已获准读取 `liuxie-incus` 的既有快照并做上述一次 Feishu 元数据 POC，但未验证表中每行持仓值、所有预期账户覆盖、账本未结情况或新版运行；配置切换的 owner 仍是各目标环境操作者，须在获准切换中另行清点。
 - 本轮最小结构检查不能证明每个股票行数值有效；`portfolio_context_builder.py::build_context` 对不支持的资产种类和无效数量仍可能跳过，风险消费端也会跳过畸形股票映射。是否将所有非标准资产计入全局 NAV、哪些行应使风险整体不可用，须由持仓/风险 owner 另行定义并在目标环境只读抽样后实现，不能用本轮 F2 时间语义修复代替。
 - 如果 `om accounts remove` 的现有预览不能覆盖某个旧配置的全部引用，先用候选副本与差异展示精确改动；不得为省步骤静默删除或把不完整预览视为批准。
+
+## 全局 Holdings 扫描分支退役（2026-09-30，Devflow simple）
+
+### 目标、范围和成功信号
+
+目标：删除已不可达的扫描全局 Feishu Holdings 风险读取、全局期权上下文和两者的缓存/消费分支；保留候选数据及排序仍使用的账户级风险计算。非目标：不改变账户富途数据、账本期权数据、候选排序公式、Portfolio Exposure/PM 开关、独立的 Feishu 持仓读取命令、真实配置或运行环境；不删除已有运行时缓存文件。
+
+成功信号：① 直接扫描与预备运行不再构造、加载或写入 `portfolio_context.global.json`、`option_positions_context.global.json`，不再读 Feishu Holdings 作为扫描风险来源；② CSP/Combo Put 仍以账户级 `portfolio_ctx` 和 `option_ctx` 计算候选风险字段与排序，CC 保持既有行为；③ 静态导入/调用、测试与操作者文档没有把已退役的全局扫描风险描述成可用能力。仅源码研发交付，不含提交、部署或线上数据清理。
+
+### 当前事实、复用与取舍
+
+当前 `strategy_policy.py::strategy_semantics_for_profile` 对所有可选开仓 profile 都返回 `scan_uses_path_risk=False`；`wants_global_path_risk_context` 只读取该字段。因此 `pipeline_context.py::build_pipeline_context` 中两个全局加载器、预备 worker 中的全局读取以及 `short_vol_risk_context.py` 的 `_global_*` 消费分支都不能由有效配置触发。测试可通过 monkeypatch 人为令门为真，但不能证明产品路径可达。`portfolio_context_builder.py::load_holdings_records` 还供该模块独立 `main()` 使用；`build_shared_context` 也供其 `--shared-out` 使用，不能随着扫描分支一起删除。`positions.context_builder` 的账户账本上下文、`portfolio_context_service.py::load_account_portfolio_context` 的账户富途上下文、`short_vol_risk_context.py::build_portfolio_risk_context` 及候选排序仍在真实调用链上。
+
+复用清单：账户持仓沿用 `portfolio_context_service.py::load_account_portfolio_context`；账户期权沿用 `pipeline_context.py::load_option_positions_context` 与 `prepared_option_positions_context.py`，包括前者使用的 `build_shared_option_positions_context` 和账户共享缓存；CSP 风险计算沿用 `short_vol_risk_context.py::build_portfolio_risk_context`，CC 维持自己的候选逻辑；缓存 I/O 沿用现有账户级路径。新增概念、字段、状态、别名、计算或校验：无。检索范围为 `src/application`、`src/interfaces`、`domain/domain`、`scripts`、测试、服务/部署模板和 `docs/INDEX.md` 指向的文档；关键词为 `wants_global_path_risk_context`、`scan_uses_path_risk`、`_global_portfolio_ctx`、`_global_option_ctx`、两个 `.global.json` 文件名、`load_holdings_records` 和 `build_shared_context`。除上述门控链、独立读取命令与测试外，未发现运行时全局扫描风险消费者；文档历史记载不是运行时消费者。
+
+选定方案：在策略 owner 移除恒假能力字段及门函数，在直接/预备上下文 owner 删除全局读取与两类全局缓存分支，在风险 owner 只消费账户上下文；删去仅为全局风险服务的校验/共享包装与无用导入。保留 Feishu 底层读取和独立命令，不将它改造成账户风险回退。备选的“保留死分支以便未来开启”继续制造无效配置预期和伪覆盖，拒绝；“删除全部 Feishu 读取器”会改变独立命令的现有合同，超出范围，拒绝。
+
+数据流仍为：有效配置 → 账户富途上下文 + 同账户账本期权上下文（直接或预备）→ CSP/Combo Put 的 `build_portfolio_risk_context` → 候选风险字段/排序。富途读取失败、账户缓存来源错误、预备 manifest 错误、期权或汇率证据缺失，继续沿现有路径处理；本次不改变已有缺失原因或可计算性判定，也不声称缺失期权证据必然阻断集中度。不引入全局回退或新的异常。原 `.global.json` 仅失去读写方，本次不删除真实运行时文件。
+
+### 实施与验证
+
+单片 A：删除扫描全局链和只为它服务的测试/文档声明，同时保持账户级风险计算与候选排序。覆盖成功信号 ①②③，无前置切片。实现 owner：`strategy_policy.py`、`pipeline_context.py`、`prepared_portfolio_context.py`、`short_vol_risk_context.py`、`portfolio_context_builder.py`、`portfolio_context_service.py`；相关测试及当前文档 owner 随行为同步更新。用直接与预备入口的回归测试证明无全局读取/缓存写入；保留账户期权共享缓存刷新测试，并把现有 `_global_*` 跨标的排序 fixture 改成账户现金、股票和 `option_ctx`，断言 CSP 具体风险值、缺失原因与排序。CC 只核对既有行为。保留独立 Feishu 命令测试，删除人为打开恒假门的测试。按实际消失的顶层函数和导入，向追加式 `docs/public_surface_retirements.json` 登记；旧条目不改。逐处修正 `README.md`、`CONFIGURATION_GUIDE.md`、`docs/AGENT_GETTING_STARTED.md`、`docs/INDEX.md`、`docs/STRATEGY_ARCHITECTURE.md` 的当前能力说明，保留独立 Feishu 命令与 Portfolio Exposure 配置的事实。运行受影响测试、完整项目必需检查、静态全局符号/缓存引用检查及文档/公共面 guardrails。
+
+风险与边界：运行环境可能留有旧全局缓存，但本次源码不再读取，物理清理须另行授权和目标绑定。现有“期权上下文缺失时集中度可能仍可计算”的静态线索由 CSP 风险 owner 后续单独核实，不借退役改动扩大失败语义。先前设计中关于 Feishu 观察时间的结论仍是历史事实，退役后不再是扫描门禁；若将来重新引入跨账户风险，需另行定义业务需求、上游覆盖及观察时间合同，不能复活旧死分支。

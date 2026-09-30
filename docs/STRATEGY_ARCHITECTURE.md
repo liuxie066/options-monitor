@@ -215,7 +215,7 @@ Combo Yield 仅支持 `same_expiry_pair`。`min_expiry_gap_days` / `max_expiry_g
 - 开仓扫描证据使用 `scan_strategy_profile`，CSP / CC 的承保扫描记录为 `insurance_underwriting`。
 - 历史 `enrich_and_filter_*_short_vol` 开仓别名及对应配置包装已移除，当前开仓只有 underwriting 入口。
 - 历史 `short_vol` 解析只服务离线开仓研究；Close Advice 不消费该配置、字段或结论。
-- 开仓 underwriting 不再请求全局 path-risk / concentration context；只有明确声明 `scan_uses_path_risk` 的策略才应加载该上下文。
+- 开仓 underwriting 不请求全局 Feishu Holdings 或全局期权上下文；CSP 候选的集中度使用账户级持仓与期权上下文。
 - `yield_enhancement_mode` 已退出活动策略、CLI 和账本写路径；旧 position/open/adjust event 仅在重放时读取，以保持历史风险画像。
 - sealed Combo candidate snapshot 继续接受其既有字段集合，避免改变旧快照 hash；新候选不再生成该 mode 字段。
 - YAML authoring、结构化配置编辑和 runtime JSON 均拒绝旧 `yield_enhancement` 键；活动配置只接受 `combo_yield`。

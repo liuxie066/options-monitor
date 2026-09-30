@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from src.application.account_config import build_account_portfolio_source_plan
-from src.application.portfolio_context_builder import load_holdings_portfolio_shared_context
 
 
 JsonLoader = Callable[[Path], Optional[dict]]

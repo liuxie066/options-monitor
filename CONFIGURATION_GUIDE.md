@@ -19,7 +19,7 @@
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-全局持仓风险可读取 Feishu Holdings；账户现金和股票持仓只读取对应富途账户，期权账本仍以本地 SQLite 为准。
+开仓扫描的账户现金和股票持仓只读取对应富途账户，期权账本以本地 SQLite 为准；扫描不读取 Feishu Holdings 计算全局风险。独立的 Feishu 持仓上下文导出命令仍可使用该表。
 
 ## 初始化
 
@@ -142,7 +142,7 @@ accounts:
 
 `futu` 账户的现金、股票持仓和可用 trade-intake 能力从账户设置派生。多 OpenD endpoint、host、port 和服务配置应通过当前示例、`config explain` 和 service preflight 核对，不要从历史 redesign plan 复制。
 
-旧 `external_holdings` 账户、账户级 `holdings_account`、`portfolio.source_by_account` 和 `portfolio.source: holdings` 需在升级前从人工配置中迁出；这些输入在新版配置校验中报普通配置错误。全局 Holdings 风险读取保留，但需核对实际快照的观察证据。已安装 systemd 单元的 `--accounts` 不会随配置自动更新；配置切换到受控升级重渲染单元之间须保持受影响 timer 暂停，核对新单元账户集合后再恢复。迁移顺序与账本核对见 [退役设计](docs/EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md#旧配置切换)。
+旧 `external_holdings` 账户、账户级 `holdings_account`、`portfolio.source_by_account` 和 `portfolio.source: holdings` 需在升级前从人工配置中迁出；这些输入在新版配置校验中报普通配置错误。开仓扫描不再使用全局 Holdings 风险快照。已安装 systemd 单元的 `--accounts` 不会随配置自动更新；配置切换到受控升级重渲染单元之间须保持受影响 timer 暂停，核对新单元账户集合后再恢复。迁移顺序与账本核对见 [退役设计](docs/EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md#旧配置切换)。
 
 账户增删改应直接修改 `config.yaml`，然后 validate 并重建受影响的
 runtime snapshot：
@@ -323,9 +323,9 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
-## external holdings
+## 独立 Feishu Holdings 上下文导出
 
-需要 Feishu holdings 时，通过 env-file 提供 App credential 与 holdings table 引用。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。
+使用独立的 Feishu Holdings 上下文导出命令时，通过 env-file 提供 App credential 与 holdings table 引用。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。开仓扫描不使用此数据源。
 
 它不能配置：
 

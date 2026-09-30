@@ -75,84 +75,6 @@ def _load_portfolio_ctx(
     return out, logs
 
 
-def test_global_holdings_risk_keeps_unknown_observation_from_real_search(monkeypatch, tmp_path: Path) -> None:
-    import src.application.pipeline_context as pc
-    import src.application.portfolio_context_builder as producer
-    import src.infrastructure.feishu_bitable as bitable
-    from src.application.short_vol_risk_context import build_portfolio_risk_context
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    record = {
-        "record_id": "rec-cash",
-        "fields": {
-            "broker": "富途", "account": "lx", "asset_type": "cash",
-            "asset_id": "CNY-CASH", "currency": "CNY", "quantity": 100,
-        },
-    }
-    def fake_http_json(_method, _url, payload=None, **_kwargs):
-        return {"code": 0, "data": {"items": [{**record, "last_modified_time": 1700000000000}], "has_more": False}}
-
-    monkeypatch.setattr(bitable, "http_json", fake_http_json)
-    monkeypatch.setattr(producer, "load_holdings_records", lambda _path: bitable.bitable_search_records("token", "app", "table"))
-    monkeypatch.setattr(pc, "_persist_source_snapshot", lambda *_args: None)
-    logs: list[str] = []
-
-    context = pc.load_global_holdings_risk_context(
-        base=tmp_path,
-        data_config=str(tmp_path / "portfolio.runtime.json"),
-        ttl_sec=0,
-        shared_state_dir=tmp_path / "shared",
-        state_dir=tmp_path / "state",
-        log=logs.append,
-    )
-
-    cache = tmp_path / "shared" / "portfolio_context.global.json"
-    assert context is not None
-    assert context["source_observation_status"] == "unknown"
-    assert context["source_observed_at"] is None
-    assert context["source_account_identifiers"] == ["lx"]
-    assert cache.exists()
-    risk = build_portfolio_risk_context(
-        portfolio_ctx={"_global_risk_required": True, "_global_portfolio_ctx": context},
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-    )
-    assert risk.nav_cny == 100.0
-    assert risk.unavailable_reasons == ()
-    assert risk.warnings == ("holdings_observation_unknown",)
-
-
-def test_global_holdings_risk_rejects_legacy_edit_time_cache(monkeypatch, tmp_path: Path) -> None:
-    import src.application.pipeline_context as pc
-    from src.application.portfolio_context_builder import build_shared_context
-
-    row = {"fields": {
-        "broker": "富途", "account": "lx", "asset_type": "cash",
-        "asset_id": "CNY-CASH", "currency": "CNY", "quantity": 100,
-    }}
-    refreshed = build_shared_context([row], portfolio_source_name="holdings_global")
-    old = {
-        **refreshed["all_accounts"],
-        "source_observed_at": "2023-11-14T22:13:20Z",
-        "source_observation_status": "trusted",
-        "source_observation_basis": "feishu_record:last_modified_time",
-    }
-    cache = tmp_path / "shared" / "portfolio_context.global.json"
-    cache.parent.mkdir()
-    cache.write_text(json.dumps(old), encoding="utf-8")
-    calls = []
-    monkeypatch.setattr(pc, "load_holdings_portfolio_shared_context", lambda **_kwargs: (calls.append(True), refreshed)[1])
-    monkeypatch.setattr(pc, "_persist_source_snapshot", lambda *_args: None)
-
-    context = pc.load_global_holdings_risk_context(
-        base=tmp_path, data_config=str(tmp_path / "runtime.json"), ttl_sec=3600,
-        shared_state_dir=cache.parent, state_dir=tmp_path / "state", log=lambda _msg: None,
-    )
-    assert calls == [True]
-    assert context is not None
-    assert context["context_source"] == "global_refresh"
-    assert context["source_observation_status"] == "unknown"
-
-
 def test_build_pipeline_context_uses_futu_account_source(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
@@ -215,7 +137,7 @@ def test_build_pipeline_context_uses_futu_account_source(tmp_path: Path) -> None
     ],
     ids=["put_base", "call_base"],
 )
-def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_underwriting(
+def test_build_pipeline_context_keeps_account_context_for_underwriting(
     tmp_path: Path,
     template_name: str,
     template_body: dict,
@@ -225,17 +147,10 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_und
 
     old_load_portfolio_context = pc.load_portfolio_context
     old_load_option_positions_context = pc.load_option_positions_context
-    old_load_global_holdings = pc.load_global_holdings_risk_context
-    old_load_global_options = pc.load_global_option_positions_risk_context
     old_load_exchange_rates = pc.load_exchange_rates
     try:
         pc.load_portfolio_context = lambda **_kwargs: {"cash_by_currency": {"USD": 1000.0}}  # type: ignore[assignment]
         pc.load_option_positions_context = lambda **_kwargs: (option_payload, False)  # type: ignore[assignment]
-        def _unexpected_global_context(**_kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("underwriting scan should not load global path-risk context")
-
-        pc.load_global_holdings_risk_context = _unexpected_global_context  # type: ignore[assignment]
-        pc.load_global_option_positions_risk_context = _unexpected_global_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
 
         td = tmp_path
@@ -263,17 +178,16 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_und
         assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
         assert option_ctx == option_payload
         assert usd_per_cny_exchange_rate == 0.14
+        assert not (root / "shared" / "portfolio_context.global.json").exists()
+        assert not (root / "shared" / "option_positions_context.global.json").exists()
     finally:
         pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
-        pc.load_global_holdings_risk_context = old_load_global_holdings  # type: ignore[assignment]
-        pc.load_global_option_positions_risk_context = old_load_global_options  # type: ignore[assignment]
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
 def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
-    import src.application.portfolio_context_service as pcs
 
     shared_portfolio = {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -297,7 +211,6 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
     counts = {"portfolio": 0, "option": 0}
     old_is_fresh = pc.is_fresh
     old_fetch_futu_portfolio_context = pc.fetch_futu_portfolio_context
-    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
     old_open_position_ledger = pc.open_position_ledger
     old_load_option_position_records = pc._load_option_position_records
     old_build_option_positions_context = pc.build_option_positions_context
@@ -308,11 +221,6 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).exists()  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = lambda **kwargs: (counts.__setitem__("portfolio", counts["portfolio"] + 1) or dict(shared_portfolio["by_account"][kwargs["account"]]))  # type: ignore[assignment]
-        def _fake_load_holdings_portfolio_shared_context(**_kwargs):  # type: ignore[no-untyped-def]
-            counts["portfolio"] += 1
-            return shared_portfolio
-
-        pcs.load_holdings_portfolio_shared_context = _fake_load_holdings_portfolio_shared_context  # type: ignore[assignment]
         pc.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
         pc._load_option_position_records = lambda *_a, **_k: (object(), [])  # type: ignore[assignment]
         pc._load_option_position_exchange_rates = lambda **_kwargs: {"rates": {"USDCNY": 7.2}}  # type: ignore[assignment]
@@ -395,7 +303,6 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = old_fetch_futu_portfolio_context  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
         pc.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         pc._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         pc.build_option_positions_context = old_build_option_positions_context  # type: ignore[assignment]
@@ -673,40 +580,17 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu(tm
 
 def test_load_portfolio_context_auto_does_not_fall_back_when_futu_unavailable(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
-    import src.application.portfolio_context_service as pcs
 
     old_fetch = pc.fetch_futu_portfolio_context
-    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
 
     try:
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_shared_context = lambda **_kwargs: {  # type: ignore[assignment]
-            "as_of_utc": "2026-04-14T00:00:00+00:00",
-            "filters": {"market": "富途"},
-            "all_accounts": {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"market": "富途", "account": "lx"},
-                "cash_by_currency": {"CNY": 88000.0},
-                "stocks_by_symbol": {},
-                "raw_selected_count": 1,
-            },
-            "by_account": {
-                "lx": {
-                    "as_of_utc": "2026-04-14T00:00:00+00:00",
-                    "filters": {"market": "富途", "account": "lx"},
-                    "cash_by_currency": {"CNY": 88000.0},
-                    "stocks_by_symbol": {},
-                    "raw_selected_count": 1,
-                }
-            },
-        }
 
         out, logs = _load_portfolio_ctx(tmp_path, ttl_sec=0)
         assert out is None
         assert any("opend down" in line for line in logs)
     finally:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_auto_ignores_local_holdings_cache_when_futu_fails(tmp_path: Path) -> None:
@@ -795,12 +679,10 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
 
 def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
-    import src.application.portfolio_context_service as pcs
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
     old_fetch = pc.fetch_futu_portfolio_context
-    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
 
@@ -812,18 +694,8 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
                 return stale
             return None
 
-        shared_ctx = {
-            "as_of_utc": "2026-04-14T00:00:00+00:00",
-            "filters": {"broker": "富途", "account": None},
-            "all_accounts": _portfolio_ctx("", usd_cash=2000.0, shares=200),
-            "by_account": {
-                "sy": _portfolio_ctx("sy", usd_cash=1500.0, shares=200),
-            },
-        }
-
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = lambda **_kwargs: _portfolio_ctx("sy", usd_cash=1500.0, shares=200)  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_shared_context = lambda **_kwargs: shared_ctx  # type: ignore[assignment]
 
         runtime_cfg = {
             "accounts": ["sy"],
@@ -843,7 +715,6 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_path: Path) -> None:

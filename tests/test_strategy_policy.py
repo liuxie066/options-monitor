@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from src.application import strategy_policy as strategy_policy_module
 from src.application.strategy_policy import (
     INSURANCE_UNDERWRITING_PROFILE,
     SELL_CALL_FAMILY,
@@ -18,7 +15,6 @@ from src.application.strategy_policy import (
     strategy_semantics_for_profile,
     strategy_semantics_for_side_config,
     strategy_side_config_for_resolution,
-    wants_global_path_risk_context,
 )
 
 
@@ -110,7 +106,6 @@ def test_sell_put_strategy_semantics_matrix() -> None:
     assert underwriting.scan_requires_rv is True
     assert underwriting.scan_uses_underwriting_gate is True
     assert underwriting.scan_uses_short_vol_gate is False
-    assert underwriting.scan_uses_path_risk is False
     assert underwriting.close_advice_profile == "sell_put_short_vol"
     assert underwriting.close_requires_rv is True
     assert underwriting.close_uses_short_vol_thesis is True
@@ -164,44 +159,6 @@ def test_strategy_semantics_for_side_config_defaults_to_underwriting() -> None:
     assert semantics.strategy_profile == INSURANCE_UNDERWRITING_PROFILE
     assert semantics.scan_uses_underwriting_gate is True
     assert semantics.close_requires_rv is True
-
-
-def test_global_path_risk_context_checks_templates_then_symbols(
-    monkeypatch,
-) -> None:
-    observed: list[tuple[str, dict]] = []
-
-    def _semantics(*, family: str, side_cfg: dict) -> SimpleNamespace:
-        observed.append((family, side_cfg))
-        return SimpleNamespace(scan_uses_path_risk=side_cfg.get("path_risk", False))
-
-    monkeypatch.setattr(
-        strategy_policy_module,
-        "strategy_semantics_for_side_config",
-        _semantics,
-    )
-
-    assert wants_global_path_risk_context(
-        {
-            "templates": {
-                "base": {
-                    "sell_put": {"path_risk": False},
-                    "sell_call": {"path_risk": True},
-                }
-            },
-            "symbols": [{"sell_put": {"path_risk": True}}],
-        }
-    )
-    assert observed == [
-        (SELL_PUT_FAMILY, {"path_risk": False}),
-        (SELL_CALL_FAMILY, {"path_risk": True}),
-    ]
-
-    observed.clear()
-    assert wants_global_path_risk_context(
-        {"symbols": [{"sell_put": {"path_risk": True}}]}
-    )
-    assert observed == [(SELL_PUT_FAMILY, {"path_risk": True})]
 
 
 def test_position_strategy_semantics_reads_retired_combo_yield_mode() -> None:
@@ -260,7 +217,6 @@ def test_unknown_strategy_family_does_not_enable_underwriting_scan() -> None:
     assert semantics.scan_strategy_profile == INSURANCE_UNDERWRITING_PROFILE
     assert semantics.scan_uses_underwriting_gate is False
     assert semantics.scan_requires_rv is False
-    assert semantics.scan_uses_path_risk is False
 
 
 def test_combo_yield_position_role_does_not_treat_any_grouped_put_as_combo_yield() -> None:
