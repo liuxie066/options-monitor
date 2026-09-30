@@ -110,6 +110,31 @@
       "module": "src/application/portfolio_context_service.py",
       "name": "slice_shared_context_for_account",
       "reason": "The account portfolio service no longer accepts slices of shared Holdings context as account cash or stocks."
+    },
+    {
+      "module": "src/application/strategy_policy.py",
+      "name": "wants_global_path_risk_context",
+      "reason": "Every supported opening strategy disables scan path risk, so the global context gate has no reachable caller."
+    },
+    {
+      "module": "src/application/pipeline_context.py",
+      "name": "load_global_holdings_risk_context",
+      "reason": "The unreachable scan-global Feishu Holdings risk reader and its cache branch were retired; account Futu context remains."
+    },
+    {
+      "module": "src/application/pipeline_context.py",
+      "name": "load_global_option_positions_risk_context",
+      "reason": "The unreachable scan-global option context and cache branch were retired; account ledger option context remains."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "is_valid_global_holdings_context",
+      "reason": "The validator only guarded the retired scan-global Holdings risk path; the independent Feishu context export still uses its own builder."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "load_holdings_portfolio_shared_context",
+      "reason": "The scan-global Holdings wrapper was retired; the independent Feishu context export retains load_holdings_records and build_shared_context."
     }
   ]
 }

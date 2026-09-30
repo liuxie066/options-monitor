@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from copy import deepcopy
 
 import pandas as pd
 import pytest
@@ -54,21 +53,14 @@ def _candidate(**overrides):
     return row
 
 
-def _global_nvda_context() -> dict:
+def _account_nvda_context() -> dict:
     return {
-        "_global_portfolio_ctx": {
-            "portfolio_source_name": "holdings_global",
-            "filters": {"account": None, "broker": None},
-            "source_account_identifiers": ["lx"],
-            "source_observation_status": "trusted",
-            "source_observed_at": "2026-05-20T00:00:00Z",
-            "retrieved_at_utc": "2026-05-20T00:00:01Z",
-            "cash_by_currency": {"CNY": 800_000.0},
-            "stocks_by_symbol": {
-                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
-            },
+        "filters": {"account": "lx", "broker": "富途"},
+        "cash_by_currency": {"CNY": 800_000.0},
+        "stocks_by_symbol": {
+            "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
         },
-        "_global_option_ctx": {
+        "option_ctx": {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
             "cash_secured_total_cny": 50_000.0,
         },
@@ -134,16 +126,12 @@ def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
     assert decision["rule"] == "return_annualized"
 
 
-def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() -> None:
+def test_build_portfolio_risk_context_uses_account_holdings_and_option_context() -> None:
     from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     risk = build_portfolio_risk_context(
-        portfolio_ctx={
-            "cash_by_currency": {"CNY": 1.0},
-            "stocks_by_symbol": {},
-            **_global_nvda_context(),
-        },
+        portfolio_ctx=_account_nvda_context(),
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
     )
 
@@ -152,45 +140,6 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert abs(risk.short_put_assignment_cny_by_symbol["NVDA"] - 50_000.0) < 0.000001
     assert risk.short_put_assignment_total_cny == 50_000.0
     assert risk.unavailable_reasons == ()
-
-
-@pytest.mark.parametrize("invalid", ["missing", "account_scope", "missing_holdings_shape"])
-def test_global_risk_never_uses_account_cash_when_holdings_evidence_is_invalid(invalid: str) -> None:
-    from src.application.short_vol_risk_context import build_portfolio_risk_context
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    context = {"cash_by_currency": {"CNY": 1_000_000.0}, "_global_risk_required": True}
-    if invalid != "missing":
-        global_ctx = deepcopy(_global_nvda_context()["_global_portfolio_ctx"])
-        if invalid == "account_scope":
-            global_ctx["filters"]["account"] = "lx"
-        elif invalid == "missing_holdings_shape":
-            global_ctx.pop("stocks_by_symbol")
-        context["_global_portfolio_ctx"] = global_ctx
-
-    risk = build_portfolio_risk_context(
-        portfolio_ctx=context,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-    )
-
-    assert risk.nav_cny is None
-    assert risk.unavailable_reasons == ("holdings_context_missing",)
-
-
-def test_global_risk_reports_unknown_observation_without_losing_nav() -> None:
-    from src.application.short_vol_risk_context import build_portfolio_risk_context
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    context = _global_nvda_context()
-    global_ctx = context["_global_portfolio_ctx"]
-    global_ctx["source_observation_status"] = "unknown"
-    global_ctx["source_observed_at"] = None
-    risk = build_portfolio_risk_context(
-        portfolio_ctx=context,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-    )
-    assert risk.nav_cny == 850_000.0
-    assert risk.warnings == ("holdings_observation_unknown",)
 
 
 def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() -> None:
@@ -357,7 +306,7 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
 
 
 def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentration(tmp_path: Path) -> None:
-    portfolio_ctx = _global_nvda_context()
+    portfolio_ctx = _account_nvda_context()
 
     filtered = _filter_underwriting(pd.DataFrame([_candidate()]), ctx=portfolio_ctx)
 
@@ -375,20 +324,13 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
     from domain.domain.engine import rank_candidate_rows
 
     portfolio_ctx = {
-        "_global_portfolio_ctx": {
-            "portfolio_source_name": "holdings_global",
-            "filters": {"account": None, "broker": None},
-            "source_account_identifiers": ["lx"],
-            "source_observation_status": "trusted",
-            "source_observed_at": "2026-05-20T00:00:00Z",
-            "retrieved_at_utc": "2026-05-20T00:00:01Z",
-            "cash_by_currency": {"CNY": 500_000.0},
-            "stocks_by_symbol": {
-                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},
-                "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
-            },
+        "filters": {"account": "lx", "broker": "富途"},
+        "cash_by_currency": {"CNY": 500_000.0},
+        "stocks_by_symbol": {
+            "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},
+            "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
         },
-        "_global_option_ctx": {
+        "option_ctx": {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 14_000.0}},
             "cash_secured_total_cny": 100_000.0,
         },

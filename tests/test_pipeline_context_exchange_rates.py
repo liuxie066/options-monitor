@@ -129,7 +129,6 @@ def test_market_data_only_context_never_reads_account_authority(
         "load_option_positions_context",
         "load_prepared_portfolio_context",
         "load_prepared_option_positions_context",
-        "load_global_option_positions_risk_context",
     ):
         monkeypatch.setattr(ctx, name, _forbidden)
     monkeypatch.setattr(
@@ -194,11 +193,6 @@ def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
     )
     monkeypatch.setattr(ctx, "load_option_positions_context", _unexpected)
     monkeypatch.setattr(ctx, "load_exchange_rates", _unexpected)
-    monkeypatch.setattr(
-        ctx,
-        "load_global_option_positions_risk_context",
-        _unexpected,
-    )
     monkeypatch.setattr(
         ctx,
         "adapt_option_positions_context",

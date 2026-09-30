@@ -398,7 +398,7 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-`portfolio.runtime.json` 只在 external holdings 需要替代 env 名等兼容场景使用。它不能重新引入 Feishu `option_positions` bootstrap 或镜像。
+`portfolio.runtime.json` 只在独立 Feishu Holdings 上下文导出命令需要替代 env 名等兼容场景使用；开仓扫描不读取该表计算全局风险。它不能重新引入 Feishu `option_positions` bootstrap 或镜像。
 
 ## 禁止项
 

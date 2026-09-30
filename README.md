@@ -355,9 +355,9 @@ om-agent run --tool healthcheck \
 
 账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu`；账户现金与股票持仓来自对应富途账户，trade-intake 能力从账户设置派生。富途失败时不使用 Holdings 回填账户数据。
 
-Feishu 有三种彼此独立的角色：
+Feishu 在本项目中的角色：
 
-- 可选的全局 Holdings 持仓风险数据源；
+- 独立的 Holdings 持仓上下文导出命令（开仓扫描不读取它计算风险）；
 - `feishu_app` 出站通知；
 - Feishu long-connection 入站消息。
 

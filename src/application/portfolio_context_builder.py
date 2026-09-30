@@ -402,33 +402,6 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
     return (dict(out) if isinstance(out, dict) else None)
 
 
-def is_valid_global_holdings_context(ctx: object) -> bool:
-    if not isinstance(ctx, dict) or ctx.get("portfolio_source_name") != "holdings_global":
-        return False
-    filters = ctx.get("filters")
-    observation_status = ctx.get("source_observation_status")
-    observation_valid = (
-        observation_status == "unknown" and ctx.get("source_observed_at") is None
-    ) or (
-        observation_status == "trusted"
-        and _source_timestamp(ctx.get("source_observed_at")) is not None
-        and not str(ctx.get("source_observation_basis") or "").startswith("feishu_record:")
-    )
-    return (
-        isinstance(filters, dict)
-        and filters.get("account") is None
-        and filters.get("broker") is None
-        and isinstance(ctx.get("source_account_identifiers"), list)
-        and bool(ctx["source_account_identifiers"])
-        and all(isinstance(item, str) and item.strip() for item in ctx["source_account_identifiers"])
-        and observation_valid
-        and _source_timestamp(ctx.get("retrieved_at_utc")) is not None
-        and isinstance(ctx.get("cash_by_currency"), dict)
-        and isinstance(ctx.get("stocks_by_symbol"), dict)
-        and bool(ctx["cash_by_currency"] or ctx["stocks_by_symbol"])
-    )
-
-
 def load_holdings_records(data_config_path: Path) -> list[dict]:
     cfg: dict = {}
     if data_config_path.exists():
@@ -450,19 +423,6 @@ def load_holdings_records(data_config_path: Path) -> list[dict]:
             return bitable_list_records(token, app_token, table_id)
 
     return with_tenant_token_retry(feishu.app_id, feishu.app_secret, _list_records)
-
-
-def load_holdings_portfolio_shared_context(
-    *,
-    data_config_path: Path,
-    broker: str | None = None,
-) -> dict:
-    records = load_holdings_records(data_config_path)
-    return build_shared_context(
-        records,
-        broker=broker,
-        portfolio_source_name="holdings_global",
-    )
 
 
 def main():

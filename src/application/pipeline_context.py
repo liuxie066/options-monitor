@@ -12,7 +12,6 @@ Design constraints:
 - best-effort context (should not fail the whole pipeline in scheduled mode)
 """
 
-import json
 from pathlib import Path
 
 from src.application.account_config import build_account_portfolio_source_plan
@@ -33,10 +32,8 @@ from src.application.ledger.api import (
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
-    load_holdings_portfolio_shared_context,
     with_context_source,
 )
-from src.application.portfolio_context_builder import is_valid_global_holdings_context
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
@@ -49,7 +46,6 @@ from src.application.prepared_option_positions_context import (
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
-from src.application.strategy_policy import wants_global_path_risk_context
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
@@ -296,93 +292,6 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         return None
 
 
-def load_global_holdings_risk_context(
-    *,
-    base: Path,
-    data_config: str,
-    ttl_sec: int,
-    shared_state_dir: Path | None,
-    state_dir: Path,
-    log,
-) -> dict | None:
-    """Best-effort all-broker holdings context for portfolio risk limits."""
-
-    try:
-        shared_root = (shared_state_dir or state_dir).resolve()
-        shared_root.mkdir(parents=True, exist_ok=True)
-        path = (shared_root / "portfolio_context.global.json").resolve()
-        if ttl_sec > 0 and is_fresh(path, ttl_sec):
-            cached = load_cached_json(path)
-            if is_valid_global_holdings_context(cached):
-                cached = with_context_source(cached, "global_cache")
-                log("[CTX] portfolio_context source=global_cache account=all broker=all")
-                return cached
-
-        shared_ctx = load_holdings_portfolio_shared_context(
-            data_config_path=Path(data_config),
-            broker=None,
-        )
-        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
-        if not isinstance(all_accounts, dict):
-            raise ValueError("global holdings context missing all_accounts")
-        out = dict(all_accounts)
-        out["portfolio_source_name"] = "holdings_global"
-        if not is_valid_global_holdings_context(out):
-            raise ValueError("global holdings context lacks valid source, scope, or holdings data")
-        out = with_context_source(out, "global_refresh")
-        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        log("[CTX] portfolio_context source=global_refresh account=all broker=all")
-        snap = adapt_holdings_context(out)
-        _persist_source_snapshot(base, snap)
-        return out
-    except Exception as exc:
-        log(f"[WARN] global holdings risk context not available: {exc}")
-        return None
-
-
-def load_global_option_positions_risk_context(
-    *,
-    base: Path,
-    data_config: str,
-    ttl_sec: int,
-    shared_state_dir: Path | None,
-    state_dir: Path,
-    log,
-) -> dict | None:
-    """Best-effort all-broker option-position context for short-put exposure."""
-
-    try:
-        shared_root = (shared_state_dir or state_dir).resolve()
-        shared_root.mkdir(parents=True, exist_ok=True)
-        path = (shared_root / "option_positions_context.global.json").resolve()
-        if ttl_sec > 0 and is_fresh(path, ttl_sec):
-            cached = load_cached_json(path)
-            if isinstance(cached, dict):
-                cached = with_context_source(cached, "global_cache")
-                log("[CTX] option_positions_context source=global_cache account=all broker=all")
-                return cached
-
-        _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(
-            base=base,
-            state_dir=shared_root,
-            log=log,
-        )
-        shared_ctx = build_shared_option_positions_context(records, broker="", rates=rates)
-        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
-        if not isinstance(all_accounts, dict):
-            raise ValueError("global option positions context missing all_accounts")
-        out = dict(all_accounts)
-        out = with_context_source(out, "global_refresh")
-        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        log("[CTX] option_positions_context source=global_refresh account=all broker=all")
-        snap = adapt_option_positions_context(out)
-        _persist_source_snapshot(base, snap)
-        return out
-    except Exception as exc:
-        log(f"[WARN] global option positions risk context not available: {exc}")
-        return None
-
 def load_exchange_rates(
     *,
     base: Path,
@@ -520,10 +429,6 @@ def build_pipeline_context(
         )
 
     if prepared_option_positions_context_manifest is not None:
-        if wants_global_path_risk_context(cfg):
-            raise PreparedOptionPositionsContextError(
-                "prepared option context does not support global path risk"
-            )
         try:
             option_ctx = load_prepared_option_positions_context(
                 manifest_path=(
@@ -565,32 +470,6 @@ def build_pipeline_context(
             shared_state_dir=shared_state_dir,
             log=log,
         )
-
-    if portfolio_ctx is not None and wants_global_path_risk_context(cfg):
-        portfolio_ctx = dict(portfolio_ctx)
-        portfolio_ctx["_global_risk_required"] = True
-        if prepared_portfolio_context_manifest is None:
-            global_portfolio_ctx = load_global_holdings_risk_context(
-                base=base,
-                data_config=str(data_config),
-                ttl_sec=ttl_port_ctx,
-                shared_state_dir=shared_state_dir,
-                state_dir=state_dir,
-                log=log,
-            )
-            if global_portfolio_ctx is not None:
-                portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
-        if prepared_option_positions_context_manifest is None:
-            global_option_ctx = load_global_option_positions_risk_context(
-                base=base,
-                data_config=str(data_config),
-                ttl_sec=ttl_opt_ctx,
-                shared_state_dir=shared_state_dir,
-                state_dir=state_dir,
-                log=log,
-            )
-            if global_option_ctx is not None:
-                portfolio_ctx["_global_option_ctx"] = global_option_ctx
 
     if prepared_option_positions_context_manifest is not None:
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
