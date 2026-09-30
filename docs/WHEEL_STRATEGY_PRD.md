@@ -629,6 +629,15 @@ Wheel 区块每个批次最小展示：
 
 账户使用报告区块的现有上下文；只在同一账户+标的存在多个 Wheel 批次时展示短化批次 ID。
 
+### 9.1 同次指派的简报汇总展示
+
+- **目标与验收**：固定时段决策简报的正文和卡片中，来源于同一账户、标的、券商、币种、指派价和指派时刻的多个 Wheel Call 批次，若均无本轮独立 Call 建议且状态、原因和覆盖事实一致，展示为一个 Wheel 项；标题标明原 Put 指派价与批次数，正文合计剩余股份、CC 已覆盖股数、意图预留及分支剩余股数，并列出各批次短 ID。当前 3690.HK 77.5P 的三个 500 股批次应显示合计剩余 1,500 股；只读 assigned-stock 事实确认三批均为 77.5、`assigned_at_ms=1790682393529`。75P、80P 与 0700.HK 仍各自显示。输出中的“分支合计剩余”不是账户可开张数，后者仍以容量检查为准；三个批次均为 `linkage_unresolved` 时，合并项仍显示“成交归属待人工确认”。
+- **边界与退回**：这是固定简报的只读展示变换，不合并 `stock_lot_id`、Wheel 分支、成本、收益、CC 归属、候选或快照中的原始批次；其他简报类型和 Tool Gateway 读模型保持逐批次。任一批有 `final_candidate` 或独立 Call 建议，或同源事实缺失、错配、重复，或数量不完整/不一致，或 `phase`、批次 `reason_code` / `reason_codes`、coverage `status` / `reason_codes` 不同，均原样逐批次展示。汇总前逐批确认剩余股份及 coverage 的 target、committed、reserved、available 均为非负整数，`target_shares == shares_remaining` 且 `available_shares == max(0, target_shares - committed_shares - reserved_shares)`；不把待核实写成可开仓。
+- **复用与数据流**：复用 `src/application/wheel/read_model.py` 同次生成的 `assigned_stock_projection._all_assigned_stock_lots`（不能使用按月过滤的公开列表），由 `src/application/wheel/capacity.py::finalize_wheel_capacity` 按唯一 `stock_lot_id` 关联 Call 分支，核对账户和标的，并将非空 `broker`、`currency`、有效 `assignment_price`、正整数 `assigned_at_ms` 附到候选快照批次；无法唯一核实时该批次不得汇总。快照现有哈希封存保证新增字段的内容完整性，字段语义由汇总前检查。`src/application/daily_decision_brief_service.py::_load_wheel_snapshot_family` 转发同源事实和未降格的数量；`src/application/daily_decision_brief_renderer.py::_wheel_batch_views` 仅在 `fixed_report` 中按完整同源键和完整警示集合做确定性展示汇总。复用现有 coverage 数值与原因文案，不新增持久实体、配置键或独立计算 owner。检索范围为以上 owner、`domain/domain/wheel/projection.py`、`src/application/wheel/candidate_snapshot.py` 和当前简报测试；旧快照无分组字段时保留逐批次展示。
+- **取舍**：不按标的直接汇总，以免混合不同指派价；不改 Wheel 分支模型或交易回执，因为生命周期和归属仍按真实股票批次追踪。
+- **复用清单**：分组身份与来源事实复用 `assigned_stock_projection._all_assigned_stock_lots` 的账户、标的、券商、币种、指派价、指派时刻和 `stock_lot_id`；股份及覆盖数复用 `project_wheel_coverage`；快照完整性复用 `seal_wheel_candidate_snapshot`；简报入口和状态文案复用 `_wheel_batch_views`。新增的只有固定简报的临时汇总视图和 `has_final_candidate` 只读标记，分别用于一项展示与防止隐藏已有独立建议，不建立新持久身份或第二套容量计算。相关字段名在上述 owner 均有命中；不存在可直接复用的同源批次展示汇总实现。
+- **实现切片与验证**：单一切片覆盖上述验收：补快照展示事实、固定简报投影与渲染，并以 77.5P×3、75P/80P、0700.HK、缺字段与错配、混合状态/额外警示、有独立建议的测试证明只汇总安全同质项；同时断言固定简报正文与卡片（含 blocked 路径）、非固定提醒仍逐批，以及共同和额外原因并存时警示不消失。运行相关简报/快照测试与项目适用守卫。风险是封存前账本事实缺失，此时明确退回既有逐批次展示，不猜分组。
+
 ## 10. 失败与等待语义
 
 - 当前没有通过硬门槛的 Call 是合法等待，不是系统故障。

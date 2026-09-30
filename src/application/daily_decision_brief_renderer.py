@@ -966,6 +966,99 @@ def _candidate_views(
     return out, omissions, selected_by_family
 
 
+def _wheel_assignment_group_key(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    if _lower(row.get("direction") or "call") != "call":
+        return None
+    identity = tuple(
+        str(row.get(field) or "").strip()
+        for field in ("account", "symbol", "broker", "currency")
+    )
+    if not all(identity) or not str(row.get("wheel_branch_id") or "").strip():
+        return None
+    try:
+        price = Decimal(str(row.get("assignment_price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    assigned_at_ms = row.get("assigned_at_ms")
+    if not price.is_finite() or price <= 0 or type(assigned_at_ms) is not int or assigned_at_ms <= 0:
+        return None
+    return (identity[0].lower(), identity[1].upper(), identity[2], identity[3].upper(), price, assigned_at_ms)
+
+
+def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = [_wheel_assignment_group_key(row) for row in rows]
+    unsafe_symbols = {
+        _upper(row.get("symbol"))
+        for row, key in zip(rows, keys)
+        if _lower(row.get("direction") or "call") == "call" and key is None
+    }
+    cohorts: dict[tuple[Any, ...], list[int]] = {}
+    for index, key in enumerate(keys):
+        if key is not None and key[1] not in unsafe_symbols:
+            cohorts.setdefault(key, []).append(index)
+    replacements: dict[int, dict[str, Any]] = {}
+    skipped: set[int] = set()
+    for key, indices in cohorts.items():
+        if len(indices) < 2:
+            continue
+        members = [rows[index] for index in indices]
+        if any(
+            not isinstance(row.get("coverage"), Mapping)
+            or not isinstance(row.get("reason_codes"), list)
+            or not isinstance(row["coverage"].get("reason_codes"), list)
+            or any(not isinstance(reason, str) for reason in row["reason_codes"])
+            or any(not isinstance(reason, str) for reason in row["coverage"]["reason_codes"])
+            for row in members
+        ):
+            continue
+        signatures = {
+            (
+                _lower(row.get("phase")), _lower(row.get("status")),
+                _lower(row.get("reason_code")),
+                tuple(sorted(set(row.get("reason_codes") or []))),
+                _lower((row.get("coverage") or {}).get("status")),
+                tuple(sorted(set((row.get("coverage") or {}).get("reason_codes") or []))),
+            )
+            for row in members
+        }
+        branch_ids = [str(row["wheel_branch_id"]) for row in members]
+        quantities: list[tuple[int, int, int, int, int]] = []
+        for row in members:
+            coverage = row.get("coverage") or {}
+            values = (row.get("shares_remaining"), *(coverage.get(field) for field in (
+                "target_shares", "committed_shares", "reserved_shares", "available_shares"
+            )))
+            if any(type(value) is not int or value < 0 for value in values):
+                break
+            shares, target, committed, reserved, available = values
+            if target != shares or available != max(0, target - committed - reserved):
+                break
+            quantities.append(values)
+        if (
+            len(signatures) != 1 or len(set(branch_ids)) != len(branch_ids)
+            or len(quantities) != len(members)
+            or any(row.get("has_final_candidate") is not False or
+                   type(row.get("recommended_contracts")) is not int or
+                   row["recommended_contracts"] != 0 for row in members)
+        ):
+            continue
+        grouped = dict(members[0])
+        grouped["shares_remaining"] = sum(values[0] for values in quantities)
+        grouped["coverage"] = {
+            **dict(members[0]["coverage"]),
+            **{
+                field: sum(values[position] for values in quantities)
+                for position, field in enumerate(("target_shares", "committed_shares", "reserved_shares", "available_shares"), start=1)
+            },
+        }
+        grouped["display_batch_count"] = len(members)
+        grouped["display_assignment_price"] = key[4]
+        grouped["display_branch_ids"] = branch_ids
+        replacements[indices[0]] = grouped
+        skipped.update(indices[1:])
+    return [replacements.get(index, row) for index, row in enumerate(rows) if index not in skipped]
+
+
 def _wheel_batch_views(
     brief: Mapping[str, Any],
     *,
@@ -977,6 +1070,8 @@ def _wheel_batch_views(
         for item in brief.get("wheel_batches") or []
         if isinstance(item, Mapping)
     ]
+    if delivery_kind == "fixed_report":
+        rows = _group_fixed_wheel_batches(rows)
     symbol_counts: dict[str, int] = {}
     for row in rows:
         symbol = _upper(row.get("symbol"))
@@ -988,7 +1083,10 @@ def _wheel_batch_views(
         branch_id = str(
             row.get("wheel_branch_id") or row.get("position_lot_id") or ""
         ).strip()
+        grouped_count = row.get("display_batch_count")
         suffix = (
+            f" · {row['display_assignment_price']:g}P · {grouped_count} 批"
+            if grouped_count else
             f" · 分支 {branch_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
         )
         direction = _lower(row.get("direction") or "call")
@@ -999,7 +1097,7 @@ def _wheel_batch_views(
         ):
             continue
         details = (
-            [f"剩余股份：{shares} 股"]
+            [f"剩余股份：{shares:,} 股" if grouped_count else f"剩余股份：{shares} 股"]
             if direction == "call"
             else [f"剩余轮转：{max(0, int(row.get('remaining_contracts') or 0))} 张"]
         )
@@ -1015,12 +1113,21 @@ def _wheel_batch_views(
         label = labels.get(coverage_status, {"unavailable": "待核实", "overallocated": "超额待核实",
             "not_applicable": "本阶段无待覆盖股份" if direction == "call" else "本阶段无待接股份"}.get(coverage_status, "待核实"))
         committed, target = coverage.get("committed_shares"), coverage.get("target_shares")
-        quantity = f" · {committed} / {target} 股" if committed is not None and target is not None else ""
+        quantity = ""
+        if committed is not None and target is not None:
+            quantity = (f" · {committed:,} / {target:,} 股" if grouped_count else
+                        f" · {committed} / {target} 股")
         details.append(f"{'CC 覆盖' if direction == 'call' else 'CSP 安排'}：{label}{quantity}")
         if coverage.get("reserved_shares"):
-            details.append(f"意图预留：{coverage['reserved_shares']} 股")
+            reserved = coverage["reserved_shares"]
+            details.append(f"意图预留：{reserved:,} 股" if grouped_count else f"意图预留：{reserved} 股")
         if coverage.get("available_shares") is not None:
-            details.append(f"分支剩余：{coverage['available_shares']} 股；可开数量以账户容量检查为准")
+            available = coverage["available_shares"]
+            available_text = f"{available:,}" if grouped_count else str(available)
+            label = "分支合计剩余" if grouped_count else "分支剩余"
+            details.append(f"{label}：{available_text} 股；可开数量以账户容量检查为准")
+        if grouped_count:
+            details.append("批次：" + "、".join(branch[-8:] for branch in row["display_branch_ids"]))
         price = _number(row.get("sell_limit"))
         observed = str(row.get("quote_observed_at_utc") or "").strip()
         if contracts > 0 and (price is None or price <= 0 or not observed):
@@ -1069,10 +1176,14 @@ def _wheel_batch_views(
             reasons = list(row.get("reason_codes") or [])
             if row.get("reason_code"):
                 reasons.append(row["reason_code"])
+            if grouped_count:
+                reasons.extend(coverage.get("reason_codes") or [])
             details.append(
                 "状态：" + "；".join(
-                    _wheel_reason_text(reason)
-                    for reason in dict.fromkeys(reasons or [row.get("status")])
+                    dict.fromkeys(
+                        _wheel_reason_text(reason)
+                        for reason in (reasons or [row.get("status")])
+                    )
                 )
             )
         out.append(
@@ -1085,6 +1196,8 @@ def _wheel_batch_views(
 
 
 def _wheel_reason_text(value: Any) -> str:
+    if value is not None and not isinstance(value, str):
+        return "状态原因待核实"
     reason = _lower(value)
     return {
         "wheel_disabled": "策略已关闭，现有生命周期继续监控",

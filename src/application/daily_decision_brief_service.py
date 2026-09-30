@@ -1137,16 +1137,22 @@ def _load_wheel_snapshot_family(
         branch_id = _text(batch.get("wheel_branch_id")) or lot_id
         direction = _text(batch.get("direction") or "call").lower()
         view = {
+            "account": _text(batch.get("account")).lower(),
             "position_lot_id": lot_id,
             "wheel_branch_id": branch_id,
             "direction": direction,
             "symbol": symbol,
-            "shares_remaining": int(batch.get("shares_remaining") or 0),
+            "shares_remaining": batch.get("shares_remaining"),
+            "broker": _text(batch.get("broker")),
+            "assignment_price": batch.get("assignment_price"),
+            "assigned_at_ms": batch.get("assigned_at_ms"),
+            "has_final_candidate": final is not None,
             "remaining_contracts": int(batch.get("remaining_contracts") or 0),
             "principal_anchor": batch.get("principal_anchor"),
             "currency": _text((final or {}).get("currency") or batch.get("currency")).upper(),
             "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
+            "phase": _text(batch.get("phase")),
             "reason_code": _text(batch.get("reason_code")) or None,
             "reason_codes": list(batch.get("reason_codes") or []),
             "recommended_contracts": int(batch.get("granted_contracts") or 0) if price_available else 0,

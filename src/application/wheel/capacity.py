@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 from domain.domain.trade_contract_identity import contract_share_quantity
@@ -795,6 +796,12 @@ def finalize_wheel_capacity(
         if isinstance(row, Mapping)
         and str(row.get("direction") or "call").strip().lower() == "call"
     }
+    assigned_stock = wheel_read_model.get("assigned_stock_projection")
+    assigned_stock = assigned_stock if isinstance(assigned_stock, Mapping) else {}
+    stock_by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for stock in assigned_stock.get("_all_assigned_stock_lots") or []:
+        if isinstance(stock, Mapping):
+            stock_by_id.setdefault(str(stock.get("stock_lot_id") or ""), []).append(stock)
     raw_by_batch = wheel_scan.get("raw_candidates")
     raw_by_batch = raw_by_batch if isinstance(raw_by_batch, Mapping) else {}
     rejected_claim_ids: set[str] = set()
@@ -864,6 +871,28 @@ def finalize_wheel_capacity(
             allocation=allocation,
             coverage_facts=coverage_facts,
         )
+        source_stocks = stock_by_id.get(lot_id) or []
+        stock = source_stocks[0] if len(source_stocks) == 1 else None
+        assignment_facts: dict[str, Any] = {}
+        if stock is not None:
+            try:
+                price = Decimal(str(stock.get("assignment_price")))
+            except (TypeError, ValueError, ArithmeticError):
+                price = Decimal(0)
+            if (
+                str(stock.get("account") or "").strip().lower() == account
+                and str(stock.get("symbol") or "").strip().upper()
+                == str(batch.get("symbol") or "").strip().upper()
+                and str(stock.get("broker") or "").strip()
+                and str(stock.get("currency") or "").strip()
+                and price.is_finite() and price > 0
+                and type(stock.get("assigned_at_ms")) is int
+                and stock["assigned_at_ms"] > 0
+            ):
+                assignment_facts = {
+                    key: stock[key]
+                    for key in ("broker", "currency", "assignment_price", "assigned_at_ms")
+                }
         snapshot_batches.append(
             {
                 "account": account,
@@ -877,6 +906,7 @@ def finalize_wheel_capacity(
                 or batch.get("batch_generation_hash"),
                 "projection_hash": batch.get("projection_hash"),
                 "shares_remaining": batch.get("shares_remaining"),
+                **assignment_facts,
                 "coverage": dict(batch.get("coverage") or project_wheel_coverage(batch)),
                 "phase": batch.get("phase"),
                 "reason_codes": list(batch.get("reason_codes") or []),
