@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.2",
+  "base": {
+    "tag": "v3.8.1",
+    "commit": "b57011d96896084bbc7cd86ede16911cec98f22a"
+  },
+  "reviewed_head": "29532e86b3281ec2742b3e06735e638f1b99537a",
+  "commits": [
+    {
+      "sha": "32f3e531aaee245dc04d66bf7de02ed583fbff6b",
+      "subject": "fix(wheel): recover post-trade adopted Combo assignments"
+    },
+    {
+      "sha": "29532e86b3281ec2742b3e06735e638f1b99537a",
+      "subject": "Merge pull request #399 from liuxie066/codex/combo-wheel-recovery"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复开仓后经受控归属事件绑定的 Combo Yield Put 指派无法恢复 Wheel 分支的问题；仅在归属身份与后续事件可精确验证时允许恢复。",
+      "commits": [
+        "32f3e531aaee245dc04d66bf7de02ed583fbff6b"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "29532e86b3281ec2742b3e06735e638f1b99537a",
+      "reason": "PR #399 的合并提交；对外行为变化已由该 PR 的修复提交说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "32f3e531aaee245dc04d66bf7de02ed583fbff6b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/399"
+      ]
+    },
+    {
+      "commit": "29532e86b3281ec2742b3e06735e638f1b99537a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/399"
+      ]
+    }
+  ]
+}
