@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.8.2 - 2026-09-30
+
+### Bug Fixes
+- 修复开仓后经受控归属事件绑定的 Combo Yield Put 指派无法恢复 Wheel 分支的问题；仅在归属身份与后续事件可精确验证时允许恢复。
+
 ## 3.8.1 - 2026-09-30
 
 ### Breaking Changes
