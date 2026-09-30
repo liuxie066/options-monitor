@@ -75,7 +75,7 @@ Close Advice 详细固定规则见
 |---|---|
 | H1 默认与校验 | `portfolio.holdings.enabled` 缺省为 `false`，在默认配置和生成的市场快照中可见；只接受全局布尔值，不允许市场覆盖或未知 Holdings 键。 |
 | H2 受控切换 | `om config holdings set` 预览无目标写入，展示当前值、目标值、源与全部生成目标；apply 需确认、匹配的源 SHA 和绑定该目标的预览摘要，经现有 authoring/build 事务生成 YAML 中所有已配置的 US/HK 市场与 Assistant 快照、备份并读回；关闭可在 PM 故障时完成。 |
-| H3 开启预检 | 开启前检查 PM 集成、Holdings 账户发现及新鲜可信的估值证据。预览可展示预检失败而不写入，apply 必须拒绝。回报仅列出 PM 已观测账户、broker、market 与时间，不把一次预检解释为与 OM 查询账户对应、持续可用或全覆盖证明。 |
+| H3 开启预检 | 开启前检查 PM 集成、Holdings 账户发现及新鲜可信的估值证据。预览可展示预检失败而不写入，apply 必须拒绝。回报仅列出所检查 OM 账户中 PM 已观测的账户、broker、market 与时间，不把一次预检解释为查询已接线、持续可用或全覆盖证明。 |
 | H4 情景隔离 | 原 `portfolio_assignment_scenario` 查询与领域计算没有本轮改动；新键尚不改变查询结果，操作说明和返回值须明确这一阶段边界。 |
 
 事实及复用清单：检索 `src/application/config_defaults.py`、`config_yaml.py`、
@@ -100,9 +100,9 @@ PM 故障时仍可得到预览和预检失败原因，但 apply 不放行。确�
 市场集合和生成后 YAML 的 SHA 确定性计算；apply 重算并拒绝与预览不一致的目标。
 市场和 Assistant 快照含生成时间，预览与 apply 的文件 SHA 可以不同，不纳入确认摘要；
 源 SHA 另行保护并发编辑。
-PM Accounts 契约提供候选账户；估值证据中的 Holdings 行决定已观测账户与 broker/market。
-本轮查询尚未接线，
-不以 OM/PM 标签交集设门禁，也不宣称这些账户已可由当前情景查询使用。
+PM Accounts 契约确认 Portfolio Exposure 当前使用的 OM 运行账户是否存在；预检只对这些账户
+要求新鲜可信的估值证据，PM 的额外账户不阻止开启。估值证据中的 Holdings 行决定已观测账户与
+broker/market。本轮查询尚未接线，不宣称这些账户已可由当前情景查询使用。
 YAML 与市场快照读回 Holdings 值；
 全部目标按事务返回的 SHA 核对文件内容，Assistant 只核对生成身份和摘要，因为它不含 Holdings 值。
 事务提交前失败须明确无配置写入；提交后读回失败须报出 `write_applied=true`、受影响目标、
