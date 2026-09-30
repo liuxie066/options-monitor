@@ -269,7 +269,9 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
              and event.contract_key.option_type == "put"
              and fields.get("position_side") == "short")
             or (event.event_type == "expire_close"
-                and fields.get("position_side") == "long")
+                and (fields.get("position_side") == "long"
+                     or (event.contract_key.option_type == "put"
+                         and fields.get("position_side") == "short")))
         )
 
     later = [e.event_id for e in events if e.contract_key.account == account
