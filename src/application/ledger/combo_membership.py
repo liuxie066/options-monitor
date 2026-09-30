@@ -930,16 +930,26 @@ def resolve_combo_assignment_proof(
             "symbol": assignment.contract_key.underlying_symbol,
             "funding_put_record_id": put_binding["record_id"],
             "funding_put_open_event_id": put_binding["open_event_id"],
-            "funding_put_contract_key": leg_events["put"].contract_key.to_dict(),
             "participation_call_record_id": call_binding["record_id"],
             "participation_call_open_event_id": call_binding["open_event_id"],
-            "participation_call_contract_key": leg_events["call"].contract_key.to_dict(),
             "original_contracts": put_lot.contracts_opened,
         }
+        # Historical identities bind the stored open key, including legacy position fields.
+        contract_keys_match = all(
+            identity.get(key) in (
+                opens[binding["open_event_id"]].get("contract_key"),
+                leg_events[label].contract_key.to_dict(),
+            )
+            for key, label, binding in (
+                ("funding_put_contract_key", "put", put_binding),
+                ("participation_call_contract_key", "call", call_binding),
+            )
+        )
         if (
             validated.status != "valid"
             or validated.identity_hash != identity.get("identity_hash")
             or any(identity.get(key) != value for key, value in expected.items())
+            or not contract_keys_match
         ):
             return None, "combo_assignment_identity_mismatch"
     return variant, None

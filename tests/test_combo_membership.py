@@ -329,6 +329,40 @@ def test_sp_lc_assignment_proof_rejects_valid_hash_for_wrong_long_contract() -> 
     ) == (None, "combo_assignment_identity_mismatch")
 
 
+def test_sp_lc_assignment_proof_accepts_exact_stored_open_contract_keys() -> None:
+    assignment, events, identities = _assignment_pair("csp_lc")
+    for opening in events:
+        parsed = TradeEvent.from_dict(opening)
+        raw_key = dict(opening["contract_key"])
+        raw_key.pop("asset_type")
+        raw_key.update({
+            "strike": float(raw_key["strike"]),
+            "position_side": parsed.position_side,
+            "position_key": parsed.position_key,
+        })
+        opening["contract_key"] = raw_key
+    identity = build_combo_identity({
+        **identities[0],
+        "funding_put_contract_key": events[0]["contract_key"],
+        "participation_call_contract_key": events[1]["contract_key"],
+    })
+    assert resolve_combo_assignment_proof(
+        assignment=assignment, group_id=GROUP_ID,
+        trade_events=events, identities=[identity],
+    ) == ("csp_lc", None)
+
+    tampered = build_combo_identity({
+        **identity,
+        "participation_call_contract_key": {
+            **events[1]["contract_key"], "position_key": "wrong",
+        },
+    })
+    assert resolve_combo_assignment_proof(
+        assignment=assignment, group_id=GROUP_ID,
+        trade_events=events, identities=[tampered],
+    ) == (None, "combo_assignment_identity_mismatch")
+
+
 @pytest.mark.parametrize("bad_metadata", [False, True])
 def test_sp_lc_assignment_proof_requires_valid_pair_and_unconflicted_open_metadata(
     bad_metadata: bool,

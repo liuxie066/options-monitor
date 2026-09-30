@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 修复历史 Combo Yield 身份保存原始开仓合约键时，75P 等已指派卖腿的 Wheel 恢复被误判为身份不匹配的问题。
+
 ## 3.8.2 - 2026-09-30
 
 ### Bug Fixes
