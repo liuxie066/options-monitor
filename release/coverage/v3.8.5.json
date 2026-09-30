@@ -1,0 +1,44 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.5",
+  "base": {
+    "tag": "v3.8.4",
+    "commit": "083c5e4e50a341f614d654f160662371b96119fa"
+  },
+  "reviewed_head": "7f5e7e9467bc5318fc6c5ed1d61ba1c4b2d97c54",
+  "commits": [
+    {
+      "sha": "a6b09866d069ed71c03305844de5c3730a28fd9b",
+      "subject": "fix(config): scope Holdings preflight to OM accounts"
+    },
+    {
+      "sha": "7f5e7e9467bc5318fc6c5ed1d61ba1c4b2d97c54",
+      "subject": "Merge pull request #410 from liuxie066/codex/holdings-scope-gate"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复 Portfolio Exposure 开启 Holdings 时把 PM 额外账户也纳入质量预检、导致已配置的 OM 账户证据可信却仍无法开启的问题。",
+      "commits": [
+        "a6b09866d069ed71c03305844de5c3730a28fd9b",
+        "7f5e7e9467bc5318fc6c5ed1d61ba1c4b2d97c54"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "a6b09866d069ed71c03305844de5c3730a28fd9b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/410"
+      ]
+    },
+    {
+      "commit": "7f5e7e9467bc5318fc6c5ed1d61ba1c4b2d97c54",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/410"
+      ]
+    }
+  ]
+}
