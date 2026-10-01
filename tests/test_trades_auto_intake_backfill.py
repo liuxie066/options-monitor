@@ -103,6 +103,7 @@ def _standard_execution(*, price: str = "2.50") -> dict[str, Any]:
         "external_order_namespace": "futu.order", "external_order_id": "order-1",
         "side": "sell", "position_effect": "open", "quantity": "1", "price": price,
         "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z",
+        "status": "OK",
     }
 
 
@@ -257,7 +258,7 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
 
     def _history_deals_fn(**_kwargs):
         return (
-            [{"deal_id": "deal-1", "code": "HK.TCH260605P440000"}],
+            [{"status": "OK", "deal_id": "deal-1", "code": "HK.TCH260605P440000"}],
             {"window_start_utc": "2026-06-03T00:00:00+00:00", "window_end_utc": "2026-06-03T06:00:00+00:00",
              "account_results": [{"futu_account_id": "REAL_1", "ret": 0, "coverage_status": "complete",
                                   "coverage_complete": True, "pagination_complete": True}]},
@@ -316,6 +317,7 @@ def test_push_lookup_persists_only_exact_deal_economics_once(tmp_path, monkeypat
             return [
                 {
                     "deal_id": "other-fill",
+                    "status": "OK",
                     "order_id": "shared-order",
                     "acc_id": "123",
                     "qty": "9",
@@ -324,6 +326,7 @@ def test_push_lookup_persists_only_exact_deal_economics_once(tmp_path, monkeypat
                 },
                 {
                     "deal_id": "target-fill",
+                    "status": "OK",
                     "order_id": "shared-order",
                     "acc_id": "123",
                     "qty": "2",
@@ -405,6 +408,7 @@ def test_push_lookup_account_mismatch_keeps_missing_economics_in_review(tmp_path
         {
             "futu_account_id": "123",
             "deal_id": "target-fill",
+            "status": "OK",
             "order_id": "shared-order",
             "code": "US.NVDA260918P00100000",
             "trd_side": "SELL_SHORT",
@@ -468,6 +472,7 @@ def test_backfill_dispatches_stored_refresh_after_duplicate_recovery(
     inbox_path = tmp_path / "trade_intake_inbox.sqlite3"
     payload = {
         "deal_id": "stock-1",
+        "status": "OK",
         "code": "HK.00700",
         "futu_account_id": "REAL_1",
         "internal_account": "lx",
@@ -716,7 +721,7 @@ def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pi
     )
 
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": "deal-1", "order_id": "order-1"}], {})
+        return ([{"status": "OK", "deal_id": "deal-1", "order_id": "order-1"}], {})
 
     def _process_payload_fn(_payload: dict[str, Any], **_kwargs):
         raise AssertionError("duplicate should not enter process pipeline")
@@ -764,7 +769,7 @@ def test_history_backfill_does_not_enqueue_processed_non_option_fee_target(
     out = run_history_backfill(
         **kwargs,
         history_deals_fn=lambda **_kwargs: (
-            [{"deal_id": "deal-stock", "order_id": "order-stock"}],
+            [{"status": "OK", "deal_id": "deal-stock", "order_id": "order-stock"}],
             {},
         ),
         process_payload_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -795,7 +800,7 @@ def test_history_backfill_does_not_enqueue_non_durable_fee_target(
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
         history_deals_fn=lambda **_kwargs: (
-            [{"deal_id": "deal-1", "order_id": "order-1"}],
+            [{"status": "OK", "deal_id": "deal-1", "order_id": "order-1"}],
             {},
         ),
         process_payload_fn=lambda payload, **_kwargs: {
@@ -832,7 +837,7 @@ def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path)
     processed: list[dict[str, Any]] = []
 
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": "deal-1"}], {})
+        return ([{"status": "OK", "deal_id": "deal-1"}], {})
 
     def _process_payload_fn(payload: dict[str, Any], **kwargs):
         processed.append({"payload": payload, "source": kwargs.get("source")})
@@ -853,7 +858,7 @@ def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path)
 
 def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(tmp_path: Path) -> None:
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": "deal-1"}], {})
+        return ([{"status": "OK", "deal_id": "deal-1"}], {})
 
     def _process_payload_fn(_payload: dict[str, Any], **_kwargs):
         raise AssertionError("ledger duplicate should not enter process pipeline")
@@ -881,7 +886,7 @@ def test_backfill_does_not_dedupe_same_deal_id_across_accounts(
 
     def _history_deals_fn(**_kwargs):
         return (
-            [{"deal_id": "same-id", "futu_account_id": "REAL_2"}],
+            [{"status": "OK", "deal_id": "same-id", "futu_account_id": "REAL_2"}],
             {},
         )
 
@@ -937,7 +942,7 @@ def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
     closing_deal_id = "495287541148725639"
 
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": opening_deal_id}], {})
+        return ([{"status": "OK", "deal_id": opening_deal_id}], {})
 
     def _process_payload_fn(payload: dict[str, Any], **_kwargs):
         processed.append(str(payload["deal_id"]))
@@ -992,7 +997,7 @@ def test_history_backfill_does_not_skip_incomplete_broker_close_split(
 
     out = run_history_backfill(
         **kwargs,
-        history_deals_fn=lambda **_kwargs: ([{"deal_id": "deal-split"}], {}),
+        history_deals_fn=lambda **_kwargs: ([{"status": "OK", "deal_id": "deal-split"}], {}),
         process_payload_fn=lambda payload, **_kwargs: (
             processed.append(str(payload["deal_id"]))
             or {
@@ -1103,7 +1108,7 @@ def test_history_backfill_keeps_unexpected_pipeline_exception_in_durable_inbox(
     inbox_path = tmp_path / "trade_inbox.sqlite3"
 
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": "deal-crash"}], {})
+        return ([{"status": "OK", "deal_id": "deal-crash"}], {})
 
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
@@ -1148,7 +1153,7 @@ def test_history_backfill_fee_target_enqueue_failure_redacts_exception_message(
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
         history_deals_fn=lambda **_kwargs: (
-            [{"deal_id": "deal-1", "order_id": "order-1"}],
+            [{"status": "OK", "deal_id": "deal-1", "order_id": "order-1"}],
             {},
         ),
         process_payload_fn=lambda payload, **_kwargs: _applied_open_result(payload),
@@ -1232,7 +1237,7 @@ def test_checkpoint_advances_only_complete_durable_account(tmp_path, monkeypatch
     out, query = _scoped_history_run(
         tmp_path, account_ids=["A", "B"], now=t1,
         complete_ids=["A"] if failure == "query" else None,
-        payloads=[{"deal_id": "fill-b", "futu_account_id": "B"}] if failure == "durable" else [],
+        payloads=[{"status": "OK", "deal_id": "fill-b", "futu_account_id": "B"}] if failure == "durable" else [],
     )
     assert query["lookback_hours"] == 49
     assert out["ok"] is False
@@ -1341,7 +1346,7 @@ def test_backfill_counts_one_attempt_per_real_core_attempt(tmp_path, monkeypatch
                         lambda **_: (None, None, {}))
     payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
                "external_id_namespace": "futu.deal", "deal_id": "missing-multiplier",
-               "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
+               "status": "OK", "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
                "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00"}
     if failure == "exception":
         monkeypatch.setattr(auto_intake, "save_trade_payload_result",

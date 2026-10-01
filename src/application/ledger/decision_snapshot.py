@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import (
@@ -21,6 +22,7 @@ from src.application.ledger.lifecycle_overlay import (
     validate_account_lifecycle_resolution,
 )
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.repository_core import with_sqlite_repo_writer_lock
 
 
 CURRENT_DECISION_SHADOW_SCHEMA = "current_decision_shadow.v1"
@@ -135,33 +137,34 @@ def decision_state_snapshot(
             reason_code="coherent_ledger_snapshot_unavailable",
         )
     try:
-        rows = read_rows(account=account)
-        # A ledger observation is complete only after the coherent read
-        # transaction has returned.  Injected timestamps remain available for
-        # deterministic tests and historical replay.
-        observed_at = (
-            observed_at_override or datetime.now(timezone.utc).isoformat()
-        )
-        now_ms = (
-            int(current_decision_now_ms)
-            if current_decision_now_ms is not None
-            else int(datetime.now(timezone.utc).timestamp() * 1000)
-        )
-        from src.application.ledger.current_decision_projection import (
-            read_current_decision_projection,
-        )
-
-        try:
-            current_projection = read_current_decision_projection(
-                candidate,
-                account=account,
-                now_ms=now_ms,
+        with with_sqlite_repo_writer_lock(candidate):
+            rows = read_rows(account=account)
+            rows["_account_trade_source_constraints"] = _read_account_trade_source_constraints(
+                candidate, account=account, rows=rows
             )
-        except Exception as exc:
-            current_projection = {
-                "status": "data_unavailable",
-                "reason": f"current_projection_read_failed:{type(exc).__name__}",
-            }
+            # A ledger observation is complete only after the coherent read
+            # transaction has returned. Injected timestamps support replay.
+            observed_at = (
+                observed_at_override or datetime.now(timezone.utc).isoformat()
+            )
+            now_ms = (
+                int(current_decision_now_ms)
+                if current_decision_now_ms is not None
+                else int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+            from src.application.ledger.current_decision_projection import (
+                read_current_decision_projection,
+            )
+
+            try:
+                current_projection = read_current_decision_projection(
+                    candidate, account=account, now_ms=now_ms,
+                )
+            except Exception as exc:
+                current_projection = {
+                    "status": "data_unavailable",
+                    "reason": f"current_projection_read_failed:{type(exc).__name__}",
+                }
         return decision_state_snapshot_from_rows(
             rows,
             account=account,
@@ -176,6 +179,25 @@ def decision_state_snapshot(
             reason_code="coherent_ledger_snapshot_failed",
             error=exc,
         )
+
+
+def _read_account_trade_source_constraints(
+    repo: Any, *, account: str, rows: Mapping[str, Any],
+) -> dict[str, Any]:
+    from src.application.trades.inbox import read_account_trade_source_constraints
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+
+    candidate = getattr(repo, "primary_repo", repo)
+    ledger_path = getattr(candidate, "db_path", None)
+    if ledger_path is None:
+        raise ValueError("trade source Inbox requires a ledger path")
+    ledger = Path(ledger_path)
+    inbox_path = resolve_execution_inbox_path(
+        candidate, ledger.with_name(ledger.name + ".trade_intake_inbox.sqlite3")
+    )
+    return read_account_trade_source_constraints(
+        inbox_path, account=account, trade_events=rows["trade_events"]
+    )
 
 
 def decision_state_snapshot_from_rows(
@@ -208,6 +230,10 @@ def decision_state_snapshot_from_rows(
             if status != "matched"
         )
         account_value = str(account or "").strip().lower()
+        source_constraints = rows.get("_account_trade_source_constraints")
+        if not isinstance(source_constraints, Mapping):
+            raise ValueError("trade source constraints were not frozen")
+        source_reasons = list(source_constraints.get("reason_codes") or [])
         account_terminal_event_ids = {
             str(item.get("canonical_terminal_event_id") or "").strip()
             for item in rows["account_lifecycle_allocations"]
@@ -241,6 +267,8 @@ def decision_state_snapshot_from_rows(
             "normalized_account": account_value,
             "portfolio_scope_id": str(portfolio_scope_id or "").strip(),
             "event_fingerprint": canonical_sha256(events),
+            "trade_events": events,
+            "account_trade_source_constraints": dict(source_constraints),
             "stored_position_lots_fingerprint": canonical_sha256(stored_lots),
             "reprojected_position_lots_fingerprint": canonical_sha256(projected_lots),
             "account_position_lots": rows["account_position_lots"],
@@ -266,13 +294,19 @@ def decision_state_snapshot_from_rows(
         fingerprint = decision_state_snapshot_fingerprint(
             fingerprint_payload
         )
-        trusted = error_count == 0
+        trusted = error_count == 0 and source_constraints.get("status") == "trusted"
+        reason_codes = ([] if error_count == 0 else ["same_snapshot_projection_mismatch"])
+        reason_codes.extend(source_reasons)
         snapshot = {
             **fingerprint_payload,
             "fingerprint_schema_version": DECISION_STATE_FINGERPRINT_SCHEMA,
-            "snapshot_status": "trusted" if trusted else "projection_untrusted",
+            "snapshot_status": (
+                "trusted" if trusted else
+                "source_untrusted" if source_constraints.get("status") != "trusted"
+                else "projection_untrusted"
+            ),
             "actionable": trusted,
-            "reason_codes": [] if trusted else ["same_snapshot_projection_mismatch"],
+            "reason_codes": sorted(set(reason_codes)),
             "decision_state_fingerprint": fingerprint,
             "source_observed_at": observed_at,
             "projection_comparison": comparison,
@@ -308,9 +342,14 @@ def read_decision_state_rows_many(
     read_rows = getattr(candidate, "read_decision_state_rows_many", None)
     if not callable(read_rows):
         raise TypeError("coherent multi-account ledger snapshot is unavailable")
-    rows = read_rows(accounts=accounts)
-    if not isinstance(rows, dict):
-        raise TypeError("coherent multi-account ledger snapshot is invalid")
+    with with_sqlite_repo_writer_lock(candidate):
+        rows = read_rows(accounts=accounts)
+        if not isinstance(rows, dict):
+            raise TypeError("coherent multi-account ledger snapshot is invalid")
+        for account, payload in rows.items():
+            payload["_account_trade_source_constraints"] = _read_account_trade_source_constraints(
+                candidate, account=account, rows=payload
+            )
     return {
         str(account or "").strip().lower(): dict(payload)
         for account, payload in rows.items()

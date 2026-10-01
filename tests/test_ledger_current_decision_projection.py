@@ -67,6 +67,7 @@ from src.application.ledger.decision_snapshot import (
     decision_state_snapshot,
     decision_state_snapshot_fingerprint,
     decision_state_snapshot_from_rows,
+    read_decision_state_rows_many,
 )
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_forced_full,
@@ -966,7 +967,7 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
 ) -> None:
     repo = _repo(tmp_path)
     _bootstrap(repo, "lx")
-    rows = repo.read_decision_state_rows(account="lx")
+    rows = read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
     current = _trusted(repo, 20_000)
     snapshot = decision_state_snapshot_from_rows(
         rows,
@@ -1070,7 +1071,7 @@ def test_legacy_snapshot_shadow_compares_lifecycle_quality_at_same_clock(
     lifecycle_case = _discover_projected_case(repo)
     _bind_test_timing(repo, lifecycle_case)
     now_ms = 1_800_000_000_000
-    rows = repo.read_decision_state_rows(account="lx")
+    rows = read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
     current = _trusted(repo, now_ms)
 
     snapshot = decision_state_snapshot_from_rows(

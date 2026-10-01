@@ -22,7 +22,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain.trade_account_identity import extract_primary_account_id
-from domain.domain.trade_execution import _futu_asset_type, _parse_futu_option_code
+from domain.domain.trade_execution import _futu_asset_type, _parse_futu_option_code, execution_source_status
 from src.application.config_loader import load_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -621,6 +621,25 @@ def _process_payload(
                 "evidence_refs": _append_evidence_ref(payload.get("evidence_refs"), evidence_ref),
             }
         stored = read_trade_payload(inbox_path, inbox_id=inbox_id)
+        if (
+            source == "push"
+            and allow_external_lookup
+            and (stored or {}).get("result_reason") == "broker_deal_status_missing"
+        ):
+            lookup = enrich_trade_push_payload_with_account_id(
+                payload, host=host, port=port, futu_account_ids=futu_account_ids,
+            )
+            checked = lookup.payload
+            if (
+                execution_source_status(checked) is not None
+                and broker_deal_key_from_payload(checked, account_mapping=account_mapping) == key
+            ):
+                enqueue_trade_payload(
+                    inbox_path, payload=checked, source="lookup", broker_deal_key=key,
+                    repo=repo, adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+                )
+                payload = checked
+                stored = read_trade_payload(inbox_path, inbox_id=inbox_id)
         if input_errors:
             mark_trade_payload_review(inbox_path, inbox_id=inbox_id, errors=input_errors, repo=repo)
             return {"status": "unresolved", "reason": review_reason, "inbox_id": inbox_id,

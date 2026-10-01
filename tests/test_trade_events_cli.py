@@ -448,7 +448,10 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
 def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_path: Path, capsys) -> None:
     cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
+    assert cli.main(["repair", event_id, "--strike", "500", "--format", "json"]) == 0
+    expected_hash = json.loads(capsys.readouterr().out)["expected_input_hash"]
+    assert cli.main(["repair", event_id, "--strike", "500", "--expected-input-hash",
+                     expected_hash, "--confirm", "--format", "json"]) == 0
 
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "applied"
@@ -467,6 +470,9 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     lots = repo.list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["contract_key"]["strike"] == "500"
+    assert cli.main(["repair", event_id, "--strike", "500", "--expected-input-hash",
+                     expected_hash, "--confirm"]) == 0
+    assert "[NO_OP]" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("with_fx", [True, False])
@@ -523,10 +529,12 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **kw: (tmp_path / "data.json", repo))
     args = ["repair", event.event_id, *overrides, "--format", "json"]
     assert cli.main([*args, "--dry-run"]) == 0
-    preview = json.loads(capsys.readouterr().out)["repair_event"]
+    preview_payload = json.loads(capsys.readouterr().out)
+    preview = preview_payload["repair_event"]
+    expected_hash = preview_payload["expected_input_hash"]
     assert preview["fees"] == "20"
     assert repo.list_trade_events() == before
-    assert cli.main([*args, "--confirm"]) == 0
+    assert cli.main([*args, "--expected-input-hash", expected_hash, "--confirm"]) == 0
     applied = json.loads(capsys.readouterr().out)
     stored = next(row for row in repo.list_trade_events() if row["event_id"] == applied["repair_event_id"])
     assert stored["fees"] == preview["fees"] == "20"
@@ -551,15 +559,20 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
                 assert conversion["status"] == "pending"
                 assert conversion["amount_cny"] is None
     assert next(row for row in repo.list_trade_events() if row["event_id"] == event.event_id) == before[0]
-    assert cli.main([*args, "--confirm"]) == 2
-    capsys.readouterr()
+    assert cli.main([*args, "--expected-input-hash", expected_hash, "--confirm"]) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["mode"] == "no_op"
+    assert repeated["write_applied"] is False
     assert len(repo.list_trade_events()) == 3
 
 
 def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, capsys) -> None:
     cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
+    assert cli.main(["repair", event_id, "--strike", "500", "--format", "json"]) == 0
+    expected_hash = json.loads(capsys.readouterr().out)["expected_input_hash"]
+    assert cli.main(["repair", event_id, "--strike", "500", "--expected-input-hash",
+                     expected_hash, "--confirm", "--format", "json"]) == 0
     capsys.readouterr()
 
     assert cli.main(["repair", event_id, "--strike", "510", "--confirm"]) == 2
@@ -1221,6 +1234,11 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
     repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     original_transaction = interventions.with_sqlite_repo_transaction
+    from src.application.trades.review import preview_repair_trade_event
+    expected_hash = preview_repair_trade_event(
+        repo, event_id=assignment_event_id, overrides={"price": 99.0},
+        reason="manual_repair",
+    )["expected_input_hash"]
 
     def _transaction_after_sale(repo_arg, fn, **kwargs):
         _append_assigned_stock_sale(
@@ -1240,7 +1258,8 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
         _transaction_after_sale,
     )
 
-    assert cli.main(["repair", assignment_event_id, "--price", "99", "--confirm"]) == 2
+    assert cli.main(["repair", assignment_event_id, "--price", "99",
+                     "--expected-input-hash", expected_hash, "--confirm"]) == 2
 
     assert "repair apply race rejected after dependency re-read" in capsys.readouterr().out
     assert len(repo.list_trade_events()) == 2
@@ -1645,6 +1664,11 @@ def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path:
         opened_at_ms=1000,
     )
     event_id = str(repo.list_trade_events()[0]["event_id"])
+    from src.application.trades.review import preview_repair_trade_event
+    expected_hash = preview_repair_trade_event(
+        repo, event_id=event_id, overrides={"strike": 500.0},
+        reason="manual_repair",
+    )["expected_input_hash"]
 
     assert cli.main([
         "--data-config",
@@ -1655,6 +1679,8 @@ def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path:
         event_id,
         "--strike",
         "500",
+        "--expected-input-hash",
+        expected_hash,
         "--confirm",
         "--format",
         "json",

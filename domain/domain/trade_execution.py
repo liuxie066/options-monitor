@@ -157,6 +157,41 @@ def epoch_milliseconds_instant(value: Any) -> str | None:
     return instant.strftime("%Y-%m-%dT%H:%M:%S") + (f".{fractional_digits}" if fractional_digits else "") + "Z"
 
 
+def execution_source_status(payload: Mapping[str, Any]) -> str | None:
+    """Canonical Futu deal status; None means the source did not provide one."""
+    nested = payload.get("execution_input")
+    source = payload
+    if not any(name in source for name in ("deal_status", "status")) and isinstance(nested, Mapping):
+        source = nested
+    raw = source.get("deal_status", source.get("status"))
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return "unknown"
+    if isinstance(raw, int):
+        return {0: "ok", 1: "cancelled", 2: "changed"}.get(raw, "unknown")
+    value = str(raw).strip().upper()
+    return {
+        "OK": "ok", "CANCELLED": "cancelled", "CHANGED": "changed",
+    }.get(value, "unknown")
+
+
+
+def execution_source_revision(payload: Mapping[str, Any]) -> Decimal | None:
+    """Comparable broker revision only when its Unix timestamp is explicit."""
+    nested = payload.get("execution_input")
+    source = payload
+    if not any(name in source for name in ("update_timestamp", "updateTimestamp")) and isinstance(nested, Mapping):
+        source = nested
+    raw = source.get("update_timestamp", source.get("updateTimestamp"))
+    if raw is None or raw == "":
+        return None
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() and value > 0 else None
+
 def normalize_execution_input(
     payload: Mapping[str, Any], *, source_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:

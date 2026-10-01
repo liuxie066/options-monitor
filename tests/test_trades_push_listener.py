@@ -511,3 +511,20 @@ def test_real_listener_source_loop_keeps_rejected_push_in_durable_review(monkeyp
     restarted = json.loads((tmp_path / "status.json").read_text())
     assert restarted["inbox"]["identity_attention"] == status["inbox"]["identity_attention"]
     assert repo.list_trade_events() == []
+
+
+def test_push_keeps_provider_fill_revision_dropped_by_sdk_dataframe(monkeypatch) -> None:
+    row = {"acc_id": "123", "deal_id": "fill-revision", "order_id": "order-1"}
+    response = _push_response(accID=123, trdEnv=1)
+    response.s2c.orderFill = SimpleNamespace(
+        HasField=lambda name: name == "updateTimestamp", updateTimestamp=1700000000.25,
+    )
+    _mock_sdk_rows(monkeypatch, rows=[row], response=response,
+                   accounts=[{"acc_id": "123", "trd_env": "REAL"}])
+    seen = []
+    _ctx, handler = OpenDTradePushListener(
+        host="127.0.0.1", port=11111, on_deal=seen.append
+    )._build_default_context()
+    handler.on_recv_rsp(response)
+    assert seen[0]["update_timestamp"] == 1700000000.25
+    assert "update_timestamp" not in row

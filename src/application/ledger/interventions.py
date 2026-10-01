@@ -3,11 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 import unicodedata
 import uuid
 from typing import Any, Mapping
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event, position_lots_fingerprint
 from domain.domain.ledger.fees import FeeBasis
 from domain.domain.ledger.position_fields import (
@@ -45,6 +47,7 @@ from src.application.ledger.position_projection_runtime import (
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
     with_sqlite_repo_transaction,
+    with_sqlite_repo_writer_lock,
 )
 from src.application.ledger.results import LedgerWriteResult, TradeEventInterventionPreview
 from src.application.ledger.writer import (
@@ -1420,6 +1423,69 @@ def _manual_repair_event_ids(
     return f"manual-repair-void-{digest}", f"manual-repair-{digest}"
 
 
+def _manual_repair_source_evidence(
+    sqlite_repo: Any,
+    *,
+    events: list[dict[str, Any]],
+    target: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from domain.domain.trade_execution import structured_deal_keys_from_ledger_event
+    from src.application.trades.inbox import (
+        TRADE_EVIDENCE_SET_REF_PREFIX,
+        read_account_trade_source_constraints,
+    )
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+
+    ledger = Path(sqlite_repo.db_path)
+    inbox_path = resolve_execution_inbox_path(
+        sqlite_repo, ledger.with_name(ledger.name + ".trade_intake_inbox.sqlite3")
+    )
+    state = read_account_trade_source_constraints(
+        inbox_path, account=str(target.get("account") or ""), trade_events=events
+    )
+    raw = target.get("raw_payload") or {}
+    execution = raw.get("execution_input") if isinstance(raw, Mapping) else None
+    refs: set[str] = set()
+    for holder in (raw, execution):
+        if not isinstance(holder, Mapping):
+            continue
+        refs.update(
+            ref.removeprefix(TRADE_EVIDENCE_SET_REF_PREFIX)
+            for ref in holder.get("evidence_refs") or []
+            if isinstance(ref, str) and ref.startswith(TRADE_EVIDENCE_SET_REF_PREFIX)
+        )
+    prior_resolution = raw.get("resolved_trade_source_evidence") if isinstance(raw, Mapping) else None
+    if isinstance(prior_resolution, Mapping):
+        refs.update(str(value) for value in prior_resolution.get("inbox_ids") or [])
+    keys = structured_deal_keys_from_ledger_event(target)
+    inbox_ids = sorted(
+        str(row["inbox_id"])
+        for row in state.get("source_rows") or []
+        if str(row["inbox_id"]) in refs or str(row["broker_deal_key"]) in keys
+    )
+    resolution = {
+        "evidence_fingerprint": state["evidence_fingerprint"],
+        "inbox_ids": inbox_ids,
+    }
+    return state, resolution
+
+
+def _manual_repair_input_hash(
+    *, target: dict[str, Any], stock_dependencies: list[dict[str, str]],
+    downstream_dependencies: list[dict[str, Any]], source_state: dict[str, Any],
+    overrides: dict[str, Any], repair_reason: str,
+) -> str:
+    return canonical_sha256({
+        "target": target,
+        "stock_dependencies": stock_dependencies,
+        "downstream_dependencies": downstream_dependencies,
+        "source_fingerprint": source_state["evidence_fingerprint"],
+        "source_inbox_ids": source_state["inbox_ids"],
+        "overrides": _repair_override_payload(overrides),
+        "repair_reason": repair_reason,
+    })
+
+
 def build_manual_repair_preview(
     repo: Any,
     *,
@@ -1429,10 +1495,13 @@ def build_manual_repair_preview(
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionPreview:
     sqlite_repo = require_option_positions_event_write_repo(repo)
-    events, target, stock_dependencies = _intervention_context(
-        sqlite_repo,
-        target_event_id=target_event_id,
-    )
+    with with_sqlite_repo_writer_lock(sqlite_repo):
+        events, target, stock_dependencies = _intervention_context(
+            sqlite_repo, target_event_id=target_event_id,
+        )
+        source_state, source_resolution = _manual_repair_source_evidence(
+            sqlite_repo, events=events, target=target
+        )
     _assert_trade_event_can_be_manually_voided(
         events,
         target,
@@ -1446,6 +1515,11 @@ def build_manual_repair_preview(
             f"dependencies={json.dumps(downstream_dependencies, ensure_ascii=False, sort_keys=True)}"
         )
 
+    expected_input_hash = _manual_repair_input_hash(
+        target=target, stock_dependencies=stock_dependencies,
+        downstream_dependencies=downstream_dependencies, source_state=source_state,
+        overrides=overrides, repair_reason=repair_reason,
+    )
     core = _normalized_repair_core_event(target, overrides)
     void_event_id, repair_event_id = _manual_repair_event_ids(
         target_event_id=target_event_id,
@@ -1454,6 +1528,12 @@ def build_manual_repair_preview(
         repair_reason=repair_reason,
     )
     core_raw_payload = dict(core.get("raw_payload") or {})
+    # The replacement is a manual correction, not a second broker execution.
+    origin_execution_id = core_raw_payload.pop("execution_id", None)
+    core_raw_payload.pop("execution_input", None)
+    core_raw_payload.pop("broker_deal_completion", None)
+    if origin_execution_id:
+        core_raw_payload["repair_origin_execution_id"] = origin_execution_id
     # Conversions belong to the original event identity and economics.
     core_raw_payload.pop("cash_conversions", None)
     core_raw_payload.update(
@@ -1463,6 +1543,8 @@ def build_manual_repair_preview(
             "repair_target_event_id": str(target_event_id),
             "repair_reason": str(repair_reason or ""),
             "repair_overrides": _repair_override_payload(overrides),
+            "repair_expected_input_hash": expected_input_hash,
+            "resolved_trade_source_evidence": source_resolution,
         }
     )
     repair_event = _repair_trade_event(event_id=repair_event_id, core=core, raw_payload=core_raw_payload)
@@ -1485,7 +1567,53 @@ def build_manual_repair_preview(
         target_event=target,
         void_event=void_event.to_dict(),
         repair_event=repair_event.to_dict(),
+        expected_input_hash=expected_input_hash,
     )
+
+
+def readback_manual_repair_event(
+    repo: Any, *, target_event_id: str, overrides: dict[str, Any],
+    repair_reason: str, expected_input_hash: str | None,
+) -> dict[str, Any] | None:
+    """A lost apply response is safe to repeat only for the identical request."""
+    if not expected_input_hash:
+        return None
+    sqlite_repo = require_option_positions_event_write_repo(repo)
+    with with_sqlite_repo_writer_lock(sqlite_repo):
+        events = [dict(row) for row in sqlite_repo.list_trade_events()]
+        repair = next((event for event in events if (
+            (raw := _event_payload(event)).get("mode") == "manual_repair"
+            and raw.get("repair_target_event_id") == target_event_id
+            and raw.get("repair_reason") == repair_reason
+            and raw.get("repair_overrides") == _repair_override_payload(overrides)
+            and raw.get("repair_expected_input_hash") == expected_input_hash
+        )), None)
+        if repair is None:
+            return None
+        void = next((event for event in events if (
+            (raw := _event_payload(event)).get("mode") == "manual_repair_void"
+            and raw.get("void_target_event_id") == target_event_id
+            and raw.get("repair_event_id") == repair.get("event_id")
+        )), None)
+        if void is None:
+            raise ValueError("manual repair readback found an incomplete repair pair")
+        source_state, _ = _manual_repair_source_evidence(
+            sqlite_repo, events=events, target=repair
+        )
+        saved_resolution = _event_payload(repair).get("resolved_trade_source_evidence") or {}
+        return {
+            "event_id": str(repair["event_id"]),
+            "target_event_id": target_event_id,
+            "void_event_id": str(void["event_id"]),
+            "repair_event_id": str(repair["event_id"]),
+            "void_created": False,
+            "repair_created": False,
+            "position_lot_count": len(sqlite_repo.list_position_lots()),
+            "source_evidence_reopened": (
+                saved_resolution.get("evidence_fingerprint")
+                != source_state.get("evidence_fingerprint")
+            ),
+        }
 
 
 def persist_manual_repair_event(
@@ -1494,6 +1622,7 @@ def persist_manual_repair_event(
     target_event_id: str,
     overrides: dict[str, Any],
     repair_reason: str,
+    expected_input_hash: str | None,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
     preview = build_manual_repair_preview(
@@ -1503,6 +1632,10 @@ def persist_manual_repair_event(
         repair_reason=repair_reason,
         as_of_ms=as_of_ms,
     )
+    if not str(expected_input_hash or "").strip():
+        raise ValueError("manual repair requires expected_input_hash from preview")
+    if preview.expected_input_hash != expected_input_hash:
+        raise ValueError("manual repair preview is stale; preview again")
     void_event = _preview_event_to_trade_event(preview.void_event)
     repair_event = _preview_event_to_trade_event(preview.repair_event)
 
@@ -1514,6 +1647,39 @@ def persist_manual_repair_event(
             target_event_id=target_event_id,
             conn=conn,
         )
+        stored_repair = next(
+            (event for event in events if event.get("event_id") == repair_event.event_id), None
+        )
+        stored_void = next(
+            (event for event in events if event.get("event_id") == void_event.event_id), None
+        )
+        if stored_repair is not None or stored_void is not None:
+            saved = _event_payload(stored_repair or {})
+            if (
+                stored_repair is None or stored_void is None
+                or saved.get("repair_expected_input_hash") != expected_input_hash
+                or saved.get("repair_target_event_id") != target_event_id
+                or saved.get("repair_overrides") != _repair_override_payload(overrides)
+                or saved.get("repair_reason") != repair_reason
+                or _event_payload(stored_void).get("repair_event_id") != repair_event.event_id
+            ):
+                raise ValueError("manual repair readback conflict")
+            source_state, _ = _manual_repair_source_evidence(
+                sqlite_repo, events=events, target=stored_repair
+            )
+            saved_resolution = saved.get("resolved_trade_source_evidence") or {}
+            return {
+                "target_event_id": target_event_id,
+                "void_event_id": void_event.event_id,
+                "repair_event_id": repair_event.event_id,
+                "void_created": False,
+                "repair_created": False,
+                "position_lot_count": len(sqlite_repo.list_position_lots(conn=conn)),
+                "source_evidence_reopened": (
+                    saved_resolution.get("evidence_fingerprint")
+                    != source_state.get("evidence_fingerprint")
+                ),
+            }
         _assert_trade_event_can_be_manually_voided(
             events,
             target,
@@ -1526,6 +1692,17 @@ def persist_manual_repair_event(
                 f"{target_event_id}; void or repair downstream events first; "
                 f"dependencies={json.dumps(downstream_dependencies, ensure_ascii=False, sort_keys=True)}"
             )
+        source_state, _ = _manual_repair_source_evidence(
+            sqlite_repo, events=events, target=target
+        )
+        actual_hash = _manual_repair_input_hash(
+            target=target, stock_dependencies=stock_dependencies,
+            downstream_dependencies=downstream_dependencies,
+            source_state=source_state, overrides=overrides,
+            repair_reason=repair_reason,
+        )
+        if actual_hash != expected_input_hash:
+            raise ValueError("manual repair preview is stale; preview again")
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
             (void_event, repair_event),

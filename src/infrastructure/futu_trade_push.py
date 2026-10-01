@@ -66,8 +66,17 @@ class OpenDTradePushListener:
                 if ret == 0 and data is not None:
                     rows = data.to_dict("records") if hasattr(data, "to_dict") else []
                     if isinstance(rows, list):
+                        raw_fill = getattr(getattr(rsp_pb, "s2c", None), "orderFill", None)
+                        revision = (
+                            raw_fill.updateTimestamp
+                            if raw_fill is not None and raw_fill.HasField("updateTimestamp")
+                            else None
+                        )
                         for row in rows:
                             if isinstance(row, dict):
+                                row = dict(row)
+                                if revision is not None:
+                                    row["update_timestamp"] = revision
                                 try:
                                     self._callback(row, header_fields if header is not None else None)
                                 except Exception as exc:

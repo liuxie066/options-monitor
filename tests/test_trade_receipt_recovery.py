@@ -33,6 +33,7 @@ def _payload(deal_id="opening", *, effect="open"):
         "side": "sell" if effect == "open" else "buy", "position_effect": effect,
         "quantity": "1", "price": "2.50", "currency": "USD",
         "occurred_at_utc": "2026-09-07T02:30:00Z" if effect == "open" else "2026-09-07T03:30:00Z",
+        "status": "OK",
     }
 
 
@@ -241,7 +242,7 @@ def _legacy_payload():
     return {
         "acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
         "external_id_namespace": "futu.deal", "deal_id": "old-fill",
-        "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
+        "status": "OK", "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
         "multiplier": "100", "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00",
     }
 

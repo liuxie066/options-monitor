@@ -95,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_repair.add_argument("event_id")
     p_repair.add_argument("--reason", default="manual_repair")
+    p_repair.add_argument("--expected-input-hash", default=None)
     p_repair.add_argument("--broker", default=None)
     p_repair.add_argument("--account", default=None)
     p_repair.add_argument("--symbol", default=None)
@@ -253,7 +254,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides = _repair_overrides(args)
         try:
             payload = (
-                apply_repair_trade_event(repo, event_id=args.event_id, overrides=overrides, reason=args.reason)
+                apply_repair_trade_event(
+                    repo, event_id=args.event_id, overrides=overrides, reason=args.reason,
+                    expected_input_hash=args.expected_input_hash,
+                )
                 if should_apply
                 else preview_repair_trade_event(repo, event_id=args.event_id, overrides=overrides, reason=args.reason)
             )
@@ -263,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         identity_binding = payload.get("operation") == "futu_order_identity_binding"
         time_correction = payload.get("operation") == "opend_trade_time_correction"
         in_place_repair = identity_binding or time_correction
-        write_applied = bool(payload.get("mode") == "applied") if in_place_repair else should_apply
+        write_applied = bool(payload.get("mode") == "applied")
         payload["ledger_store"] = ledger_store
         payload = attach_write_contract(
             payload,
@@ -301,16 +305,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if should_apply:
+            state = "NO_OP" if payload.get("mode") == "no_op" else "DONE"
+            reopened = " source_evidence_reopened=true; review required" if payload.get("source_evidence_reopened") else ""
             print(
-                f"[DONE] repaired event_id={args.event_id} "
+                f"[{state}] repaired event_id={args.event_id} "
                 f"void={payload.get('void_event_id')} repair={payload.get('repair_event_id')} "
-                f"position_lots={payload.get('position_lot_count')}"
+                f"position_lots={payload.get('position_lot_count')}{reopened}"
             )
         else:
             repair_event = payload.get("repair_event") or {}
             print(
                 f"[DRY_RUN] would repair event_id={args.event_id} "
-                f"repair={repair_event.get('event_id')}"
+                f"repair={repair_event.get('event_id')} "
+                f"expected_input_hash={payload.get('expected_input_hash')}"
             )
         return 0
 
