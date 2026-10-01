@@ -611,16 +611,22 @@ trade-intake audit 只记录 `portfolio_refresh_hint_accepted` 或
 
 1. 第一阶段确认平仓事实。Futu 零价期权成交进入 durable Inbox，以
    `futu:<account>:<futu_account_id>:<deal_id>` 占用唯一 broker source，
-   冻结受影响 lot 和合约数量，并生成一次 `option_leg_closed` Outbox 意图。
+   冻结受影响 lot 和合约数量，在同一账本事务内按成交时间写入原因待定的
+   canonical close event、allocation 和 lot 投影，并生成一次 `option_leg_closed`
+   Outbox 意图。确认成交后不等待平仓原因才减少未平仓数量。
 2. 第二阶段确认平仓原因。原因未确认时为 `cause_pending`；证据完整后写入
-   canonical terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
+   原子更正后的 terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
    数量冲突或投影漂移进入 `needs_review` 或 `conflict`，不得猜测原因。
 
 平仓事实不会因为原因尚未确认而消失；原因确认也不能再次消费同一 broker
 成交。`resolution_revision` 只随业务结论变化，通知重发只增加
 `delivery_revision`。
 
-### 已确认期权平仓的风险占用设计
+### 已确认期权平仓的风险占用设计（历史方案）
+
+以下记录此前按预留量修正风险占用的设计。当期零价成交已写 canonical close
+event 后，风险数量取投影中的未平仓张数，不再扣减同一笔预留量；待交收资金和
+股份的不可用标记仍须依据独立结算证据解除。下文“不改 canonical”仅描述旧方案。
 
 目标：账户级期权上下文在已接受的平仓事实出现后，按仍实际未平仓的合约数计算
 CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金再次被旧期权占用。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
@@ -50,6 +51,8 @@ from src.application.trades.lifecycle_reconciliation import (
 from src.application.trades.lifecycle import (
     reconcile_polled_stock_settlement_evidence,
 )
+from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.settlement_attempts import (
     SETTLEMENT_OBSERVATION_CONTEXT_KEY,
     case_scope_fingerprint,
@@ -93,6 +96,8 @@ def _repo_with_pending_case(
     *,
     opening_event: TradeEvent | None = None,
     option_code: str = OPTION_CODE,
+    seed_anchor: bool = True,
+    second_open_lot: bool = False,
 ) -> tuple[
     SQLiteOptionPositionsRepository,
     dict,
@@ -142,6 +147,12 @@ def _repo_with_pending_case(
             },
         ),
     )
+    if second_open_lot:
+        first_open = TradeEvent.from_dict(repo.list_trade_events()[0])
+        persist_trade_event_object(
+            repo,
+            replace(first_open, event_id="open-2", lot_id="lot-2"),
+        )
     anchor_time_ms = int(
         datetime(
             2026,
@@ -187,22 +198,24 @@ def _repo_with_pending_case(
         "target_contracts_by_lot": {lot_id: 1},
         "raw": {"raw_payload": {"code": option_code}},
     }
-    assert repo.insert_trade_lifecycle_evidence_once(evidence)
+    if seed_anchor:
+        assert repo.insert_trade_lifecycle_evidence_once(evidence)
     assert repo.bind_trade_lifecycle_case_futu_account_once(
         case_id=case_id,
         futu_account_id="1001",
     )
     lifecycle_case = repo.get_trade_lifecycle_case(case_id)
     assert lifecycle_case is not None
-    assert repo.insert_trade_lifecycle_source_consumption_once(
-        build_source_consumption_claim(
-            source_key=source_key,
-            case_id=case_id,
-            owner_evidence_id="anchor-1",
-            source_role="option_anchor",
-            economic_payload=evidence,
+    if seed_anchor:
+        assert repo.insert_trade_lifecycle_source_consumption_once(
+            build_source_consumption_claim(
+                source_key=source_key,
+                case_id=case_id,
+                owner_evidence_id="anchor-1",
+                source_role="option_anchor",
+                economic_payload=evidence,
+            )
         )
-    )
     policy = build_lifecycle_timing_policy(
         case_id=case_id,
         market="US",
@@ -3208,6 +3221,68 @@ def _admitted_terminal_settlement(
         == "admitted_semantic"
     )
     return repo, case_id, now_ms, observation
+
+
+def test_two_pending_anchors_observation_stays_incomplete_and_is_recorded_for_review(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, anchor_ms = _repo_with_pending_case(
+        tmp_path, seed_anchor=False, second_open_lot=True,
+    )
+    case_id = str(lifecycle_case["case_id"])
+    history_deals = []
+    for number in (1, 2):
+        deal_id = f"option-close-{number}"
+        result = resolve_trade_deal(
+            NormalizedTradeDeal(
+                broker="富途", futu_account_id="1001", internal_account="lx",
+                deal_id=deal_id, order_id="option-order-1", symbol="NVDA",
+                option_type="put", side="buy", position_effect="close",
+                contracts=1, price=0, strike=100, multiplier=100,
+                multiplier_source="cache", expiration_ymd=EXPIRATION_YMD,
+                currency="USD", trade_time_ms=anchor_ms + number,
+                raw_payload={"deal_id": deal_id, "code": OPTION_CODE},
+            ),
+            repo=repo, state={}, apply_changes=True,
+        )
+        assert result.status == "applied"
+        history_deals.append({
+            "deal_id": deal_id, "acc_id": "1001", "code": OPTION_CODE,
+            "price": "0", "qty": 1,
+        })
+    assert [repo.get_position_lot_fields(lot_id)["contracts_open"]
+            for lot_id in ("lot-1", "lot-2")] == [0, 0]
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=repo.get_trade_lifecycle_case(case_id),
+        case_id=case_id, gateway=_Gateway(history_deals=history_deals),
+        now_ms=now_ms,
+    )
+    assert observation["complete"] is False
+    assert "option_anchor_claim_not_unique" in observation["incomplete_reason_codes"]
+    preview = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=now_ms,
+        observation=observation, apply_changes=False,
+    )
+    assert preview["decision"]["status"] == "needs_review"
+    assert "settlement_observation_incomplete" in preview["decision"]["reason_codes"]
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174405",
+        attempted_at_ms=now_ms,
+        outcome_kind="observed_incomplete",
+        observation=observation,
+    )
+    applied = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=now_ms,
+        observation=observation, apply_changes=True, attempt_audit=envelope,
+    )
+    assert applied["decision"] == preview["decision"]
+    assert applied["write_result"]["admission_status"] == "admitted_semantic"
+    assert repo.get_trade_lifecycle_evidence(observation["observation_id"]) is not None
+    assert len(repo.list_trade_lifecycle_attempt_audits(case_id=case_id)) == 1
+    assert not [event for event in repo.list_trade_events()
+                if event["event_type"] == "expire_close"]
 
 
 def _rebase_terminal_duplicate(

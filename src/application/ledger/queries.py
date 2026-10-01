@@ -659,6 +659,7 @@ def lifecycle_reconciliation_facts(
         "requested_evidence": requested_evidence,
         "position_lot_fields_by_id": lot_fields_by_id,
         "effective_void_event_ids": effective_void_event_ids,
+        "trade_events": [dict(item) for item in trade_events if isinstance(item, dict)],
     }
 
 

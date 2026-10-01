@@ -107,7 +107,9 @@ from src.application.ledger.results import (
     TradeEventInterventionLedgerResult,
 )
 from src.application.ledger.writer import (
+    _trade_event_from_normalized_deal,
     accept_option_close_evidence_atomically,
+    record_zero_price_option_close_atomically,
     adopt_existing_combo_identity_atomically,
     advance_lifecycle_case_state_atomically,
     apply_lifecycle_allocation_atomically,
@@ -2387,6 +2389,21 @@ def accept_option_close_evidence(
         contract_identity=contract_identity,
         evidence=evidence,
         apply_changes=apply_changes,
+    )
+
+
+def record_zero_price_option_close(
+    repo: Any,
+    *,
+    deal: Any,
+    contract_identity: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    return record_zero_price_option_close_atomically(
+        repo,
+        contract_identity=contract_identity,
+        evidence=evidence,
+        base_event=_trade_event_from_normalized_deal(deal),
     )
 
 

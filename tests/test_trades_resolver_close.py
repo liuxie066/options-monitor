@@ -15,6 +15,12 @@ from src.application.ledger.api import (
     summarize_broker_trade_close_candidates,
 )
 from src.application.ledger.writer import persist_trade_event_object
+from src.application.ledger.current_decision_projection import (
+    build_current_decision_projection,
+    current_decision_projection_row,
+    empty_assigned_stock_fact,
+    read_current_decision_projection,
+)
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import (
     load_close_candidate_records,
@@ -29,6 +35,7 @@ from src.application.trades.lifecycle import (
 )
 from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
+    lifecycle_case_read_model,
     reconcile_lifecycle_evidence,
 )
 
@@ -640,12 +647,11 @@ def test_late_zero_price_evidence_does_not_adopt_unbound_expire_close(
     assert repo.list_trade_lifecycle_evidence() == []
 
 
-def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_stock_settlement(tmp_path) -> None:
+def test_resolve_trade_close_apply_records_zero_price_option_leg_pending_reason(tmp_path) -> None:
     repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
 
-    result = resolve_trade_deal(
-        _deal(
+    deal = _deal(
             deal_id="5646137975909129735",
             order_id="FH1C8FA7239D5FA000",
             symbol="TIGR",
@@ -656,20 +662,179 @@ def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_s
             currency="USD",
             trade_time_ms=1779468493916,
             raw_payload={"deal_id": "5646137975909129735", "code": "US.TIGR260522P6000"},
-        ),
+        )
+    result = resolve_trade_deal(
+        deal,
         repo=repo,
         state={},
         apply_changes=True,
     )
 
-    assert result.status == "unresolved"
+    assert result.status == "applied"
     assert result.action == "lifecycle"
-    assert result.reason == "waiting_settlement_evidence"
+    assert result.reason == "close_reason_pending"
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
-    assert close_events == []
+    assert len(close_events) == 1
+    assert close_events[0]["event_time_ms"] == 1779468493916
+    assert close_events[0]["price"] == "0"
+    assert close_events[0]["raw_payload"]["close_type"] == "cause_pending"
     cases = repo.list_trade_lifecycle_cases()
-    assert cases[0]["status"] == "waiting_settlement_evidence"
+    assert cases[0]["status"] == "ledger_written"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    model = lifecycle_case_read_model(repo, case_id=cases[0]["case_id"])
+    assert model["reason_state"] == "cause_pending"
+    assert model["pending_close_contracts_by_lot"] == {lot_id: 10}
+    replay = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+    assert replay.status == "skipped"
+    assert len([item for item in repo.list_trade_events() if item["position_effect"] == "close"]) == 1
+    changed = resolve_trade_deal(
+        replace(deal, trade_time_ms=deal.trade_time_ms + 1),
+        repo=repo, state={}, apply_changes=True,
+    )
+    assert changed.status == "unresolved"
+    assert changed.reason == "lifecycle_source_event_already_consumed"
+
+
+@pytest.mark.parametrize("failure_point", ["after_claim", "after_projection"])
+def test_zero_price_close_failure_rolls_back_anchor_and_position(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, failure_point: str,
+) -> None:
+    import src.application.ledger.writer_lifecycle_allocation as allocation_writer
+
+    repo = _open_lot(tmp_path)
+    original = allocation_writer.apply_lifecycle_allocation_atomically
+    before_events = len(repo.list_trade_events())
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    def fail(*args, **kwargs):
+        if failure_point == "after_projection":
+            original(*args, **kwargs)
+        raise RuntimeError(failure_point)
+
+    monkeypatch.setattr(allocation_writer, "apply_lifecycle_allocation_atomically", fail)
+    with pytest.raises(RuntimeError, match=failure_point):
+        resolve_trade_deal(
+            _deal(
+                deal_id=failure_point, symbol="TIGR", contracts=10,
+                price=0, strike=6, expiration_ymd="2026-05-22",
+                currency="USD",
+                trade_time_ms=1779468493916,
+                raw_payload={"deal_id": failure_point, "code": "US.TIGR260522P6000"},
+            ),
+            repo=repo, state={}, apply_changes=True,
+        )
+    assert len(repo.list_trade_events()) == before_events
+    assert repo.list_trade_lifecycle_cases() == []
+    assert repo.list_trade_lifecycle_evidence() == []
+    assert repo.list_trade_lifecycle_source_consumptions() == []
     assert repo.get_record_fields(lot_id)["contracts_open"] == 10
+
+
+def test_zero_price_close_updates_trusted_decision_snapshot(tmp_path) -> None:
+    repo = _open_lot(tmp_path)
+    with repo._connect() as conn:
+        conn.execute(
+            "INSERT INTO current_decision_input_generations ("
+            "account, generation, case_generation, evidence_generation, "
+            "allocation_generation, source_consumption_generation, "
+            "timing_generation, combo_identity_generation, "
+            "assigned_stock_generation, updated_at_ms) "
+            "VALUES ('lx', 0, 0, 0, 0, 0, 0, 0, 0, 1)"
+        )
+    payload = build_current_decision_projection(
+        repo, account="lx", updated_at_ms=1779468493910,
+        assigned_stock_after=empty_assigned_stock_fact("lx"),
+        all_quality_case_facts=[],
+    )
+    repo.upsert_current_decision_projection(current_decision_projection_row(payload))
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="snapshot-close", symbol="TIGR", contracts=10,
+            price=0, strike=6, expiration_ymd="2026-05-22",
+            currency="USD", trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "snapshot-close", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo, state={}, apply_changes=True,
+    )
+    assert result.status == "applied"
+    snapshot = read_current_decision_projection(
+        repo, account="lx", now_ms=1779468493920,
+    )
+    assert snapshot["status"] == "trusted", (
+        snapshot,
+        result.diagnostics["lifecycle_adoption"]["economic_close"]["decision_projection"],
+    )
+    case = repo.list_trade_lifecycle_cases()[0]
+    assert snapshot["lifecycle_by_case"].get(case["case_id"], {}).get("reason_state") == "cause_pending", (
+        snapshot["lifecycle_by_case"],
+        result.diagnostics["lifecycle_adoption"]["economic_close"]["decision_projection"],
+    )
+    settled = resolve_trade_deal(
+        _deal(
+            deal_id="snapshot-stock", symbol="TIGR", option_type=None,
+            side="buy", position_effect=None, contracts=1000, price=6,
+            strike=None, multiplier=None, expiration_ymd=None, currency="USD",
+            trade_time_ms=1779468500000,
+            raw_payload={"deal_id": "snapshot-stock", "code": "US.TIGR"},
+        ),
+        repo=repo, state={}, apply_changes=True,
+    )
+    assert settled.status == "applied"
+    snapshot_after = read_current_decision_projection(
+        repo, account="lx", now_ms=1779468500010,
+    )
+    assert snapshot_after["status"] == "trusted", snapshot_after
+    assert snapshot_after["lifecycle_by_case"][case["case_id"]]["reason_state"] == "resolved"
+
+
+def test_zero_price_close_reopened_same_contract_uses_new_case(tmp_path) -> None:
+    repo = _open_lot(tmp_path)
+
+    def close(deal_id: str, trade_time_ms: int):
+        return resolve_trade_deal(
+            _deal(
+                deal_id=deal_id, symbol="TIGR", contracts=10,
+                price=0, strike=6, expiration_ymd="2026-05-22",
+                currency="USD", trade_time_ms=trade_time_ms,
+                raw_payload={"deal_id": deal_id, "code": "US.TIGR260522P6000"},
+            ), repo=repo, state={}, apply_changes=True,
+        )
+
+    assert close("first-close", 1779382093916).status == "applied"
+    first_case = repo.list_trade_lifecycle_cases()[0]["case_id"]
+    _persist_lot(repo, opened_at_ms=1779382094000)
+    assert close("second-close", 1779382095000).status == "applied"
+    case_ids = {case["case_id"] for case in repo.list_trade_lifecycle_cases()}
+    assert len(case_ids) == 2
+    assert first_case in case_ids
+    assert all(repo.get_record_fields(lot["record_id"])["contracts_open"] == 0
+               for lot in repo.list_position_lots())
+
+
+def test_zero_price_partial_deals_close_only_confirmed_contracts(tmp_path) -> None:
+    repo = _open_lot(tmp_path)
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    for deal_id, contracts, time_ms, remaining in (
+        ("partial-4", 4, 1779382093916, 6),
+        ("partial-6", 6, 1779382095000, 0),
+    ):
+        result = resolve_trade_deal(
+            _deal(
+                deal_id=deal_id, symbol="TIGR", contracts=contracts,
+                price=0, strike=6, expiration_ymd="2026-05-22",
+                currency="USD", trade_time_ms=time_ms,
+                raw_payload={"deal_id": deal_id, "code": "US.TIGR260522P6000"},
+            ), repo=repo, state={}, apply_changes=True,
+        )
+        assert result.status == "applied"
+        assert repo.get_record_fields(lot_id)["contracts_open"] == remaining
+
+    closes = [event for event in repo.list_trade_events()
+              if event["position_effect"] == "close"]
+    assert [(event["contracts"], event["event_time_ms"]) for event in closes] == [
+        (4, 1779382093916), (6, 1779382095000),
+    ]
 
 
 def test_confirm_lifecycle_expired_unassigned_fails_closed_without_broker_observation(
@@ -702,7 +867,7 @@ def test_confirm_lifecycle_expired_unassigned_fails_closed_without_broker_observ
         state={},
         apply_changes=True,
     )
-    assert option_result.reason == "waiting_settlement_evidence"
+    assert option_result.reason == "close_reason_pending"
     status_before = repo.list_trade_lifecycle_cases()[0]["status"]
 
     result = resolve_lifecycle_expired_unassigned(
@@ -719,8 +884,8 @@ def test_confirm_lifecycle_expired_unassigned_fails_closed_without_broker_observ
     cases = repo.list_trade_lifecycle_cases()
     assert cases[0]["status"] == status_before
     fields = repo.get_record_fields(lot_id)
-    assert fields["status"] == "open"
-    assert fields["contracts_open"] == 2
+    assert fields["status"] == "close"
+    assert fields["contracts_open"] == 0
 
 
 def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_lifecycle_pending(tmp_path) -> None:
@@ -767,19 +932,19 @@ def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_
         retry_failed_deal=True,
     )
 
-    assert result.status == "unresolved"
+    assert result.status == "applied"
     assert result.action == "lifecycle"
-    assert result.reason == "waiting_settlement_evidence"
+    assert result.reason == "close_reason_pending"
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
-    assert close_events == []
+    assert len(close_events) == 1
     cases = repo.list_trade_lifecycle_cases()
     assert cases[0]["symbol"] == "FUTU"
-    assert cases[0]["status"] == "waiting_settlement_evidence"
+    assert cases[0]["status"] == "ledger_written"
     assert result.diagnostics["lifecycle_schema_version"] == "lifecycle_case.v2"
     evidence = repo.list_trade_lifecycle_evidence(case_id=cases[0]["case_id"])
     assert evidence[0]["source_event_id"] == "futu:lx:REAL_1:3254612655429789712"
     assert evidence[0]["evidence_type"] == "option_zero_price_close"
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 1
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
 
 
 def test_resolve_trade_lifecycle_retry_without_open_target_fails_closed(
@@ -912,8 +1077,8 @@ def test_resolve_trade_lifecycle_records_early_assignment_before_expiration(
 
     first_result = resolve_trade_deal(legs[first_leg], repo=repo, state={}, apply_changes=True)
 
-    assert first_result.status == "unresolved"
-    assert first_result.reason == pending_reason
+    assert first_result.status == ("applied" if first_leg == "option" else "unresolved")
+    assert first_result.reason == ("close_reason_pending" if first_leg == "option" else pending_reason)
 
     second_result = resolve_trade_deal(legs[other_leg], repo=repo, state={}, apply_changes=True)
 
@@ -948,9 +1113,75 @@ def test_resolve_trade_lifecycle_stock_first_records_early_assignment_before_exp
     )
 
 
-def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path) -> None:
+@pytest.mark.parametrize("readback_failure", [False, True])
+def test_stock_first_reason_failure_retries_without_reclosing(
+    tmp_path, monkeypatch, readback_failure: bool,
+) -> None:
+    import src.application.trades.lifecycle as lifecycle_module
+
+    repo = _open_lot(tmp_path, contracts=1)
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    stock = _deal(
+        deal_id="stock-before-retry", symbol="TIGR", option_type=None,
+        side="buy", position_effect=None, contracts=100, price=6,
+        strike=None, multiplier=None, expiration_ymd=None, currency="USD",
+        trade_time_ms=1779468500000,
+        raw_payload={"deal_id": "stock-before-retry", "code": "US.TIGR"},
+    )
+    option = _deal(
+        deal_id="option-after-stock", symbol="TIGR", contracts=1,
+        price=0, strike=6, expiration_ymd="2026-05-22", currency="USD",
+        trade_time_ms=1779468493916,
+        raw_payload={"deal_id": "option-after-stock", "code": "US.TIGR260522P6000"},
+    )
+    assert resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True).status == "unresolved"
+
+    original = lifecycle_module._write_lifecycle_close_from_case
+    original_list_events = repo.list_trade_events
+
+    def fail_reason(*_args, **_kwargs):
+        if readback_failure:
+            monkeypatch.setattr(
+                repo, "list_trade_events",
+                lambda: (_ for _ in ()).throw(RuntimeError("readback unavailable")),
+            )
+        raise RuntimeError("reason correction unavailable")
+
+    monkeypatch.setattr(lifecycle_module, "_write_lifecycle_close_from_case", fail_reason)
+    first = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+    assert first.status == "applied"
+    assert first.reason == "close_reason_pending"
+    assert first.diagnostics["reason_correction_error"] == "RuntimeError: reason correction unavailable"
+    if readback_failure:
+        assert first.diagnostics["reason_correction_readback_error"] == "RuntimeError: readback unavailable"
+        monkeypatch.setattr(repo, "list_trade_events", original_list_events)
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert _lot_close_type(repo, lot_id) == "cause_pending"
+
+    monkeypatch.setattr(lifecycle_module, "_write_lifecycle_close_from_case", original)
+    retry = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+    assert retry.status == "applied"
+    assert retry.action == "assignment"
+    assert _lot_close_type(repo, lot_id) == "assignment"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert len([event for event in repo.list_trade_events() if event["event_type"] == "assignment"]) == 1
+    assert len([row for row in repo.list_trade_lifecycle_source_consumptions()
+                if row["source_role"] == "stock_settlement"]) == 1
+    duplicate = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+    assert duplicate.status == "skipped"
+    assert duplicate.action == "assignment"
+    assert len([event for event in repo.list_trade_events()
+                if event["event_type"] == "assignment"]) == 1
+
+
+@pytest.mark.parametrize("fee_timing", ["before_reason", "after_reason"])
+def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path, monkeypatch, fee_timing) -> None:
     repo = _open_lot(tmp_path)
     lot_id = repo.list_position_lots()[0]["record_id"]
+    fx = {"rates": {"USDCNY": 7.2}, "timestamp": "2026-05-22T16:48:13+00:00"}
+    monkeypatch.setattr("src.application.ledger.writer_lifecycle_evidence.load_cash_fx_payload", lambda *_args, **_kwargs: fx)
+    monkeypatch.setattr("src.application.ledger.writer_lifecycle_allocation.load_cash_fx_payload", lambda *_args, **_kwargs: fx)
+    monkeypatch.setattr("src.application.ledger.order_fee_migration.load_cash_fx_payload", lambda *_args, **_kwargs: fx)
 
     option_result = resolve_trade_deal(
         _deal(
@@ -969,7 +1200,36 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
         apply_changes=True,
     )
 
-    assert option_result.status == "unresolved"
+    assert option_result.status == "applied"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert _lot_close_type(repo, lot_id) == "cause_pending"
+    from src.application.trades.order_fee_sync import recover_order_fee_targets, sync_order_fees
+
+    class FeeProvider:
+        def fetch_terminal_orders(self, **kwargs):
+            return {"order-1": {
+                "status": "terminal_with_fill", "dealt_qty": "10", "currency": "USD",
+            }}, {}
+
+        def fetch_order_fees(self, **kwargs):
+            return {"order-1": {"fee_amount": "2.00", "fee_details": {}}}, {}
+
+    def sync_fee():
+        fee_targets = recover_order_fee_targets(repo, account="lx")["targets"]
+        assert ("富途", "lx", "REAL_1", "order-1") in fee_targets
+        result = sync_order_fees(
+            repo, account="lx", provider=FeeProvider(), apply=True,
+            observed_at_ms=1779468501000, futu_account_id="REAL_1",
+            target_identity=("富途", "lx", "REAL_1", "order-1"),
+        )
+        assert result["migration"]["status_counts"].get("committed") == 1
+
+    if fee_timing == "before_reason":
+        sync_fee()
+        prior_fee_conversion = next(
+            row for row in repo.list_trade_events() if row.get("event_type") == "close"
+        )["raw_payload"]["cash_conversions"]["option_fee_cash"]
+        assert prior_fee_conversion["status"] == "observed"
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -993,7 +1253,7 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
         apply_changes=True,
     )
 
-    assert stock_result.status == "applied"
+    assert stock_result.status == "applied", stock_result
     assert stock_result.action == "assignment"
     assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
     assert len(assignment_events) == 1
@@ -1001,6 +1261,74 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
     assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 1000
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
     assert _lot_close_type(repo, lot_id) == "assignment"
+    if fee_timing == "after_reason":
+        sync_fee()
+    assignment_after_fee = next(
+        row for row in repo.list_trade_events() if row.get("event_type") == "assignment"
+    )
+    assert assignment_after_fee["raw_payload"]["fee_provenance"]["amount"] == "2"
+    fee_conversion = assignment_after_fee["raw_payload"]["cash_conversions"]["option_fee_cash"]
+    assert fee_conversion["status"] == "observed"
+    assert fee_conversion["amount_cny"] == "-14.4"
+    if fee_timing == "before_reason":
+        assert fee_conversion["fx_rate"] == prior_fee_conversion["fx_rate"]
+        assert fee_conversion["rate_source_id"] == prior_fee_conversion["rate_source_id"]
+
+
+def test_reason_correction_projection_failure_keeps_pending_close(tmp_path, monkeypatch) -> None:
+    repo = _open_lot(tmp_path, contracts=1)
+    option = _deal(
+        deal_id="rollback-option", symbol="TIGR", contracts=1, price=0,
+        strike=6, expiration_ymd="2026-05-22", currency="USD",
+        trade_time_ms=1779468493916,
+        raw_payload={"deal_id": "rollback-option", "code": "US.TIGR260522P6000"},
+    )
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
+    original_events = repo.list_trade_events()
+    original_allocations = repo.list_trade_lifecycle_allocations()
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    stock = _deal(
+        deal_id="rollback-stock", symbol="TIGR", option_type=None,
+        side="buy", position_effect=None, contracts=100, price=6,
+        strike=None, multiplier=None, expiration_ymd=None, currency="USD",
+        trade_time_ms=1779468500000,
+        raw_payload={"deal_id": "rollback-stock", "code": "US.TIGR"},
+    )
+    monkeypatch.setattr(
+        "src.application.ledger.writer_lifecycle_allocation.run_position_projection_in_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection_failed")),
+    )
+    with pytest.raises(RuntimeError, match="projection_failed"):
+        resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert repo.list_trade_events() == original_events
+    assert repo.list_trade_lifecycle_allocations() == original_allocations
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert _lot_close_type(repo, lot_id) == "cause_pending"
+
+
+def test_one_stock_settlement_cannot_correct_two_pending_option_deals(tmp_path) -> None:
+    repo = _open_lot(tmp_path, contracts=2)
+    for index in range(2):
+        option = _deal(
+            deal_id=f"split-option-{index}", symbol="TIGR", contracts=1,
+            price=0, strike=6, expiration_ymd="2026-05-22",
+            currency="USD", trade_time_ms=1779468493916 + index,
+            raw_payload={"deal_id": f"split-option-{index}", "code": "US.TIGR260522P6000"},
+        )
+        assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
+    stock = _deal(
+        deal_id="split-stock", symbol="TIGR", option_type=None,
+        side="buy", position_effect=None, contracts=200, price=6,
+        strike=None, multiplier=None, expiration_ymd=None, currency="USD",
+        trade_time_ms=1779468500000,
+        raw_payload={"deal_id": "split-stock", "code": "US.TIGR"},
+    )
+    settled = resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert settled.status == "unresolved"
+    assert not [item for item in repo.list_trade_events() if item["event_type"] == "assignment"]
+    assert len([item for item in repo.list_trade_events()
+                if item["event_type"] == "close" and item["raw_payload"].get("close_type") == "cause_pending"]) == 2
+    assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
 
 
 def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_path) -> None:
@@ -1034,7 +1362,7 @@ def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_p
         state={},
         apply_changes=True,
     )
-    assert option_result.status == "unresolved"
+    assert option_result.status == "applied"
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -1062,13 +1390,14 @@ def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_p
     assert stock_result.action == "assignment"
     assert stock_result.reason == "assignment_recorded"
     allocations = repo.list_trade_lifecycle_allocations(case_id=v2_case_id)
-    assert len(allocations) == 1
-    assert allocations[0]["target_lot_id"] == lot_id
-    assert allocations[0]["contracts_allocated"] == 10
+    assert len(allocations) == 2
+    terminal_allocation = next(item for item in allocations if item["terminal_type"] == "assignment")
+    assert terminal_allocation["target_lot_id"] == lot_id
+    assert terminal_allocation["contracts_allocated"] == 10
     terminal_event = next(
         item
         for item in repo.list_trade_events()
-        if item.get("event_id") == allocations[0]["canonical_terminal_event_id"]
+        if item.get("event_id") == terminal_allocation["canonical_terminal_event_id"]
     )
     assert terminal_event["event_type"] == "assignment"
     assert terminal_event["raw_payload"]["schema_version"] == "lifecycle_terminal_event.v2"
@@ -1109,7 +1438,8 @@ def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
         repo=repo,
         state={},
         apply_changes=True,
-    ).status == "unresolved"
+    ).status == "applied"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
 
     def stock_leg(deal_id: str, offset: int) -> NormalizedTradeDeal:
         return _deal(
@@ -1135,20 +1465,21 @@ def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
         state={},
         apply_changes=True,
     )
-    assert first.status == "applied"
-    assert first.reason == "assignment_partially_recorded"
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 1
-    assert repo.get_trade_lifecycle_case(v2_case_id)["status"] == "partially_resolved"
-    assert repo.list_trade_lifecycle_cases()[0]["status"] == "partially_resolved"
+    assert first.status == "unresolved", first
+    assert first.reason == "pending_close_settlement_not_exact"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert not [event for event in repo.list_trade_events() if event["event_type"] == "assignment"]
 
+    before_events = len(repo.list_trade_events())
     replay = resolve_trade_deal(
         stock_leg("partial-stock-1", 2_000),
         repo=repo,
         state={},
         apply_changes=True,
     )
-    assert replay.status == "skipped"
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 1
+    assert replay.status == "unresolved"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert len(repo.list_trade_events()) == before_events
 
     completed = resolve_trade_deal(
         stock_leg("partial-stock-2", 3_000),
@@ -1156,11 +1487,11 @@ def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
         state={},
         apply_changes=True,
     )
-    assert completed.status == "applied"
-    assert completed.reason == "assignment_recorded"
+    assert completed.status == "unresolved"
+    assert completed.reason == "pending_close_settlement_not_exact"
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
-    assert repo.get_trade_lifecycle_case(v2_case_id)["status"] == "ledger_written"
-    assert len(repo.list_trade_lifecycle_allocations(case_id=v2_case_id)) == 2
+    assert repo.get_trade_lifecycle_case(v2_case_id)["status"] == "needs_review"
+    assert len(repo.list_trade_lifecycle_allocations(case_id=v2_case_id)) == 1
 
 
 def test_broker_lifecycle_adapter_creates_v2_case_for_partial_stock_settlement(
@@ -1189,7 +1520,7 @@ def test_broker_lifecycle_adapter_creates_v2_case_for_partial_stock_settlement(
         repo=repo,
         state={},
         apply_changes=True,
-    ).status == "unresolved"
+    ).status == "applied"
 
     partial = resolve_trade_deal(
         _deal(
@@ -1213,12 +1544,12 @@ def test_broker_lifecycle_adapter_creates_v2_case_for_partial_stock_settlement(
         apply_changes=True,
     )
 
-    assert partial.status == "applied"
-    assert partial.reason == "assignment_partially_recorded"
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 1
+    assert partial.status == "unresolved"
+    assert partial.reason == "pending_close_settlement_not_exact"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
     cases = repo.list_trade_lifecycle_cases()
     assert len(cases) == 1
-    assert cases[0]["status"] == "partially_resolved"
+    assert cases[0]["status"] == "needs_review"
 
 
 def test_lifecycle_evidence_identity_is_scoped_by_broker_account(tmp_path) -> None:
@@ -1270,7 +1601,7 @@ def test_resolve_trade_lifecycle_option_first_ignores_pre_expiration_stock_trade
         state={},
         apply_changes=True,
     )
-    assert option_result.status == "unresolved"
+    assert option_result.status == "applied"
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -1296,7 +1627,7 @@ def test_resolve_trade_lifecycle_option_first_ignores_pre_expiration_stock_trade
     assert stock_result.status == "skipped"
     assert stock_result.reason == "not_option_deal"
     assert [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"] == []
-    assert repo.list_trade_lifecycle_cases()[0]["status"] == "waiting_settlement_evidence"
+    assert repo.list_trade_lifecycle_cases()[0]["status"] == "ledger_written"
 
 
 def test_resolve_trade_lifecycle_option_leg_ignores_pre_expiration_stock_evidence(tmp_path) -> None:
@@ -1335,10 +1666,10 @@ def test_resolve_trade_lifecycle_option_leg_ignores_pre_expiration_stock_evidenc
         apply_changes=True,
     )
 
-    assert option_result.status == "unresolved"
-    assert option_result.reason == "waiting_settlement_evidence"
+    assert option_result.status == "applied"
+    assert option_result.reason == "close_reason_pending"
     assert [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"] == []
-    assert repo.list_trade_lifecycle_cases()[0]["status"] == "waiting_settlement_evidence"
+    assert repo.list_trade_lifecycle_cases()[0]["status"] == "ledger_written"
 
 
 def test_resolve_trade_lifecycle_duplicate_option_leg_after_assignment_is_idempotent(tmp_path) -> None:
@@ -1355,7 +1686,7 @@ def test_resolve_trade_lifecycle_duplicate_option_leg_after_assignment_is_idempo
         raw_payload={"deal_id": "option-leg-dup", "code": "US.TIGR260522P6000"},
     )
 
-    assert resolve_trade_deal(option_deal, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option_deal, repo=repo, state={}, apply_changes=True).status == "applied"
     assert resolve_trade_deal(
         _deal(
             deal_id="stock-leg-dup",
@@ -1418,7 +1749,7 @@ def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -
         state={},
         apply_changes=True,
     )
-    assert option_result.status == "unresolved"
+    assert option_result.status == "applied"
 
     stock_result = resolve_trade_deal(
         _deal(
@@ -1740,7 +2071,7 @@ def test_push_stock_after_expire_close_reaches_conflict_writer(
         repo=repo,
         state={},
         apply_changes=True,
-    ).status == "unresolved"
+    ).status == "applied"
     case_id = repo.list_trade_lifecycle_cases()[0]["case_id"]
     expiry = reconcile_lifecycle_evidence(
         repo,
@@ -1758,6 +2089,7 @@ def test_push_stock_after_expire_close_reaches_conflict_writer(
             "contracts": 1,
             "event_time_ms": option_time_ms + 1,
             "target_lot_id": lot_id,
+            "pending_close_anchor_evidence_id": repo.list_trade_lifecycle_evidence(case_id=case_id)[0]["evidence_id"],
         },
         case_id=case_id,
         apply_changes=True,
@@ -1819,7 +2151,7 @@ def test_option_anchor_cannot_rebind_case_to_other_futu_account(
         repo=repo,
         state={},
         apply_changes=True,
-    ).status == "unresolved"
+    ).status == "applied"
 
     second = resolve_trade_deal(
         replace(
@@ -1838,7 +2170,8 @@ def test_option_anchor_cannot_rebind_case_to_other_futu_account(
     )
 
     assert second.status == "unresolved"
-    assert second.reason == "lifecycle_case_futu_account_mismatch"
+    assert second.reason == "lifecycle_close_target_not_found"
+    assert len(repo.list_trade_lifecycle_evidence()) == 1
 
 
 def test_resolve_trade_close_retry_failed_keeps_zero_price_option_leg_pending(tmp_path) -> None:
@@ -1864,11 +2197,11 @@ def test_resolve_trade_close_retry_failed_keeps_zero_price_option_leg_pending(tm
         retry_failed_deal=True,
     )
 
-    assert result.status == "unresolved"
-    assert result.reason == "waiting_settlement_evidence"
+    assert result.status == "applied"
+    assert result.reason == "close_reason_pending"
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
-    assert close_events == []
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 10
+    assert len(close_events) == 1
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
 
 
 def test_resolve_trade_close_rejects_missing_trade_time_before_write() -> None:
@@ -2025,7 +2358,7 @@ def test_lifecycle_three_hk_put_lots_match_one_1500_share_settlement(tmp_path, f
     }
     other_leg = "option" if first_leg == "stock" else "stock"
     first = resolve_trade_deal(legs[first_leg], repo=repo, state={}, apply_changes=True)
-    assert first.status == "unresolved"
+    assert first.status == ("applied" if first_leg == "option" else "unresolved")
     second = resolve_trade_deal(legs[other_leg], repo=repo, state={}, apply_changes=True)
     assert second.status == "applied", second.to_dict()
     assert second.action == "assignment"
@@ -2112,7 +2445,7 @@ def test_option_anchor_does_not_choose_between_two_waiting_stock_sources(tmp_pat
         state={},
         apply_changes=True,
     )
-    assert option.status == "unresolved"
+    assert option.status == "applied"
     assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]
     retry = resolve_trade_deal(
         _deal(
@@ -2125,7 +2458,8 @@ def test_option_anchor_does_not_choose_between_two_waiting_stock_sources(tmp_pat
     )
     assert (retry.status, retry.reason) == ("unresolved", "ambiguous_stock_settlement_evidence")
     assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]
-    assert repo.list_trade_lifecycle_notifications() == []
+    assert not [row for row in repo.list_trade_lifecycle_notifications()
+                if row["transition_type"] == "resolution_confirmed" and row["status"] != "suppressed"]
     from src.application.trades.lifecycle import _write_v2_lifecycle_close_from_case
     case = repo.list_trade_lifecycle_cases()[0]
     evidences = repo.list_trade_lifecycle_evidence()
@@ -2171,14 +2505,15 @@ def test_inbox_retry_cannot_choose_between_two_waiting_stock_sources(tmp_path):
         currency="HKD", trade_time_ms=1790683024000,
         raw_payload={"deal_id": "option-after-inbox-stocks", "code": "HK.03690"},
     )
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).reason == "ambiguous_stock_settlement_evidence"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).reason == "close_reason_pending"
     retry = _process_payload(stocks[0], retry_failed_deal=True, **kwargs)
     assert (retry["status"], retry["reason"]) == ("unresolved", "ambiguous_stock_settlement_evidence")
     assert not [row for row in repo.list_trade_events() if row["event_type"] == "assignment"]
-    assert repo.list_trade_lifecycle_notifications() == []
+    assert not [row for row in repo.list_trade_lifecycle_notifications()
+                if row["transition_type"] == "resolution_confirmed" and row["status"] != "suppressed"]
 
 
-def test_option_retry_can_use_one_unconsumed_stock_after_partial_assignment(tmp_path):
+def test_option_retry_keeps_partial_stock_pending_without_reassigning(tmp_path):
     from src.application.trades.lifecycle import _evidence_from_deal
 
     repo = _open_lot(tmp_path, contracts=2)
@@ -2190,7 +2525,7 @@ def test_option_retry_can_use_one_unconsumed_stock_after_partial_assignment(tmp_
         trade_time_ms=start + 1000,
         raw_payload={"deal_id": "partial-option-retry", "code": "US.TIGR260522P6000"},
     )
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
 
     def stock(index):
         return _deal(
@@ -2201,13 +2536,13 @@ def test_option_retry_can_use_one_unconsumed_stock_after_partial_assignment(tmp_
             raw_payload={"deal_id": f"partial-stock-retry-{index}", "code": "US.TIGR"},
         )
 
-    assert resolve_trade_deal(stock(0), repo=repo, state={}, apply_changes=True).status == "applied"
+    assert resolve_trade_deal(stock(0), repo=repo, state={}, apply_changes=True).status == "unresolved"
     assert repo.insert_trade_lifecycle_evidence_once(
         _evidence_from_deal(stock(1), evidence_type="stock_settlement_leg", case_id=None)
     )
     retry = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
-    assert retry.status == "applied"
-    assert len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"]) == 2
+    assert retry.status == "skipped"
+    assert not [row for row in repo.list_trade_events() if row["event_type"] == "assignment"]
     assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "skipped"
 
 
@@ -2249,7 +2584,7 @@ def test_broker_assigned_stock_sale_keeps_assignment_physical_account(tmp_path):
         trade_time_ms=1790683025000,
         raw_payload={"deal_id": "physical-stock", "code": "HK.03690"},
     )
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
     assert resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True).status == "applied"
     sale = _deal(
         deal_id="wrong-physical-sale",
@@ -2293,7 +2628,8 @@ def test_historical_stock_recovery_suppresses_new_lifecycle_outbox(tmp_path):
         trade_time_ms=1790683025000,
         raw_payload={"deal_id": "suppressed-stock", "code": "HK.03690"},
     )
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
+    before_outbox = {row["outbox_id"] for row in repo.list_trade_lifecycle_notifications()}
     result = resolve_trade_deal(
         stock, repo=repo, state={}, apply_changes=True,
         notification_status="suppressed",
@@ -2301,7 +2637,8 @@ def test_historical_stock_recovery_suppresses_new_lifecycle_outbox(tmp_path):
     assert result.status == "applied"
     outbox = repo.list_trade_lifecycle_notifications()
     assert outbox
-    assert all(row["status"] == "suppressed" for row in outbox)
+    assert all(row["status"] == "suppressed" for row in outbox
+               if row["outbox_id"] not in before_outbox)
 
 
 def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(tmp_path, monkeypatch):
@@ -2337,7 +2674,8 @@ def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(t
         currency="HKD", trade_time_ms=1790683024000,
         raw_payload={"deal_id": "recovered-option", "code": "HK.03690"},
     )
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
+    before_outbox = {row["outbox_id"] for row in repo.list_trade_lifecycle_notifications()}
     inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
     preview = _skipped_recovery_snapshot(
         inbox_path=inbox, inbox_id=skipped["inbox_id"], state_path=state_path,
@@ -2377,7 +2715,8 @@ def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(t
     assert recovered["receipt_notification_owner"] == "lifecycle_outbox"
     assert recovered["receipt_suppression_reason"] == "historical_recovery"
     assert list_trade_receipt_recovery_rows(inbox, account_ids=["REAL_1"]) == []
-    assert all(row["status"] == "suppressed" for row in repo.list_trade_lifecycle_notifications())
+    assert all(row["status"] == "suppressed" for row in repo.list_trade_lifecycle_notifications()
+               if row["outbox_id"] not in before_outbox)
     assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 3
     assert read_trade_payload(inbox, inbox_id=skipped["inbox_id"])["status"] == "handled"
     duplicate = _process_payload(raw_stock, recover_skipped=True, **kwargs)
@@ -2427,7 +2766,7 @@ def test_manual_required_stock_ambiguity_uses_guarded_recovery_without_delivery(
                    price=0, strike=80, multiplier=500, expiration_ymd="2026-09-29",
                    currency="HKD", trade_time_ms=1790682391907,
                    raw_payload={"deal_id": "old-ambiguous-option", "code": "HK.MET260929P80000"})
-    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(option, repo=repo, state={}, apply_changes=True).status == "applied"
     preview = _skipped_recovery_snapshot(
         inbox_path=inbox, inbox_id=original["inbox_id"], state_path=state_path,
         ledger_path=repo.db_path, account_mapping={"REAL_1": "lx"},

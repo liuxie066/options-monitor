@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.application.ledger.commands import (
     accept_option_close_evidence,
+    record_zero_price_option_close,
     adopt_existing_combo_identity,
     advance_lifecycle_case_state,
     BrokerTradeOpenPreviewResult,

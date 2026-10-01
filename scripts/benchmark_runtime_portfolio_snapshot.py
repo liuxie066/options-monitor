@@ -152,7 +152,8 @@ _LIFECYCLE_VIEW_KEYS = frozenset(
     "schema_version lifecycle_case_id lifecycle_state lifecycle_evidence_status "
     "lifecycle_reason_codes observation_start_ms pending_until_ms timing_policy_hash "
     "target_contracts_by_lot resolved_contracts_by_lot remaining_contracts_by_lot "
-    "resolved_contracts_by_terminal_type reserved_contracts_by_lot closure_fact "
+    "resolved_contracts_by_terminal_type reserved_contracts_by_lot "
+    "pending_close_contracts_by_lot closure_fact "
     "reason_state close_reason lifecycle_generation_token actionable".split()
 )
 _QUALITY_DETAIL_KEYS = frozenset(

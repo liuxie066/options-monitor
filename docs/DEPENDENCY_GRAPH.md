@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1083 (`src`: 539, `domain`: 87, `scripts`: 14, `tests`: 443)
-- Internal import edges: 7707 total, 3376 production/script edges excluding tests
+- Internal import edges: 7719 total, 3382 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|537| domain
+  application -->|542| domain
   application -->|4| domain_services
   application -->|164| infrastructure
   application -->|53| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3298| application
+  tests -->|3304| application
   tests -->|410| domain
   tests -->|2| domain_services
   tests -->|224| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 537 |
+| application | domain | 542 |
 | application | infrastructure | 164 |
 | interfaces | application | 164 |
 | application | storage | 53 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3298 |
+| tests | application | 3304 |
 | tests | domain | 410 |
 | tests | interfaces | 255 |
 | tests | infrastructure | 224 |
@@ -95,9 +95,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 234 |
 | src.interfaces | src.application | 129 |
-| src.application.ledger | domain.domain | 116 |
+| src.application.ledger | domain.domain | 120 |
 | src.application | src.infrastructure | 114 |
-| src.application.ledger | domain.domain.ledger | 58 |
+| src.application.ledger | domain.domain.ledger | 59 |
 | src.application.trades | domain.domain | 48 |
 | src.application.trades | src.application | 44 |
 | src.application | domain.storage | 41 |
