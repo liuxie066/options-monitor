@@ -34,12 +34,15 @@ class OpenDTradePushListener:
         host: str,
         port: int,
         on_deal: Callable[[dict[str, Any]], None],
+        on_order_hint: Callable[[dict[str, str]], None] | None = None,
     ) -> None:
         self.host = str(host)
         self.port = int(port)
         self.on_deal = on_deal
+        self.on_order_hint = on_order_hint
         self._ctx: Any = None
         self._handler: Any = None
+        self._order_handler: Any = None
 
     def _build_default_context(self) -> tuple[Any, Any]:
         try:
@@ -48,6 +51,9 @@ class OpenDTradePushListener:
             raise RuntimeError("futu SDK not importable; install futu-api in runtime env") from exc
         OpenSecTradeContext: Any = getattr(futu_mod, "OpenSecTradeContext")
         TradeDealHandlerBase: Any = getattr(futu_mod, "TradeDealHandlerBase")
+        TradeOrderHandlerBase: Any = (
+            getattr(futu_mod, "TradeOrderHandlerBase") if self.on_order_hint is not None else None
+        )
 
         class DealHandler(TradeDealHandlerBase):
             def __init__(self, callback: Callable[[dict[str, Any], dict[str, Any] | None], None]) -> None:
@@ -66,8 +72,17 @@ class OpenDTradePushListener:
                 if ret == 0 and data is not None:
                     rows = data.to_dict("records") if hasattr(data, "to_dict") else []
                     if isinstance(rows, list):
+                        raw_fill = getattr(getattr(rsp_pb, "s2c", None), "orderFill", None)
+                        revision = (
+                            raw_fill.updateTimestamp
+                            if raw_fill is not None and raw_fill.HasField("updateTimestamp")
+                            else None
+                        )
                         for row in rows:
                             if isinstance(row, dict):
+                                row = dict(row)
+                                if revision is not None:
+                                    row["update_timestamp"] = revision
                                 try:
                                     self._callback(row, header_fields if header is not None else None)
                                 except Exception as exc:
@@ -186,6 +201,56 @@ class OpenDTradePushListener:
                 if any(row.get(key) not in (None, "") for key in ("order_id", "orderID", "orderId")):
                     payload["external_order_namespace"] = "futu.order"
             self.on_deal(payload)
+        if TradeOrderHandlerBase is not None:
+            class OrderHandler(TradeOrderHandlerBase):
+                def on_recv_rsp(self, rsp_pb: Any) -> tuple[int, Any]:
+                    header = getattr(getattr(rsp_pb, "s2c", None), "header", None)
+                    ret, data = super().on_recv_rsp(rsp_pb)
+                    if ret != 0 or header is None or data is None:
+                        return ret, data
+                    if not all(header.HasField(key) for key in ("accID", "trdEnv", "trdMarket")):
+                        return ret, data
+                    physical = header.accID
+                    if type(physical) is not int or physical <= 0:
+                        return ret, data
+                    account_id = str(physical)
+                    if account_id in ambiguous_accounts or environments.get(account_id) != "REAL":
+                        return ret, data
+                    environment = futu_mod.TrdEnv.to_string2(header.trdEnv)
+                    market = futu_mod.TrdMarket.to_string2(header.trdMarket)
+                    if environment != "REAL" or market in {"NONE", "N/A", ""}:
+                        return ret, data
+                    rows = data.to_dict("records") if hasattr(data, "to_dict") else []
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        order_id = str(row.get("order_id") or "").strip()
+                        row_market = str(row.get("trd_market") or "").rsplit(".", 1)[-1].upper()
+                        row_env = str(row.get("trd_env") or "").rsplit(".", 1)[-1].upper()
+                        row_accounts = {
+                            value for key, value in extract_visible_account_fields(row).items()
+                            if key != "account"
+                        }
+                        if not order_id or (row_market not in {"", "N/A"} and row_market != market) or (
+                            row_env not in {"", "N/A"} and row_env != environment
+                        ) or (row_accounts and row_accounts != {account_id}):
+                            continue
+                        try:
+                            self_outer.on_order_hint({
+                                "futu_account_id": account_id,
+                                "environment": environment,
+                                "market": market,
+                                "order_id": order_id,
+                            })
+                        except Exception as exc:
+                            print(
+                                f"[WARN] order push callback failed: {type(exc).__name__}: {exc}",
+                                file=sys.stderr, flush=True,
+                            )
+                    return ret, data
+
+            self_outer = self
+            self._order_handler = OrderHandler()
         return ctx, DealHandler(receive)
 
     def start(
@@ -242,7 +307,11 @@ class OpenDTradePushListener:
                 if result == "error":
                     raise value
                 self._ctx, self._handler = value, handler
-                self._ctx.set_handler(self._handler)
+                if self._ctx.set_handler(self._handler) not in (None, 0):
+                    raise RuntimeError("trade deal push handler registration failed")
+                if self._order_handler is not None:
+                    if self._ctx.set_handler(self._order_handler) not in (None, 0):
+                        raise RuntimeError("trade order push handler registration failed")
                 self._ctx.start()
                 return
         finally:
@@ -278,3 +347,4 @@ class OpenDTradePushListener:
             finally:
                 self._ctx = None
                 self._handler = None
+                self._order_handler = None

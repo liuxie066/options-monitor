@@ -27,7 +27,7 @@ def _hk_df(**overrides) -> pd.DataFrame:
 def _usd_cny_portfolio_ctx(**overrides) -> dict:
     return {
         "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
-        "option_ctx": {
+        "option_ctx": {"decision_snapshot_status": "trusted",
             "cash_secured_total_by_ccy": {"USD": 2_000.0},
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
         },
@@ -49,7 +49,7 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "unavailable"},
             "cash_by_currency": {"USD": 20_000.0},
-            "option_ctx": {"cash_secured_total_by_ccy": {}},
+            "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {}},
         },
     )
     available = sell_put_opening_capacity_inputs(
@@ -58,7 +58,7 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "available"},
             "cash_by_currency": {"USD": 20_000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {},
                 "cash_secured_by_symbol_by_ccy": {},
             },
@@ -70,7 +70,7 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "available"},
             "cash_by_currency": {"USD": 20_000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "context_status": "unavailable",
                 "cash_secured_total_by_ccy": {},
                 "cash_secured_by_symbol_by_ccy": {},
@@ -94,7 +94,7 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
     )
 
 
-def test_sell_put_opening_capacity_uses_closed_put_and_newer_direct_cash() -> None:
+def test_sell_put_opening_capacity_keeps_closed_put_pending_despite_newer_cash() -> None:
     result = sell_put_opening_capacity_inputs(
         symbol="NVDA", strike=100.0, multiplier=100, currency="CNY",
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
@@ -104,7 +104,7 @@ def test_sell_put_opening_capacity_uses_closed_put_and_newer_direct_cash() -> No
             "source_observed_at": "2026-09-30T03:00:48+00:00",
             "capacity_authority": {"status": "available"},
             "cash_by_currency": {"CNY": 20000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"CNY": 2000.0},
                 "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 2000.0}},
                 "cash_secured_unavailable_by_symbol": {"0700.HK": "option_close_settlement_pending"},
@@ -118,8 +118,24 @@ def test_sell_put_opening_capacity_uses_closed_put_and_newer_direct_cash() -> No
         },
     )
 
-    assert result["put_cash_capacity_available"] is True
-    assert result["put_cash_free"] == 18000.0
+    assert result["put_cash_capacity_available"] is False
+    assert result["put_cash_free"] is None
+    assert "0700.HK:option_close_settlement_pending" in result["put_cash_capacity_reason"]
+
+
+def test_sell_put_opening_capacity_blocks_explicitly_stale_broker_cash() -> None:
+    result = sell_put_opening_capacity_inputs(
+        symbol="NVDA", strike=100.0, multiplier=100, currency="USD",
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        portfolio_ctx={
+            "portfolio_source_name": "futu", "capacity_authority": {"status": "available"},
+            "cash_by_currency": {"USD": 20_000}, "cash_source_observation_status": "stale",
+            "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {}, "cash_secured_by_symbol_by_ccy": {}},
+        },
+    )
+    assert result["put_cash_capacity_available"] is False
+    assert result["put_cash_free"] is None
+    assert result["put_cash_capacity_reason"] == "broker_cash_snapshot_unavailable"
 
 
 def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing() -> None:
@@ -166,7 +182,7 @@ def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing(
                 "trd_env": "REAL",
                 "market": "US",
             },
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "locked_shares_status": "unavailable",
                 "locked_shares_unavailable_reason": (
                     "option_positions_context_unavailable"
@@ -197,7 +213,7 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
         symbol="0700.HK",
         portfolio_ctx={
             "cash_by_currency": {"CNY": 10000.0, "HKD": 1000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"HKD": 500.0},
                 "cash_secured_total_cny": 460.0,
                 "cash_secured_by_symbol_by_ccy": {"0700.HK": {"HKD": 500.0}},
@@ -225,7 +241,7 @@ def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_cl
         symbol="0700.HK",
         portfolio_ctx={
             "cash_by_currency": {"CNY": 10000.0, "HKD": 1000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_unavailable_by_symbol": {
                     "0700.HK": "short_put_cash_secured_basis_missing",
                 },
@@ -248,7 +264,7 @@ def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_c
         symbol="0700.HK",
         portfolio_ctx={
             "cash_by_currency": {"CNY": 10000.0, "USD": 10000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {},
                 "cash_secured_total_cny": 0.0,
                 "cash_secured_by_symbol_by_ccy": {},
@@ -270,7 +286,7 @@ def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_
         symbol="0700.HK",
         portfolio_ctx={
             "cash_by_currency": {"USD": 1_000_000.0},
-            "option_ctx": {
+            "option_ctx": {"decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {},
                 "cash_secured_total_cny": 0.0,
                 "cash_secured_by_symbol_by_ccy": {},

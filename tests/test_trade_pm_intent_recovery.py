@@ -24,7 +24,7 @@ def _inbox(tmp_path):
 
 
 def _stock(execution_id="stock-1", *, physical="123", account="lx"):
-    return {"schema_version": "trade_execution.v1", "acc_id": physical,
+    return {"schema_version": "trade_execution.v1", "status": "OK", "acc_id": physical,
         "broker_account_ref": {"broker_id": "futu", "external_account_id": physical,
             "environment": "REAL", "broker_account_id": f"futu:REAL:{physical}", "account_label": account},
         "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},

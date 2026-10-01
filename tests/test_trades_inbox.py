@@ -325,13 +325,18 @@ def test_trade_inbox_is_idempotent_and_retries_callback_exception(
 def test_trade_inbox_migrates_old_evidence_without_guessing_adapter_version(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "inbox.sqlite3"
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+    path = resolve_execution_inbox_path(repo, tmp_path / "inbox.sqlite3")
     payload = {"deal_id": "legacy-deal"}
     inbox_id = _enqueue(
         path,
         payload=payload,
         broker_deal_key="futu:lx:REAL_1:legacy-deal",
         adapter_version="om.trade-intake.push.v1",
+        repo=repo,
     )
     with sqlite3.connect(path) as conn:
         conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
@@ -344,6 +349,7 @@ def test_trade_inbox_migrates_old_evidence_without_guessing_adapter_version(
         payload=payload,
         broker_deal_key="futu:lx:REAL_1:legacy-deal",
         adapter_version="om.trade-intake.push.v1",
+        repo=repo,
     )
     evidence = read_trade_source_evidence(
         path,

@@ -551,7 +551,7 @@ def test_worker_retains_account_risk_context(monkeypatch, tmp_path: Path) -> Non
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
     )
     assert risk.nav_cny == 100_000.0
-    assert risk.unavailable_reasons == ()
+    assert risk.unavailable_reasons == ("option_decision_snapshot_unavailable",)
 
 
 def test_worker_fails_closed_when_config_changes_after_spawn(

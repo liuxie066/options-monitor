@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -23,12 +22,10 @@ from domain.domain.wheel import (
     build_wheel_branch_created_event,
     lot_strategy_metadata_for_lot,
     merge_lot_strategy_metadata,
-    plan_wheel_call_intent_consume,
     project_wheel_branches,
     project_wheel_call_intents,
     wheel_called_away_event_from_call_assignment,
 )
-from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
@@ -747,101 +744,6 @@ def append_wheel_trade_companions(
     return companion_by_trade, review_reason_by_trade
 
 
-def prepare_wheel_intent_open_event(
-    rows: Mapping[str, Any],
-    event: Any,
-    coverage_fact: Mapping[str, Any],
-    *,
-    recorded_at_ms: int,
-) -> tuple[Any, dict[str, Any] | None, str]:
-    if (
-        str(getattr(event, "event_type", "") or "").strip().lower() != "open"
-        or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
-        != "call"
-        or str(getattr(event, "position_side", "") or "")
-        != "short"
-    ):
-        return event, None, "not_short_call_open"
-    account = _event_account(event)
-    instant = _event_time_ms(event)
-    batches = _wheel_batches_from_rows(
-        rows,
-        account=account,
-        as_of_ms=instant,
-    )
-    contract_key = getattr(event, "contract_key", None)
-    current_coverage = revalidate_opening_share_coverage(
-        coverage_fact,
-        list(rows.get("account_position_lots") or []),
-        batches,
-        account=account,
-        symbol=str(getattr(contract_key, "underlying_symbol", "") or ""),
-    )
-    known_trade_ids = {
-        str(item.get("event_id") or "").strip()
-        for item in rows.get("trade_events") or []
-        if str(item.get("event_id") or "").strip()
-    }
-    plans: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for batch in batches:
-        if batch["lifecycle_status"] != "active" or batch["integrity_status"] != "trusted":
-            continue
-        summaries = project_wheel_call_intents(
-            rows.get("account_wheel_events") or [],
-            account=account,
-            lot_id=batch["stock_lot_id"],
-            as_of_ms=instant,
-            known_trade_event_ids=known_trade_ids,
-        )
-        for intent in summaries:
-            if intent.get("status") != "active":
-                continue
-            intent_payload = intent.get("payload")
-            intent_payload = (
-                intent_payload if isinstance(intent_payload, Mapping) else intent
-            )
-            try:
-                intent_coverage = {
-                    **current_coverage,
-                    "shares_available_for_cover": int(
-                        current_coverage.get("shares_available_for_cover") or 0
-                    )
-                    + contract_share_quantity(intent.get("remaining_contracts"), intent_payload.get("multiplier")),
-                }
-                plan = plan_wheel_call_intent_consume(
-                    batch,
-                    intent,
-                    event,
-                    intent_coverage,
-                    recorded_at_ms=recorded_at_ms,
-                )
-            except ValueError:
-                continue
-            plans.append((batch, plan))
-    if not plans:
-        return event, None, "no_matching_intent"
-    if len(plans) != 1:
-        return event, None, "ambiguous_matching_intent"
-    batch, plan = plans[0]
-    raw_payload = {
-        **dict(getattr(event, "raw_payload", None) or {}),
-        "strategy": "wheel",
-        "leg_role": "wheel_call",
-        "source_stock_lot_id": batch["stock_lot_id"],
-        "source_wheel_branch_id": batch["wheel_branch_id"],
-        "wheel_call_intent_id": plan["intent_id"],
-    }
-    return (
-        replace(
-            event,
-            lot_id=str(getattr(event, "lot_id", "") or f"lot_{event.event_id}"),
-            raw_payload=raw_payload,
-        ),
-        plan,
-        "matched_intent",
-    )
-
-
 def append_and_verify_wheel_intent_consumption(
     repo: Any,
     *,
@@ -904,5 +806,4 @@ __all__ = [
     "append_and_verify_wheel_intent_consumption",
     "append_wheel_trade_companions",
     "capture_wheel_trade_companion_context",
-    "prepare_wheel_intent_open_event",
 ]

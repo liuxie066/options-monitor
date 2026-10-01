@@ -84,6 +84,7 @@ def test_skipped_stock_recovery_requires_exact_snapshot_and_does_not_send(
         "deal_id": "stock-before-option", "code": "HK.03690",
         "futu_account_id": "REAL_LX", "trd_side": "BUY", "qty": 1500,
         "price": 77.5, "create_time": "2026-09-29 16:00:00",
+        "status": "OK",
         "external_id_namespace": "futu.deal", "environment": "REAL",
         "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_LX"},
     }
@@ -216,6 +217,7 @@ def _write_open_deal_payload(path: Path) -> Path:
                 "expiration": "20260429",
                 "currency": "HKD",
                 "create_time": "2026-04-09 13:10:25",
+                "status": "OK",
             },
             ensure_ascii=False,
             indent=2,
@@ -1413,6 +1415,7 @@ def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fie
                     "price": 6.3,
                     "multiplier": 1000,
                     "create_time": "2026-04-28 10:15:56",
+                    "status": "OK",
                 },
                 f,
                 ensure_ascii=False,
@@ -1463,7 +1466,8 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
                               "expiration_ymd": "2026-09-18", "multiplier": "100"},
            "external_id_namespace": "futu.deal", "external_execution_id": "file-cli",
            "side": "sell", "position_effect": "open", "quantity": "1", "price": "2.50",
-           "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z"}
+           "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z",
+           "status": "OK"}
     path = tmp_path / "executions.jsonl"
     path.write_text(json.dumps(row) + "\n")
     common = ["--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path)]
@@ -1599,7 +1603,8 @@ def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
     payload = {"acc_id": "REAL_LX", "broker_account_id": "futu:REAL:REAL_LX", "environment": "REAL",
                "external_id_namespace": "futu.deal", "deal_id": "listener-missing-multiplier",
                "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
-               "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00"}
+               "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00",
+               "status": "OK"}
     class Listener:
         def __init__(self, *, on_deal, **_):
             self.on_deal = on_deal

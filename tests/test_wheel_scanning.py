@@ -16,8 +16,10 @@ from src.application.wheel import (
     run_wheel_call_scan,
 )
 from src.application.wheel.capacity import (
+    build_shared_cash_capacity_fact,
     finalize_wheel_put_capacity,
     revalidate_selected_wheel_put_candidate,
+    revalidate_selected_wheel_put_candidate_from_rows,
 )
 from src.application.wheel.scanning import run_wheel_put_scan
 from src.application.wheel.candidate_snapshot import (
@@ -280,6 +282,7 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
             },
         },
         option_context={
+            "decision_snapshot_status": "trusted",
             "locked_shares_status": "available",
             "locked_shares_by_symbol": {"NVDA": 100},
             "locked_shares_unavailable_by_symbol": {},
@@ -906,7 +909,7 @@ def test_unknown_wheel_reservation_blocks_scan_and_transaction_coverage():
         fact = build_shared_coverage_facts(
             account="lx",
             portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 200, "can_sell_qty": 200}}},
-            option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
+            option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {}},
             wheel_read_model={"batches": [batch]},
         )[0]
         rechecked = revalidate_opening_share_coverage(
@@ -944,3 +947,120 @@ def test_partial_coverage_scans_only_uncommitted_unreserved_shares(direction):
     branch["active_intent_reserved_shares"] = 0
     branch["coverage"] = project_wheel_coverage(branch)
     assert not scan()["capacity_claims"]
+
+
+def test_shared_wheel_capacity_blocks_pending_settlement_even_after_cash_or_stock_refresh() -> None:
+    put_fact = build_shared_cash_capacity_fact(
+        account="lx",
+        portfolio_context={
+            "capacity_authority": {"status": "available", "logical_account": "lx"},
+            "cash_by_currency": {"HKD": 100_000},
+            "source_observed_at": "2026-09-30T03:00:48+00:00",
+        },
+        option_context={
+            "decision_snapshot_status": "trusted",
+            "cash_secured_total_by_ccy": {},
+            "cash_secured_unavailable_by_symbol": {"3690.HK": "option_close_settlement_pending"},
+        },
+        wheel_read_model={"wheel_branches": []},
+        fx_snapshot={},
+    )
+    assert put_fact["status"] == "unavailable"
+    assert put_fact["reason"] == "option_cash_secured_unavailable"
+
+    call_fact = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 500, "can_sell_qty": 500}}},
+        option_context={
+            "decision_snapshot_status": "trusted",
+            "locked_shares_status": "available",
+            "locked_shares_by_symbol": {},
+            "locked_shares_unavailable_by_symbol": {"3690.HK": "option_close_settlement_pending"},
+        },
+        wheel_read_model={"batches": []},
+    )[0]
+    assert call_fact["status"] == "unavailable"
+    assert call_fact["reason"] == "option_close_settlement_pending"
+
+
+def test_wheel_put_preview_invalidates_when_source_evidence_changes_without_cash_change() -> None:
+    def fact(fingerprint: str) -> dict:
+        return build_shared_cash_capacity_fact(
+            account="lx",
+            portfolio_context={
+                "capacity_authority": {"status": "available", "logical_account": "lx"},
+                "cash_by_currency": {"USD": 20_000},
+            },
+            option_context={
+                "decision_snapshot_status": "trusted",
+                "decision_state_fingerprint": fingerprint,
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_unavailable_by_symbol": {},
+            },
+            wheel_read_model={"wheel_branches": []},
+            fx_snapshot={},
+        )
+
+    candidate = {
+        "claim_id": "wheel:put:branch-a", "wheel_branch_id": "branch-a", "symbol": "NVDA",
+        "currency": "USD", "strike": 100, "multiplier": 100, "granted_contracts": 1,
+    }
+    original = revalidate_selected_wheel_put_candidate(cash_capacity_fact=fact("source-a"), final_candidate=candidate)
+    with pytest.raises(ValueError, match="cash capacity facts changed"):
+        revalidate_selected_wheel_put_candidate(
+            cash_capacity_fact=fact("source-b"),
+            final_candidate={**candidate, "capacity_identity_hash": original["capacity_identity_hash"]},
+        )
+
+
+def test_wheel_call_blocks_unknown_overlap_between_broker_sellable_and_ledger_lock() -> None:
+    fact = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 1000, "can_sell_qty": 500}}},
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {"3690.HK": 500}},
+        wheel_read_model={"batches": []},
+    )[0]
+    assert fact["status"] == "unavailable"
+    assert fact["reason"] == "broker_ledger_stock_lock_overlap_unproven"
+
+
+def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.wheel.capacity.build_wheel_read_model_from_rows",
+        lambda *_args, **_kwargs: {"wheel_branches": []},
+    )
+    with pytest.raises(ValueError, match="no longer has cash capacity"):
+        revalidate_selected_wheel_put_candidate_from_rows(
+            account="lx",
+            portfolio_context={
+                "capacity_authority": {"status": "available", "logical_account": "lx"},
+                "cash_by_currency": {"USD": 20_000},
+            },
+            position_lots=[], lifecycle_rows={}, broker="futu", as_of_ms=1_000,
+            fx_snapshot={}, decision_snapshot={"snapshot_status": "source_untrusted"},
+            final_candidate={
+                "claim_id": "wheel:put:branch-a", "wheel_branch_id": "branch-a", "symbol": "NVDA",
+                "currency": "USD", "strike": 100, "multiplier": 100, "granted_contracts": 1,
+            },
+        )
+
+
+def test_wheel_capacity_facts_require_trusted_decision_snapshot() -> None:
+    put = build_shared_cash_capacity_fact(
+        account="lx", portfolio_context={
+            "capacity_authority": {"status": "available", "logical_account": "lx"},
+            "cash_by_currency": {"USD": 20_000},
+        },
+        option_context={"cash_secured_total_by_ccy": {}},
+        wheel_read_model={"wheel_branches": []}, fx_snapshot={},
+    )
+    call = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 100, "can_sell_qty": 100}}},
+        option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
+        wheel_read_model={"batches": []},
+    )[0]
+    assert put["status"] == "unavailable"
+    assert put["reason"] == "option_decision_snapshot_unavailable"
+    assert call["status"] == "unavailable"
+    assert call["reason"] == "short_call_coverage_unavailable"

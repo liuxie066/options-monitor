@@ -237,3 +237,206 @@ def test_multi_source_shutdown_is_bounded_when_sibling_ignores_stop() -> None:
 
     assert rc == 1
     assert elapsed < 0.5
+
+
+def test_order_hints_coalesce_to_one_probe_and_deal_backfill(tmp_path: Path, monkeypatch) -> None:
+    stop = threading.Event()
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
+
+    class Listener:
+        def __init__(self, *, on_order_hint, **_kwargs):
+            self.on_order_hint = on_order_hint
+
+        def start(self, **_kwargs):
+            for order_id in ("o1", "o1", "o2"):
+                self.on_order_hint({
+                    "futu_account_id": "123", "environment": "REAL",
+                    "market": "HK", "order_id": order_id,
+                })
+            self.on_order_hint({
+                "futu_account_id": "456", "environment": "REAL",
+                "market": "HK", "order_id": "wrong",
+            })
+
+        def check_health(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def probe_order_hint(self, **kwargs):
+            calls.append(("order", kwargs))
+            return {"found": True, "dealt_qty": "2"}
+
+        def fetch(self, **_kwargs):
+            raise AssertionError("fake backfill should intercept")
+
+        def close(self):
+            pass
+
+    def backfill(**_kwargs):
+        calls.append(("deals", None))
+        if calls.count(("deals", None)) == 1:
+            clock[0] += 31
+        else:
+            stop.set()
+        return {"ok": True, "finished_at_utc": "now", "deal_count": 0,
+                "applied_count": 0, "skipped_duplicate_count": 0,
+                "failed_count": 0, "unresolved_count": 0}
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", Client)
+    monkeypatch.setattr(auto_intake, "run_history_backfill", backfill)
+    source = _source(tmp_path)
+    source.update(
+        account_mapping={"123": "lx"}, futu_account_ids=["123"],
+        backfill={"enabled": True, "startup_check": False, "interval_sec": 300},
+        settlement_observation={"enabled": False},
+    )
+    rc = auto_intake._run_listener_source_loop(
+        source=source, repo=object(), cfg={}, cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path, runtime_root_source="test",
+        intake_cfg={"mode": "dry-run", "enabled": True, "account_mapping": {"123": "lx"},
+                    "backfill": source["backfill"]},
+        apply_changes=False, receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(), stop_event=stop,
+    )
+    assert rc == 0
+    assert calls == [
+        ("order", {"futu_account_id": "123", "order_id": "o1"}),
+        ("deals", None),
+        ("order", {"futu_account_id": "123", "order_id": "o2"}),
+        ("deals", None),
+    ]
+
+
+def test_order_hint_query_failure_retries_without_fabricated_deal(tmp_path: Path, monkeypatch) -> None:
+    stop = threading.Event()
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
+
+    class Listener:
+        def __init__(self, *, on_order_hint, **_kwargs):
+            self.on_order_hint = on_order_hint
+
+        def start(self, **_kwargs):
+            self.on_order_hint({
+                "futu_account_id": "123", "environment": "REAL",
+                "market": "HK", "order_id": "o1",
+            })
+
+        def check_health(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def probe_order_hint(self, **_kwargs):
+            calls.append("order")
+            if calls.count("order") == 1:
+                raise RuntimeError("order query failed")
+            return {"found": True}
+
+        def fetch(self, **_kwargs):
+            raise AssertionError("fake backfill should intercept")
+
+        def close(self):
+            pass
+
+    def backfill(**_kwargs):
+        calls.append("deals")
+        if calls.count("deals") == 1:
+            clock[0] += 31
+            return {"ok": False, "finished_at_utc": "now", "deal_count": 0,
+                    "applied_count": 0, "skipped_duplicate_count": 0,
+                    "failed_count": 1, "unresolved_count": 0}
+        stop.set()
+        return {"ok": True, "finished_at_utc": "now", "deal_count": 0,
+                "applied_count": 0, "skipped_duplicate_count": 0,
+                "failed_count": 0, "unresolved_count": 0}
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", Client)
+    monkeypatch.setattr(auto_intake, "run_history_backfill", backfill)
+    source = _source(tmp_path)
+    source.update(
+        account_mapping={"123": "lx"}, futu_account_ids=["123"],
+        backfill={"enabled": True, "startup_check": False, "interval_sec": 300},
+        settlement_observation={"enabled": False},
+    )
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=object(), cfg={}, cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path, runtime_root_source="test",
+        intake_cfg={"mode": "dry-run", "enabled": True, "account_mapping": {"123": "lx"},
+                    "backfill": source["backfill"]},
+        apply_changes=False, receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    assert calls == ["order", "deals", "order", "deals"]
+
+
+def test_order_hint_cancellation_skips_deal_query(tmp_path: Path, monkeypatch) -> None:
+    stop = threading.Event()
+    calls = []
+
+    class Listener:
+        def __init__(self, *, on_order_hint, **_kwargs):
+            self.on_order_hint = on_order_hint
+
+        def start(self, **_kwargs):
+            self.on_order_hint({
+                "futu_account_id": "123", "environment": "REAL",
+                "market": "HK", "order_id": "o1",
+            })
+
+        def check_health(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def probe_order_hint(self, **_kwargs):
+            calls.append("order")
+            stop.set()
+            return {"found": True}
+
+        def fetch(self, **_kwargs):
+            raise AssertionError("cancelled backfill must not query deals")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", Client)
+    monkeypatch.setattr(auto_intake, "run_history_backfill",
+                        lambda **_kwargs: pytest.fail("cancelled backfill must not run"))
+    source = _source(tmp_path)
+    source.update(
+        account_mapping={"123": "lx"}, futu_account_ids=["123"],
+        backfill={"enabled": True, "startup_check": False, "interval_sec": 300},
+        settlement_observation={"enabled": False},
+    )
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=object(), cfg={}, cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path, runtime_root_source="test",
+        intake_cfg={"mode": "dry-run", "enabled": True, "account_mapping": {"123": "lx"},
+                    "backfill": source["backfill"]},
+        apply_changes=False, receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    assert calls == ["order"]

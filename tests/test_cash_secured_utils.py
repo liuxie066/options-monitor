@@ -14,8 +14,9 @@ from domain.domain.cash_secured_utils import (
 
 
 class TestCashSecuredUtils(unittest.TestCase):
-    def test_closed_put_uses_newer_direct_cash_snapshot(self) -> None:
+    def test_closed_put_is_not_released_by_newer_total_cash_snapshot(self) -> None:
         option_ctx = {
+            "decision_snapshot_status": "trusted",
             "cash_secured_unavailable_by_symbol": {
                 "0700.HK": "option_close_settlement_pending",
                 "NVDA": "short_put_cash_secured_basis_missing",
@@ -41,7 +42,7 @@ class TestCashSecuredUtils(unittest.TestCase):
         }
         self.assertEqual(
             cash_secured_unavailable_for_cash_snapshot(option_ctx, cash),
-            {"NVDA": "short_put_cash_secured_basis_missing"},
+            option_ctx["cash_secured_unavailable_by_symbol"],
         )
         self.assertEqual(
             cash_secured_unavailable_for_cash_snapshot(
@@ -59,6 +60,25 @@ class TestCashSecuredUtils(unittest.TestCase):
         self.assertEqual(
             cash_secured_unavailable_for_cash_snapshot(option_ctx, cash),
             option_ctx["cash_secured_unavailable_by_symbol"],
+        )
+
+    def test_missing_decision_snapshot_blocks_cash_even_without_open_puts(self) -> None:
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(
+                {"cash_secured_unavailable_by_symbol": {}},
+                {"cash_by_currency": {"USD": 1000}},
+            ),
+            "option_decision_snapshot_unavailable",
+        )
+
+    def test_untrusted_decision_snapshot_blocks_cash_even_without_open_puts(self) -> None:
+        option_ctx = {
+            "decision_snapshot_status": "source_untrusted",
+            "cash_secured_unavailable_by_symbol": {},
+        }
+        self.assertEqual(
+            cash_secured_unavailable_for_cash_snapshot(option_ctx, {"cash_by_currency": {"USD": 1000}}),
+            "option_decision_snapshot_unavailable",
         )
 
     def test_cash_secured_utils_only_by_ccy(self) -> None:

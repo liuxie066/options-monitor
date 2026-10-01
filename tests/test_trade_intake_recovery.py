@@ -27,6 +27,8 @@ from src.application.trades.inbox import (
     resume_trade_payload,
     save_trade_payload_result,
     trade_payload_commit_scope,
+    trade_payload_evidence_ref,
+    read_trade_source_evidence,
 )
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 
@@ -46,6 +48,7 @@ def _execution(*, physical: str = "123", deal_id: str = "fill-1", price: str = "
         "external_order_namespace": "futu.order", "external_order_id": f"order-{deal_id}",
         "side": "sell", "position_effect": "open", "quantity": "1", "price": price,
         "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z",
+        "status": "OK",
     }
 
 
@@ -1649,3 +1652,346 @@ def test_reconcile_bad_row_does_not_block_good_rows_or_complete_its_action(tmp_p
     retry = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
     assert retry["inbox_updated_count"] == retry["applied_count"] == 0
     assert repo.list_trade_events() == before_events
+
+
+def test_same_economics_broker_status_change_blocks_inbox_even_after_prior_conflict(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(_execution(), account_mapping={"123": "lx"})
+    base = _execution()
+    first = {**base, "status": "OK", "update_timestamp": 1_000}
+    inbox_id = enqueue_trade_payload(inbox, payload=first, source="push",
+                                     broker_deal_key=key, repo=repo)
+    original = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert original["status"] == "pending"
+
+    cancelled = {**base, "status": "CANCELLED", "update_timestamp": 2_000}
+    assert enqueue_trade_payload(inbox, payload=cancelled, source="backfill",
+                                 broker_deal_key=key, repo=repo) == inbox_id
+    blocked = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert blocked["status"] == "conflict"
+    assert blocked["payload_version"] > original["payload_version"]
+
+    changed = {**base, "status": "CHANGED", "update_timestamp": 3_000}
+    assert enqueue_trade_payload(inbox, payload=changed, source="backfill",
+                                 broker_deal_key=key, repo=repo) == inbox_id
+    newer = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert newer["status"] == "conflict"
+    assert newer["payload_version"] > blocked["payload_version"]
+    assert len(read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(inbox_id))) == 3
+    enqueue_trade_payload(inbox, payload=first, source="push",
+                          broker_deal_key=key, repo=repo)
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)["status"] == "conflict"
+
+
+def test_trusted_ok_supplements_missing_broker_status_without_permanent_conflict(tmp_path: Path) -> None:
+    from src.application.trades.inbox import TRADE_INTAKE_ADAPTER_VERSIONS
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    base = _execution(deal_id="status-later")
+    base.pop("status")
+    key = broker_deal_key_from_payload(base, account_mapping={"123": "lx"})
+    inbox_id = enqueue_trade_payload(inbox, payload=base, source="push",
+                                     broker_deal_key=key, repo=repo,
+                                     adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"])
+    missing = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert missing["status"] == "conflict"
+    assert missing["result_reason"] == "broker_deal_status_missing"
+
+    complete = {**base, "status": "OK", "update_timestamp": 2_000}
+    assert enqueue_trade_payload(inbox, payload=complete, source="backfill",
+                                 broker_deal_key=key, repo=repo,
+                                 adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["backfill"]) == inbox_id
+    observed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert observed["status"] == "pending"
+    assert observed["payload_version"] > missing["payload_version"]
+
+
+def test_authoritative_trade_source_requires_repo_writer_lock(tmp_path: Path) -> None:
+    from src.application.trades.inbox import TRADE_INTAKE_ADAPTER_VERSIONS
+
+    payload = _execution(deal_id="writer-lock-required")
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    with pytest.raises(ValueError, match="requires the ledger writer lock"):
+        enqueue_trade_payload(
+            tmp_path / "inbox.sqlite3", payload=payload, source="push",
+            broker_deal_key=key,
+            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"],
+        )
+    assert not (tmp_path / "inbox.sqlite3").exists()
+
+
+def test_older_ok_cannot_clear_newer_missing_status(tmp_path: Path) -> None:
+    from src.application.trades.inbox import TRADE_INTAKE_ADAPTER_VERSIONS
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    base = _execution(deal_id="old-ok")
+    base.pop("status")
+    missing = {**base, "update_timestamp": 3_000}
+    key = broker_deal_key_from_payload(base, account_mapping={"123": "lx"})
+    inbox_id = enqueue_trade_payload(
+        inbox, payload=missing, source="push", broker_deal_key=key, repo=repo,
+        adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"],
+    )
+    older = {**base, "status": "OK", "update_timestamp": 2_000}
+    enqueue_trade_payload(
+        inbox, payload=older, source="backfill", broker_deal_key=key, repo=repo,
+        adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["backfill"],
+    )
+    observed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert observed["status"] == "conflict"
+    assert observed["result_reason"] == "broker_deal_revision_stale"
+
+
+def test_other_account_source_conflict_does_not_block_lx_snapshot(tmp_path: Path) -> None:
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    assert _process(repo, tmp_path, "push", _execution(deal_id="lx-clean"))["status"] == "applied"
+    before = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    foreign = _execution(physical="456", deal_id="sy-cancelled")
+    foreign["broker_account_ref"]["account_label"] = "sy"
+    foreign["status"] = "CANCELLED"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(foreign, account_mapping={"456": "sy"})
+    enqueue_trade_payload(inbox, payload=foreign, source="backfill",
+                          broker_deal_key=key, repo=repo)
+    after = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert after["snapshot_status"] == "trusted"
+    assert after["decision_state_fingerprint"] == before["decision_state_fingerprint"]
+
+
+def test_missing_referenced_inbox_row_fails_closed(tmp_path: Path) -> None:
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    result = _process(repo, tmp_path, "push", _execution(deal_id="missing-row"))
+    assert result["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("DELETE FROM trade_inbox WHERE inbox_id = ?", (result["inbox_id"],))
+    snapshot = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert snapshot["actionable"] is False
+    assert "trade_source_inbox_incomplete" in snapshot["reason_codes"]
+
+
+def test_missing_inbox_for_recorded_broker_execution_fails_closed(tmp_path: Path) -> None:
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    assert _process(repo, tmp_path, "push", _execution(deal_id="lost-inbox"))["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    inbox.unlink()
+    snapshot = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert snapshot["actionable"] is False
+    assert snapshot["snapshot_status"] == "source_untrusted"
+    assert snapshot["reason_codes"] == ["trade_source_inbox_unavailable"]
+
+
+def test_inbox_only_cancellation_invalidates_ledger_decision_snapshot(tmp_path: Path) -> None:
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    original = _execution(deal_id="snapshot-status")
+    result = _process(repo, tmp_path, "push", original)
+    assert result["status"] == "applied"
+    before = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert before["snapshot_status"] == "trusted"
+
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(original, account_mapping={"123": "lx"})
+    cancelled = {**original, "status": "CANCELLED", "update_timestamp": 2_000}
+    enqueue_trade_payload(inbox, payload=cancelled, source="backfill",
+                          broker_deal_key=key, repo=repo)
+    after = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert after["decision_state_fingerprint"] != before["decision_state_fingerprint"]
+    assert after["actionable"] is False
+    assert "broker_deal_status_conflict" in after["reason_codes"]
+
+
+def test_manual_repair_binds_source_evidence_and_reopens_on_new_version(tmp_path: Path) -> None:
+    from src.application.ledger.commands import preview_trade_event_repair, record_trade_event_repair
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    original = _execution(deal_id="repair-source")
+    assert _process(repo, tmp_path, "push", original)["status"] == "applied"
+    target_event_id = str(repo.list_trade_events()[0]["event_id"])
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(original, account_mapping={"123": "lx"})
+    cancelled = {**original, "status": "CANCELLED", "update_timestamp": 2_000}
+    enqueue_trade_payload(inbox, payload=cancelled, source="backfill",
+                          broker_deal_key=key, repo=repo)
+    blocked = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")
+    assert blocked["actionable"] is False
+
+    preview = preview_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5}, reason="verified_manual_repair"
+    )
+    expected_hash = preview["expected_input_hash"]
+    applied = record_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5},
+        reason="verified_manual_repair", expected_input_hash=expected_hash,
+    )
+    assert applied["mode"] == "applied"
+    assert decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")["actionable"] is True
+    repeated = record_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5},
+        reason="verified_manual_repair", expected_input_hash=expected_hash,
+    )
+    assert repeated["mode"] == "no_op"
+    assert repeated["source_evidence_reopened"] is False
+    assert len(repo.list_trade_events()) == 3
+
+    changed = {**original, "status": "CHANGED", "update_timestamp": 3_000}
+    enqueue_trade_payload(inbox, payload=changed, source="backfill",
+                          broker_deal_key=key, repo=repo)
+    assert decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")["actionable"] is False
+    repeated_after_change = record_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5},
+        reason="verified_manual_repair", expected_input_hash=expected_hash,
+    )
+    assert repeated_after_change["source_evidence_reopened"] is True
+    second_preview = preview_trade_event_repair(
+        repo, event_id=applied["repair_event_id"], overrides={"price": 2.5},
+        reason="verified_new_evidence",
+    )
+    second = record_trade_event_repair(
+        repo, event_id=applied["repair_event_id"], overrides={"price": 2.5},
+        reason="verified_new_evidence", expected_input_hash=second_preview["expected_input_hash"],
+    )
+    assert second["mode"] == "applied"
+    assert len(repo.list_trade_events()) == 5
+    assert decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-scope")["actionable"] is True
+
+
+def test_manual_repair_rejects_stale_source_preview(tmp_path: Path) -> None:
+    from src.application.ledger.commands import preview_trade_event_repair, record_trade_event_repair
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    original = _execution(deal_id="repair-stale")
+    assert _process(repo, tmp_path, "push", original)["status"] == "applied"
+    target_event_id = str(repo.list_trade_events()[0]["event_id"])
+    preview = preview_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5}, reason="verified_manual_repair"
+    )
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(original, account_mapping={"123": "lx"})
+    enqueue_trade_payload(
+        inbox, payload={**original, "status": "CANCELLED", "update_timestamp": 2_000},
+        source="backfill", broker_deal_key=key, repo=repo,
+    )
+    with pytest.raises(ValueError, match="stale"):
+        record_trade_event_repair(
+            repo, event_id=target_event_id, overrides={"price": 2.5},
+            reason="verified_manual_repair", expected_input_hash=preview["expected_input_hash"],
+        )
+    assert len(repo.list_trade_events()) == 1
+
+
+def test_zero_price_option_close_is_recorded_once(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    opened = _execution(deal_id="zero-open")
+    closed = {**_execution(deal_id="zero-close", price="0"),
+              "side": "buy", "position_effect": "close"}
+    assert _process(repo, tmp_path, "push", opened)["status"] == "applied"
+    assert _process(repo, tmp_path, "push", closed)["status"] == "applied"
+    assert _process(repo, tmp_path, "push", closed)["status"] == "skipped"
+    assert len(repo.list_trade_events()) == 2
+    assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
+
+
+def test_source_conflict_ignores_unpaired_repair_marker(tmp_path: Path) -> None:
+    from src.application.trades.inbox import read_account_trade_source_constraints
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    original = _execution(deal_id="fake-resolution")
+    assert _process(repo, tmp_path, "push", original)["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(original, account_mapping={"123": "lx"})
+    enqueue_trade_payload(
+        inbox, payload={**original, "status": "CANCELLED", "update_timestamp": 2_000},
+        source="backfill", broker_deal_key=key, repo=repo,
+    )
+    events = repo.list_trade_events()
+    state = read_account_trade_source_constraints(inbox, account="lx", trade_events=events)
+    assert state["status"] == "conflict"
+    forged = {
+        **events[0], "event_id": "unpaired-repair-marker",
+        "raw_payload": {
+            "mode": "manual_repair", "repair_target_event_id": events[0]["event_id"],
+            "resolved_trade_source_evidence": {
+                "evidence_fingerprint": state["evidence_fingerprint"],
+                "inbox_ids": state["inbox_ids"],
+            },
+        },
+    }
+    checked = read_account_trade_source_constraints(
+        inbox, account="lx", trade_events=[*events, forged]
+    )
+    assert checked["status"] == "conflict"
+
+
+def test_manual_repair_rechecks_inbox_inside_writer_transaction(monkeypatch, tmp_path: Path) -> None:
+    from src.application.ledger.commands import preview_trade_event_repair, record_trade_event_repair
+    from src.application.ledger import interventions
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    original = _execution(deal_id="repair-race")
+    assert _process(repo, tmp_path, "push", original)["status"] == "applied"
+    target_event_id = str(repo.list_trade_events()[0]["event_id"])
+    preview = preview_trade_event_repair(
+        repo, event_id=target_event_id, overrides={"price": 2.5}, reason="verified_manual_repair"
+    )
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(original, account_mapping={"123": "lx"})
+    real_transaction = interventions.with_sqlite_repo_transaction
+
+    def race(repo_arg, fn, **kwargs):
+        enqueue_trade_payload(
+            inbox, payload={**original, "status": "CANCELLED", "update_timestamp": 2_000},
+            source="backfill", broker_deal_key=key, repo=repo,
+        )
+        return real_transaction(repo_arg, fn, **kwargs)
+
+    monkeypatch.setattr(interventions, "with_sqlite_repo_transaction", race)
+    with pytest.raises(ValueError, match="stale"):
+        record_trade_event_repair(
+            repo, event_id=target_event_id, overrides={"price": 2.5},
+            reason="verified_manual_repair", expected_input_hash=preview["expected_input_hash"],
+        )
+    assert len(repo.list_trade_events()) == 1
+
+
+def test_simultaneous_duplicate_repair_reads_back_in_transaction(monkeypatch, tmp_path: Path) -> None:
+    from src.application.ledger.commands import preview_trade_event_repair, record_trade_event_repair
+    from src.application.ledger import interventions
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    assert _process(repo, tmp_path, "push", _execution(deal_id="repair-duplicate"))["status"] == "applied"
+    target_event_id = str(repo.list_trade_events()[0]["event_id"])
+    kwargs = {
+        "event_id": target_event_id,
+        "overrides": {"price": 2.5},
+        "reason": "verified_manual_repair",
+    }
+    expected_hash = preview_trade_event_repair(repo, **kwargs)["expected_input_hash"]
+    real_transaction = interventions.with_sqlite_repo_transaction
+    first_result = {}
+
+    def interleave(repo_arg, fn, **options):
+        monkeypatch.setattr(interventions, "with_sqlite_repo_transaction", real_transaction)
+        first_result.update(record_trade_event_repair(
+            repo, **kwargs, expected_input_hash=expected_hash
+        ))
+        return real_transaction(repo_arg, fn, **options)
+
+    monkeypatch.setattr(interventions, "with_sqlite_repo_transaction", interleave)
+    second = record_trade_event_repair(repo, **kwargs, expected_input_hash=expected_hash)
+    assert first_result["mode"] == "applied"
+    assert second["mode"] == "no_op"
+    assert second["repair_event_id"] == first_result["repair_event_id"]
+    assert len(repo.list_trade_events()) == 3

@@ -157,7 +157,7 @@ def test_standard_execution_keeps_futu_event_lot_and_frozen_economics(tmp_path) 
     ({"multiplier": "10"}, "ledger_contract_multiplier"),
 ])
 def test_real_intake_admission_preserves_projection_scope(tmp_path, change, error):
-    payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
+    payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL", "status": "OK",
                "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
                "deal_id": "first", "order_id": "first-order", "code": "US.NVDA260918P00100000",
                "qty": "1", "price": "2.50", "multiplier": "100", "trd_side": "SELL_SHORT",
@@ -182,6 +182,7 @@ def test_real_intake_admission_preserves_projection_scope(tmp_path, change, erro
 def _execution_input(deal_id="fill-1", *, namespace="futu.deal", effect="open", option_type="put"):
     return {
         "schema_version": "trade_execution.v1",
+        "status": "OK",
         "broker_account_ref": {"broker_id": "futu", "external_account_id": "123", "environment": "REAL",
                                "broker_account_id": "futu:REAL:123", "account_label": "lx"},
         "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",
@@ -346,7 +347,7 @@ def test_close_outbox_keeps_namespace_and_original_account_scope_on_replay(tmp_p
             "broker_account_ref": {**close.execution_input["broker_account_ref"], "account_label": "renamed"},
         })
         replay = _process_payload(
-            renamed.execution_input, repo=repo, state_path=tmp_path / "recovery/state.json",
+            {**renamed.execution_input, "status": "OK"}, repo=repo, state_path=tmp_path / "recovery/state.json",
             audit_path=tmp_path / "recovery/audit.jsonl", account_mapping={"123": "renamed"},
             futu_account_ids=["123"], host="localhost", port=11111,
             source="file", apply_changes=True, allow_external_lookup=False,
@@ -584,7 +585,7 @@ def _proven_legacy_execution_fixture(tmp_path, *, split=False, order_known=True,
         "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
         "deal_id": "legacy-fill", "order_id": "legacy-order", "code": "US.NVDA260918P00100000",
         "qty": "1", "price": "2.50", "multiplier": "100", "trd_side": "SELL_SHORT",
-        "create_time": "2026-09-07 10:30:00",
+        "create_time": "2026-09-07 10:30:00", "status": "OK",
     }
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
 

@@ -156,5 +156,9 @@ def apply_repair_trade_event(
     event_id: str,
     overrides: dict[str, Any],
     reason: str,
+    expected_input_hash: str | None = None,
 ) -> dict[str, Any]:
-    return record_trade_event_repair(repo, event_id=event_id, overrides=overrides, reason=reason)
+    return record_trade_event_repair(
+        repo, event_id=event_id, overrides=overrides, reason=reason,
+        expected_input_hash=expected_input_hash,
+    )

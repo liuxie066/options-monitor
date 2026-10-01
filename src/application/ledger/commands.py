@@ -34,6 +34,7 @@ from src.application.ledger.interventions import (
     persist_manual_void_event,
     preview_manual_opend_trade_time_correction,
     preview_manual_order_identity_binding,
+    readback_manual_repair_event,
 )
 from src.application.ledger.lot_resolver import (
     CloseTargetResolution,
@@ -310,6 +311,7 @@ def persist_manual_repair_event_with_ledger(
     target_event_id: str,
     overrides: dict[str, Any],
     repair_reason: str,
+    expected_input_hash: str | None,
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionLedgerResult:
     payload = _preflight_manual_repair_payload(
@@ -324,6 +326,7 @@ def persist_manual_repair_event_with_ledger(
         target_event_id=target_event_id,
         overrides=overrides,
         repair_reason=repair_reason,
+        expected_input_hash=expected_input_hash,
         as_of_ms=as_of_ms,
     )
     return TradeEventInterventionLedgerResult(
@@ -2563,6 +2566,7 @@ def record_trade_event_repair(
     event_id: str,
     overrides: dict[str, Any],
     reason: str,
+    expected_input_hash: str | None = None,
 ) -> dict[str, Any]:
     if is_order_identity_repair_request(overrides):
         return persist_manual_order_identity_binding(
@@ -2578,14 +2582,22 @@ def record_trade_event_repair(
             overrides=overrides,
             repair_reason=reason,
         )
+    readback = readback_manual_repair_event(
+        repo, target_event_id=event_id, overrides=overrides,
+        repair_reason=reason, expected_input_hash=expected_input_hash,
+    )
+    if readback is not None:
+        return readback | {"mode": "no_op"}
     ledger_result = persist_manual_repair_event_with_ledger(
         repo,
         target_event_id=event_id,
         overrides=overrides,
         repair_reason=reason,
+        expected_input_hash=expected_input_hash,
     )
-    return ledger_result.result.to_dict() | {
-        "mode": "applied",
+    result = ledger_result.result.to_dict()
+    return result | {
+        "mode": "applied" if result.get("repair_created") else "no_op",
         "ledger_preflight": ledger_result.ledger_preflight.to_dict(),
     }
 

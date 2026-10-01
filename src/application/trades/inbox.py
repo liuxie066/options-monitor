@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from domain.domain.source_evidence import build_source_evidence
+from domain.domain.trade_execution import execution_source_revision, execution_source_status
 from domain.domain.trade_account_identity import extract_primary_account_id
 
 from src.application.ledger.api import (
@@ -24,6 +25,10 @@ from src.application.ledger.api import (
     canonical_source_payload_hash,
     lifecycle_attempt_diagnostic_sha256,
 )
+from src.application.trades.source_constraints import (
+    TRADE_EVIDENCE_SET_REF_PREFIX,
+    read_account_trade_source_constraints,
+)
 from src.application.trades.settlement_attempts import (
     SettlementAttemptOutcome,
     settlement_attempt_updates_after_outcome,
@@ -35,13 +40,13 @@ _LOGGER = logging.getLogger(__name__)
 
 
 SETTLEMENT_ATTEMPT_MIN_LEASE_MS = 120_000
-TRADE_EVIDENCE_SET_REF_PREFIX = "trade-inbox-evidence-set:v1:"
 LEGACY_ADAPTER_VERSION = "legacy/unversioned"
 _UNOBSERVED_RECEIPT_RESULT = object()
 TRADE_INTAKE_ADAPTER_VERSIONS = {
     "push": "om.trade-intake.push.v1",
     "backfill": "om.trade-intake.history.v1",
     "file": "om.trade-intake.execution-jsonl.v1",
+    "lookup": "om.trade-intake.exact-deal-query.v1",
 }
 _SETTLEMENT_ATTEMPT_QUERY_BATCH_SIZE = 400
 _SETTLEMENT_INVOCATION_STATES = frozenset(
@@ -167,7 +172,14 @@ def enqueue_trade_payload(
     adapter_version: str = LEGACY_ADAPTER_VERSION,
 ) -> str:
     """Persist every source version before any economic use; never clear conflicts."""
-    inbox_path = Path(path)
+    authoritative = adapter_version in TRADE_INTAKE_ADAPTER_VERSIONS.values()
+    if authoritative and repo is None:
+        raise ValueError("authoritative trade source requires the ledger writer lock")
+    if authoritative:
+        from src.application.trades.inbox_authority import resolve_execution_inbox_path
+        inbox_path = resolve_execution_inbox_path(repo, path)
+    else:
+        inbox_path = Path(path)
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
@@ -215,6 +227,7 @@ def enqueue_trade_payload(
         known_before = _known_execution_associations(
             canonical_key, [original, *(json.loads(item[0]) for item in prior_evidence)]
         ) if canonical_key else {}
+        new_evidence = False
         for raw_json, raw_source, raw_received_at_ms, raw_adapter_version in (
             (
                 original_json,
@@ -224,7 +237,7 @@ def enqueue_trade_payload(
             ),
             (payload_json, source_text, now_ms, adapter_version),
         ):
-            _insert_trade_payload_evidence(
+            new_evidence = _insert_trade_payload_evidence(
                 conn,
                 inbox_id=inbox_id,
                 source=raw_source,
@@ -232,7 +245,7 @@ def enqueue_trade_payload(
                 received_at_ms=raw_received_at_ms,
                 broker_deal_key=canonical_key,
                 adapter_version=raw_adapter_version,
-            )
+            ) or new_evidence
         if canonical_key:
             from domain.domain.trade_execution import conflicting_execution_associations
             original_content = _inbox_execution_content(canonical_key, original)
@@ -245,20 +258,65 @@ def enqueue_trade_payload(
                 _inbox_execution_content(canonical_key, json.loads(item[0])) for item in evidence
             ]
             source_identity_conflict = _has_source_identity_conflict(evidence_content)
-            conflict = original_hash != economic_hash or any(
-                conflicting_execution_associations(item, content) for item in evidence_content
+            source_status = execution_source_status(payload)
+            status_conflict = new_evidence and (
+                source_status in {"cancelled", "changed", "unknown"} or any(
+                    prior_status not in (None, source_status)
+                    for prior_status in (
+                        execution_source_status(json.loads(item[0])) for item in evidence
+                    )
+                )
+            )
+            status_missing = (
+                new_evidence
+                and source_status is None
+                and adapter_version in TRADE_INTAKE_ADAPTER_VERSIONS.values()
+            )
+            incoming_revision = execution_source_revision(payload)
+            stale_revision = incoming_revision is not None and any(
+                prior_revision is not None and prior_revision > incoming_revision
+                for prior_revision in (
+                    execution_source_revision(json.loads(item[0])) for item in evidence
+                )
+            )
+            conflict = any(
+                _economic_values_conflict(item.get("economic"), content.get("economic"))
+                or conflicting_execution_associations(item, content)
+                for item in evidence_content
             )
             applied_conflicts = applied_execution_association_conflicts(repo, canonical_key, content)
-            if source_identity_conflict or conflict or applied_conflicts:
+            if source_identity_conflict or conflict or applied_conflicts or status_conflict or status_missing or stale_revision:
                 reason = ("broker_source_identity_conflict" if source_identity_conflict else
                           "broker_economic_payload_conflict" if conflict else
-                          "broker_applied_association_conflict")
+                          "broker_applied_association_conflict" if applied_conflicts else
+                          "broker_deal_status_conflict" if status_conflict else
+                          "broker_deal_status_missing" if status_missing else
+                          "broker_deal_revision_stale")
                 conn.execute(
                     """UPDATE trade_inbox SET status = 'conflict',
                     payload_version = payload_version + 1, claim_id = NULL, claim_until_ms = NULL,
                     updated_at_ms = ?, last_error = ?,
                     result_status = 'conflict', result_reason = ?
-                    WHERE inbox_id = ? AND status != 'conflict'""", (now_ms, reason, reason, inbox_id),
+                    WHERE inbox_id = ? AND (status != 'conflict' OR ?)""", (now_ms, reason, reason, inbox_id, int(new_evidence)),
+                )
+            elif (
+                row["status"] == "conflict"
+                and row["result_reason"] == "broker_deal_status_missing"
+                and source_status == "ok"
+                and source_text in {"push", "backfill", "lookup"}
+                and adapter_version == TRADE_INTAKE_ADAPTER_VERSIONS[source_text]
+                and new_evidence
+                and not stale_revision
+            ):
+                conn.execute(
+                    """UPDATE trade_inbox SET payload_json = ?, source = ?,
+                    economic_payload_hash = ?, status = 'pending',
+                    payload_version = payload_version + 1, claim_id = NULL,
+                    claim_until_ms = NULL, updated_at_ms = ?, last_error = NULL,
+                    result_status = NULL, result_reason = NULL
+                    WHERE inbox_id = ? AND status = 'conflict'
+                    AND result_reason = 'broker_deal_status_missing'""",
+                    (payload_json, source_text, economic_hash, now_ms, inbox_id),
                 )
             elif str(row["economic_payload_hash"] or "") != original_hash:
                 conn.execute("UPDATE trade_inbox SET economic_payload_hash = ? WHERE inbox_id = ?",
@@ -356,6 +414,7 @@ def read_trade_source_evidence(
     return out
 
 
+
 def _insert_trade_payload_evidence(
     conn: sqlite3.Connection,
     *,
@@ -365,7 +424,7 @@ def _insert_trade_payload_evidence(
     received_at_ms: int,
     broker_deal_key: str,
     adapter_version: str,
-) -> None:
+) -> bool:
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     evidence = _build_trade_source_evidence(
         inbox_id=inbox_id,
@@ -376,7 +435,7 @@ def _insert_trade_payload_evidence(
         broker_deal_key=broker_deal_key,
         adapter_version=adapter_version,
     )
-    conn.execute(
+    cursor = conn.execute(
         """INSERT INTO trade_inbox_evidence
         (inbox_id, source, payload_hash, payload_json, received_at_ms, evidence_id, evidence_json)
         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(inbox_id, source, payload_hash) DO NOTHING""",
@@ -390,6 +449,7 @@ def _insert_trade_payload_evidence(
             json.dumps(evidence, ensure_ascii=False, sort_keys=True),
         ),
     )
+    return cursor.rowcount == 1
 
 
 def _build_trade_source_evidence(
@@ -3381,6 +3441,15 @@ def _inbox_execution_content(source_key: str, payload: dict[str, Any]) -> dict[s
 
 def _has_source_identity_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
     return any("invalid:source_execution_identity" in item.get("errors", ()) for item in contents)
+
+
+def _economic_values_conflict(left: Any, right: Any) -> bool:
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return any(
+            _economic_values_conflict(left[name], right[name])
+            for name in left.keys() & right.keys()
+        )
+    return left not in (None, "") and right not in (None, "") and left != right
 
 
 def _execution_content_hash(content: Mapping[str, Any]) -> str:

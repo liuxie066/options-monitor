@@ -21,6 +21,7 @@ def _advance_retry_clock(monkeypatch, seconds=61):
 def _execution():
     return {
         "schema_version": "trade_execution.v1",
+        "status": "OK",
         "broker_account_ref": {"broker_id": "futu", "external_account_id": "123", "environment": "REAL",
                                "broker_account_id": "futu:REAL:123", "account_label": "lx"},
         "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",

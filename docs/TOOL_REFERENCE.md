@@ -392,7 +392,8 @@ Bot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细�
 账户、物理 broker 身份与配置不一致时不能确认；查询不更新 Inbox 或 Control operation。
 人工操作见 [Inbound Control](INBOUND_CONTROL.md#已入账成交的策略归属)。
 
-规则管理由人类 CLI `om trade-intake attribution-enable` / `attribution-migrate` 提供，默认预览。
-使用 `--help` 检查必需参数；`--apply --confirm` 才写入。迁移须先停流并排空旧 writer，
-提供 `--writers-stopped`、预览 manifest 和新的备份目标；启用须给明确账户、actor、request ID 与未来生效时间。
-迁移不会自动启用规则，部署与生产启用均需单独授权。
+归属规则只有一套当前写入路径。人类 CLI `om trade-intake attribution-migrate` 负责按物理来源和账户切换到 v2；
+`--effective-from-ms` 指定未来的成交时间切换点，默认只预览。预览列出旧 v1 启用时间 T0、v2 切换时间 T2、来源和成交数量。
+写入前须停流并排空 writer，提供 `--writers-stopped`、同一来源的完整预览 manifest、新备份目标与 `--apply --confirm`。
+迁移只追加 v2 生效记录，不改旧行。T0 至 T2 之间及未切换来源的未归属成交仍可人工确认；仅成交时间不早于 T2 的成交可自动归属。
+部署与生产迁移各需单独授权；简报和成交回执持续显示待人工确认，不把缺失证据或账户总额变化当作归属证明。

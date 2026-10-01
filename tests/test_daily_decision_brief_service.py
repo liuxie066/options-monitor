@@ -41,6 +41,7 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
         json.dumps(
             {
                 "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"HKD": 255_000, "USD": 3_000},
                 "cash_secured_unavailable_by_symbol": {},
                 "cash_secured_total_cny": 250_500.0,
@@ -1246,6 +1247,7 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) ->
         json.dumps(
             {
                 "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"HKD": 171_000, "USD": 8_500},
                 "cash_secured_unavailable_by_symbol": {},
                 "cash_secured_total_cny": 213_400.0,
@@ -1296,7 +1298,7 @@ def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
     assert brief["funds"]["reason"] == "option_cash_secured_unavailable"
 
 
-def test_closed_put_with_newer_futu_cash_does_not_hide_opening_funds(tmp_path: Path) -> None:
+def test_closed_put_with_newer_futu_cash_keeps_settlement_block(tmp_path: Path) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     state_dir = account_dir / "state"
     portfolio_path = state_dir / "portfolio_context.json"
@@ -1316,9 +1318,9 @@ def test_closed_put_with_newer_futu_cash_does_not_hide_opening_funds(tmp_path: P
 
     brief = _assemble(tmp_path)
 
-    assert brief["funds"]["available"] is True
-    assert brief["funds"]["option_opening_available_cny"] == 307_500.0
-    assert not any(item.get("kind") == "option_opening_available" for item in brief["data_gaps"])
+    assert brief["funds"]["available"] is False
+    assert brief["funds"].get("option_opening_available_cny") is None
+    assert any(item.get("kind") == "option_opening_available" for item in brief["data_gaps"])
 
 
 def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path: Path) -> None:
@@ -2850,3 +2852,22 @@ def test_wheel_suggestion_requires_original_price_and_quote_time(monkeypatch, qu
     else:
         assert not candidates and views[0]["recommended_contracts"] == 0
         assert gaps[0]["reason"] == "wheel_suggested_price_unavailable"
+
+
+def test_daily_brief_funds_do_not_offer_explicitly_stale_broker_cash() -> None:
+    from src.application.daily_decision_brief_service import _build_funds
+    gaps: list[dict[str, Any]] = []
+    funds, cash_reliable = _build_funds(
+        portfolio_context={
+            "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_by_currency": {"HKD": 100_000},
+            "cash_balance_reliable": True, "cash_source_observation_status": "stale",
+        },
+        option_positions_context={
+            "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_secured_total_by_ccy": {},
+            "cash_secured_total_cny": 0, "cash_secured_unavailable_by_symbol": {},
+        },
+        data_gaps=gaps,
+    )
+    assert cash_reliable is False
+    assert funds["available"] is False
+    assert funds["option_opening_available_by_currency"] == {}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -9,14 +9,12 @@ import pytest
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.wheel.workflows as wheel_workflows
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.portfolio_scope import portfolio_scope_id
+from src.application.ledger.api import decision_state_snapshot
 from domain.domain.wheel import lot_strategy_metadata_for_lot
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.ledger.writer import (
-    persist_trade_event_objects_atomically,
-    persist_trade_event_with_wheel_intent,
-)
-from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.positions.workflows import execute_manual_assignment
 from src.application.wheel import (
     build_wheel_read_model,
@@ -118,8 +116,14 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     )
     monkeypatch.setattr(wheel_workflows, "_wheel_branch", lambda *_args, **_kwargs: branch)
     monkeypatch.setattr(wheel_workflows, "project_wheel_intents", lambda *_args, **_kwargs: [])
+    trusted_snapshot = {"snapshot_status": "trusted", "decision_state_fingerprint": "decision-1"}
+    monkeypatch.setattr(
+        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        lambda *_args, **_kwargs: trusted_snapshot,
+    )
 
     def _revalidate(**kwargs):
+        assert kwargs["decision_snapshot"] is trusted_snapshot
         revalidations.append(kwargs)
         return allocation
 
@@ -143,7 +147,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         request_id="request-1",
         actor="tester",
         capacity_fact={
-            "cash_authority": {"status": "available"},
+            "cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()},
             "cash_authority_hash": "authority-1",
             "cash_by_currency": {"USD": 20_000},
             "fx_snapshot": {"rates": {}},
@@ -169,6 +173,44 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     assert result["wheel_branch_id"] == "wheel-put-1"
     assert result["dry_run"] is True
     assert result["write_applied"] is False
+
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        wheel_workflows.create_wheel_intent(
+            repo, candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
+            account="lx", wheel_branch_id="wheel-put-1", direction="put",
+            final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
+            expected_batch_generation_hash="generation-1", expires_at_ms=2_000,
+            request_id="request-stale-broker", actor="tester",
+            capacity_fact={"cash_authority": {"status": "available", "source_observed_at":
+                (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}},
+            new_intent_enabled=True, account_configured=True, market="us",
+            activation_descriptor={
+                "market": "us", "account": "lx", "generation": 1,
+                "activated_at_ms": 500, "deactivated_at_ms": None,
+                "policy_hash": "a" * 64,
+            },
+            policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
+        )
+    assert len(revalidations) == 1
+
+    candidate.pop("capacity_identity_hash")
+    with pytest.raises(ValueError, match="capacity identity"):
+        wheel_workflows.create_wheel_intent(
+            repo, candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
+            account="lx", wheel_branch_id="wheel-put-1", direction="put",
+            final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
+            expected_batch_generation_hash="generation-1", expires_at_ms=2_000,
+            request_id="request-missing-hash", actor="tester",
+            capacity_fact={"cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()}},
+            new_intent_enabled=True, account_configured=True, market="us",
+            activation_descriptor={
+                "market": "us", "account": "lx", "generation": 1,
+                "activated_at_ms": 500, "deactivated_at_ms": None,
+                "policy_hash": "a" * 64,
+            },
+            policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
+        )
+    candidate["capacity_identity_hash"] = "capacity-1"
 
     with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
         wheel_workflows.create_wheel_intent(
@@ -274,47 +316,10 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
     assert result["dry_run"] is True
 
 
-def _partial_call_fill() -> NormalizedTradeDeal:
-    return NormalizedTradeDeal(
-        broker="富途", futu_account_id="REAL_1", internal_account="lx",
-        deal_id="partial-call-1", order_id="bound-call-order", symbol="NVDA",
-        option_type="call", side="sell", position_effect="open", contracts=1,
-        price=2, strike=110, multiplier=100, multiplier_source="broker",
-        expiration_ymd="2026-08-21", currency="USD", trade_time_ms=5_000,
-        raw_payload={},
-    )
 
 
-def test_two_partial_fills_consume_one_wheel_intent_without_changing_trade_amounts(tmp_path):
-    repo, lot_id = _wheel_repo(tmp_path, contracts=2)
-    created, coverage = _create_call_intent(repo, lot_id, contracts=2, broker_order_id="bound-call-order")
-    first_deal = _partial_call_fill()
-    first = persist_trade_event_with_wheel_intent(repo, first_deal, coverage).to_dict()
-    partial = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
-    assert first["wheel_linkage_status"] == "matched_intent"
-    assert partial["active_intent_ids"] == [created["intent_id"]]
-    assert partial["active_intent_reserved_shares"] == 100
-    second = persist_trade_event_with_wheel_intent(repo, replace(first_deal, deal_id="partial-call-2", trade_time_ms=6_000), coverage).to_dict()
-    completed = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    assert second["wheel_linkage_status"] == "matched_intent"
-    assert completed["active_intent_ids"] == []
-    assert completed["active_intent_reserved_shares"] == 0
-    consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
-    assert [event["payload"]["contracts"] for event in consumed] == [1, 1]
-    fills = [event for event in repo.list_trade_events() if event["event_type"] == "open" and event["option_type"] == "call"]
-    assert sum(event["contracts"] * float(event["price"]) * event["multiplier"] for event in fills) == 400
-    assert all(event["raw_payload"]["source_stock_lot_id"] == lot_id for event in fills)
 
 
-@pytest.mark.parametrize("order_id", [None, "another-order"])
-def test_bound_wheel_order_does_not_consume_another_fill(tmp_path, order_id):
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id, broker_order_id="bound-call-order")
-    result = persist_trade_event_with_wheel_intent(repo, replace(_partial_call_fill(), order_id=order_id), coverage).to_dict()
-    assert result["wheel_linkage_status"] == "no_matching_intent"
-    assert not [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
-    assert created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]
-    assert any(event["event_id"] == result["event_id"] for event in repo.list_trade_events())
 
 
 def test_wheel_intent_replay_uses_stable_request_and_preserves_accepted_capacity(tmp_path):
@@ -466,6 +471,9 @@ def _create_call_intent(
     contracts: int = 1,
     broker_order_id: str | None = None,
     market: str = "us",
+    broker_observed_at: str | None = None,
+    include_decision_identity: bool = True,
+    include_capacity_identity: bool = True,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -484,13 +492,25 @@ def _create_call_intent(
                     "expiration_ymd": "2026-08-21",
                     "granted_contracts": contracts,
                     "multiplier": 100,
+                    **({"capacity_identity_hash": "capacity-1"} if include_capacity_identity else {}),
                 },
             }
         ],
     }
+    observed_at = (
+        datetime.now(timezone.utc).isoformat()
+        if broker_observed_at is None else broker_observed_at
+    )
+    decision = decision_state_snapshot(
+        repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
+        source_observed_at=observed_at, current_decision_now_ms=4_000,
+    )
     coverage = {
         "account": "lx",
         "symbol": "NVDA",
+        "source_observed_at": observed_at,
+        **({"decision_state_fingerprint": decision["decision_state_fingerprint"]}
+           if include_decision_identity else {}),
         "capacity_identity_hash": "capacity-1",
         "status": "available",
         "shares_eligible": contracts * 100,
@@ -528,6 +548,40 @@ def _create_call_intent(
         as_of_ms=4_000,
     )
     return created, coverage
+
+
+def test_call_intent_rejects_stale_broker_fact_and_unbound_decision(
+    tmp_path: Path,
+) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    before = repo.list_wheel_events(account="lx")
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        _create_call_intent(repo, lot_id, broker_observed_at=old_time)
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        _create_call_intent(repo, lot_id, broker_observed_at="")
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="coverage settlement decision"):
+        _create_call_intent(repo, lot_id, include_decision_identity=False)
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="coverage settlement decision"):
+        _create_call_intent(repo, lot_id, include_capacity_identity=False)
+    assert repo.list_wheel_events(account="lx") == before
+
+
+def test_call_intent_rechecks_source_conflict_inside_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    before = repo.list_wheel_events(account="lx")
+    monkeypatch.setattr(
+        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        lambda *_args, **_kwargs: {"snapshot_status": "source_untrusted"},
+    )
+    with pytest.raises(ValueError, match="coverage settlement decision is unavailable"):
+        _create_call_intent(repo, lot_id)
+    assert repo.list_wheel_events(account="lx") == before
 
 
 def _open_unlinked_call(
@@ -842,6 +896,10 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
 ) -> None:
     repo, lot_id = _wheel_repo(tmp_path)
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    prior_decision = decision_state_snapshot(
+        repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
+        source_observed_at=datetime.now(timezone.utc).isoformat(), current_decision_now_ms=3_000,
+    )
     _open_unlinked_call(repo, event_time_ms=3_500)
     snapshot = {
         "account": "lx",
@@ -868,7 +926,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
         ValueError,
         match=(
             "batch generation changed|coverage is unavailable|coverage is insufficient|"
-            "not ready"
+            "not ready|coverage settlement decision is unavailable"
         ),
     ):
         create_wheel_call_intent(
@@ -887,6 +945,8 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
                 "account": "lx",
                 "symbol": "NVDA",
                 "capacity_identity_hash": "capacity-before-race",
+                "decision_state_fingerprint": prior_decision["decision_state_fingerprint"],
+                "source_observed_at": datetime.now(timezone.utc).isoformat(),
                 "status": "available",
                 "shares_eligible": 100,
                 "shares_locked": 0,
@@ -1050,59 +1110,8 @@ def test_call_intent_cancel_rejects_cross_market_without_effects(
     assert repo.list_wheel_events(account="lx") == before
 
 
-def test_short_call_fill_consumes_matching_intent_atomically(tmp_path: Path) -> None:
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id)
-    coverage = {**coverage, "shares_available_for_cover": 0}
-    deal = replace(
-        _partial_call_fill(),
-        deal_id="call-fill-1",
-        order_id="call-order-1",
-        raw_payload={"deal_id": "call-fill-1"},
-    )
-
-    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-
-    batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    call_lot = _lot_row_for_option_type(repo, "call")
-    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
-    assert result["wheel_linkage_status"] == "matched_intent"
-    assert result["wheel_intent_event_id"]
-    assert call_metadata["strategy"] == "wheel"
-    assert call_metadata["source_stock_lot_id"] == lot_id
-    assert batch["phase"] == "call_open"
-    assert batch["active_intent_ids"] == []
-    assert created["intent_id"] not in batch["active_intent_ids"]
 
 
-def test_unmatched_short_call_fill_stays_unlinked_and_is_still_recorded(
-    tmp_path: Path,
-) -> None:
-    repo, _lot_id = _wheel_repo(tmp_path)
-    deal = replace(
-        _partial_call_fill(),
-        deal_id="unmatched-call-fill",
-        order_id="unmatched-call-order",
-        raw_payload={"deal_id": "unmatched-call-fill"},
-    )
-    coverage = {
-        "account": "lx",
-        "symbol": "NVDA",
-        "capacity_identity_hash": "capacity-1",
-        "status": "available",
-        "shares_available_for_cover": 100,
-    }
-
-    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-
-    call_lot = _lot_row_for_option_type(repo, "call")
-    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
-    model = build_wheel_read_model(repo, "lx", 6_000)
-    assert result["created"] is True
-    assert result["wheel_linkage_status"] == "no_matching_intent"
-    assert call_metadata.get("strategy") is None
-    assert model["batches"][0]["phase"] == "linkage_unresolved"
-    assert len(model["linkage_candidates"]) == 1
 
 
 def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path: Path) -> None:
@@ -1420,35 +1429,3 @@ def test_wheel_start_failure_rolls_back_assignment(
 
     assert [item["event_type"] for item in repo.list_trade_events()] == ["open"]
     assert repo.get_position_lot_fields(put_lot_id)["status"] == "open"
-
-
-@pytest.mark.parametrize("namespace", ["futu.order", "external-file.order"])
-def test_bound_wheel_order_requires_proven_order_namespace(tmp_path, namespace):
-    from src.application.ledger.api import record_trade_event_with_wheel_intent
-    from src.application.trades.normalizer import normalize_trade_deal
-
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id, broker_order_id="bound-call-order")
-    deal = normalize_trade_deal({
-        "schema_version": "trade_execution.v1",
-        "broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1",
-                               "environment": "REAL", "broker_account_id": "futu:REAL:REAL_1",
-                               "account_label": "lx"},
-        "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
-                           "currency": "USD", "option_type": "call", "strike": "110",
-                           "expiration_ymd": "2026-08-21", "multiplier": "100"},
-        "external_id_namespace": "futu.deal", "external_execution_id": "scope-fill",
-        "external_order_namespace": namespace, "external_order_id": "bound-call-order",
-        "side": "sell", "position_effect": "open", "quantity": "1", "price": "2",
-        "currency": "USD", "occurred_at_utc": "1970-01-01T00:00:05Z",
-    })
-    result = record_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-    matched = namespace == "futu.order"
-    assert result["wheel_linkage_status"] == ("matched_intent" if matched else "no_matching_intent")
-    consumed = [event for event in repo.list_wheel_events(account="lx")
-                if event["event_type"] == "wheel_call_intent_consumed"]
-    assert len(consumed) == int(matched)
-    event = next(event for event in repo.list_trade_events() if event["event_id"] == result["event_id"])
-    assert event["contracts"] * float(event["price"]) * event["multiplier"] == 200
-    assert bool(event["raw_payload"].get("source_stock_lot_id")) is matched
-    assert (created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]) is not matched

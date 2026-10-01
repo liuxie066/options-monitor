@@ -21,6 +21,7 @@ from domain.domain.ledger.position_fields import (
     effective_strike,
 )
 from domain.domain.risk_capacity import revalidate_opening_share_coverage
+from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
     WHEEL_EVENT_SCHEMA_V1,
@@ -102,6 +103,7 @@ from src.application.ledger.api import (
     finalize_trade_event_decision_projection,
     run_position_projection_in_transaction,
     with_sqlite_repo_transaction,
+    decision_state_snapshot_from_locked_rows,
 )
 from src.application.wheel.read_model import (
     build_wheel_read_model,
@@ -111,8 +113,10 @@ from src.application.wheel.config import (
     WHEEL_ACTIVATION_DESCRIPTOR_FIELDS, build_wheel_policy_hash, evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor, resolve_wheel_config, materialize_wheel_config, normalize_wheel_accounts,
 )
+from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.wheel.capacity import (
     revalidate_selected_wheel_put_candidate_from_rows,
+    broker_capacity_observation_is_fresh,
 )
 from src.application.wheel.remediation import policy_remediation
 from src.application.write_contract import attach_write_contract
@@ -1155,6 +1159,32 @@ def create_wheel_call_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
+        if not broker_capacity_observation_is_fresh(coverage_fact.get("source_observed_at")):
+            raise ValueError("Wheel Call broker capacity observation is stale or unavailable")
+        decision_snapshot = decision_state_snapshot_from_locked_rows(
+            sqlite_repo, rows,
+            account=account_value,
+            portfolio_scope_id=portfolio_scope_id(account_value),
+            source_observed_at=datetime.now(timezone.utc).isoformat(),
+            current_decision_now_ms=instant,
+        )
+        option_context = build_option_positions_context(
+            list(rows["stored_position_lots"]),
+            broker=str(candidate.get("broker") or "futu"),
+            account=account_value,
+            decision_snapshot=decision_snapshot,
+            lifecycle_now_ms=instant,
+        )
+        symbol = str(batch.get("symbol") or "")
+        if (option_context.get("context_status") != "available"
+                or option_context.get("decision_snapshot_status") != "trusted"
+                or symbol in (option_context.get("locked_shares_unavailable_by_symbol") or {})
+                or not str(coverage_fact.get("decision_state_fingerprint") or "").strip()
+                or coverage_fact.get("decision_state_fingerprint")
+                   != option_context.get("decision_state_fingerprint")
+                or str(candidate.get("capacity_identity_hash") or "").strip()
+                   != str(coverage_fact.get("capacity_identity_hash") or "").strip()):
+            raise ValueError("Wheel Call coverage settlement decision is unavailable")
         current_coverage = revalidate_opening_share_coverage(
             coverage_fact,
             list(rows.get("account_position_lots") or []),
@@ -2070,6 +2100,19 @@ def _create_wheel_put_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
+        source_observed_at = (
+            capacity_fact.get("source_observed_at")
+            or (capacity_fact.get("cash_authority") or {}).get("source_observed_at")
+        )
+        if not broker_capacity_observation_is_fresh(source_observed_at):
+            raise ValueError("Wheel Put broker capacity observation is stale or unavailable")
+        decision_snapshot = decision_state_snapshot_from_locked_rows(
+            sqlite_repo, rows,
+            account=account,
+            portfolio_scope_id=portfolio_scope_id(account),
+            source_observed_at=datetime.now(timezone.utc).isoformat(),
+            current_decision_now_ms=as_of_ms,
+        )
         current_capacity = revalidate_selected_wheel_put_candidate_from_rows(
             account=account,
             portfolio_context=_put_portfolio_context(capacity_fact),
@@ -2082,6 +2125,7 @@ def _create_wheel_put_intent(
                 or "futu"
             ),
             as_of_ms=as_of_ms,
+            decision_snapshot=decision_snapshot,
             fx_snapshot=(
                 capacity_fact.get("fx_snapshot")
                 if isinstance(capacity_fact.get("fx_snapshot"), Mapping)

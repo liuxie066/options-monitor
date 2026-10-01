@@ -135,6 +135,36 @@
       "module": "src/application/portfolio_context_builder.py",
       "name": "load_holdings_portfolio_shared_context",
       "reason": "The scan-global Holdings wrapper was retired; the independent Feishu context export retains load_holdings_records and build_shared_context."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "enable_trade_attribution_policy",
+      "reason": "The old per-source v1 enable writer was retired; controlled v2 attribution migration is the sole policy cutover writer."
+    },
+    {
+      "module": "src/application/ledger/trade_attribution.py",
+      "name": "enable_trade_attribution_policy",
+      "reason": "The old per-source v1 enable writer was retired; controlled v2 attribution migration is the sole policy cutover writer."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "record_trade_event_with_wheel_intent",
+      "reason": "The independent Wheel intent trade writer was retired; canonical trade intake now records the fill once and applies the shared attribution decision."
+    },
+    {
+      "module": "src/application/ledger/wheel_trade_companions.py",
+      "name": "prepare_wheel_intent_open_event",
+      "reason": "The legacy Wheel intent companion writer was retired in favor of the shared post-fill attribution decision."
+    },
+    {
+      "module": "src/application/ledger/writer_trade_events.py",
+      "name": "persist_trade_event_with_wheel_intent",
+      "reason": "The legacy Wheel intent persistence path was retired; canonical trade intake and shared attribution own new fills."
+    },
+    {
+      "module": "src/application/trades/attribution.py",
+      "name": "trade_attribution_enabled_for_execution",
+      "reason": "The old v1 execution enable switch was retired; v2 event-time cutover and the shared attribution decision replace it."
     }
   ]
 }

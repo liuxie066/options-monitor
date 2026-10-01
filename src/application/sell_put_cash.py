@@ -34,6 +34,12 @@ def _cash_secured_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
     portfolio_ctx: dict[str, Any] | None,
 ) -> str:
+    if isinstance(portfolio_ctx, dict) and (
+        portfolio_ctx.get("cash_balance_reliable") is False
+        or portfolio_ctx.get("cash_source_observation_status", portfolio_ctx.get("source_observation_status"))
+        not in (None, "trusted")
+    ):
+        return "broker_cash_snapshot_unavailable"
     if not isinstance(option_ctx, dict):
         return "option_positions_cash_secured_context_unavailable"
     context_status = str(option_ctx.get("context_status") or "").strip().lower()

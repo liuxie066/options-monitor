@@ -12,7 +12,7 @@ from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.ledger.api import (
     ledger_resource_identity, open_trade_reconciliation_evidence_repo,
     read_trade_attribution_facts, resolve_ledger_store, resolve_position_data_config_path,
-    ledger_store_write_guard, open_wheel_activation_repository, enable_trade_attribution_policy,
+    ledger_store_write_guard,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
     read_trade_attribution_snapshot, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
@@ -36,22 +36,11 @@ from src.application.daily_decision_brief_repository import read_combo_candidate
 from src.application.wheel.workflows import confirm_wheel_call_linkage, confirm_wheel_linkage
 
 
-def trade_attribution_enabled_for_execution(repo: Any, *, execution: Mapping[str, Any], account: str,
-                                            market: str, event_time_ms: int) -> bool:
-    if not getattr(repo, "db_path", None):
-        return False
-    ref = execution.get("broker_account_ref") or {}
-    if not all(ref.get(key) for key in ("broker_id", "external_account_id", "environment")):
-        return False
-    policy = read_trade_attribution_policy(repo, scope={"broker": ref["broker_id"], "physical_account_id": ref["external_account_id"],
-        "environment": ref["environment"], "account": account, "market": market.lower()})
-    return bool(policy and int(event_time_ms) >= policy["effective_from_ms"])
-
-
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
     return {key: fact.get(key) for key in ("schema_version", "execution_key", "open_event_id", "lot_id", "account",
         "status", "strategy", "wheel_branch_id", "strategy_group_id", "origin", "reason_codes", "candidate_ids",
-        "input_hash", "policy_version", "evaluated_at_ms", "ledger_event_ids", "coverage", "direction")}
+        "input_hash", "policy_version", "evaluated_at_ms", "ledger_event_ids", "coverage", "direction",
+        "rules_enabled", "evidence_complete", "selected_candidate_id")}
 
 
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
@@ -146,8 +135,6 @@ def build_trade_attribution_view(
             continue
         members = [pair["put_record_id"], pair["call_record_id"]]
         reasons = []
-        if combo_mode != "auto":
-            reasons.append("combo_confirmation_required")
         if (pair["evidence_grade"] != "exact_delivered_candidate" or pair.get("alternative_inference_ids")
                 or pair["status"] != "proposal_ready"):
             reasons.append("combo_not_unique_delivered_pair")
@@ -436,8 +423,6 @@ def reconcile_trade_attribution_account(
     from src.application.trades.inbox import cache_trade_attribution_result
 
     rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-    if not rows["attribution_policy_enablings"]:
-        return {"status": "disabled", "checked": 0, "next_cursor": ""}
     facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
     selected = sorted((row for row in facts if row["execution_key"] and row["execution_key"] > cursor
         and str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market),
@@ -591,28 +576,26 @@ def run_attribution_admin(args: Any, *, config: dict[str, Any], config_path: Pat
         if not guard.get("ok"):
             raise ValueError("ledger write scope guard failed: " + str(guard.get("errors")))
     if args.action == "attribution-migrate":
+        account = str(args.account or "").strip().lower()
+        physical = resolve_futu_account_ids(config, account=account) if account in config.get("accounts", []) else []
+        settings = infer_futu_portfolio_settings(config, account=account) if physical else {}
+        if len(physical) != 1:
+            raise ValueError("attribution migration requires one configured account and physical source")
+        scope = {"broker": "futu", "physical_account_id": physical[0], "account": account,
+                 "environment": str(settings.get("trd_env") or "").upper(),
+                 "market": runtime_config_market(config).lower()}
         if not args.apply:
-            return preview_trade_attribution_migration(store.sqlite_path)
+            if args.effective_from_ms is None:
+                raise ValueError("attribution migration preview requires --effective-from-ms")
+            return preview_trade_attribution_migration(store.sqlite_path, scope=scope,
+                effective_from_ms=args.effective_from_ms)
         if not args.manifest or not args.backup_path:
             raise ValueError("migration apply requires --manifest and --backup-path")
         manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
         if isinstance(manifest, dict) and manifest.get("ok") is True and "result" in manifest:
             manifest = manifest["result"]
+        if not isinstance(manifest, dict) or manifest.get("cutover_scope") != scope:
+            raise ValueError("migration manifest source differs from current configuration")
         return apply_trade_attribution_migration(store.sqlite_path, manifest=manifest,
             backup_path=args.backup_path, writers_stopped=args.writers_stopped)
-    if args.action != "attribution-enable":
-        raise ValueError("unknown attribution administration action")
-    account = str(args.account or "").strip().lower()
-    if account not in config.get("accounts", []):
-        raise ValueError("attribution enabling requires a configured account")
-    physical = resolve_futu_account_ids(config, account=account)
-    settings = infer_futu_portfolio_settings(config, account=account)
-    if len(physical) != 1 or not args.actor or not args.request_id or args.effective_from_ms is None:
-        raise ValueError("enabling requires unique physical account, --actor, --request-id and --effective-from-ms")
-    scope = {"broker": "futu", "physical_account_id": physical[0], "account": account,
-             "environment": str(settings.get("trd_env") or "").upper(),
-             "market": runtime_config_market(config).lower()}
-    repo = (open_wheel_activation_repository(store.sqlite_path) if args.apply
-            else open_trade_reconciliation_evidence_repo(store.sqlite_path))
-    return enable_trade_attribution_policy(repo, scope=scope, effective_from_ms=args.effective_from_ms,
-        actor=args.actor, request_id=args.request_id, now_ms=int(time.time() * 1000), apply_changes=args.apply)
+    raise ValueError("unknown attribution administration action")

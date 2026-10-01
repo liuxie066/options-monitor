@@ -61,6 +61,7 @@ def _account_nvda_context() -> dict:
             "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
         },
         "option_ctx": {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
             "cash_secured_total_cny": 50_000.0,
         },
@@ -149,6 +150,7 @@ def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() 
     risk = build_portfolio_risk_context(
         portfolio_ctx={
             "cash_by_currency": {},
+            "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {}},
             "stocks_by_symbol": {
                 "0883.HK": {
                     "symbol": "0883.HK",
@@ -331,6 +333,7 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
             "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
         },
         "option_ctx": {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 14_000.0}},
             "cash_secured_total_cny": 100_000.0,
         },

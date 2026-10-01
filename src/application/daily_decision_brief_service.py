@@ -77,6 +77,9 @@ from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
 from src.application.payload_helpers import positive_int_or as _positive_int
+from src.application.ledger.api import (
+    open_trade_reconciliation_evidence_repo, resolve_position_ledger_sqlite_path,
+)
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -87,6 +90,35 @@ _COMBO_OCCURRENCE_FIELDS = (
     "candidate_occurrence_data_as_of_utc",
     "candidate_row_content_hash",
 )
+
+
+def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
+                                   account: str, market: str, now_ms: int) -> tuple[list[dict[str, Any]], str | None]:
+    """Re-evaluate ledger fills using the same read-only arbiter as Control."""
+    try:
+        from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
+        from src.application.trades.attribution import build_trade_attribution_view, read_attribution_combo_evidence
+        from src.application.ledger.api import read_trade_attribution_snapshot
+
+        ledger_path = resolve_position_ledger_sqlite_path(base=base, cfg=dict(config))
+        if not ledger_path.exists():
+            return [], "ledger_missing"
+        repo = open_trade_reconciliation_evidence_repo(ledger_path)
+        snapshot = read_trade_attribution_snapshot(repo, account=account, market=market.lower())
+        evidence = read_attribution_combo_evidence(snapshot, account=account,
+                                                   runtime_root=ledger_path.parents[2], now_ms=now_ms)
+        view = build_trade_attribution_view(snapshot, config=config, account=account, market=market.lower(),
+            now_ms=now_ms, combo_evidence=evidence,
+            combo_mode=combo_reconciliation_mode_for_account(config, account=account))
+        pending = [row for row in view["rows"] if row["status"] in {"pending", "conflict"}
+                   and row["contracts_open"] > 0]
+        pending.sort(key=lambda row: (row["event_time_ms"], row["open_event_id"]))
+        return [{"execution_key": row["execution_key"], "symbol": row["contract_key"]["underlying_symbol"],
+                 "option_type": row["contract_key"]["option_type"], "strike": row["contract_key"]["strike"],
+                 "expiration": row["contract_key"]["expiration_ymd"], "status": row["status"]}
+                for row in pending], None
+    except Exception as exc:
+        return [], type(exc).__name__
 
 
 def assemble_daily_decision_brief(
@@ -711,7 +743,13 @@ def assemble_daily_decision_brief(
         data_gaps=deduped_data_gaps,
     )
 
+    attribution_pending, attribution_read_error = _pending_attribution_for_brief(
+        base=base_path, config=config_map, account=account_norm, market=market_norm,
+        now_ms=int(effective_now.timestamp() * 1000),
+    )
     brief_payload = {
+            "attribution_pending": attribution_pending,
+            "attribution_read_error": attribution_read_error,
             "market": market_norm,
             "market_trading_date": market_date,
             "account": account_norm,
@@ -1543,7 +1581,16 @@ def _build_funds(
 ) -> tuple[dict[str, Any], bool]:
     cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
     portfolio_as_of = _parse_datetime(portfolio_context.get("as_of_utc"))
-    cash_total_reliable = cash_total is not None and portfolio_as_of is not None
+    cash_source_status = portfolio_context.get(
+        "cash_source_observation_status",
+        portfolio_context.get("source_observation_status"),
+    )
+    cash_total_reliable = (
+        cash_total is not None
+        and portfolio_as_of is not None
+        and portfolio_context.get("cash_balance_reliable") is not False
+        and cash_source_status in (None, "trusted")
+    )
     if not cash_total_reliable:
         data_gaps.append(
             {

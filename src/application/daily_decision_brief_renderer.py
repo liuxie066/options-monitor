@@ -205,6 +205,8 @@ def build_daily_brief_user_view(
         "capacity": capacity,
         "reminders": reminders,
         "fixed_report_reminders": fixed_report_reminders,
+        "attribution_pending": list(brief.get("attribution_pending") or []),
+        "attribution_read_error": brief.get("attribution_read_error"),
     }
     return view
 
@@ -443,6 +445,21 @@ def render_daily_brief_lifecycle(
     return _render_user_view(view)
 
 
+def _attribution_review_lines(view: Mapping[str, Any]) -> list[str]:
+    rows = [row for row in view.get("attribution_pending") or [] if isinstance(row, Mapping)]
+    out = []
+    if rows:
+        out.append(f"待确认归属｜{len(rows)} 笔已入账期权成交；请在 OM Bot 查看待确认归属，选目标后预览确认。")
+        for row in rows[:5]:
+            out.append(f"归属待办｜{row.get('symbol')} {row.get('expiration')} {row.get('strike')} "
+                       f"{str(row.get('option_type') or '').upper()}｜成交 `{row.get('execution_key')}`")
+        if len(rows) > 5:
+            out.append(f"归属待办｜另有 {len(rows) - 5} 笔，请在 OM Bot 查看。")
+    if view.get("attribution_read_error"):
+        out.append("归属待办｜账本读取失败，当前简报无法确认是否还有待办；请检查账本并在 OM Bot 查询。")
+    return out
+
+
 def _render_user_view(
     view: Mapping[str, Any],
     *,
@@ -462,6 +479,7 @@ def _render_user_view(
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
     ]
     lines.extend(_flat_field_line(item) for item in query_status if str(item).strip())
+    lines.extend(_attribution_review_lines(view))
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
         lines.extend([_VISIBLE_BLANK_LINE, f"提示｜{planning_notice}"])
@@ -613,6 +631,7 @@ def _render_user_view_card(
         f"市场｜{view['market_label']}",
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
     ]
+    lines.extend(_attribution_review_lines(view))
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
         lines.extend(["", f"提示｜{planning_notice}"])
