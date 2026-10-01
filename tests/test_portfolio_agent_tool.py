@@ -120,6 +120,9 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
     assert definition.safe_default_input == {}
     assert definition.input_json_schema()["required"] == ["accounts"]
     assert definition.bot_input_fields == ("accounts",)
+    assert definition.output_contract["source_label"] == (
+        "Futu account + OM SQLite position_lots; PM non-Futu Holdings optional"
+    )
 
     data, warnings, meta = definition.call({"accounts": ["lx"]})
 

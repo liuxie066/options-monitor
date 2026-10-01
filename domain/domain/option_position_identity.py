@@ -59,6 +59,7 @@ def normalize_broker(value: str | None) -> str:
         "富途證券",
         "富途證券(香港)",
         "富途牛牛",
+        "moomoo",
         "futu",
         "futuhk",
         "futusecurities",

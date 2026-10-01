@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
-import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
 from src.application.config_primitives import configured_markets, resolve_config_path
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file, resolve_yaml_runtime_config
-from src.application.portfolio_management import (
-    PORTFOLIO_MANAGEMENT_DISABLED,
-    resolve_portfolio_management_client,
+from src.application.portfolio_assignment_scenario import (
+    non_futu_broker_inventory,
+    read_portfolio_valuation_evidence,
 )
-from src.application.portfolio_assignment_scenario import read_portfolio_valuation_evidence
 from src.application.write_contract import attach_write_contract
 
 
@@ -29,25 +26,6 @@ def holdings_included(config: dict[str, Any]) -> bool:
 
 
 def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
-    client = resolve_portfolio_management_client(config, urlopen_fn=urllib.request.urlopen)
-    if client == PORTFOLIO_MANAGEMENT_DISABLED:
-        raise ValueError("portfolio_management.enabled is false")
-    response = client.read_view("accounts", query={"include_default": "false"}, timeout=10.0)
-    freshness = response.get("freshness")
-    accounts = response.get("accounts")
-    if response.get("success") is not True or not isinstance(accounts, list) or not accounts:
-        raise ValueError("PM account discovery has no usable accounts")
-    if (
-        not isinstance(freshness, dict)
-        or freshness.get("status") != "fresh"
-        or freshness.get("trust_status") != "trusted"
-    ):
-        raise ValueError("PM account discovery is stale or untrusted")
-    warnings = response.get("warnings")
-    if isinstance(warnings, list) and any(
-        isinstance(item, dict) and item.get("source") == "holdings" for item in warnings
-    ):
-        raise ValueError("PM Holdings account discovery reported a holdings warning")
     configured = config.get("accounts")
     if not isinstance(configured, list) or not configured:
         raise ValueError("OM configured accounts are unavailable")
@@ -56,17 +34,14 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
     )
     if not candidate_accounts:
         raise ValueError("OM configured accounts are unavailable")
-    discovered = {account.strip().lower() for account in accounts if isinstance(account, str) and account.strip()}
-    missing = sorted(set(candidate_accounts) - discovered)
-    if missing:
-        raise ValueError("PM account discovery is missing configured OM accounts: " + ", ".join(missing))
     evidence = read_portfolio_valuation_evidence(
         accounts=candidate_accounts,
         supplemental_codes=[],
         price_timeout=10,
-        client=client,
         runtime_config=config,
+        holdings_scope="non_futu",
     )
+    inventory = non_futu_broker_inventory(evidence, candidate_accounts)
     quality = evidence.get("freshness")
     if (
         evidence.get("status") != "complete"
@@ -75,24 +50,26 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
         or quality.get("status") != "fresh"
         or quality.get("trust_status") != "trusted"
         or any(item.get("status") != "complete" for item in evidence.get("account_status", []))
+        or any(
+            any(row["classification"] == "unknown" for row in inventory[account])
+            or evidence["scope"]["holding_counts"][account]["unsupported"]
+            for account in candidate_accounts
+        )
     ):
         raise ValueError("PM Holdings valuation evidence is incomplete or stale")
-    rows = [row for row in evidence.get("holdings", []) if isinstance(row, dict)]
-    observed_accounts = sorted(
-        {str(row.get("account") or "").strip().lower() for row in rows if str(row.get("account") or "").strip()}
-    )
-    if not observed_accounts:
-        raise ValueError("PM Holdings valuation evidence has no observed holdings")
+    rows = evidence["holdings"]
+    approved = {
+        account: sorted(row["broker"] for row in inventory[account] if row["classification"] == "non_futu")
+        for account in candidate_accounts
+    }
     return {
-        "status": "ready_observed",
-        "scope": "observed_only",
-        "accounts_observed": observed_accounts,
-        "brokers_observed": sorted(
-            {str(row.get("broker") or "").strip() for row in rows if str(row.get("broker") or "").strip()}
-        ),
-        "markets_observed": sorted(
-            {str(market).upper() for row in rows if (market := symbol_market(str(row.get("code") or "")))}
-        ),
+        "status": "ready_observed" if rows else "ready_empty",
+        "scope": "non_futu",
+        "accounts_observed": candidate_accounts,
+        "broker_inventory": inventory,
+        "holding_counts": evidence["scope"]["holding_counts"],
+        "approved_non_futu_brokers": approved,
+        "eligible_rows": len(rows),
         "source_observed_at": quality.get("observed_at_utc"),
         "warnings": [],
     }
@@ -104,6 +81,7 @@ def _preview_sha256(transaction: dict[str, Any], *, enabled: bool) -> str:
         "runtime_root": transaction["runtime_root"],
         "source_revision": transaction["source_revision"],
         "enabled": enabled,
+        "approved_non_futu_brokers": transaction.get("approved_non_futu_brokers"),
         "markets": {market: item["output_config_path"] for market, item in transaction["markets"].items()},
         "assistant": transaction["assistant"]["output_config_path"],
     }
@@ -123,12 +101,13 @@ def _readback_generation(transaction: dict[str, Any], *, enabled: bool) -> list[
 
     try:
         require_sha(transaction["source_revision"]["after_sha256"])
-        if holdings_included(load_yaml_config_file(target)) != enabled:
+        authored = load_yaml_config_file(target)
+        if holdings_included(authored) != enabled or (enabled and authored["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
             raise ValueError("Holdings differs in config.yaml after apply")
         for item in transaction["markets"].values():
             target = Path(item["output_config_path"])
             runtime = json.loads(require_sha(item["sha256"]).decode("utf-8"))
-            if holdings_included(runtime) != enabled:
+            if holdings_included(runtime) != enabled or (enabled and runtime["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
                 raise ValueError("Holdings differs in market runtime config after apply")
         assistant = transaction["assistant"]
         target = Path(assistant["output_config_path"])
@@ -179,6 +158,25 @@ def set_yaml_holdings_inclusion(
     markets = configured_markets(doc)
     target_root = Path(runtime_root).expanduser().resolve() if runtime_root else source.parent
 
+    preflight = None
+    if enabled:
+        current, _meta = resolve_yaml_runtime_config(repo_root=repo_root, market=markets[0], config_path=source)
+        current["accounts"] = list(doc.get("accounts") or {})
+        try:
+            preflight = _probe_holdings(current)
+            approved = preflight["approved_non_futu_brokers"]
+            if set(approved) != set(current["accounts"]):
+                raise ValueError("PM broker approval does not cover all configured accounts")
+            holdings["approved_non_futu_brokers"] = approved
+        except Exception as exc:
+            preflight = {"status": "failed", "reason": str(exc)}
+            if apply:
+                raise AgentToolError(
+                    code="HOLDINGS_PREFLIGHT_FAILED",
+                    message="Holdings source is not ready; inclusion remains unchanged",
+                    details={"reason": str(exc), "write_applied": False},
+                ) from exc
+
     preview = publish_yaml_config_generation(
         repo_root=repo_root,
         config_yaml_path=source,
@@ -190,6 +188,7 @@ def set_yaml_holdings_inclusion(
         backup=True,
         expected_source_sha256=before_sha,
     )
+    preview["approved_non_futu_brokers"] = holdings.get("approved_non_futu_brokers") if enabled else None
     preview_sha = _preview_sha256(preview, enabled=enabled)
     if apply and expected_preview_sha256 != preview_sha:
         raise AgentToolError(
@@ -197,24 +196,6 @@ def set_yaml_holdings_inclusion(
             message="apply target differs from the confirmed Holdings preview",
             details={"expected_preview_sha256": expected_preview_sha256, "actual_preview_sha256": preview_sha},
         )
-
-    preflight = None
-    if enabled:
-        current, _meta = resolve_yaml_runtime_config(
-            repo_root=repo_root,
-            market=markets[0],
-            config_path=source,
-        )
-        try:
-            preflight = _probe_holdings(current)
-        except Exception as exc:
-            preflight = {"status": "failed", "reason": str(exc)}
-            if apply:
-                raise AgentToolError(
-                    code="HOLDINGS_PREFLIGHT_FAILED",
-                    message="Holdings source is not ready; inclusion remains unchanged",
-                    details={"reason": str(exc), "write_applied": False},
-                ) from exc
 
     transaction = preview
     if apply:
@@ -229,6 +210,7 @@ def set_yaml_holdings_inclusion(
             backup=True,
             expected_source_sha256=before_sha,
         )
+        transaction["approved_non_futu_brokers"] = holdings.get("approved_non_futu_brokers") if enabled else None
         verified_targets = _readback_generation(transaction, enabled=enabled)
     else:
         verified_targets = []
@@ -240,8 +222,8 @@ def set_yaml_holdings_inclusion(
             "enabled": enabled,
             "current_enabled": current_enabled,
             "target_enabled": enabled,
-            "effect_scope": "configuration_only",
-            "effect_note": "The current assignment-scenario query does not consume this setting.",
+            "effect_scope": "assignment_scenario",
+            "effect_note": "When enabled, assignment distribution includes PM Holdings from non-Futu brokers; Futu stocks, cash and MMF come from OpenD.",
             "preview_sha256": preview_sha,
             "preflight": preflight,
             "config_yaml_path": str(source),

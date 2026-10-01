@@ -53,6 +53,7 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
+_FX_NOT_PROVIDED = object()
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -573,6 +574,7 @@ def _query_opend_exchange_rate_observation(
     *,
     account_ids: set[str],
     trd_env: str,
+    read_exchange_rate: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     return (
         _filter_rows_for_account_ids(
@@ -587,7 +589,7 @@ def _query_opend_exchange_rate_observation(
             account_ids,
             trd_env=trd_env,
         ),
-        _fetch_market_exchange_rate_observation(),
+        _fetch_market_exchange_rate_observation() if read_exchange_rate else None,
     )
 
 
@@ -854,6 +856,7 @@ def fetch_futu_portfolio_context(
     market: str = "富途",
     base_currency: str = "CNY",
     include_options: bool = False,
+    exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
 ) -> dict[str, Any]:
     if not account:
         raise ValueError("futu portfolio context requires account")
@@ -882,13 +885,23 @@ def fetch_futu_portfolio_context(
         is_option_chain_cache_enabled=False,
     )
     try:
-        balance_rows, exchange_rate_observation = (
+        provided_exchange_rate_observation = exchange_rate_observation
+        balance_rows, fetched_exchange_rate_observation = (
             _query_opend_exchange_rate_observation(
                 gateway,
                 account_ids=account_ids,
                 trd_env=trd_env,
+                read_exchange_rate=provided_exchange_rate_observation is _FX_NOT_PROVIDED,
             )
         )
+        if provided_exchange_rate_observation is _FX_NOT_PROVIDED:
+            exchange_rate_observation = fetched_exchange_rate_observation
+        else:
+            exchange_rate_observation = (
+                dict(provided_exchange_rate_observation)
+                if isinstance(provided_exchange_rate_observation, Mapping)
+                else None
+            )
         position_rows = _query_rows_for_account_ids(
             gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True
         )

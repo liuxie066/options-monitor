@@ -192,12 +192,15 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assi
 `authoritative_option_pnl_source_unavailable` 和
 `combined_option_assignment_cash_source_required`，不会从期权净现金流推导替代值。
 
-`portfolio_assignment_scenario` 只接受 `accounts`。它通过 PM 的
-`portfolio.valuation_evidence.v1` 只读快照取得全部非期权资产、当前报价和显式 FX，
-并从 OM canonical SQLite `position_lots` 读取 open short put/call。输出固定为 CNY
-资金覆盖，MMF 计入现金，Long Option 不进入输入或输出。费用复用统一股票费用计算器；
+`portfolio_assignment_scenario` 只接受 `accounts`。它从富途 OpenD 取得股票、现金
+（含 MMF）和股票现价，富途余额及报价估值共用同次 OM 市场汇率观测；仅当
+`portfolio.holdings.enabled=true` 时补充 PM Holdings 中明确为非富途来源的资产，
+排除 PM 的富途股票、现金和 MMF 副本。OM canonical SQLite `position_lots` 提供
+open short put/call。输出固定为 CNY 资金覆盖，Long Option 不进入输入或输出。费用复用统一股票费用计算器；
 缺少指派费用规则时净现金与净分布保持 `null/partial`。该工具不写 assignment、
-持仓、报告或通知状态；上游实时估值可能刷新 portfolio-management 的既有行情 cache。
+持仓、报告或通知状态。Holdings 关闭时不读取 PM；开启时 PM 只提供非富途资产，
+并要求 `holdings_scope=non_futu` 回显与按账户批准的 broker 原文清单；缺失、新值或
+旧版响应时保留富途基线并标 partial。非富途现金不计入富途期权资金覆盖。
 
 Cash-Secured Put (CSP) 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、

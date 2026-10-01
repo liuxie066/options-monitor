@@ -57,6 +57,7 @@ def _cmd(**overrides: object) -> dict[str, object]:
 def test_normalize_broker_maps_futu_aliases() -> None:
     assert normalize_broker("富途证券（香港）") == "富途"
     assert normalize_broker("富途證券(香港)") == "富途"
+    assert normalize_broker("moomoo") == "富途"
     assert normalize_broker("Futu Securities HK") == "富途"
     assert normalize_broker("其他券商") == "其他券商"
 
