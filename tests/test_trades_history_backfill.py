@@ -272,6 +272,44 @@ def test_history_deal_client_reuses_one_context_across_checks(monkeypatch) -> No
     assert calls[-1] == {"closed": True}
 
 
+def test_order_hint_probe_queries_current_order_without_creating_deals() -> None:
+    calls = []
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(
+        get_order_list=lambda **kwargs: (
+            calls.append(kwargs) or [{"order_id": "o1", "order_status": "FILLED_ALL", "dealt_qty": 2}]
+        ),
+        close=lambda: None,
+    )
+    result = client.probe_order_hint(futu_account_id="123", order_id="o1")
+    assert calls == [{"trd_env": "REAL", "acc_id": 123, "order_id": "o1", "refresh_cache": True}]
+    assert result == {"order_id": "o1", "found": True, "status": "FILLED_ALL", "dealt_qty": "2.000000"}
+
+
+def test_known_old_deal_is_queried_by_original_hk_date() -> None:
+    calls = []
+
+    def query(**kwargs):
+        calls.append(kwargs)
+        rows = ([{"deal_id": "old-1", "order_id": "o1"},
+                 {"deal_id": "unrelated", "order_id": "o2"}]
+                if kwargs["start"].startswith("2026-05-01") else [])
+        return {"retcode": 0, "rows": rows,
+                "coverage_complete": True, "pagination_complete": True}
+
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(get_history_deals=query, close=lambda: None)
+    rows, diagnostics = client.fetch(
+        futu_account_ids=["123"], lookback_hours=6,
+        now=datetime(2026, 6, 3, 6, tzinfo=timezone.utc),
+        targeted_deals=[{"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}],
+    )
+    assert [row["deal_id"] for row in rows] == ["old-1"]
+    assert calls[1]["start"] == "2026-05-01 00:00:00"
+    assert calls[1]["end"] == "2026-05-02 00:00:00"
+    assert diagnostics["targeted_complete"] is True
+
+
 def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> None:
     calls: list[dict] = []
     query_count = 0

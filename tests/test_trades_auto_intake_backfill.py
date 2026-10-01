@@ -36,6 +36,64 @@ class _FakeRepo:
         return list(self.events)
 
 
+def test_known_old_unresolved_deal_targets_original_date_and_account(monkeypatch, tmp_path):
+    monkeypatch.setattr(backfill_module, "load_trade_intake_state", lambda _path: {
+        "unresolved_deal_ids": {"old-1": {"status": "unresolved"}},
+        "failed_deal_ids": {}, "processed_deal_ids": {},
+    })
+    monkeypatch.setattr(backfill_module, "read_trade_payloads_for_reconciliation",
+                        lambda _path, **_kwargs: [
+                            {"payload": {"deal_id": "old-1", "acc_id": "123", "trd_env": "REAL",
+                                         "create_time": "2026-05-01 10:45:31"}},
+                            {"payload": {"deal_id": "wrong", "acc_id": "456", "trd_env": "REAL",
+                                         "create_time": "2026-05-01 10:45:31"}},
+                        ])
+    targets = backfill_module._known_old_deal_targets(
+        state_path=tmp_path / "state.json", inbox_path=tmp_path / "inbox.sqlite3",
+        futu_account_ids=["123"], now=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        lookback_hours=6,
+    )
+    assert targets == [{"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}]
+
+
+def test_old_target_is_not_hidden_by_earlier_unresolved_keys(monkeypatch, tmp_path):
+    keys = [f"recent-{index}" for index in range(25)] + ["old-1"]
+    monkeypatch.setattr(backfill_module, "load_trade_intake_state", lambda _path: {
+        "unresolved_deal_ids": dict.fromkeys(keys, {}), "failed_deal_ids": {},
+    })
+    monkeypatch.setattr(backfill_module, "read_trade_payloads_for_reconciliation",
+                        lambda _path, *, deal_ids: [
+                            {"payload": {"deal_id": "old-1", "acc_id": "123", "trd_env": "REAL",
+                                         "create_time": "2026-05-01 10:45:31"}}
+                        ] if "old-1" in deal_ids else [])
+    assert backfill_module._known_old_deal_targets(
+        state_path=tmp_path / "state.json", inbox_path=tmp_path / "inbox.sqlite3",
+        futu_account_ids=["123"], now=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        lookback_hours=6,
+    ) == [{"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}]
+
+
+def test_old_target_query_failure_keeps_backfill_incomplete(monkeypatch, tmp_path):
+    target = {"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}
+    monkeypatch.setattr(backfill_module, "_known_old_deal_targets", lambda **_kwargs: [target])
+    observed = []
+
+    def history(**kwargs):
+        observed.append(kwargs["targeted_deals"])
+        return [], {"account_results": [_complete_account("123")],
+                    "targeted_complete": False}
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs.update(account_mapping={"123": "lx"}, futu_account_ids=["123"],
+                  apply_changes=False)
+    result = run_history_backfill(
+        **kwargs, history_deals_fn=history, process_payload_fn=lambda *_args, **_kwargs: {},
+    )
+    assert observed == [[target]]
+    assert result["ok"] is False
+    assert result["error"] == "targeted_history_query_incomplete"
+
+
 @pytest.fixture(autouse=True)
 def _healthy_lifecycle_discovery(monkeypatch) -> None:
     def _discover(_repo, *, account, observed_at_ms, apply_changes):

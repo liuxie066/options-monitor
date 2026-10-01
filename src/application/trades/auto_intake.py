@@ -2565,10 +2565,34 @@ def _run_listener_source_loop(
                  f"deal_id={payload_deal_id(payload) or '-'} error={error}")
             return
 
+    # ponytail: probe one distinct order per account per 30s; batch if measured push volume outgrows this.
+    order_hints: dict[str, dict[str, None]] = {}
+    order_hints_lock = threading.Lock()
+    order_probe_attempts: dict[str, float] = {}
+
+    def _on_order_hint(hint: dict[str, str]) -> None:
+        physical = str(hint.get("futu_account_id") or "")
+        market = str(hint.get("market") or "").upper()
+        generated = cfg.get("_generated")
+        configured_market = str(
+            (generated.get("market") if isinstance(generated, dict) else None)
+            or cfg.get("market") or ""
+        ).upper()
+        if (physical not in futu_account_ids or physical not in account_mapping
+                or hint.get("environment") != "REAL"
+                or (configured_market and market != configured_market)):
+            return
+        order_id = str(hint.get("order_id") or "").strip()
+        if order_id:
+            with order_hints_lock:
+                order_hints.setdefault(physical, {})[order_id] = None
+
     listener = None
     history_client = None
     try:
-        listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
+        listener = OpenDTradePushListener(
+            host=host, port=port, on_deal=_on_deal, on_order_hint=_on_order_hint,
+        )
         history_client = OpenDHistoryDealClient(host=host, port=port)
     except Exception:
         if listener is not None:
@@ -2861,10 +2885,39 @@ def _run_listener_source_loop(
                 if should_backfill:
                     interval_sec = int(backfill_cfg.get("interval_sec") or 300)
                     startup_check = bool(backfill_cfg.get("startup_check", True))
+                    with order_hints_lock:
+                        pending_hints = {
+                            physical: next(iter(order_ids))
+                            for physical, order_ids in order_hints.items() if order_ids
+                        }
+                    probe_hints = {
+                        physical: order_id for physical, order_id in pending_hints.items()
+                        if now_mono - order_probe_attempts.get(physical, float("-inf")) >= 30
+                    }
                     due = (last_backfill_monotonic is None and startup_check) or (
                         last_backfill_monotonic is not None and now_mono - last_backfill_monotonic >= interval_sec
-                    )
+                    ) or bool(probe_hints)
                     if due:
+                        successful_order_probes: set[str] = set()
+                        for physical, order_id in probe_hints.items():
+                            if stop.is_set():
+                                break
+                            order_probe_attempts[physical] = time.monotonic()
+                            try:
+                                status_state["last_order_hint_probe"] = {
+                                    "futu_account_id": physical,
+                                    **history_client.probe_order_hint(
+                                        futu_account_id=physical, order_id=order_id,
+                                    ),
+                                }
+                                successful_order_probes.add(physical)
+                                status_state.pop("last_order_hint_error", None)
+                            except Exception as exc:
+                                status_state["last_order_hint_error"] = (
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                        if stop.is_set():
+                            break
                         try:
                             result = run_history_backfill(
                                 repo=repo,
@@ -2937,6 +2990,14 @@ def _run_listener_source_loop(
                                 status_state["last_combo_reconciliation_error"] = error
                             last_combo_reconciliation_monotonic = time.monotonic()
                         last_backfill_monotonic = time.monotonic()
+                        if result.get("ok"):
+                            with order_hints_lock:
+                                for physical in successful_order_probes:
+                                    order_id = probe_hints[physical]
+                                    if order_id in order_hints.get(physical, {}):
+                                        order_hints[physical].pop(order_id)
+                                    if not order_hints.get(physical):
+                                        order_hints.pop(physical, None)
                         status_state.update(_update_status_from_backfill(status_state, result))
                         _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
                 if last_heartbeat_monotonic is None or now_mono - last_heartbeat_monotonic >= 60:

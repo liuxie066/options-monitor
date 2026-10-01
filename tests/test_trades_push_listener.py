@@ -255,9 +255,14 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, han
         def on_recv_rsp(self, _rsp):
             return 0, Frame(rows)
 
+    class OrderBase:
+        def on_recv_rsp(self, _rsp):
+            return 0, Frame([])
+
     class Context:
         def __init__(self, **_kwargs):
             self.account_reads = 0
+            self.handlers = []
 
         def get_acc_list(self):
             self.account_reads += 1
@@ -268,10 +273,14 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, han
             self.connect_timeout = timeout
 
         def set_handler(self, handler):
-            self.handler = handler
+            self.handlers.append(handler)
 
         def start(self):
-            self.handler.on_recv_rsp(response)
+            deal_handler = next(
+                item for item in self.handlers
+                if isinstance(item, handler_base or HandlerBase)
+            )
+            deal_handler.on_recv_rsp(response)
             if stop is not None:
                 stop.set()
 
@@ -280,7 +289,9 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, han
 
     monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(
         OpenSecTradeContext=Context, TradeDealHandlerBase=handler_base or HandlerBase,
+        TradeOrderHandlerBase=OrderBase,
         TrdEnv=SimpleNamespace(to_string2=lambda value: {0: "SIMULATE", 1: "REAL"}.get(value, "N/A")),
+        TrdMarket=SimpleNamespace(to_string2=lambda value: {1: "HK", 2: "US"}.get(value, "N/A")),
     ))
 
 
@@ -359,7 +370,7 @@ def test_real_sdk_protobuf_header_survives_dataframe_conversion(monkeypatch, tmp
     deal.price = 100
     deal.createTime = "2026-09-09 10:00:00"
     deal.secMarket = 2
-    assert response.IsInitialized()
+    assert response.IsInitialized(), response.FindInitializationErrors()
     ret, frame = futu.TradeDealHandlerBase().on_recv_rsp(response)
     assert ret == 0
     assert "acc_id" not in frame.columns
@@ -372,6 +383,54 @@ def test_real_sdk_protobuf_header_survives_dataframe_conversion(monkeypatch, tmp
     assert seen[0]["acc_id"] == "123"
     assert seen[0]["broker_account_id"] == "futu:REAL:123"
     assert "_trade_intake_source_identity_errors" not in seen[0]
+
+
+def test_real_sdk_order_push_keeps_header_account_for_refresh_hint(monkeypatch, tmp_path):
+    import os.path
+
+    join = os.path.join
+    monkeypatch.setattr(os.path, "join", lambda *parts: str(tmp_path / "sdk-log")
+                        if parts[-1:] == (".com.futunn.FutuOpenD/Log",) else join(*parts))
+    futu = pytest.importorskip("futu")
+    from futu.common.pb import Trd_UpdateOrder_pb2
+
+    response = Trd_UpdateOrder_pb2.Response()
+    response.retType = 0
+    response.s2c.header.accID = 123
+    response.s2c.header.trdEnv = 1
+    response.s2c.header.trdMarket = 1
+    order = response.s2c.order
+    order.orderID = 321
+    order.orderIDEx = "o1"
+    order.trdSide = 1
+    order.orderType = 5
+    order.orderStatus = 11
+    order.code = "03690"
+    order.name = "Meituan"
+    order.qty = 1
+    order.price = 2
+    order.createTime = "2026-09-09 10:00:00"
+    order.updateTime = "2026-09-09 10:00:01"
+    order.secMarket = 1
+    order.fillQty = 1
+    assert response.IsInitialized(), response.FindInitializationErrors()
+    _mock_sdk_rows(
+        monkeypatch, rows=None, accounts=[{"acc_id": "123", "trd_env": "REAL"}],
+        response=response, handler_base=futu.TradeDealHandlerBase,
+    )
+    import sys
+    sdk = sys.modules["futu"]
+    sdk.TradeOrderHandlerBase = futu.TradeOrderHandlerBase
+    seen = []
+    listener = OpenDTradePushListener(
+        host="127.0.0.1", port=11111, on_deal=lambda _row: None,
+        on_order_hint=seen.append,
+    )
+    ctx, _deal_handler = listener._build_default_context()
+    listener._order_handler.on_recv_rsp(response)
+    assert ctx.account_reads == 1
+    assert seen == [{"futu_account_id": "123", "environment": "REAL",
+                     "market": "HK", "order_id": "o1"}]
 
 
 def test_start_wait_hook_runs_repeatedly_before_initialization_and_stops(monkeypatch):
@@ -528,3 +587,80 @@ def test_push_keeps_provider_fill_revision_dropped_by_sdk_dataframe(monkeypatch)
     handler.on_recv_rsp(response)
     assert seen[0]["update_timestamp"] == 1700000000.25
     assert "update_timestamp" not in row
+
+
+def test_order_push_on_same_context_only_emits_bound_refresh_hint(monkeypatch) -> None:
+    class Frame:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            return self.rows
+
+    class DealBase:
+        def on_recv_rsp(self, _response):
+            return 0, Frame([])
+
+    class OrderBase:
+        row = {"order_id": "o1", "dealt_qty": 5, "trd_env": "REAL", "trd_market": "HK"}
+
+        def on_recv_rsp(self, _response):
+            return 0, Frame([self.row])
+
+    class Context:
+        instances = []
+
+        def __init__(self, **_kwargs):
+            self.handlers = []
+            type(self).instances.append(self)
+
+        def get_acc_list(self):
+            return 0, Frame([{"acc_id": "123", "trd_env": "REAL"}])
+
+        def set_sync_query_connect_timeout(self, _timeout):
+            pass
+
+        def set_handler(self, handler):
+            self.handlers.append(handler)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(
+        OpenSecTradeContext=Context, TradeDealHandlerBase=DealBase,
+        TradeOrderHandlerBase=OrderBase,
+        TrdEnv=SimpleNamespace(to_string2=lambda value: {1: "REAL", 0: "SIMULATE"}[value]),
+        TrdMarket=SimpleNamespace(to_string2=lambda value: {1: "HK", 2: "US"}[value]),
+    ))
+    hints = []
+    listener = OpenDTradePushListener(
+        host="127.0.0.1", port=11111, on_deal=lambda _row: None,
+        on_order_hint=hints.append,
+    )
+    listener.start()
+    assert len(Context.instances) == 1
+    assert len(Context.instances[0].handlers) == 2
+    order_handler = next(item for item in Context.instances[0].handlers if isinstance(item, OrderBase))
+    order_handler.on_recv_rsp(_push_response(accID=123, trdEnv=1, trdMarket=1))
+    order_handler.on_recv_rsp(_push_response(accID=456, trdEnv=1, trdMarket=1))
+    order_handler.on_recv_rsp(_push_response(accID=123, trdEnv=1, trdMarket=2))
+    OrderBase.row = {**OrderBase.row, "acc_id": "456"}
+    order_handler.on_recv_rsp(_push_response(accID=123, trdEnv=1, trdMarket=1))
+    assert hints == [{"futu_account_id": "123", "environment": "REAL", "market": "HK", "order_id": "o1"}]
+    listener.close()
+
+    def reject_order(self, handler):
+        return -1 if isinstance(handler, OrderBase) else 0
+
+    monkeypatch.setattr(Context, "set_handler", reject_order)
+    listener = OpenDTradePushListener(
+        host="127.0.0.1", port=11111, on_deal=lambda _row: None,
+        on_order_hint=hints.append,
+    )
+    with pytest.raises(RuntimeError, match="order push handler registration failed"):
+        listener.start()
+    listener.close()
