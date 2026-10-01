@@ -602,6 +602,8 @@ def _fee_missing(fee: FeeFact, *, exercise: bool = False) -> tuple[str, ...]:
 
 def _terminal_kind(allocation: OptionEconomicAllocation) -> str:
     raw = str(allocation.close_type or "").strip().lower()
+    if raw == "cause_pending":
+        return "cause_pending"
     if raw in _EXPIRY_CLOSE_TYPES:
         return "expiry"
     if raw in {"assignment", "exercise", "buy_to_close", "sell_to_close"}:
@@ -618,6 +620,8 @@ def _terminal_win(
     net_cash: Decimal | None,
     cash_missing: set[str],
 ) -> tuple[bool, bool | None, set[str]]:
+    if terminal_kind == "cause_pending":
+        return False, None, {"close_reason_pending"}
     if leg_type.startswith("sell_"):
         if terminal_kind == "expiry":
             return True, True, set()

@@ -264,6 +264,27 @@ def build_context(
         }
 
     for it in selected_items:
+        lifecycle = lifecycle_by_lot.get(it.lot_id)
+        snapshot_lot = snapshot_lots_by_id.get(it.lot_id)
+        if (
+            lifecycle
+            and lifecycle.get("lifecycle_state") != "conflict"
+            and lifecycle.get("reason_state") != "conflict"
+            and snapshot_lot is not None
+            and snapshot_lot.fields == {
+                key: value for key, value in it.fields.items()
+                if key not in STRATEGY_METADATA_KEYS
+            }
+            and (
+                (lifecycle.get("pending_close_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+                or (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+            )
+        ):
+            symbol = it.canonical_underlying_symbol
+            if symbol and it.side == "short" and it.option_type == "put":
+                cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+            elif symbol and it.side == "short" and it.option_type == "call":
+                locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
         if not it.is_open:
             continue
         contracts_total = int(it.contracts or 0)
@@ -274,7 +295,6 @@ def build_context(
         symbol = it.canonical_underlying_symbol
 
         position_row = it.as_open_position_min(as_of_date=as_of_date)
-        lifecycle = lifecycle_by_lot.get(it.lot_id)
         if lifecycle is not None:
             position_row.update(lifecycle)
         open_positions_min.append(position_row)
@@ -513,6 +533,7 @@ def build_lifecycle_read_models_from_decision_snapshot(
                 for item in snapshot.get("account_lifecycle_cases") or []
                 if isinstance(item, dict)
             ],
+            trade_events=list(snapshot.get("trade_events") or []),
             allocations=[
                 dict(item)
                 for item in snapshot.get("account_lifecycle_allocations")

@@ -29,6 +29,7 @@ from .writer_lifecycle_allocation import (
 
 from .writer_lifecycle_evidence import (
     accept_option_close_evidence_atomically,
+    record_zero_price_option_close_atomically,
     bind_lifecycle_timing_policy_atomically,
     discover_expired_lifecycle_cases_atomically,
     record_assigned_stock_event_atomically,

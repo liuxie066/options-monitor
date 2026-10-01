@@ -154,6 +154,42 @@ def build_lifecycle_case(
     }
 
 
+def pending_close_quantities(
+    allocations: Iterable[dict[str, Any]],
+    trade_events: Iterable[dict[str, Any]],
+    *,
+    void_event_ids: Iterable[str] = (),
+) -> dict[str, int]:
+    """Read reason-pending quantities from effective close events."""
+    voided = set(void_event_ids)
+    events = {
+        str(event.get("event_id") or ""): event
+        for event in trade_events
+        if isinstance(event, dict)
+    }
+    pending: dict[str, int] = {}
+    for allocation in allocations:
+        if str(allocation.get("terminal_type") or "").strip().lower() != "close":
+            continue
+        event_id = str(allocation.get("canonical_terminal_event_id") or "").strip()
+        if event_id in voided or bool(allocation.get("voided")):
+            continue
+        event = events.get(event_id)
+        if event is None:
+            raise ValueError("lifecycle_close_event_missing")
+        payload = event.get("raw_payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError("lifecycle_close_payload_invalid")
+        if str(payload.get("close_type") or "").strip().lower() != "cause_pending":
+            continue
+        lot_id = str(allocation.get("target_lot_id") or "").strip()
+        quantity = int(allocation.get("contracts_allocated") or 0)
+        if not lot_id or quantity <= 0:
+            raise ValueError("lifecycle_pending_close_allocation_invalid")
+        pending[lot_id] = pending.get(lot_id, 0) + quantity
+    return pending
+
+
 def derive_lifecycle_read_model(
     *,
     expiration_ymd: str,
@@ -162,6 +198,7 @@ def derive_lifecycle_read_model(
     allocations: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
     void_event_ids: Iterable[str] = (),
     accepted_option_close_contracts_by_lot: dict[str, Any] | None = None,
+    pending_close_contracts_by_lot: dict[str, int] | None = None,
     now_ms: int | None = None,
     conflict_reason_codes: list[str] | tuple[str, ...] = (),
     orphan_evidence: bool = False,
@@ -170,6 +207,7 @@ def derive_lifecycle_read_model(
     pending_until_ms_override: int | None = None,
 ) -> LifecycleReadModel:
     target_manifest = normalize_target_manifest(target_contracts_by_lot)
+    pending_close = dict(pending_close_contracts_by_lot or {})
     reservation, reservation_reasons = _reservation_overlay(
         target_manifest=target_manifest,
         allocations=allocations,
@@ -255,6 +293,26 @@ def derive_lifecycle_read_model(
             reservation=reservation,
         )
     current_ms = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
+    if any(pending_close.values()):
+        if any(
+            lot_id not in target_manifest
+            or int(quantity) <= 0
+            or int(quantity) > int(resolution.resolved_contracts_by_lot.get(lot_id, 0))
+            for lot_id, quantity in pending_close.items()
+        ):
+            return _read_model(
+                state="conflict", reasons=("pending_close_quantity_conflict",),
+                observation_start=observation_start, pending_until=pending_until,
+                resolution=resolution, reservation=reservation,
+            )
+        return _read_model(
+            state=("settlement_pending" if resolution.remaining_contracts == 0
+                   else "partially_resolved"),
+            reasons=("close_reason_pending",),
+            observation_start=observation_start, pending_until=pending_until,
+            resolution=resolution, reservation=reservation,
+            pending_close=pending_close,
+        )
     if current_ms < observation_start and not any(reservation.values()):
         return _read_model(
             state="open",
@@ -368,6 +426,7 @@ def _read_model(
     pending_until: int | None,
     resolution: AllocationResolution,
     reservation: dict[str, int],
+    pending_close: dict[str, int] | None = None,
 ) -> LifecycleReadModel:
     covered_by_lot = {
         lot_id: int(resolution.resolved_contracts_by_lot.get(lot_id, 0))
@@ -389,6 +448,8 @@ def _read_model(
         reason_state = "conflict"
     elif state == "needs_review":
         reason_state = "needs_review"
+    elif any((pending_close or {}).values()):
+        reason_state = "cause_pending"
     elif resolution.remaining_contracts == 0:
         reason_state = "resolved"
     elif resolution.resolved_contracts > 0:
@@ -437,4 +498,5 @@ __all__ = [
     "expiration_observation_start_ms",
     "lifecycle_case_key",
     "normalize_market",
+    "pending_close_quantities",
 ]

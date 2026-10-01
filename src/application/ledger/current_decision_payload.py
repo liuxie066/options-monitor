@@ -297,6 +297,7 @@ def _referenced_case_fact(
         or bool(set(fact["target_contracts_by_lot"]) & referenced_lot_ids)
         or bool(fact["resolution"]["requested_reservations_by_lot"])
         or bool(fact["resolution"]["effective_reservations_by_lot"])
+        or bool(fact["resolution"]["pending_close_contracts_by_lot"])
     )
 
 def build_current_decision_projection_payload(

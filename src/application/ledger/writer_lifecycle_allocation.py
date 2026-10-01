@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from decimal import Decimal
+
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.money import quantize_money
+from domain.domain.performance.cash_conversion import (
+    cash_conversion_id,
+    cash_conversion_identity,
+    validate_observed_cash_conversion,
+)
 from src.application.ledger.external_event_key import futu_compatibility_source_key
 
 from .writer_common import (
@@ -22,7 +32,6 @@ from .writer_decision import (
     _advance_settlement_admission_head,
     _append_lifecycle_observation_attempt,
     _begin_lifecycle_decision_projection,
-    _defer_lifecycle_decision_projection,
     _finish_lifecycle_attempt_cleanup,
     _finish_lifecycle_decision_projection,
     _lifecycle_resolution_after_allocations,
@@ -53,6 +62,61 @@ from .writer_trade_events import (
     _prepare_fee_evidence_for_storage,
 )
 
+
+def _retain_pending_close_economics(event: Any, original: dict[str, Any]) -> Any:
+    """Move current broker option fee and its frozen FX to the replacement."""
+    prior = _canonical_storage_event(original)
+    prior_raw = dict(prior.raw_payload or {})
+    raw = dict(event.raw_payload or {})
+    if raw.get("pending_close_event_id") != prior.event_id:
+        raise ValueError("pending close economic source mismatch")
+    raw["fee_provenance"] = dict(prior_raw.get("fee_provenance") or {})
+    event = replace(event, fees=prior.fees, raw_payload=raw)
+    old_conversions = prior_raw.get("cash_conversions") or {}
+    new_conversions = dict(raw.get("cash_conversions") or {})
+    for fact in cash_facts_for_trade_event(event):
+        if not fact.fact_kind.startswith("option_"):
+            continue
+        old = old_conversions.get(fact.fact_kind) if isinstance(old_conversions, dict) else None
+        if not isinstance(old, dict):
+            new_conversions.pop(fact.fact_kind, None)
+            continue
+        if old.get("status") != "observed":
+            continue
+        if fact.amount is None or not fact.currency:
+            raise ValueError("pending close cash fact changed")
+        rate = old.get("fx_rate")
+        amount_cny = (
+            quantize_money(fact.amount * Decimal(str(rate)))
+            if rate is not None else Decimal(0)
+        )
+        identity = cash_conversion_identity(
+            cash_fact_id=fact.fact_id,
+            native_amount=fact.amount,
+            native_currency=fact.currency,
+            fx_rate=rate,
+            amount_cny=amount_cny,
+            rate_source_id=old.get("rate_source_id"),
+            effective_at_ms=fact.effective_at_ms,
+        )
+        updated = {
+            **old, **identity,
+            "conversion_id": cash_conversion_id(identity),
+        }
+        _value, problem = validate_observed_cash_conversion(
+            updated, cash_fact_id=fact.fact_id,
+            native_amount=fact.amount, native_currency=fact.currency,
+            effective_at_ms=fact.effective_at_ms,
+        )
+        if problem:
+            raise ValueError("pending close cash conversion invalid: " + problem)
+        new_conversions[fact.fact_kind] = updated
+    if new_conversions:
+        raw["cash_conversions"] = new_conversions
+    else:
+        raw.pop("cash_conversions", None)
+    return replace(event, raw_payload=raw)
+
 def apply_lifecycle_allocation_atomically(
     repo: Any,
     *,
@@ -71,6 +135,11 @@ def apply_lifecycle_allocation_atomically(
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
+    _conn: Any = None,
+    _fresh_anchor_evidence: bool = False,
+    _new_case: bool = False,
+    _decision_fence: Any = None,
+    _prior_decision_fact: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Adopt evidence, terminal events, projection and allocations as one fact."""
 
@@ -117,13 +186,14 @@ def apply_lifecycle_allocation_atomically(
             ),
         )
         decision_fence, prior_decision_fact = (
-            _begin_lifecycle_decision_projection(
+            (_decision_fence, _prior_decision_fact)
+            if _decision_fence is not None
+            else _begin_lifecycle_decision_projection(
                 sqlite_repo,
                 conn=conn,
                 lifecycle_case=lifecycle_case,
-                global_event_owner=bool(
-                    event_rows or correction_void_rows
-                ),
+                allow_missing_fact=_new_case,
+                global_event_owner=bool(event_rows or correction_void_rows),
             )
         )
         admission = _prepare_settlement_admission(
@@ -259,7 +329,8 @@ def apply_lifecycle_allocation_atomically(
             for item in case_allocations
             if str(item.get("evidence_id") or "").strip() == evidence_id
         ]
-        if existing_evidence is not None and not existing_evidence_allocations:
+        if (existing_evidence is not None and not existing_evidence_allocations
+                and not _fresh_anchor_evidence):
             raise ValueError("evidence_without_allocation_requires_review")
         if existing_evidence_allocations and _canonical_rows(
             existing_evidence_allocations
@@ -290,7 +361,69 @@ def apply_lifecycle_allocation_atomically(
                 raise ValueError("target_lot_quantity_drift")
 
         proposed_void_target_ids: set[str] = set()
+        prior_pending_by_lot: dict[str, dict[str, Any]] = {}
         if correction_void_rows:
+            anchor_id = str(
+                evidence_payload.get("pending_close_anchor_evidence_id") or ""
+            ).strip()
+            if anchor_id:
+                anchor = sqlite_repo.get_trade_lifecycle_evidence(anchor_id, conn=conn)
+                source_claims = sqlite_repo.list_trade_lifecycle_source_consumptions(
+                    case_id=case_id_value, conn=conn,
+                )
+                if (
+                    not isinstance(anchor, dict)
+                    or str(anchor.get("case_id") or "") != case_id_value
+                    or str(anchor.get("evidence_type") or "") != "option_zero_price_close"
+                    or not any(
+                        str(claim.get("owner_evidence_id") or "") == anchor_id
+                        and str(claim.get("source_role") or "") == "option_anchor"
+                        for claim in source_claims
+                    )
+                ):
+                    raise ValueError("pending_close_anchor_unproven")
+                anchor_allocations = [
+                    item for item in case_allocations
+                    if str(item.get("evidence_id") or "") == anchor_id
+                    and str(item.get("canonical_terminal_event_id") or "") not in void_event_ids
+                ]
+                target_ids = {
+                    str(item.get("canonical_terminal_event_id") or "")
+                    for item in anchor_allocations
+                }
+                if (
+                    not target_ids
+                    or target_ids != {str(item.target_event_id or "") for item in correction_void_rows}
+                    or sum(int(item.get("contracts_allocated") or 0) for item in anchor_allocations)
+                    != int(evidence_payload.get("contracts") or 0)
+                ):
+                    raise ValueError("pending_close_replacement_not_exact")
+                prior_events = _trade_events_by_id(sqlite_repo, target_ids, conn=conn)
+                replacements = {str(item.target_lot_id or ""): item for item in event_rows}
+                if len(replacements) != len(anchor_allocations):
+                    raise ValueError("pending_close_replacement_not_exact")
+                for item in anchor_allocations:
+                    event_id = str(item.get("canonical_terminal_event_id") or "")
+                    original = prior_events.get(event_id)
+                    lot_id = str(item.get("target_lot_id") or "")
+                    replacement = replacements.get(lot_id)
+                    if (
+                        not isinstance(original, dict)
+                        or str(original.get("event_type") or "") != "close"
+                        or str((original.get("raw_payload") or {}).get("close_type") or "")
+                        != "cause_pending"
+                        or replacement is None
+                        or replacement.contracts != int(item.get("contracts_allocated") or 0)
+                        or replacement.event_time_ms != int(original.get("event_time_ms") or 0)
+                        or replacement.contract_key != _canonical_storage_event(original).contract_key
+                        or any(
+                            str(replacement.raw_payload.get(key) or "")
+                            != str((original.get("raw_payload") or {}).get(key) or "")
+                            for key in ("source_deal_id", "futu_account_id", "order_id")
+                        )
+                    ):
+                        raise ValueError("pending_close_replacement_not_exact")
+                    prior_pending_by_lot[lot_id] = original
             effective_allocated_event_ids = {
                 str(
                     item.get("canonical_terminal_event_id")
@@ -566,6 +699,13 @@ def apply_lifecycle_allocation_atomically(
             )
             for item in projection_rows
         ]
+        if prior_pending_by_lot:
+            projection_rows = [
+                _retain_pending_close_economics(item, prior_pending_by_lot[item.target_lot_id])
+                if item.target_lot_id in prior_pending_by_lot and item.event_type != "void"
+                else item
+                for item in projection_rows
+            ]
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
             projection_rows,
@@ -822,30 +962,37 @@ def apply_lifecycle_allocation_atomically(
             admission=admission,
         )
         if correction_void_rows:
-            decision_projection = _defer_lifecycle_decision_projection(
-                decision_fence
+            corrected = resolve_allocations(
+                lifecycle_case["target_contracts_by_lot"],
+                post_allocations,
+                void_event_ids=void_event_ids,
             )
+            if corrected.status != "ok":
+                raise ValueError("corrected lifecycle allocation conflict")
+            resolution_update = {
+                "resolved_contracts_by_lot": corrected.resolved_contracts_by_lot,
+                "remaining_contracts_by_lot": corrected.remaining_contracts_by_lot,
+                "resolved_contracts_by_terminal_type": corrected.resolved_contracts_by_terminal_type,
+            }
         else:
             resolution_update = _lifecycle_resolution_after_allocations(
                 prior_decision_fact,
                 allocations=allocation_rows,
                 created_flags=allocation_created,
             )
-            decision_projection = _finish_lifecycle_decision_projection(
-                sqlite_repo,
-                conn=conn,
-                fence=decision_fence,
-                prior_fact=prior_decision_fact,
-                case_id=case_id_value,
-                resolution=resolution_update,
-                trade_event_mutations=tuple(
-                    zip(
-                        event_rows,
-                        terminal_event_created,
-                        strict=True,
-                    )
-                ),
-            )
+        decision_projection = _finish_lifecycle_decision_projection(
+            sqlite_repo,
+            conn=conn,
+            fence=decision_fence,
+            prior_fact=prior_decision_fact,
+            case_id=case_id_value,
+            resolution=resolution_update,
+            trade_event_mutations=tuple(zip(
+                projection_rows if correction_void_rows else event_rows,
+                runtime.created_flags if correction_void_rows else terminal_event_created,
+                strict=True,
+            )),
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
@@ -888,6 +1035,8 @@ def apply_lifecycle_allocation_atomically(
             **audit_result,
         }
 
+    if _conn is not None:
+        return _run(repo, _conn)
     return _finish_lifecycle_attempt_cleanup(
         repo,
         with_sqlite_repo_transaction(

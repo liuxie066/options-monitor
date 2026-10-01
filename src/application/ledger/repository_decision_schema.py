@@ -266,6 +266,13 @@ def _ensure_current_decision_projection_schema(conn: sqlite3.Connection) -> None
     )
     for operation in ("INSERT", "UPDATE OF decision_fact_json, decision_fact_sha256"):
         suffix = "insert" if operation == "INSERT" else "update"
+        trigger_name = f"trg_current_decision_lifecycle_case_fact_{suffix}_guard"
+        existing_trigger = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if existing_trigger is not None and "lifecycle_case_decision_fact.v2" not in existing_trigger[0]:
+            conn.execute(f"DROP TRIGGER {trigger_name}")
         conn.execute(
             f"""
         CREATE TRIGGER IF NOT EXISTS
@@ -280,13 +287,21 @@ def _ensure_current_decision_projection_schema(conn: sqlite3.Connection) -> None
               AND (
                 json_valid(NEW.decision_fact_json) = 0
                 OR json_extract(NEW.decision_fact_json, '$.schema_version')
-                   != 'lifecycle_case_decision_fact.v1'
+                   != 'lifecycle_case_decision_fact.v2'
               )
               THEN RAISE(ABORT, 'lifecycle case decision fact is invalid')
           END;
         END
         """
         )
+    # Old compact facts cannot prove which close allocations have pending causes.
+    # Invalidate them so the projection must be rebuilt from canonical events.
+    conn.execute(
+        "UPDATE trade_lifecycle_cases SET decision_fact_json = NULL, "
+        "decision_fact_sha256 = NULL WHERE decision_fact_json IS NOT NULL "
+        "AND json_extract(decision_fact_json, '$.schema_version') "
+        "!= 'lifecycle_case_decision_fact.v2'"
+    )
     conn.execute(
         """
         CREATE TRIGGER IF NOT EXISTS

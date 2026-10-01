@@ -68,7 +68,7 @@ CURRENT_DECISION_PROJECTION_SCHEMA = "current_decision_projection.v1"
 
 CURRENT_DECISION_READ_SCHEMA = "current_decision_projection_read.v1"
 
-LIFECYCLE_CASE_DECISION_FACT_SCHEMA = "lifecycle_case_decision_fact.v1"
+LIFECYCLE_CASE_DECISION_FACT_SCHEMA = "lifecycle_case_decision_fact.v2"
 
 _LIFECYCLE_CASE_CURRENT_GENERATION_TOKEN_SCHEMA = (
     "lifecycle_case_current_generation_token.v1"
