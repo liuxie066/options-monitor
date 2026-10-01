@@ -1,5 +1,6 @@
 """Current opening policy must agree with sealed evidence before any new intent."""
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,8 +11,10 @@ from src.application.account_run import build_account_runtime_config
 from src.application.tick_run_workspace import publish_account_run_config
 from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.writer import persist_trade_event_objects_atomically
+from src.application.ledger.api import decision_state_snapshot
 from src.application.opening_candidate_snapshot import strategy_policy_hash
 from src.application.wheel import build_wheel_read_model
 from tests.test_wheel_workflows import _assign_short_put, _open_test_activation, _trusted_multiplier_payload
@@ -113,8 +116,14 @@ def _environment(tmp_path, direction, monkeypatch):
     snapshot = {"account": "lx", "snapshot_hash": "snapshot",
                 "strategy_policy_sha256": strategy_policy_hash(POLICY_A),
                 "batches": [{**branch, "final_candidate": candidate}]}
+    observed_at = datetime.now(timezone.utc).isoformat()
     capacity = {"account": "lx", "symbol": "NVDA", "capacity_identity_hash": "capacity", "status": "available",
+                "source_observed_at": observed_at,
                 "shares_eligible": 100, "shares_locked": 0, "shares_reserved": 0, "shares_available_for_cover": 100}
+    if direction == "call":
+        decision = decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
+            source_observed_at=observed_at, current_decision_now_ms=5_000)
+        capacity["decision_state_fingerprint"] = decision["decision_state_fingerprint"]
     descriptor = repo.get_current_wheel_activation_window(market="us", account="lx")
     resolved = {"market": "us", "enabled_for_new_lifecycle": True, "account_configured": True,
                 "activation_descriptor": descriptor, "policy_sha256": "a" * 64}

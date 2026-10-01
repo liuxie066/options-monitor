@@ -2492,7 +2492,7 @@ def test_inbox_retry_cannot_choose_between_two_waiting_stock_sources(tmp_path):
             "deal_id": f"raw-stock-{index}", "code": "HK.03690",
             "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 500,
             "price": 80, "trade_time_ms": 1790683025000 + index,
-            "external_id_namespace": "futu.deal", "environment": "REAL",
+            "external_id_namespace": "futu.deal", "environment": "REAL", "status": "OK",
             "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"},
         }
         for index in range(2)
@@ -2653,7 +2653,7 @@ def test_skipped_stock_source_recovery_writes_assignment_once_without_delivery(t
     raw_stock = {"deal_id": "recovered-stock", "code": "HK.03690",
                  "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 1500,
                  "price": 77.5, "trade_time_ms": 1790683025000,
-                 "external_id_namespace": "futu.deal", "environment": "REAL",
+                 "external_id_namespace": "futu.deal", "environment": "REAL", "status": "OK",
                  "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"}}
     state_path = tmp_path / "state.json"
     kwargs = dict(repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",
@@ -2734,7 +2734,7 @@ def test_manual_required_stock_ambiguity_uses_guarded_recovery_without_delivery(
     stock = {"deal_id": "old-ambiguous-stock", "code": "HK.03690",
              "futu_account_id": "REAL_1", "trd_side": "BUY", "qty": 500,
              "price": 80, "trade_time_ms": 1790682392448,
-             "external_id_namespace": "futu.deal", "environment": "REAL",
+             "external_id_namespace": "futu.deal", "environment": "REAL", "status": "OK",
              "_trade_intake_source": {"account": "lx", "futu_account_id": "REAL_1"}}
     state_path = tmp_path / "state.json"
     kwargs = dict(repo=repo, state_path=state_path, audit_path=tmp_path / "audit.jsonl",

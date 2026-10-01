@@ -33,8 +33,6 @@ PUBLIC_SYMBOLS = {
         "persist_trade_event",
         "persist_trade_event_object",
         "persist_trade_event_objects_atomically",
-        "persist_trade_event_with_combo_identity",
-        "persist_trade_event_with_wheel_intent",
         "projection_diagnostics_summary",
         "rebuild_position_lots_from_trade_events",
         "record_assigned_stock_event_atomically",

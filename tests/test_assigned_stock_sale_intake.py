@@ -775,7 +775,7 @@ def _standard_stock_sale_deal(**overrides) -> NormalizedTradeDeal:
         "currency": deal.currency, "occurred_at_utc": "1970-01-01T00:00:03Z",
     })
     assert execution["errors"] == []
-    return replace(deal, asset_type="stock", execution_input=execution)
+    return replace(deal, asset_type="stock", execution_input={**execution, "status": "OK"})
 
 
 def test_standard_stock_sale_replay_keeps_original_event_and_economic_references(tmp_path: Path) -> None:

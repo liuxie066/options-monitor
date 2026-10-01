@@ -1083,6 +1083,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
 ) -> None:
     from src.application.ledger import maintenance as maintenance_mod
     from src.application.ledger.commands import persist_manual_repair_event_with_ledger
+    from src.application.ledger.interventions import build_manual_repair_preview
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     lot_id = "lot_tigr_put_6_20260522"
@@ -1106,12 +1107,18 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
 
     def repair_after_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
         result = original_preflight(*args, **kwargs)
+        repair = {"account": "sy", "symbol": "MSFT"}
+        reason = "simulate concurrent identity repair"
+        repair_time = int(result.event_time_ms) + 1
+        preview = build_manual_repair_preview(repo, target_event_id=f"seed-{lot_id}",
+            overrides=repair, repair_reason=reason, as_of_ms=repair_time)
         persist_manual_repair_event_with_ledger(
             repo,
             target_event_id=f"seed-{lot_id}",
-            overrides={"account": "sy", "symbol": "MSFT"},
-            repair_reason="simulate concurrent identity repair",
-            as_of_ms=int(result.event_time_ms) + 1,
+            overrides=repair,
+            repair_reason=reason,
+            expected_input_hash=preview.expected_input_hash,
+            as_of_ms=repair_time,
         )
         return result
 
