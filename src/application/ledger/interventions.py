@@ -1430,7 +1430,7 @@ def _manual_repair_source_evidence(
     target: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from domain.domain.trade_execution import structured_deal_keys_from_ledger_event
-    from src.application.trades.inbox import (
+    from src.application.trades.source_constraints import (
         TRADE_EVIDENCE_SET_REF_PREFIX,
         read_account_trade_source_constraints,
     )

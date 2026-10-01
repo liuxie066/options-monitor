@@ -184,7 +184,7 @@ def decision_state_snapshot(
 def _read_account_trade_source_constraints(
     repo: Any, *, account: str, rows: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from src.application.trades.inbox import read_account_trade_source_constraints
+    from src.application.trades.source_constraints import read_account_trade_source_constraints
     from src.application.trades.inbox_authority import resolve_execution_inbox_path
 
     candidate = getattr(repo, "primary_repo", repo)
