@@ -1073,6 +1073,7 @@ def test_explicit_mapping_apply_rejects_source_drift(
 
 def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
@@ -1304,6 +1305,20 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         data_gaps=gaps,
     )
     assert context["cash_secured_unavailable_by_symbol"] == {"NVDA": "option_close_settlement_pending"}
+    from src.application.wheel.capacity import load_shared_cash_capacity_fact
+    monkeypatch.setattr(
+        "src.application.wheel.capacity.fetch_futu_portfolio_context",
+        lambda **_kwargs: {
+            "capacity_authority": {"status": "available", "logical_account": "lx"},
+            "cash_by_currency": {"USD": 100_000},
+            "cash_balance_reliable": True,
+        },
+    )
+    wheel_fact = load_shared_cash_capacity_fact(
+        repo, config={}, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
+    )
+    assert wheel_fact["status"] == "unavailable"
+    assert wheel_fact["reason"] == "option_cash_secured_unavailable"
     assert funds["option_opening_available_cny"] is None
     assert funds["available"] is False
     assert gaps == [{"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"}]
@@ -1322,8 +1337,8 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         option_positions_context=context,
         data_gaps=[],
     )
-    assert refreshed_funds["available"] is True
-    assert refreshed_funds["option_opening_available_cny"] == 7200.0
+    assert refreshed_funds["available"] is False
+    assert refreshed_funds["option_opening_available_cny"] is None
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(

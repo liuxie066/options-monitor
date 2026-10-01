@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ import pytest
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.wheel.workflows as wheel_workflows
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.portfolio_scope import portfolio_scope_id
+from src.application.ledger.api import decision_state_snapshot
 from domain.domain.wheel import lot_strategy_metadata_for_lot
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -118,8 +121,14 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     )
     monkeypatch.setattr(wheel_workflows, "_wheel_branch", lambda *_args, **_kwargs: branch)
     monkeypatch.setattr(wheel_workflows, "project_wheel_intents", lambda *_args, **_kwargs: [])
+    trusted_snapshot = {"snapshot_status": "trusted", "decision_state_fingerprint": "decision-1"}
+    monkeypatch.setattr(
+        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        lambda *_args, **_kwargs: trusted_snapshot,
+    )
 
     def _revalidate(**kwargs):
+        assert kwargs["decision_snapshot"] is trusted_snapshot
         revalidations.append(kwargs)
         return allocation
 
@@ -143,7 +152,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         request_id="request-1",
         actor="tester",
         capacity_fact={
-            "cash_authority": {"status": "available"},
+            "cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()},
             "cash_authority_hash": "authority-1",
             "cash_by_currency": {"USD": 20_000},
             "fx_snapshot": {"rates": {}},
@@ -169,6 +178,44 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     assert result["wheel_branch_id"] == "wheel-put-1"
     assert result["dry_run"] is True
     assert result["write_applied"] is False
+
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        wheel_workflows.create_wheel_intent(
+            repo, candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
+            account="lx", wheel_branch_id="wheel-put-1", direction="put",
+            final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
+            expected_batch_generation_hash="generation-1", expires_at_ms=2_000,
+            request_id="request-stale-broker", actor="tester",
+            capacity_fact={"cash_authority": {"status": "available", "source_observed_at":
+                (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}},
+            new_intent_enabled=True, account_configured=True, market="us",
+            activation_descriptor={
+                "market": "us", "account": "lx", "generation": 1,
+                "activated_at_ms": 500, "deactivated_at_ms": None,
+                "policy_hash": "a" * 64,
+            },
+            policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
+        )
+    assert len(revalidations) == 1
+
+    candidate.pop("capacity_identity_hash")
+    with pytest.raises(ValueError, match="capacity identity"):
+        wheel_workflows.create_wheel_intent(
+            repo, candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
+            account="lx", wheel_branch_id="wheel-put-1", direction="put",
+            final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
+            expected_batch_generation_hash="generation-1", expires_at_ms=2_000,
+            request_id="request-missing-hash", actor="tester",
+            capacity_fact={"cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()}},
+            new_intent_enabled=True, account_configured=True, market="us",
+            activation_descriptor={
+                "market": "us", "account": "lx", "generation": 1,
+                "activated_at_ms": 500, "deactivated_at_ms": None,
+                "policy_hash": "a" * 64,
+            },
+            policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
+        )
+    candidate["capacity_identity_hash"] = "capacity-1"
 
     with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
         wheel_workflows.create_wheel_intent(
@@ -466,6 +513,9 @@ def _create_call_intent(
     contracts: int = 1,
     broker_order_id: str | None = None,
     market: str = "us",
+    broker_observed_at: str | None = None,
+    include_decision_identity: bool = True,
+    include_capacity_identity: bool = True,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -484,13 +534,25 @@ def _create_call_intent(
                     "expiration_ymd": "2026-08-21",
                     "granted_contracts": contracts,
                     "multiplier": 100,
+                    **({"capacity_identity_hash": "capacity-1"} if include_capacity_identity else {}),
                 },
             }
         ],
     }
+    observed_at = (
+        datetime.now(timezone.utc).isoformat()
+        if broker_observed_at is None else broker_observed_at
+    )
+    decision = decision_state_snapshot(
+        repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
+        source_observed_at=observed_at, current_decision_now_ms=4_000,
+    )
     coverage = {
         "account": "lx",
         "symbol": "NVDA",
+        "source_observed_at": observed_at,
+        **({"decision_state_fingerprint": decision["decision_state_fingerprint"]}
+           if include_decision_identity else {}),
         "capacity_identity_hash": "capacity-1",
         "status": "available",
         "shares_eligible": contracts * 100,
@@ -528,6 +590,40 @@ def _create_call_intent(
         as_of_ms=4_000,
     )
     return created, coverage
+
+
+def test_call_intent_rejects_stale_broker_fact_and_unbound_decision(
+    tmp_path: Path,
+) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    before = repo.list_wheel_events(account="lx")
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        _create_call_intent(repo, lot_id, broker_observed_at=old_time)
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="broker capacity observation"):
+        _create_call_intent(repo, lot_id, broker_observed_at="")
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="coverage settlement decision"):
+        _create_call_intent(repo, lot_id, include_decision_identity=False)
+    assert repo.list_wheel_events(account="lx") == before
+    with pytest.raises(ValueError, match="coverage settlement decision"):
+        _create_call_intent(repo, lot_id, include_capacity_identity=False)
+    assert repo.list_wheel_events(account="lx") == before
+
+
+def test_call_intent_rechecks_source_conflict_inside_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    before = repo.list_wheel_events(account="lx")
+    monkeypatch.setattr(
+        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        lambda *_args, **_kwargs: {"snapshot_status": "source_untrusted"},
+    )
+    with pytest.raises(ValueError, match="coverage settlement decision is unavailable"):
+        _create_call_intent(repo, lot_id)
+    assert repo.list_wheel_events(account="lx") == before
 
 
 def _open_unlinked_call(
@@ -842,6 +938,10 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
 ) -> None:
     repo, lot_id = _wheel_repo(tmp_path)
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    prior_decision = decision_state_snapshot(
+        repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
+        source_observed_at=datetime.now(timezone.utc).isoformat(), current_decision_now_ms=3_000,
+    )
     _open_unlinked_call(repo, event_time_ms=3_500)
     snapshot = {
         "account": "lx",
@@ -868,7 +968,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
         ValueError,
         match=(
             "batch generation changed|coverage is unavailable|coverage is insufficient|"
-            "not ready"
+            "not ready|coverage settlement decision is unavailable"
         ),
     ):
         create_wheel_call_intent(
@@ -887,6 +987,8 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
                 "account": "lx",
                 "symbol": "NVDA",
                 "capacity_identity_hash": "capacity-before-race",
+                "decision_state_fingerprint": prior_decision["decision_state_fingerprint"],
+                "source_observed_at": datetime.now(timezone.utc).isoformat(),
                 "status": "available",
                 "shares_eligible": 100,
                 "shares_locked": 0,

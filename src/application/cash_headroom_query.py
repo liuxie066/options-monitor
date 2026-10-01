@@ -96,7 +96,11 @@ def _cash_secured_unavailable_reason(
     option_ctx: dict | None, portfolio_ctx: dict | None,
 ) -> tuple[dict[str, str], str | None]:
     unavailable = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
-    if not isinstance(unavailable, dict) or not unavailable:
+    if isinstance(unavailable, str):
+        return {}, unavailable
+    if unavailable is not None and not isinstance(unavailable, dict):
+        return {}, "option_cash_secured_context_invalid"
+    if not unavailable:
         return {}, None
 
     normalized: dict[str, str] = {}
@@ -106,7 +110,7 @@ def _cash_secured_unavailable_reason(
             continue
         normalized[symbol] = str(reason or "cash_secured_basis_missing").strip() or "cash_secured_basis_missing"
     if not normalized:
-        return {}, None
+        return {}, "option_cash_secured_context_invalid"
     return normalized, ";".join(f"{sym}:{reason}" for sym, reason in sorted(normalized.items()))
 
 
@@ -333,7 +337,7 @@ def query_sell_put_cash(
     norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(opt)
     total_by_ccy_norm = normalize_cash_secured_total_by_ccy(opt, by_symbol_by_ccy=norm_by_ccy)
     cash_secured_unavailable_by_symbol, cash_secured_unavailable_reason = _cash_secured_unavailable_reason(opt, portfolio)
-    cash_secured_reliable = not cash_secured_unavailable_by_symbol
+    cash_secured_reliable = cash_secured_unavailable_reason is None
     cash_secured_total_cny = read_cash_secured_total_cny(opt) if cash_secured_reliable else None
 
     cash_secured_total_usd = total_by_ccy_norm.get('USD') if cash_secured_reliable else None
@@ -408,6 +412,10 @@ def query_sell_put_cash(
         ),
         portfolio_max_age_sec=_portfolio_context_ttl_sec(runtime_cfg),
     )
+    if freshness["status"] != "fresh":
+        cash_free_usd = None
+        cash_free_cny = None
+        cash_free_total_cny = None
     payload = {
         'as_of_utc': observed_at,
         'freshness': freshness,

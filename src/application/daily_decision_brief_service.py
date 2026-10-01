@@ -1543,7 +1543,16 @@ def _build_funds(
 ) -> tuple[dict[str, Any], bool]:
     cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
     portfolio_as_of = _parse_datetime(portfolio_context.get("as_of_utc"))
-    cash_total_reliable = cash_total is not None and portfolio_as_of is not None
+    cash_source_status = portfolio_context.get(
+        "cash_source_observation_status",
+        portfolio_context.get("source_observation_status"),
+    )
+    cash_total_reliable = (
+        cash_total is not None
+        and portfolio_as_of is not None
+        and portfolio_context.get("cash_balance_reliable") is not False
+        and cash_source_status in (None, "trusted")
+    )
     if not cash_total_reliable:
         data_gaps.append(
             {

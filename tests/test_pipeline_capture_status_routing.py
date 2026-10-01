@@ -460,6 +460,7 @@ def _run_wheel_scan_failure_capture(
         "exchange_rates": {},
     }
     option_context = {
+        "decision_snapshot_status": "trusted",
         "locked_shares_status": "available",
         "locked_shares_by_symbol": {},
         "locked_shares_unavailable_by_symbol": {},

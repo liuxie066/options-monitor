@@ -770,6 +770,7 @@ def allocate_wheel_put_cash_capacity(
             "account": account,
             "cash_authority": authority,
             "cash_authority_hash": fact.get("cash_authority_hash"),
+            "cash_capacity_fact_identity_hash": fact.get("capacity_identity_hash"),
             "cash_by_currency": cash,
             "cash_secured_by_currency": existing_secured,
             "ordinary_put_claims": ordinary_identity_rows,

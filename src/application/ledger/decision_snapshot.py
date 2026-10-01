@@ -200,6 +200,29 @@ def _read_account_trade_source_constraints(
     )
 
 
+def decision_state_snapshot_from_locked_rows(
+    repo: Any,
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    portfolio_scope_id: str,
+    source_observed_at: str,
+    current_decision_now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Use a caller-held ledger writer lock to bind its rows to Inbox evidence."""
+    frozen = dict(rows)
+    frozen["_account_trade_source_constraints"] = _read_account_trade_source_constraints(
+        repo, account=account, rows=frozen
+    )
+    return decision_state_snapshot_from_rows(
+        frozen,
+        account=account,
+        portfolio_scope_id=portfolio_scope_id,
+        source_observed_at=source_observed_at,
+        current_decision_now_ms=current_decision_now_ms,
+    )
+
+
 def decision_state_snapshot_from_rows(
     rows: Mapping[str, Any],
     *,
@@ -861,6 +884,7 @@ __all__ = [
     "POSITION_FACT_SNAPSHOT_CONTRACT",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
+    "decision_state_snapshot_from_locked_rows",
     "decision_state_snapshot_fingerprint",
     "read_decision_state_rows_many",
     "validate_position_fact_snapshot_contract",

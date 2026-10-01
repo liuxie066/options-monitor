@@ -200,6 +200,8 @@ def _short_put_assignment_from_option_ctx(
     if isinstance(unresolved, dict):
         for raw_symbol, reason in unresolved.items():
             unavailable.append(f"{canonical_symbol(raw_symbol) or raw_symbol}:{reason}")
+    elif unresolved is not None:
+        unavailable.append(str(unresolved))
     return by_symbol, total_cny, unavailable
 
 

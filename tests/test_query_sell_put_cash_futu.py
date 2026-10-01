@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -37,6 +38,8 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             "cash_power_source": "futu_net_cash_power",
             "stocks_by_symbol": {},
             "portfolio_source_name": "futu",
+            "context_source": "futu_direct",
+            "source_observed_at": datetime.now(timezone.utc).isoformat(),
         }
 
     with _patched(
@@ -46,6 +49,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
         _load_option_position_records=lambda *_a, **_k: (object(), []),
         decision_state_snapshot=lambda *_a, **_k: {},
         build_option_positions_context=lambda *_a, **_k: {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 72000.0}},
             "cash_secured_total_by_ccy": {"CNY": 72000.0},
             "cash_secured_total_cny": 72000.0,
@@ -68,7 +72,8 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
 
     assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 130000.0
-    assert result["cash_free_cny"] == 58000.0
+    assert result["cash_free_cny"] is None
+    assert result["freshness"]["status"] == "unknown"
     assert result["cash_source"] == "futu_cash_like_assets"
     assert result["cash_components_by_currency"] == {
         "CNY": {"cn_cash": 130000.0},
@@ -108,7 +113,7 @@ def test_query_sell_put_cash_uses_futu_context_for_second_account(tmp_path: Path
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "sy"
-        return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
+        return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()}
 
     with _patched(
         m,
@@ -117,6 +122,7 @@ def test_query_sell_put_cash_uses_futu_context_for_second_account(tmp_path: Path
         _load_option_position_records=lambda *_a, **_k: (object(), []),
         decision_state_snapshot=lambda *_a, **_k: {},
         build_option_positions_context=lambda *_a, **_k: {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
             "cash_secured_total_cny": 12000.0,
@@ -149,7 +155,7 @@ def test_query_sell_put_cash_uses_configured_futu_account(tmp_path: Path) -> Non
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "sy"
-        return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
+        return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()}
 
     with _patched(
         m,
@@ -158,6 +164,7 @@ def test_query_sell_put_cash_uses_configured_futu_account(tmp_path: Path) -> Non
         _load_option_position_records=lambda *_a, **_k: (object(), []),
         decision_state_snapshot=lambda *_a, **_k: {},
         build_option_positions_context=lambda *_a, **_k: {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 8000.0}},
             "cash_secured_total_by_ccy": {"CNY": 8000.0},
             "cash_secured_total_cny": 8000.0,
@@ -203,6 +210,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         _load_option_position_records=lambda *_a, **_k: (object(), []),
         decision_state_snapshot=lambda *_a, **_k: {},
         build_option_positions_context=lambda *_a, **_k: {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
             "cash_secured_total_cny": None,
@@ -234,7 +242,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
     assert result["cash_secured_unavailable_reason"] == "0700.HK:short_put_cash_secured_basis_missing"
 
 
-def test_query_sell_put_cash_releases_closed_put_after_newer_direct_cash() -> None:
+def test_query_sell_put_cash_keeps_closed_put_pending_after_newer_cash() -> None:
     import src.application.cash_headroom_query as m
 
     snapshot = {"snapshot_status": "trusted"}
@@ -271,5 +279,55 @@ def test_query_sell_put_cash_releases_closed_put_after_newer_direct_cash() -> No
             no_exchange_rates=True, write_cache=False,
         )
 
-    assert result["cash_secured_usage_reliable"] is True
-    assert result["cash_free_cny"] == 118000.0
+    assert result["cash_secured_usage_reliable"] is False
+    assert result["cash_free_cny"] is None
+
+
+def test_query_sell_put_cash_does_not_offer_stale_broker_cash_as_free_capacity() -> None:
+    import src.application.cash_headroom_query as m
+    with _patched(
+        m,
+        load_account_portfolio_context=lambda **_kwargs: {
+            "cash_by_currency": {"CNY": 130_000.0},
+            "portfolio_source_name": "futu", "context_source": "futu_direct",
+            "source_observed_at": "2020-01-01T00:00:00+00:00", "cash_balance_reliable": True,
+        },
+        _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
+        decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
+        build_option_positions_context=lambda *_args, **_kwargs: {
+            "decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {"CNY": 12_000.0},
+            "cash_secured_total_cny": 12_000.0, "cash_secured_unavailable_by_symbol": {},
+        },
+    ):
+        result = m.query_sell_put_cash(
+            market="富途", account="lx", base_dir=BASE,
+            runtime_config={"portfolio": {"base_currency": "CNY"}},
+            no_exchange_rates=True, write_cache=False,
+        )
+    assert result["freshness"]["status"] == "stale"
+    assert result["cash_free_cny"] is None
+    assert result["cash_free_total_cny"] is None
+
+
+def test_query_sell_put_cash_rejects_malformed_settlement_blockers() -> None:
+    import src.application.cash_headroom_query as m
+    with _patched(
+        m,
+        load_account_portfolio_context=lambda **_kwargs: {
+            "cash_by_currency": {"CNY": 130_000.0}, "portfolio_source_name": "futu",
+            "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
+        decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
+        build_option_positions_context=lambda *_args, **_kwargs: {
+            "decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {},
+            "cash_secured_total_cny": 0.0, "cash_secured_unavailable_by_symbol": ["invalid"],
+        },
+    ):
+        result = m.query_sell_put_cash(
+            market="富途", account="lx", base_dir=BASE,
+            runtime_config={"portfolio": {"base_currency": "CNY"}},
+            no_exchange_rates=True, write_cache=False,
+        )
+    assert result["cash_secured_usage_reliable"] is False
+    assert result["cash_free_cny"] is None
