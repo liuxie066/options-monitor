@@ -195,7 +195,10 @@ def normalize_wheel_activation_by_account(raw: Any) -> dict[str, dict[str, int |
 def normalize_wheel_accounts(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         raise ValueError("wheel.accounts must be a list")
-    return [_normalized_account(value) for value in raw]
+    accounts = [_normalized_account(value) for value in raw]
+    if len(accounts) != len(set(accounts)):
+        raise ValueError("wheel.accounts contains duplicate normalized accounts")
+    return accounts
 
 
 def materialize_wheel_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -295,10 +298,11 @@ def resolve_wheel_config(
         else None
     )
     call_policy = dict(static["call"])
+    account_configured = account_value in static["accounts"]
     statically_open = bool(
         descriptor is not None
         and descriptor.get("deactivated_at_ms") is None
-        and account_value in static["accounts"]
+        and account_configured
     )
     return {
         **static,
@@ -307,6 +311,7 @@ def resolve_wheel_config(
         "account": account_value,
         "market": market_value,
         "activation_descriptor": descriptor,
+        "account_configured": account_configured,
         "policy_hash": descriptor.get("policy_hash") if descriptor else None,
         "policy_sha256": descriptor.get("policy_hash") if descriptor else None,
         "enabled_for_new_lifecycle": statically_open,
@@ -335,9 +340,19 @@ def _window_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
 def evaluate_wheel_activation_readiness(
     descriptor: Mapping[str, Any] | None,
     durable_window: Mapping[str, Any] | None,
+    *,
+    account_configured: bool,
 ) -> dict[str, Any]:
     """Compare static config with the durable window without performing I/O."""
 
+    if not account_configured:
+        return {
+            "ready": False,
+            "enabled_for_new_lifecycle": False,
+            "monitoring_gate": "disabled",
+            "reason_code": "account_not_configured",
+            "policy_drift": False,
+        }
     if descriptor is None:
         return {
             "ready": False,

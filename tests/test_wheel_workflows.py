@@ -149,6 +149,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             "fx_snapshot": {"rates": {}},
         },
         new_intent_enabled=True,
+        account_configured=True,
         market="us",
         activation_descriptor={
             "market": "us",
@@ -168,6 +169,34 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     assert result["wheel_branch_id"] == "wheel-put-1"
     assert result["dry_run"] is True
     assert result["write_applied"] is False
+
+    with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
+        wheel_workflows.create_wheel_intent(
+            repo,
+            candidate_snapshot=snapshot,
+            current_strategy_policy_sha256="b" * 64,
+            account="lx",
+            wheel_branch_id="wheel-put-1",
+            direction="put",
+            final_candidate_id="candidate-1",
+            expected_snapshot_hash="snapshot-1",
+            expected_batch_generation_hash="generation-1",
+            expires_at_ms=2_000,
+            request_id="request-removed",
+            actor="tester",
+            capacity_fact={"cash_authority": {"status": "available"}},
+            new_intent_enabled=True,
+            account_configured=False,
+            market="us",
+            activation_descriptor={
+                "market": "us", "account": "lx", "generation": 1,
+                "activated_at_ms": 500, "deactivated_at_ms": None,
+                "policy_hash": "a" * 64,
+            },
+            policy_sha256="a" * 64,
+            apply_changes=False,
+            as_of_ms=1_000,
+        )
     assert revalidations[0]["lifecycle_rows"] is rows
     assert revalidations[0]["position_lots"] == position_lots
     assert revalidations[0]["opening_put_candidates"] == [{"symbol": "MSFT"}]
@@ -299,7 +328,7 @@ def test_wheel_intent_replay_uses_stable_request_and_preserves_accepted_capacity
         expected_batch_generation_hash=original["batch_generation_hash"],
         expires_at_ms=original["expires_at_ms"], request_id=original["request_id"], actor=original["actor"],
         coverage_fact={**coverage, "capacity_identity_hash": "refreshed-capacity", "shares_available_for_cover": 0},
-        new_intent_enabled=True, market="us", activation_descriptor=None,
+        new_intent_enabled=True, account_configured=False, market="us", activation_descriptor=None,
         policy_sha256="", apply_changes=True, as_of_ms=6_000,
     )
     assert replay["status"] == "idempotent"
@@ -433,6 +462,7 @@ def _create_call_intent(
     lot_id: str,
     *,
     new_intent_enabled: bool = True,
+    account_configured: bool = True,
     contracts: int = 1,
     broker_order_id: str | None = None,
     market: str = "us",
@@ -482,6 +512,7 @@ def _create_call_intent(
         actor="tester",
         coverage_fact=coverage,
         new_intent_enabled=new_intent_enabled,
+        account_configured=account_configured,
         market=market,
         activation_descriptor={
             "market": market,
@@ -863,6 +894,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
                 "shares_available_for_cover": 100,
             },
             new_intent_enabled=True,
+            account_configured=True,
             market="us",
             activation_descriptor={
                 "market": "us",
@@ -892,6 +924,16 @@ def test_intent_creation_rejects_disabled_wheel(tmp_path: Path) -> None:
         event["event_type"] == "wheel_call_intent_created"
         for event in repo.list_wheel_events(account="lx")
     )
+
+
+def test_intent_creation_rejects_removed_account_with_open_window(tmp_path: Path) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    before = repo.list_wheel_events(account="lx")
+
+    with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
+        _create_call_intent(repo, lot_id, account_configured=False)
+
+    assert repo.list_wheel_events(account="lx") == before
 
 
 def test_intent_creation_rejects_closed_activation_without_effects(tmp_path: Path) -> None:
@@ -931,6 +973,14 @@ def test_wheel_call_intent_create_and_cancel(tmp_path: Path) -> None:
     repo, lot_id = _wheel_repo(tmp_path)
     created, _coverage = _create_call_intent(repo, lot_id)
     pending = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
+    with patch(
+        "src.application.ledger.repository_assigned_stock.now_ms", return_value=5_500,
+    ), repo._writer_connection(begin_immediate=True) as conn:
+        repo.close_wheel_activation_window(
+            market="us", account="lx", expected_current_generation=1,
+            policy_hash="a" * 64, request_id="close-before-cancel",
+            request_hash="c" * 64, conn=conn,
+        )
     cancelled = cancel_wheel_call_intent(
         repo,
         account="lx",
@@ -1262,6 +1312,48 @@ def test_wheel_call_assignment_closes_batch_in_same_transaction(
     assert parent["shares_remaining"] == 0
     assert parent["integrity_status"] == "trusted"
     assert child["lifecycle_status"] == "pending_decision"
+
+
+def test_branch_start_rejects_removed_account_but_end_remains_available(tmp_path: Path) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    _persist_wheel_call_open(
+        repo, event_id="wheel-call-open-for-decision", lot_id="wheel-call-for-decision",
+        source_stock_lot_id=lot_id,
+    )
+    _persist_wheel_call_assignment(
+        repo, event_id="wheel-call-assignment-for-decision", lot_id="wheel-call-for-decision",
+    )
+    child = next(
+        branch for branch in build_wheel_read_model(repo, "lx", 5_000)["wheel_branches"]
+        if branch["direction"] == "put"
+    )
+    before = repo.list_wheel_events(account="lx")
+    args = dict(
+        account="lx", wheel_branch_id=child["wheel_branch_id"],
+        expected_batch_generation_hash=child["batch_generation_hash"],
+        request_id="removed-account-decision", actor="tester", market="us",
+        activation_descriptor={
+            "market": "us", "account": "lx", "generation": 1,
+            "activated_at_ms": 500, "deactivated_at_ms": None,
+            "policy_hash": "a" * 64,
+        },
+        account_configured=False, policy_sha256="a" * 64,
+        apply_changes=False, as_of_ms=6_000,
+    )
+
+    preview = wheel_workflows.decide_wheel_branch(
+        repo, decision="start", **{**args, "account_configured": True},
+    )
+    assert preview["status"] == "planned"
+    with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
+        wheel_workflows.decide_wheel_branch(
+            repo, decision="start", **{**args, "apply_changes": True},
+        )
+    assert repo.list_wheel_events(account="lx") == before
+
+    ended = wheel_workflows.decide_wheel_branch(repo, decision="end", **args)
+    assert ended["status"] == "planned"
+    assert repo.list_wheel_events(account="lx") == before
 
 
 def test_wheel_start_failure_rolls_back_assignment(

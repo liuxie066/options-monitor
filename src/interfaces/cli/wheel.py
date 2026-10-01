@@ -452,6 +452,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             branch_args.update(
                 market=resolved.get("market"),
                 activation_descriptor=resolved.get("activation_descriptor"),
+                account_configured=resolved["account_configured"],
                 policy_sha256=resolved.get("policy_sha256"),
             )
         return wheel_application.decide_wheel_branch(repo, **branch_args)
@@ -556,6 +557,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             broker_order_id=args.broker_order_id,
             capacity_fact=capacity_fact,
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            account_configured=resolved["account_configured"],
             activation_descriptor=resolved.get("activation_descriptor"),
             policy_sha256=str(resolved.get("policy_sha256") or ""),
         )
