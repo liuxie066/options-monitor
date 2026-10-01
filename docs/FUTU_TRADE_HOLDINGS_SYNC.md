@@ -1744,7 +1744,7 @@ F12/F13 已用临时 SQLite 复现存储行为，未调用真实渠道或修改�
 
 ### S1：成交状态与冻结证据
 
-Allowed modules: domain/domain/trade_execution.py；src/application/trades/{inbox,inbox_authority,auto_intake,backfill,review}.py；src/application/ledger/{api,decision_snapshot,repository_decision_reads,interventions,commands}.py；成交写入 facade、相关 tests。S1 不修改容量计算、Wheel 归属选择或订单回调。
+Allowed modules: domain/domain/trade_execution.py；src/application/trades/{inbox,inbox_authority,auto_intake,backfill,review}.py；src/application/ledger/{api,decision_snapshot,repository_decision_reads,interventions,commands,results}.py；src/infrastructure/futu_trade_push.py 的成交修订字段；src/interfaces/cli/trade_events.py 的人工修复参数；成交写入 facade、相关 tests。S1 不修改容量计算、Wheel 归属选择或订单状态回调。
 
 入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：
 - 缺失/未知状态：保存来源，主动查询；新经济成交不入账。历史已入账事件保持可读，但相关证据不完整时待核实。
