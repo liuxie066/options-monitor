@@ -116,7 +116,7 @@ def _environment(tmp_path, direction, monkeypatch):
     capacity = {"account": "lx", "symbol": "NVDA", "capacity_identity_hash": "capacity", "status": "available",
                 "shares_eligible": 100, "shares_locked": 0, "shares_reserved": 0, "shares_available_for_cover": 100}
     descriptor = repo.get_current_wheel_activation_window(market="us", account="lx")
-    resolved = {"market": "us", "enabled_for_new_lifecycle": True,
+    resolved = {"market": "us", "enabled_for_new_lifecycle": True, "account_configured": True,
                 "activation_descriptor": descriptor, "policy_sha256": "a" * 64}
     return repo, branch, snapshot, capacity, resolved
 
@@ -126,7 +126,7 @@ def _request(branch, snapshot, capacity, resolved):
                 direction=branch["direction"], final_candidate_id="candidate", expected_snapshot_hash="snapshot",
                 expected_batch_generation_hash=branch["batch_generation_hash"], expires_at_ms=10_000,
                 request_id="intent-request", actor="tester", capacity_fact=capacity,
-                new_intent_enabled=True, market="us", activation_descriptor=resolved["activation_descriptor"],
+                new_intent_enabled=True, account_configured=True, market="us", activation_descriptor=resolved["activation_descriptor"],
                 policy_sha256=resolved["policy_sha256"], as_of_ms=5_000)
 
 

@@ -108,7 +108,10 @@ def _classify(
             "detail": "no activation descriptor for this account",
             "target_policy_hash": target_policy_hash,
         }
-    readiness = evaluate_wheel_activation_readiness(descriptor, latest)
+    wheel_accounts = normalize_wheel_accounts((authored.get("wheel") or {}).get("accounts", []))
+    readiness = evaluate_wheel_activation_readiness(
+        descriptor, latest, account_configured=account in wheel_accounts,
+    )
     boundary_matches = all(descriptor.get(key) == latest.get(key) for key in _BOUNDARY_FIELDS)
     if readiness["ready"]:
         classification = "already_current"

@@ -11,6 +11,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.wheel.read_model import build_wheel_read_model
+from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
 from src.application.wheel.scanning import run_wheel_call_scan
 from src.application.wheel.workflows import (
     create_wheel_call_intent,
@@ -72,6 +73,43 @@ def _persist_put_assignment(
     return result.to_dict(), f"assigned-stock-{assignment_event_id}", assignment_event
 
 
+def test_account_removed_keeps_historical_assignment_but_closes_current_actions(tmp_path, monkeypatch):
+    import json
+
+    root = _deployment(tmp_path, monkeypatch)
+    with patch("src.application.ledger.repository_assigned_stock.now_ms", return_value=500):
+        enabled = _apply(root)
+    repo = SQLiteOptionPositionsRepository(enabled["paths"]["sqlite_path"])
+    config = json.loads((root / "config.us.json").read_text())
+    config["wheel"]["accounts"] = []
+    resolved = resolve_wheel_config(config, "lx", market="us")
+    window = repo.get_current_wheel_activation_window(market="us", account="lx")
+    readiness = evaluate_wheel_activation_readiness(resolved["activation_descriptor"], window,
+        account_configured=resolved["account_configured"])
+    assert readiness["reason_code"] == "account_not_configured"
+
+    assignment, lot_id, event = _persist_put_assignment(repo, prefix="removed-scope",
+        opened_at_ms=1_000, assigned_at_ms=2_000)
+    assert assignment["wheel_event_id"]
+    assert persist_trade_event_objects_atomically(repo, [event])[0].created is False
+    model = build_wheel_read_model(repo, "lx", 2_500, monitoring_readiness=readiness, market="us")
+    branch = next(row for row in model["wheel_branches"] if row["wheel_branch_id"] == lot_id)
+    assert branch["lifecycle_status"] == "active"
+    assert len([row for row in repo.list_wheel_events(account="lx") if row["event_id"] == assignment["wheel_event_id"]]) == 1
+    scan = run_wheel_call_scan(model, {}, {"frames": {}}, {}, {}, decision_time_ms=2_500)
+    assert scan["scope_results"][0]["reason_code"] == "wheel_disabled"
+    assert scan["capacity_claims"] == []
+    before = repo.list_wheel_events(account="lx")
+    with pytest.raises(ValueError, match="wheel_disabled: account_not_configured"):
+        create_wheel_call_intent(repo, candidate_snapshot={}, current_strategy_policy_sha256="b" * 64,
+            account="lx", lot_id=lot_id, final_candidate_id="removed-candidate", expected_snapshot_hash="snapshot",
+            expected_batch_generation_hash=branch["batch_generation_hash"], expires_at_ms=10_000,
+            request_id="removed-intent", actor="tester", coverage_fact={}, new_intent_enabled=True,
+            account_configured=False, market="us", activation_descriptor=resolved["activation_descriptor"],
+            policy_sha256=resolved["activation_descriptor"]["policy_hash"], apply_changes=True, as_of_ms=2_500)
+    assert repo.list_wheel_events(account="lx") == before
+
+
 def test_publish_failure_preserves_historical_assignment_rules_and_same_request_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -118,7 +156,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     )
 
     unavailable_status = _call(root, action="status")
-    assert unavailable_status["reason_code"] == "missing_descriptor"
+    assert unavailable_status["reason_code"] == "account_not_configured"
     assert unavailable_status["monitoring_gate"] == "disabled"
     unavailable = build_wheel_read_model(
         repo,
@@ -157,6 +195,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
             actor="tester",
             coverage_fact={},
             new_intent_enabled=True,
+            account_configured=True,
             market="us",
             activation_descriptor=None,
             policy_sha256="",

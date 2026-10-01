@@ -143,6 +143,15 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["capacity_claims"][0]["requested_shares"] == 100
 
+    removed_model = _read_model()
+    removed_model["batches"][0]["monitoring_gate"] = "disabled"
+    closed = run_wheel_call_scan(
+        removed_model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}}, {},
+        {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    assert not closed["raw_candidates"].get("stock-1")
+
     captured = finalize_wheel_capacity(
         account="lx",
         wheel_read_model=_read_model(),

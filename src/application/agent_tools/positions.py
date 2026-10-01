@@ -686,6 +686,7 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            account_configured=resolved["account_configured"],
             market=str(resolved.get("market") or ""),
             activation_descriptor=resolved.get("activation_descriptor"),
             policy_sha256=str(resolved.get("policy_sha256") or ""),
@@ -827,6 +828,7 @@ def _wheel_intent_tool(
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             capacity_fact=capacity_fact,
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            account_configured=resolved["account_configured"],
             activation_descriptor=resolved.get("activation_descriptor"),
             policy_sha256=str(resolved.get("policy_sha256") or ""),
         )
@@ -914,6 +916,7 @@ def _wheel_branch_decision_tool(
             args.update(
                 market=resolved.get("market"),
                 activation_descriptor=resolved.get("activation_descriptor"),
+                account_configured=resolved["account_configured"],
                 policy_sha256=resolved.get("policy_sha256"),
             )
         result = wheel_application.decide_wheel_branch(repo, **args)

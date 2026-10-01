@@ -26,6 +26,7 @@ from src.application.wheel.config import (
     build_wheel_policy_hash,
     evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor,
+    resolve_wheel_config,
 )
 from src.application.wheel.workflows import _activation_effective_config, _activation_owner_preflight
 
@@ -100,7 +101,8 @@ def rebind_wheel_policy(
         raw_installed = json.loads(runtime_path.read_text())
         if _activation_effective_config(raw_installed) != _activation_effective_config(authored):
             raise ValueError("Wheel runtime configuration differs from canonical YAML; rebuild before rebind")
-        if account not in installed.get("accounts", {}) or account not in installed.get("wheel", {}).get("accounts", []):
+        account_configured = resolve_wheel_config(installed, account, market=market)["account_configured"]
+        if account not in installed.get("accounts", {}) or not account_configured:
             raise ValueError("Wheel account is not configured")
         windows = observed["windows"]
         if not windows or windows[-1]["deactivated_at_ms"] is not None:
@@ -123,7 +125,9 @@ def rebind_wheel_policy(
         }
         if source_identity != _file_identity(source, content=True) or runtime_identity != _file_identity(runtime_path, content=True):
             raise ValueError("Wheel configuration changed while preparing policy binding")
-        return request, evaluate_wheel_activation_readiness(descriptor, current)
+        return request, evaluate_wheel_activation_readiness(
+            descriptor, current, account_configured=account_configured,
+        )
 
     def replay(observed: dict[str, Any]) -> bool:
         matches = [r for r in observed.get("policy_bindings", []) if r["request_id"] == request_id]

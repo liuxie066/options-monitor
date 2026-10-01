@@ -273,6 +273,88 @@ def test_two_booked_intent_fills_are_linked_and_consumed_atomically(tmp_path, mo
     assert len(repo.list_trade_events()) == len(before) + 2
 
 
+def test_late_exact_intent_fill_after_wheel_close_is_linked_once(tmp_path, monkeypatch):
+    from test_wheel_workflows import _wheel_repo, _create_call_intent
+    from src.application.trades.attribution import apply_trade_attribution
+
+    repo, config = _writable_call_scope(tmp_path, monkeypatch, fill_time=5_000)
+    seed = tmp_path / "intent-seed"
+    seed.mkdir()
+    source, lot_id = _wheel_repo(seed)
+    _create_call_intent(source, lot_id)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for event in source.list_wheel_events(account="lx"):
+            if event["event_type"] == "wheel_call_intent_created":
+                repo.append_wheel_event_once(event, conn=conn)
+    monkeypatch.setattr("src.application.ledger.repository_assigned_stock.now_ms", lambda: 4_500)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        closed = repo.close_wheel_activation_window(market="us", account="lx", expected_current_generation=1,
+            policy_hash=repo.get_current_wheel_activation_window(market="us", account="lx", conn=conn)["policy_hash"],
+            request_id="close", request_hash="c" * 64, conn=conn)
+    config["wheel"]["activation_by_account"]["lx"]["deactivated_at_ms"] = closed["window"]["deactivated_at_ms"]
+    monkeypatch.setattr("time.time", lambda: 6)
+    evidence = {"complete": True, "exposures": []}
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="us")
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=6_000, combo_evidence=evidence)
+    call = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    assert call["selected_candidate_id"] and call["candidates"][0]["intent_id"]
+    args = dict(account="lx", market="us", config=config, execution_key=call["execution_key"],
+        candidate_id=call["selected_candidate_id"], expected_input_hash=call["input_hash"],
+        request_id="late-intent", actor="trade_intake:rule", combo_evidence=evidence,
+        capacity_observation={}, combo_mode="confirm")
+    first = apply_trade_attribution(repo, **args)
+    second = apply_trade_attribution(repo, **args)
+    assert first["status"] == second["status"] == "linked"
+    assert first["write_applied"] and not second["write_applied"]
+    assert len([event for event in repo.list_wheel_events(account="lx")
+                if event["event_type"] == "wheel_call_intent_consumed"]) == 1
+
+
+@pytest.mark.parametrize("gate, with_intent, eligible", [
+    ("account_removed", True, True),
+    ("account_removed", False, False),
+    ("closed", False, False),
+    ("closed_order_mismatch", True, False),
+    ("closed_policy_drift", True, False),
+    ("account_removed_boundary_mismatch", True, False),
+    ("missing_window", True, False),
+])
+def test_late_fill_needs_exact_intent_and_valid_historical_gate(tmp_path, monkeypatch, gate, with_intent, eligible):
+    from test_wheel_workflows import _wheel_repo, _create_call_intent
+
+    rows, config, branch_id = _call_scope(tmp_path, monkeypatch)
+    next(event for event in rows["trade_events"] if event["event_id"] == "unlinked-call-open-1")["event_time_ms"] = 5_000
+    if with_intent:
+        seed = tmp_path / "intent-seed"
+        seed.mkdir()
+        source, lot_id = _wheel_repo(seed)
+        _create_call_intent(source, lot_id, broker_order_id="different-order" if gate == "closed_order_mismatch" else None)
+        rows["account_wheel_events"].extend(event for event in source.list_wheel_events(account="lx")
+            if event["event_type"] == "wheel_call_intent_created")
+    if gate.startswith("account_removed"):
+        config["wheel"]["accounts"] = []
+    if gate.startswith("closed"):
+        config["wheel"]["activation_by_account"]["lx"]["deactivated_at_ms"] = 4_500
+        rows["wheel_activation_window"]["deactivated_at_ms"] = 4_500
+    if gate == "closed_policy_drift":
+        rows["wheel_activation_window"]["policy_sha256"] = "e" * 64
+    elif gate == "account_removed_boundary_mismatch":
+        rows["wheel_activation_window"]["generation"] = 2
+    elif gate == "missing_window":
+        rows["wheel_activation_window"] = None
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=6_000,
+                                        combo_evidence={"complete": True, "exposures": []})
+    call = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    assert bool(call["selected_candidate_id"]) is eligible, (gate, call["reason_codes"])
+    if eligible:
+        assert call["selected_candidate_id"] == "wheel:" + branch_id
+        assert call["candidates"][0]["intent_id"]
+    else:
+        assert "wheel_branch_not_ready" in call["reason_codes"]
+        if gate == "closed_order_mismatch":
+            assert "wheel_intent_fill_mismatch_or_consumed" in call["reason_codes"]
+
+
 def test_two_independent_writers_cannot_claim_different_memberships(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier

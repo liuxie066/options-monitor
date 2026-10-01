@@ -114,7 +114,16 @@ def build_trade_attribution_view(
             fact["ordinary_previewable"] = False
     stored = {row["record_id"]: row["fields"] for row in rows["stored_position_lots"]}
     wheel_config = resolve_wheel_config(config, account, market=market)
-    readiness = evaluate_wheel_activation_readiness(wheel_config.get("activation_descriptor"), rows.get("wheel_activation_window"))
+    readiness = evaluate_wheel_activation_readiness(
+        wheel_config.get("activation_descriptor"), rows.get("wheel_activation_window"),
+        account_configured=wheel_config["account_configured"],
+    )
+    intent_history_readiness = (readiness if wheel_config["account_configured"] else
+        evaluate_wheel_activation_readiness(wheel_config.get("activation_descriptor"),
+            rows.get("wheel_activation_window"), account_configured=True))
+    late_intent_allowed = (readiness["reason_code"] in {"closed_window", "account_not_configured"}
+        and intent_history_readiness["reason_code"] in {None, "closed_window"}
+        and not intent_history_readiness.get("policy_drift"))
     model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=now_ms, market=market,
                                             monitoring_readiness=readiness)
     capacity_model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=now_ms)
@@ -180,8 +189,6 @@ def build_trade_attribution_view(
                 continue
             if prior["integrity_status"] != "trusted":
                 reasons.append("wheel_branch_not_trusted_at_fill")
-            if branch["integrity_status"] != "trusted" or not readiness["ready"]:
-                reasons.append("wheel_branch_not_ready")
             branch_ref = _branch_account_ref(branch, rows)
             if branch_ref is not None and branch_ref != fact["broker_account_ref"]:
                 continue
@@ -199,6 +206,9 @@ def build_trade_attribution_view(
                 known_trade_event_ids={event["event_id"] for event in rows["trade_events"]})
             reasons.extend(intent_check["reason_codes"])
             intent = intent_check["intent"]
+            if branch["integrity_status"] != "trusted" or (not readiness["ready"]
+                    and not (late_intent_allowed and intent is not None)):
+                reasons.append("wheel_branch_not_ready")
             consumed_reservation = ({"wheel_branch_id": branch_id, "intent_id": intent["intent_id"],
                 "contracts": intent_check["reserved_contracts_to_consume"]} if intent else None)
             try:

@@ -191,8 +191,11 @@ def _require_current_wheel_activation(
     market: str,
     branch: Mapping[str, Any],
     activation_descriptor: Mapping[str, Any] | None,
+    account_configured: bool,
     policy_sha256: str,
 ) -> None:
+    if not account_configured:
+        raise ValueError("wheel_disabled: account_not_configured")
     market_value = str(market or "").strip().lower()
     policy_hash = str(policy_sha256 or "").strip().lower()
     descriptor_policy = str(
@@ -214,6 +217,7 @@ def _require_current_wheel_activation(
             account=account,
             conn=conn,
         ),
+        account_configured=account_configured,
     )
     if not readiness["ready"]:
         raise ValueError(
@@ -232,6 +236,7 @@ def decide_wheel_branch(
     actor: str,
     market: str,
     activation_descriptor: Mapping[str, Any] | None = None,
+    account_configured: bool | None = None,
     policy_sha256: str | None = None,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
@@ -311,6 +316,7 @@ def decide_wheel_branch(
                 market=market_value,
                 branch=branch,
                 activation_descriptor=activation_descriptor,
+                account_configured=account_configured is True,
                 policy_sha256=str(policy_sha256 or ""),
             )
         event = plan_wheel_branch_decision(
@@ -404,6 +410,7 @@ def _activation_status(
     latest = windows[-1] if windows else None
     current = latest if latest and latest["deactivated_at_ms"] is None else None
     membership = False
+    invalid_account_scope = False
     try:
         raw_wheel = cfg.get("wheel")
         if raw_wheel is None:
@@ -411,19 +418,25 @@ def _activation_status(
         if not isinstance(raw_wheel, Mapping):
             raise ValueError("wheel must be an object")
         membership = account in normalize_wheel_accounts(raw_wheel.get("accounts", []))
-        readiness = evaluate_wheel_activation_readiness(
-            resolve_wheel_activation_descriptor(cfg, market=market, account=account), latest,
-        )
     except (ValueError, TypeError):
+        invalid_account_scope = True
+    if invalid_account_scope:
         readiness = {"ready": False, "enabled_for_new_lifecycle": False,
-                     "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch",
+                     "monitoring_gate": "config_mismatch", "reason_code": "invalid_account_scope",
                      "policy_drift": False}
-    if observed["source_status"] != "available":
+    else:
+        try:
+            readiness = evaluate_wheel_activation_readiness(
+                resolve_wheel_activation_descriptor(cfg, market=market, account=account), latest,
+                account_configured=membership,
+            )
+        except (ValueError, TypeError):
+            readiness = {"ready": False, "enabled_for_new_lifecycle": False,
+                         "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch",
+                         "policy_drift": False}
+    if observed["source_status"] != "available" and readiness["monitoring_gate"] != "config_mismatch":
         readiness.update(ready=False, enabled_for_new_lifecycle=False,
                          monitoring_gate="disabled", reason_code=observed["source_status"])
-    elif readiness["ready"] and not membership:
-        readiness.update(ready=False, enabled_for_new_lifecycle=False,
-                         monitoring_gate="disabled", reason_code="account_not_configured")
     # After the overrides: a gate that was closed for another reason must never advertise
     # a policy command, and the overrides above rewrite `reason_code` to say so.
     readiness.update(
@@ -1029,6 +1042,7 @@ def create_wheel_call_intent(
     actor: str,
     coverage_fact: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
@@ -1112,6 +1126,7 @@ def create_wheel_call_intent(
             market=market_value,
             branch=batch,
             activation_descriptor=activation_descriptor,
+            account_configured=account_configured,
             policy_sha256=policy_sha256,
         )
         if batch["batch_generation_hash"] != expected_generation:
@@ -1955,6 +1970,7 @@ def _create_wheel_put_intent(
     actor: str,
     capacity_fact: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
@@ -2017,6 +2033,7 @@ def _create_wheel_put_intent(
             market=market,
             branch=branch,
             activation_descriptor=activation_descriptor,
+            account_configured=account_configured,
             policy_sha256=policy_sha256,
         )
         if branch.get("direction") != "put":
@@ -2145,6 +2162,7 @@ def create_wheel_intent(
     actor: str,
     capacity_fact: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
@@ -2174,6 +2192,7 @@ def create_wheel_intent(
             actor=str(actor or "").strip(),
             capacity_fact=capacity_fact,
             new_intent_enabled=new_intent_enabled,
+            account_configured=account_configured,
             market=market_value,
             activation_descriptor=activation_descriptor,
             policy_sha256=policy_sha256,
@@ -2207,6 +2226,7 @@ def create_wheel_intent(
         actor=actor,
         coverage_fact=capacity_fact,
         new_intent_enabled=new_intent_enabled,
+        account_configured=account_configured,
         market=market_value,
         activation_descriptor=activation_descriptor,
         policy_sha256=policy_sha256,

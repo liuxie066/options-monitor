@@ -18,6 +18,7 @@ from .position_projection_runtime import run_position_projection_in_transaction
 from .current_decision_projection import capture_trade_event_decision_projection_fence
 from .writer import _finish_trade_event_decision_projection
 from .read_only_evidence import open_trade_reconciliation_evidence_repo
+from .repository_wheel_policy import effective_wheel_window
 
 
 ATTRIBUTION_POLICY_VERSION = "trade_attribution.v1"
@@ -91,6 +92,11 @@ def read_trade_attribution_snapshot(repo: Any, *, account: str, market: str, con
         rows = reader.read_lifecycle_account_rows(account=account, conn=active)
         rows["account_combo_inferences"] = reader.list_combo_pair_inferences(account=account, conn=active)
         rows["wheel_activation_window"] = reader.get_current_wheel_activation_window(market=market, account=account, conn=active)
+        if rows["wheel_activation_window"] is None:
+            windows = reader.list_wheel_activation_windows(market=market, account=account, conn=active)
+            if windows:
+                bindings = reader.list_wheel_policy_bindings(market=market, account=account, conn=active)
+                rows["wheel_activation_window"] = effective_wheel_window(windows[-1], bindings)
         if active.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_attribution_policy_enablings'").fetchone():
             rows["attribution_policy_enablings"] = [dict(row) for row in active.execute(
                 "SELECT * FROM trade_attribution_policy_enablings WHERE account = ? AND market = ? AND policy_version = ?",

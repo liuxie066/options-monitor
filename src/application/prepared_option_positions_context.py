@@ -49,7 +49,7 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import required_text
 from src.application.wheel.config import (
     evaluate_wheel_activation_readiness,
-    resolve_wheel_activation_descriptor,
+    resolve_wheel_config,
 )
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
@@ -724,8 +724,8 @@ def prepare_option_positions_contexts(
                         config_path=config_path,
                         config=configs[account],
                     )
-                    descriptor = resolve_wheel_activation_descriptor(
-                        configs[account], market=market, account=account
+                    wheel_config = resolve_wheel_config(
+                        configs[account], account, market=market,
                     )
                     durable_window = repos_by_ledger_path[
                         ledger_path
@@ -734,8 +734,9 @@ def prepare_option_positions_contexts(
                         account=account,
                     )
                     monitoring_readiness = evaluate_wheel_activation_readiness(
-                        descriptor,
+                        wheel_config["activation_descriptor"],
                         durable_window,
+                        account_configured=wheel_config["account_configured"],
                     )
                     wheel_model = build_wheel_read_model_from_rows(
                         rows_by_account[account],
