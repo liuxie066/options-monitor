@@ -253,7 +253,9 @@ om-agent run --tool portfolio_assignment_scenario \
 该功能是纯读压力测试，不写 assignment event、不修改 `position_lots`、不修改 portfolio-management 持仓，也不发送通知。固定口径：
 
 - 只处理 open short put/call；Long Option 完全不读取、不估值、不保留；
-- portfolio-management 提供全部非期权资产、当前报价、显式 FX 和补充标的报价，OM SQLite 提供 short option lot；
+- 富途账户股票、现金与 MMF 从 OpenD 读取，富途股票现价也以 OpenD 为准；OM SQLite 提供 short option lot；
+- `portfolio.holdings.enabled` 默认关闭；开启后仅补充 PM Holdings 中经预检确认的非富途资产，不重复计入 PM 的富途股票、现金和 MMF 副本；
+- 非富途资产估值使用 PM 报价和显式 FX；PM 证据不可用时保留富途基线并标记 `partial`；
 - MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
 - 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；

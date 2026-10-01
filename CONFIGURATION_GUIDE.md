@@ -84,18 +84,25 @@ portfolio_management:
 - `symbols` 保持字符串列表；
 - 个性化策略配置放在 `overrides.<symbol>`；
 - `portfolio_management.enabled` 是全局开关，不按市场配置；默认关闭；
-- `portfolio.holdings.enabled` 是可选 Holdings 来源的独立配置，默认关闭；
+- `portfolio.holdings.enabled` 控制全部指派后分布是否补充 PM Holdings 的非富途资产，默认关闭；
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
 
 ## Portfolio Exposure 的 Holdings 来源配置
 
-Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。当前这轮只增加
-`portfolio.holdings.enabled` 的配置、PM 来源预检和读回；现有情景查询尚未按该字段扩展持仓来源。
-开启预检以 Portfolio Exposure 当前使用的 OM 运行账户为范围：这些账户须由 PM 发现，且估值证据
-新鲜可信；PM 的额外账户不阻止开启。结果只列出该范围内已观测的 Holdings，不宣称覆盖全部 broker
-或 market，也不把 Holdings 写入 Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
+Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。情景以富途 OpenD 的
+股票和现金（含 MMF）为底，OM `position_lots` 提供未平仓卖出期权。开启
+`portfolio.holdings.enabled` 后，仅补充 PM Holdings 中券商明确为非富途的资产；PM 中
+富途股票、现金和 MMF 副本全部排除。来源不明的 PM 行不纳入并标记结果为 partial。
+富途股票及期权标的价格取自 OpenD 市场快照；汇率使用同次情景的 OM 市场汇率观测。
+休市价或报价缺失会标记 partial，不以 PM 报价回退。Holdings 关闭时查询不依赖 PM；
+缺少富途底仓时结果为 unavailable。
+开启预检以已配置 OM 账户为范围，要求 PM `non_futu` 估值证据新鲜可信，并展示完整原始
+broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。预览将非富途
+broker 原文集合按账户写入待发布配置；apply 重读 PM，集合变化会在写入前拒绝。
+查询遇旧配置缺集合或新 broker 值会暂停整份 PM 补充并标 partial。不把 Holdings 写入
+Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
 `portfolio_management.enabled` 开启。
 PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
 

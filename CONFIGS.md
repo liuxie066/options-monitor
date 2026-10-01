@@ -39,11 +39,11 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
-- `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，同时控制只读工具、
-  指派证据和成交后的持仓刷新提示；不要放在 `markets.*` 下；
-- `portfolio.holdings.enabled` 是 Portfolio Exposure 的可选 Holdings 来源配置，默认关闭；
-  开启前检查 PM 的 Holdings 账户和估值证据，只报告已观测范围，不声明 broker/market 全覆盖。
-  本阶段只建立配置和读回，不改变现有指派后情景的持仓来源；
+- `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，控制 PM 只读工具、
+  Holdings 开启时的补充来源和成交后的持仓刷新提示；不要放在 `markets.*` 下；
+- `portfolio.holdings.enabled` 控制指派后分布是否补充 PM Holdings 中明确为非富途来源的资产，
+  默认关闭；富途股票、现金、MMF 和股票现价取自 OpenD，PM 的富途副本不重复计入。
+  开启预览展示 PM 原始 broker 清单，并把按账户批准的非富途原文集合绑定配置摘要；
 - 旧 `trade_intake.holdings_sync.enabled` 只保留一个版本的迁移读取，旧队列、重试、
   超时和状态目录参数不再生效；
 - account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
@@ -63,58 +63,15 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 Close Advice 详细固定规则见
 [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md)。
 
-### Portfolio Exposure 的 Holdings 来源配置（研发设计）
+### Portfolio Exposure 的 Holdings 来源配置
 
-目标：为始终可用的 Portfolio Exposure 增加一个**来源纳入意图**，默认不纳入 Holdings；
-可预览、开启和关闭，并在开启前核对 PM Holdings 的当前可用证据。本轮仅交付配置行为，
-不改变现有“所有未平仓卖出期权均被指派”的只读情景计算及其持仓读取路径。
-不恢复已退役的 `external_holdings` 账户，不写 Futu、PM Holdings、OM 期权账本或生产配置，
-不新增 Portfolio Exposure 产品总开关，也不承诺覆盖所有 broker 或 market。
+`portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以富途 OpenD 股票、现金（含 MMF）和 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途股票、现金和 MMF 副本不会参与报价、估值或分布。PM 非富途现金计入资产分布，但不增加富途期权资金覆盖。
 
-| 验收 | 可观察行为 |
-|---|---|
-| H1 默认与校验 | `portfolio.holdings.enabled` 缺省为 `false`，在默认配置和生成的市场快照中可见；只接受全局布尔值，不允许市场覆盖或未知 Holdings 键。 |
-| H2 受控切换 | `om config holdings set` 预览无目标写入，展示当前值、目标值、源与全部生成目标；apply 需确认、匹配的源 SHA 和绑定该目标的预览摘要，经现有 authoring/build 事务生成 YAML 中所有已配置的 US/HK 市场与 Assistant 快照、备份并读回；关闭可在 PM 故障时完成。 |
-| H3 开启预检 | 开启前检查 PM 集成、Holdings 账户发现及新鲜可信的估值证据。预览可展示预检失败而不写入，apply 必须拒绝。回报仅列出所检查 OM 账户中 PM 已观测的账户、broker、market 与时间，不把一次预检解释为查询已接线、持续可用或全覆盖证明。 |
-| H4 情景隔离 | 原 `portfolio_assignment_scenario` 查询与领域计算没有本轮改动；新键尚不改变查询结果，操作说明和返回值须明确这一阶段边界。 |
+开启前运行 `om config holdings set --enabled true` 预览。预检向 PM 读取完整原始 Holdings 切片的 broker 清单，展示每个账户的 broker 原文、`futu/non_futu/unknown` 分类、行数、纳入/排除数量与读取时间。成功读取且零合格行、无 unknown 和 unsupported 时为 `ready_empty`。预览把各账户确认的非富途 broker 原文集合写入待发布 `portfolio.holdings.approved_non_futu_brokers`，并绑定 `preview_sha256`；apply 再读 PM，集合变化会在写配置前返回 `STALE_PREVIEW`。实值 broker 归属仍须在实际启用预览中核对。
 
-事实及复用清单：检索 `src/application/config_defaults.py`、`config_yaml.py`、
-`config_validator.py`、`config_authoring_transaction.py`、`portfolio_management.py`、
-`portfolio_assignment_scenario.py`、`domain/domain/portfolio_assignment_scenario.py`、
-`src/interfaces/cli/config_ops.py` 和相邻测试，关键词为 `portfolio.holdings`、
-`portfolio_management.enabled`、`publish_yaml_config_generation`、`read_portfolio_valuation_evidence`、
-`project_assignment_scenario`。配置层级及默认值复用 `DEFAULT_CONFIG` 和现有 YAML 转换，
-默认值落在 `DEFAULT_CONFIG['defaults']['portfolio']['holdings']['enabled'] = false`；
-校验复用 `validate_config`；写入复用 `publish_yaml_config_generation` 的预览、SHA、备份和构建；
-PM 连接与估值证据复用 `resolve_portfolio_management_client` 和
-`read_portfolio_valuation_evidence`；指派计算复用现有领域 owner，**本轮不接线或复制计算**。
-新增的只有 `portfolio.holdings.enabled` 这个独立来源意图和对应 CLI 操作；它不同于控制整个
-PM 集成的 `portfolio_management.enabled`。未找到可直接表达这一独立意图的既有键。
+apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事务生成 YAML、所有已配置市场快照和 Assistant 快照、备份并读回。PM 失败、旧版响应、未知 broker 或估值质量不完整时禁止开启；关闭不依赖 PM。旧版 `enabled=true` 而没有批准集合的配置允许加载，但只读查询暂停 PM 补充并标 partial，提示重新预览确认。启用后出现未批准的新非富途 broker 时，整份 PM 补充暂停并标 partial；已批准 broker 的行数变化无需重新批准。配置只允许全局设置，不允许市场覆盖。
 
-选择全局布尔键，而不复用 PM 集成开关或账户类型：后两者已有更广的运行语义。
-不调用 PM 当前持仓分布作为 Portfolio Exposure 结果，因为它不包含卖出期权全部被指派的情景。
-不在本轮新增查询 facade、状态枚举或后台同步。数据流为 YAML 作者源 → 只读生成预览 →
-预检（仅开启） → 现有生成事务 → 市场/Assistant 快照 → 全部目标读回。
-预览展示源 SHA、生成后 YAML 的 SHA、当前/目标值、绝对源路径、runtime root、市场集合及目标路径；
-PM 故障时仍可得到预览和预检失败原因，但 apply 不放行。确认摘要由源 SHA、目标值、路径、
-市场集合和生成后 YAML 的 SHA 确定性计算；apply 重算并拒绝与预览不一致的目标。
-市场和 Assistant 快照含生成时间，预览与 apply 的文件 SHA 可以不同，不纳入确认摘要；
-源 SHA 另行保护并发编辑。
-PM Accounts 契约确认 Portfolio Exposure 当前使用的 OM 运行账户是否存在；预检只对这些账户
-要求新鲜可信的估值证据，PM 的额外账户不阻止开启。估值证据中的 Holdings 行决定已观测账户与
-broker/market。本轮查询尚未接线，不宣称这些账户已可由当前情景查询使用。
-YAML 与市场快照读回 Holdings 值；
-全部目标按事务返回的 SHA 核对文件内容，Assistant 只核对生成身份和摘要，因为它不含 Holdings 值。
-事务提交前失败须明确无配置写入；提交后读回失败须报出 `write_applied=true`、受影响目标、
-`audit_id`、备份路径和安全复核指引，不把报错解释成未写入。返回值明确“本阶段只是配置，
-当前情景查询尚未消费该开关”。预检通过只描述那次观测，后续查询仍须单独判断实时质量。
-
-实施切片：① 默认值与严格校验（H1）；② 开启/关闭、预检、事务与读回（H2、H3，依赖①）；
-③ CLI、文档与情景隔离回归（H4，依赖②）。验证使用隔离临时 YAML/runtime root、PM 假客户端，
-覆盖成功、预检失败仍可预览且 apply 无写入、关闭恢复、确认目标不匹配、
-提交后读回失败回执、全部目标摘要及旧情景回归，再运行项目适用门禁。
-风险：当前 PM 估值的 `complete` 要求也受行情质量影响，可能阻断开启；这是本轮保守的
-开启门禁，不代表配置后的持续状态。真正按开关切换持仓来源及运行状态显示属于后续独立范围。
+`portfolio_management.enabled` 仍控制更广的 PM 集成，不能代替此开关。配置切换不执行交易、指派、账本、PM Holdings 或 Feishu 写入；生产配置发布与部署另行授权。
 
 ## Symbol 并发配置
 

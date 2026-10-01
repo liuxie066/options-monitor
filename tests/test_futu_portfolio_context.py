@@ -29,6 +29,28 @@ def _futu_portfolio_cfg(**extra) -> dict:
     return {"portfolio": {"futu": {"host": "127.0.0.1", "port": 11111, "trd_env": "REAL"}}, **extra}
 
 
+def test_scenario_supplied_fx_skips_context_fx_fetch(monkeypatch) -> None:
+    import src.application.futu_portfolio_context as fc
+
+    monkeypatch.setattr(
+        fc,
+        "_query_rows_for_account_ids",
+        lambda *_args, **_kwargs: [{"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "REAL", "cn_cash": 1}],
+    )
+    monkeypatch.setattr(
+        fc,
+        "_fetch_market_exchange_rate_observation",
+        lambda: pytest.fail("context fetched FX despite supplied scenario observation"),
+    )
+
+    rows, observation = fc._query_opend_exchange_rate_observation(
+        object(), account_ids={FAKE_FUTU_ACC_ID_LX_PRIMARY}, trd_env="REAL", read_exchange_rate=False,
+    )
+
+    assert rows[0]["cn_cash"] == 1
+    assert observation is None
+
+
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
     from src.application.account_config import resolve_trade_intake_futu_account_ids
 

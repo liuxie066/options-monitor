@@ -178,8 +178,14 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   --input-json '{"accounts":["lx","sy"]}'
 ```
 
-该工具只有 `accounts` 一个业务入参。它把 portfolio-management 的非期权估值证据与 OM SQLite 的 open short put/call lot 合并，输出
-`portfolio.assignment_scenario.v1`。MMF 计入现金、主资金口径为 CNY、Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
+该工具只有 `accounts` 一个业务入参。富途 OpenD 的股票和现金（含 MMF）是底仓；
+`portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
+PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
+富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
+启用须先通过 `om config holdings set` 预览确认 broker 原文；查询时 PM scoped 清单
+缺失或出现未批准的新值会暂停整份 PM 补充，保留富途基线并标 `partial`。
+输出 `portfolio.assignment_scenario.v1`，主资金口径为 CNY，
+Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 
 ### 查询运行历史
 

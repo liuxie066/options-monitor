@@ -163,22 +163,27 @@ class PortfolioManagementClient:
         accounts: list[str],
         supplemental_codes: list[str],
         price_timeout: int,
+        holdings_scope: str | None = None,
     ) -> dict[str, Any]:
         normalized_accounts = _normalized_accounts(accounts)
+        payload = {
+            "accounts": normalized_accounts,
+            "supplemental_codes": supplemental_codes,
+            "price_timeout": int(price_timeout),
+        }
+        if holdings_scope is not None:
+            payload["holdings_scope"] = holdings_scope
         result = self._request(
             "POST",
             VALUATION_EVIDENCE_PATH,
-            payload={
-                "accounts": normalized_accounts,
-                "supplemental_codes": supplemental_codes,
-                "price_timeout": int(price_timeout),
-            },
+            payload=payload,
             timeout=float(min(max(int(price_timeout) + 10, 15), 180)),
             max_response_bytes=VALUATION_MAX_RESPONSE_BYTES,
         )
         return _validate_valuation_evidence_response(
             result,
             requested_accounts=normalized_accounts,
+            holdings_scope=holdings_scope,
         )
 
     def request_holdings_refresh(
@@ -373,6 +378,7 @@ def _validate_valuation_evidence_response(
     result: Mapping[str, Any],
     *,
     requested_accounts: list[str],
+    holdings_scope: str | None = None,
 ) -> dict[str, Any]:
     item = dict(result)
     required = {
@@ -426,6 +432,11 @@ def _validate_valuation_evidence_response(
         raise PortfolioManagementProtocolError(
             "portfolio valuation account scope mismatch"
         )
+    if holdings_scope is not None:
+        if scope.get("holdings_scope") != holdings_scope:
+            raise PortfolioManagementProtocolError("portfolio valuation holdings scope mismatch")
+        if holdings_scope == "non_futu":
+            _validate_non_futu_inventory(item, requested_accounts)
     if not isinstance(snapshot, Mapping):
         raise PortfolioManagementProtocolError(
             "portfolio valuation snapshot must be an object"
@@ -498,6 +509,86 @@ def _validate_valuation_evidence_response(
             "portfolio valuation warnings must be strings"
         )
     return item
+
+
+def _broker_scope(value: str) -> str:
+    compact = value.strip().replace("（", "(").replace("）", ")").replace(" ", "").replace("\u3000", "").lower()
+    if (
+        not compact or compact in {"n/a", "na", "none", "null"}
+        or compact.startswith(("unknown", "未知", "其他", "其它", "other", "manual", "手动", "未指定", "待确认"))
+        or not any(char.isalnum() for char in compact)
+    ):
+        return "unknown"
+    return "futu" if compact.startswith(("moomoo", "富途", "futu")) else "non_futu"
+
+
+def _validate_non_futu_inventory(item: Mapping[str, Any], accounts: list[str]) -> None:
+    scope = item["scope"]
+    inventory = scope.get("broker_inventory")
+    counts = scope.get("holding_counts")
+    statuses = item.get("account_status")
+    holdings = item.get("holdings")
+    if not isinstance(inventory, Mapping) or not isinstance(counts, Mapping) or not isinstance(statuses, list) or not isinstance(holdings, list):
+        raise PortfolioManagementProtocolError("PM non_futu broker inventory is missing")
+    if set(inventory) != set(accounts) or set(counts) != set(accounts):
+        raise PortfolioManagementProtocolError("PM non_futu broker inventory account mismatch")
+    for account in accounts:
+        source = inventory[account]
+        count = counts[account]
+        status = next((row for row in statuses if isinstance(row, Mapping) and row.get("account") == account), None)
+        if not isinstance(source, Mapping) or not isinstance(count, Mapping) or not isinstance(status, Mapping):
+            raise PortfolioManagementProtocolError("PM non_futu broker inventory is incomplete")
+        brokers = source.get("brokers")
+        rows = status.get("source_rows")
+        if source.get("source") != "feishu" or not isinstance(brokers, list) or not isinstance(rows, list) or status.get("holding_counts") != count:
+            raise PortfolioManagementProtocolError("PM non_futu source inventory is invalid")
+        _require_timestamp(source.get("read_at_utc"), "PM non_futu source read_at_utc")
+        grouped: dict[tuple[str, str], int] = {}
+        ids: set[str] = set()
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("broker"), str) or not isinstance(row.get("record_id"), str) or not row["record_id"].strip() or row["record_id"] in ids:
+                raise PortfolioManagementProtocolError("PM non_futu source row is invalid")
+            broker = row["broker"]
+            classification = _broker_scope(broker)
+            if row.get("classification") != classification or row.get("source_read_at_utc") != source["read_at_utc"]:
+                raise PortfolioManagementProtocolError("PM non_futu source row classification mismatch")
+            ids.add(row["record_id"])
+            key = (broker, classification)
+            grouped[key] = grouped.get(key, 0) + 1
+        declared: dict[tuple[str, str], int] = {}
+        for row in brokers:
+            if not isinstance(row, Mapping) or not isinstance(row.get("broker"), str) or row.get("classification") != _broker_scope(row["broker"]) or type(row.get("row_count")) is not int or row["row_count"] <= 0:
+                raise PortfolioManagementProtocolError("PM non_futu broker classification mismatch")
+            key = (row["broker"], row["classification"])
+            if key in declared:
+                raise PortfolioManagementProtocolError("PM non_futu duplicate broker inventory")
+            declared[key] = row["row_count"]
+        if declared != grouped or type(source.get("source_rows")) is not int or source["source_rows"] != len(rows):
+            raise PortfolioManagementProtocolError("PM non_futu broker inventory counts mismatch")
+        fields = ("source_rows", "included", "zero_quantity", "excluded_futu", "excluded_unknown_broker", "unsupported")
+        if any(type(count.get(field)) is not int or count[field] < 0 for field in fields):
+            raise PortfolioManagementProtocolError("PM non_futu holding counts are invalid")
+        if count["source_rows"] != len(rows) or count["excluded_futu"] != sum(n for (broker, kind), n in grouped.items() if kind == "futu") or count["excluded_unknown_broker"] != sum(n for (broker, kind), n in grouped.items() if kind == "unknown") or count["source_rows"] != count["included"] + count["zero_quantity"] + count["excluded_futu"] + count["excluded_unknown_broker"]:
+            raise PortfolioManagementProtocolError("PM non_futu holding counts mismatch")
+        account_holdings = [row for row in holdings if isinstance(row, Mapping) and row.get("account") == account]
+        if len(account_holdings) != count["included"] or count["unsupported"] > count["included"]:
+            raise PortfolioManagementProtocolError("PM non_futu included holdings count mismatch")
+        if any(_broker_scope(str(row.get("broker"))) != "non_futu" for row in account_holdings):
+            raise PortfolioManagementProtocolError("PM non_futu holding source mismatch")
+        eligible_ids = {
+            row["record_id"]: row["broker"].strip()
+            for row in rows if row["classification"] == "non_futu"
+        }
+        included_ids: set[str] = set()
+        for row in account_holdings:
+            record_id = row.get("record_id")
+            if (
+                not isinstance(record_id, str) or record_id in included_ids
+                or eligible_ids.get(record_id) != row.get("broker")
+                or row.get("source_read_at_utc") != source["read_at_utc"]
+            ):
+                raise PortfolioManagementProtocolError("PM non_futu holding record provenance mismatch")
+            included_ids.add(record_id)
 
 
 def _validate_freshness(value: Any) -> dict[str, Any]:

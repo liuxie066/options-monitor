@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -51,20 +53,59 @@ def _valuation_response(*, accounts=None):
         },
         "holdings": [],
         "quotes": [],
-        "account_status": [
-            {"account": account, "status": "complete"}
-            for account in resolved_accounts
-        ],
+        "account_status": [{"account": account, "status": "complete"} for account in resolved_accounts],
         "warnings": [],
     }
 
 
-def _patch_positions(monkeypatch, positions):
+def _patch_positions(monkeypatch, positions, *, holdings_enabled=False, approved=None, futu_context=None, futu_quotes=None):
+    monkeypatch.setattr(
+        application,
+        "fetch_market_exchange_rates",
+        lambda: {
+            "source": "tencent_quote",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     monkeypatch.setattr(
         application,
         "_load_runtime_and_positions",
-        lambda accounts: (positions, "config.us.json", {"portfolio_management": {"enabled": True}}),
+        lambda accounts: (
+            positions,
+            "config.us.json",
+            {"portfolio_management": {"enabled": True}, "portfolio": {"holdings": {"enabled": holdings_enabled, **({"approved_non_futu_brokers": {"lx": approved if approved is not None else ["银行"]}} if holdings_enabled else {})}}},
+        ),
     )
+    monkeypatch.setattr(
+        application,
+        "fetch_futu_portfolio_context",
+        lambda *, cfg, account, exchange_rate_observation: (
+            futu_context
+            or {
+                "source_observed_at": "2026-07-24T01:00:00Z",
+                "cash_by_currency": {"CNY": 0},
+                "cash_balance_reliable": True,
+                "stocks_by_symbol": {},
+                "position_snapshot_input": {"rows": [], "errors": []},
+                "exchange_rates": None,
+                "exchange_rate_status": "unavailable",
+            }
+        ),
+    )
+    monkeypatch.setattr(application, "_read_futu_quotes", lambda *_args, **_kwargs: (futu_quotes or [], []))
+
+
+def _futu_quote(code, price_native, *, rate=7.2):
+    return {
+        "code": code,
+        "currency": "USD",
+        "price_native": price_native,
+        "price_cny": price_native * rate,
+        "exchange_rate_to_cny": rate,
+        "source": "futu_opend_market_snapshot",
+        "observed_at": "2026-07-24T01:00:00Z",
+    }
 
 
 def test_normalize_assignment_accounts_trims_lowercases_and_deduplicates():
@@ -161,46 +202,171 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
     seen = {}
     _patch_positions(monkeypatch, positions)
 
-    def evidence_reader(
-        *,
-        accounts,
-        supplemental_codes,
-        price_timeout=30,
-        runtime_config=None,
-    ):
-        seen["accounts"] = accounts
-        seen["supplemental_codes"] = supplemental_codes
-        result = _valuation_response(accounts=["lx"])
-        result["quotes"] = [
-            {
-                "code": "NVDA",
-                "currency": "USD",
-                "price_native": 120,
-                "price_cny": 864,
-                "exchange_rate_to_cny": 7.2,
-                "source": "test",
-            }
-        ]
-        return result
+    def read_quotes(codes, **_kwargs):
+        seen["codes"] = list(codes)
+        return [_futu_quote("NVDA", 120)], []
 
     monkeypatch.setattr(
         application,
+        "_read_futu_quotes",
+        read_quotes,
+    )
+    monkeypatch.setattr(
+        application,
         "read_portfolio_valuation_evidence",
-        evidence_reader,
+        lambda **_kwargs: pytest.fail("PM must not be read when Holdings is off"),
     )
 
     result = application.query_portfolio_assignment_scenario([" LX ", "lx"])
 
-    assert seen == {"accounts": ["lx"], "supplemental_codes": ["NVDA"]}
+    assert seen == {"codes": ["NVDA"]}
     assert result["scope"]["accounts"] == ["lx"]
     assert result["scope"]["include_long_options"] is False
     assert result["summary"]["assignment_count"] == 1
-    assert result["snapshot"]["portfolio_snapshot_id"] == "valuation-1"
+    assert result["snapshot"]["portfolio_snapshot_id"].startswith("futu-")
+    assert result["snapshot"]["quote_observed_at_by_code"] == {"NVDA": "2026-07-24T01:00:00Z"}
     assert result["snapshot"]["runtime_config"] == "config.us.json"
 
 
-def test_query_returns_business_unavailable_when_portfolio_source_is_down(monkeypatch):
-    _patch_positions(monkeypatch, [])
+def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypatch):
+    observation = {
+        "source": "tencent_quote",
+        "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    reads = []
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
+        [], "config.us.json", {"portfolio": {"holdings": {"enabled": False}}},
+    ))
+    monkeypatch.setattr(application, "fetch_market_exchange_rates", lambda: reads.append("fx") or observation)
+
+    def read_context(*, cfg, account, exchange_rate_observation):
+        assert exchange_rate_observation is observation
+        reads.append(account)
+        return {
+            "source_observed_at": "2026-07-24T01:00:00Z",
+            "cash_by_currency": {"CNY": 1},
+            "cash_balance_reliable": True,
+            "position_snapshot_input": {"rows": [], "errors": []},
+            "exchange_rates": observation,
+            "exchange_rate_status": "ready",
+            "filters": {"account": account},
+        }
+
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", read_context)
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: pytest.fail("PM read while off"))
+
+    result = application.query_portfolio_assignment_scenario(["lx", "sy"])
+
+    assert reads == ["fx", "lx", "sy"]
+    assert result["snapshot"]["fx_observation"]["source"] == "tencent_quote"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "2.00"
+
+
+def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
+    calls = []
+    gateway = SimpleNamespace(close=lambda: calls.append("closed"))
+    monkeypatch.setattr(
+        application,
+        "resolve_futu_quote_route",
+        lambda _cfg: SimpleNamespace(ok=True, status="ok", host="127.0.0.1", port=11111),
+    )
+    monkeypatch.setattr(application, "build_ready_futu_quote_gateway", lambda **_kwargs: gateway)
+
+    def fetch_observations(used_gateway, codes, **kwargs):
+        assert used_gateway is gateway
+        assert codes == ["US.NVDA", "US.TSLA", "US.AAPL", "US.MSFT"]
+        assert kwargs["market"] == "US"
+        return {
+            "US.NVDA": SimpleNamespace(
+                code="US.NVDA", market="US", sec_status="NORMAL", suspension=False,
+                status="ready",
+                reason_code=None,
+                last_price=120,
+                observed_at_utc="2026-07-24T01:00:00Z",
+                age_seconds=10,
+            ),
+            "US.TSLA": SimpleNamespace(
+                code="US.TSLA", market="US", sec_status="NORMAL", suspension=False,
+                status="market_closed",
+                reason_code="market_closed",
+                last_price=50,
+                observed_at_utc="2026-07-23T20:00:00Z",
+                age_seconds=18000,
+            ),
+            "US.AAPL": SimpleNamespace(
+                code="US.AAPL", market="US", sec_status="HALT", suspension=False,
+                status="market_closed", reason_code="market_closed", last_price=200,
+                observed_at_utc="2026-07-23T20:00:00Z", age_seconds=18000,
+            ),
+            "US.MSFT": SimpleNamespace(
+                code="US.MSFT", market="US", sec_status="NORMAL", suspension=False,
+                status="market_closed", reason_code="market_closed", last_price=300,
+                observed_at_utc="2026-07-14T20:00:00Z", age_seconds=10 * 86400,
+            ),
+        }
+
+    monkeypatch.setattr(application, "get_underlier_observations_opend", fetch_observations)
+    quotes, warnings = application._read_futu_quotes(
+        ["NVDA", "TSLA", "AAPL", "MSFT"],
+        runtime_config={},
+        contexts={"lx": {}},
+        fx_observation={
+            "source": "tencent_quote",
+            "rates": {"USDCNY": 7.2},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    assert calls == ["closed"]
+    assert [(item["code"], item["price_native"], item["price_cny"]) for item in quotes] == [
+        ("NVDA", "120", "864.0"),
+        ("TSLA", "50", "360.0"),
+    ]
+    assert all(item["source"] == "futu_opend_market_snapshot" for item in quotes)
+    assert quotes[1]["is_stale"] is True
+    assert any("quote is dated" in warning for warning in warnings)
+    assert any("AAPL: Futu quote unavailable" in warning for warning in warnings)
+    assert any("MSFT: Futu quote unavailable" in warning for warning in warnings)
+
+
+def test_query_missing_futu_quote_is_partial_without_pm_fallback(monkeypatch):
+    _patch_positions(
+        monkeypatch,
+        [],
+        futu_context={
+            "source_observed_at": "2026-07-24T01:00:00Z",
+            "cash_by_currency": {"CNY": 100},
+            "cash_balance_reliable": True,
+            "position_snapshot_input": {
+                "rows": [
+                    {
+                        "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                        "position_side": "long",
+                        "quantity": "1",
+                    }
+                ],
+                "errors": [],
+            },
+            "exchange_rates": None,
+            "exchange_rate_status": "unavailable",
+        },
+    )
+    monkeypatch.setattr(
+        application,
+        "read_portfolio_valuation_evidence",
+        lambda **_kwargs: pytest.fail("PM quote fallback is forbidden"),
+    )
+
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["status"] == "partial"
+    assert result["distribution"]["net_assets_cny"] is None
+    assert any("CNY market value missing" in warning for warning in result["warnings"])
+
+
+def test_query_preserves_futu_baseline_when_portfolio_source_is_down(monkeypatch):
+    _patch_positions(monkeypatch, [], holdings_enabled=True)
     monkeypatch.setattr(
         application,
         "read_portfolio_valuation_evidence",
@@ -214,8 +380,264 @@ def test_query_returns_business_unavailable_when_portfolio_source_is_down(monkey
 
     result = application.query_portfolio_assignment_scenario(["lx"])
 
-    assert result["status"] == "unavailable"
+    assert result["status"] == "partial"
     assert "service down" in result["warnings"]
+
+
+def test_scoped_old_pm_input_error_is_source_failure() -> None:
+    from src.infrastructure.portfolio_management_client import PortfolioManagementHTTPError
+
+    class OldClient:
+        def read_valuation_evidence(self, **_kwargs):
+            raise PortfolioManagementHTTPError("unknown holdings_scope", status=422, error_code="INPUT_ERROR")
+
+    with pytest.raises(application.PortfolioEvidenceReadError, match="holdings_scope"):
+        application.read_portfolio_valuation_evidence(
+            accounts=["lx"], supplemental_codes=[], client=OldClient(), holdings_scope="non_futu"
+        )
+
+
+def test_query_old_enabled_config_without_broker_approval_skips_pm(monkeypatch):
+    _patch_positions(monkeypatch, [], holdings_enabled=True)
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
+        [], "config.us.json", {"portfolio": {"holdings": {"enabled": True}}},
+    ))
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence",
+                        lambda **_kwargs: pytest.fail("PM must not be read before broker approval"))
+    result = application.query_portfolio_assignment_scenario(["lx"])
+    assert result["status"] == "partial"
+    assert result["snapshot"]["pm_supplement"]["status"] == "missing"
+    assert any("re-preview" in warning for warning in result["warnings"])
+
+
+def test_query_new_broker_pauses_entire_pm_supplement(monkeypatch):
+    _patch_positions(monkeypatch, [], holdings_enabled=True, approved=["银行"])
+    evidence = _valuation_response()
+    evidence["scope"].update({
+        "holdings_scope": "non_futu",
+        "broker_inventory": {"lx": {"brokers": [
+            {"broker": "银行", "classification": "non_futu", "row_count": 1},
+            {"broker": "新券商", "classification": "non_futu", "row_count": 1},
+        ]}},
+        "holding_counts": {"lx": {"source_rows": 2, "included": 2, "zero_quantity": 0,
+                                  "excluded_futu": 0, "excluded_unknown_broker": 0, "unsupported": 0}},
+    })
+    evidence["holdings"] = [
+        {"account": "lx", "broker": broker, "code": f"{index}-CASH", "asset_type": "cash",
+         "quantity": "100", "market_value_cny": "100"}
+        for index, broker in enumerate(("银行", "新券商"))
+    ]
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: evidence)
+    result = application.query_portfolio_assignment_scenario(["lx"])
+    assert result["status"] == "partial"
+    assert result["snapshot"]["holdings_sources"] == ["futu"]
+    assert result["snapshot"]["pm_supplement"]["included_rows"] == 0
+    assert any("新券商" in warning and "re-preview" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize(
+    "enabled,expected_cash,expected_codes",
+    [
+        (False, "125000.00", {"NVDA", "TSLA"}),
+        (True, "125000.00", {"NVDA", "TSLA", "BANK"}),
+    ],
+)
+def test_query_uses_futu_baseline_and_only_optional_non_futu_pm_rows(
+    monkeypatch,
+    enabled,
+    expected_cash,
+    expected_codes,
+):
+    context = {
+        "source_observed_at": "2026-07-24T01:00:00Z",
+        "cash_by_currency": {"CNY": 125000},  # Futu cash plus its fund_assets/MMF
+        "cash_balance_reliable": True,
+        "cash_components_by_currency": {"CNY": {"cn_cash": 100000, "fund_assets": 25000}},
+        "stocks_by_symbol": {"NVDA": {"shares": 10, "currency": "USD", "name": "Nvidia"}},
+        "position_snapshot_input": {
+            "rows": [
+                {
+                    "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                    "position_side": "long",
+                    "quantity": "10",
+                    "source_row": {"stock_name": "Nvidia"},
+                },
+                {
+                    "instrument_ref": {"asset_type": "stock", "symbol": "TSLA", "currency": "USD"},
+                    "position_side": "short",
+                    "quantity": "10",
+                    "source_row": {"stock_name": "Tesla"},
+                },
+            ]
+        },
+        "exchange_rates": None,
+        "exchange_rate_status": "unavailable",
+    }
+    _patch_positions(
+        monkeypatch,
+        [],
+        holdings_enabled=enabled,
+        futu_context=context,
+        futu_quotes=[_futu_quote("NVDA", 100), _futu_quote("TSLA", 50)],
+    )
+    evidence = _valuation_response()
+    evidence["quotes"] = [_futu_quote("NVDA", 9999)]  # PM quote must not value Futu stock.
+    evidence["scope"].update({"holdings_scope": "non_futu", "broker_inventory": {"lx": {"brokers": [{"broker": "银行", "classification": "non_futu", "row_count": 2}]}}, "holding_counts": {"lx": {"source_rows": 2, "included": 2, "zero_quantity": 0, "excluded_futu": 0, "excluded_unknown_broker": 0, "unsupported": 0}}})
+    evidence["holdings"] = [
+        {
+            "account": "lx",
+            "broker": "银行",
+            "code": "CNY-CASH",
+            "asset_type": "cash",
+            "currency": "CNY",
+            "quantity": 2000,
+            "market_value_cny": 2000,
+        },
+        {
+            "account": "lx",
+            "broker": "银行",
+            "code": "BANK",
+            "asset_type": "stock",
+            "quantity": 1,
+            "market_value_cny": 500,
+        },
+    ]
+    seen = {}
+
+    def reader(**kwargs):
+        seen["supplemental_codes"] = kwargs["supplemental_codes"]
+        seen["holdings_scope"] = kwargs["holdings_scope"]
+        return evidence
+
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", reader)
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert seen == ({"supplemental_codes": [], "holdings_scope": "non_futu"} if enabled else {})
+    assert result["snapshot"]["pm_snapshot_id"] == ("valuation-1" if enabled else None)
+    assert result["snapshot"]["holdings_sources"] == (["futu", "pm_non_futu"] if enabled else ["futu"])
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] == expected_cash
+    assert {row["code"] for row in result["distribution"]["by_code"]} == expected_codes | {"CASH+MMF"}
+    assert result["distribution"]["net_assets_cny"] == ("131100.00" if enabled else "128600.00")
+    assert result["distribution"]["liabilities_cny"] == "3600.00"
+
+
+def test_query_fails_closed_when_futu_baseline_is_unavailable(monkeypatch):
+    _patch_positions(monkeypatch, [])
+    monkeypatch.setattr(
+        application, "fetch_futu_portfolio_context", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("OpenD down"))
+    )
+    monkeypatch.setattr(
+        application, "read_portfolio_valuation_evidence", lambda **_kwargs: pytest.fail("PM should not replace Futu")
+    )
+
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert any("OpenD down" in warning for warning in result["warnings"])
+
+
+def test_query_marks_incomplete_futu_cash_and_unknown_pm_broker_partial(monkeypatch):
+    _patch_positions(
+        monkeypatch,
+        [],
+        holdings_enabled=True,
+        futu_context={
+            "source_observed_at": "2026-07-24T01:00:00Z",
+            "cash_by_currency": {"CNY": 100},
+            "cash_balance_reliable": False,
+            "stocks_by_symbol": {},
+            "position_snapshot_input": {"rows": [], "errors": []},
+            "exchange_rates": None,
+            "exchange_rate_status": "unavailable",
+        },
+    )
+    evidence = _valuation_response()
+    evidence["scope"].update({"holdings_scope": "non_futu", "broker_inventory": {"lx": {"brokers": [{"broker": "Futu", "classification": "futu", "row_count": 1}]}}})
+    evidence["holdings"] = [
+        {"account": "lx", "code": "UNKNOWN", "asset_type": "stock", "quantity": 1, "market_value_cny": 900},
+    ]
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: pytest.fail("PM read before Futu baseline validation"))
+
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert "UNKNOWN" not in {row["code"] for row in result["distribution"]["by_code"]}
+    assert any("Futu cash snapshot is incomplete" in warning for warning in result["warnings"])
+
+
+def test_futu_cash_uses_observed_currency_rate():
+    rows, warnings = application._futu_holdings(
+        "lx",
+        {
+            "cash_by_currency": {"HKD": 100},
+            "cash_balance_reliable": True,
+            "stocks_by_symbol": {},
+            "position_snapshot_input": {"rows": [], "errors": []},
+            "exchange_rates": {"rates": {"HKDCNY": 0.92}},
+            "exchange_rate_status": "ready",
+        },
+        {},
+    )
+
+    assert warnings == []
+    assert rows[0]["market_value_cny"] == "92.00"
+
+
+def test_futu_holdings_requires_full_position_snapshot():
+    with pytest.raises(ValueError, match="stock snapshot is missing"):
+        application._futu_holdings("lx", {"cash_by_currency": {"CNY": 0}, "stocks_by_symbol": {}}, {})
+
+
+def test_call_assignment_does_not_count_pm_futu_stock_copy(monkeypatch):
+    _patch_positions(
+        monkeypatch,
+        [
+            {
+                "record_id": "call-1",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "multiplier": 100,
+                "strike": 100,
+                "currency": "USD",
+                "expiration_ymd": "2026-08-28",
+            }
+        ],
+        holdings_enabled=True,
+        futu_context={
+            "source_observed_at": "2026-07-24T01:00:00Z",
+            "cash_by_currency": {"CNY": 0},
+            "cash_balance_reliable": True,
+            "stocks_by_symbol": {"NVDA": {"shares": 100, "currency": "USD"}},
+            "position_snapshot_input": {
+                "rows": [
+                    {
+                        "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                        "position_side": "long",
+                        "quantity": "100",
+                    }
+                ]
+            },
+            "exchange_rates": None,
+            "exchange_rate_status": "unavailable",
+        },
+    )
+    evidence = _valuation_response()
+    monkeypatch.setattr(application, "_read_futu_quotes", lambda *_args, **_kwargs: ([_futu_quote("NVDA", 120)], []))
+    evidence["holdings"] = []
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: evidence)
+
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["summary"]["assignment_count"] == 1
+    assert result["position_changes"][0]["opening_shares"] == "100"
+    assert result["position_changes"][0]["ending_shares"] == "0"
 
 
 def test_query_returns_business_unavailable_when_option_ledger_is_down(monkeypatch):

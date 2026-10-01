@@ -647,7 +647,7 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
         "coverage": "primary_rows",
         "freshness": "source_declared",
         "pagination": {"mode": "none"},
-        "source_label": "portfolio-management valuation evidence + OM SQLite position_lots",
+        "source_label": "Futu account + OM SQLite position_lots; PM non-Futu Holdings optional",
         "primary_rows": "assignments",
         "fact_fields": [
             "status",

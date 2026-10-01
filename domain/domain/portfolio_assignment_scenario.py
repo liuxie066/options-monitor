@@ -459,23 +459,46 @@ def project_assignment_scenario(
     starting_cash = _ZERO
     cash_complete = not unavailable
     cash_components: list[dict[str, Any]] = []
+    cash_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in cash_rows:
+        currency = normalize_currency(row.get("currency")) or _text(row.get("currency")).upper()
+        bucket_key = (row["account"], row["broker"], currency)
+        bucket = cash_buckets.setdefault(
+            bucket_key,
+            {"quantity_native": _ZERO, "opening_value_cny": _ZERO, "complete": True},
+        )
+        bucket["quantity_native"] += row["quantity_decimal"]
         value = row["market_value_decimal"]
         if value is None:
-            cash_complete = False
+            bucket["complete"] = False
         else:
-            starting_cash += value
-        cash_components.append(
-            {
-                "account": row["account"],
-                "broker": row["broker"],
-                "code": row["code"],
-                "asset_type": _text(row.get("asset_type") or row.get("type")).lower(),
-                "currency": normalize_currency(row.get("currency")) or _text(row.get("currency")).upper(),
-                "quantity_native": _quantity(row["quantity_decimal"]),
-                "value_cny": _money(value),
-            }
-        )
+            bucket["opening_value_cny"] += value
+        if row["broker"] == "富途":
+            if value is None:
+                cash_complete = False
+            else:
+                starting_cash += value
+            cash_components.append(
+                {
+                    "account": row["account"],
+                    "broker": row["broker"],
+                    "code": row["code"],
+                    "asset_type": _text(row.get("asset_type") or row.get("type")).lower(),
+                    "currency": currency,
+                    "quantity_native": _quantity(row["quantity_decimal"]),
+                    "value_cny": _money(value),
+                }
+            )
+
+    explicit_fx = portfolio_evidence.get("fx_rates_to_cny")
+    has_explicit_fx = isinstance(explicit_fx, Mapping)
+
+    def rate_for(currency: str, quote: Mapping[str, Any] | None = None) -> Decimal | None:
+        if currency == "CNY":
+            return Decimal(1)
+        if has_explicit_fx:
+            return _positive(explicit_fx.get(f"{currency}CNY"))
+        return _positive(quote.get("exchange_rate_to_cny")) if isinstance(quote, Mapping) else None
 
     assignment_rows: list[dict[str, Any]] = []
     fee_items: list[dict[str, Any]] = []
@@ -484,7 +507,10 @@ def project_assignment_scenario(
     call_inflow = _ZERO
     known_fees = _ZERO
     fees_complete = True
+    all_fees_complete = True
     assignment_cash_complete = True
+    cash_adjustments: dict[tuple[str, str, str], dict[str, Any]] = {}
+    unknown_cash_buckets: set[tuple[str, str, str]] = set()
     expiry_accumulator: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "put_outflow_cny": _ZERO,
@@ -512,6 +538,7 @@ def project_assignment_scenario(
     for index, option in enumerate(selected_positions):
         account = _text(option.get("account")).lower()
         broker = normalize_broker(option.get("broker")) or _text(option.get("broker"))
+        is_futu = broker == "富途"
         symbol = canonical_symbol(option.get("symbol"))
         option_type = _text(option.get("option_type")).lower()
         state_warning = _text(option.get("state_warning"))
@@ -535,20 +562,32 @@ def project_assignment_scenario(
         ):
             warnings.append(f"option[{index}]: required assignment inputs missing; row skipped")
             partial = True
-            assignment_cash_complete = False
-            fees_complete = False
+            if is_futu:
+                assignment_cash_complete = False
+            all_fees_complete = False
+            if is_futu:
+                fees_complete = False
             continue
 
-        quote = quotes.get(symbol)
-        spot_native, spot_cny, exchange_rate, quote_error = _quote_values(
-            quote,
-            expected_currency=currency,
-        )
-        if quote_error:
-            warnings.append(f"{account}/{symbol}: {quote_error}")
+        quote = quotes.get(symbol) if is_futu else None
+        if is_futu:
+            spot_native, _quoted_cny, _quoted_rate, quote_error = _quote_values(
+                quote, expected_currency=currency,
+            )
+            exchange_rate = rate_for(currency, quote)
+            spot_cny = spot_native * exchange_rate if spot_native is not None and exchange_rate is not None else None
+            if quote_error:
+                warnings.append(f"{account}/{symbol}: {quote_error}")
+                partial = True
+            if exchange_rate is None:
+                warnings.append(f"{account}/{symbol}: fx_evidence_missing")
+                assignment_cash_complete = False
+        else:
+            spot_native = spot_cny = exchange_rate = None
+            distribution_incomplete = True
             partial = True
-        if exchange_rate is None:
-            assignment_cash_complete = False
+            warnings.append(f"{account}/{broker}/{symbol}: non-Futu terminal baseline unavailable")
+            unknown_cash_buckets.add((account, broker, currency))
         if spot_cny is None:
             distribution_incomplete = True
         shares = contract_share_quantity(contracts, multiplier)
@@ -564,7 +603,16 @@ def project_assignment_scenario(
         fee_fact: dict[str, Any]
         fee_cny: Decimal | None
         fee_complete: bool
-        if exchange_rate is None:
+        if not is_futu:
+            fee_fact, fee_cny, fee_complete = _fee_fact(
+                option,
+                shares=shares,
+                strike=strike,
+                currency=currency,
+                exchange_rate=Decimal(1),
+                option_type=option_type,
+            )
+        elif exchange_rate is None:
             fee_fact = {
                 "status": "missing",
                 "basis": "assignment_at_strike",
@@ -598,31 +646,45 @@ def project_assignment_scenario(
             **fee_fact,
         }
         fee_items.append(fee_item)
-        if fee_cny is not None:
+        if fee_cny is not None and is_futu:
             known_fees += fee_cny
         if not fee_complete:
-            fees_complete = False
+            all_fees_complete = False
+            if is_futu:
+                fees_complete = False
             partial = True
 
-        if principal_cny is not None:
-            if option_type == "put":
-                put_outflow += principal_cny
+        if is_futu:
+            if principal_cny is not None:
+                if option_type == "put":
+                    put_outflow += principal_cny
+                else:
+                    call_inflow += principal_cny
             else:
-                call_inflow += principal_cny
-        else:
-            assignment_cash_complete = False
-        expiry = expiry_accumulator[expiration]
-        expiry["assignments"] += 1
-        if principal_cny is None:
-            expiry["cash_complete"] = False
-        elif option_type == "put":
-            expiry["put_outflow_cny"] += principal_cny
-        else:
-            expiry["call_inflow_cny"] += principal_cny
-        if fee_cny is not None:
-            expiry["known_fees_cny"] += fee_cny
-        if not fee_complete:
-            expiry["fees_complete"] = False
+                assignment_cash_complete = False
+            expiry = expiry_accumulator[expiration]
+            expiry["assignments"] += 1
+            if principal_cny is None:
+                expiry["cash_complete"] = False
+            elif option_type == "put":
+                expiry["put_outflow_cny"] += principal_cny
+            else:
+                expiry["call_inflow_cny"] += principal_cny
+            if fee_cny is not None:
+                expiry["known_fees_cny"] += fee_cny
+            if not fee_complete:
+                expiry["fees_complete"] = False
+            adjustment = cash_adjustments.setdefault(
+                (account, broker, currency),
+                {"delta_native": _ZERO, "known_fee_native": _ZERO, "fees_complete": True, "rate_to_cny": exchange_rate},
+            )
+            adjustment["delta_native"] += cash_delta_native
+            if adjustment["rate_to_cny"] is None:
+                adjustment["rate_to_cny"] = exchange_rate
+            if fee_complete:
+                adjustment["known_fee_native"] += _decimal(fee_fact.get("fee_native")) or _ZERO
+            else:
+                adjustment["fees_complete"] = False
 
         change_key = (account, broker, symbol)
         change = changes.setdefault(
@@ -686,13 +748,13 @@ def project_assignment_scenario(
         change = changes[key]
         existing = security_groups.get(key)
         opening_shares = existing["opening_shares"] if existing else _ZERO
+        is_futu = key[1] == "富途"
         ending_shares = (
-            opening_shares
-            + change["put_assigned_shares"]
-            - change["call_assigned_shares"]
+            opening_shares + change["put_assigned_shares"] - change["call_assigned_shares"]
+            if is_futu else None
         )
-        spot_cny = change.get("spot_cny")
-        if spot_cny is None:
+        spot_cny = change.get("spot_cny") if is_futu else None
+        if spot_cny is None or ending_shares is None:
             ending_value = None
             distribution_incomplete = True
         else:
@@ -700,7 +762,7 @@ def project_assignment_scenario(
         opening_value = (
             existing["opening_market_value_cny"]
             if existing and existing["opening_value_complete"]
-            else (opening_shares * spot_cny if spot_cny is not None else None)
+            else (opening_shares * spot_cny if spot_cny is not None and is_futu else None)
         )
         category = existing["category"] if existing else "stock"
         security_groups[key] = {
@@ -730,7 +792,7 @@ def project_assignment_scenario(
                 "spot_cny": _money(spot_cny),
                 "opening_market_value_cny": _money(opening_value),
                 "ending_market_value_cny": _money(ending_value),
-                "liability_kind": "short_stock" if ending_shares < 0 else None,
+                "liability_kind": "short_stock" if ending_shares is not None and ending_shares < 0 else None,
             }
         )
 
@@ -762,8 +824,8 @@ def project_assignment_scenario(
         }
         for account in normalized_accounts
     }
-    for component, row in zip(cash_components, cash_rows):
-        bucket = account_cash[row["account"]]
+    for component, row in zip(cash_components, (item for item in cash_rows if item["broker"] == "富途")):
+        bucket = account_cash[component["account"]]
         bucket["cash_components"].append(component)
         value = row["market_value_decimal"]
         if value is None:
@@ -771,6 +833,8 @@ def project_assignment_scenario(
         else:
             bucket["opening_cash_mmf_cny"] += value
     for assignment, fee_item in zip(assignment_rows, fee_items):
+        if assignment["broker"] != "富途":
+            continue
         bucket = account_cash[assignment["account"]]
         principal_cny = _decimal(assignment.get("principal_cny"))
         if principal_cny is None:
@@ -897,20 +961,36 @@ def project_assignment_scenario(
                 "_value": value,
             }
         )
-    distribution_rows.append(
-        {
-            "account": "combined",
-            "broker": "combined",
-            "code": "CASH+MMF",
-            "name": "现金及货币基金（指派后）",
-            "category": "cash",
-            "quantity": None,
-            "value_cny": _money(ending_cash_net),
-            "_value": ending_cash_net,
-        }
-    )
-    if ending_cash_net is None:
-        distribution_incomplete = True
+    for key in sorted(set(cash_buckets) | set(cash_adjustments) | unknown_cash_buckets):
+        account, broker, currency = key
+        opening = cash_buckets.get(key)
+        adjustment = cash_adjustments.get(key)
+        opening_native = opening["quantity_native"] if opening else _ZERO
+        ending_native = opening_native + (adjustment["delta_native"] if adjustment else _ZERO)
+        if adjustment and adjustment["fees_complete"]:
+            ending_native -= adjustment["known_fee_native"]
+        if key in unknown_cash_buckets or (opening and not opening["complete"]):
+            value = None
+        elif adjustment:
+            rate = adjustment["rate_to_cny"] or rate_for(currency)
+            value = ending_native * rate if rate is not None and adjustment["fees_complete"] else None
+        else:
+            value = opening["opening_value_cny"] if opening else None
+        if value is None:
+            distribution_incomplete = True
+        distribution_rows.append(
+            {
+                "account": account,
+                "broker": broker,
+                "currency": currency,
+                "code": "CASH+MMF",
+                "name": "现金及货币基金（指派后）",
+                "category": "cash",
+                "quantity": _quantity(ending_native) if value is not None else None,
+                "value_cny": _money(value),
+                "_value": value,
+            }
+        )
 
     by_code_map: dict[tuple[str, str], Decimal | None] = {}
     by_code_meta: dict[tuple[str, str], dict[str, Any]] = {}
@@ -936,12 +1016,12 @@ def project_assignment_scenario(
         value is not None for value in by_code_map.values()
     )
     gross_assets = (
-        sum((value for value in by_code_map.values() if value is not None and value > 0), _ZERO)
+        sum((row["_value"] for row in distribution_rows if row["_value"] is not None and row["_value"] > 0), _ZERO)
         if complete_values
         else None
     )
     liabilities = (
-        sum((-value for value in by_code_map.values() if value is not None and value < 0), _ZERO)
+        sum((-row["_value"] for row in distribution_rows if row["_value"] is not None and row["_value"] < 0), _ZERO)
         if complete_values
         else None
     )
@@ -962,12 +1042,19 @@ def project_assignment_scenario(
             ),
         }
         by_code.append(item)
+    for row in distribution_rows:
+        value = row["_value"]
         if value is not None and value < 0:
             liability_rows.append(
                 {
-                    **meta,
+                    "account": row["account"],
+                    "broker": row["broker"],
+                    "currency": row.get("currency"),
+                    "category": row["category"],
+                    "code": row["code"],
+                    "name": row["name"],
                     "liability_cny": _money(-value),
-                    "kind": "funding" if meta["category"] == "cash" else "short_position",
+                    "kind": "funding" if row["category"] == "cash" else "short_position",
                 }
             )
 
@@ -994,37 +1081,54 @@ def project_assignment_scenario(
 
     if distribution_incomplete:
         partial = True
-    fee_status = "complete" if fees_complete else "partial"
+    fee_status = "complete" if all_fees_complete else "partial"
     missing_fee_count = sum(1 for item in fee_items if item.get("status") == "missing")
     status = _status_from(unavailable=unavailable, partial=partial)
     deduped_warnings = _dedupe_warnings(warnings)
 
     fx_facts: list[dict[str, Any]] = []
     seen_fx: set[tuple[str, str | None, str | None]] = set()
-    for quote in quotes.values():
-        currency = normalize_currency(quote.get("currency"))
-        rate_value = (
-            Decimal("1")
-            if currency == "CNY"
-            else _positive(
-                quote.get("exchange_rate_to_cny")
-                if "exchange_rate_to_cny" in quote
-                else quote.get("exchange_rate")
+    fx_observation = portfolio_evidence.get("fx_observation")
+    if has_explicit_fx:
+        source = fx_observation.get("source") if isinstance(fx_observation, Mapping) else None
+        observed_at = fx_observation.get("timestamp") if isinstance(fx_observation, Mapping) else None
+        for pair, raw_rate in explicit_fx.items():
+            if not str(pair).endswith("CNY"):
+                continue
+            rate_value = _positive(raw_rate)
+            if rate_value is not None:
+                fx_facts.append({
+                    "currency": str(pair)[:-3],
+                    "rate_to_cny": _rate(rate_value),
+                    "source": source,
+                    "observed_at": observed_at,
+                    "quality": "current",
+                })
+    else:
+        for quote in quotes.values():
+            currency = normalize_currency(quote.get("currency"))
+            rate_value = (
+                Decimal("1")
+                if currency == "CNY"
+                else _positive(
+                    quote.get("exchange_rate_to_cny")
+                    if "exchange_rate_to_cny" in quote
+                    else quote.get("exchange_rate")
+                )
             )
-        )
-        key = (currency, _text(quote.get("source")) or None, _text(quote.get("observed_at")) or None)
-        if not currency or rate_value is None or key in seen_fx:
-            continue
-        seen_fx.add(key)
-        fx_facts.append(
-            {
-                "currency": currency,
-                "rate_to_cny": _rate(rate_value),
-                "source": quote.get("source"),
-                "observed_at": quote.get("observed_at"),
-                "quality": "stale" if quote.get("is_stale") else "current",
-            }
-        )
+            key = (currency, _text(quote.get("source")) or None, _text(quote.get("observed_at")) or None)
+            if not currency or rate_value is None or key in seen_fx:
+                continue
+            seen_fx.add(key)
+            fx_facts.append(
+                {
+                    "currency": currency,
+                    "rate_to_cny": _rate(rate_value),
+                    "source": quote.get("source"),
+                    "observed_at": quote.get("observed_at"),
+                    "quality": "stale" if quote.get("is_stale") else "current",
+                }
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1067,13 +1171,13 @@ def project_assignment_scenario(
             ),
             "basis": "cross_account_cny_economic_coverage",
             "operational_note": (
-                "账户、券商和币种拆分仅用于操作约束；主覆盖口径假设组合内资金可自由等值调拨。"
+                "仅汇总富途账户的 CNY 经济金额；不证明跨账户或跨币种资金可调拨。"
             ),
         },
         "fee_summary": {
             "status": fee_status,
             "known_estimated_fees_cny": _money(known_fees),
-            "total_fees_cny": _money(known_fees) if fees_complete else None,
+            "total_fees_cny": _money(known_fees) if all_fees_complete else None,
             "missing_fee_count": missing_fee_count,
             "items": fee_items,
         },
@@ -1085,6 +1189,7 @@ def project_assignment_scenario(
             "gross_assets_cny": _money(gross_assets),
             "liabilities_cny": _money(liabilities),
             "net_assets_cny": _money(net_assets),
+            "rows": [{key: value for key, value in row.items() if key != "_value"} for row in distribution_rows],
             "by_category": by_category,
             "by_code": by_code,
             "liabilities": liability_rows,
