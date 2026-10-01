@@ -114,6 +114,7 @@ def _coherent_account_lifecycle_inputs(
     ]
     models_by_lot = build_lifecycle_read_models_from_resolved_account(
         cases=cases,
+        trade_events=list(facts.get("trade_events") or []),
         allocations=[
             dict(item)
             for item in facts.get("account_lifecycle_allocations") or []

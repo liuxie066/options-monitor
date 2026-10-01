@@ -1510,7 +1510,10 @@ def _group_options_by_order(
 ) -> dict[tuple[str, str, str, str], tuple[TradeEvent, ...]]:
     grouped: dict[tuple[str, str, str, str], list[TradeEvent]] = {}
     for event in events:
-        if zero_option_fee_lifecycle_reason(event) or stock_settlement_fee_context(event) is not None:
+        if zero_option_fee_lifecycle_reason(event) or (
+            stock_settlement_fee_context(event) is not None
+            and not (event.raw_payload or {}).get("pending_close_event_id")
+        ):
             continue
         raw = event.raw_payload or {}
         if futu_order_namespace_issue(raw):

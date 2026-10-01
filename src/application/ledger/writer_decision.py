@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
+from domain.domain.option_lifecycle import pending_close_quantities
 
 from .writer_common import (
     Any,
@@ -28,6 +29,7 @@ from .writer_common import (
 )
 
 from .writer_lifecycle_support import (
+    _effective_void_target_ids,
     _validate_existing_lifecycle_evidence,
 )
 
@@ -204,19 +206,36 @@ def _finish_lifecycle_decision_projection(
     )
     if fact_state is None:
         raise ValueError("current decision lifecycle fact source disappeared")
+    case_allocations = list(sqlite_repo.list_trade_lifecycle_allocations(
+        case_id=case_id, conn=conn,
+    ))
+    close_ids = [
+        str(item.get("canonical_terminal_event_id") or "")
+        for item in case_allocations
+        if str(item.get("terminal_type") or "").strip().lower() == "close"
+    ]
+    pending_close = pending_close_quantities(
+        case_allocations,
+        sqlite_repo.get_trade_events_by_ids(close_ids, conn=conn),
+        void_event_ids=_effective_void_target_ids(sqlite_repo, conn=conn),
+    )
+    resolution_with_pending = {
+        **dict(resolution or {}),
+        "pending_close_contracts_by_lot": pending_close,
+    }
     final_fact = (
         advance_lifecycle_case_decision_fact(
             prior_fact,
             lifecycle_case=lifecycle_case,
             fact_state=fact_state,
-            resolution=resolution,
+            resolution=resolution_with_pending,
             timing=timing,
         )
         if prior_fact is not None
         else build_initial_lifecycle_case_decision_fact(
             lifecycle_case=lifecycle_case,
             fact_state=fact_state,
-            resolution=resolution,
+            resolution=resolution_with_pending,
             timing=timing,
         )
     )

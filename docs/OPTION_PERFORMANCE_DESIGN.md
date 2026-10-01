@@ -2,6 +2,10 @@
 
 Status: current contract.
 
+A broker-confirmed zero-price option close ends capital time at the execution timestamp even while
+its cause is pending. Complete cash and fee evidence can support return; win rate waits for the
+resolved cause. Previously accepted closes without a terminal ledger event require separate repair.
+
 This document is the canonical owner of the option-performance contract. Current source and tests
 remain the runtime authority. The implementation is in place: there is no parallel version,
 compatibility payload, dual read, dual write, or historical backfill path.

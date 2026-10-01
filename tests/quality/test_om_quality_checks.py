@@ -1818,7 +1818,7 @@ def _public_assignment_repo(tmp_path):
         trade_time_ms=observed + 1000,
         raw_payload={"deal_id": "quality-option", "code": "US.TIGR260522P6000"},
     ), repo=repo, state={}, apply_changes=True)
-    assert option.status == "unresolved"
+    assert option.status == "applied"
     stock = resolve_trade_deal(_deal(
         deal_id="quality-stock", order_id="stock-order", symbol="TIGR",
         option_type=None, side="buy", position_effect=None, contracts=300,

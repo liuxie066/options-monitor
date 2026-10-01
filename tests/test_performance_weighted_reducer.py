@@ -80,6 +80,7 @@ def _event(
     close_type: str | None = None,
     raw: dict | None = None,
     fx_rate: float = 7,
+    currency: str = "USD",
 ) -> TradeEvent:
     leg = key or _key()
     payload = dict(raw or {})
@@ -99,7 +100,7 @@ def _event(
         contract_key=leg.key,
         contracts=contracts,
         price=price,
-        currency="USD",
+        currency=currency,
         source="test",
         multiplier=100,
         fees=0 if fee_basis == "estimated" else fee,
@@ -110,7 +111,7 @@ def _event(
     return attach_trade_event_cash_conversions(
         event,
         fx_payload={
-            "rates": {"USDCNY": fx_rate},
+            "rates": {f"{currency}CNY": fx_rate},
             "timestamp": datetime.fromtimestamp(
                 event.event_time_ms / 1000,
                 tz=timezone.utc,
@@ -143,6 +144,27 @@ def _reduce_with_lx_diagnostic(projection, diagnostic):
         period=_period(),
         account="lx",
     )
+
+
+def test_zero_price_pending_close_has_return_but_no_win_rate() -> None:
+    hk_put = _key(symbol="0700.HK", strike=430)
+    projection = project_trade_events([
+        _event("open", "open", "2026-09-01T10:00:00", key=hk_put,
+               lot_id="lot", contracts=4, price=1, currency="HKD", fx_rate=0.85),
+        _event(
+            "pending", "close", "2026-09-02T10:00:00",
+            key=hk_put, target_lot_id="lot", contracts=4, price=0,
+            close_type="cause_pending", currency="HKD", fx_rate=0.85,
+        ),
+    ])
+    reduction = reduce_option_performance(projection, period=_period())
+    fact = reduction.facts[0]
+    assert fact.state == "terminated"
+    assert fact.terminal_at_ms == _ms("2026-09-02T10:00:00")
+    assert fact.missing == ("close_reason_pending",)
+    assert reduction.bundle["option_net_cashflow"]["by_currency"]["HKD"]["total"]["amount"] is not None
+    assert reduction.bundle["option_return"]["by_currency"]["HKD"]["rate"] is not None
+    assert reduction.bundle["sell_option_win_rate"]["rate"] is None
 
 
 def test_period_normalization_and_cohort_use_effective_opening_date() -> None:

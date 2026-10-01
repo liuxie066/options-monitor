@@ -185,9 +185,9 @@ def test_option_anchor_cannot_consume_stock_that_became_assigned_sale_candidate(
     before = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
     result = _resolve(repo, option)
     after = len([row for row in repo.list_trade_events() if row["event_type"] == "assignment"])
-    assert (result.status, result.reason) == ("unresolved", "ambiguous_stock_trade_ownership")
+    assert (result.status, result.reason) == ("applied", "close_reason_pending")
     assert after == before
-    assert repo.list_trade_lifecycle_notifications() == []
+    assert next(row for row in repo.list_position_lots() if row["record_id"] in existing_lots)["fields"]["contracts_open"] == 0
     from src.application.trades.lifecycle import _write_v2_lifecycle_close_from_case
     case = next(row for row in repo.list_trade_lifecycle_cases() if row["option_type"] == "call")
     evidences = repo.list_trade_lifecycle_evidence()
@@ -283,8 +283,10 @@ def test_lifecycle_writer_rechecks_structured_stock_source_used_by_sale(tmp_path
         strike=105, multiplier=100, expiration_ymd="2026-06-19",
         raw_payload={"deal_id": "short-call-option-close", "code": "US.NVDA"},
     )
-    with pytest.raises(ValueError, match="broker_stock_source_already_consumed"):
-        resolve_lifecycle_trade_deal(option, repo=repo, apply_changes=True)
+    result = resolve_lifecycle_trade_deal(option, repo=repo, apply_changes=True)
+    assert result is not None
+    assert (result.status, result.reason) == ("applied", "close_reason_pending")
+    assert "broker_stock_source_already_consumed" in result.diagnostics["reason_correction_error"]
     assert not [row for row in repo.list_trade_events() if row.get("event_type") == "assignment"
                 and (row.get("raw_payload") or {}).get("source_deal_id") == stock.deal_id]
 

@@ -335,6 +335,7 @@ def reconcile_lifecycle_close_reason(
         )
     )
     option_anchor = option_rows[0] if option_rows else {}
+    exact_single_anchor = option_anchor if len(option_rows) == 1 else {}
     timing_policy = facts.get("timing_policy")
     effective_timing_payload: dict[str, Any] | None = None
     timing: EffectiveLifecycleTiming | None = None
@@ -552,7 +553,14 @@ def reconcile_lifecycle_close_reason(
             "strike": lifecycle_case.get("strike"),
             "expiration_ymd": lifecycle_case.get("expiration_ymd"),
             "contracts": sum(
+                int(value) for value in dict(
+                    exact_single_anchor.get("target_contracts_by_lot") or {}
+                ).values()
+            ) if exact_single_anchor else sum(
                 resolution.remaining_contracts_by_lot.values()
+            ),
+            "pending_close_anchor_evidence_id": (
+                exact_single_anchor.get("evidence_id") if exact_single_anchor else None
             ),
             "event_time_ms": int(
                 observation_payload.get("observed_at_ms") or now_ms

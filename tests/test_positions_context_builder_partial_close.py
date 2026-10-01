@@ -538,6 +538,37 @@ def test_closed_option_leg_does_not_reserve_cash_while_reason_is_pending(monkeyp
     assert ctx["open_positions_min"][0]["contracts_open"] == 1
 
 
+def test_fully_closed_pending_put_still_blocks_cash_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        lambda *_args, **_kwargs: {
+            "closed": {
+                "lifecycle_state": "settlement_pending",
+                "reason_state": "cause_pending",
+                "closure_fact": "option_leg_closed",
+                "reserved_contracts_by_lot": {},
+                "pending_close_contracts_by_lot": {"closed": 4},
+            }
+        },
+    )
+    records = [_lot(
+        record_id="closed", symbol="0700.HK", status="closed",
+        contracts=4, contracts_open=0, strike=430, multiplier=100,
+        currency="HKD",
+    )]
+    context = build_context(
+        records, broker="富途", account="lx", rates={"HKDCNY": 0.85},
+        decision_snapshot={
+            "snapshot_status": "trusted", "normalized_account": "lx",
+            "account_position_lots": deepcopy(records),
+        },
+    )
+    assert context["cash_secured_total_by_ccy"] == {}
+    assert context["cash_secured_unavailable_by_symbol"] == {
+        "0700.HK": "option_close_settlement_pending"
+    }
+
+
 @pytest.mark.parametrize("mismatch", [False, True])
 def test_closed_option_leg_keeps_cash_reserved_on_conflict_or_stale_lot(
     monkeypatch: pytest.MonkeyPatch, mismatch: bool,

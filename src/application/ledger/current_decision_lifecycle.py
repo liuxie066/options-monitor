@@ -124,6 +124,9 @@ def build_lifecycle_case_decision_fact(
                     ).items()
                 )
             ),
+            "pending_close_contracts_by_lot": dict(
+                sorted(dict(model.get("pending_close_contracts_by_lot") or {}).items())
+            ),
             "requested_reservations_by_lot": dict(
                 sorted(
                     dict(
@@ -278,6 +281,7 @@ def validate_lifecycle_case_decision_fact(
         "resolved_contracts_by_lot",
         "remaining_contracts_by_lot",
         "resolved_contracts_by_terminal_type",
+        "pending_close_contracts_by_lot",
         "requested_reservations_by_lot",
         "effective_reservations_by_lot",
         "contested_reason_codes",
@@ -298,6 +302,10 @@ def validate_lifecycle_case_decision_fact(
         resolution["resolved_contracts_by_terminal_type"],
         field="resolved_contracts_by_terminal_type",
     )
+    pending_close = _integer_map(
+        resolution["pending_close_contracts_by_lot"],
+        field="pending_close_contracts_by_lot", positive=True,
+    )
     requested = _integer_map(
         resolution["requested_reservations_by_lot"],
         field="requested_reservations_by_lot",
@@ -314,6 +322,10 @@ def validate_lifecycle_case_decision_fact(
         raise CurrentDecisionProjectionError("lifecycle quantity total mismatch")
     if sum(terminal.values()) != sum(resolved.values()):
         raise CurrentDecisionProjectionError("terminal quantity total mismatch")
+    if any(key not in target or value > resolved[key] for key, value in pending_close.items()):
+        raise CurrentDecisionProjectionError("pending close exceeds resolved quantity")
+    if sum(pending_close.values()) > terminal.get("close", 0):
+        raise CurrentDecisionProjectionError("pending close exceeds close quantity")
     if any(key not in target or value > remaining[key] for key, value in requested.items()):
         raise CurrentDecisionProjectionError("requested reservation exceeds remaining")
     if any(key not in requested or value > requested[key] for key, value in effective.items()):
@@ -476,6 +488,9 @@ def build_initial_lifecycle_case_decision_fact(
             "resolved_contracts_by_terminal_type": dict(
                 summary.get("resolved_contracts_by_terminal_type") or {}
             ),
+            "pending_close_contracts_by_lot": dict(
+                (resolution or {}).get("pending_close_contracts_by_lot") or {}
+            ),
             "observation_start_ms": timing_value.get(
                 "observation_start_ms",
                 case.get("observation_start_ms"),
@@ -569,6 +584,9 @@ def advance_lifecycle_case_decision_fact(
             ),
             "resolved_contracts_by_terminal_type": quantity_map(
                 "resolved_contracts_by_terminal_type"
+            ),
+            "pending_close_contracts_by_lot": quantity_map(
+                "pending_close_contracts_by_lot"
             ),
             "observation_start_ms": observation_start_ms,
             "pending_until_ms": pending_until_ms,

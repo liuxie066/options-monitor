@@ -25,6 +25,7 @@ def is_unexecuted_expire_close(event: TradeEvent) -> bool:
     payload = event.raw_payload or {}
     if not (
         event.event_type == "expire_close"
+        and not payload.get("pending_close_event_id")
         and not str(payload.get("order_id") or "").strip()
         and event.source != "opend_push"
         and not any(
@@ -48,6 +49,8 @@ def is_unexecuted_expire_close(event: TradeEvent) -> bool:
 
 def zero_option_fee_lifecycle_reason(event: TradeEvent) -> str | None:
     if event.event_type == "assignment":
+        if (event.raw_payload or {}).get("pending_close_event_id"):
+            return None
         return "assignment_without_option_trade"
     if is_unexecuted_expire_close(event):
         return "expired_without_executed_order"
