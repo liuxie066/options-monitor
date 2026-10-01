@@ -1689,3 +1689,110 @@ F12/F13 已用临时 SQLite 复现存储行为，未调用真实渠道或修改�
 | 旧产品 PRD 仍要求逐笔 intent | Wheel 产品 owner | B 同步修订 §4.4；本设计未实现前保持现状 |
 | 真实渠道的 sender/conversation 形状、scope 映射与管理员配置未验证 | assistant/渠道 adapter owner | B 用脱敏入口 fixture 验证规范身份；生产写入前按现有受控流程核对，缺身份拒绝预览 |
 | 部署、真实发送和 broker 联调未执行 | 运维与通知 owner | 单独授权后的部署验收，不计入本次设计完成 |
+
+
+## 期权成交、结算与开仓容量统一：Gateflow 实施合同（2026-10-01）
+
+本节是当前任务从已确认设计进入实施的可携带合同，基线为 origin/main f9cc0773。
+目标是成交事实只入账一次、平仓原因和资源释放各有对应证据、所有开仓入口共享结算约束，
+歧义主动提供人工待办；保留 Wheel 自动启用和 Combo 指派转 Wheel，删除旧归属及重复容量路径。
+生产账本写入、真实通知、发布和部署不在本次研发范围内。旧成交不因升级自动重放或自动归属。
+不新增订单账本、待办表、监听进程、容量计算器或策略开关。
+
+四路设计审查增加五个约束：Inbox 撤销/更改须进入冻结决策；人工修复绑定看到的证据版本且可安全重试；
+新切换时点与旧启用时点分开；状态补齐、冲突和迟到消息有确定规则；已知旧成交按原日期有限量补查。
+富途历史成交日期过滤尚未证明，完全无提示的旧更改不得声称已被默认回查覆盖。
+
+#### A1–A8 验收合同
+
+|---|---|
+| A1 成交正确 | 正常/零价平仓及时更新剩余张数；推送、回查、重复、乱序、重连恢复仍恰好入账一次。撤销/更改/未知状态不会被正常成交去重吞掉或默认为正常。 |
+| A2 结算独立 | 全平仓但待结算/冲突仍受约束；日期、总现金/总持股变化和本地订单推断不能放行；唯一完整交收证据或合规人工修复才改变对应事实，重复证据不重复消费。 |
+| A3 容量一致 | 同一事实输入下，Daily Brief、query_cash_headroom、CSP、Wheel Put、CC、预览及确认得出一致约束；覆盖六项已确认缺口和资金/股票守恒案例。 |
+| A4 推送可靠 | 订单回调保留账户/环境身份；只唤醒现有查询，错误账户拒绝、重复合并、乱序不改账、断线靠回查恢复；查询限频、失败退避、取消和重启可验证。 |
+| A5 人工可达 | 多候选/冲突主动显示具体待办与有效入口；无扫描候选仍可见；重复不骚扰、失败不假称送达；预览后事实变动阻止旧确认。 |
+| A6 只有一套 | 删除清单逐项给出代码与消费者证据，全部真实入口使用共同规则；无新旧策略开关、独立旧写入或重复计算，历史记录仍能读取。 |
+| A7 证据可信 | 保持账户/市场/币种隔离；快照同源且包含消费者需要的事件；查询失败、陈旧/缺失/部分数据明确不可用，不当作空数据放行；金额不变的证据变化也使旧预览失效。 |
+| A8 全流程可证 | 隔离集成测试从监听/回查入口经持久化、投影、核对到容量和待办验证；补齐一个脱敏真实指派案例，分别展示收到的推送、可主动查询的数据、关联依据和时序。未取得真实样本时明确此项未通过。 |
+
+官方接口依据：[成交推送](https://openapi.futunn.com/futu-api-doc/en/trade/update-order-fill.html)、
+[成交状态定义](https://openapi.futunn.com/futu-api-doc/en/trade/trade.html)、
+[订单推送](https://openapi.futunn.com/futu-api-doc/en/trade/update-order.html)和
+[历史成交查询](https://openapi.futunn.com/futu-api-doc/en/trade/get-history-order-fill-list.html)。
+文档确认状态字段和更新时间戳，但未说明旧成交更改的历史查询日期归属。
+
+### 目标对齐与切片
+
+| 切片 | 对应验收 | 独立可观察结果 |
+|---|---|---|
+| S1 成交状态与冻结证据 | A1、A7 | 成交源状态入 Inbox；ledger 决策看见撤销/更改并使旧预览失效，即使经济账本尚未改变 |
+| S2 结算约束与共同容量 | A2、A3，重验 A7 | 全平仓、到期或总额变化均不会提前释放；所有资金/股票开仓入口同样阻断 |
+| S3 单一归属与人工处理 | A5、A6及美团案例 | 唯一入口决定归属，歧义主动可见且可确认，旧自动写入路径消失 |
+| S4 订单提示、回查与全链验收 | A4、A8，重验 A1–A7 | 同连接订单提示加速查询，漏推恢复；真实指派样本与隔离全链分别有证据 |
+
+四片比默认三片多一片，因为来源跨库正确性、容量消费者、归属交互、Broker 调度各有独立副作用和回归。强行合并会使单次实施和评审范围过大。顺序 S1 → S2 → S3 → S4；S3 人工修复 facade 的底层证据契约在 S1 建立，UI 在 S3 交付。每片完成真实入口观察、评审和 commit 后才进入下一片。
+
+### 直接依据与最小设计
+
+1. 富途官方文档的成交状态有 OK、CANCELLED、CHANGED，推送协议有 updateTimestamp；订单推送含账户/环境头、状态和累计成交量。订单只做刷新提示，不用累计量差制造成交。历史成交 API 有 start/end，但未承诺旧成交更改按哪个日期返回。
+2. 标准化在 domain/domain/trade_execution.py；来源 Inbox 在 src/application/trades/inbox.py；账本冻结快照在 src/application/ledger/decision_snapshot.py。两份 SQLite 需要共享写锁、完整来源摘要及确认前重验。审计所有真实 Inbox 写入是否传权威 repo；打不开 Inbox 标不可用。
+3. 可信 OK 才建立正常经济成交；入账前 CANCELLED/CHANGED 不入账；入账后状态变化阻断受影响资源，并要求人工修复，不自动倒写下游股票、费用或收益。缺状态先查历史，同身份同修订同内容去重；可信较新修订胜过旧修订；同修订冲突或跨来源无法比较则待核实。经济身份与状态摘要分离，旧格式通过同一读取入口转换。
+4. 复用已有 ledger 事务、人工修复 facade、Wheel/Combo 指派共同规划、持仓上下文及归属预览。不新增数据库表或第二套策略。已有 policy 表追加本次迁移版本和切换时点，保留旧启用记录；按成交发生时间判断，切换前未归属成交只可人工处理，不因升级自动归属。
+5. 同账户/市场/币种/账本版本的事实和有来源时间的券商资源一起决定容量。待结算、冲突、撤销独立于剩余期权张数。逐笔释放必须有对应义务证据；总现金/总持股只约束总量。券商冻结与本地占用无法去重时阻断相关资源池。
+6. 人工待办复用成交回执、Daily Brief、Control 和现有通知去重。相同证据版本不重复骚扰，未解决仍持续可见。确认绑定完整成交身份、来源摘要及依赖摘要，事务内再比对；重试读回已持久结果，新证据重开阻断，不清空原冲突。
+7. 美团 HK 五个 500 股候选须由真实成交入口进入隔离账本。无唯一证据就待人工；精确意图仍需排除竞争；确认只关联目标分支的 500 股。保留 #418 Wheel 启用和 Combo 指派转 Wheel 的同一规划函数。
+
+### S1：成交状态与冻结证据
+
+Allowed modules: domain/domain/trade_execution.py；src/application/trades/{inbox,inbox_authority,auto_intake,backfill,review}.py；src/application/ledger/{api,decision_snapshot,repository_decision_reads,interventions,commands}.py；成交写入 facade、相关 tests。S1 不修改容量计算、Wheel 归属选择或订单回调。
+
+入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：
+- 缺失/未知状态：保存来源，主动查询；新经济成交不入账。历史已入账事件保持可读，但相关证据不完整时待核实。
+- OK：身份完整且无冲突才入账一次；缺状态来源后来由可验证 OK 补齐，可以解除该项缺失阻断。
+- CANCELLED/CHANGED：入账前不记经济事件；入账后保留已有事件、添加来源冲突，使相关决策 unavailable，待修复预览。
+- 相同身份、同一 provider updateTimestamp、同状态和内容：重复 no-op；同修订不同状态/经济字段：冲突；可比较的更旧修订不能覆盖新状态。不同来源缺少可比较修订：待核实，不以收到时间推断先后。CANCELLED 后出现更晚 OK 也须核对及人工裁决，不自动恢复经济可用性。
+- 已裁决 evidence set：原证据不删除；相同 evidence IDs 与摘要再次到达不重开，新 evidence ID/digest 重新阻断。不能只靠 Inbox status 或 payload_version，因为已 conflict 时新证据可能不增加版本。
+
+冻结边界：所有权威 canonical Inbox 写入必须传 repo；无 repo 的 source-only/测试记录不可进入生产经济决策。由 inbox_authority.resolve_execution_inbox_path(repo, requested_path) 绑定 Inbox 到 ledger 路径。只读预览先用现有 with_sqlite_repo_writer_lock 获取一次共享跨进程 writer lock，再读 ledger 决策行和 Inbox 完整来源摘要；所有权威 Inbox 写入必须使用同一锁。确认沿现有 with_sqlite_repo_transaction 进入一次 writer lock 和 ledger 事务，在其回调中读取 Inbox、ledger generation 与依赖并比对预览，不在事务外再套一次锁，避免 _writer_connection 嵌套锁。读序由单一锁串行化两个 SQLite 的权威写入；任一非锁内写入视为契约违例。Inbox 缺失仅在明确空新库且 ledger 无来源事件时可判空，其余缺失/不可读为 unavailable；不能让 read_trade_source_evidence 的 [] 被解释为无冲突。decision_snapshot 返回 trade_events、来源约束及其 fingerprint；金额/张数不变的来源变化仍改变指纹。
+
+人工修复底层：现有 review.py/commands.py/interventions.py 的 preview 加 expected_input_hash（目标事件、来源 evidence IDs/digest、股票及后续事件依赖）；apply 必须带该值，事务内复查，旧值拒绝。成功的手工事件 raw_payload 保存已裁决证据集合与摘要；现有确定性 repair event ID 与同一请求一起做丢响应读回，读回的目标/摘要/结果一致才返回成功，真正不同请求或依赖冲突拒绝。历史修复工具其他模式保持现有明确入口，不暗改其授权边界。
+
+验证与完成：先红后绿覆盖 OK/零价平仓去重、缺状态→可信 OK、OK→CANCELLED→迟到旧 OK、同修订冲突、不同源不可比、已 conflict 后新增证据、Inbox 已写但处理前崩溃、锁内并发/确认前变更、缺 Inbox、无 repo 权威写入拒绝、修复失败与重复读回。使用隔离双 SQLite 与真实 facade；A1/A7 的状态和旧预览失效成立才结束。发现依赖修复不安全时返回具体阻断，不保证一键解决。
+
+### S2：结算约束与共同容量
+
+Allowed modules: domain/domain/cash_secured_utils.py 与现有容量 domain；src/application/positions/context_builder.py；src/application/ledger/decision_snapshot.py；src/application/wheel/capacity.py；sell_put_cash.py、cash_headroom_query.py、daily_decision_brief_service.py、short_vol_risk_context.py、Control 预览/确认直接消费者及 tests。S2 不写归属迁移或通知渠道。
+
+数据流：S1 冻结快照（同账户/市场/币种/账本及来源摘要）+ 带来源和时间的券商资金/持仓 → context_builder 的结算和冲突约束 → CSP/Wheel Put/Call/查询/简报/预览/事务确认。归属容量只核对既有成交的覆盖义务；新增开仓才申请新增额度。任何消费者不得跳过来源冲突、待结算或券商陈旧状态。
+
+改动：从 decision_snapshot 返回消费者实际使用的 trade_events；context_builder 对 contracts_open=0 的 lot 仍携带待结算/冲突约束；删除 cash_secured_unavailable_for_cash_snapshot 的总现金放行和 Put 到期加一天释放；Wheel Put/Call 的 load、finalize 和事务 revalidate 消费同一决策约束；所有直接消费者只消费共享事实。冻结与本地占用可证明同一义务时只扣一次，无法证明时对应池 unavailable。普通买回平仓只释放已证明的普通期权义务；指派/到期原因 pending 不因总额变化解除待结算。
+
+验证与完成：先用六项现有缺口的失败回归定位，然后隔离 ledger+fake broker 数值场景覆盖部分成交、普通平仓、到期未结算、指派交收、现金/股票冻结重叠、跨币种、陈旧或失败快照及扫描与确认竞争。逐个真实入口断言相同阻断和预览失效；A2/A3 通过后完成。
+
+### S3：单一归属与人工闭环
+
+Allowed modules: src/application/trades/{auto_intake,attribution,combo_reconciliation,receipt}.py；src/application/ledger/{api,trade_attribution,trade_attribution_migration,repository_schema,writer_trade_events,wheel_trade_companions}.py；src/application/wheel/capacity.py；assistant/attribution_operations.py、daily_decision_brief_service.py/renderer.py、现有 Control/通知路由、相关 tests/docs。S3 不接订单状态回调。
+
+切换：已有 append-only trade_attribution_policy_enablings 保留 v1；新实现固定当前 policy_version=v2。受控迁移按 broker、物理账户、环境、账户、市场在既有表追加 v2 effective_from_ms，不改旧行；受控 preview 展示来源、T0 旧启用边界、T2 本次切换点和影响数，apply 需要停 writer、manifest、备份与读回。T0≤成交时间<T2 的未归属交易保持人工可处理；成交时间≥T2 才自动归属；晚到旧成交不能因处理时间晚而自动归属。未迁移来源可只读评估/人工待办，自动写入 fail closed。Wheel 自身启用门槛继续决定新开仓，历史启用窗口继续判断旧指派，不引入第三个业务开关。
+
+唯一入口：auto_intake 删除按 trade_attribution_enabled_for_execution 选择旧 Wheel intent writer 的分支；所有成交同一经济写入后统一评估归属。combo_reconciliation 删除独立自动采用，但统一归属可调用既有原子 adopt 函数；Combo 指派转 Wheel 保留共同规划函数与历史恢复。精准 intent 是候选证据，不自动排除其他可行分支。S2 容量规则核对股票/现金，已成交归属不再申请新增开仓额度。
+
+人工闭环：多候选/来源冲突/配置或证据不足进入现有回执、Daily Brief、Control 待办，说明已确认成交、影响、最近核对和下一步。相同事项和证据摘要去重通知，未解决持续展示；外部送达无回执显示未知。Control 预览及确认绑定 S1/S2 来源/依赖/容量摘要，重读后再写；重复确认读回，不重放成交。
+
+验证与完成：美团五个 500 股 HK 分支经真实成交入口进入隔离库，分别测无意图、单意图仍有竞争、精确排除竞争、缺配置、手工选目标、预览失效、重复确认；目标覆盖 1 张/500 股且其他四分支不变。Combo Put/Call 卖腿部分/全部指派、另一腿仍开仓、缺乘数/费用可见阻断、重复不建第二分支。静态导出/动态注册/真实入口验证旧 writer、独立 Combo 自动采用、通用归属 enable 业务命令与重复容量规则均退役；A5/A6 通过才完成。
+
+### S4：订单提示、回查与全链验收
+
+Allowed modules: 现有 OpenD trade listener、futu_gateway.py、futu_history_deals.py、trades/backfill.py、auto_intake 主循环；关联 fake-provider tests、集成 tests 与 docs。S4 不改变 S1–S3 的业务决策。
+
+同一 OpenD 连接注册订单状态回调，协议头绑定物理账户/环境/市场；回调只提交刷新提示到主循环，同账户合并并沿现有限频、超时、退避和取消；随后查询真实订单及成交并走 S1 唯一入口。订单累计量只核对，不差额制造成交。错误账户拒绝；查询失败不推进可信游标；断线保留周期回查。默认近 6 小时与停机窗口扩展保留；已知未决旧成交按原发生日期限量定向补查。无提示且超出窗口的旧更改，在富途日期过滤语义得到真实证据前保持明确残余风险，不能承诺自动发现。
+
+验证与完成：假 provider 记录同连接、调用顺序、限频/合并、失败退避、取消/重连、漏推与旧日期定向查询；全链从推送/回查经持久化、投影、结算、容量、待办到预览确认。收集一个脱敏真实指派样本，列推送、主动查询、交收匹配和时序；缺失则 A8 未通过，不能宣称完成。A4/A8 及 A1–A7 共享回归、项目门禁通过后进入 aggregate deepreview。
+
+### 验证、文档与风险
+
+每项行为先证明旧实现会失败，再跑定向 pytest；跨模块契约用隔离 DB、假券商与假渠道；最终按 om-pre-push-checks 执行必需门禁。本节作为分支内的实施合同；公共命令和 payload 变动时更新相应说明，主工作区其它未提交内容保持原状。Gateflow 每片 code review/fix/re-review/commit 后做 aggregate deepreview、draft PR review。
+
+待补证据：真实成交状态修订语义、历史查询日期过滤、券商资金/可卖量与本地占用重叠、真实指派完整样本。证据不足时保守阻断并报告，不能把 mock、静态审查或总额变化当生产验收。当前还有其它任务未提交归属改动，只读复核可复用差异，不直接合并或覆盖。
+
+本方案复用现有数据库和入口，没有新订单账本、待办表、监听服务、业务开关或通用框架；四片均直接映射目标和 A1–A8，没有扩大目标。完成报告列出改动/删除路径、A1–A8 证据、测试与 CI、commit、draft PR、剩余风险和 owner。
