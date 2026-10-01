@@ -66,10 +66,9 @@ def add_run_commands(subparsers: Any) -> None:
     heartbeat_check.add_argument("--config", required=True)
     heartbeat_check.add_argument("--runtime-root", required=True)
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
-    trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
+    trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-migrate"])
     trade_intake.add_argument("--effective-from-ms", type=int)
     trade_intake.add_argument("--actor")
-    trade_intake.add_argument("--request-id")
     trade_intake.add_argument("--manifest")
     trade_intake.add_argument("--backup-path")
     trade_intake.add_argument("--writers-stopped", action="store_true")
@@ -135,7 +134,7 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
     intake_argv: list[str] = ["--config", str(args.config)]
     if getattr(args, "action", "listen") != "listen":
         intake_argv.append(args.action)
-    for name in ("effective_from_ms", "actor", "request_id", "manifest", "backup_path"):
+    for name in ("effective_from_ms", "actor", "manifest", "backup_path"):
         value = getattr(args, name, None)
         if value is not None:
             intake_argv.extend(["--" + name.replace("_", "-"), str(value)])

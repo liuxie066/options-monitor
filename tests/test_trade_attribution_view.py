@@ -26,7 +26,7 @@ def _call_scope(tmp_path, monkeypatch, contracts=1):
     descriptor = resolve_wheel_activation_descriptor(cfg, market="us", account="lx")
     rows["wheel_activation_window"] = {**descriptor, "policy_sha256": descriptor["policy_hash"]}
     rows["attribution_policy_enablings"] = [{"broker": "futu", "physical_account_id": "1001", "environment": "REAL",
-        "account": "lx", "market": "us", "policy_version": "trade_attribution.v1", "effective_from_ms": 2500}]
+        "account": "lx", "market": "us", "policy_version": "trade_attribution.v2", "effective_from_ms": 2500}]
     # Capacity owner has separate full snapshot checks below; this isolates global competition.
     monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
                         lambda **kwargs: {"status": "available", "reason_codes": []})
@@ -56,6 +56,30 @@ def test_global_wheel_rule_and_all_competing_executions(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert all(row["selected_candidate_id"] is None for row in calls)
     assert all("competing_fills_exceed_capacity" in row["reason_codes"] for row in calls)
+
+
+
+def test_v1_window_fill_stays_manual_after_v2_cutover(tmp_path, monkeypatch):
+    rows, config, branch = _call_scope(tmp_path, monkeypatch)
+    scope = {"broker": "futu", "physical_account_id": "1001", "environment": "REAL",
+             "account": "lx", "market": "us"}
+    rows["attribution_policy_enablings"] = [
+        {**scope, "policy_version": "trade_attribution.v1", "effective_from_ms": 2000},
+        {**scope, "policy_version": "trade_attribution.v2", "effective_from_ms": 3500},
+    ]
+    args = dict(config=config, account="lx", market="us", now_ms=5000,
+                combo_evidence={"complete": True, "exposures": []})
+    before = build_trade_attribution_view(rows, **args)
+    call = next(row for row in before["rows"] if row["contract_key"]["option_type"] == "call")
+    assert call["event_time_ms"] == 3000
+    assert call["candidate_ids"] == ["wheel:" + branch]
+    assert call["rules_enabled"] is False and call["selected_candidate_id"] is None
+    for event in rows["trade_events"]:
+        if event["event_id"] == "unlinked-call-open-1":
+            event["event_time_ms"] = 4000
+    after = build_trade_attribution_view(rows, **args)
+    call = next(row for row in after["rows"] if row["contract_key"]["option_type"] == "call")
+    assert call["rules_enabled"] is True and call["selected_candidate_id"] == "wheel:" + branch
 
 
 def test_future_branch_does_not_own_past_fill_and_missing_evidence_stays_pending(tmp_path, monkeypatch):
@@ -131,7 +155,6 @@ def _writable_call_scope(tmp_path, monkeypatch, contracts=1, fill_time=3000):
     from domain.domain.ledger import TradeEvent
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.ledger.writer import persist_trade_event_objects_atomically
-    from src.application.ledger.api import enable_trade_attribution_policy
     from src.application.trades.attribution import apply_trade_attribution
     from src.application.wheel.config import resolve_wheel_activation_descriptor
 
@@ -144,9 +167,13 @@ def _writable_call_scope(tmp_path, monkeypatch, contracts=1, fill_time=3000):
     with repo._writer_connection(begin_immediate=True) as conn:
         repo.open_wheel_activation_window(market="us", account="lx", expected_current_generation=0,
             policy_hash=descriptor["policy_hash"], request_id="window", request_hash="b" * 64, conn=conn)
-    monkeypatch.setattr("time.time", lambda: 2)
-    enable_trade_attribution_policy(repo, scope={"broker": "futu", "physical_account_id": "1001", "environment": "REAL",
-        "account": "lx", "market": "us"}, effective_from_ms=2500, actor="test", request_id="enable", now_ms=2000, apply_changes=True)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        from src.application.ledger.trade_attribution import ATTRIBUTION_POLICY_VERSION
+        conn.execute("""INSERT INTO trade_attribution_policy_enablings
+            (broker, physical_account_id, environment, account, market, policy_version,
+             effective_from_ms, created_at_ms, actor, request_id, request_hash)
+            VALUES ('futu', '1001', 'REAL', 'lx', 'us', ?, 2500, 2000, 'fixture', 'cutover-v2', ?)""",
+            (ATTRIBUTION_POLICY_VERSION, "a" * 64))
     from domain.domain.trade_execution import execution_identity_from_input
     for event in rows["trade_events"]:
         if event["event_id"] == "unlinked-call-open-1":

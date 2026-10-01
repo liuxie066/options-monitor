@@ -120,7 +120,6 @@ from src.application.ledger.api import (
     broker_external_event_key,
     with_sqlite_repo_writer_lock,
     resolve_position_ledger_sqlite_path,
-    record_trade_event_with_wheel_intent,
 )
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.portfolio_management import (
@@ -135,7 +134,6 @@ from src.application.trades.intake import (
     process_trade_payload,
 )
 from src.application.write_contract import attach_write_contract, write_control
-from src.application.wheel.capacity import load_shared_coverage_fact
 from src.infrastructure.io_utils import atomic_write_json, utc_now
 from src.infrastructure.futu_gateway import build_futu_gateway
 
@@ -151,31 +149,11 @@ def _append_evidence_ref(value: Any, evidence_ref: str) -> Any:
     return [*value, evidence_ref] if evidence_ref not in value else list(value)
 
 
-def _wheel_intent_coverage_fact(
-    *,
-    repo: Any,
-    deal: Any,
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    account = str(getattr(deal, "internal_account", "") or "").strip().lower()
-    symbol = str(getattr(deal, "symbol", "") or "").strip().upper()
-    return load_shared_coverage_fact(
-        repo,
-        config=config,
-        account=account,
-        symbol=symbol,
-        broker=str(getattr(deal, "broker", "") or "futu"),
-        as_of_ms=max(int(getattr(deal, "trade_time_ms", 0) or 0), 1),
-        source_identity=str(getattr(deal, "deal_id", "") or ""),
-    )
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Auto trade intake via OpenD deal push")
-    ap.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
+    ap.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-migrate"])
     ap.add_argument("--effective-from-ms", type=int)
     ap.add_argument("--actor")
-    ap.add_argument("--request-id")
     ap.add_argument("--manifest")
     ap.add_argument("--backup-path")
     ap.add_argument("--writers-stopped", action="store_true")
@@ -723,20 +701,6 @@ def _process_payload(
                           "retry_with_new_associations": bool((claim or {}).get("new_associations"))}
         if recover_skipped:
             resolve_kwargs.update(retry_skipped_deal=True, notification_status="suppressed")
-        from src.application.trades.attribution import trade_attribution_enabled_for_execution
-        from domain.domain.symbol_identity import symbol_market
-        new_attribution = trade_attribution_enabled_for_execution(kwargs["repo"],
-            execution=getattr(deal, "execution_input", None) or {}, account=deal_account,
-            market=str(symbol_market(getattr(deal, "symbol", "")) or "").lower(),
-            event_time_ms=int(getattr(deal, "trade_time_ms", 0) or 0))
-        if (not new_attribution and apply_changes and allow_external_lookup and isinstance(config, dict)
-                and str(getattr(deal, "position_effect", "") or "").lower() == "open"
-                and str(getattr(deal, "side", "") or "").lower() == "sell"
-                and str(getattr(deal, "option_type", "") or "").lower() == "call"):
-            coverage_fact = _wheel_intent_coverage_fact(repo=kwargs["repo"], deal=deal, config=config)
-            resolve_kwargs["persist_trade_event_fn"] = lambda active_repo, active_deal: (
-                record_trade_event_with_wheel_intent(active_repo, active_deal, coverage_fact)
-            )
         scope = (trade_payload_commit_scope(inbox_path, claim=claim, repo=repo)
                  if claim is not None else contextlib.nullcontext())
         with scope:
@@ -758,7 +722,7 @@ def _process_payload(
         if before_receipt_fn is not None:
             current = before_receipt_fn(current) or current
         if isinstance(config, dict) and runtime_root is not None and current.get("action") == "open":
-            from src.application.trades.attribution import (trade_attribution_enabled_for_execution,
+            from src.application.trades.attribution import (
                 read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload)
             from src.application.ledger.api import read_trade_attribution_snapshot
             from domain.domain.symbol_identity import symbol_market
@@ -766,19 +730,16 @@ def _process_payload(
             account = str(getattr(normalized_deal, "internal_account", "") or "")
             market = str(symbol_market(getattr(normalized_deal, "symbol", "")) or "").lower()
             try:
-                enabled = trade_attribution_enabled_for_execution(repo, execution=execution, account=account, market=market,
-                    event_time_ms=int(getattr(normalized_deal, "trade_time_ms", 0) or 0))
-                if enabled:
-                    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-                    instant = int(time.time() * 1000)
-                    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant)
-                    from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
-                    view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
-                        combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(config, account=account))
-                    from domain.domain.trade_execution import execution_identity_from_input
-                    matched = [row for row in view["rows"] if row["execution_key"] == execution_identity_from_input(execution)]
-                    if len(matched) == 1:
-                        current = {**current, "attribution_result": attribution_result_payload(matched[0])}
+                rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+                instant = int(time.time() * 1000)
+                evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant)
+                from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
+                view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
+                    combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(config, account=account))
+                from domain.domain.trade_execution import execution_identity_from_input
+                matched = [row for row in view["rows"] if row["execution_key"] == execution_identity_from_input(execution)]
+                if len(matched) == 1:
+                    current = {**current, "attribution_result": attribution_result_payload(matched[0])}
             except Exception as exc:
                 current = {**current, "attribution_error": type(exc).__name__}
         if _lifecycle_notification_is_outbox_owned({"deal": normalized_deal, "result": current}):
@@ -1044,10 +1005,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
         return 0
-    if any((args.effective_from_ms is not None, args.request_id, args.manifest, args.backup_path)) or (
+    if any((args.effective_from_ms is not None, args.manifest, args.backup_path)) or (
         not args.recover_skipped and (args.actor or args.writers_stopped)
     ):
-        print("attribution administration flags require attribution-enable or attribution-migrate")
+        print("attribution administration flags require attribution-migrate")
         return 2
     intake_cfg = resolve_trade_intake_config(
         cfg,

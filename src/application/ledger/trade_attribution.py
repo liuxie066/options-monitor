@@ -21,7 +21,7 @@ from .read_only_evidence import open_trade_reconciliation_evidence_repo
 from .repository_wheel_policy import effective_wheel_window
 
 
-ATTRIBUTION_POLICY_VERSION = "trade_attribution.v1"
+ATTRIBUTION_POLICY_VERSION = "trade_attribution.v2"
 _POLICY_SCOPE = ("broker", "physical_account_id", "environment", "account", "market")
 
 
@@ -33,47 +33,6 @@ def read_trade_attribution_policy(repo: Any, *, scope: Mapping[str, Any], conn: 
             + " AND ".join(f"{key} = ?" for key in _POLICY_SCOPE) + " AND policy_version = ?",
             (*[scope.get(key) for key in _POLICY_SCOPE], ATTRIBUTION_POLICY_VERSION)).fetchone()
         return dict(row) if row else None
-
-
-def enable_trade_attribution_policy(repo: Any, *, scope: Mapping[str, Any], effective_from_ms: int,
-                                    actor: str, request_id: str, now_ms: int,
-                                    apply_changes: bool = False) -> dict[str, Any]:
-    request = {key: scope.get(key) for key in _POLICY_SCOPE}
-    request.update(policy_version=ATTRIBUTION_POLICY_VERSION, effective_from_ms=effective_from_ms,
-                   actor=actor, request_id=request_id)
-    if (any(not isinstance(value, str) or not value or value.strip() != value for key, value in request.items()
-            if key != "effective_from_ms") or request["broker"] != request["broker"].lower()
-            or request["account"] != request["account"].lower() or request["market"] not in {"us", "hk"}
-            or request["environment"] not in {"REAL", "SIMULATE"}
-            or type(effective_from_ms) is not int or type(now_ms) is not int or now_ms <= 0):
-        raise ValueError("invalid attribution policy enabling identity")
-    request_hash = canonical_sha256(request)
-
-    def run(active_repo: Any, conn: Any) -> dict[str, Any]:
-        existing = read_trade_attribution_policy(active_repo, scope=request, conn=conn)
-        if existing:
-            if existing["request_id"] != request_id or existing["request_hash"] != request_hash:
-                raise ValueError("attribution policy is already enabled with another request")
-            return {**existing, "write_applied": False}
-        written_at = max(now_ms, int(time.time() * 1000)) if apply_changes else now_ms
-        if effective_from_ms < written_at:
-            raise ValueError("attribution policy cannot be enabled retroactively")
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_attribution_policy_enablings'").fetchone():
-            raise ValueError("controlled trade attribution schema migration is required")
-        result = {**request, "created_at_ms": written_at, "request_hash": request_hash}
-        if apply_changes:
-            columns = list(result)
-            conn.execute("INSERT INTO trade_attribution_policy_enablings (" + ",".join(columns)
-                         + ") VALUES (" + ",".join("?" for _ in columns) + ")", tuple(result.values()))
-            if effective_from_ms < int(time.time() * 1000):
-                raise ValueError("attribution policy enabling missed its effective time")
-        return {**result, "write_applied": apply_changes}
-
-    if apply_changes:
-        return with_sqlite_repo_transaction(repo, run)
-    with _read_only_connection(repo.db_path.resolve()) as conn:
-        conn.execute("BEGIN")
-        return run(repo, conn)
 
 
 def ledger_resource_identity(repo: Any) -> dict[str, Any]:
@@ -140,13 +99,21 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
     metadata = lot_strategy_metadata_from_trade_events(effective)
     projection = project_stored_trade_events_to_position_lots(list(events))
     lots = {lot.lot_id: dict(lot.fields) for lot in projection.lots}
+    by_open_event: dict[str, list[str]] = {}
+    for lot_id, fields in lots.items():
+        open_event_id = str(fields.get("open_event_id") or fields.get("source_event_id") or "")
+        if open_event_id:
+            by_open_event.setdefault(open_event_id, []).append(lot_id)
     out = []
     for event in effective:
         contract = event.get("contract_key") or {}
         if event.get("event_type") != "open" or contract.get("account") != account:
             continue
-        lot_id = str(event.get("lot_id") or "")
-        if lot_id not in lots:
+        mapped_lots = by_open_event.get(str(event.get("event_id") or ""), [])
+        if len(mapped_lots) != 1:
+            continue
+        lot_id = mapped_lots[0]
+        if event.get("lot_id") and event["lot_id"] != lot_id:
             continue
         raw = event.get("raw_payload") or {}
         execution = raw.get("execution_input") or {}
@@ -155,7 +122,8 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         fields = lots[lot_id]
         membership = metadata.get(lot_id) or {}
         ordinary = _manual_ordinary_decision(effective, lot_id)
-        related = [row for row in effective if row.get("lot_id") == lot_id or row.get("target_lot_id") == lot_id]
+        related = [row for row in effective if row.get("event_id") == event["event_id"]
+                   or row.get("lot_id") == lot_id or row.get("target_lot_id") == lot_id]
         linked = bool(membership.get("source_wheel_branch_id") or membership.get("source_stock_lot_id")
                       or membership.get("strategy_group_id"))
         decisions = [row for row in related if row.get("event_type") == "adjust"

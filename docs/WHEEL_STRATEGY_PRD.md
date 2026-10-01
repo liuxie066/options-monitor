@@ -298,12 +298,13 @@ trade intake、生命周期核对和 SQLite option-position ledger 形成权威�
 
 ### 4.4 Wheel Call 自动确认批次
 
-候选展示不代表用户已采用，broker 成交不携带策略归属。未启用全局归属规则的账户继续采用
-既有精确 intent 路径；启用后，Call/Put 都由同一交易归属 owner 汇总 Wheel、Combo 的竞争证据。
+候选展示不代表用户已采用，broker 成交不携带策略归属。Call/Put 成交均先由同一交易归属逻辑
+汇总 Wheel、Combo 的竞争证据；旧 v1 启用记录只供历史读取，旧 intent 自动写入路径已退役。
+按物理来源受控切换到 v2 后，只有成交时间不早于切换点的交易可按规则自动关联。
 唯一合法、成交时与当前均有效的 active 分支，且账户、合约、全部竞争成交和容量证据通过时，
-可以在没有 intent 的情况下按规则关联；存在多候选、缺失证据或容量不足时保持待核实。
-现有 intent 继续固定账户、批次、合约、数量、multiplier 和有效期；精确匹配才消费预留，
-不匹配时不能退回宽泛分支匹配。规则启用不启动新分支，也不重写经济成交。
+可以在没有 intent 的情况下关联；存在多候选、缺失证据或容量不足时进入人工待办。
+现有 intent 继续固定账户、批次、合约、数量、multiplier 和有效期，作为候选证据参与竞争；
+精确匹配才消费预留，不能仅凭 intent 排除其他可行分支。切换不启动新分支，也不重写经济成交。
 
 人工确认统一通过 OM Bot 查询、请求预览，再由 Control 确认。归属冲突持久化到 ledger，
 相关分支停止新增扫描；复杂纠错需受控人工修复。完整规则与切换契约见
@@ -877,8 +878,9 @@ partial assignment 对实际转换量创建 pending child；父分支若仍有 o
 
 期权 lot 使用 `strategy=wheel`、方向对应的 `leg_role=wheel_call|wheel_put` 和中性
 `source_wheel_branch_id`。Call 同时保留 `source_stock_lot_id` 以证明股票覆盖来源。唯一匹配的有效
-intent 才允许 trade writer 原子写入归属并消费 intent；没有或存在多个匹配时不猜，仓位保持真实、
-占用进入共享容量，并在读模型中暴露 linkage unresolved。
+intent 是统一归属判断的候选证据；唯一合法目标及全部竞争、容量证据通过后，由归属事务写入关系，
+匹配 intent 时同时消费预留。没有合法目标或存在多个匹配时不猜，仓位保持真实，
+占用进入共享容量，并在读模型与人工待办中暴露 linkage unresolved。
 
 已有 open Wheel Call lot 的兼容 adapter 只在 `strategy=wheel`、`leg_role=wheel_call`、没有冲突
 `strategy_group_id` 且 `source_stock_lot_id` 在账户内唯一时映射到同 ID branch；新 lot 必须显式保存

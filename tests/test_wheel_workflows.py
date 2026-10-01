@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -15,11 +14,7 @@ from src.application.ledger.api import decision_state_snapshot
 from domain.domain.wheel import lot_strategy_metadata_for_lot
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.ledger.writer import (
-    persist_trade_event_objects_atomically,
-    persist_trade_event_with_wheel_intent,
-)
-from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.positions.workflows import execute_manual_assignment
 from src.application.wheel import (
     build_wheel_read_model,
@@ -321,47 +316,10 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
     assert result["dry_run"] is True
 
 
-def _partial_call_fill() -> NormalizedTradeDeal:
-    return NormalizedTradeDeal(
-        broker="富途", futu_account_id="REAL_1", internal_account="lx",
-        deal_id="partial-call-1", order_id="bound-call-order", symbol="NVDA",
-        option_type="call", side="sell", position_effect="open", contracts=1,
-        price=2, strike=110, multiplier=100, multiplier_source="broker",
-        expiration_ymd="2026-08-21", currency="USD", trade_time_ms=5_000,
-        raw_payload={},
-    )
 
 
-def test_two_partial_fills_consume_one_wheel_intent_without_changing_trade_amounts(tmp_path):
-    repo, lot_id = _wheel_repo(tmp_path, contracts=2)
-    created, coverage = _create_call_intent(repo, lot_id, contracts=2, broker_order_id="bound-call-order")
-    first_deal = _partial_call_fill()
-    first = persist_trade_event_with_wheel_intent(repo, first_deal, coverage).to_dict()
-    partial = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
-    assert first["wheel_linkage_status"] == "matched_intent"
-    assert partial["active_intent_ids"] == [created["intent_id"]]
-    assert partial["active_intent_reserved_shares"] == 100
-    second = persist_trade_event_with_wheel_intent(repo, replace(first_deal, deal_id="partial-call-2", trade_time_ms=6_000), coverage).to_dict()
-    completed = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    assert second["wheel_linkage_status"] == "matched_intent"
-    assert completed["active_intent_ids"] == []
-    assert completed["active_intent_reserved_shares"] == 0
-    consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
-    assert [event["payload"]["contracts"] for event in consumed] == [1, 1]
-    fills = [event for event in repo.list_trade_events() if event["event_type"] == "open" and event["option_type"] == "call"]
-    assert sum(event["contracts"] * float(event["price"]) * event["multiplier"] for event in fills) == 400
-    assert all(event["raw_payload"]["source_stock_lot_id"] == lot_id for event in fills)
 
 
-@pytest.mark.parametrize("order_id", [None, "another-order"])
-def test_bound_wheel_order_does_not_consume_another_fill(tmp_path, order_id):
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id, broker_order_id="bound-call-order")
-    result = persist_trade_event_with_wheel_intent(repo, replace(_partial_call_fill(), order_id=order_id), coverage).to_dict()
-    assert result["wheel_linkage_status"] == "no_matching_intent"
-    assert not [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
-    assert created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]
-    assert any(event["event_id"] == result["event_id"] for event in repo.list_trade_events())
 
 
 def test_wheel_intent_replay_uses_stable_request_and_preserves_accepted_capacity(tmp_path):
@@ -1152,59 +1110,8 @@ def test_call_intent_cancel_rejects_cross_market_without_effects(
     assert repo.list_wheel_events(account="lx") == before
 
 
-def test_short_call_fill_consumes_matching_intent_atomically(tmp_path: Path) -> None:
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id)
-    coverage = {**coverage, "shares_available_for_cover": 0}
-    deal = replace(
-        _partial_call_fill(),
-        deal_id="call-fill-1",
-        order_id="call-order-1",
-        raw_payload={"deal_id": "call-fill-1"},
-    )
-
-    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-
-    batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    call_lot = _lot_row_for_option_type(repo, "call")
-    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
-    assert result["wheel_linkage_status"] == "matched_intent"
-    assert result["wheel_intent_event_id"]
-    assert call_metadata["strategy"] == "wheel"
-    assert call_metadata["source_stock_lot_id"] == lot_id
-    assert batch["phase"] == "call_open"
-    assert batch["active_intent_ids"] == []
-    assert created["intent_id"] not in batch["active_intent_ids"]
 
 
-def test_unmatched_short_call_fill_stays_unlinked_and_is_still_recorded(
-    tmp_path: Path,
-) -> None:
-    repo, _lot_id = _wheel_repo(tmp_path)
-    deal = replace(
-        _partial_call_fill(),
-        deal_id="unmatched-call-fill",
-        order_id="unmatched-call-order",
-        raw_payload={"deal_id": "unmatched-call-fill"},
-    )
-    coverage = {
-        "account": "lx",
-        "symbol": "NVDA",
-        "capacity_identity_hash": "capacity-1",
-        "status": "available",
-        "shares_available_for_cover": 100,
-    }
-
-    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-
-    call_lot = _lot_row_for_option_type(repo, "call")
-    call_metadata = _lot_strategy_metadata(repo, str(call_lot["record_id"]))
-    model = build_wheel_read_model(repo, "lx", 6_000)
-    assert result["created"] is True
-    assert result["wheel_linkage_status"] == "no_matching_intent"
-    assert call_metadata.get("strategy") is None
-    assert model["batches"][0]["phase"] == "linkage_unresolved"
-    assert len(model["linkage_candidates"]) == 1
 
 
 def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path: Path) -> None:
@@ -1522,35 +1429,3 @@ def test_wheel_start_failure_rolls_back_assignment(
 
     assert [item["event_type"] for item in repo.list_trade_events()] == ["open"]
     assert repo.get_position_lot_fields(put_lot_id)["status"] == "open"
-
-
-@pytest.mark.parametrize("namespace", ["futu.order", "external-file.order"])
-def test_bound_wheel_order_requires_proven_order_namespace(tmp_path, namespace):
-    from src.application.ledger.api import record_trade_event_with_wheel_intent
-    from src.application.trades.normalizer import normalize_trade_deal
-
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id, broker_order_id="bound-call-order")
-    deal = normalize_trade_deal({
-        "schema_version": "trade_execution.v1",
-        "broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1",
-                               "environment": "REAL", "broker_account_id": "futu:REAL:REAL_1",
-                               "account_label": "lx"},
-        "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
-                           "currency": "USD", "option_type": "call", "strike": "110",
-                           "expiration_ymd": "2026-08-21", "multiplier": "100"},
-        "external_id_namespace": "futu.deal", "external_execution_id": "scope-fill",
-        "external_order_namespace": namespace, "external_order_id": "bound-call-order",
-        "side": "sell", "position_effect": "open", "quantity": "1", "price": "2",
-        "currency": "USD", "occurred_at_utc": "1970-01-01T00:00:05Z",
-    })
-    result = record_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
-    matched = namespace == "futu.order"
-    assert result["wheel_linkage_status"] == ("matched_intent" if matched else "no_matching_intent")
-    consumed = [event for event in repo.list_wheel_events(account="lx")
-                if event["event_type"] == "wheel_call_intent_consumed"]
-    assert len(consumed) == int(matched)
-    event = next(event for event in repo.list_trade_events() if event["event_id"] == result["event_id"])
-    assert event["contracts"] * float(event["price"]) * event["multiplier"] == 200
-    assert bool(event["raw_payload"].get("source_stock_lot_id")) is matched
-    assert (created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]) is not matched

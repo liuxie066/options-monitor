@@ -213,7 +213,6 @@ from src.application.ledger.trade_event_pagination import (
 )
 from src.application.ledger.writer import (
     _finish_trade_event_decision_projection as finalize_trade_event_decision_projection,
-    persist_trade_event_with_wheel_intent as record_trade_event_with_wheel_intent,
 )
 from src.application.ledger.writer_trade_events import reconcile_normalized_execution_order_identity
 from src.application.ledger.current_decision_projection import (
@@ -305,7 +304,6 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 from .trade_attribution import (
-    enable_trade_attribution_policy,
     read_trade_attribution_policy,
     ATTRIBUTION_POLICY_VERSION,
     assert_trade_attribution_unclaimed,
@@ -323,7 +321,7 @@ __all__ = [
     "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
     "ledger_resource_identity", "read_trade_attribution_facts",
     "read_trade_attribution_snapshot",
-    "enable_trade_attribution_policy", "read_trade_attribution_policy",
+    "read_trade_attribution_policy",
     "preview_trade_attribution_migration", "apply_trade_attribution_migration",
     "record_trade_ordinary_attribution", "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
     "contract_key_from_lot_fields",
@@ -503,7 +501,6 @@ __all__ = [
     "record_manual_position_close",
     "record_manual_position_open",
     "record_normalized_trade_event",
-    "record_trade_event_with_wheel_intent",
     "append_and_verify_wheel_intent_consumption",
     "record_trade_event_repair",
     "record_trade_event_void",

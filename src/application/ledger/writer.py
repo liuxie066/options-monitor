@@ -19,7 +19,6 @@ from .writer_trade_events import (
     persist_trade_event_object,
     persist_trade_event_objects_atomically,
     persist_trade_event_with_combo_identity,
-    persist_trade_event_with_wheel_intent,
     rebuild_position_lots_from_trade_events,
 )
 
