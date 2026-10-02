@@ -20,7 +20,6 @@ from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_curren
 from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.infrastructure.exchange_rates import (
-    exchange_rate_observation_status,
     get_exchange_rates_or_fetch_latest,
 )
 from src.application.positions.context_builder import build_context as build_option_positions_context
@@ -269,6 +268,16 @@ def query_sell_put_cash(
     if write_cache:
         out_dir_path.mkdir(parents=True, exist_ok=True)
 
+    exchange_rate_payload: dict[str, Any] = {}
+    if not no_exchange_rates:
+        candidate = get_exchange_rates_or_fetch_latest(
+            cache_path=(out_dir_path / "rate_cache.json").resolve(),
+            max_age_hours=24,
+            write_cache=write_cache,
+        )
+        if isinstance(candidate, Mapping):
+            exchange_rate_payload = dict(candidate)
+
     portfolio = load_account_portfolio_context(
         market=market,
         account=account,
@@ -277,23 +286,15 @@ def query_sell_put_cash(
         log=lambda _message: None,
         runtime_config=runtime_cfg,
         portfolio_source=None,
-        fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+        fetch_futu_portfolio_context_fn=lambda **kwargs: fetch_futu_portfolio_context(
+            **kwargs, exchange_rate_observation=exchange_rate_payload,
+        ),
         is_fresh_fn=lambda _path, _ttl_sec: False,
         load_json_fn=load_json,
         write_cache=write_cache,
     )
 
     option_repo, option_records = _load_option_position_records(data_config_path)
-    exchange_rate_payload: dict[str, Any] = {}
-    if not no_exchange_rates:
-        cache_file = (out_dir_path / "rate_cache.json").resolve()
-        candidate = get_exchange_rates_or_fetch_latest(
-            cache_path=cache_file,
-            max_age_hours=24,
-            write_cache=write_cache,
-        )
-        if exchange_rate_observation_status(candidate, max_age_hours=24) == "ready":
-            exchange_rate_payload = dict(candidate or {})
     normalized_account = str(account or "").strip().lower()
     decision_snapshot = (
         decision_state_snapshot(

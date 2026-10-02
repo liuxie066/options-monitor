@@ -1152,10 +1152,10 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert fixed.startswith("# OM · 决策简报 · lx")
     assert "状态｜10:00 批次" in fixed
     assert "## CSP" in fixed
-    assert "现金总额｜$180,000.00" not in fixed
+    assert fixed.index("现金总额（折CNY）") < fixed.index("现金总额｜$180,000.00")
     assert "现金总额（折CNY）｜¥1,260,000.00" in fixed
-    assert "可用于期权开仓｜$75,000.00" not in fixed
-    assert "可用于期权开仓（折CNY）｜¥525,000.00" in fixed
+    assert "可用于期权开仓｜$75,000.00" in fixed
+    assert "可用于期权开仓（折CNY，展示值）｜¥525,000.00" in fixed
     assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
 
     alert_context = {**_scheduled_context(), "scheduled_target_market": "10:30"}
@@ -1173,7 +1173,7 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "MSFT｜CSP" in alert
     assert "NVDA｜CSP" in alert
     assert "较上一轮" not in alert
-    assert "现金总额｜$180,000.00" not in alert
+    assert "现金总额｜$180,000.00" in alert
     assert "现金总额（折CNY）｜¥1,260,000.00" in alert
 
     failure = render_fixed_failure(brief, context=_scheduled_context())
@@ -1226,7 +1226,8 @@ def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
     assert "现金总额｜HK$480,000.00" in message
     assert "现金总额｜$18,000.00" in message
     assert "可用于期权开仓｜HK$225,000.00" in message
-    assert "折CNY" not in message
+    assert "现金总额（折CNY）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
 
 
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
@@ -1240,8 +1241,8 @@ def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
 
     message = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "现金总额｜暂不可用" in message
-    assert "可用于期权开仓｜暂不可用" in message
+    assert "现金总额（折CNY）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
     assert "现金总额｜$0" not in message
 
 
@@ -1624,8 +1625,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "剩余最高年化 5.0%" in message
     assert "Put 担保资金代理 $10,000.00" in message
     assert "AMD｜CSP｜08-21 $150 Put｜建议平仓" in message
-    assert "现金总额｜暂不可用" in message
-    assert "可用于期权开仓｜暂不可用" in message
+    assert "现金总额（折CNY）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
@@ -1675,8 +1676,8 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "\n\n事件｜CSP #1（MSFT）：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
-    assert "现金总额｜暂不可用" in message
-    assert "可用于期权开仓｜暂不可用" in message
+    assert "现金总额（折CNY）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
 
 

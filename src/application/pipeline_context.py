@@ -13,6 +13,7 @@ Design constraints:
 """
 
 from pathlib import Path
+from typing import Mapping
 
 from src.application.account_config import build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
@@ -42,6 +43,12 @@ from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     exchange_rate_scalars_from_option_context,
     load_prepared_option_positions_context,
+)
+from src.application.current_fx_run import load_run_fx_snapshot
+from src.infrastructure.exchange_rates import (
+    exchange_rate_observation_status,
+    get_exchange_rates_or_fetch_latest,
+    project_exchange_rate_snapshot,
 )
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
@@ -94,6 +101,7 @@ def load_portfolio_context(
     log,
     runtime_config: dict | None = None,
     portfolio_source: str | None = None,
+    exchange_rate_observation: Mapping | None = None,
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
     try:
@@ -105,7 +113,11 @@ def load_portfolio_context(
             log=log,
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
-            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            fetch_futu_portfolio_context_fn=(
+                (lambda **kwargs: fetch_futu_portfolio_context(
+                    **kwargs, exchange_rate_observation=exchange_rate_observation,
+                )) if exchange_rate_observation is not None else fetch_futu_portfolio_context
+            ),
             is_fresh_fn=is_fresh,
             load_json_fn=load_cached_json,
         )
@@ -127,6 +139,7 @@ def load_option_positions_context(
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
+    exchange_rate_observation: Mapping | None = None,
 ) -> tuple[dict | None, bool]:
     """Best-effort load position-lot context.
 
@@ -202,11 +215,8 @@ def load_option_positions_context(
         # Refresh shared cache (single fetch) and produce account context in one command.
         try:
             _repo, records = _load_option_position_records(data_config)
-            rates = _load_option_position_exchange_rates(
-                base=base,
-                state_dir=shared_root,
-                log=log,
-            )
+            rates = (exchange_rate_observation if exchange_rate_observation is not None
+                     else _load_option_position_exchange_rates(base=base, state_dir=shared_root, log=log))
             decision_snapshots = _decision_snapshots_for_records(
                 _repo,
                 records,
@@ -240,11 +250,8 @@ def load_option_positions_context(
 
         # Fallback: direct per-account fetch path.
         _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(
-            base=base,
-            state_dir=shared_root,
-            log=log,
-        )
+        rates = (exchange_rate_observation if exchange_rate_observation is not None
+                 else _load_option_position_exchange_rates(base=base, state_dir=shared_root, log=log))
         normalized_account = str(account or "").strip().lower()
         decision_snapshot = (
             decision_state_snapshot(
@@ -299,6 +306,7 @@ def load_exchange_rates(
     log,
     shared_state_dir: Path | None = None,
     status_out: dict[str, str] | None = None,
+    exchange_rate_observation: Mapping | None = None,
 ) -> tuple[float | None, float | None]:
     """Best-effort exchange-rate loader.
 
@@ -310,9 +318,7 @@ def load_exchange_rates(
     if status_out is not None:
         status_out["status"] = "unavailable"
     try:
-        from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
-
-        rates_obj = get_exchange_rates_or_fetch_latest(
+        rates_obj = exchange_rate_observation if exchange_rate_observation is not None else get_exchange_rates_or_fetch_latest(
             cache_path=(
                 (shared_state_dir or state_dir) / "rate_cache.json"
             ).resolve(),
@@ -333,11 +339,8 @@ def load_exchange_rates(
                 cny_per_hkd_exchange_rate = None
             if usdcny and usdcny > 0:
                 usd_per_cny_exchange_rate = 1.0 / usdcny
-            if status_out is not None and (
-                usd_per_cny_exchange_rate is not None
-                or cny_per_hkd_exchange_rate is not None
-            ):
-                status_out["status"] = "ready"
+            if status_out is not None:
+                status_out["status"] = exchange_rate_observation_status(rates_obj)
     except Exception as e:
         log(f"[WARN] exchange rates not available: {e}")
     return usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate
@@ -393,6 +396,17 @@ def build_pipeline_context(
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
     ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if is_scheduled else 60) or 0)
+    direct_fx: Mapping | None = None
+    if prepared_portfolio_context_manifest is None and prepared_option_positions_context_manifest is None:
+        try:
+            direct_fx = get_exchange_rates_or_fetch_latest(
+                cache_path=((shared_state_dir or state_dir) / "rate_cache.json").resolve(),
+                max_age_hours=24,
+                log=log,
+            ) or {}
+        except Exception as exc:
+            log(f"[WARN] exchange rates not available: {exc}")
+            direct_fx = {}
 
     if prepared_portfolio_context_manifest is not None:
         try:
@@ -426,6 +440,7 @@ def build_pipeline_context(
             log=log,
             runtime_config=cfg,
             portfolio_source=str(portfolio_source),
+            exchange_rate_observation=direct_fx,
         )
 
     if prepared_option_positions_context_manifest is not None:
@@ -469,9 +484,69 @@ def build_pipeline_context(
             state_dir=state_dir,
             shared_state_dir=shared_state_dir,
             log=log,
+            exchange_rate_observation=direct_fx,
         )
 
+    if direct_fx is not None:
+        if isinstance(portfolio_ctx, dict) and "exchange_rates" in portfolio_ctx:
+            portfolio_ctx = dict(portfolio_ctx)
+            portfolio_ctx["exchange_rates"] = direct_fx
+            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(direct_fx)
+        if isinstance(option_ctx, dict) and "exchange_rates" in option_ctx:
+            prior = option_ctx.get("exchange_rates")
+            prior_rates = prior.get("rates") if isinstance(prior, dict) else None
+            current_rates = direct_fx.get("rates") if isinstance(direct_fx.get("rates"), dict) else {}
+            secured = option_ctx.get("cash_secured_total_by_ccy")
+            required_pairs = {
+                {"USD": "USDCNY", "HKD": "HKDCNY"}[ccy]
+                for ccy, amount in (secured.items() if isinstance(secured, dict) else ())
+                if ccy in {"USD", "HKD"} and amount
+            }
+            option_ctx = dict(option_ctx)
+            option_ctx["exchange_rates"] = direct_fx
+            if not isinstance(prior_rates, dict) or any(
+                prior_rates.get(pair) != current_rates.get(pair) for pair in required_pairs
+            ):
+                option_ctx["cash_secured_total_cny"] = None
+
     if prepared_option_positions_context_manifest is not None:
+        fx_authority = option_ctx.get("prepared_authority") if isinstance(option_ctx, dict) else None
+        if (
+            isinstance(option_ctx, dict)
+            and isinstance(portfolio_ctx, dict)
+            and (
+                portfolio_ctx.get("fx_snapshot_sha256")
+                or (fx_authority.get("run_fx_snapshot_sha256") if isinstance(fx_authority, dict) else None)
+            )
+        ):
+            run_id = str(prepared_option_positions_context_run_id or "")
+            snapshot, fx_hash = load_run_fx_snapshot(base=base, run_id=run_id)
+            authority = option_ctx.get("prepared_authority")
+            if (
+                portfolio_ctx.get("fx_snapshot_sha256") != fx_hash
+                or not isinstance(authority, dict)
+                or authority.get("run_fx_snapshot_sha256") != fx_hash
+            ):
+                raise PreparedOptionPositionsContextError("prepared context FX snapshot mismatch")
+            current_fx = project_exchange_rate_snapshot(snapshot, purpose="capacity")
+            prior_fx = option_ctx.get("exchange_rates")
+            prior_rates = prior_fx.get("rates") if isinstance(prior_fx, dict) else None
+            current_rates = current_fx["rates"]
+            secured = option_ctx.get("cash_secured_total_by_ccy")
+            required_pairs = {
+                {"USD": "USDCNY", "HKD": "HKDCNY"}[ccy]
+                for ccy, amount in (secured.items() if isinstance(secured, dict) else ())
+                if ccy in {"USD", "HKD"} and amount
+            }
+            option_ctx = dict(option_ctx)
+            option_ctx["exchange_rates"] = current_fx
+            if not isinstance(prior_rates, dict) or any(
+                prior_rates.get(pair) != current_rates.get(pair) for pair in required_pairs
+            ):
+                option_ctx["cash_secured_total_cny"] = None
+            portfolio_ctx = dict(portfolio_ctx)
+            portfolio_ctx["exchange_rates"] = current_fx
+            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(current_fx)
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
             exchange_rate_scalars_from_option_context(option_ctx or {})
         )
@@ -481,7 +556,9 @@ def build_pipeline_context(
             and isinstance(option_ctx.get("prepared_authority"), dict)
             else {}
         )
-        fx_status = str(prepared_authority.get("fx_status") or "").strip().lower()
+        fx_status = exchange_rate_observation_status(
+            option_ctx.get("exchange_rates") if isinstance(option_ctx, dict) else None,
+        )
     else:
         rate_status: dict[str, str] = {}
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
@@ -491,6 +568,7 @@ def build_pipeline_context(
                 shared_state_dir=shared_state_dir,
                 log=log,
                 status_out=rate_status,
+                exchange_rate_observation=direct_fx,
             )
         )
         fx_status = str(rate_status.get("status") or "").strip().lower()

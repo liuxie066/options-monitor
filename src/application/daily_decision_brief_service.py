@@ -26,11 +26,11 @@ from domain.domain.engine import (
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import (
     cash_secured_unavailable_for_cash_snapshot,
-    read_cash_secured_total_cny,
 )
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application.cash_totals import sum_by_currency_to_cny
+from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
 from src.application.strategy_scan_failures import (
     ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
     FAILURE_REASON as STRATEGY_FAILURE_REASON,
@@ -1620,8 +1620,8 @@ def _build_funds(
     opening: dict[str, float] = {}
     if cash_total_reliable and secured_reliable:
         opening = {
-            currency: float(amount) - float((secured or {}).get(currency, 0.0))
-            for currency, amount in (cash_total or {}).items()
+            currency: float((cash_total or {}).get(currency, 0.0)) - float((secured or {}).get(currency, 0.0))
+            for currency in sorted(set(cash_total or {}) | set(secured or {}))
         }
     if not secured_reliable:
         if reason == "ok":
@@ -1636,30 +1636,66 @@ def _build_funds(
     if not cash_total_reliable:
         reason = "portfolio_cash_unavailable"
 
-    rate_payload = option_positions_context.get("exchange_rates")
-    rates = rate_payload.get("rates") if isinstance(rate_payload, Mapping) else None
+    option_fx = option_positions_context.get("exchange_rates")
+    portfolio_fx = portfolio_context.get("exchange_rates")
+    option_hash = (option_positions_context.get("prepared_authority") or {}).get("run_fx_snapshot_sha256") if isinstance(option_positions_context.get("prepared_authority"), Mapping) else None
+    portfolio_hash = portfolio_context.get("fx_snapshot_sha256")
+    fx_mismatch = bool(option_hash or portfolio_hash) and option_hash != portfolio_hash
+    if isinstance(option_fx, Mapping) and isinstance(portfolio_fx, Mapping):
+        option_pairs = option_fx.get("pairs")
+        portfolio_pairs = portfolio_fx.get("pairs")
+        if isinstance(option_pairs, Mapping) and isinstance(portfolio_pairs, Mapping):
+            for pair in ("USDCNY", "HKDCNY"):
+                for field in ("rate", "source", "quote_at_utc", "observed_at_utc"):
+                    left = option_pairs.get(pair) if isinstance(option_pairs.get(pair), Mapping) else {}
+                    right = portfolio_pairs.get(pair) if isinstance(portfolio_pairs.get(pair), Mapping) else {}
+                    if left.get(field) != right.get(field):
+                        fx_mismatch = True
+    raw_fx = option_fx if isinstance(option_fx, Mapping) and isinstance(option_fx.get("pairs"), Mapping) else portfolio_fx
+    display_fx = project_exchange_rate_snapshot(raw_fx, purpose="display") if isinstance(raw_fx, Mapping) and not fx_mismatch else {}
+    rates = display_fx.get("rates")
     rates = rates if isinstance(rates, Mapping) else {}
     usdcny_rate = _number(rates.get("USDCNY"))
     cny_per_hkd_rate = _number(rates.get("HKDCNY"))
     cash_total_cny: float | None = None
-    if cash_total:
+    if cash_total_reliable:
         cash_total_cny = sum_by_currency_to_cny(
-            cash_total,
+            cash_total or {},
             usdcny_exchange_rate=usdcny_rate,
             cny_per_hkd_exchange_rate=cny_per_hkd_rate,
         )
-        if cash_total_cny is None:
-            data_gaps.append(
-                {
-                    "scope": "funds",
-                    "kind": "cash_total_cny",
-                    "reason": "cash_total_cny_unavailable",
-                }
-            )
-    secured_total_cny = read_cash_secured_total_cny(dict(option_positions_context)) if secured_reliable else None
+    if cash_total_cny is None:
+        data_gaps.append({"scope": "funds", "kind": "cash_total_cny", "reason": "cash_total_cny_unavailable"})
+    secured_total_cny = (
+        sum_by_currency_to_cny(
+            secured or {},
+            usdcny_exchange_rate=usdcny_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_rate,
+        ) if secured_reliable else None
+    )
     opening_cny: float | None = None
     if cash_total_cny is not None and secured_total_cny is not None:
         opening_cny = cash_total_cny - secured_total_cny
+    needed_pairs = {
+        f"{currency}CNY" for amounts in (cash_total or {}, secured or {})
+        for currency, amount in amounts.items() if currency in {"USD", "HKD"} and amount
+    }
+    pairs = display_fx.get("pairs") if isinstance(display_fx.get("pairs"), Mapping) else {}
+    missing_pairs = [pair for pair in sorted(needed_pairs) if pair not in rates]
+    fx_reason_labels = {
+        "missing_verified_quote": "缺少已核实报价",
+        "calendar_or_timestamp_unknown": "报价时间或休市日历不明",
+        "trading_session_gap": "交易时段断档",
+        "calendar_unknown": "休市日历不明",
+        "stale_quote": "报价过期",
+    }
+    fx_reason = (
+        "批次汇率快照不一致" if fx_mismatch else
+        "汇率证据不足：" + "、".join(
+            f"{pair[:3]}/CNY {fx_reason_labels.get(str((pairs.get(pair) or {}).get('reason')), '不可用')}"
+            for pair in missing_pairs
+        ) if missing_pairs else "暂不支持所需币种折算"
+    )
 
     as_of_values = [item for item in (portfolio_as_of, option_as_of) if item is not None]
     return (
@@ -1670,6 +1706,15 @@ def _build_funds(
             "cash_total_cny": cash_total_cny,
             "cash_secured_total_cny": secured_total_cny,
             "option_opening_available_cny": opening_cny,
+            "cash_total_reliable": cash_total_reliable,
+            "option_opening_reliable": cash_total_reliable and secured_reliable,
+            "cash_total_cny_unavailable_reason": "现金来源不可靠" if not cash_total_reliable else fx_reason,
+            "option_opening_cny_unavailable_reason": reason if not (cash_total_reliable and secured_reliable) else fx_reason,
+            "fx_snapshot_sha256": "" if fx_mismatch else option_hash or portfolio_hash or "",
+            "fx_pairs": {
+                pair: {key: row.get(key) for key in ("source", "quote_at_utc", "quality", "reason")}
+                for pair, row in pairs.items() if isinstance(row, Mapping)
+            },
             "available": bool(
                 cash_total_reliable and secured_reliable and (opening or opening_cny is not None)
             ),

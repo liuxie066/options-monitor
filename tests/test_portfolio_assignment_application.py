@@ -59,15 +59,17 @@ def _valuation_response(*, accounts=None):
 
 
 def _patch_positions(monkeypatch, positions, *, holdings_enabled=False, approved=None, futu_context=None, futu_quotes=None):
+    observation = {
+        "source": "tencent_quote",
+        "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
     monkeypatch.setattr(
         application,
-        "fetch_market_exchange_rates",
-        lambda: {
-            "source": "tencent_quote",
-            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
+        "current_exchange_rate_snapshot",
+        lambda **_kwargs: observation,
     )
+    monkeypatch.setattr(application, "project_exchange_rate_snapshot", lambda *_args, **_kwargs: observation)
     monkeypatch.setattr(
         application,
         "_load_runtime_and_positions",
@@ -238,7 +240,8 @@ def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypat
     monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
         [], "config.us.json", {"portfolio": {"holdings": {"enabled": False}}},
     ))
-    monkeypatch.setattr(application, "fetch_market_exchange_rates", lambda: reads.append("fx") or observation)
+    monkeypatch.setattr(application, "current_exchange_rate_snapshot", lambda **_kwargs: reads.append("fx") or observation)
+    monkeypatch.setattr(application, "project_exchange_rate_snapshot", lambda *_args, **_kwargs: observation)
 
     def read_context(*, cfg, account, exchange_rate_observation):
         assert exchange_rate_observation is observation
@@ -263,8 +266,90 @@ def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypat
     assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "2.00"
 
 
+@pytest.mark.parametrize("existing_cache", [False, True])
+def test_query_keeps_shared_fx_cache_read_only(monkeypatch, tmp_path, existing_cache):
+    from src.infrastructure import exchange_rates as fx
+
+    now = datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(fx, "_utc_now", lambda: now)
+    monkeypatch.setattr(application, "repo_base", lambda: tmp_path)
+    cache = tmp_path / "output_shared" / "state" / "rate_cache.json"
+
+    def pair(rate, quoted):
+        return {
+            "rate": rate, "source": "tencent_quote",
+            "quote_at_utc": quoted, "observed_at_utc": quoted,
+        }
+
+    if existing_cache:
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"schema_version": 2, "pairs": {
+            "USDCNY": pair(7.1, "2026-09-30T10:00:00+00:00"),
+            "HKDCNY": pair(0.91, "2026-09-30T10:00:00+00:00"),
+        }}), encoding="utf-8")
+    original = cache.read_bytes() if existing_cache else None
+    monkeypatch.setattr(fx, "fetch_market_exchange_rates", lambda: {"pairs": {
+        "USDCNY": pair(7.2, "2026-09-30T11:00:00+00:00"),
+        "HKDCNY": pair(0.92, "2026-09-30T11:00:00+00:00"),
+    }})
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
+        [], "config.us.json", {"portfolio": {"holdings": {"enabled": False}}},
+    ))
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", lambda **_kwargs: {
+        "source_observed_at": now.isoformat(),
+        "cash_by_currency": {"CNY": 1},
+        "cash_balance_reliable": True,
+        "position_snapshot_input": {"rows": [], "errors": []},
+    })
+
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["snapshot"]["fx_observation"]["pairs"]["USDCNY"]["rate"] == 7.2
+    assert (cache.read_bytes() if cache.exists() else None) == original
+    assert not cache.with_suffix(".json.lock").exists()
+
+
+def test_query_holiday_fx_keeps_cash_valuation_but_withholds_coverage(monkeypatch):
+    from src.infrastructure import exchange_rates as fx
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
+    snapshot = {"schema_version": 2, "pairs": {
+        "HKDCNY": {
+            "rate": 0.92, "source": "tencent_quote",
+            "quote_at_utc": "2026-09-30T07:00:00+00:00",
+            "observed_at_utc": "2026-09-30T07:01:00+00:00",
+        },
+    }}
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
+        [], "config.hk.json", {"portfolio": {"holdings": {"enabled": False}}},
+    ))
+    monkeypatch.setattr(application, "current_exchange_rate_snapshot", lambda **_kwargs: snapshot)
+
+    def read_context(*, cfg, account, exchange_rate_observation):
+        return {
+            "source_observed_at": "2026-10-02T01:42:00+00:00",
+            "cash_by_currency": {"HKD": 100},
+            "cash_balance_reliable": True,
+            "position_snapshot_input": {"rows": [], "errors": []},
+            "exchange_rates": exchange_rate_observation,
+            "exchange_rate_status": "unavailable_stale",
+            "filters": {"account": account},
+        }
+
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", read_context)
+    result = application.query_portfolio_assignment_scenario(["lx"])
+
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert result["distribution"]["by_code"][0]["value_cny"] == "92.00"
+    assert result["fx_facts"][0]["quality"] == "holiday_carried"
+    assert result["snapshot"]["fx_observation"]["pairs"]["HKDCNY"]["quote_at_utc"] == "2026-09-30T07:00:00+00:00"
+    assert result["snapshot"]["fx_observation"]["snapshot_sha256"]
+    assert "资金能力汇率：不可用；假期沿用价仅用于估值" in application.render_assignment_scenario_text(result)
+
+
 def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
     calls = []
+    monkeypatch.setattr(application, "exchange_rate_observation_status", lambda *_args, **_kwargs: "ready")
     gateway = SimpleNamespace(close=lambda: calls.append("closed"))
     monkeypatch.setattr(
         application,
@@ -313,7 +398,7 @@ def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
         contexts={"lx": {}},
         fx_observation={
             "source": "tencent_quote",
-            "rates": {"USDCNY": 7.2},
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     )

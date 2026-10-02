@@ -1868,22 +1868,27 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
     opening = _currency_amounts(funds.get("option_opening_available_by_currency"))
     cash_total_cny = _number(funds.get("cash_total_cny"))
     opening_cny = _number(funds.get("option_opening_available_cny"))
-    cash_lines: list[str] = []
-    if cash_total_cny is not None:
-        cash_lines.append(f"现金总额（折CNY）：{_currency_money('CNY', cash_total_cny)}")
-    else:
-        cash_lines.extend(f"现金总额：{_currency_money(currency, amount)}" for currency, amount in cash.items())
-    opening_lines: list[str] = []
-    if opening_cny is not None:
-        opening_lines.append(f"可用于期权开仓（折CNY）：{_currency_money('CNY', opening_cny)}")
-    else:
-        opening_lines.extend(
-            f"可用于期权开仓：{_currency_money(currency, amount)}" for currency, amount in opening.items()
-        )
     out = [
-        *(cash_lines if cash_lines else ["现金总额：暂不可用"]),
-        *(opening_lines if opening_lines else ["可用于期权开仓：暂不可用"]),
+        f"现金总额（折CNY）：{_currency_money('CNY', cash_total_cny)}" if cash_total_cny is not None
+        else f"现金总额（折CNY）：暂不可用（{funds.get('cash_total_cny_unavailable_reason') or '证据不足'}）",
+        f"可用于期权开仓（折CNY，展示值）：{_currency_money('CNY', opening_cny)}" if opening_cny is not None
+        else f"可用于期权开仓（折CNY，展示值）：暂不可用（{funds.get('option_opening_cny_unavailable_reason') or '证据不足'}）",
     ]
+    pairs = funds.get("fx_pairs") if isinstance(funds.get("fx_pairs"), Mapping) else {}
+    used = {f"{currency}CNY" for currency in set(cash) | set(opening) if currency in {"USD", "HKD"}}
+    carried = []
+    for pair in ("USDCNY", "HKDCNY"):
+        row = pairs.get(pair) if isinstance(pairs.get(pair), Mapping) else {}
+        if pair in used and row.get("quality") == "holiday_carried":
+            carried.append(f"{pair[:3]}/CNY（{row.get('source') or '来源不明'}，原报价 {row.get('quote_at_utc') or '时间不明'}）")
+    if carried:
+        out.append("汇率：假期沿用 " + "、".join(carried))
+    reliability = "（来源未核实）" if funds.get("cash_total_reliable") is False else ""
+    out.extend(f"现金总额：{_currency_money(currency, amount)}{reliability}" for currency, amount in cash.items())
+    out.extend(
+        f"可用于期权开仓：{_currency_money(currency, amount)}"
+        for currency, amount in opening.items()
+    )
     return out
 
 

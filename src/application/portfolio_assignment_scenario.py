@@ -13,6 +13,7 @@ from domain.domain.portfolio_assignment_scenario import (
     PORTFOLIO_EVIDENCE_VERSION,
     project_assignment_scenario,
 )
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import canonical_symbol
 from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from src.application.agent_tool_config import load_runtime_config, repo_base
@@ -39,7 +40,11 @@ from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSH
 from src.application.opend_market_snapshot_fetching import get_underlier_observations_opend
 from src.application.opend_utils import normalize_underlier
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
-from src.infrastructure.exchange_rates import exchange_rate_observation_status, fetch_market_exchange_rates
+from src.infrastructure.exchange_rates import (
+    current_exchange_rate_snapshot,
+    exchange_rate_observation_status,
+    project_exchange_rate_snapshot,
+)
 
 
 MAX_ACCOUNTS = 20
@@ -321,9 +326,8 @@ def _read_futu_quotes(
     if not underliers:
         return [], warnings
     observed_rates = fx_observation.get("rates") if isinstance(fx_observation, Mapping) else None
-    fx_ready = exchange_rate_observation_status(fx_observation, max_age_hours=24) == "ready"
     rates: dict[str, Decimal] = {"CNY": Decimal(1)}
-    if fx_ready and isinstance(observed_rates, Mapping):
+    if isinstance(observed_rates, Mapping):
         for currency in {item.currency for item in underliers.values()}:
             rate = _amount(observed_rates.get(f"{currency}CNY"))
             if rate is not None and rate > 0:
@@ -463,8 +467,6 @@ def _futu_holdings(
     warnings: list[str] = []
     fx = context.get("exchange_rates")
     rates = fx.get("rates") if isinstance(fx, Mapping) else None
-    if context.get("exchange_rate_status") != "ready":
-        rates = None
     for currency, raw_amount in cash.items():
         code = normalize_currency(currency)
         amount = _amount(raw_amount)
@@ -562,8 +564,15 @@ def query_portfolio_assignment_scenario(
         )
     futu_contexts: dict[str, dict[str, Any]] = {}
     futu_error: str | None = None
+    fx_snapshot: Mapping[str, Any] | None = None
+    capacity_fx: Mapping[str, Any] | None = None
     try:
-        fx_observation = fetch_market_exchange_rates()
+        fx_snapshot = current_exchange_rate_snapshot(
+            cache_path=repo_base() / "output_shared" / "state" / "rate_cache.json",
+            write_cache=False,
+        )
+        fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="display")
+        capacity_fx = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
     except Exception:
         fx_observation = None
     try:
@@ -609,16 +618,17 @@ def query_portfolio_assignment_scenario(
         )
         evidence = _futu_evidence(normalized_accounts, futu_contexts)
         observed_rates = fx_observation.get("rates") if isinstance(fx_observation, Mapping) else None
-        evidence["fx_rates_to_cny"] = (
-            dict(observed_rates)
-            if exchange_rate_observation_status(fx_observation, max_age_hours=24) == "ready"
-            and isinstance(observed_rates, Mapping)
-            else {}
-        )
+        evidence["fx_rates_to_cny"] = dict(observed_rates) if isinstance(observed_rates, Mapping) else {}
+        capacity_rates = capacity_fx.get("rates") if isinstance(capacity_fx, Mapping) else None
+        evidence["capacity_fx_rates_to_cny"] = dict(capacity_rates) if isinstance(capacity_rates, Mapping) else {}
         evidence["fx_observation"] = {
             "source": fx_observation.get("source"),
             "timestamp": fx_observation.get("timestamp"),
             "status": exchange_rate_observation_status(fx_observation, max_age_hours=24),
+            "snapshot_sha256": canonical_sha256(fx_snapshot) if fx_snapshot is not None else None,
+            "evaluated_at_utc": fx_observation.get("evaluated_at_utc"),
+            "calendar": fx_observation.get("calendar"),
+            "pairs": fx_observation.get("pairs"),
         } if isinstance(fx_observation, Mapping) else {"status": "unavailable"}
         pm_holdings: list[Any] = []
         pm_issues: list[str] = []
@@ -765,6 +775,7 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         "",
         "## 仅富途期权资金覆盖（跨账户、币种 CNY 经济汇总）",
         "",
+        *( ["- 资金能力汇率：不可用；假期沿用价仅用于估值"] if cash.get("fx_status") == "unavailable" else [] ),
         f"- 现金 + MMF：{cash.get('available_cash_and_mmf_cny') or '-'}",
         f"- 富途 CSP 指派需求：{cash.get('gross_put_requirement_cny') or '-'}",
         f"- CC 回款：{cash.get('call_assignment_inflow_cny') or '-'}",

@@ -43,6 +43,11 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import required_text
 from functools import partial
 from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
+from src.application.current_fx_run import load_run_fx_snapshot
+from src.infrastructure.exchange_rates import (
+    exchange_rate_observation_status,
+    project_exchange_rate_snapshot,
+)
 
 
 _required_text = partial(required_text, error=lambda m: PreparedPortfolioContextError(m))
@@ -66,6 +71,7 @@ def prepare_portfolio_contexts(
     account_state_dirs: Mapping[str, Path],
     shared_state_dir: Path,
     timeout_sec: float,
+    fx_snapshot_sha256: str | None = None,
     python_executable: Path | None = None,
     kill_grace_sec: float = DEFAULT_KILL_GRACE_SEC,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
@@ -188,7 +194,7 @@ def prepare_portfolio_contexts(
                         "reason": "prepared_portfolio_context_existing_invalid",
                     }
                 try:
-                    load_prepared_portfolio_context(
+                    existing_context = load_prepared_portfolio_context(
                         manifest_path=existing_path,
                         expected_base=base_path,
                         expected_run_id=run_id_norm,
@@ -199,6 +205,11 @@ def prepare_portfolio_contexts(
                         expected_manifest_sha256=existing_digest,
                         expected_runtime_config=account_config,
                     )
+                    if fx_snapshot_sha256 is not None and (
+                        not isinstance(existing_context, dict)
+                        or existing_context.get("fx_snapshot_sha256") != fx_snapshot_sha256
+                    ):
+                        raise PreparedPortfolioContextError("prepared portfolio FX snapshot mismatch")
                 except PreparedPortfolioContextError as exc:
                     existing_manifest = {
                         **existing_manifest,
@@ -260,6 +271,7 @@ def prepare_portfolio_contexts(
                 "base": str(Path(base).resolve()),
                 "state_dir": str(states_by_account[account].resolve()),
                 "shared_state_dir": str(run_state_dir),
+                "fx_snapshot_sha256": fx_snapshot_sha256,
                 "account_config_path": str(authority.state_path),
                 "account_config_compatibility_path": str(
                     authority.compatibility_path
@@ -715,6 +727,17 @@ def run_worker(request_path: Path) -> int:
             account=account,
         )
         source = source_plan.requested_source
+        fx_hash = request.get("fx_snapshot_sha256")
+        if fx_hash is not None:
+            fx_snapshot, sealed_hash = load_run_fx_snapshot(base=base, run_id=run_id)
+            if sealed_hash != fx_hash:
+                raise PreparedPortfolioContextError("worker FX snapshot mismatch")
+            fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
+            fetch_fn = lambda **kwargs: fetch_futu_portfolio_context(
+                **kwargs, exchange_rate_observation=fx_observation,
+            )
+        else:
+            fetch_fn = fetch_futu_portfolio_context
         context = load_account_portfolio_context(
             market=broker,
             account=account,
@@ -723,11 +746,18 @@ def run_worker(request_path: Path) -> int:
             log=logs.append,
             runtime_config=cfg,
             portfolio_source=str(source),
-            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            fetch_futu_portfolio_context_fn=fetch_fn,
             is_fresh_fn=is_fresh,
             load_json_fn=load_cached_json,
             write_cache=False,
         )
+        if fx_hash is not None:
+            context = dict(context)
+            context["exchange_rates"] = fx_observation
+            context["exchange_rate_status"] = exchange_rate_observation_status(
+                fx_observation, max_age_hours=24,
+            )
+            context["fx_snapshot_sha256"] = fx_hash
         source_name, source_account = _resolve_context_source_binding(
             config=cfg,
             account=account,

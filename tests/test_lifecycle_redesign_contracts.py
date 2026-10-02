@@ -1321,7 +1321,10 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert wheel_fact["reason"] == "option_cash_secured_unavailable"
     assert funds["option_opening_available_cny"] is None
     assert funds["available"] is False
-    assert gaps == [{"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"}]
+    assert gaps == [
+        {"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"},
+        {"scope": "funds", "kind": "cash_total_cny", "reason": "cash_total_cny_unavailable"},
+    ]
 
     refreshed_at = datetime.fromtimestamp(
         (max(now_ms, frozen_model["last_option_close_received_at_ms"]) + 1000) / 1000,

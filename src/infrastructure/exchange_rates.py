@@ -12,10 +12,10 @@ This module is intentionally minimal; expand only as needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+import fcntl
 import json
 import math
-import re
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
@@ -30,31 +30,35 @@ TENCENT_EXCHANGE_RATE_SOURCE = "tencent_quote"
 SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
 
 _REQUIRED_RATES = ("USDCNY", "HKDCNY")
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_MARKET_HOURS_SOURCE = "https://www.chinamoney.com.cn/chinese/mgwhcphjy/"
+_HOLIDAY_SOURCE_2026 = "https://big5.www.gov.cn/gate/big5/www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm"
+# CFETS RMB spot is closed on weekends and the State Council's 2026 holiday dates.
+# Make-up Saturdays/Sundays remain closed under CFETS's explicit weekend rule.
+_HOLIDAYS_2026 = (
+    (date(2026, 1, 1), date(2026, 1, 3)),
+    (date(2026, 2, 15), date(2026, 2, 23)),
+    (date(2026, 4, 4), date(2026, 4, 6)),
+    (date(2026, 5, 1), date(2026, 5, 5)),
+    (date(2026, 6, 19), date(2026, 6, 21)),
+    (date(2026, 9, 25), date(2026, 9, 27)),
+    (date(2026, 10, 1), date(2026, 10, 7)),
+)
 
 
-def _observation_rates_are_valid(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    present = False
-    for key in _REQUIRED_RATES:
-        if key not in value:
-            continue
-        raw = value.get(key)
-        if isinstance(raw, bool):
-            return False
-        try:
-            number = float(raw)
-        except (TypeError, ValueError):
-            return False
-        if not math.isfinite(number) or not (0 < number < 1000):
-            return False
-        present = True
-    return present
+def _valid_rate(raw: Any) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and 0 < number < 1000 else None
 
 
 # 腾讯主源：单次请求取 USDCNY + HKDCNY，`~` 分隔，字段 [3] 为现价。
 _TENCENT_URL = "https://qt.gtimg.cn/q=whUSDCNY,whHKDCNY"
-# 新浪兑底：需 Referer，返回行 `..."价格,..."`，取第一个字段。
+# 新浪后备：需 Referer；fx_s* 为 `时间,价格,...,日期`。
 _SINA_URL = "https://hq.sinajs.cn/list=fx_susdcny,fx_shkdcny"
 _SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 
@@ -136,37 +140,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_iso_datetime(value: object) -> datetime | None:
-    raw = str(value or '').strip()
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw)
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _payload_timestamp(obj: dict | None) -> datetime | None:
-    if not isinstance(obj, dict):
-        return None
-    return _parse_iso_datetime(obj.get('timestamp'))
-
-
-def _is_cache_fresh(obj: dict | None, *, max_age_hours: int | None) -> bool:
-    if not isinstance(obj, dict):
-        return False
-    if max_age_hours is None or int(max_age_hours) <= 0:
-        return True
-    ts = _payload_timestamp(obj)
-    if ts is None:
-        return False
-    age_seconds = (_utc_now() - ts).total_seconds()
-    return 0 <= age_seconds <= int(max_age_hours) * 3600
-
-
 def exchange_rate_observation_status(
     payload: Mapping[str, Any] | None,
     *,
@@ -176,23 +149,15 @@ def exchange_rate_observation_status(
 
     if not isinstance(payload, Mapping):
         return "unavailable"
-    value = dict(payload)
-    if str(value.get("source") or "").strip() not in {
-        OPEND_EXCHANGE_RATE_SOURCE,
-        TENCENT_EXCHANGE_RATE_SOURCE,
-        SINA_EXCHANGE_RATE_SOURCE,
-    }:
+    now = _utc_now()
+    pairs = _verified_pairs(payload, now=now)
+    if any(pair not in pairs for pair in _REQUIRED_RATES):
         return "unavailable"
-    rates = value.get("rates")
-    if not _observation_rates_are_valid(rates):
-        return "unavailable"
-    if _payload_timestamp(value) is None:
-        return "unavailable_stale"
-    return (
-        "ready"
-        if _is_cache_fresh(value, max_age_hours=max_age_hours)
-        else "unavailable_stale"
-    )
+    return "ready" if all(
+        _pair_quality(pairs[pair], now=now)[0] == "fresh"
+        and now - _strict_timestamp(pairs[pair]["quote_at_utc"]) <= timedelta(hours=max_age_hours)
+        for pair in _REQUIRED_RATES
+    ) else "unavailable_stale"
 
 
 def _read_cache(path: Path) -> dict | None:
@@ -211,24 +176,18 @@ def get_cached_exchange_rates(
     cache_path: Path,
     max_age_hours: int | None = None,
 ) -> dict | None:
-    """Read current-project exchange-rate cache when present and fresh enough."""
+    """Read verified pair facts through the current owner, without fetching."""
     obj = _read_cache(cache_path)
-    if obj is None:
+    pairs = _verified_pairs(obj, now=_utc_now())
+    if not pairs:
         return None
-    if str(obj.get("source") or "").strip() not in {
-        OPEND_EXCHANGE_RATE_SOURCE,
-        TENCENT_EXCHANGE_RATE_SOURCE,
-        SINA_EXCHANGE_RATE_SOURCE,
-    }:
-        return None
-    if _payload_timestamp(obj) is None:
-        return None
-    rates = obj.get("rates")
-    if not _observation_rates_are_valid(rates):
-        return None
-    if not _is_cache_fresh(obj, max_age_hours=max_age_hours):
-        return None
-    return obj
+    if max_age_hours is not None:
+        now = _utc_now()
+        pairs = {
+            pair: row for pair, row in pairs.items()
+            if now - _strict_timestamp(row["quote_at_utc"]) <= timedelta(hours=max_age_hours)
+        }
+    return _legacy_projection({"pairs": pairs}, purpose=None) if pairs else None
 
 
 def _warn(log: Callable[[str], None] | None, message: str) -> None:
@@ -253,152 +212,343 @@ def _validated_rates(value: Any) -> dict[str, float] | None:
         return None
     out: dict[str, float] = {}
     for key in _REQUIRED_RATES:
-        raw = value.get(key)
-        try:
-            number = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if not (0 < number < 1000):
+        number = _valid_rate(value.get(key))
+        if number is None:
             return None
         out[key] = number
     return out
 
 
-def _parse_tencent(text: str) -> dict[str, float] | None:
-    """Parse `v_whUSDCNY="~名称~代码~价~..."` lines into USDCNY/HKDCNY."""
+def _parse_provider_quotes(
+    payload: str, *, source: str, observed_at: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Parse only the two known wire layouts; each pair stands on its own."""
+    observed = observed_at.astimezone(timezone.utc)
+    quotes: dict[str, dict[str, Any]] = {}
+    for line in payload.splitlines():
+        name, separator, value = line.strip().partition("=")
+        if not separator or not value.startswith('"') or '"' not in value[1:]:
+            continue
+        if source == TENCENT_EXCHANGE_RATE_SOURCE:
+            pair = next((p for p in _REQUIRED_RATES if name == f"v_wh{p}"), None)
+            fields = value[1:].split('"', 1)[0].split("~")
+            if pair is None or len(fields) <= 5 or fields[2] != pair:
+                continue
+            raw_rate, raw_time = fields[3], fields[5]
+            if len(raw_time) != 14 or not raw_time.isdigit():
+                continue
+            try:
+                quoted = datetime.strptime(raw_time, "%Y%m%d%H%M%S").replace(tzinfo=_SHANGHAI)
+            except ValueError:
+                continue
+        elif source == SINA_EXCHANGE_RATE_SOURCE:
+            pair = next((p for p in _REQUIRED_RATES if name == f"var hq_str_fx_s{p.lower()}"), None)
+            fields = value[1:].split('"', 1)[0].split(",")
+            if pair is None or len(fields) <= 17:
+                continue
+            raw_rate = fields[1]
+            if len(fields[17].strip()) != 10 or len(fields[0].strip()) != 8:
+                continue
+            try:
+                quoted = datetime.strptime(
+                    f"{fields[17].strip()} {fields[0].strip()}", "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=_SHANGHAI)
+            except ValueError:
+                continue
+        else:
+            return {}
+        rate = _valid_rate(raw_rate)
+        quote_at = quoted.astimezone(timezone.utc)
+        if rate is None or quote_at > observed:
+            continue
+        candidate = {
+            "rate": rate,
+            "source": source,
+            "quote_at_utc": quote_at.isoformat(),
+            "observed_at_utc": observed.isoformat(),
+        }
+        quotes[pair] = _newer_pair(quotes.get(pair), candidate)
+    return quotes
 
-    rates: dict[str, float] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if "whUSDCNY" in line:
-            bits = line.split("~")
-            if len(bits) >= 4:
-                rates["USDCNY"] = float(bits[3])
-        elif "whHKDCNY" in line:
-            bits = line.split("~")
-            if len(bits) >= 4:
-                rates["HKDCNY"] = float(bits[3])
-    return _validated_rates(rates)
+
+def _parse_tencent(text: str) -> dict[str, float] | None:
+    quotes = _parse_provider_quotes(text, source=TENCENT_EXCHANGE_RATE_SOURCE, observed_at=_utc_now())
+    return _validated_rates({pair: row["rate"] for pair, row in quotes.items()})
 
 
 def _parse_sina(text: str) -> dict[str, float] | None:
-    """Parse `var hq_str_...="价,昨收,..."` lines into USDCNY/HKDCNY.
-
-    Sina fx_susdcny / fx_shkdcny return `现价,昨收,今开,...`; take the first.
-    """
-
-    rates: dict[str, float] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        code: str | None = None
-        if "fx_susdcny" in line or ("USDCNY" in line and "hq_str_" in line):
-            code = "USDCNY"
-        elif "fx_shkdcny" in line or ("HKDCNY" in line and "hq_str_" in line):
-            code = "HKDCNY"
-        if code is None:
-            continue
-        try:
-            parts = line.split('"')[1].split(",")
-            if len(parts) >= 1:
-                rates[code] = float(parts[0])
-        except (IndexError, ValueError):
-            continue
-    return _validated_rates(rates)
+    quotes = _parse_provider_quotes(text, source=SINA_EXCHANGE_RATE_SOURCE, observed_at=_utc_now())
+    return _validated_rates({pair: row["rate"] for pair, row in quotes.items()})
 
 
 def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | None:
-    """Fetch USDCNY/HKDCNY from Tencent first, falling back to Sina.
-
-    Returns a canonical observation dict ``{source, rates, timestamp}``, or
-    ``None`` when both providers fail (fail-closed; never fabricate a rate).
-    """
-
+    """Fetch both sources and choose the newest verified quote per pair."""
+    observed = _utc_now()
     errors: list[str] = []
-    try:
-        text = _http_get(_TENCENT_URL, timeout_sec=timeout_sec)
-        observation = _market_observation(text, source=TENCENT_EXCHANGE_RATE_SOURCE, rates=_parse_tencent(text))
-        if observation is not None:
-            return observation
-        errors.append("tencent:invalid")
-    except Exception as exc:
-        errors.append(f"tencent:{type(exc).__name__}")
-
-    try:
-        text = _http_get(_SINA_URL, headers=_SINA_HEADERS, timeout_sec=timeout_sec)
-        observation = _market_observation(text, source=SINA_EXCHANGE_RATE_SOURCE, rates=_parse_sina(text))
-        if observation is not None:
-            return observation
-        errors.append("sina:invalid")
-    except Exception as exc:
-        errors.append(f"sina:{type(exc).__name__}")
-
-    _warn(None, f"[WARN] market FX fetch failed: {'; '.join(errors)}")
-    return None
-
-
-def _market_observation(text: str, *, source: str, rates: dict[str, float] | None) -> dict[str, Any] | None:
-    if rates is None:
-        return None
-    timestamps: dict[str, str] = {}
-    shanghai = ZoneInfo("Asia/Shanghai")
-    observed_at = _utc_now()
-    for line in text.splitlines():
-        pair = next((pair for pair in _REQUIRED_RATES if pair.lower() in line.lower()), None)
-        if pair is None:
-            continue
+    chosen: dict[str, dict[str, Any]] = {}
+    for source, url, headers in (
+        (TENCENT_EXCHANGE_RATE_SOURCE, _TENCENT_URL, None),
+        (SINA_EXCHANGE_RATE_SOURCE, _SINA_URL, _SINA_HEADERS),
+    ):
         try:
-            fields = line.split('"')[1].split("~" if source == TENCENT_EXCHANGE_RATE_SOURCE else ",")
-            if source == TENCENT_EXCHANGE_RATE_SOURCE:
-                quote_time = datetime.strptime(fields[5], "%Y%m%d%H%M%S").replace(tzinfo=shanghai)
-            else:
-                # Only explicit provider date/time fields establish a quote day.
-                dates = [field.strip() for field in fields if re.fullmatch(r"\d{4}-\d{2}-\d{2}", field.strip())]
-                times = [field.strip() for field in fields if re.fullmatch(r"\d{2}:\d{2}:\d{2}", field.strip())]
-                if len(dates) != 1 or len(times) != 1:
-                    return None
-                quote_time = datetime.fromisoformat(f"{dates[0]}T{times[0]}").replace(tzinfo=shanghai)
-        except (IndexError, ValueError):
-            return None
-        if quote_time.date() != observed_at.astimezone(shanghai).date() or quote_time > observed_at:
-            return None
-        timestamps[pair] = quote_time.astimezone(timezone.utc).isoformat()
-    if any(pair not in timestamps for pair in _REQUIRED_RATES):
+            raw = _http_get(url, headers=headers, timeout_sec=timeout_sec)
+            observed = _utc_now()
+            candidates = _parse_provider_quotes(raw, source=source, observed_at=observed)
+            if not candidates:
+                errors.append(f"{source}:invalid")
+            for pair, row in candidates.items():
+                previous = chosen.get(pair)
+                if previous is None or row["quote_at_utc"] > previous["quote_at_utc"]:
+                    chosen[pair] = row
+        except Exception as exc:
+            errors.append(f"{source}:{type(exc).__name__}")
+    if not chosen:
+        _warn(None, f"[WARN] market FX fetch failed: {'; '.join(errors)}")
         return None
+    sources = {row["source"] for row in chosen.values()}
+    timestamps = {pair: row["quote_at_utc"] for pair, row in chosen.items()}
     return {
-        "source": source,
-        "rates": rates,
+        "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+        "rates": {pair: row["rate"] for pair, row in chosen.items()},
         "timestamp": min(timestamps.values()),
         "quote_timestamps": timestamps,
-        "observed_at": observed_at.isoformat(),
-        "raw_quotes": text,
+        "observed_at": observed.isoformat(),
+        "pairs": chosen,
     }
 
 
-def save_exchange_rate_observation(
-    path: Path,
-    payload: Mapping[str, Any],
-    *,
-    log: Callable[[str], None] | None = None,
-) -> None:
-    """Persist the exact provider observation without refreshing its timestamp."""
+def _market_day(day: date) -> bool | None:
+    if day.year != 2026:
+        return None
+    return day.weekday() < 5 and not any(start <= day <= end for start, end in _HOLIDAYS_2026)
+
+
+def _session_start(at: datetime) -> datetime | None:
+    local = at.astimezone(_SHANGHAI)
+    for day in (local.date(), local.date() - timedelta(days=1)):
+        if _market_day(day) is not True:
+            continue
+        start = datetime.combine(day, time(9, 30), _SHANGHAI)
+        if start <= local < start + timedelta(hours=17, minutes=30):
+            return start
+    return None
+
+
+def _last_session_start(at: datetime) -> datetime | None:
+    local = at.astimezone(_SHANGHAI)
+    day = local.date()
+    while day.year == 2026:
+        if _market_day(day):
+            start = datetime.combine(day, time(9, 30), _SHANGHAI)
+            if start <= local:
+                return start
+        day -= timedelta(days=1)
+    return None
+
+
+def _strict_timestamp(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
     try:
-        path = Path(path).resolve()
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo is not None else None
+
+
+def _verified_pair(row: Any, *, now: datetime) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    source = row.get("source")
+    rate = _valid_rate(row.get("rate"))
+    quoted = _strict_timestamp(row.get("quote_at_utc"))
+    observed = _strict_timestamp(row.get("observed_at_utc"))
+    if (
+        source not in {TENCENT_EXCHANGE_RATE_SOURCE, SINA_EXCHANGE_RATE_SOURCE}
+        or rate is None or quoted is None or observed is None
+        or quoted > observed or observed > now or _session_start(quoted) is None
+    ):
+        return None
+    return {
+        "rate": rate,
+        "source": source,
+        "quote_at_utc": quoted.isoformat(),
+        "observed_at_utc": observed.isoformat(),
+    }
+
+
+def _verified_pairs(payload: Any, *, now: datetime) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return {}
+    pairs = payload.get("pairs")
+    if isinstance(pairs, Mapping):
+        return {
+            pair: verified
+            for pair in _REQUIRED_RATES
+            if (verified := _verified_pair(pairs.get(pair), now=now)) is not None
+        }
+    # Older observations qualify only when each pair has its own source time.
+    source = payload.get("source")
+    rates = payload.get("rates")
+    timestamps = payload.get("quote_timestamps")
+    observed = payload.get("observed_at")
+    if not isinstance(rates, Mapping) or not isinstance(timestamps, Mapping):
+        return {}
+    return {
+        pair: verified
+        for pair in _REQUIRED_RATES
+        if (verified := _verified_pair({
+            "rate": rates.get(pair), "source": source,
+            "quote_at_utc": timestamps.get(pair), "observed_at_utc": observed,
+        }, now=now)) is not None
+    }
+
+
+def _newer_pair(existing: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+    if existing is None or candidate["quote_at_utc"] > existing["quote_at_utc"]:
+        return candidate
+    if (candidate["quote_at_utc"] == existing["quote_at_utc"]
+            and candidate["source"] == TENCENT_EXCHANGE_RATE_SOURCE
+            and existing["source"] != TENCENT_EXCHANGE_RATE_SOURCE):
+        return candidate
+    return existing
+
+
+def _pair_quality(row: dict[str, Any] | None, *, now: datetime) -> tuple[str, str]:
+    if row is None:
+        return "unavailable", "missing_verified_quote"
+    quoted = _strict_timestamp(row["quote_at_utc"])
+    if quoted is None or quoted > now or now.astimezone(_SHANGHAI).year != 2026:
+        return "unavailable", "calendar_or_timestamp_unknown"
+    quote_session = _session_start(quoted)
+    latest_session = _last_session_start(now)
+    if quote_session is None or latest_session is None or quote_session != latest_session:
+        return "unavailable", "trading_session_gap"
+    if _session_start(now) == latest_session:
+        return ("fresh", "ok") if now - quoted <= timedelta(hours=24) else ("unavailable", "stale_quote")
+    day = (latest_session + timedelta(days=1)).date()
+    has_full_closure = False
+    while day <= now.astimezone(_SHANGHAI).date():
+        market_day = _market_day(day)
+        if market_day is None:
+            return "unavailable", "calendar_unknown"
+        has_full_closure |= not market_day
+        day += timedelta(days=1)
+    if has_full_closure:
+        return "holiday_carried", "verified_market_closure"
+    return ("fresh", "ok") if now - quoted <= timedelta(hours=24) else ("unavailable", "stale_quote")
+
+
+def current_exchange_rate_snapshot(
+    *, cache_path: Path, now: datetime | None = None, write_cache: bool = True,
+) -> dict[str, Any]:
+    """One request's verified quotes and purpose states; no invented quote times."""
+    path = Path(cache_path).resolve()
+    cached = _read_cache(path)
+    fetched = fetch_market_exchange_rates()
+    evaluated = (now or _utc_now()).astimezone(timezone.utc)
+    selected = _verified_pairs(cached, now=evaluated)
+    for pair, row in _verified_pairs(fetched, now=evaluated).items():
+        selected[pair] = _newer_pair(selected.get(pair), row)
+    if write_cache and selected:
         path.parent.mkdir(parents=True, exist_ok=True)
-        value = dict(payload)
-        rates = value.get("rates")
-        if not _observation_rates_are_valid(rates):
-            raise ValueError("exchange-rate payload rates are invalid")
-        if _payload_timestamp(value) is None:
-            raise ValueError("exchange-rate payload timestamp is required")
-        if str(value.get("source") or "").strip() not in {
-            OPEND_EXCHANGE_RATE_SOURCE,
-            TENCENT_EXCHANGE_RATE_SOURCE,
-            SINA_EXCHANGE_RATE_SOURCE,
-        }:
-            raise ValueError("exchange-rate payload source is unknown")
-        atomic_write_json(path, value, sort_keys=True)
-    except Exception as exc:
-        _warn(log, f"[WARN] exchange_rate cache write failed: path={path} error={exc}")
+        # A stable lock file protects the read/merge/write across processes.
+        with path.with_suffix(path.suffix + ".lock").open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                latest = _verified_pairs(_read_cache(path), now=evaluated)
+                for pair, row in selected.items():
+                    latest[pair] = _newer_pair(latest.get(pair), row)
+                atomic_write_json(path, {"schema_version": 2, "pairs": latest}, sort_keys=True)
+                selected = latest
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    pairs: dict[str, dict[str, Any]] = {}
+    for pair in _REQUIRED_RATES:
+        row = selected.get(pair)
+        quality, reason = _pair_quality(row, now=evaluated)
+        pairs[pair] = {
+            **(row or {}), "quality": quality, "reason": reason,
+            "display_eligible": quality in {"fresh", "holiday_carried"},
+            "capacity_eligible": quality == "fresh",
+        }
+    return {
+        "schema_version": 2,
+        "evaluated_at_utc": evaluated.isoformat(),
+        "calendar": {
+            "year": 2026, "market_hours_source": _MARKET_HOURS_SOURCE,
+            "holiday_source": _HOLIDAY_SOURCE_2026,
+        },
+        "pairs": pairs,
+        "rates": {pair: row["rate"] for pair, row in pairs.items() if row["display_eligible"]},
+    }
+
+
+def _legacy_projection(snapshot: Mapping[str, Any], *, purpose: str | None = "capacity") -> dict[str, Any]:
+    pairs = snapshot.get("pairs") or {}
+    rates = (
+        rates_for_purpose(snapshot, purpose=purpose)
+        if purpose is not None else {pair: row["rate"] for pair, row in pairs.items()}
+    )
+    sources = {row.get("source") for row in pairs.values() if isinstance(row, Mapping) and row.get("source")}
+    timestamps = {
+        pair: row["quote_at_utc"] for pair, row in pairs.items()
+        if isinstance(row, Mapping) and row.get("quote_at_utc")
+    }
+    return {
+        "schema_version": 2,
+        "pairs": pairs,
+        "rates": rates,
+        "source": next(iter(sources)) if len(sources) == 1 else "mixed",
+        "timestamp": min(timestamps.values()) if timestamps else "",
+        "quote_timestamps": timestamps,
+        "observed_at": max(
+            (row["observed_at_utc"] for row in pairs.values() if row.get("observed_at_utc")),
+            default="",
+        ),
+    }
+
+
+def rates_for_purpose(
+    snapshot: Mapping[str, Any], *, purpose: str, now: datetime | None = None,
+) -> dict[str, float]:
+    """Recheck time-sensitive eligibility without refreshing a sealed quote."""
+    if purpose not in {"display", "capacity"}:
+        raise ValueError("FX purpose must be display or capacity")
+    evaluated = (now or _utc_now()).astimezone(timezone.utc)
+    pairs = snapshot.get("pairs") if isinstance(snapshot, Mapping) else None
+    if not isinstance(pairs, Mapping):
+        return {}
+    out: dict[str, float] = {}
+    for pair in _REQUIRED_RATES:
+        row = _verified_pair(pairs.get(pair), now=evaluated)
+        quality, _ = _pair_quality(row, now=evaluated)
+        if row is not None and (quality == "fresh" or purpose == "display" and quality == "holiday_carried"):
+            out[pair] = row["rate"]
+    return out
+
+
+def project_exchange_rate_snapshot(
+    snapshot: Mapping[str, Any], *, purpose: str, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Project one quote snapshot for a consumer without fetching or changing it."""
+    if purpose not in {"display", "capacity"}:
+        raise ValueError("FX purpose must be display or capacity")
+    evaluated = (now or _utc_now()).astimezone(timezone.utc)
+    verified = _verified_pairs(snapshot, now=evaluated)
+    pairs = {}
+    for pair in _REQUIRED_RATES:
+        row = verified.get(pair)
+        quality, reason = _pair_quality(row, now=evaluated)
+        pairs[pair] = {
+            **(row or {}), "quality": quality, "reason": reason,
+            "display_eligible": quality in {"fresh", "holiday_carried"},
+            "capacity_eligible": quality == "fresh",
+        }
+    projection = _legacy_projection({"pairs": pairs}, purpose=purpose)
+    projection["evaluated_at_utc"] = evaluated.isoformat()
+    projection["calendar"] = snapshot.get("calendar")
+    return projection
 
 
 def get_exchange_rates_or_fetch_latest(
@@ -409,49 +559,19 @@ def get_exchange_rates_or_fetch_latest(
     log: Callable[[str], None] | None = None,
     write_cache: bool = True,
 ) -> dict | None:
-    """Return a fresh market FX observation, fetching Tencent/Sina on miss.
-
-    Reads the cache first; when missing or stale, fetches from the market
-    providers (Tencent primary, Sina fallback) and writes the fresh
-    observation back to ``cache_path``. Returns ``None`` only when no source
-    yields a valid rate (fail-closed).
-    """
-
-    cached = get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
-    if cached is not None:
-        return cached
-
-    observation = fetch_market_exchange_rates()
-    if observation is None:
-        # Fall back to a stale cache rather than fabricating a number.
-        stale = _read_cache(cache_path)
-        if (
-            stale is not None
-            and _observation_rates_are_valid(stale.get("rates"))
-            and _payload_timestamp(stale) is not None
-            and str(stale.get("source") or "").strip()
-            in {
-                OPEND_EXCHANGE_RATE_SOURCE,
-                TENCENT_EXCHANGE_RATE_SOURCE,
-                SINA_EXCHANGE_RATE_SOURCE,
-            }
-        ):
-            _warn(log, f"[WARN] market FX unavailable; using stale cache {Path(cache_path).resolve()}")
-            return stale
-        _warn(log, f"[WARN] market FX unavailable and no cache: {Path(cache_path).resolve()}")
+    """Compatibility view of the single current FX owner; rates are capacity-safe."""
+    del max_age_hours
+    try:
+        snapshot = current_exchange_rate_snapshot(cache_path=cache_path, write_cache=write_cache)
+    except OSError as exc:
+        _warn(log, f"[WARN] FX cache unavailable: {exc}")
         return None
-
-    if write_cache:
-        try:
-            save_exchange_rate_observation(cache_path, observation, log=log)
-        except Exception as exc:
-            _warn(log, f"[WARN] failed to persist FX observation: {exc}")
     if write_through_path is not None:
         try:
-            save_exchange_rate_observation(write_through_path, observation, log=log)
-        except Exception as exc:
-            _warn(log, f"[WARN] failed to persist FX write-through: {exc}")
-    return observation
+            atomic_write_json(write_through_path, snapshot, sort_keys=True)
+        except OSError as exc:
+            _warn(log, f"[WARN] FX run copy unavailable: {exc}")
+    return _legacy_projection(snapshot) if any(snapshot["pairs"][pair].get("rate") for pair in _REQUIRED_RATES) else None
 
 
 def load_exchange_rate_info(

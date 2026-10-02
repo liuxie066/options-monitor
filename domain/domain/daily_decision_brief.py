@@ -678,8 +678,11 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
         "reason": str(funds.get("reason") or ("ok" if available else "unavailable")).strip(),
     }
     for key in ("cash_total_cny", "cash_secured_total_cny", "option_opening_available_cny"):
-        raw = funds.get(key)
+        if key not in funds:
+            continue
+        raw = funds[key]
         if raw is None:
+            out[key] = None
             continue
         if isinstance(raw, bool):
             raise ValueError(f"funds.{key} must be a number")
@@ -687,6 +690,24 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
             out[key] = float(raw)
         except (TypeError, ValueError):
             raise ValueError(f"funds.{key} must be a number") from None
+    for key in ("cash_total_reliable", "option_opening_reliable"):
+        if key in funds:
+            if not isinstance(funds[key], bool):
+                raise ValueError(f"funds.{key} must be a boolean")
+            out[key] = funds[key]
+    for key in ("cash_total_cny_unavailable_reason", "option_opening_cny_unavailable_reason", "fx_snapshot_sha256"):
+        if key in funds:
+            out[key] = str(funds[key] or "").strip()
+    if "fx_pairs" in funds:
+        pairs = _mapping(funds["fx_pairs"], field="funds.fx_pairs")
+        out["fx_pairs"] = {}
+        for pair in ("USDCNY", "HKDCNY"):
+            if pair in pairs:
+                row = _mapping(pairs[pair], field=f"funds.fx_pairs.{pair}")
+                out["fx_pairs"][pair] = {
+                    key: str(row.get(key) or "").strip()
+                    for key in ("source", "quote_at_utc", "quality", "reason")
+                }
     return out
 
 

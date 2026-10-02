@@ -1,99 +1,60 @@
-# Portfolio Assignment Scenario Devflow scope.
-# The previous completed task scope at this path remains recoverable from the worktree base commit.
-goal: "全部指派后分布以富途股票与现金/MMF及 OM 短期权账本为基线，按现有开关选择性补充 PM 非富途资产"
-non_goals:
-  - "不执行真实指派、交易、账本/PM/飞书写入或生产服务变更"
-  - "不把 PM Holdings 作为富途账户资产的替代来源"
-  - "不提交、不发布或升级"
-scope: "Portfolio Exposure 全部指派后分布的来源、报价、FX、质量、资金覆盖与配置预检实现"
-success_signals:
-  - "S1: 开关关闭不访问 PM，仅用富途仓位/现金/MMF和 OM 短期权账本"
-  - "S2: 开关开启只补充同账户明确非富途的 PM 资产，零合格行有效"
-  - "S3: 富途标的用同次 OpenD 报价，缺价或 FX 不回退 PM"
-  - "S4: 非富途现金进入资产分布但不增加富途指派资金覆盖"
-  - "S5: 只对纳入资产判断质量，保留来源、时间和不完整原因"
-  - "S6: 保持现有只读入口与配置预览/确认/回读边界"
-authorized_slices: [A, B, C]
-slice_checkpoints:
-  - "A: 富途基线、全部券商期权隔离投影、同次报价与 FX、来源文案已实现；173 个相关测试、ruff、py_compile、guardrails 与 git diff --check 通过；用户已确认"
-  - "B: PM non_futu 已按第五轮设计返工：完整原始 Holdings 切片先判券商再严格转换，回传 broker 清单与数量；CNY 现金/MMF 恒等价、报价缓存/可核实市场时刻及独立 FX 证据按纳入行判质量；PM 全套 1571 项及项目门禁通过；用户已确认"
-  - "C: OM 已按现有开关请求 PM non_futu 并核对完整 broker 清单、计数、逐行来源与按账户批准集合；PM 失败/旧版/新 broker 保留富途基线且 partial，预览零合格行与 apply stale 摘要、配置回读、输出/文档已完成；OM 394 个相关测试、smoke、ruff、编译、guardrails 与 diff 检查通过；用户已确认"
-user_confirmation:
-  - "开启时只补充 PM Holdings 中非富途来源的资产，排除 PM 的富途股票、现金和 MMF 副本，避免重复计入。"
-  - "先用 devflow 设计方案，别着急开发"
-  - "进入下一节（确认 Brainstorm 结果后进入 Save Design）"
-  - "好的（确认 Save Design 版本 48fddb15ffebe00e833279eab9d9d1a56dfd65be379e4772cb4c7432982f30e6，进入 Improve Design）"
-  - "确认（批准四路 Panel 裁决；仅修订同一设计稿，不进入开发）"
-  - "优化方案，再跑 planreview（授权修订现有设计并对新快照执行第二轮只读评审，不进入开发）"
-  - "impl（授权按已确认设计进入实现节点；各切片仍分别展示结果并确认）"
-  - "确认（批准 Slice A 验收，进入 Slice B）"
-  - "先修订，然后跑planreview（批准本轮 Improve Design 修订与第三轮只读评审；不授权继续 Slice B 代码）"
-  - "得确认确实有数据源（核对 PM 上游是否有真实市场价格时刻，不把 fetched_at 当作市场时刻）"
-  - "先修订，然后跑planreview（授权第四轮设计修订与只读评审；不授权继续 Slice B 代码）"
-  - "先修订，然后跑planreview（授权第五轮设计修订与只读评审；不授权继续 Slice B 代码）"
-  - "确认（批准第五轮 pass-with-risks 的 Improve Design 结果；按此前 impl 授权继续 Slice B 返工）"
-  - "确认（批准 PM Slice B 验收，进入 OM Slice C）"
-  - "确认（批准 OM Slice C 与 Impl 最终验证结果；Impl 节点完成）"
-prd_doc: not-applicable
-prd_doc_ref: not-applicable
-design_doc: docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md
-design_ref: "docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md sha256:210b06a8d5d65d64cc5df360e6bfaff1c849561467c0b500de4145137347567e"
-implementation_workspace: <task-worktree>/options-monitor, <task-worktree>/portfolio-management
-review_base: 73a8da096f5e06b1a87ecb1592e5ca9830579071
-authorization_diffs: []
-workflow_version: 2
-mode: node
-workflow_path: null
-node_sequence: [Improve Design, Impl]
-current_node: Impl
-internal_step: complete
+# 当前汇率事实 Devflow scope
+# 前一已完成任务的记录可从基线提交 3e757295 回读。
+goal: "统一 OM 当前汇率事实；CNY 为决策简报主要展示；外汇市场假期沿用各币种对最后有效报价"
+acceptance:
+  - "A1 同一正式批次共用一份封存快照，当前汇率只保留一套取数、校验、缓存和选择代码"
+  - "A2 腾讯和新浪真实字段可解析，逐币种对验证来源、价格和报价时间"
+  - "A3 CNY 优先并保留原币种及负余额；有外汇休市证据才按最后有效价沿用"
+  - "A4 假期沿用不放宽开仓容量，历史账本汇率事实不变"
+confirmed_by_user:
+  - "想要 cny 是主要展示口径"
+  - "假期汇率失效时按最后有效汇率计算"
+  - "确认，另外要求只保留一套代码"
+  - "进入 save design"
+  - "确认（批准 Save Design 版本 6f1c8163，进入 Improve Design）"
+  - "修订后运行planreview（确认四份意见的合批修订与 Planreview）"
+  - "impl（确认 Improve Design 版本 48baca1f，进入 Impl）"
+  - "确认（批准切片 1，进入切片 2）"
+  - "确认（批准切片 2，进入切片 3）"
+  - "确认（批准切片 3 的 Impl 结果，进入 Review）"
+  - "修复问题，再跑一遍deepreview（授权按 Review 发现修复、验证并重审）"
+  - "确认（批准修复后的 Review 结果，Devflow 完成）"
+non_goals: "不修成交归属，不修改生产账本、配置或服务；不提交、发布或升级"
+design_doc: docs/EXCHANGE_RATE_FACT_DESIGN.md
+design_sha256: 48baca1fd3368b79b45bd2b80f577653eeca1ffdcbe21c145fb9f068ca8b3d0a
+workspace: "Codex managed worktree fx-unified-design/options-monitor"
+initial_base: 3e757295e35b433ed2693ac4c301dc73fb2d0144
+current_node: Review
 status: completed
-next_action: "Impl 已确认完成；Review 是后续独立节点，待明确调用"
-approved_scope_ref: "本会话的非富途补充要求及已确认的 Brainstorm 结论"
-path_approval_ref: null
-implementation_baseline: "detached HEAD 73a8da096f5e06b1a87ecb1592e5ca9830579071; 进入 Impl 时已有方案、文档、配置与应用/测试草稿的未提交改动，保留并在任务 diff 中一并核查"
-inventory:
-  - "Slice A 改 OM 工作区；未接触真实券商/PM/飞书"
-  - "Slice A 验证: python3.12 -m pytest -p no:cacheprovider (173 passed); ruff check --no-cache (pass); py_compile (pass); guardrails_check.py (pass); git diff --check (pass)"
-  - "Slice B 改 PM 隔离工作区；仅用 fixture 模拟 Feishu/报价，无真实服务调用；get_raw_holdings 不发布 Holdings 本地缓存，pm.holdings_quantity 不用于 scoped 数量质量"
-  - "Slice B 验证: PM Python 3.12 pytest tests (1571 passed); 项目 ruff、compileall、OpenAPI contract --check、git diff --check 均通过；既有模拟 Feishu 测试需在隔离 worktree 创建进程锁文件，沙箱许可后全套通过"
-  - "Slice C 验证: OM Python 3.12 相关和配置消费者 pytest (394 passed); tests/run_smoke.py (OK); ruff、PYTHONPYCACHEPREFIX=/tmp 的 py_compile、guardrails 文档/敏感文件/公开接口、git diff --check 均通过；PM 工作区自 Slice B 验证后未改动"
-content_revision: "sha256:210b06a8d5d65d64cc5df360e6bfaff1c849561467c0b500de4145137347567e"
+next_action: "研发流程已完成；提交、PR、发布与运行环境升级分别等待独立授权"
 panel:
-  design_snapshot: "sha256:48fddb15ffebe00e833279eab9d9d1a56dfd65be379e4772cb4c7432982f30e6"
-  backend: "four separate native subagents"
-  model: "GPT-6 family; exact variant not exposed; cross-family dispatch unavailable"
+  design_sha256: 6f1c8163f5bb014a10d77dd41ca458b2dc6b738af4cfcbc510d3e03cc8c0dc44
   result_count: 4
-  independence: "separate reviews verified; cross-family independence unverified"
-  decisions:
-    accepted: "separate non-Futu option funding; preserve signed cash by broker before gross/liability; make PM failure/empty scoped quality explicit; enforce Futu completeness flags; align broker aliases; single scenario FX; label aggregate economic coverage and per-account gaps"
-    needs_evidence: "OpenD FUND/MMF row shape before changing the position classifier"
-    rejected: "do not make the whole distribution unavailable solely because a non-Futu short option exists"
-  revision_note: "Panel reviewed the previous fixed snapshot; the revised design awaits user confirmation and was not itself panel-reviewed"
-planreview_round: 5
-deepreview_round: 0
+  agents: [fx_design_review_1, fx_design_review_2, fx_design_review_3_local, fx_design_review_4]
+  independence: "四个独立原生子代理审阅同一快照；继承模型的精确型号未暴露；跨模型入口不支持当前账户"
+  cross_family_attempt: "deepseek-v4-pro 返回 model unsupported，未计入四份结果"
+  proposed_changes: "核实市场休市日和互斥汇率状态；run 重试与时效绑定；逐币种历史证据与唯一当前换算；简报可靠性/负币种/证据穿透；指派情景估值和资金能力隔离"
+planreview_attempts: 3
+planreview_result: pass-with-risks
+planreview_artifact: docs/reviews/plan-review-20261002-124243.md
+slice_1:
+  result: "逐对真实报文解析、来源择新、2026 FX 休市状态、容量/展示用途和并发缓存合并；旧接口返回容量安全视图"
+  checks: "129 个相关 pytest 通过；ruff、doc guardrails、git diff --check 通过"
+  pending: "正式 tick 共用快照和资金/简报展示属于切片 2/3，尚未实现"
+slice_2:
+  result: "正式 tick 在 worker 前封存一次带 hash 的当前 FX 快照；账户/期权 prepared context 与扫描按同一 hash 读取，晚到消费重判容量资格；直接扫描与独立资金查询复用请求内报价；逐对原报价进入历史候选，Wheel 跨币种容量保持新鲜门槛"
+  checks: "209 个相关 pytest 通过；ruff、doc guardrails、git diff --check 通过；另 8 个无关读模型用例因 worktree tests 目录权限在建临时目录时失败，未运行到业务断言"
+  pending: "决策简报 CNY 优先、假期沿用证据和情景估值/资金能力隔离在切片 3；09:40 生产输入在隔离 worktree 中不可得，尚未只读重放"
+slice_3:
+  result: "简报 CNY 优先且保留原币种负余额；逐对假期沿用证据穿透 normalize/render；缺汇率或来源不可靠时完整 CNY 值不可用；指派情景估值可沿用假期价而资金覆盖继续按容量资格 fail closed；通知 PRD 同步"
+  checks: "329 个核心相关 pytest 与 158 个扩展回归 pytest 通过；全改动 Python Ruff、doc guardrails、git diff --check 通过"
+  pending: "09:40 原始生产输入不在隔离 worktree，未做只读实盘回放；切片 2 的 8 个读模型用例因临时目录权限未到业务断言，未据此宣称通过"
 in_flight: []
-evidence_paths:
-  - docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md
-  - docs/reviews/plan-review-20260930-210746.md
-  - docs/reviews/plan-review-20260930-213726.md
-  - docs/reviews/plan-review-20261001-000528.md
-  - docs/reviews/plan-review-20261001-003526.md
-  - docs/reviews/plan-review-20261001-084009.md
-blocking_findings: []
-planreview_result: "第五轮 pass-with-risks；broker 新值由配置内按账户批准集合和查询时完整清单约束，旧配置缺集合安全 partial；真实 broker 值与部分市场时刻语义待实际验证"
-residual_risks:
-  - {item: "PM scoped freshness must be proven from included rows", classification: assigned-to-later-work-unit, owner: "PM valuation owner", destination: "Slice B source and quote/FX evidence"}
-  - {item: "Closed-market quote lookback may exclude long holidays", classification: assigned-to-later-work-unit, owner: "OM quote owner", destination: "Improve Design and Slice A"}
-  - {item: "Domain cash pool currently mixes distribution and funding", classification: assigned-to-later-work-unit, owner: "OM scenario domain owner", destination: "Slice A"}
-  - {item: "Non-Futu option terminal values lack broker-complete starting cash and stock evidence", classification: accepted-residual-risk, owner: "OM scenario domain owner", destination: "Slice A/C partial output"}
-  - {item: "Real PM broker labels are not yet verified; approved-name mislabel remains possible", classification: accepted-residual-risk, owner: "PM data source owner", destination: "Authorized enablement preview and Holdings record management"}
-  - {item: "New legitimate broker labels conservatively pause PM supplement", classification: accepted-residual-risk, owner: "OM configuration owner", destination: "Slice C visible partial reason and re-preview path"}
-panel_b:
-  design_snapshot: "sha256:d01b280c3c2835b25a5aed2b21bf7f9a080e1247c4700b3e372c6a205e794b69"
-  backend: "four separate native subagents; read-only"
-  result_count: 4
-  independence: "separate reviews verified; cross-family independence unverified"
-  proposed_changes: "raw complete Feishu account slice before broker/quantity filtering; avoid get_holdings_fresh cache write; distinguish PM record read time from broker-current quantity; require independent scoped price/FX provenance and age; clarify non-Futu positive broker recognition"
-  evidence_gap: "current draft may omit zero/negative rows and claim trusted on unavailable quote/FX time; no Slice B acceptance"
-  disposition: "four-panel proposals incorporated into design snapshot d2f6d32c; Slice B draft remains unaccepted pending review and rework"
+
+review_attempts: 3
+review_result: pass
+review_artifact: docs/reviews/code-review-20261002-163654.md
+review_history: "首次 Devflow Review 与用户显式独立 DeepReview 均确认只读归属情景写缓存；本次修复后重审无未关闭实质问题"
+repair_1: "portfolio_assignment_scenario 显式 write_cache=False；新增有/无缓存两种入口级无写入回归"
+repair_checks: "33 个相关 pytest 通过；两份改动 Python Ruff、git diff --check 通过"
+review_residual: "09:40 原始批次未回放；切片 2 的 8 个读模型用例仍未到业务断言"

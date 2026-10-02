@@ -492,6 +492,7 @@ def project_assignment_scenario(
 
     explicit_fx = portfolio_evidence.get("fx_rates_to_cny")
     has_explicit_fx = isinstance(explicit_fx, Mapping)
+    capacity_fx = portfolio_evidence.get("capacity_fx_rates_to_cny")
 
     def rate_for(currency: str, quote: Mapping[str, Any] | None = None) -> Decimal | None:
         if currency == "CNY":
@@ -534,6 +535,25 @@ def project_assignment_scenario(
         if _text(row.get("option_type")).lower() not in {"put", "call"}:
             continue
         selected_positions.append(row)
+
+    capacity_fx_complete = True
+    if isinstance(capacity_fx, Mapping):
+        required_currencies = {
+            normalize_currency(row.get("currency"))
+            for row in cash_rows
+            if row["broker"] == "富途" and row["quantity_decimal"] != 0
+        } | {
+            normalize_currency(row.get("currency"))
+            for row in selected_positions
+            if normalize_broker(row.get("broker")) == "富途"
+        }
+        capacity_fx_complete = all(
+            currency == "CNY" or _positive(capacity_fx.get(f"{currency}CNY")) is not None
+            for currency in required_currencies
+        )
+        if not capacity_fx_complete:
+            warnings.append("cash_coverage_fx_unavailable")
+            partial = True
 
     for index, option in enumerate(selected_positions):
         account = _text(option.get("account")).lower()
@@ -934,6 +954,22 @@ def project_assignment_scenario(
             }
         )
 
+    if not capacity_fx_complete:
+        for row in account_breakdown:
+            for key in (
+                "opening_cash_mmf_cny", "put_assignment_outflow_cny", "call_assignment_inflow_cny",
+                "known_estimated_fees_cny", "ending_cash_gross_cny",
+                "ending_cash_net_estimated_cny", "funding_gap_cny",
+            ):
+                row[key] = None
+        for row in expiry_ladder:
+            for key in (
+                "put_outflow_cny", "call_inflow_cny", "known_estimated_fees_cny",
+                "cumulative_put_outflow_cny", "cumulative_call_inflow_cny",
+                "projected_ending_cash_net_cny", "funding_gap_cny",
+            ):
+                row[key] = None
+
     distribution_rows: list[dict[str, Any]] = []
     for key in sorted(security_groups):
         row = security_groups[key]
@@ -1090,19 +1126,19 @@ def project_assignment_scenario(
     seen_fx: set[tuple[str, str | None, str | None]] = set()
     fx_observation = portfolio_evidence.get("fx_observation")
     if has_explicit_fx:
-        source = fx_observation.get("source") if isinstance(fx_observation, Mapping) else None
-        observed_at = fx_observation.get("timestamp") if isinstance(fx_observation, Mapping) else None
+        observed_pairs = fx_observation.get("pairs") if isinstance(fx_observation, Mapping) else None
         for pair, raw_rate in explicit_fx.items():
             if not str(pair).endswith("CNY"):
                 continue
             rate_value = _positive(raw_rate)
             if rate_value is not None:
+                pair_observation = observed_pairs.get(pair) if isinstance(observed_pairs, Mapping) and isinstance(observed_pairs.get(pair), Mapping) else {}
                 fx_facts.append({
                     "currency": str(pair)[:-3],
                     "rate_to_cny": _rate(rate_value),
-                    "source": source,
-                    "observed_at": observed_at,
-                    "quality": "current",
+                    "source": pair_observation.get("source"),
+                    "observed_at": pair_observation.get("quote_at_utc"),
+                    "quality": pair_observation.get("quality") or "unverified",
                 })
     else:
         for quote in quotes.values():
@@ -1152,21 +1188,22 @@ def project_assignment_scenario(
         },
         "cash_coverage": {
             "currency": "CNY",
-            "available_cash_and_mmf_cny": _money(starting_cash if cash_complete else None),
-            "gross_put_requirement_cny": _money(put_outflow if assignment_cash_complete else None),
-            "call_assignment_inflow_cny": _money(call_inflow if assignment_cash_complete else None),
-            "known_estimated_fees_cny": _money(known_fees),
-            "total_fees_cny": _money(known_fees) if fees_complete else None,
-            "ending_cash_gross_cny": _money(ending_cash_gross),
-            "ending_cash_net_estimated_cny": _money(ending_cash_net),
+            "fx_status": "ready" if capacity_fx_complete else "unavailable",
+            "available_cash_and_mmf_cny": _money(starting_cash if cash_complete and capacity_fx_complete else None),
+            "gross_put_requirement_cny": _money(put_outflow if assignment_cash_complete and capacity_fx_complete else None),
+            "call_assignment_inflow_cny": _money(call_inflow if assignment_cash_complete and capacity_fx_complete else None),
+            "known_estimated_fees_cny": _money(known_fees) if capacity_fx_complete else None,
+            "total_fees_cny": _money(known_fees) if fees_complete and capacity_fx_complete else None,
+            "ending_cash_gross_cny": _money(ending_cash_gross) if capacity_fx_complete else None,
+            "ending_cash_net_estimated_cny": _money(ending_cash_net) if capacity_fx_complete else None,
             "conservative_put_only_funding_gap_cny": (
                 _money(max(_ZERO, -conservative_cash_net))
-                if conservative_cash_net is not None
+                if conservative_cash_net is not None and capacity_fx_complete
                 else None
             ),
             "terminal_funding_gap_cny": (
                 _money(max(_ZERO, -ending_cash_net))
-                if ending_cash_net is not None
+                if ending_cash_net is not None and capacity_fx_complete
                 else None
             ),
             "basis": "cross_account_cny_economic_coverage",

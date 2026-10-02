@@ -263,6 +263,8 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         "source": "tencent_quote",
         "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
     }
+    fx_observation["quote_timestamps"] = {pair: fx_observation["timestamp"] for pair in fx_observation["rates"]}
+    fx_observation["observed_at"] = fx_observation["timestamp"]
     fx_calls: list[list[str]] = []
 
     def _rates(cache_path=None, **_kwargs):
@@ -317,11 +319,12 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         ("USD", "CNY"),
         ("HKD", "CNY"),
     }
-    assert {item.source for item in evidence.fx_rates} == {"realtime_snapshot"}
-    assert {item.quality["provider_source"] for item in evidence.fx_rates} == {
+    quote_facts = [item for item in evidence.fx_rates if item.source == "realtime_snapshot"]
+    assert len(quote_facts) == 2
+    assert {item.quality["provider_source"] for item in quote_facts} == {
         "tencent_quote"
     }
-    assert all(item.observed_at_ms > item.effective_at_ms for item in evidence.fx_rates)
+    assert all(item.observed_at_ms >= item.effective_at_ms for item in quote_facts)
 
     loaded = {}
     for account in ("lx", "sy"):
@@ -475,6 +478,8 @@ def test_prepare_default_path_does_not_persist_fx_evidence(
             "timestamp": NOW.isoformat(),
             "source": "tencent_quote",
             "rates": {"USDCNY": 7.2},
+            "quote_timestamps": {"USDCNY": NOW.isoformat()},
+            "observed_at": NOW.isoformat(),
         },
         {
             "timestamp": "2099-08-21T03:00:00+00:00",
@@ -508,12 +513,13 @@ def test_prepare_rejects_invalid_fx_evidence_batch(
         persist_fx_evidence=True,
     )
 
-    assert batch.fx_evidence_status == "error"
-    assert batch.fx_evidence_error_count == 1
+    assert batch.fx_evidence_status == ("persisted" if "HKDCNY" not in fx_observation["rates"] else "error")
+    assert batch.fx_evidence_inserted_count == (1 if "HKDCNY" not in fx_observation["rates"] else 0)
+    assert batch.fx_evidence_error_count == (0 if "HKDCNY" not in fx_observation["rates"] else 1)
     evidence = PerformanceEvidenceSQLiteRepository(
         tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     )
-    assert evidence.schema_state() == "not_initialized"
+    assert evidence.schema_state() == ("initialized_v1" if "HKDCNY" not in fx_observation["rates"] else "not_initialized")
 
 
 def test_fx_evidence_concurrent_winner_converges_to_idempotent(
@@ -532,6 +538,9 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
 
         def read_all(self):
             return evidence.read_all()
+
+        def freeze_cash_fx_daily_rates(self, *args, **kwargs):
+            return evidence.freeze_cash_fx_daily_rates(*args, **kwargs)
 
         def import_envelope(self, envelope, *, apply, migrated_at_ms):
             self.import_calls += 1
@@ -559,6 +568,8 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
             )
 
     racing = RacingEvidenceRepository()
+    captured_at = datetime.fromtimestamp(captured_at_ms / 1000, timezone.utc)
+    quoted_at = (captured_at - timedelta(hours=2)).isoformat()
     monkeypatch.setattr(
         mod,
         "open_performance_evidence_repository",
@@ -568,9 +579,11 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
     result = mod._persist_fx_evidence(
         repos_by_ledger_path={db_path: object()},
         observation={
-            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            "timestamp": quoted_at,
             "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+            "quote_timestamps": {"USDCNY": quoted_at, "HKDCNY": quoted_at},
+            "observed_at": captured_at.isoformat(),
         },
         observation_status="ready",
         migrated_at_ms=captured_at_ms,
@@ -602,6 +615,8 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
             "timestamp": NOW.isoformat(),
             "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+            "quote_timestamps": {"USDCNY": NOW.isoformat(), "HKDCNY": NOW.isoformat()},
+            "observed_at": NOW.isoformat(),
         },
         observation_status="unavailable_stale",
         migrated_at_ms=int((NOW + timedelta(days=2)).timestamp() * 1000),
@@ -610,8 +625,9 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
 
     assert result["status"] == "persisted"
     rates = PerformanceEvidenceSQLiteRepository(db_path).read_all().fx_rates
-    assert {item.source for item in rates} == {"cache_snapshot"}
-    assert all(item.quality["stale_cache_fallback"] is True for item in rates)
+    cached = [item for item in rates if item.source == "cache_snapshot"]
+    assert len(cached) == 2
+    assert all(item.quality["stale_cache_fallback"] is True for item in cached)
 
     fresh_db_path = tmp_path / "fresh-option-positions.sqlite3"
     fresh_repo = SQLiteOptionPositionsRepository(fresh_db_path)
@@ -621,6 +637,8 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
             "timestamp": NOW.isoformat(),
             "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+            "quote_timestamps": {"USDCNY": NOW.isoformat(), "HKDCNY": NOW.isoformat()},
+            "observed_at": NOW.isoformat(),
         },
         observation_status="ready",
         migrated_at_ms=int((NOW + timedelta(hours=2)).timestamp() * 1000),
@@ -632,6 +650,8 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
             "timestamp": NOW.isoformat(),
             "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+            "quote_timestamps": {"USDCNY": NOW.isoformat(), "HKDCNY": NOW.isoformat()},
+            "observed_at": NOW.isoformat(),
         },
         observation_status="unavailable_stale",
         migrated_at_ms=int((NOW + timedelta(days=2)).timestamp() * 1000),
@@ -639,12 +659,11 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
     )
     assert first["status"] == "persisted"
     assert repeated_stale["status"] == "idempotent"
-    assert {
-        item.source
-        for item in PerformanceEvidenceSQLiteRepository(
-            fresh_db_path
-        ).read_all().fx_rates
-    } == {"realtime_snapshot"}
+    assert len([
+        item
+        for item in PerformanceEvidenceSQLiteRepository(fresh_db_path).read_all().fx_rates
+        if item.source == "realtime_snapshot"
+    ]) == 2
 
 
 def test_one_ledger_freezes_account_isolated_option_contexts(

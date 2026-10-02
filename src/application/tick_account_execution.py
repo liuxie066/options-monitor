@@ -77,6 +77,7 @@ from src.application.runtime_portfolio_snapshot import (
     publish_runtime_portfolio_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.current_fx_run import seal_run_fx_snapshot
 from src.application.experience_mode import (
     resolve_experience_account_display_name,
 )
@@ -535,6 +536,10 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     if scanning_accounts and not request.prefetch_done:
         run_started_at_utc = datetime.now(timezone.utc)
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
+        fx_snapshot_sha256 = (
+            seal_run_fx_snapshot(base=request.base, run_id=request.run_id)[1]
+            if not request.experience else None
+        )
         scanning_configs = {
             str(account).strip().lower(): account_configs[
                 str(account).strip().lower()
@@ -572,6 +577,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 account_state_dirs=account_state_dirs,
                 shared_state_dir=run_state_dir,
                 timeout_sec=portfolio_timeout_sec,
+                fx_snapshot_sha256=fx_snapshot_sha256,
                 python_executable=request.vpy,
             )
         except Exception as exc:
@@ -660,6 +666,13 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 )
                 invalid_prepared_accounts.add(account)
                 continue
+            if fx_snapshot_sha256 is not None and prepared_context.get("fx_snapshot_sha256") != fx_snapshot_sha256:
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    "prepared portfolio FX snapshot mismatch",
+                )
+                invalid_prepared_accounts.add(account)
+                continue
             prepared_contexts[account] = prepared_context
             prepared_manifest_paths[account] = manifest_path
             prepared_manifest_sha256_by_account[account] = str(
@@ -706,6 +719,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     message=str(message),
                 ),
                 persist_fx_evidence=not request.smoke,
+                fx_snapshot_sha256=fx_snapshot_sha256,
                 )
             )
         except Exception as exc:
@@ -764,6 +778,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             if (
                 not manifest_path.is_file()
                 or len(manifest_sha256) != 64
+                or (fx_snapshot_sha256 is not None and manifest.get("run_fx_snapshot_sha256") != fx_snapshot_sha256)
                 or any(
                     character not in "0123456789abcdef"
                     for character in manifest_sha256

@@ -97,9 +97,12 @@ def test_cross_account_instrument_reuse_midpoint_and_live_fx_are_collected_once(
         [_position(account="lx"), _position(account="sy", market_code="US.NVDA260821P100000")],
         fetch,
         fx_payload_fetcher=lambda: {
-            "rates": {"USDCNY": 7.12},
-            "timestamp_ms": NOW_MS - 500,
-            "source": "test",
+            "pairs": {"USDCNY": {
+                "rate": 7.12,
+                "source": "tencent_quote",
+                "quote_at_utc": datetime.fromtimestamp((NOW_MS - 500) / 1000, timezone.utc).isoformat(),
+                "observed_at_utc": datetime.fromtimestamp((NOW_MS - 500) / 1000, timezone.utc).isoformat(),
+            }},
         },
     )
 
@@ -152,8 +155,8 @@ def test_last_fallback_timestamp_fallback_and_exact_code_resolution_fail_closed(
     )
     assert naive_or_future.valuation_marks[0].effective_at_ms == NOW_MS
     assert naive_or_future.valuation_marks[0].quality["timestamp_fallback"] is True
-    assert naive_or_future.fx_rates[0].effective_at_ms == NOW_MS
-    assert naive_or_future.fx_rates[0].quality["timestamp_fallback"] is True
+    assert not naive_or_future.fx_rates
+    assert any(item["code"] == "fx_timestamp_missing_or_invalid" for item in naive_or_future.diagnostics)
 
 
 def test_conflicting_stored_codes_for_same_instrument_fail_closed() -> None:
@@ -392,8 +395,12 @@ def test_external_snapshot_raw_is_json_safe_and_report_provenance_is_compact() -
             }
         ],
         fx_payload_fetcher=lambda: {
-            "rates": {"USDCNY": 7.1},
-            "timestamp_ms": NOW_MS,
+            "pairs": {"USDCNY": {
+                "rate": 7.1,
+                "source": "tencent_quote",
+                "quote_at_utc": datetime.fromtimestamp(NOW_MS / 1000, timezone.utc).isoformat(),
+                "observed_at_utc": datetime.fromtimestamp(NOW_MS / 1000, timezone.utc).isoformat(),
+            }},
             "provider_nan": float("nan"),
         },
     )
