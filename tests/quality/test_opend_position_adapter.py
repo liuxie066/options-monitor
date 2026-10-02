@@ -132,7 +132,7 @@ def test_adapter_scopes_contract_term_snapshot_to_requested_market(
         },
     )
     _wire(monkeypatch, gateway)
-    monkeypatch.setattr(adapter_module, "_MARKET_SNAPSHOT_BATCH_SIZE", 1)
+    monkeypatch.setattr("src.application.futu_option_terms._MARKET_SNAPSHOT_BATCH_SIZE", 1)
 
     snapshot = _fetch(market="us")
 
