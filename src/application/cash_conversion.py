@@ -77,7 +77,7 @@ def cash_fx_observation_facts(
             rate = rates.get(pair)
             provider = str(observation.get("source") or "").strip()
             effective = _payload_timestamp_ms({"timestamp": timestamps.get(pair)})
-            captured = _payload_timestamp_ms({"timestamp": observation.get("observed_at")})
+            captured = _payload_timestamp_ms({"timestamp": observation.get("observed_at")}) or int(observed_at_ms)
         if rate in (None, "") or not provider or effective is None or captured is None:
             continue
         if effective > captured or captured > int(observed_at_ms):
