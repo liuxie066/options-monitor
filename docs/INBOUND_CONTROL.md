@@ -162,10 +162,14 @@ Do not add:
 ```text
 /attribute lx <execution_key> ordinary
 /attribute lx <execution_key> wheel <wheel_branch_id>
+/attribute lx <execution_key> wheel <branch_id_1>,<branch_id_2>,<branch_id_3>
 /attribute lx <execution_key> combo <strategy_group_id>
 /confirm attribution <operation_id>
 /cancel attribution <operation_id>
 ```
+
+`wheel` 的逗号列表按每张合约列一个完整分支 ID：上例把同一笔 3 张成交分别分给三个分支。
+部分平仓或待确认指派不会自动释放这三个分支的占用。
 
 `execution_key` 使用查询返回的规范成交身份，不是 broker 原始订单编号。`/pending` 只列当前对话的预览。
 确认要求同一已鉴权渠道、sender、非空 conversation、当前写权限和签名，并重新检查账本资源与账户映射。

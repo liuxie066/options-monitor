@@ -18,6 +18,7 @@ from src.application.trades.attribution import (attribution_runtime, build_trade
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.wheel.capacity import observe_trade_attribution_capacity
+from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
 def _fact(repo: Any, *, account: str, execution_key: str) -> dict[str, Any]:
@@ -28,7 +29,8 @@ def _fact(repo: Any, *, account: str, execution_key: str) -> dict[str, Any]:
 
 
 def _response(operation_id: str, status: str, result: dict[str, Any]) -> dict[str, Any]:
-    target = "普通单腿" if result.get("status") == "ordinary" else "Wheel" if result.get("wheel_branch_id") else "Combo"
+    target = "普通单腿" if result.get("status") == "ordinary" else "Wheel" if (
+        result.get("wheel_branch_id") or result.get("wheel_call_allocations")) else "Combo"
     text = {"applied": f"已确认归属：{target}；成交金额和数量不变。", "cancelled": "已取消本次预览，未改变成交归属。",
             "failed": "本次归属未执行，请重新查询并预览。", "expired": "预览已过期，请重新预览。"}.get(status, "归属结果待核实。")
     return build_response(tool_name="inbound.attribution", ok=status in {"applied", "cancelled"},
@@ -52,6 +54,9 @@ def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str,
 def _decision_matches(repo: Any, *, payload: dict[str, Any], fact: dict[str, Any]) -> bool:
     if payload["action"] == "ordinary":
         return fact["status"] == "ordinary" and fact["origin"] == "manual"
+    if payload.get("wheel_branch_ids"):
+        return (fact["status"] == "linked" and fact["origin"] == "manual"
+                and fact.get("wheel_call_allocations") == payload.get("wheel_call_allocations"))
     facts = {row["lot_id"]: row for row in read_trade_attribution_facts(repo, account=payload["account"])}
     members = payload.get("members") or []
     if {row["lot_id"] for row in members} != set(payload["member_ids"]):
@@ -78,6 +83,7 @@ def handle_attribution_operation(intent: ControlCommand, request: AssistantReque
         fact = _fact(repo, account=account, execution_key=str(args.get("execution_key") or ""))
         action = args.get("action")
         candidate = None
+        branch_ids: tuple[str, ...] = ()
         context = None
         if action == "ordinary":
             if not fact["ordinary_previewable"]:
@@ -88,17 +94,27 @@ def handle_attribution_operation(intent: ControlCommand, request: AssistantReque
             target = str(args.get("target_id") or "").strip()
             if not target:
                 raise AgentToolError(code="NEEDS_CLARIFICATION", message="请先查询待归属成交，选择具体的目标 ID。")
-            candidate_id = target if target.startswith(action + ":") else action + ":" + target
+            if action == "wheel" and "," in target:
+                branch_ids = tuple(part.removeprefix("wheel:") for part in target.split(","))
+                if len(branch_ids) < 2 or any(not part or part.strip() != part for part in branch_ids):
+                    raise AgentToolError(code="INPUT_ERROR", message="多分支归属须用逗号列出每张合约的分支 ID。")
+                candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
+            else:
+                candidate_id = target if target.startswith(action + ":") else action + ":" + target
             context = _strategy_context(repo, config=config, authority=authority, account=account)
             view = context.pop("view")
             fact = next(row for row in view["rows"] if row["execution_key"] == fact["execution_key"])
-            candidate = next((row for row in fact["candidates"] if row["candidate_id"] == candidate_id), None)
+            candidate = ({"candidate_id": candidate_id, "member_lot_ids": [fact["lot_id"]]}
+                         if branch_ids else next((row for row in fact["candidates"]
+                                                   if row["candidate_id"] == candidate_id), None))
             if candidate is None:
                 raise AgentToolError(code="NEEDS_CLARIFICATION", message="所选目标已不可用，请重新查询。")
-            apply_trade_attribution(open_wheel_activation_repository(repo.db_path), account=account,
+            planned = apply_trade_attribution(open_wheel_activation_repository(repo.db_path), account=account,
                 execution_key=fact["execution_key"], candidate_id=candidate_id, expected_input_hash=fact["input_hash"],
                 request_id=f"control:{command_id}", actor=f"{request.channel}:{request.sender_id}", manual=True,
-                apply_changes=False, **context)
+                apply_changes=False, wheel_branch_ids=branch_ids, **context)
+            if branch_ids:
+                candidate["wheel_call_allocations"] = planned["wheel_call_allocations"]
         else:
             raise AgentToolError(code="INPUT_ERROR", message="未知的归属选项。")
         ref = fact["broker_account_ref"]
@@ -116,7 +132,14 @@ def handle_attribution_operation(intent: ControlCommand, request: AssistantReque
                 branch_generation_hash=candidate.get("branch_generation_hash"),
                 members=[{key: row[key] for key in ("lot_id", "execution_key", "open_event_id", "broker_account_ref")}
                          for row in view["rows"] if row["lot_id"] in payload["member_ids"]])
+            if branch_ids:
+                payload.update(wheel_branch_ids=list(branch_ids),
+                               wheel_call_allocations=candidate["wheel_call_allocations"])
         target_label = "普通单腿" if action == "ordinary" else ("Wheel 批次 " if action == "wheel" else "Combo Yield ") + candidate["candidate_id"].split(":", 1)[1]
+        if branch_ids:
+            target_label = "；".join(
+                f"Wheel 分支 {row['wheel_branch_id']}：{row['contracts']} 张"
+                for row in candidate["wheel_call_allocations"])
         preview_members = [row for row in view["rows"] if row["lot_id"] in payload["member_ids"]] if candidate else [fact]
         return build_previewed_operation_response(
             tool_name="inbound.attribution", operation_id=command_id, request=request, store=store,
@@ -191,7 +214,8 @@ def _finish_attribution_operation(repo: Any, *, store: InboundOperationStore,
             elif context is not None:
                 result = apply_trade_attribution(active, account=payload["account"], execution_key=payload["execution_key"],
                     candidate_id=payload["candidate_id"], expected_input_hash=payload["input_hash"],
-                    request_id=payload["request_id"], actor=payload["actor"], manual=True, **context)
+                    request_id=payload["request_id"], actor=payload["actor"], manual=True,
+                    wheel_branch_ids=tuple(payload.get("wheel_branch_ids") or ()), **context)
             else:
                 raise ValueError("claimed operation has no fresh confirmation evidence")
             if not _decision_matches(active, payload=payload, fact=result):

@@ -98,7 +98,7 @@ def parse_assistant_command(
         return _parse_model_command(command, args)
     if command in _COMMANDS["attribution_preview"]:
         if len(args) not in {3, 4} or args[0] not in account_set or args[2] not in {"ordinary", "wheel", "combo"}:
-            raise AgentToolError(code="INPUT_ERROR", message="格式：/attribute <账户> <execution_key> <ordinary|wheel|combo> [target_id]")
+            raise AgentToolError(code="INPUT_ERROR", message="格式：/attribute <账户> <execution_key> <ordinary|wheel|combo> [target_id]；多分支 Wheel 用逗号列出每张合约的分支 ID。")
         return _intent("attribution_preview", {"account": args[0], "execution_key": args[1], "action": args[2],
                                                **({"target_id": args[3]} if len(args) == 4 else {})})
     if command in _COMMANDS["manual_trade_open"]:

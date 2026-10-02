@@ -96,6 +96,8 @@ def render_attribution_preview(operation: dict[str, Any]) -> str:
         "本次归属准入已通过，确认时将重新核对。",
         f"确认：/confirm attribution {operation['operation_id']}",
         f"取消：/cancel attribution {operation['operation_id']}", f"有效期至：{operation['expires_at']}"])
+    if operation["payload"].get("wheel_branch_ids"):
+        lines.insert(-3, "此批次日后若部分平仓或指派，分支占用会保持阻断，待逐张核对结算。")
     return "\n".join(lines)
 
 
