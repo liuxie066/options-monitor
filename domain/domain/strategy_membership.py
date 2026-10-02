@@ -9,6 +9,7 @@ from domain.domain.strategy_vocab import (
     STRATEGY_SELL_PUT,
     canonical_strategy_id,
 )
+from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 
 if TYPE_CHECKING:
     from domain.domain.ledger.identity import ContractKey
@@ -21,6 +22,7 @@ class StrategyMetadata:
     strategy_group_id: str | None = None
     source_lot_id: str | None = None
     source_wheel_branch_id: str | None = None
+    wheel_call_allocations: tuple[tuple[str, str, int], ...] = ()
     expiry_structure: str | None = None
 
 
@@ -39,10 +41,11 @@ class OptionStrategyMembership:
     strategy_group_id: str | None = None
     source_lot_id: str | None = None
     source_wheel_branch_id: str | None = None
+    wheel_call_allocations: tuple[tuple[str, str, int], ...] = ()
     issues: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "leg_type": self.leg_type,
             "strategy": self.strategy,
             "parent_universe": self.parent_universe,
@@ -52,6 +55,12 @@ class OptionStrategyMembership:
             "source_wheel_branch_id": self.source_wheel_branch_id,
             "issues": list(self.issues),
         }
+        if self.wheel_call_allocations:
+            payload["wheel_call_allocations"] = [
+                {"stock_lot_id": stock, "wheel_branch_id": branch, "contracts": contracts}
+                for stock, branch, contracts in self.wheel_call_allocations
+            ]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -69,7 +78,8 @@ def strategy_metadata_has_owner(metadata: Mapping[str, Any]) -> bool:
     resolved = resolve_strategy_metadata(metadata)
     value = resolved.metadata
     return bool(resolved.issues or value.strategy not in {"", "unassigned", STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL}
-                or value.leg_role or value.strategy_group_id or value.source_lot_id or value.source_wheel_branch_id)
+                or value.leg_role or value.strategy_group_id or value.source_lot_id or value.source_wheel_branch_id
+                or value.wheel_call_allocations)
 
 
 def resolve_trade_attribution(
@@ -155,6 +165,19 @@ def resolve_strategy_metadata(
             issues.append(f"strategy_metadata_conflict{prefix}:{key}")
         values[key] = nested or top
 
+    allocations: tuple[tuple[str, str, int], ...] = ()
+    for source in (raw, snapshot):
+        if "wheel_call_allocations" not in source:
+            continue
+        try:
+            parsed = parse_wheel_call_allocations(source["wheel_call_allocations"])
+        except ValueError:
+            issues.append("wheel_call_allocations_invalid")
+            continue
+        if allocations and allocations != parsed:
+            issues.append("wheel_call_allocations_conflict")
+        allocations = parsed
+
     expiry_structure = values["expiry_structure"] or resolve_expiry_structure(
         snapshot,
         raw,
@@ -166,6 +189,7 @@ def resolve_strategy_metadata(
             strategy_group_id=values["strategy_group_id"] or None,
             source_lot_id=values["source_stock_lot_id"] or None,
             source_wheel_branch_id=values["source_wheel_branch_id"] or None,
+            wheel_call_allocations=allocations,
             expiry_structure=expiry_structure,
         ),
         issues=tuple(issues),
@@ -202,6 +226,7 @@ def resolve_option_strategy_membership(
             source_wheel_branch_id=(
                 metadata.source_wheel_branch_id if keep_relationship else None
             ),
+            wheel_call_allocations=(metadata.wheel_call_allocations if keep_relationship else ()),
             issues=issues,
         )
 
@@ -249,7 +274,12 @@ def resolve_option_strategy_membership(
             and not metadata.source_wheel_branch_id
             and leg_type == "sell_call"
         )
-        if valid_wheel or legacy_wheel_call:
+        multi_wheel_call = (
+            strategy == "wheel" and role == "wheel_call" and leg_type == "sell_call"
+            and metadata.wheel_call_allocations and not metadata.source_lot_id
+            and not metadata.source_wheel_branch_id and not group_id
+        )
+        if ((valid_wheel or legacy_wheel_call) and not metadata.wheel_call_allocations) or multi_wheel_call:
             return result("wheel", keep_relationship=True, issues=())
         return result(issues=("strategy_attribution_conflict",))
 

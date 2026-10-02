@@ -124,7 +124,8 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         ordinary = _manual_ordinary_decision(effective, lot_id)
         related = [row for row in effective if row.get("event_id") == event["event_id"]
                    or row.get("lot_id") == lot_id or row.get("target_lot_id") == lot_id]
-        linked = bool(membership.get("source_wheel_branch_id") or membership.get("source_stock_lot_id")
+        allocations = membership.get("wheel_call_allocations") or []
+        linked = bool(allocations or membership.get("source_wheel_branch_id") or membership.get("source_stock_lot_id")
                       or membership.get("strategy_group_id"))
         decisions = [row for row in related if row.get("event_type") == "adjust"
             and row.get("source") in {"wheel_linkage", "post_trade_combo_reconciliation"}
@@ -158,6 +159,7 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
             "input_hash": canonical_sha256(related), "policy_version": ATTRIBUTION_POLICY_VERSION,
             "ledger_event_ids": [row["event_id"] for row in related if row.get("event_type") == "adjust"],
             "ordinary_previewable": not reasons and not linked,
+            **({"wheel_call_allocations": allocations} if allocations else {}),
         })
     return sorted(out, key=lambda row: (str(row["execution_key"] or ""), row["open_event_id"]))
 

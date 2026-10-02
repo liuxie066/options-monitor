@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- 人工归属可将同一笔多张 Wheel Call 成交按合约张数分配给多个股票分支，并在确认前逐分支预览；平仓或结算证据不足时保守保留占用。
+
 ## 4.0.0 - 2026-10-02
 
 ### Breaking Changes

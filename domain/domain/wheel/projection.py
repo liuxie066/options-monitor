@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.strategy_membership import strategy_metadata_has_owner
+from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 from domain.domain.trade_contract_identity import contract_share_quantity
 
 from ._common import (
@@ -35,6 +36,27 @@ from .events import _positive_int, _required_text, normalize_wheel_event
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     fields = row.get("fields")
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
+
+
+def _call_contracts_for_branch(fields: Mapping[str, Any], *, branch_id: str, stock_lot_id: str) -> int | None:
+    allocations = fields.get("wheel_call_allocations")
+    if allocations is not None:
+        return next((contracts for stock, branch, contracts in parse_wheel_call_allocations(allocations)
+                     if stock == stock_lot_id and branch == branch_id), None)
+    if (str(fields.get("source_stock_lot_id") or "").strip() == stock_lot_id
+            and str(fields.get("source_wheel_branch_id") or stock_lot_id).strip() == branch_id):
+        return _contracts_open(fields)
+    return None
+
+
+def _call_allocation_held(lot_id: str, fields: Mapping[str, Any],
+                          trade_events: Sequence[Mapping[str, Any]]) -> bool:
+    if _contracts_open(fields) > 0:
+        return True
+    return fields.get("wheel_call_allocations") is not None and any(
+        _event_type(event) in {"assignment", "exercise", "expire_close"}
+        and str(event.get("target_lot_id") or "") == lot_id
+        for event in trade_events)
 
 
 def _event_type(row: Mapping[str, Any]) -> str:
@@ -66,6 +88,7 @@ STRATEGY_METADATA_KEYS = (
     "strategy_group_id",
     "source_stock_lot_id",
     "source_wheel_branch_id",
+    "wheel_call_allocations",
     "strategy_snapshot",
     "yield_enhancement_mode",
 )
@@ -961,7 +984,7 @@ def project_wheel_lifecycles(
             call_key = lot_contract_key(fields)
             if str(call_key.get("account") or "").strip().lower() != account:
                 continue
-            if str(fields.get("source_stock_lot_id") or "").strip() != lot_id:
+            if _call_contracts_for_branch(fields, branch_id=lot_id, stock_lot_id=lot_id) is None:
                 continue
             if (
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
@@ -974,7 +997,8 @@ def project_wheel_lifecycles(
                 continue
             linked_lots.append((call_lot_id, fields))
         active_call_lot_ids = sorted(
-            call_lot_id for call_lot_id, fields in linked_lots if _contracts_open(fields) > 0
+            call_lot_id for call_lot_id, fields in linked_lots
+            if _call_allocation_held(call_lot_id, fields, active_trade_events)
         )
 
         assignment_ids = {
@@ -984,6 +1008,13 @@ def project_wheel_lifecycles(
             and str(row.get("target_lot_id") or "").strip()
             in {call_lot_id for call_lot_id, _fields in linked_lots}
         }
+        if any(fields.get("wheel_call_allocations") is not None and any(
+            _event_type(event) in {"assignment", "exercise", "expire_close"}
+            and str(event.get("target_lot_id") or "") == call_lot_id
+            for event in active_trade_events)
+            for call_lot_id, fields in linked_lots
+        ):
+            reasons.add("wheel_call_settlement_allocation_pending")
         called_events = [item for item in terminals if item["event_type"] == "wheel_called_away"]
         manual_events = [item for item in terminals if item["event_type"] == "wheel_manual_ended"]
         if called_events:
@@ -1017,10 +1048,11 @@ def project_wheel_lifecycles(
 
         locked_shares = 0
         for _lot_id, fields in linked_lots:
-            if _contracts_open(fields) <= 0:
+            if not _call_allocation_held(_lot_id, fields, active_trade_events):
                 continue
             try:
-                locked_shares += contract_share_quantity(_contracts_open(fields), fields.get("multiplier"))
+                contracts = _call_contracts_for_branch(fields, branch_id=lot_id, stock_lot_id=lot_id)
+                locked_shares += contract_share_quantity(contracts, fields.get("multiplier"))
             except (TypeError, ValueError):
                 reasons.add("wheel_call_multiplier_invalid")
         if shares_remaining is not None and locked_shares > shares_remaining:
@@ -1477,11 +1509,16 @@ def project_wheel_branches(
         if lifecycle_status == "active" and initial_contracts > 0 and remaining_contracts == 0:
             lifecycle_status = "converted"
 
+        lot_id = str(created.get("stock_lot_id") or "").strip() or None
         linked_lots = [
             (option_lot_id, fields)
             for option_lot_id, fields in lots
             if str(lot_contract_key(fields).get("account") or "").strip().lower() == account
-            and str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
+            and (
+                str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
+                or (direction == "call" and lot_id
+                    and _call_contracts_for_branch(fields, branch_id=branch_id, stock_lot_id=lot_id) is not None)
+            )
         ]
         realized_put_net_pnl: float | None = None
         if direction == "put":
@@ -1509,10 +1546,18 @@ def project_wheel_branches(
             else:
                 reasons.add("realized_put_net_pnl_unavailable")
         active_lot_ids = sorted(
-            option_lot_id
-            for option_lot_id, fields in linked_lots
-            if _contracts_open(fields) > 0
+            option_lot_id for option_lot_id, fields in linked_lots
+            if (_call_allocation_held(option_lot_id, fields, active_trade_events)
+                if direction == "call" else _contracts_open(fields) > 0)
         )
+        if direction == "call" and any(
+            fields.get("wheel_call_allocations") is not None
+            and any(_event_type(event) in {"assignment", "exercise", "expire_close"}
+                    and str(event.get("target_lot_id") or "") == option_lot_id
+                    for event in active_trade_events)
+            for option_lot_id, fields in linked_lots
+        ):
+            reasons.add("wheel_call_settlement_allocation_pending")
         expected_role = f"wheel_{direction}"
         for _lot_id, fields in linked_lots:
             if (
@@ -1576,8 +1621,13 @@ def project_wheel_branches(
                     }
                 )
         try:
-            committed_shares = sum(contract_share_quantity(_contracts_open(fields), fields.get("multiplier"))
-                                   for _, fields in linked_lots if _contracts_open(fields) > 0)
+            committed_shares = sum(contract_share_quantity(
+                _call_contracts_for_branch(fields, branch_id=branch_id, stock_lot_id=lot_id)
+                if direction == "call" and fields.get("wheel_call_allocations") is not None
+                else _contracts_open(fields), fields.get("multiplier"))
+                for option_lot_id, fields in linked_lots
+                if (_call_allocation_held(option_lot_id, fields, active_trade_events)
+                    if direction == "call" else _contracts_open(fields) > 0))
         except (TypeError, ValueError):
             committed_shares = None
             reasons.add("wheel_option_units_invalid")
@@ -1686,7 +1736,13 @@ def project_wheel_branches(
             "terminal_event_id": terminal_event_id,
             "active_option_lot_ids": active_lot_ids,
             "active_intent_reserved_shares": reserved_shares,
-            "active_option_committed_contracts": sum(_contracts_open(fields) for _, fields in linked_lots),
+            "active_option_committed_contracts": sum(
+                _call_contracts_for_branch(fields, branch_id=branch_id, stock_lot_id=lot_id)
+                if direction == "call" and fields.get("wheel_call_allocations") is not None
+                else _contracts_open(fields)
+                for option_lot_id, fields in linked_lots
+                if (_call_allocation_held(option_lot_id, fields, active_trade_events)
+                    if direction == "call" else _contracts_open(fields) > 0)),
             "active_option_committed_shares": committed_shares,
             "active_intent_ids": active_intent_ids,
             "active_intent_reserved_contracts": sum(

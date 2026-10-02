@@ -7,6 +7,7 @@ import pytest
 from unittest.mock import patch
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.trade_execution import execution_identity_from_input
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
@@ -21,7 +22,7 @@ def _ms(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
 
 
-def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path, monkeypatch):
+def _meituan_repo(tmp_path, *, call_contracts: int = 1):
     ledger = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     ledger.parent.mkdir(parents=True)
     repo = SQLiteOptionPositionsRepository(ledger)
@@ -63,12 +64,17 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
             "option_type": "call", "strike": "80", "expiration_ymd": "2026-11-27", "multiplier": "500"},
         "external_id_namespace": "futu.deal", "external_execution_id": "meituan-call-fill",
         "external_order_namespace": "futu.order", "external_order_id": "meituan-order",
-        "side": "sell", "position_effect": "open", "quantity": "1", "price": "1.5", "currency": "HKD",
+        "side": "sell", "position_effect": "open", "quantity": str(call_contracts), "price": "1.5", "currency": "HKD",
         "occurred_at_utc": "2026-09-27T02:45:31Z", "status": "OK"}
     result = _process_payload(payload, repo=repo, state_path=tmp_path / "state.json",
         audit_path=tmp_path / "audit.jsonl", account_mapping={"1001": "lx"}, futu_account_ids=["1001"],
         apply_changes=True, host="127.0.0.1", port=11111, allow_external_lookup=False,
         config=config, runtime_root=tmp_path)
+    return repo, config, result
+
+
+def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path, monkeypatch):
+    repo, config, result = _meituan_repo(tmp_path)
     assert result["status"] == "applied", result
     call_event = next(e for e in repo.list_trade_events() if e["event_type"] == "open" and e["option_type"] == "call")
     assert call_event["lot_id"] is None
@@ -135,3 +141,102 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     pending_after, read_error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
         market="HK", now_ms=int(time.time() * 1000) + 1000)
     assert read_error is None and pending_after == []
+
+
+def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_path, monkeypatch):
+    repo, config, intake = _meituan_repo(tmp_path, call_contracts=3)
+    assert intake["status"] == "applied"
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    evidence = {"complete": True, "exposures": []}
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
+        now_ms=_ms("2026-10-01T00:00:00Z"), combo_evidence=evidence)
+    call = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    assert call["contracts"] == 3 and call["status"] == "pending"
+    assert all("wheel_branch_capacity_exceeded" in item["reason_codes"]
+               for item in call["candidates"] if item["strategy"] == "wheel")
+    chosen = tuple(sorted(item["wheel_branch_id"] for item in call["candidates"] if item["strategy"] == "wheel")[:3])
+    candidate_id = "wheel-multi:" + canonical_sha256(sorted(chosen))[:24]
+    args = dict(account="lx", market="hk", config=config, execution_key=call["execution_key"],
+                candidate_id=candidate_id, expected_input_hash=call["input_hash"], request_id="manual:3",
+                actor="fixture:operator", combo_evidence=evidence, capacity_observation={},
+                combo_mode="confirm", manual=True, wheel_branch_ids=chosen)
+    planned = apply_trade_attribution(repo, **args, apply_changes=False)
+    assert [row["contracts"] for row in planned["wheel_call_allocations"]] == [1, 1, 1]
+    assert len(repo.list_trade_events()) == len(rows["trade_events"])
+    with pytest.raises(ValueError, match="evidence changed"):
+        apply_trade_attribution(repo, **{**args, "expected_input_hash": "stale"})
+    with pytest.raises(ValueError, match="exceeds unclaimed branch capacity"):
+        duplicate = (chosen[0], chosen[0], chosen[1])
+        apply_trade_attribution(repo, **{**args, "wheel_branch_ids": duplicate,
+            "candidate_id": "wheel-multi:" + canonical_sha256(sorted(duplicate))[:24]})
+    applied = apply_trade_attribution(repo, **args)
+    assert applied["status"] == "linked" and applied["origin"] == "manual"
+    assert applied["wheel_branch_id"] is None
+    assert len(applied["wheel_call_allocations"]) == 3
+    assert apply_trade_attribution(repo, **args)["write_applied"] is False
+    call_opens = [row for row in repo.list_trade_events()
+                  if row["event_type"] == "open" and row["option_type"] == "call"]
+    assert len(call_opens) == 1 and call_opens[0]["contracts"] == 3
+    assert len([row for row in repo.list_trade_events()
+                if row["event_type"] == "adjust" and row["source"] == "wheel_linkage"]) == 1
+    after_rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    after_view = build_trade_attribution_view(after_rows, config=config, account="lx", market="hk",
+        now_ms=int(time.time() * 1000) + 1000, combo_evidence=evidence)
+    assert next(row for row in after_view["rows"]
+                if row["execution_key"] == call["execution_key"])["status"] == "linked"
+    from src.application.wheel.read_model import build_wheel_read_model
+    branches = build_wheel_read_model(repo, "lx", int(time.time() * 1000) + 1000, market="hk")["wheel_branches"]
+    assert {row["wheel_branch_id"]: row["active_option_committed_shares"] for row in branches} == {
+        row["wheel_branch_id"]: (500 if row["wheel_branch_id"] in chosen else 0) for row in branches}
+    close_at = int(time.time() * 1000) + 10_000
+    for index, contracts in enumerate((1, 2)):
+        persist_trade_event_objects_atomically(repo, [TradeEvent(
+            event_id=f"call-close-{index}", event_type="close", event_time_ms=close_at + index * 1000,
+            contract_key=TradeEvent.from_dict(call_opens[0]).contract_key,
+            contracts=contracts, price=0.5, multiplier=500, currency="HKD", source="test",
+            target_lot_id=applied["lot_id"], raw_payload={"side": "buy", "target_lot_id": applied["lot_id"]},
+        )])
+        branches = build_wheel_read_model(repo, "lx", close_at + index * 1000 + 1, market="hk")["wheel_branches"]
+        expected = 500 if index == 0 else 0
+        assert all(row["active_option_committed_shares"] == expected
+                   for row in branches if row["wheel_branch_id"] in chosen)
+
+
+@pytest.mark.parametrize("terminal_event", ["assignment", "expire_close"])
+def test_multi_branch_terminal_keeps_stock_coverage_blocked_until_settlement_is_attributed(
+        tmp_path, monkeypatch, terminal_event):
+    repo, config, _intake = _meituan_repo(tmp_path, call_contracts=3)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    evidence = {"complete": True, "exposures": []}
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
+        now_ms=_ms("2026-10-01T00:00:00Z"), combo_evidence=evidence)
+    call = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    chosen = tuple(sorted(item["wheel_branch_id"] for item in call["candidates"] if item["strategy"] == "wheel")[:3])
+    applied = apply_trade_attribution(repo, account="lx", market="hk", config=config,
+        execution_key=call["execution_key"], candidate_id="wheel-multi:" + canonical_sha256(sorted(chosen))[:24],
+        expected_input_hash=call["input_hash"], request_id="manual:assign", actor="fixture:operator",
+        combo_evidence=evidence, capacity_observation={}, combo_mode="confirm", manual=True,
+        wheel_branch_ids=chosen)
+    call_open = next(row for row in repo.list_trade_events()
+                     if row["event_type"] == "open" and row["option_type"] == "call")
+    assignment_at = int(time.time() * 1000) + 10_000
+    raw_payload = {"side": "buy", "target_lot_id": applied["lot_id"]}
+    if terminal_event == "assignment":
+        raw_payload["stock_settlement"] = {
+            "side": "sell", "shares": 1500, "price": 80, "fees": 0,
+            "currency": "HKD", "fee_provenance": {"basis": "actual", "source": "test"}}
+    persist_trade_event_objects_atomically(repo, [TradeEvent(
+        event_id="call-terminal-all", event_type=terminal_event, event_time_ms=assignment_at,
+        contract_key=TradeEvent.from_dict(call_open).contract_key,
+        contracts=3, price=0, multiplier=500, currency="HKD", source="test",
+        target_lot_id=applied["lot_id"], raw_payload=raw_payload,
+    )])
+    from src.application.wheel.read_model import build_wheel_read_model
+    branches = build_wheel_read_model(repo, "lx", assignment_at + 1, market="hk")["wheel_branches"]
+    assert all(row["active_option_committed_shares"] == 500
+               and "wheel_call_settlement_allocation_pending" in row["reason_codes"]
+               for row in branches if row["wheel_branch_id"] in chosen)

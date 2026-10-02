@@ -153,6 +153,50 @@ def test_bot_wheel_manual_membership_and_commit_recovery(tmp_path, monkeypatch):
     assert result["data"]["status"] == "applied" and len(repo.list_trade_events()) == count
 
 
+def test_bot_confirms_three_contracts_to_three_wheel_branches(tmp_path, monkeypatch):
+    from test_trade_attribution_meituan import _meituan_repo
+    from src.application.ledger.api import read_trade_attribution_facts
+    from src.application.wheel.read_model import build_wheel_read_model
+    repo, config, _ = _meituan_repo(tmp_path, call_contracts=3)
+    for key, value in {"OM_INBOUND_OPERATIONS_ENABLED": "1", "OM_INBOUND_TRADE_WRITE_ENABLED": "1",
+                       "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated-key"}.items():
+        monkeypatch.setenv(key, value)
+    authority = {"config_path": str(tmp_path / "config.hk.json"), "runtime_root": str(tmp_path),
+                 "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority,
+        {"physical_account_ids": ["1001"], "environment": "REAL"}))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence",
+                        lambda *a, **k: {"complete": True, "exposures": []})
+    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    fact = next(row for row in read_trade_attribution_facts(repo, account="lx")
+                if row["contract_key"]["option_type"] == "call")
+    branches = build_wheel_read_model(repo, "lx", 10**16, market="hk")["wheel_branches"]
+    chosen = sorted(row["wheel_branch_id"] for row in branches)[:3]
+    command = parse_assistant_command(
+        f"/attribute lx {fact['execution_key']} wheel {','.join(chosen)}")
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    request = AssistantRequest(text="归属", sender_id="user", channel="wechat",
+                               conversation_id="room", config_key="hk")
+    preview = operations.handle_attribution_operation(command, request, command_id="multi-preview", store=store)
+    assert all(branch in preview["data"]["response_text"] for branch in chosen)
+    assert preview["data"]["response_text"].count("：1 张") == 3
+    assert len(store.get("multi-preview")["payload"]["wheel_call_allocations"]) == 3
+    confirmed = operations.handle_attribution_operation(
+        ControlCommand("attribution_confirm", {"operation_id": "multi-preview"}),
+        request, command_id="multi-confirm", store=store)
+    assert confirmed["data"]["status"] == "applied"
+    linked = next(row for row in read_trade_attribution_facts(repo, account="lx")
+                  if row["execution_key"] == fact["execution_key"])
+    assert linked["status"] == "linked" and len(linked["wheel_call_allocations"]) == 3
+    count = len(repo.list_trade_events())
+    assert operations.handle_attribution_operation(
+        ControlCommand("attribution_confirm", {"operation_id": "multi-preview"}),
+        request, command_id="multi-retry", store=store)["data"]["status"] == "applied"
+    assert len(repo.list_trade_events()) == count
+
+
 def test_bot_combo_freezes_both_members_and_confirms_atomic_pair(tmp_path, monkeypatch):
     from test_combo_reconciliation_application import _call_open, _put_open, BASE_TIME_MS
     from src.application.ledger.api import read_trade_attribution_snapshot, read_trade_attribution_facts

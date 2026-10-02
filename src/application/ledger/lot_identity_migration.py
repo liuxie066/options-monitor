@@ -197,6 +197,7 @@ RECONSTRUCTIBLE_DROPPED_KEYS = {
     "strategy_group_id": "the open event payload's strategy metadata",
     "source_stock_lot_id": "the open event payload's strategy metadata",
     "source_wheel_branch_id": "the open event payload's strategy metadata",
+    "wheel_call_allocations": "the open or adjust event payload's strategy metadata",
     "yield_enhancement_mode": "the open or adjust event payload's legacy strategy metadata",
     # The close patch (``publisher._close_fields``) writes each of these straight
     # off the closing trade event — ``event.event_id``/``event.price``/
@@ -229,6 +230,7 @@ EVENT_LAYER_MEASURED_DROPPED_KEYS = frozenset(
         "strategy_group_id",
         "source_stock_lot_id",
         "source_wheel_branch_id",
+        "wheel_call_allocations",
         "strategy_snapshot",
         "yield_enhancement_mode",
     }

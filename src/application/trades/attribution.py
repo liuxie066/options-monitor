@@ -29,6 +29,12 @@ from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
 from domain.domain.wheel.intents import resolve_wheel_fill_intent
 from domain.domain.wheel import effective_wheel_events
 from domain.domain.ledger.position_fields import effective_contracts_open
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.position_fields import build_open_adjustment_patch_contract, effective_multiplier
+from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
+from src.application.ledger.api import (assert_trade_attribution_unclaimed,
+    capture_trade_event_decision_projection_fence, finalize_trade_event_decision_projection,
+    run_position_projection_in_transaction)
 from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.wheel.capacity import trade_attribution_capacity_check
@@ -37,10 +43,113 @@ from src.application.wheel.workflows import confirm_wheel_call_linkage, confirm_
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: fact.get(key) for key in ("schema_version", "execution_key", "open_event_id", "lot_id", "account",
+    payload = {key: fact.get(key) for key in ("schema_version", "execution_key", "open_event_id", "lot_id", "account",
         "status", "strategy", "wheel_branch_id", "strategy_group_id", "origin", "reason_codes", "candidate_ids",
         "input_hash", "policy_version", "evaluated_at_ms", "ledger_event_ids", "coverage", "direction",
         "rules_enabled", "evidence_complete", "selected_candidate_id")}
+    if fact.get("wheel_call_allocations"):
+        payload["wheel_call_allocations"] = fact["wheel_call_allocations"]
+    return payload
+
+
+def _multi_wheel_call_attribution(
+    active: Any, conn: Any, *, rows: Mapping[str, Any], view: Mapping[str, Any],
+    current: Mapping[str, Any], branch_ids: tuple[str, ...], account: str, market: str,
+    request_id: str, actor: str, instant: int, apply_changes: bool,
+    capacity_observation: Mapping[str, Any], stop_event: Any,
+) -> dict[str, Any]:
+    if (current["status"] not in {"pending", "conflict"} or current["position_side"] != "short"
+            or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"]
+            or current["reason_codes"] and set(current["reason_codes"]) != {"multiple_strategy_candidates"}):
+        raise ValueError("Wheel Call allocation requires one complete, unclaimed short Call fill")
+    if len(branch_ids) != current["contracts"] or len(set(branch_ids)) < 2:
+        raise ValueError("Wheel Call allocation must account for every contract")
+    if current["contracts_open"] != current["contracts"]:
+        raise ValueError("Wheel Call allocation requires the original fill to be fully open")
+    multiplier = int(current["multiplier"])
+    if multiplier <= 0 or multiplier != current["multiplier"]:
+        raise ValueError("Wheel Call multiplier is invalid")
+    branch_by_id = {row["wheel_branch_id"]: row for row in view["wheel_model"]["wheel_branches"]}
+    allocations = []
+    for branch_id in sorted(set(branch_ids)):
+        count = branch_ids.count(branch_id)
+        candidate = next((row for row in current["candidates"]
+                          if row["candidate_id"] == "wheel:" + branch_id), None)
+        branch = branch_by_id.get(branch_id)
+        if candidate is None or branch is None or branch["direction"] != "call" or candidate.get("intent_id"):
+            raise ValueError("Wheel Call allocation branch is unavailable")
+        if set(candidate["reason_codes"]) - {"wheel_branch_capacity_exceeded", "competing_fills_exceed_capacity"}:
+            raise ValueError("Wheel Call allocation branch evidence is incomplete")
+        competing = [row for row in view["rows"] if row["lot_id"] != current["lot_id"]
+                     and row["status"] in {"pending", "conflict"}
+                     and any(item["candidate_id"] == "wheel:" + branch_id for item in row["candidates"])]
+        if competing or candidate["competition_available_shares"] is None or count * multiplier > candidate["competition_available_shares"]:
+            raise ValueError("Wheel Call allocation exceeds unclaimed branch capacity")
+        allocations.append({"stock_lot_id": branch["stock_lot_id"], "wheel_branch_id": branch_id,
+                            "contracts": count})
+    normalized = parse_wheel_call_allocations(allocations)
+    if sum(row[2] for row in normalized) != current["contracts"]:
+        raise ValueError("Wheel Call allocation quantity does not match the fill")
+    candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
+    preview = {**current, "candidate_id": candidate_id, "wheel_call_allocations": allocations,
+               "write_applied": False}
+    if not apply_changes:
+        return preview
+    if stop_event is not None and stop_event.is_set():
+        raise ValueError("attribution cancelled")
+    assert_trade_attribution_unclaimed(rows["trade_events"], [current["lot_id"]])
+    fields = active.get_position_lot_fields(current["lot_id"], conn=conn)
+    patch = build_open_adjustment_patch_contract(fields, strategy="wheel", leg_role="wheel_call",
+                                                  wheel_call_allocations=allocations, as_of_ms=instant)
+    contract = current["contract_key"]
+    event = TradeEvent(
+        event_id="wheel-call-allocations-confirmed:" + canonical_sha256({
+            "account": account, "lot_id": current["lot_id"], "request_id": request_id,
+            "allocations": allocations})[:24],
+        event_type="adjust", event_time_ms=instant,
+        contract_key=ContractKey.from_values(
+            broker=contract["broker"], account=account, underlying_symbol=contract["underlying_symbol"],
+            option_type="call", strike=contract["strike"], expiration_ymd=contract["expiration_ymd"]),
+        contracts=0, price=0, currency=current["currency"], source="wheel_linkage",
+        multiplier=float(effective_multiplier(fields) or 0), target_lot_id=current["lot_id"],
+        raw_payload={
+            "schema_version": "wheel_call_allocations_confirmed.v1", "market": market,
+            "target_lot_id": current["lot_id"], "adjust_target_source_event_id": current["open_event_id"],
+            "wheel_linkage_request_id": request_id, "input_snapshot_hash": current["input_hash"],
+            "actor": actor, "patch": patch.to_dict(), "attribution_origin": "manual",
+            "attribution_request_id": request_id, "attribution_policy_version": ATTRIBUTION_POLICY_VERSION,
+            "attribution_candidate_id": candidate_id, "attribution_candidate_ids": current["candidate_ids"],
+        })
+    fence = capture_trade_event_decision_projection_fence(active, conn=conn)
+    runtime = run_position_projection_in_transaction(active, [event], conn=conn, mode="fast_if_safe")
+    if runtime.created_flags != (True,):
+        raise ValueError("Wheel Call allocation unexpectedly replayed")
+    finalize_trade_event_decision_projection(active, conn=conn, fence=fence, events=[event],
+                                             created_flags=runtime.created_flags)
+    after_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
+    after = next(row for row in trade_attribution_facts_from_events(after_rows["trade_events"], account=account)
+                 if row["execution_key"] == current["execution_key"])
+    if (after["status"] != "linked" or after["origin"] != "manual"
+            or parse_wheel_call_allocations(after["wheel_call_allocations"]) != normalized):
+        raise ValueError("Wheel Call allocation durable readback failed")
+    after_model = build_wheel_read_model_from_rows(after_rows, account=account, as_of_ms=instant, market=market)
+    for _stock, branch_id, contracts in normalized:
+        branch = next((row for row in after_model["wheel_branches"]
+                       if row["wheel_branch_id"] == branch_id), None)
+        before_committed = branch_by_id[branch_id]["active_option_committed_shares"]
+        if (branch is None or branch["integrity_status"] != "trusted"
+                or before_committed is None
+                or branch["active_option_committed_shares"] != before_committed + contracts * multiplier):
+            raise ValueError("Wheel Call allocation branch readback failed")
+    capacity = trade_attribution_capacity_check(
+        fact=current, facts=trade_attribution_facts_from_events(rows["trade_events"], account=account),
+        wheel_read_model=view["wheel_model"], observation=capacity_observation,
+        now_ms=int(time.time() * 1000))
+    if capacity["status"] != "available":
+        raise ValueError("Wheel Call allocation capacity changed before commit")
+    if stop_event is not None and stop_event.is_set():
+        raise ValueError("attribution cancelled before commit")
+    return {**after, "write_applied": True}
 
 
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
@@ -319,6 +428,7 @@ def apply_trade_attribution(
     candidate_id: str, expected_input_hash: str, request_id: str, actor: str,
     combo_evidence: Mapping[str, Any], capacity_observation: Mapping[str, Any], combo_mode: str,
     stop_event: Any = None, manual: bool = False, apply_changes: bool = True,
+    wheel_branch_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Re-arbitrate under the ledger transaction, then reuse the existing narrow writers."""
     if not all((execution_key, candidate_id, expected_input_hash, request_id, actor)):
@@ -331,6 +441,14 @@ def apply_trade_attribution(
         if len(existing) != 1:
             raise ValueError("attribution execution is not unique")
         fact = existing[0]
+        if wheel_branch_ids:
+            if not manual or candidate_id != "wheel-multi:" + canonical_sha256(sorted(wheel_branch_ids))[:24]:
+                raise ValueError("Wheel Call allocation identity is invalid")
+            if fact["status"] == "linked":
+                linked = fact.get("wheel_call_allocations") or []
+                if sorted(row["wheel_branch_id"] for row in linked for _ in range(row["contracts"])) != sorted(wheel_branch_ids):
+                    raise ValueError("Wheel Call allocation conflicts with durable membership")
+                return {**fact, "write_applied": False}
         existing_target = ("wheel:" + fact["wheel_branch_id"] if fact["wheel_branch_id"] else
                            "combo:" + fact["strategy_group_id"] if fact["strategy_group_id"] else None)
         if existing_target:
@@ -347,6 +465,12 @@ def apply_trade_attribution(
         current = next(row for row in view["rows"] if row["execution_key"] == execution_key)
         if current["input_hash"] != expected_input_hash:
             raise ValueError("attribution evidence changed; create a new preview")
+        if wheel_branch_ids:
+            return _multi_wheel_call_attribution(
+                active, conn, rows=rows, view=view, current=current, branch_ids=wheel_branch_ids,
+                account=account, market=market, request_id=request_id, actor=actor,
+                instant=instant, apply_changes=apply_changes,
+                capacity_observation=capacity_observation, stop_event=stop_event)
         chosen = next((row for row in current["candidates"] if row["candidate_id"] == candidate_id), None)
         if chosen is None or not current["evidence_complete"]:
             raise ValueError("attribution candidate evidence is incomplete")
