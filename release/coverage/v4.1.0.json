@@ -1,0 +1,40 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.0",
+  "base": {
+    "tag": "v4.0.0",
+    "commit": "4a9c26dbd4db7f10922cfb7722a2157271edd3ef"
+  },
+  "reviewed_head": "090f01b76916c49a3552852e7843632967d4c1c3",
+  "commits": [
+    {
+      "sha": "df3136d6fe25fec72b9a32c6c7a5ef05012b1c0e",
+      "subject": "feat(wheel): allocate one Call fill across stock branches"
+    },
+    {
+      "sha": "090f01b76916c49a3552852e7843632967d4c1c3",
+      "subject": "Merge pull request #421 from liuxie066/codex/meituan-multi-branch-attribution"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "人工归属可将同一笔多张 Wheel Call 成交按合约张数分配给多个股票分支，并在确认前逐分支预览；平仓或结算证据不足时保守保留占用。",
+      "commits": [
+        "df3136d6fe25fec72b9a32c6c7a5ef05012b1c0e",
+        "090f01b76916c49a3552852e7843632967d4c1c3"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "df3136d6fe25fec72b9a32c6c7a5ef05012b1c0e",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/421"]
+    },
+    {
+      "commit": "090f01b76916c49a3552852e7843632967d4c1c3",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/421"]
+    }
+  ]
+}
