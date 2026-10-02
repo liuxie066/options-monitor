@@ -143,6 +143,49 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     assert read_error is None and pending_after == []
 
 
+def test_historical_futu_assignment_inherits_exact_source_account():
+    from src.application.trades.attribution import _branch_account_ref
+
+    source_id = "futu:lx:1001:put-deal"
+    rows = {"trade_events": [
+        {"event_id": source_id, "event_type": "open", "account": "lx", "broker": "富途",
+         "lot_id": None, "raw_payload": {"futu_account_id": "1001", "trd_env": "REAL",
+             "source_deal_id": "put-deal"}},
+        {"event_id": "assigned", "event_type": "assignment", "target_lot_id": "lot_" + source_id,
+         "raw_payload": {}},
+    ], "account_wheel_events": []}
+    branch = {"source_assignment_event_id": "assigned"}
+    assert _branch_account_ref(branch, rows) == {
+        "broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}
+    rows["trade_events"][0]["raw_payload"]["futu_account_id"] = "other"
+    assert _branch_account_ref(branch, rows) is None
+
+
+def test_manual_preview_reads_combo_evidence_for_target_date_only(tmp_path, monkeypatch):
+    repo, config, _intake = _meituan_repo(tmp_path)
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    call = next(row for row in rows["trade_events"] if row["event_type"] == "open"
+                and row["option_type"] == "call")
+    checked = []
+    def read_one(**kwargs):
+        checked.append(kwargs["market_trading_date"])
+        return {"available": True, "complete": True, "delivery_available": True,
+                "reason": "ok", "exposures": []}
+    monkeypatch.setattr(attribution, "read_combo_candidate_exposures", read_one)
+    evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path,
+        now_ms=_ms("2026-10-01T00:00:00Z"), focus_open_event_id=call["event_id"])
+    assert evidence["complete"] is True and len(checked) == 1
+    assert checked == ["2026-09-27"]
+    all_evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path,
+        now_ms=_ms("2026-10-01T00:00:00Z"))
+    assert len(checked) > 1
+    args = dict(rows=rows, config=config, account="lx", market="hk", now_ms=_ms("2026-10-01T00:00:00Z"))
+    focused = build_trade_attribution_view(**args, combo_evidence=evidence)
+    all_dates = build_trade_attribution_view(**args, combo_evidence=all_evidence)
+    assert next(row for row in focused["rows"] if row["open_event_id"] == call["event_id"])["input_hash"] == next(
+        row for row in all_dates["rows"] if row["open_event_id"] == call["event_id"])["input_hash"]
+
+
 def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_path, monkeypatch):
     repo, config, intake = _meituan_repo(tmp_path, call_contracts=3)
     assert intake["status"] == "applied"

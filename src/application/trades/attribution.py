@@ -153,10 +153,11 @@ def _multi_wheel_call_attribution(
 
 
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
-                                    now_ms: int) -> dict[str, Any]:
+                                    now_ms: int, focus_open_event_id: str | None = None) -> dict[str, Any]:
     preview = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
         exposures=[], effective_now_ms=now_ms, include_claimed=True)
-    scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]}
+    scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]
+              if focus_open_event_id is None or item["open_event_id"] == focus_open_event_id}
     exposures, reads = {}, []
     for market, market_date in sorted(scopes):
         result = read_combo_candidate_exposures(base=runtime_root, account=account, market=market,
@@ -177,14 +178,24 @@ def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, ru
 
 def _branch_account_ref(branch: Mapping[str, Any], rows: Mapping[str, Any]) -> dict[str, Any] | None:
     events = {row["event_id"]: row for row in rows["trade_events"]}
-    opens = {row.get("lot_id"): row for row in events.values() if row.get("event_type") == "open"}
+    opens = {row.get("lot_id") or "lot_" + row["event_id"]: row
+             for row in events.values() if row.get("event_type") == "open"}
     starts = {row["event_id"]: row for row in rows["account_wheel_events"]}
     start = starts.get(branch.get("start_event_id"), {})
     source = events.get(branch.get("source_assignment_event_id") or start.get("source_trade_event_id"), {})
     # Settlement events may inherit physical identity from their exact source lot.
     references = []
     for event in (source, opens.get(source.get("target_lot_id"), {})):
-        ref = ((event.get("raw_payload") or {}).get("execution_input") or {}).get("broker_account_ref") or {}
+        raw = event.get("raw_payload") or {}
+        ref = (raw.get("execution_input") or {}).get("broker_account_ref") or {}
+        if not ref and event.get("event_type") == "open":
+            account_id = str(raw.get("futu_account_id") or "").strip()
+            deal_id = str(raw.get("source_deal_id") or raw.get("deal_id") or "").strip()
+            environment = str(raw.get("trd_env") or "").strip().upper()
+            if (account_id and deal_id and environment in {"REAL", "SIMULATE"}
+                    and event.get("broker") in {"futu", "富途"}
+                    and event.get("event_id") == f"futu:{event.get('account')}:{account_id}:{deal_id}"):
+                ref = {"broker_id": "futu", "external_account_id": account_id, "environment": environment}
         if all(ref.get(key) for key in ("broker_id", "external_account_id", "environment")):
             references.append({key: ref[key] for key in ("broker_id", "external_account_id", "environment")})
     return references[0] if references and all(ref == references[0] for ref in references) else None
@@ -272,12 +283,14 @@ def build_trade_attribution_view(
             continue
         contract = fact["contract_key"]
         # ponytail: reuse the historical projector per fill; cache by event time if account history becomes large.
+        matching_branches = [branch for branch in branches
+            if branch["symbol"] == contract["underlying_symbol"] and branch["direction"] == contract["option_type"]
+            and branch["lifecycle_status"] == "active"]
+        if not matching_branches:
+            continue
         historical = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=fact["event_time_ms"], market=market)
         history = {row["wheel_branch_id"]: row for row in historical["wheel_branches"]}
-        for branch in branches:
-            if (branch["symbol"] != contract["underlying_symbol"] or branch["direction"] != contract["option_type"]
-                    or branch["lifecycle_status"] != "active"):
-                continue
+        for branch in matching_branches:
             branch_id = branch["wheel_branch_id"]
             reasons = []
             prior = history.get(branch_id)

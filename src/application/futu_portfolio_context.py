@@ -10,7 +10,9 @@ from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway, build_ready_futu_quote_gateway
+from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.futu_option_terms import _enrich_option_contract_terms
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.position_snapshot import normalize_position_snapshot_input, position_snapshot_scope_errors
@@ -905,11 +907,26 @@ def fetch_futu_portfolio_context(
         position_rows = _query_rows_for_account_ids(
             gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True
         )
+        source_observed_at = datetime.now(timezone.utc).isoformat()
     finally:
         gateway.close()
 
     balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
-    source_observed_at = datetime.now(timezone.utc).isoformat()
+    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
+    if include_options:
+        option_indexes = [index for index, row in enumerate(position_rows) if _row_looks_like_option_position(row)]
+        if option_indexes:
+            route = resolve_futu_quote_route(cfg, market=_runtime_market(cfg, fallback=base_currency))
+            if not route.ok:
+                raise ValueError("Futu option terms quote route unavailable")
+            quotes = build_ready_futu_quote_gateway(
+                host=str(route.host), port=int(route.port), is_option_chain_cache_enabled=False)
+            try:
+                enriched = _enrich_option_contract_terms(quotes, [position_rows[index] for index in option_indexes])
+            finally:
+                quotes.close()
+            for index, row in zip(option_indexes, enriched, strict=True):
+                position_rows[index] = row
     capacity_market = _runtime_market(cfg, fallback=base_currency)
     snapshot_input = build_futu_position_snapshot(
         rows=position_rows,
@@ -921,8 +938,6 @@ def fetch_futu_portfolio_context(
         markets=sorted({"US", "HK", capacity_market.upper()} | {str(symbol_market(_pick(row, "code", "symbol", "stock_code")) or "").upper() for row in position_rows} - {""}),
         asset_types=["stock", "option"] if include_options else ["stock"], observed_at_utc=source_observed_at, completeness="complete",
     )
-    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
-
     return build_futu_portfolio_context(
         balance_rows=balance_rows,
         position_rows=position_rows,

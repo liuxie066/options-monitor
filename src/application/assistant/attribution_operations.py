@@ -38,12 +38,14 @@ def _response(operation_id: str, status: str, result: dict[str, Any]) -> dict[st
                                 "status": status, "result": result, "response_text": text})
 
 
-def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str, Any], account: str) -> dict[str, Any]:
+def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str, Any], account: str,
+                      open_event_id: str) -> dict[str, Any]:
     # Provider I/O is outside both the audit claim and the ledger writer lock.
     observation = observe_trade_attribution_capacity(config=config, account=account)
     market = runtime_config_market(config).lower()
     rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=int(time.time() * 1000))
+    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=Path(authority["runtime_root"]),
+        now_ms=int(time.time() * 1000), focus_open_event_id=open_event_id)
     mode = combo_reconciliation_mode_for_account(config, account=account)
     view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=int(time.time() * 1000),
         combo_evidence=evidence, capacity_observation=observation, combo_mode=mode)
@@ -101,7 +103,8 @@ def handle_attribution_operation(intent: ControlCommand, request: AssistantReque
                 candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
             else:
                 candidate_id = target if target.startswith(action + ":") else action + ":" + target
-            context = _strategy_context(repo, config=config, authority=authority, account=account)
+            context = _strategy_context(repo, config=config, authority=authority, account=account,
+                open_event_id=fact["open_event_id"])
             view = context.pop("view")
             fact = next(row for row in view["rows"] if row["execution_key"] == fact["execution_key"])
             candidate = ({"candidate_id": candidate_id, "member_lot_ids": [fact["lot_id"]]}
@@ -171,7 +174,8 @@ def handle_attribution_operation(intent: ControlCommand, request: AssistantReque
             store.mark_expired(operation_id, result={"status": "expired"})
             return _response(operation_id, "expired", {})
         if payload["action"] != "ordinary":
-            context = _strategy_context(repo, config=config, authority=authority, account=payload["account"])
+            context = _strategy_context(repo, config=config, authority=authority, account=payload["account"],
+                open_event_id=payload["open_event_id"])
             context.pop("view")
         claimed = store.mark_confirmed(operation_id, expected_payload_hash=operation["payload_hash"])
     return _finish_attribution_operation(repo, store=store, operation=operation, apply_changes=claimed, context=context)
