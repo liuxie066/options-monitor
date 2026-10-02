@@ -129,6 +129,35 @@ def _snapshot():
     }
 
 
+def test_holiday_fx_values_distribution_without_authorizing_cash_coverage():
+    evidence = _evidence(
+        holdings=[_holding("HKD-CASH", "港币现金", "cash", quantity=100, market_value_cny=92, currency="HKD")],
+        quotes=[_quote("0700.HK")],
+    )
+    evidence["fx_rates_to_cny"] = {"HKDCNY": 0.92}
+    evidence["capacity_fx_rates_to_cny"] = {}
+    evidence["fx_observation"] = {
+        "pairs": {"HKDCNY": {
+            "source": "tencent_quote",
+            "quote_at_utc": "2026-09-30T07:00:00+00:00",
+            "quality": "holiday_carried",
+        }},
+    }
+
+    result = project_assignment_scenario(
+        accounts=["lx"], portfolio_evidence=evidence,
+        option_positions=[_option("put-1", option_type="put")], snapshot=_snapshot(),
+    )
+
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert result["cash_coverage"]["gross_put_requirement_cny"] is None
+    assert result["cash_coverage"]["terminal_funding_gap_cny"] is None
+    assert result["account_breakdown"][0]["funding_gap_cny"] is None
+    assert result["expiration_ladder"][0]["funding_gap_cny"] is None
+    assert result["assignments"][0]["principal_cny"] == "32200.00"
+    assert result["fx_facts"][0]["quality"] == "holiday_carried"
+
+
 def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
     result = project_assignment_scenario(
         accounts=["lx"],

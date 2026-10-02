@@ -20,6 +20,7 @@ from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.ledger.api import decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock
 from src.application.positions.context_builder import build_context
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
+from src.infrastructure.exchange_rates import rates_for_purpose
 
 
 WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA = "wheel_put_cash_capacity_fact.v1"
@@ -183,9 +184,14 @@ def trade_attribution_capacity_check(
             required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
             secured = {currency: float(amount) for currency, amount in put_claims.items()}
             secured[native] = float(put_claims[native] - required)
+            fx_payload = portfolio.get("exchange_rates")
+            if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("pairs"), Mapping):
+                fx_for_capacity = {"rates": rates_for_purpose(fx_payload, purpose="capacity")}
+            else:
+                fx_for_capacity = fx_payload if portfolio.get("exchange_rate_status") == "ready" else {}
             available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
                 cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
-                convert_currency=_frozen_fx_converter(portfolio.get("exchange_rates") or {} if portfolio.get("exchange_rate_status") == "ready" else {}),
+                convert_currency=_frozen_fx_converter(fx_for_capacity or {}),
                 fx_status=portfolio.get("exchange_rate_status"))
             if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
                 reasons.add("account_cash_capacity_exceeded")

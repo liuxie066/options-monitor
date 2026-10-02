@@ -6,6 +6,7 @@ import math
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -26,7 +27,7 @@ from src.application.opend_normalize import normalize_opend_option_type
 from src.application.account_config import resolve_futu_account_ids
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
-    fetch_market_exchange_rates,
+    get_exchange_rates_or_fetch_latest,
 )
 
 
@@ -338,7 +339,9 @@ def _to_futu_acc_id(value: Any) -> int:
 
 
 def _fetch_market_exchange_rate_observation() -> dict[str, Any] | None:
-    return fetch_market_exchange_rates()
+    return get_exchange_rates_or_fetch_latest(
+        cache_path=Path(__file__).resolve().parents[2] / "output_shared" / "state" / "rate_cache.json",
+    )
 
 
 def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:

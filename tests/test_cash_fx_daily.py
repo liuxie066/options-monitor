@@ -33,6 +33,27 @@ def observation(rate: str = "7.2", *, quote: str = "2026-09-07T02:00:00+00:00", 
             "quote_timestamps": {"USDCNY": quote, "HKDCNY": quote}, "observed_at": captured}
 
 
+def test_cash_fx_fact_keeps_one_valid_pair_and_original_quote_time() -> None:
+    payload = {
+        "pairs": {
+            "USDCNY": {
+                "rate": 7.2,
+                "source": "tencent_quote",
+                "quote_at_utc": "2026-09-07T02:00:00+00:00",
+                "observed_at_utc": "2026-09-07T02:00:01+00:00",
+                "quality": "holiday_carried",
+            },
+            "HKDCNY": {"rate": 0.92, "source": "sina_quote"},
+        },
+        "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+    }
+    facts = cash_fx_observation_facts(payload, observed_at_ms=ms("2026-09-10T12:00:00"))
+    assert len(facts) == 1
+    assert facts[0].base_currency == "USD"
+    assert facts[0].effective_at_ms == int(datetime.fromisoformat("2026-09-07T02:00:00+00:00").timestamp() * 1000)
+    assert facts[0].observed_at_ms == int(datetime.fromisoformat("2026-09-07T02:00:01+00:00").timestamp() * 1000)
+
+
 def event(identity: str, at_ms: int) -> TradeEvent:
     return TradeEvent(
         event_id=identity, event_type="open", event_time_ms=at_ms,
@@ -190,7 +211,12 @@ def test_fetch_preserves_quote_time_and_falls_back_when_tencent_date_is_old(monk
     assert payload["timestamp"] == "2026-09-07T07:00:00+00:00"
     assert payload["observed_at"] == now.isoformat()
     assert payload["quote_timestamps"]["HKDCNY"] == "2026-09-07T07:00:01+00:00"
-    sina = 'var hq_str_fx_susdcny="7.3,0,2026-09-07,15:01:00";\nvar hq_str_fx_shkdcny="0.93,0,2026-09-07,15:01:00";'
+    usd_fields = ["15:01:00", "7.3", *(["0"] * 15), "2026-09-07"]
+    hkd_fields = ["15:01:00", "0.93", *(["0"] * 15), "2026-09-07"]
+    sina = (
+        f'var hq_str_fx_susdcny="{",".join(usd_fields)}";\n'
+        f'var hq_str_fx_shkdcny="{",".join(hkd_fields)}";'
+    )
     monkeypatch.setattr(exchange_rates, "_http_get", lambda url, **_kwargs: text.replace("20260907", "20260906") if "gtimg" in url else sina)
     fallback = exchange_rates.fetch_market_exchange_rates()
     assert fallback["source"] == "sina_quote"

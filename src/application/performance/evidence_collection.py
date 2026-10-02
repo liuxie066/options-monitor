@@ -181,18 +181,29 @@ def collect_current_performance_evidence(
             diagnostics.append(_diag("fx_payload_missing"))
         else:
             rates_map = fx_payload.get("rates") if isinstance(fx_payload.get("rates"), Mapping) else fx_payload
-            effective_at_ms, timestamp_fallback = _snapshot_timestamp_ms(fx_payload, fallback_ms=instant)
-            age_ms = max(0, instant - effective_at_ms)
-            source = "cache_snapshot" if age_ms > 24 * 3_600_000 else "realtime_snapshot"
+            pairs = fx_payload.get("pairs") if isinstance(fx_payload.get("pairs"), Mapping) else {}
+            timestamps = fx_payload.get("quote_timestamps") if isinstance(fx_payload.get("quote_timestamps"), Mapping) else {}
             for currency in currencies:
-                raw_rate = rates_map.get(f"{currency}CNY") if isinstance(rates_map, Mapping) else None
+                pair = f"{currency}CNY"
+                row = pairs.get(pair) if isinstance(pairs.get(pair), Mapping) else {}
+                raw_rate = row.get("rate") if pairs else rates_map.get(pair) if isinstance(rates_map, Mapping) else None
                 rate = _positive_decimal(raw_rate)
                 if rate is None:
                     diagnostics.append(_diag("fx_rate_missing", base_currency=currency, quote_currency="CNY"))
                     continue
-                quality = {"persistence": "live_unpersisted"}
-                if timestamp_fallback:
-                    quality["timestamp_fallback"] = True
+                effective_at_ms, timestamp_fallback = _snapshot_timestamp_ms(
+                    {"timestamp": row.get("quote_at_utc") if pairs else timestamps.get(pair)}, fallback_ms=instant,
+                )
+                observed_at_ms, observation_fallback = _snapshot_timestamp_ms(
+                    {"timestamp": row.get("observed_at_utc") if pairs else fx_payload.get("observed_at")}, fallback_ms=instant,
+                )
+                provider = row.get("source") if pairs else fx_payload.get("source")
+                if not provider or timestamp_fallback or observation_fallback or effective_at_ms > observed_at_ms or observed_at_ms > instant:
+                    diagnostics.append(_diag("fx_timestamp_missing_or_invalid", base_currency=currency, quote_currency="CNY"))
+                    continue
+                age_ms = max(0, instant - effective_at_ms)
+                source = "cache_snapshot" if age_ms > 24 * 3_600_000 else "realtime_snapshot"
+                quality = {"persistence": "live_unpersisted", "provider_source": provider}
                 if source == "cache_snapshot":
                     quality["stale_cache_fallback"] = True
                 rates.append(
@@ -203,7 +214,7 @@ def collect_current_performance_evidence(
                         rate=rate,
                         rate_kind="spot",
                         effective_at_ms=effective_at_ms,
-                        observed_at_ms=instant,
+                        observed_at_ms=observed_at_ms,
                         source=source,
                         source_id=f"{currency}CNY:{effective_at_ms}",
                         quality=quality,

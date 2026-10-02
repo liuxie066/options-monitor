@@ -58,35 +58,46 @@ def cash_fx_observation_facts(
     observed_at_ms: int,
     observation_status: str = "ready",
 ) -> tuple[FXRateFact, ...]:
-    provider = str(observation.get("source") or "").strip()
     rates = observation.get("rates")
+    pairs = observation.get("pairs")
+    pairs = pairs if isinstance(pairs, Mapping) else {}
     timestamps = observation.get("quote_timestamps")
     timestamps = timestamps if isinstance(timestamps, Mapping) else {}
-    if not provider or not isinstance(rates, Mapping) or any(rates.get(pair) in (None, "") for pair in ("USDCNY", "HKDCNY")):
-        raise ValueError("FX evidence requires a provider and both currency pairs")
-    captured = _payload_timestamp_ms({"timestamp": observation.get("observed_at")}) or int(observed_at_ms)
-    if captured > int(observed_at_ms):
-        raise ValueError("FX observation capture time is in the future")
+    rates = rates if isinstance(rates, Mapping) else {}
     facts = []
     for pair in ("USDCNY", "HKDCNY"):
-        timestamp = timestamps.get(pair) or observation.get("timestamp")
-        effective = _payload_timestamp_ms({"timestamp": timestamp})
-        if effective is None or effective > captured:
-            raise ValueError("FX source timestamp is missing or in the future")
+        if pairs:
+            row = pairs.get(pair) if isinstance(pairs.get(pair), Mapping) else {}
+            rate = row.get("rate")
+            provider = str(row.get("source") or "").strip()
+            effective = _payload_timestamp_ms({"timestamp": row.get("quote_at_utc")})
+            captured = _payload_timestamp_ms({"timestamp": row.get("observed_at_utc")})
+        else:
+            row = {}
+            rate = rates.get(pair)
+            provider = str(observation.get("source") or "").strip()
+            effective = _payload_timestamp_ms({"timestamp": timestamps.get(pair)})
+            captured = _payload_timestamp_ms({"timestamp": observation.get("observed_at")})
+        if rate in (None, "") or not provider or effective is None or captured is None:
+            continue
+        if effective > captured or captured > int(observed_at_ms):
+            continue
         quality = {
             "capture_path": "scheduled_tick",
             "provider_source": provider,
-            "source_timestamp_verified": pair in timestamps,
+            "source_timestamp_verified": True,
         }
         if observation_status == "unavailable_stale":
             quality["stale_cache_fallback"] = True
         facts.append(FXRateFact(
             fact_id=None,
-            base_currency=pair[:3], quote_currency="CNY", rate=rates[pair], rate_kind="spot",
+            base_currency=pair[:3], quote_currency="CNY", rate=rate, rate_kind="spot",
             effective_at_ms=effective, observed_at_ms=captured,
             source="cache_snapshot" if observation_status == "unavailable_stale" else "realtime_snapshot",
-            source_id=f"{provider}:{pair}:{effective}", quality=quality, raw=dict(observation),
+            source_id=f"{provider}:{pair}:{effective}", quality=quality, raw=dict(row or observation),
         ))
+    if not facts:
+        raise ValueError("FX evidence has no pair with verified source and quote time")
     return tuple(facts)
 
 

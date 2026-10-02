@@ -168,6 +168,8 @@ def _fake_prepare(**kwargs):
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
         context = _portfolio_context(account)
+        if kwargs.get("fx_snapshot_sha256") is not None:
+            context["fx_snapshot_sha256"] = kwargs["fx_snapshot_sha256"]
         context_path = state_dir / "portfolio_context.json"
         atomic_write_json(context_path, context)
         manifest_path = state_dir / "prepared_portfolio_context.v1.json"
@@ -220,6 +222,8 @@ def _fake_prepare_options(**kwargs):
             "status": "ready",
             "account_config_sha256": authority.account_config_sha256,
         }
+        if kwargs.get("fx_snapshot_sha256") is not None:
+            manifest["run_fx_snapshot_sha256"] = kwargs["fx_snapshot_sha256"]
         atomic_write_json(manifest_path, manifest)
         manifests[account] = {
             **manifest,
@@ -356,6 +360,21 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     prefetch_calls: list[dict] = []
     account_requests = []
     cleanup_calls: list[dict] = []
+    fx_calls: list[str] = []
+    fx_hash = "f" * 64
+
+    def fake_seal_fx(**kwargs):
+        fx_calls.append(kwargs["run_id"])
+        return {"pairs": {}}, fx_hash
+
+    def fake_prepare_with_fx(**kwargs):
+        assert fx_calls == ["run-1"]
+        assert kwargs["fx_snapshot_sha256"] == fx_hash
+        return _fake_prepare(**kwargs)
+
+    def fake_options_with_fx(**kwargs):
+        assert kwargs["fx_snapshot_sha256"] == fx_hash
+        return _fake_prepare_options(**kwargs)
 
     def fake_prefetch(**kwargs):
         prefetch_calls.append(kwargs)
@@ -385,7 +404,9 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
         account_requests.append(request)
         return _outcome(request.acct)
 
-    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(mod, "seal_run_fx_snapshot", fake_seal_fx)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", fake_prepare_with_fx)
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", fake_options_with_fx)
     monkeypatch.setattr(mod, "prefetch_required_data", fake_prefetch)
     monkeypatch.setattr(mod, "seal_required_data_snapshot", fake_seal)
     monkeypatch.setattr(
@@ -400,6 +421,7 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     )
 
     assert len(prefetch_calls) == 1
+    assert fx_calls == ["run-1"]
     assert prefetch_payload == prefetch_payload_before
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0]["trigger"] == "new_seal"
