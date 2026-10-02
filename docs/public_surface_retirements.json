@@ -165,6 +165,11 @@
       "module": "src/application/trades/attribution.py",
       "name": "trade_attribution_enabled_for_execution",
       "reason": "The old v1 execution enable switch was retired; v2 event-time cutover and the shared attribution decision replace it."
+    },
+    {
+      "module": "src/infrastructure/exchange_rates.py",
+      "name": "save_exchange_rate_observation",
+      "reason": "The standalone observation cache writer was retired; current_exchange_rate_snapshot now validates and caches each pair as part of one sealed FX fact."
     }
   ]
 }
