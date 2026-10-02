@@ -82,6 +82,8 @@ def _multi_wheel_call_attribution(
             raise ValueError("Wheel Call allocation branch evidence is incomplete")
         competing = [row for row in view["rows"] if row["lot_id"] != current["lot_id"]
                      and row["status"] in {"pending", "conflict"}
+                     and not (row.get("wheel_branch_id") or row.get("wheel_call_allocations")
+                              or row.get("strategy_group_id"))
                      and any(item["candidate_id"] == "wheel:" + branch_id for item in row["candidates"])]
         if competing or candidate["competition_available_shares"] is None or count * multiplier > candidate["competition_available_shares"]:
             raise ValueError("Wheel Call allocation exceeds unclaimed branch capacity")
