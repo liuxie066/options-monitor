@@ -58,6 +58,23 @@ def test_global_wheel_rule_and_all_competing_executions(tmp_path, monkeypatch):
     assert all("competing_fills_exceed_capacity" in row["reason_codes"] for row in calls)
 
 
+def test_unrelated_fills_skip_historical_wheel_projection(tmp_path, monkeypatch):
+    import src.application.trades.attribution as attribution
+
+    rows, config, _branch = _call_scope(tmp_path, monkeypatch)
+    original = attribution.build_wheel_read_model_from_rows
+    projected_at = []
+    def tracked(*args, **kwargs):
+        projected_at.append(kwargs["as_of_ms"])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(attribution, "build_wheel_read_model_from_rows", tracked)
+    build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=4000,
+                                 combo_evidence={"complete": True, "exposures": []})
+    put_times = {event["event_time_ms"] for event in rows["trade_events"]
+                 if event["event_type"] == "open" and event["option_type"] == "put"}
+    assert put_times and not put_times.intersection(projected_at)
+
+
 
 def test_v1_window_fill_stays_manual_after_v2_cutover(tmp_path, monkeypatch):
     rows, config, branch = _call_scope(tmp_path, monkeypatch)
@@ -114,6 +131,10 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
     args = dict(fact=fact, facts=[fact], observation=observation, wheel_read_model={"wheel_branches": []})
     result = trade_attribution_capacity_check(**args, now_ms=now)
     assert result["status"] == "available", result
+    unrelated = deepcopy(fact)
+    unrelated["contract_key"] = {**fact["contract_key"], "underlying_symbol": "PDD"}
+    unrelated["broker_account_ref"] = {"broker_id": None, "external_account_id": None, "environment": None}
+    assert trade_attribution_capacity_check(**{**args, "facts": [fact, unrelated]}, now_ms=now)["status"] == "available"
     stale = trade_attribution_capacity_check(**args, now_ms=now + 60001)
     assert "snapshot_observed_at_utc_stale_or_future" in stale["reason_codes"]
     mismatched = trade_attribution_capacity_check(**{**args, "facts": [fact, fact]}, now_ms=now)

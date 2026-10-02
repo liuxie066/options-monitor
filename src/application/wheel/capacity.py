@@ -99,6 +99,7 @@ def trade_attribution_capacity_check(
             or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
         reasons.add("capacity_authority_unavailable")
     pooled_cash = fact["contract_key"]["option_type"] == "put"
+    call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
     markets = {"us", "hk"} if pooled_cash else {market}
     for required_market in markets:
         for asset in ("stock", "option"):
@@ -117,7 +118,8 @@ def trade_attribution_capacity_check(
         shares, call_claims, put_claims = defaultdict(int), defaultdict(int), defaultdict(Decimal)
         for row in snapshot.get("rows") or []:
             instrument = row["instrument_ref"]
-            if not pooled_cash and str(instrument.get("market") or "").lower() != market:
+            if not pooled_cash and (str(instrument.get("market") or "").lower() != market
+                    or instrument.get("symbol") != call_symbol):
                 continue
             quantity = Decimal(str(row["quantity"]))
             if not quantity.is_finite() or quantity != quantity.to_integral_value() or quantity < 0:
@@ -129,7 +131,7 @@ def trade_attribution_capacity_check(
                 # can_sell_qty is not reduced by those obligations a second time.
                 shares[instrument["symbol"]] += int(quantity)
         for item in facts:
-            if item["contracts_open"] <= 0 or (not pooled_cash and str(symbol_market(item["contract_key"]["underlying_symbol"]) or "").lower() != market):
+            if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
                 continue
             if item.get("broker_account_ref") != ref:
                 reasons.add("ledger_capacity_account_unproven")

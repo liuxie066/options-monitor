@@ -22,6 +22,18 @@ def _ms(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
 
 
+def _call_payload(*, deal_id: str, contracts: int) -> dict:
+    return {"schema_version": "trade_execution.v1",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL",
+                               "broker_account_id": "futu:REAL:1001", "account_label": "lx"},
+        "instrument_ref": {"asset_type": "option", "market": "HK", "symbol": "3690.HK", "currency": "HKD",
+            "option_type": "call", "strike": "80", "expiration_ymd": "2026-11-27", "multiplier": "500"},
+        "external_id_namespace": "futu.deal", "external_execution_id": deal_id,
+        "external_order_namespace": "futu.order", "external_order_id": "order-" + deal_id,
+        "side": "sell", "position_effect": "open", "quantity": str(contracts), "price": "1.5", "currency": "HKD",
+        "occurred_at_utc": "2026-09-27T02:45:31Z", "status": "OK"}
+
+
 def _meituan_repo(tmp_path, *, call_contracts: int = 1):
     ledger = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     ledger.parent.mkdir(parents=True)
@@ -58,14 +70,7 @@ def _meituan_repo(tmp_path, *, call_contracts: int = 1):
                 "stock_settlement": {"side": "buy", "shares": 500, "price": 75, "fees": 0,
                     "currency": "HKD", "fee_provenance": {"basis": "actual", "source": "test"}}},
         )], wheel_start_enabled=True)
-    payload = {"schema_version": "trade_execution.v1",
-        "broker_account_ref": {**ref, "broker_account_id": "futu:REAL:1001", "account_label": "lx"},
-        "instrument_ref": {"asset_type": "option", "market": "HK", "symbol": "3690.HK", "currency": "HKD",
-            "option_type": "call", "strike": "80", "expiration_ymd": "2026-11-27", "multiplier": "500"},
-        "external_id_namespace": "futu.deal", "external_execution_id": "meituan-call-fill",
-        "external_order_namespace": "futu.order", "external_order_id": "meituan-order",
-        "side": "sell", "position_effect": "open", "quantity": str(call_contracts), "price": "1.5", "currency": "HKD",
-        "occurred_at_utc": "2026-09-27T02:45:31Z", "status": "OK"}
+    payload = _call_payload(deal_id="meituan-call-fill", contracts=call_contracts)
     result = _process_payload(payload, repo=repo, state_path=tmp_path / "state.json",
         audit_path=tmp_path / "audit.jsonl", account_mapping={"1001": "lx"}, futu_account_ids=["1001"],
         apply_changes=True, host="127.0.0.1", port=11111, allow_external_lookup=False,
@@ -143,6 +148,49 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     assert read_error is None and pending_after == []
 
 
+def test_historical_futu_assignment_inherits_exact_source_account():
+    from src.application.trades.attribution import _branch_account_ref
+
+    source_id = "futu:lx:1001:put-deal"
+    rows = {"trade_events": [
+        {"event_id": source_id, "event_type": "open", "account": "lx", "broker": "富途",
+         "lot_id": None, "raw_payload": {"futu_account_id": "1001", "trd_env": "REAL",
+             "source_deal_id": "put-deal"}},
+        {"event_id": "assigned", "event_type": "assignment", "target_lot_id": "lot_" + source_id,
+         "raw_payload": {}},
+    ], "account_wheel_events": []}
+    branch = {"source_assignment_event_id": "assigned"}
+    assert _branch_account_ref(branch, rows) == {
+        "broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}
+    rows["trade_events"][0]["raw_payload"]["futu_account_id"] = "other"
+    assert _branch_account_ref(branch, rows) is None
+
+
+def test_manual_preview_reads_combo_evidence_for_target_date_only(tmp_path, monkeypatch):
+    repo, config, _intake = _meituan_repo(tmp_path)
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    call = next(row for row in rows["trade_events"] if row["event_type"] == "open"
+                and row["option_type"] == "call")
+    checked = []
+    def read_one(**kwargs):
+        checked.append(kwargs["market_trading_date"])
+        return {"available": True, "complete": True, "delivery_available": True,
+                "reason": "ok", "exposures": []}
+    monkeypatch.setattr(attribution, "read_combo_candidate_exposures", read_one)
+    evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path,
+        now_ms=_ms("2026-10-01T00:00:00Z"), focus_open_event_id=call["event_id"])
+    assert evidence["complete"] is True and len(checked) == 1
+    assert checked == ["2026-09-27"]
+    all_evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path,
+        now_ms=_ms("2026-10-01T00:00:00Z"))
+    assert len(checked) > 1
+    args = dict(rows=rows, config=config, account="lx", market="hk", now_ms=_ms("2026-10-01T00:00:00Z"))
+    focused = build_trade_attribution_view(**args, combo_evidence=evidence)
+    all_dates = build_trade_attribution_view(**args, combo_evidence=all_evidence)
+    assert next(row for row in focused["rows"] if row["open_event_id"] == call["event_id"])["input_hash"] == next(
+        row for row in all_dates["rows"] if row["open_event_id"] == call["event_id"])["input_hash"]
+
+
 def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_path, monkeypatch):
     repo, config, intake = _meituan_repo(tmp_path, call_contracts=3)
     assert intake["status"] == "applied"
@@ -202,6 +250,47 @@ def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_pa
         expected = 500 if index == 0 else 0
         assert all(row["active_option_committed_shares"] == expected
                    for row in branches if row["wheel_branch_id"] in chosen)
+
+
+def test_linked_call_with_late_conflict_does_not_reserve_other_branches(tmp_path, monkeypatch):
+    repo, config, _ = _meituan_repo(tmp_path)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    evidence = {"complete": True, "exposures": []}
+    def view_now():
+        return build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="hk"),
+            config=config, account="lx", market="hk", now_ms=int(time.time() * 1000),
+            combo_evidence=evidence, combo_mode="confirm")
+    first = next(row for row in view_now()["rows"] if row["contract_key"]["option_type"] == "call")
+    linked_branch = first["candidate_ids"][0]
+    apply_trade_attribution(repo, account="lx", market="hk", config=config,
+        execution_key=first["execution_key"], candidate_id=linked_branch,
+        expected_input_hash=first["input_hash"], request_id="manual:first", actor="fixture:operator",
+        combo_evidence=evidence, capacity_observation={}, combo_mode="confirm", manual=True)
+    intake = _process_payload(_call_payload(deal_id="meituan-three-fill", contracts=3), repo=repo,
+        state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"1001": "lx"}, futu_account_ids=["1001"], apply_changes=True,
+        host="127.0.0.1", port=11111, allow_external_lookup=False, config=config, runtime_root=tmp_path)
+    assert intake["status"] == "applied"
+    view = view_now()
+    linked = next(row for row in view["rows"] if row["execution_key"] == first["execution_key"])
+    assert linked["status"] == "conflict" and linked["reason_codes"]
+    assert linked["wheel_branch_id"] == linked_branch.removeprefix("wheel:")
+    target = next(row for row in view["rows"] if row["contracts"] == 3)
+    chosen = tuple(item["wheel_branch_id"] for item in target["candidates"]
+                   if item["strategy"] == "wheel" and item["candidate_id"] != linked_branch)[:3]
+    args = dict(account="lx", market="hk", config=config, execution_key=target["execution_key"],
+                candidate_id="wheel-multi:" + canonical_sha256(sorted(chosen))[:24],
+                expected_input_hash=target["input_hash"], request_id="manual:three", actor="fixture:operator",
+                combo_evidence=evidence, capacity_observation={}, combo_mode="confirm", manual=True,
+                wheel_branch_ids=chosen)
+    assert len(apply_trade_attribution(repo, **args, apply_changes=False)["wheel_call_allocations"]) == 3
+    assert apply_trade_attribution(repo, **args)["status"] == "linked"
+    from src.application.wheel.read_model import build_wheel_read_model
+    branches = build_wheel_read_model(repo, "lx", int(time.time() * 1000), market="hk")["wheel_branches"]
+    assert {row["wheel_branch_id"]: row["active_option_committed_shares"] for row in branches
+            if row["wheel_branch_id"] in chosen or row["wheel_branch_id"] == linked["wheel_branch_id"]} == {
+                branch_id: 500 for branch_id in (*chosen, linked["wheel_branch_id"])}
 
 
 @pytest.mark.parametrize("terminal_event", ["assignment", "expire_close"])

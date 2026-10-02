@@ -1,0 +1,53 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.2",
+  "base": {
+    "tag": "v4.1.1",
+    "commit": "17763ed12eee6972b335778bdc1709f24423ea32"
+  },
+  "reviewed_head": "9363825fc121dd06840f0daa8af77ac54a2b97b5",
+  "commits": [
+    {
+      "sha": "173d977d10fef44a8832d9954f8b871a7c25296d",
+      "subject": "fix(trades): ignore already linked calls in branch competition"
+    },
+    {
+      "sha": "f22499a017c5bbcef04d252a1be3feae3496d026",
+      "subject": "docs(graph): refresh attribution import counts"
+    },
+    {
+      "sha": "9363825fc121dd06840f0daa8af77ac54a2b97b5",
+      "subject": "Merge pull request #425 from liuxie066/codex/attribution-linked-conflict-capacity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复已归属的 Call 因后到候选证据显示为冲突时，仍被误算作其他 Wheel 股票分支的未归属竞争成交，阻断多分支人工确认的问题。",
+      "commits": [
+        "173d977d10fef44a8832d9954f8b871a7c25296d",
+        "9363825fc121dd06840f0daa8af77ac54a2b97b5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "f22499a017c5bbcef04d252a1be3feae3496d026",
+      "reason": "仅同步自动生成的测试导入计数，没有用户或运行行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "173d977d10fef44a8832d9954f8b871a7c25296d",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/425"]
+    },
+    {
+      "commit": "f22499a017c5bbcef04d252a1be3feae3496d026",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/425"]
+    },
+    {
+      "commit": "9363825fc121dd06840f0daa8af77ac54a2b97b5",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/425"]
+    }
+  ]
+}
