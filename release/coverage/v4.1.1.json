@@ -1,0 +1,53 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.1",
+  "base": {
+    "tag": "v4.1.0",
+    "commit": "3e757295e35b433ed2693ac4c301dc73fb2d0144"
+  },
+  "reviewed_head": "9bd24612e3cbea438f3fd57cb98f935491deee52",
+  "commits": [
+    {
+      "sha": "afd8c1c2dfc2d0acf7955a7db97aa4f607f34de0",
+      "subject": "fix(trades): use trusted broker capacity for manual attribution"
+    },
+    {
+      "sha": "1d0839435c8ea64855ec6f08d78b32397ef1beb9",
+      "subject": "test(guardrails): make unreadable blob fixture deterministic"
+    },
+    {
+      "sha": "9bd24612e3cbea438f3fd57cb98f935491deee52",
+      "subject": "Merge pull request #423 from liuxie066/codex/attribution-capacity-evidence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复人工归属预览缺少富途期权合约条款和历史账户身份、Call 容量误计其他标的，以及旧成交证据查询过慢的问题；美团同笔 3 张 Call 可分别确认到三条各有 500 股的 Wheel 分支。",
+      "commits": [
+        "afd8c1c2dfc2d0acf7955a7db97aa4f607f34de0",
+        "9bd24612e3cbea438f3fd57cb98f935491deee52"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1d0839435c8ea64855ec6f08d78b32397ef1beb9",
+      "reason": "CI 测试环境适配，仅令缺失 Git blob 的测试夹具稳定复现，不改变运行行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "afd8c1c2dfc2d0acf7955a7db97aa4f607f34de0",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/423"]
+    },
+    {
+      "commit": "1d0839435c8ea64855ec6f08d78b32397ef1beb9",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/423"]
+    },
+    {
+      "commit": "9bd24612e3cbea438f3fd57cb98f935491deee52",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/423"]
+    }
+  ]
+}
