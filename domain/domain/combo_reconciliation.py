@@ -206,9 +206,18 @@ def match_post_trade_combo_pairs(
         edge_ids_by_record.setdefault(edge.call.lot_id, []).append(edge.inference_id)
 
     optimum_score, optimum_edge_ids = _maximum_weight_matching(edges)
+    unique_graph_ids = (
+        len({lot.lot_id for lot in normalized_lots}) == len(normalized_lots)
+        and len({edge.inference_id for edge in edges}) == len(edges)
+    )
     forced_ids = {
         edge.inference_id
         for edge in edges
+        # Preserve the solver's weight scale when skipping an unselected edge.
+        if not unique_graph_ids
+        or edge.inference_id in optimum_edge_ids
+        or len(edge_ids_by_record[edge.put.lot_id]) <= 1
+        or len(edge_ids_by_record[edge.call.lot_id]) <= 1
         if _maximum_weight_matching(edges, forbidden_ids={edge.inference_id})[0]
         < optimum_score
     }

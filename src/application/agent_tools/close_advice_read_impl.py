@@ -417,7 +417,6 @@ def _agent_tool_report_sources(
         if desired_market is None:
             roots.append((base / "output_shared" / "agent_tools").resolve())
 
-    out: list[_Source] = []
     seen: set[Path] = set()
     for root in roots:
         request_paths = sorted(
@@ -446,10 +445,8 @@ def _agent_tool_report_sources(
                 expected_run_id=None,
             )
             if manifest.get("ok"):
-                out.append(source)
-        if out:
-            return out[:1]
-    return out
+                return [source]
+    return []
 
 
 def _validate_source_manifest(

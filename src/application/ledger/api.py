@@ -64,6 +64,7 @@ from src.application.ledger.event_codec import (
 )
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
+    project_position_lots_and_assigned_stock_from_rows,
 )
 from src.application.ledger.external_event_key import (
     applied_execution_association_conflicts,
@@ -483,6 +484,7 @@ __all__ = [
     "project_trade_event_log",
     "project_position_lots_from_trade_facts",
     "project_assigned_stock_lifecycle_from_rows",
+    "project_position_lots_and_assigned_stock_from_rows",
     "resolve_position_data_config_path",
     "resolve_position_ledger_sqlite_path",
     "record_broker_trade_close",

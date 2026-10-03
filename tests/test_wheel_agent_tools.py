@@ -742,16 +742,6 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
     }
     monkeypatch.setattr(
         wheel_read_model,
-        "build_assigned_stock_projection_from_rows",
-        lambda *_args, **_kwargs: {},
-    )
-    monkeypatch.setattr(
-        wheel_read_model,
-        "project_wheel_lifecycles",
-        lambda *_args, **_kwargs: [legacy_batch],
-    )
-    monkeypatch.setattr(
-        wheel_read_model,
         "project_wheel_branches",
         lambda *_args, **_kwargs: [
             {

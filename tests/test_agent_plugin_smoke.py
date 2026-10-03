@@ -3823,6 +3823,63 @@ def test_close_advice_read_skips_newer_run_with_invalid_manifest(
     assert out["data"]["source"]["run_id"] == "run-valid"
 
 
+
+def test_close_advice_read_stops_at_first_valid_request_report(monkeypatch, tmp_path: Path) -> None:
+    from src.application.agent_tools import close_advice_read_impl as reader
+
+    output_root = tmp_path / "agent_tools"
+    reports = {}
+    for name, symbol, timestamp in (
+        ("older", "PDD", 1_000_000),
+        ("valid", "NVDA", 2_000_000),
+        ("invalid", "AAPL", 3_000_000),
+    ):
+        report_dir = output_root / "requests" / name / "reports"
+        _write_close_advice_report(
+            report_dir,
+            [{
+                "account": "lx", "symbol": symbol, "option_type": "put",
+                "position_side": "short", "evaluation_status": "priced",
+                "recommendation_state": "hold", "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold", "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.5,
+            }],
+            run_id=name,
+            market="US",
+        )
+        reports[name] = report_dir / "close_advice.csv"
+        if name == "invalid":
+            (report_dir / "close_advice.txt").write_text("tampered", encoding="utf-8")
+        os.utime(reports[name], (timestamp, timestamp))
+
+    validated = []
+    original_validate = reader._validate_source_manifest
+    expected_bytes = reports["valid"].read_bytes()
+
+    def tracked_validate(source, **kwargs):
+        validated.append(source.path)
+        result = original_validate(source, **kwargs)
+        if source.path == reports["valid"]:
+            assert result["ok"] is True
+            assert source.csv_bytes == expected_bytes
+        return result
+
+    monkeypatch.setattr(reader, "_validate_source_manifest", tracked_validate)
+    data, warnings, _meta = reader.close_advice_read_tool(
+        {"config_key": "us", "output_dir": str(output_root), "account": "lx"},
+        load_runtime_config=lambda **_kwargs: (tmp_path / "config.us.json", _minimal_cfg(market="us")),
+        resolve_output_root=lambda value: Path(value),
+        repo_base=lambda: tmp_path,
+        mask_path=str,
+    )
+
+    assert validated == [reports["invalid"], reports["valid"]]
+    assert warnings == []
+    assert data["source"]["type"] == "agent_tool"
+    assert data["row_count"] == 1
+    assert data["rows"][0]["symbol"] == "NVDA"
+    assert data["rows"][0]["net_capture_ratio"] == 0.5
+
 def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

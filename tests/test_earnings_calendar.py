@@ -68,25 +68,15 @@ class _Gateway:
         self.close_calls += 1
 
 
-def test_candidate_annotation_preserves_optional_earnings_none(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def _evidence(*, expiration: str, **_kwargs: object) -> dict[str, object]:
-        soft_end = None if expiration == "2026-08-21" else "2026-09-11"
-        return {
-            "earnings_evidence_status": "ready",
-            "earnings_soft_window_end": soft_end,
-        }
-
-    monkeypatch.setattr(
-        earnings_calendar,
-        "load_earnings_evidence_for_candidate",
-        _evidence,
+def test_candidate_annotation_preserves_optional_earnings_none(tmp_path: Path) -> None:
+    snapshot = _fetch_calendar(
+        _Gateway([[]] * 7),
+        expirations_by_underlier={"US.NVDA": ["2026-08-12", "2026-09-18"]},
     )
+    _write_snapshot(tmp_path, snapshot)
     candidates = pd.DataFrame(
         [
-            {"market": "US", "symbol": "NVDA", "expiration": "2026-08-21"},
+            {"market": "US", "symbol": "NVDA", "expiration": "2026-08-12"},
             {"market": "US", "symbol": "NVDA", "expiration": "2026-09-18"},
         ]
     )
@@ -372,3 +362,108 @@ def test_prefetch_publishes_one_shared_snapshot_per_market(tmp_path: Path) -> No
         underlier_code="US.NVDA",
         expiration="2026-08-13",
     )["status"] == "ready"
+
+
+def _write_snapshot(root: Path, snapshot: dict) -> Path:
+    path = root / "earnings_calendar" / f"{snapshot['market']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    return path
+
+
+def test_annotation_reuses_market_validation_and_candidate_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots = [
+        _fetch_calendar(_Gateway([[], [], []]),
+                        expirations_by_underlier={"US.NVDA": ["2026-08-12", "2026-08-21"]}),
+        _fetch_calendar(_Gateway([[], [], []]), market="HK",
+                        scan_at_utc=datetime(2026, 8, 6, 8, tzinfo=timezone.utc),
+                        expirations_by_underlier={"HK.00700": ["2026-08-21"]}),
+    ]
+    for snapshot in snapshots:
+        _write_snapshot(tmp_path, snapshot)
+    records = [
+        {"market": "US", "symbol": "NVDA", "expiration": "2026-08-12"},
+        {"market": " us ", "symbol": "NVDA", "expiration": "2026-08-12"},
+        {"market": "US", "symbol": "NVDA", "expiration": "2026-08-21"},
+        {"market": "HK", "symbol": "0700.HK", "expiration": "2026-08-21"},
+        {"market": "US", "symbol": "0700.HK", "expiration": "2026-08-21"},
+    ]
+    expected = [{**row, **earnings_calendar.load_earnings_evidence_for_candidate(
+        input_root=tmp_path, **row,
+    )} for row in records]
+    reads, validations, projections = [], [], []
+    read_text = Path.read_text
+    validate = earnings_calendar.validate_earnings_calendar_snapshot
+    project = earnings_calendar._candidate_earnings_from_snapshot
+
+    def counted_read(path, *args, **kwargs):
+        reads.append(path.name)
+        return read_text(path, *args, **kwargs)
+
+    def counted_validate(snapshot, **kwargs):
+        validations.append(kwargs["expected_market"])
+        return validate(snapshot, **kwargs)
+
+    def counted_project(snapshot, **kwargs):
+        projections.append((kwargs["market"], kwargs["symbol"], kwargs["expiration"]))
+        return project(snapshot, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    monkeypatch.setattr(earnings_calendar, "validate_earnings_calendar_snapshot", counted_validate)
+    monkeypatch.setattr(earnings_calendar, "_candidate_earnings_from_snapshot", counted_project)
+    frame = pd.DataFrame(records)
+    original = frame.copy(deep=True)
+    actual = annotate_candidates_with_earnings_evidence(frame, input_root=tmp_path).to_dict("records")
+    evidence_fields = {key for row in expected for key in row if key.startswith("earnings_")}
+    expected = [{**row, **{key: row.get(key) for key in evidence_fields}} for row in expected]
+    assert actual == expected
+    pd.testing.assert_frame_equal(frame, original)
+    assert reads == ["US.json", "HK.json"]
+    assert validations == ["US", "HK"]
+    assert len(projections) == 4
+    assert actual[-1]["earnings_reason_code"] == "earnings_calendar_candidate_identity_invalid"
+
+
+@pytest.mark.parametrize("condition", ["missing", "invalid_json", "not_object", "hash", "partition", "partial"])
+def test_annotation_failure_evidence_matches_single_candidate_and_refreshes(
+    tmp_path: Path, condition: str,
+) -> None:
+    responses = [[], RuntimeError("calendar unavailable"), []] if condition == "partial" else [[], [], []]
+    snapshot = _fetch(_Gateway(responses))
+    path = _write_snapshot(tmp_path, snapshot)
+    if condition == "missing":
+        path.unlink()
+    elif condition == "invalid_json":
+        path.write_text("{", encoding="utf-8")
+    elif condition == "not_object":
+        path.write_text("[]", encoding="utf-8")
+    elif condition == "hash":
+        snapshot["snapshot_hash"] = "0" * 64
+        _write_snapshot(tmp_path, snapshot)
+    elif condition == "partition":
+        snapshot["market"] = "HK"
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+    candidate = {"market": "US", "symbol": "NVDA", "expiration": "2026-08-21"}
+    expected = earnings_calendar.load_earnings_evidence_for_candidate(input_root=tmp_path, **candidate)
+    actual = annotate_candidates_with_earnings_evidence(pd.DataFrame([candidate] * 3), input_root=tmp_path)
+    assert actual.to_dict("records") == [{**candidate, **expected}] * 3
+    assert actual.iloc[0]["earnings_evidence_status"] == "data_unavailable"
+    _write_snapshot(tmp_path, _fetch(_Gateway([[], [], []])))
+    fresh = annotate_candidates_with_earnings_evidence(pd.DataFrame([candidate]), input_root=tmp_path)
+    assert fresh.iloc[0]["earnings_evidence_status"] == "ready"
+
+
+def test_annotation_cached_evidence_does_not_alias_rows(tmp_path: Path) -> None:
+    snapshot = _fetch(_Gateway([[ _event("US.NVDA", "2026-08-10") ], [], []]))
+    _write_snapshot(tmp_path, snapshot)
+    candidate = {"market": "US", "symbol": "NVDA", "expiration": "2026-08-21"}
+    frame = pd.DataFrame([candidate] * 2)
+    result = annotate_candidates_with_earnings_evidence(frame, input_root=tmp_path)
+    result.at[0, "earnings_events"][0]["earnings_date"] = "changed"
+    result.at[0, "earnings_hard_reason_codes"].append("changed")
+    assert result.at[1, "earnings_events"][0]["earnings_date"] == "2026-08-10"
+    assert result.at[1, "earnings_hard_reason_codes"] == []
+    fresh = annotate_candidates_with_earnings_evidence(frame, input_root=tmp_path)
+    assert fresh.at[0, "earnings_events"][0]["earnings_date"] == "2026-08-10"
