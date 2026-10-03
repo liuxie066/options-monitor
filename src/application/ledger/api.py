@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from src.application.ledger.commands import (
     accept_option_close_evidence,
     record_zero_price_option_close,
@@ -244,7 +246,6 @@ from src.application.ledger.combo_membership import (
 )
 from src.application.ledger.combo_reconciliation import (
     combo_attribution_candidates_from_rows,
-    adopt_post_trade_combo_pair,
     list_combo_pair_inferences,
     reject_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
@@ -304,26 +305,30 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 from .trade_attribution import (
+    write_trade_attribution_decision,
+    read_trade_attribution_decision,
     read_trade_attribution_policy,
     ATTRIBUTION_POLICY_VERSION,
     assert_trade_attribution_unclaimed,
     ledger_resource_identity,
     read_trade_attribution_facts,
     read_trade_attribution_snapshot,
-    record_trade_ordinary_attribution,
     record_trade_attribution_conflict,
     trade_attribution_facts_from_events,
 )
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
 __all__ = [
+    "write_trade_attribution_decision",
+    "read_trade_attribution_decision",
+    "lot_id_for_open_event",
     "combo_attribution_candidates_from_rows",
     "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
     "ledger_resource_identity", "read_trade_attribution_facts",
     "read_trade_attribution_snapshot",
     "read_trade_attribution_policy",
     "preview_trade_attribution_migration", "apply_trade_attribution_migration",
-    "record_trade_ordinary_attribution", "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
+    "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
     "contract_key_from_lot_fields",
     "lot_contract_value",
     "recover_wheel_assignment",
@@ -338,7 +343,6 @@ __all__ = [
     "assigned_stock_event_log",
     "accept_option_close_evidence",
     "adopt_existing_combo_identity",
-    "adopt_post_trade_combo_pair",
     "advance_lifecycle_case_state",
     "build_source_consumption_claim",
     "apply_lifecycle_migration_manifest",

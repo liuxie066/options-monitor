@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from domain.domain.trade_contract_identity import contract_key
 
 from src.application.ledger.api import (
+    lot_id_for_open_event,
     BrokerTradeOperation,
     CloseTargetResolution,
     execution_identity_from_input,
@@ -421,7 +422,8 @@ def resolve_trade_deal(
                 operations=[BrokerTradeOperation(
                     action=str(event.get("event_type") or deal.position_effect or "recorded"),
                     event_id=event.get("event_id"),
-                    lot_id=event.get("target_lot_id") or event.get("lot_id"),
+                    lot_id=(lot_id_for_open_event(event) if event.get("event_type") == "open"
+                            else event.get("target_lot_id") or event.get("lot_id")),
                     result={"event": dict(event), "replayed": True,
                             **({"notification_outbox_id": notifications[0]["outbox_id"]} if notifications else {})},
                 ) for event in recorded],

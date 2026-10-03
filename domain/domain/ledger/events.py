@@ -239,12 +239,38 @@ def _clean_optional_id(value: Any) -> str | None:
     return raw or None
 
 
-def lot_id_for_open_event(event: TradeEvent) -> str:
-    return event.lot_id or f"lot_{event.event_id}"
+def lot_id_for_open_event(event: TradeEvent | Mapping[str, Any]) -> str:
+    """Resolve an opening's identity without changing its stored representation.
+
+    Mappings carry the same canonical fields as TradeEvent.to_dict(); legacy
+    aliases are consistency evidence, never an alternative identity source.
+    """
+    row = ({"event_id": event.event_id, "lot_id": event.lot_id,
+            "raw_payload": event.raw_payload} if isinstance(event, TradeEvent) else event)
+    event_id = _clean_optional_id(row.get("event_id"))
+    if not event_id:
+        raise ValueError("event_id_required")
+    lot_id = _clean_optional_id(row.get("lot_id")) or f"lot_{event_id}"
+    payload = row.get("raw_payload") or {}
+    if not isinstance(payload, Mapping):
+        raise ValueError("lot_identity_payload_invalid")
+    for field in ("record_id", "lot_record_id", "lot_id"):
+        alias = _clean_optional_id(payload.get(field))
+        if alias and alias != lot_id:
+            raise ValueError("lot_identity_conflict")
+    return lot_id
 
 
 def validate_trade_event(event: TradeEvent) -> list[LedgerDiagnostic]:
     diagnostics: list[LedgerDiagnostic] = []
+    if event.event_type == "open" and event.event_id:
+        try:
+            lot_id_for_open_event(event)
+        except ValueError as exc:
+            diagnostics.append(LedgerDiagnostic(
+                event_id=event.event_id, severity="error", code=str(exc),
+                message="opening lot identity conflicts with its source aliases",
+            ))
     if not event.event_id:
         diagnostics.append(
             LedgerDiagnostic(

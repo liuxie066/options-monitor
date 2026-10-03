@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -367,7 +369,6 @@ def plan_wheel_assignment_companion(
     as_of_events = [
         item for item in rows.get("trade_events") or []
         if int(item.get("event_time_ms") or 0) < _event_time_ms(event)
-        or valid_void_target_event_id(item)
     ]
     as_of_metadata = lot_strategy_metadata_for_lot(fields.get("lot_id"), as_of_events)
     strategy_fields = merge_lot_strategy_metadata(
@@ -553,7 +554,7 @@ def plan_wheel_assignment_companion(
         reason = "assignment_currency_conflict"
         return None, reason
     lot_id = (
-        f"assigned-stock-{event_id}" if direction == "call" else None
+        assigned_stock_lot_id_for_event(event_id) if direction == "call" else None
     )
     companion = build_wheel_branch_created_event(
         account=account,

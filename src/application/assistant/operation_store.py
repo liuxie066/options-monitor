@@ -459,10 +459,11 @@ class InboundOperationStore:
     def mark_cancelled(
         self, operation_id: str, *, result: dict[str, Any],
         expected_payload_hash: str | None = None,
+        expected_statuses: tuple[str, ...] = ("previewed",),
     ) -> bool:
         return self._set_status(
             operation_id, "cancelled", cancelled_at=utc_now_iso(), result_json=_json(result),
-            expected_statuses=("previewed",), expected_payload_hash=expected_payload_hash,
+            expected_statuses=expected_statuses, expected_payload_hash=expected_payload_hash,
         )
 
     def mark_expired(self, operation_id: str, *, result: dict[str, Any]) -> None:
@@ -922,8 +923,11 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
     args_raw = payload_map.get("arguments")
     args = args_raw if isinstance(args_raw, dict) else {}
     if operation_type == "trade_attribution":
-        contract = (payload_map.get("economics") or {}).get("contract_key") or {}
-        return f"{payload_map.get('account')} {contract.get('underlying_symbol')} {_option_contract_text(contract)} → {(operation.get('preview') or {}).get('target', '待核实')}"
+        preview = operation.get("preview") or {}
+        targets = preview.get("targets") or {}
+        return str(payload_map.get("account")) + " " + "；".join(
+            f"{fact['contract_key']['underlying_symbol']} {_option_contract_text(fact['contract_key'])} → {targets.get(fact['lot_id'], '待核实')}"
+            for fact in preview.get("members") or [])
     if operation_type == "manual_open":
         return _manual_open_summary(args)
     if operation_type == "manual_close":

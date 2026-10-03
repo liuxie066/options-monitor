@@ -127,6 +127,14 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
         if event_type == "wheel_attribution_conflict_resolved":
             _required_text(payload.get("conflict_event_id"), "conflict_event_id")
             _required_text(payload.get("resolution_evidence_event_id"), "resolution_evidence_event_id")
+            proofs = payload.get("resolution_evidence_event_ids")
+            if proofs is not None and (
+                not isinstance(proofs, list) or not proofs
+                or any(not isinstance(value, str) or not value.strip() for value in proofs)
+                or len(set(proofs)) != len(proofs)
+                or payload["resolution_evidence_event_id"] not in proofs
+            ):
+                raise ValueError("resolution proof list must contain unique IDs and its primary proof")
         elif (not isinstance(payload.get("execution_keys"), list) or not payload["execution_keys"]
               or any(not isinstance(key, str) or not key.strip() for key in payload["execution_keys"])):
             raise ValueError("wheel attribution conflict requires execution_keys")

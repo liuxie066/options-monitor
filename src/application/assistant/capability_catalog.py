@@ -59,11 +59,11 @@ def _binding_command_specs() -> tuple[AssistantCommandSpec, ...]:
 COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="attribution_preview", tool_name="inbound.attribution", commands=("/attribute",),
-        display_name="成交归属预览", arguments=("account", "execution_key", "action", "target_id"),
+        display_name="成交归属预览", arguments=("account", "execution_key", "action", "target_id", "conflict_event_ids", "members"),
         read_only=False, risk_level="preview_write", operation_action="preview", operation_target="attribution",
-        required_information=("account", "execution_key", "action"),
+        required_information=("account",),
         summary="preview attribution of an already recorded execution without changing its economics",
-        examples=("/attribute lx <execution_key> ordinary",),
+        examples=("/attribute lx <execution_key> ordinary", "/attribute lx batch '<JSON: conflict_event_ids, members>'"),
     ),
     AssistantCommandSpec(
         intent_name="attribution_confirm", tool_name="inbound.attribution", commands=("/confirm",),

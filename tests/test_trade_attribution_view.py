@@ -207,6 +207,99 @@ def _writable_call_scope(tmp_path, monkeypatch, contracts=1, fill_time=3000):
     return repo, config
 
 
+def _call_capacity_observation(contracts=1, now_ms=4000):
+    from src.application.futu_portfolio_context import build_futu_position_snapshot
+    snapshot = build_futu_position_snapshot(rows=[
+        {"code": "US.NVDA", "sec_type": "STOCK", "qty": contracts * 100, "can_sell_qty": 0},
+        {"code": "US.NVDA260821C00110000", "stock_owner": "US.NVDA", "sec_type": "OPTION",
+         "qty": -contracts, "option_type": "CALL", "option_strike_price": 110,
+         "strike_time": "2026-08-21", "multiplier": 100},
+    ], broker_account_ref={"broker_id": "futu", "external_account_id": "1001", "environment": "REAL",
+        "account_label": "lx", "broker_account_id": "futu:REAL:1001"},
+        markets=["US"], asset_types=["stock", "option"], completeness="complete",
+        observed_at_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat())
+    return {"portfolio": {"capacity_authority": {"status": "available", "logical_account": "lx",
+        "futu_account_id": "1001", "trd_env": "REAL", "market": "us"}, "position_snapshot_input": snapshot}}
+
+
+def test_public_confirmation_read_hash_confirms_and_default_read_stays_local(tmp_path, monkeypatch):
+    from src.application.trades import attribution
+    from src.application.agent_tools.positions import TRADE_ATTRIBUTION_READ_TOOL
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config,
+        {"runtime_root": str(tmp_path), "config_path": str(tmp_path / "config.json")}, {}))
+    evidence = {"complete": True, "exposures": []}
+    monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **kw: evidence)
+    observations = []
+    def observe(**kwargs):
+        observations.append(kwargs)
+        return _call_capacity_observation()
+    monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity", observe)
+    local, _, _ = TRADE_ATTRIBUTION_READ_TOOL.call({"account": "lx"})
+    assert observations == [] and local["capacity_observed"] is False
+    prepared, _, _ = TRADE_ATTRIBUTION_READ_TOOL.call({"account": "lx", "prepare_confirmation": True})
+    assert len(observations) == 1 and prepared["capacity_observed"] is True
+    call = next(row for row in prepared["rows"] if row["contract_key"]["option_type"] == "call")
+    from src.application.wheel.read_model import build_wheel_read_model_from_rows
+    model = build_wheel_read_model_from_rows(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", market="us", as_of_ms=4000)
+    linkage = next(row for row in model["linkage_candidates"] if row["call_record_id"] == call["lot_id"])
+    args = dict(account="lx", config=config, runtime_root=tmp_path, expected_input_hash=call["input_hash"],
+        request_id="public-confirmation", actor="operator", option_lot_id=call["lot_id"],
+        wheel_branch_id=linkage["wheel_branch_id"], direction="call",
+        linkage_candidate_id=linkage["linkage_candidate_id"],
+        expected_batch_generation_hash=linkage["batch_generation_hash"])
+    before = repo.list_trade_events()
+    assert attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=False)["status"] == "planned"
+    assert repo.list_trade_events() == before
+    assert attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=True)["status"] == "confirmed"
+    assert len(repo.list_trade_events()) == len(before) + 1
+
+
+def test_confirmation_read_capacity_failure_stays_unavailable(tmp_path, monkeypatch):
+    from src.application.trades import attribution
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config, {"runtime_root": str(tmp_path)}, {}))
+    monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **kw: {"complete": True, "exposures": []})
+    monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity", lambda **_: {"error": "provider_timeout"})
+    before = repo.list_trade_events()
+    result, _, _ = attribution.trade_attribution_read({"account": "lx", "prepare_confirmation": True})
+    call = next(row for row in result["rows"] if row["contract_key"]["option_type"] == "call")
+    assert result["capacity_observed"] is False and call["selected_candidate_id"] is None
+    assert "capacity_authority_unavailable" in call["candidates"][0]["reason_codes"]
+    assert repo.list_trade_events() == before
+
+
+def test_final_capacity_rejects_snapshot_that_expires_during_write(tmp_path, monkeypatch):
+    from src.application.trades import attribution
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    observation = _call_capacity_observation()
+    evidence = {"complete": True, "exposures": []}
+    view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        config=config, account="lx", market="us", now_ms=4000, combo_evidence=evidence,
+        capacity_observation=observation)
+    fact = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    original = attribution.write_trade_attribution_decision
+    def expire(*args, **kwargs):
+        result = original(*args, **kwargs)
+        monkeypatch.setattr("time.time", lambda: 65)
+        return result
+    monkeypatch.setattr(attribution, "write_trade_attribution_decision", expire)
+    before = read_trade_attribution_snapshot(repo, account="lx", market="us")
+    with pytest.raises(ValueError, match="capacity changed before commit"):
+        attribution.apply_trade_attribution(repo, account="lx", market="us", config=config,
+            execution_key=fact["execution_key"], candidate_id=fact["selected_candidate_id"],
+            expected_input_hash=fact["input_hash"], request_id="expires-in-writer", actor="rule",
+            combo_evidence=evidence, capacity_observation=observation, combo_mode="confirm")
+    after = read_trade_attribution_snapshot(repo, account="lx", market="us")
+    assert after["trade_events"] == before["trade_events"]
+    assert after["account_wheel_events"] == before["account_wheel_events"]
+    assert after["stored_position_lots"] == before["stored_position_lots"]
+
+
 def test_global_writer_commits_once_and_rolls_back_on_precommit_cancellation(tmp_path, monkeypatch):
     import pytest
     from src.application.trades.attribution import apply_trade_attribution
@@ -296,15 +389,18 @@ def test_two_booked_intent_fills_are_linked_and_consumed_atomically(tmp_path, mo
     second["raw_payload"]["execution_id"] = execution_identity_from_input(second["raw_payload"]["execution_input"])
     persist_trade_event_objects_atomically(repo, [TradeEvent.from_dict(second)])
     monkeypatch.setattr("time.time", lambda: now_ms / 1000)
+    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check", trade_attribution_capacity_check)
+    observation = _call_capacity_observation(contracts=2, now_ms=now_ms)
     evidence = {"complete": True, "exposures": []}
     rows = read_trade_attribution_snapshot(repo, account="lx", market="us")
-    view = build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=now_ms, combo_evidence=evidence)
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=now_ms,
+        combo_evidence=evidence, capacity_observation=observation)
     calls = [row for row in view["rows"] if row["contract_key"]["option_type"] == "call"]
     assert len(calls) == 2 and all(row["selected_candidate_id"] for row in calls), calls
     assert all(len(row["candidates"][0]["member_lot_ids"]) == 2 for row in calls)
     args = dict(account="lx", market="us", config=config, execution_key=calls[0]["execution_key"],
         candidate_id=calls[0]["selected_candidate_id"], expected_input_hash=calls[0]["input_hash"], request_id="two-fills",
-        actor="trade_intake:rule", combo_evidence=evidence, capacity_observation={}, combo_mode="confirm")
+        actor="trade_intake:rule", combo_evidence=evidence, capacity_observation=observation, combo_mode="confirm")
     class CancelBeforeCommit:
         checks = 0
         def is_set(self):
@@ -406,7 +502,7 @@ def test_late_fill_needs_exact_intent_and_valid_historical_gate(tmp_path, monkey
 def test_two_independent_writers_cannot_claim_different_memberships(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
-    from src.application.ledger.api import read_trade_attribution_facts, record_trade_ordinary_attribution
+    from src.application.ledger.api import read_trade_attribution_facts
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.trades.attribution import apply_trade_attribution
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
@@ -421,8 +517,9 @@ def test_two_independent_writers_cannot_claim_different_memberships(tmp_path, mo
         barrier.wait(timeout=5)
         try:
             if ordinary:
-                return record_trade_ordinary_attribution(second_repo, account="lx", execution_key=fact["execution_key"],
-                    expected_input_hash=fact["input_hash"], request_id="ordinary-race", actor="operator", now_ms=4000, apply_changes=True)
+                return apply_trade_attribution(second_repo, account="lx", execution_key=fact["execution_key"],
+                    expected_input_hash=target["input_hash"], request_id="ordinary-race", actor="operator", manual=True,
+                    market="us", config=config, candidate_id="ordinary", combo_evidence=evidence, capacity_observation={}, combo_mode="confirm")
             return apply_trade_attribution(repo, account="lx", market="us", config=config, execution_key=target["execution_key"],
                 candidate_id=target["selected_candidate_id"], expected_input_hash=target["input_hash"], request_id="wheel-race",
                 actor="rule", combo_evidence=evidence, capacity_observation={}, combo_mode="confirm")
@@ -617,3 +714,91 @@ def test_rejected_combo_does_not_reappear_as_placeholder_but_new_pair_competes(t
         assert [candidate["candidate_id"] for candidate in put["candidates"]] == ["combo-exposure:exposure-1"]
         assert not combo_attribution_candidates_from_rows(rows, account="lx", runtime_environment="",
             exposures=[_exposure()], effective_now_ms=BASE_TIME_MS + 3000, include_claimed=True)["inferences"]
+
+
+def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_path, monkeypatch):
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from domain.domain.wheel import build_wheel_event
+    from src.application.futu_portfolio_context import build_futu_position_snapshot
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.writer import persist_trade_event_objects_atomically
+    from src.application.trades.attribution import apply_trade_attribution
+    from src.application.wheel import build_wheel_read_model
+    from src.application.wheel.config import resolve_wheel_activation_descriptor
+    from test_wheel_intent_policy_binding import _environment
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    source, _, _, _, _ = _environment(seed, "put", monkeypatch)
+    repo = SQLiteOptionPositionsRepository(tmp_path / "put.sqlite3")
+    config = {"market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}},
+        "wheel": {"accounts": ["lx"], "activation_by_account": {"lx": {
+            "generation": 1, "activated_at_ms": 500, "deactivated_at_ms": None}}}}
+    ref = {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}
+    descriptor = resolve_wheel_activation_descriptor(config, market="us", account="lx")
+    monkeypatch.setattr("src.application.ledger.repository_assigned_stock.now_ms", lambda: 500)
+    for event in source.list_trade_events():
+        if event["event_id"] == "cc-open":
+            with repo._writer_connection(begin_immediate=True) as conn:
+                repo.open_wheel_activation_window(market="us", account="lx", expected_current_generation=0,
+                    policy_hash=descriptor["policy_hash"], request_id="window", request_hash="b" * 64, conn=conn)
+        if event["event_type"] == "open":
+            execution = {"external_id_namespace": "futu.deal", "external_execution_id": event["event_id"],
+                "broker_account_ref": ref}
+            event["raw_payload"].update(execution_input=execution, execution_id=execution_identity_from_input(execution))
+        persist_trade_event_objects_atomically(repo, [TradeEvent.from_dict(event)])
+    branch = build_wheel_read_model(repo, "lx", 5000, market="us")["wheel_branches"][0]
+    assert branch["direction"] == "put" and branch["lifecycle_status"] == "active"
+    intent = build_wheel_event(event_id="put-intent", account="lx", lot_id=None, wheel_branch_id=branch["wheel_branch_id"],
+        event_type="wheel_put_intent_created", occurred_at_ms=5000, recorded_at_ms=5000, intent_id="put-intent",
+        payload={"market": "us", "symbol": "NVDA", "contracts": 1, "multiplier": 100, "strike": 100,
+            "expiration_ymd": "2026-09-18", "expires_at_ms": 10000, "capacity_identity_hash": "put-cash",
+            "cash_reservation_amount": 10000, "cash_reservation_currency": "USD"})
+    with repo._writer_connection(begin_immediate=True) as conn:
+        repo.append_wheel_event_once(intent, conn=conn)
+        conn.execute("""INSERT INTO trade_attribution_policy_enablings
+            (broker, physical_account_id, environment, account, market, policy_version,
+             effective_from_ms, created_at_ms, actor, request_id, request_hash)
+            VALUES ('futu', '1001', 'REAL', 'lx', 'us', 'trade_attribution.v2', 4500, 4500, 'fixture', 'cutover', ?)""",
+            ("a" * 64,))
+    execution = {"external_id_namespace": "futu.deal", "external_execution_id": "put-fill", "broker_account_ref": ref}
+    persist_trade_event_objects_atomically(repo, [TradeEvent(event_id="put-fill", event_type="open", event_time_ms=6000,
+        contract_key=ContractKey.from_values(broker="futu", account="lx", underlying_symbol="NVDA", option_type="put",
+            strike=100, expiration_ymd="2026-09-18"), contracts=1, price=1, currency="USD", multiplier=100,
+        source="test", lot_id="put-fill", raw_payload={"side": "sell", "execution_input": execution,
+            "execution_id": execution_identity_from_input(execution), "multiplier_source": "payload"})])
+    monkeypatch.setattr("time.time", lambda: 7)
+    snapshot = build_futu_position_snapshot(rows=[{
+        "code": "US.NVDA260918P00100000", "stock_owner": "US.NVDA", "sec_type": "OPTION", "qty": -1,
+        "option_type": "PUT", "option_strike_price": 100, "strike_time": "2026-09-18", "multiplier": 100,
+    }], broker_account_ref={**ref, "account_label": "lx", "broker_account_id": "futu:REAL:1001"},
+        markets=["US", "HK"], asset_types=["stock", "option"], completeness="complete",
+        observed_at_utc=datetime.fromtimestamp(7, timezone.utc).isoformat())
+    observation = {"portfolio": {"capacity_authority": {"status": "available", "logical_account": "lx",
+        "futu_account_id": "1001", "trd_env": "REAL", "market": "us"}, "position_snapshot_input": snapshot,
+        "cash_balance_reliable": True, "cash_by_currency": {"USD": 10000}}}
+    evidence = {"complete": True, "exposures": []}
+    view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        config=config, account="lx", market="us", now_ms=7000, combo_evidence=evidence, capacity_observation=observation)
+    fact = next(row for row in view["rows"] if row["lot_id"] == "put-fill")
+    assert fact["selected_candidate_id"] == "wheel:" + branch["wheel_branch_id"], fact
+    # The old final check counts both this booked Put and its unconsumed cash reservation.
+    before_check = trade_attribution_capacity_check(fact=fact, facts=view["rows"], wheel_read_model=view["wheel_model"],
+        observation=observation, now_ms=7000)
+    assert before_check["reason_codes"] == ["account_cash_capacity_exceeded"]
+    args = dict(account="lx", market="us", config=config, execution_key=fact["execution_key"],
+        candidate_id=fact["selected_candidate_id"], expected_input_hash=fact["input_hash"], request_id="put-consume",
+        actor="trade_intake:rule", combo_evidence=evidence, capacity_observation=observation, combo_mode="confirm")
+    before = repo.list_trade_events()
+    before_wheel = repo.list_wheel_events(account="lx")
+    assert not apply_trade_attribution(repo, **args, apply_changes=False)["write_applied"]
+    assert repo.list_trade_events() == before
+    assert repo.list_wheel_events(account="lx") == before_wheel
+    result = apply_trade_attribution(repo, **args)
+    assert result["write_applied"] and result["origin"] == "intent"
+    assert not apply_trade_attribution(repo, **args)["write_applied"]
+    consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_put_intent_consumed"]
+    assert len(consumed) == 1 and consumed[0]["payload"]["cash_reservation_amount"] == 10000
+    after = build_wheel_read_model(repo, "lx", 7000, market="us")["wheel_branches"][0]
+    assert after["active_intent_reserved_contracts"] == 0
+    assert len(repo.list_trade_events()) == len(before) + 1

@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.api import (
+    lot_id_for_open_event,
     applied_execution_association_conflicts,
     assigned_stock_event_log,
     broker_external_event_key,
@@ -122,7 +123,7 @@ def _manual_open_lot_id(result: dict[str, Any]) -> str:
     event_id = str(result.get("event_id") or "").strip()
     if not event_id:
         return ""
-    return f"lot_{event_id}"
+    return lot_id_for_open_event({"event_id": event_id})
 
 
 def _list_repo_assigned_stock_events(repo: Any) -> list[dict[str, Any]]:

@@ -184,7 +184,7 @@ def test_wheel_projection_is_order_independent_and_tracks_linked_call() -> None:
     assert first["active_call_lot_ids"] == ["call-lot-1"]
 
 
-def test_durable_attribution_conflict_blocks_branch_until_explicit_resolution() -> None:
+def test_durable_attribution_conflict_rejects_incomplete_legacy_proof() -> None:
     from domain.domain.trade_execution import execution_identity_from_input
     execution = {"external_id_namespace": "futu.deal", "external_execution_id": "call-fill",
                  "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}}
@@ -211,9 +211,9 @@ def test_durable_attribution_conflict_blocks_branch_until_explicit_resolution() 
     proof = {**unrelated, "source": "wheel_linkage", "target_lot_id": call["lot_id"], "contract_key": {"account": "lx"},
              "raw_payload": {"actor": "operator", "attribution_request_id": "control:keep-wheel", "attribution_origin": "manual",
                              "attribution_candidate_id": "wheel:assigned-stock-assign-put"}}
-    restored = project([resolution, conflict, _started_event()], [proof])
-    assert restored["integrity_status"] == "trusted"
-    assert blocked["batch_generation_hash"] != restored["batch_generation_hash"]
+    still_blocked = project([resolution, conflict, _started_event()], [proof])
+    assert still_blocked["integrity_status"] != "trusted"
+    assert "strategy_attribution_conflict" in still_blocked["reason_codes"]
     wrong = build_wheel_event(event_id="wrong-resolution", event_type="wheel_attribution_conflict_resolved",
         **common, payload={**resolution["payload"], "conflict_event_id": "unknown"})
     assert "invalid_attribution_conflict_resolution" in project([_started_event(), conflict, wrong])["reason_codes"]

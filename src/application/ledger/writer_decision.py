@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
 from domain.domain.option_lifecycle import pending_close_quantities
 
@@ -71,6 +73,8 @@ def _trade_events_by_id(
     }
 
 def _event_position_lot_id(event: Any) -> str | None:
+    if event.event_type == "open":
+        return lot_id_for_open_event(event)
     payload = dict(getattr(event, "raw_payload", {}) or {})
     explicit = str(
         payload.get("record_id")
@@ -80,12 +84,7 @@ def _event_position_lot_id(event: Any) -> str | None:
     ).strip()
     if explicit:
         return explicit
-    if str(getattr(event, "event_type", "") or "").strip().lower() != "open":
-        return None
-    return str(
-        getattr(event, "lot_id", None)
-        or f"lot_{str(getattr(event, 'event_id', '') or '').strip()}"
-    ).strip() or None
+    return None
 
 def _require_lifecycle_generation(
     sqlite_repo: Any,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.trades.attribution import confirm_wheel_call_linkage
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,6 @@ from src.application.positions.workflows import execute_manual_assignment
 from src.application.wheel import (
     build_wheel_read_model,
     cancel_wheel_call_intent,
-    confirm_wheel_call_linkage,
     create_wheel_call_intent,
     end_wheel_lifecycle,
     reject_wheel_call_linkage,
@@ -1114,82 +1114,127 @@ def test_call_intent_cancel_rejects_cross_market_without_effects(
 
 
 
-def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path: Path) -> None:
-    repo, lot_id = _wheel_repo(tmp_path)
-    call_lot_id = _open_unlinked_call(repo)
-    model = build_wheel_read_model(repo, "lx", 4_000)
-    candidate = model["linkage_candidates"][0]
-
-    result = confirm_wheel_call_linkage(
-        repo,
-        account="lx",
-        call_lot_id=call_lot_id,
-        lot_id=lot_id,
-        linkage_candidate_id=candidate["linkage_candidate_id"],
-        expected_input_hash=candidate["input_snapshot_hash"],
-        expected_batch_generation_hash=candidate["batch_generation_hash"],
-        request_id="link-confirm-1",
-        actor="tester",
-        coverage_fact={
-            "account": "lx",
-            "symbol": "NVDA",
-            "capacity_identity_hash": "capacity-1",
-            "status": "insufficient",
-            "shares_available_for_cover": 0,
-        },
-        market="us",
-        apply_changes=True,
-        as_of_ms=5_000,
-    )
-
-    fields = repo.get_position_lot_fields(call_lot_id)
-    batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
-    adjust = next(item for item in repo.list_trade_events() if item["event_type"] == "adjust")
-    assert result["status"] == "confirmed"
-    # §2 RECONSTRUCTIBLE / §7: the linkage facts are carried by the adjust event
-    # this confirmation writes, not by the lot payload -- the guard that reads the
-    # event back is ``confirm_wheel_call_linkage``'s own, and it is what makes the
-    # status above ``confirmed``.
-    for retired in ("strategy", "leg_role", "source_stock_lot_id", "source_wheel_branch_id"):
-        assert retired not in fields, retired
-    assert adjust["raw_payload"]["patch"]["strategy"] == "wheel"
-    assert adjust["raw_payload"]["patch"]["source_stock_lot_id"] == lot_id
-    assert set(adjust["raw_payload"]["patch"]) == {
-        "last_action_at",
-        "strategy",
-        "leg_role",
-        "source_stock_lot_id",
-        "source_wheel_branch_id",
-    }
-    assert batch["phase"] == "call_open"
+def _shared_linkage_scope(tmp_path, monkeypatch):
+    from test_trade_attribution_view import _writable_call_scope
+    from src.application.trades import attribution
+    from src.application.ledger.api import read_trade_attribution_snapshot
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    context = dict(config=config, market="us", combo_evidence={"complete": True, "exposures": []},
+                   capacity_observation={}, combo_mode="confirm")
+    monkeypatch.setattr(attribution, "read_trade_attribution_context", lambda *a, **k: context)
+    view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", now_ms=4000, **context)
+    fact = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    candidate = view["wheel_model"]["linkage_candidates"][0]
+    args = dict(account="lx", call_lot_id=fact["lot_id"], lot_id=candidate["stock_lot_id"],
+        linkage_candidate_id=candidate["linkage_candidate_id"], expected_input_hash=fact["input_hash"],
+        expected_batch_generation_hash=candidate["batch_generation_hash"], request_id="link-confirm",
+        actor="tester", config=config, runtime_root=tmp_path)
+    return repo, args, candidate
 
 
-def test_manual_linkage_consumes_unique_intent_valid_at_fill(tmp_path: Path) -> None:
-    repo, lot_id = _wheel_repo(tmp_path)
-    created, coverage = _create_call_intent(repo, lot_id)
-    call_lot_id = _open_unlinked_call(repo, event_time_ms=5_000)
-    candidate = build_wheel_read_model(repo, "lx", 6_000)["linkage_candidates"][0]
+def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path, monkeypatch):
+    repo, args, candidate = _shared_linkage_scope(tmp_path, monkeypatch)
+    before = repo.list_trade_events()
+    assert not confirm_wheel_call_linkage(repo, **args)["write_applied"]
+    assert repo.list_trade_events() == before
+    result = confirm_wheel_call_linkage(repo, **args, apply_changes=True)
+    assert result["status"] == "confirmed" and len(result["proof_event_ids"]) == 1
+    assert not confirm_wheel_call_linkage(repo, **args, apply_changes=True)["write_applied"]
+    adjust = next(row for row in repo.list_trade_events() if row["event_id"] in result["proof_event_ids"])
+    patch = adjust["raw_payload"]["patch"]
+    assert patch["strategy"] == "wheel" and patch["source_stock_lot_id"] == candidate["stock_lot_id"]
+    assert adjust["contracts"] == 0 and float(adjust["price"]) == 0
+    assert repo.list_trade_events()[:len(before)] == before
+    assert build_wheel_read_model(repo, "lx", 6000)["batches"][0]["phase"] == "call_open"
 
-    result = confirm_wheel_call_linkage(
-        repo,
-        account="lx",
-        call_lot_id=call_lot_id,
-        lot_id=lot_id,
-        linkage_candidate_id=candidate["linkage_candidate_id"],
-        expected_input_hash=candidate["input_snapshot_hash"],
-        expected_batch_generation_hash=candidate["batch_generation_hash"],
-        request_id="link-confirm-with-intent",
-        actor="tester",
-        coverage_fact=coverage,
-        market="us",
-        apply_changes=True,
-        as_of_ms=6_000,
-    )
 
-    batch = build_wheel_read_model(repo, "lx", 7_000)["batches"][0]
-    assert result["intent_event_id"]
-    assert created["intent_id"] not in batch["active_intent_ids"]
-    assert batch["phase"] == "call_open"
+@pytest.mark.parametrize("entry", ["cli", "tool_call", "tool_neutral"])
+@pytest.mark.parametrize("runtime_source", ["argument", "environment"])
+def test_public_linkage_entry_uses_complete_shared_decision(tmp_path, monkeypatch, entry, runtime_source):
+    import sqlite3
+    from src.application.trades import attribution
+    from src.application.agent_tools import positions as position_tools
+    from src.interfaces.cli import wheel as wheel_cli
+    repo, args, candidate = _shared_linkage_scope(tmp_path, monkeypatch)
+    runtime_root = tmp_path / "active-runtime"
+    sqlite_path = runtime_root / "output_shared/state/option_positions.sqlite3"
+    sqlite_path.parent.mkdir(parents=True)
+    with sqlite3.connect(repo.db_path) as source, sqlite3.connect(sqlite_path) as target:
+        source.backup(target)
+    repo = SQLiteOptionPositionsRepository(sqlite_path)
+    config_path = tmp_path / "configuration/config.us.json"
+    data_path = tmp_path / "data-config/data.json"
+    data_path.parent.mkdir()
+    data_path.write_text("{}")
+    args["config"]["portfolio"] = {"data_config": str(data_path)}
+    monkeypatch.setattr(wheel_cli, "load_runtime_config", lambda **_: (config_path, args["config"]))
+    monkeypatch.setattr(position_tools, "load_runtime_config", lambda **_: (config_path, args["config"]))
+    context = attribution.read_trade_attribution_context(repo)
+    observed_roots = []
+
+    def read_context(*a, **kwargs):
+        observed_roots.append(kwargs["runtime_root"])
+        assert kwargs["runtime_root"] == runtime_root
+        return context
+
+    monkeypatch.setattr(attribution, "read_trade_attribution_context", read_context)
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+    payload = dict(config_key="us", account="lx", action="confirm", direction="call",
+        wheel_branch_id=candidate["wheel_branch_id"], option_record_id=args["call_lot_id"],
+        linkage_candidate_id=args["linkage_candidate_id"], expected_input_hash=args["expected_input_hash"],
+        expected_batch_generation_hash=args["expected_batch_generation_hash"], request_id=args["request_id"], actor=args["actor"])
+    if runtime_source == "argument":
+        payload["runtime_root"] = str(runtime_root)
+    else:
+        monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+
+    def invoke(apply):
+        if entry == "cli":
+            argv = ["linkage", "confirm"]
+            for key, value in payload.items():
+                if key != "action":
+                    argv.extend(["--" + key.replace("_", "-"), str(value)])
+            return wheel_cli.execute(wheel_cli.parse_args(argv + (["--apply", "--confirm"] if apply else [])))
+        tool = position_tools.WHEEL_LINKAGE_TOOL
+        selected = payload.copy()
+        if entry == "tool_call":
+            tool = position_tools.WHEEL_CALL_LINKAGE_TOOL
+            for key in ("direction", "wheel_branch_id", "option_record_id"):
+                selected.pop(key)
+            selected.update(stock_lot_id=args["lot_id"], call_record_id=args["call_lot_id"])
+        return tool.call({**selected, "apply": apply, "confirm": apply})[0]
+
+    before = repo.list_trade_events()
+    preview = invoke(False)
+    assert preview["dry_run"] and not preview["write_applied"]
+    assert repo.list_trade_events() == before
+    applied = invoke(True)
+    assert observed_roots
+    assert applied["write_applied"] and applied["proof_event_ids"] == preview["proof_event_ids"]
+    assert len(repo.list_trade_events()) == len(before) + 1
+    monkeypatch.setattr(attribution, "read_trade_attribution_context", lambda *a, **k: pytest.fail("recovery must use persisted proof"))
+    retried = invoke(True)
+    assert not retried["write_applied"] and retried["proof_event_ids"] == applied["proof_event_ids"]
+    assert len(repo.list_trade_events()) == len(before) + 1
+
+
+@pytest.mark.parametrize("broken", ["local_hash", "capacity", "generation"])
+def test_manual_linkage_uses_shared_fresh_evidence(tmp_path, monkeypatch, broken):
+    from src.application.trades import attribution
+    repo, args, candidate = _shared_linkage_scope(tmp_path, monkeypatch)
+    before = repo.list_trade_events()
+    if broken == "local_hash":
+        args["expected_input_hash"] = candidate["input_snapshot_hash"]
+    elif broken == "generation":
+        args["expected_batch_generation_hash"] = "stale"
+    else:
+        monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+            lambda **_: {"status": "unavailable", "reason_codes": ["capacity_evidence_missing"]})
+    with pytest.raises(ValueError):
+        confirm_wheel_call_linkage(repo, **args, apply_changes=True)
+    assert repo.list_trade_events() == before
 
 
 def test_manual_wheel_call_linkage_rejects_only_selected_relation(
@@ -1228,6 +1273,7 @@ def test_call_linkage_rejects_cross_market_without_effects(
     tmp_path: Path,
     action: str,
     apply_changes: bool,
+    monkeypatch,
 ) -> None:
     repo, lot_id = _wheel_repo(tmp_path)
     call_lot_id = _open_unlinked_call(repo)
@@ -1250,17 +1296,15 @@ def test_call_linkage_rejects_cross_market_without_effects(
         "as_of_ms": 5_000,
     }
 
-    with pytest.raises(ValueError, match="stale or unavailable"):
+    with pytest.raises(ValueError, match="unavailable|no unique branch"):
         if action == "confirm":
-            confirm_wheel_call_linkage(
-                repo,
-                **common,
-                coverage_fact={
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "capacity_identity_hash": "capacity-1",
-                },
-            )
+            from src.application.trades import attribution
+            monkeypatch.setattr(attribution, "read_trade_attribution_context", lambda *a, **k: {
+                "market": "hk", "config": {"market": "hk"}, "combo_evidence": {"complete": True},
+                "capacity_observation": {}, "combo_mode": "confirm"})
+            confirm_wheel_call_linkage(repo,
+                **{key: value for key, value in common.items() if key not in {"market", "as_of_ms"}},
+                config={"market": "hk"}, runtime_root=tmp_path)
         else:
             reject_wheel_call_linkage(
                 repo,

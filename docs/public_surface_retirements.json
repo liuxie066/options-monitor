@@ -170,6 +170,46 @@
       "module": "src/infrastructure/exchange_rates.py",
       "name": "save_exchange_rate_observation",
       "reason": "The standalone observation cache writer was retired; current_exchange_rate_snapshot now validates and caches each pair as part of one sealed FX fact."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "adopt_post_trade_combo_pair",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "record_trade_ordinary_attribution",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/combo_reconciliation.py",
+      "name": "adopt_post_trade_combo_pair",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/trade_attribution.py",
+      "name": "record_trade_ordinary_attribution",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/__init__.py",
+      "name": "confirm_wheel_call_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/__init__.py",
+      "name": "confirm_wheel_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/workflows.py",
+      "name": "confirm_wheel_call_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/workflows.py",
+      "name": "confirm_wheel_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
     }
   ]
 }

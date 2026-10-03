@@ -252,9 +252,11 @@ def _passes_report_filter(event: dict[str, Any], account_norm: str | None, broke
         return False
     return True
 
-def _assigned_lot_id(event_id: str) -> str:
+def assigned_stock_lot_id_for_event(event_id: str) -> str:
     stable = str(event_id or "").strip()
-    return f"assigned-stock-{stable}" if stable else "assigned-stock-unknown"
+    if not stable:
+        raise ValueError("assigned stock source event_id is required")
+    return f"assigned-stock-{stable}"
 
 def _stock_event_id(event: dict[str, Any], *, fallback_index: int) -> str:
     for key in ("stock_event_id", "event_id", "source_deal_id", "deal_id"):
@@ -1134,6 +1136,15 @@ def project_assigned_stock_lifecycle(
         event_at = int(_event_ts(event) or 0)
         account = normalize_account(event.get("account")) or "-"
         broker = normalize_broker(event.get("broker")) or "-"
+        if not event_id:
+            review_rows.append(_assigned_stock_review_row(
+                status="incomplete_inventory_basis", event_id=event_id,
+                month=event_month, account=account, broker=broker,
+                symbol=norm_symbol(event.get("symbol") or "-"),
+                message="assignment/exercise source event_id is required",
+                details={"reason": "event_id_required"},
+            ))
+            continue
         symbol = norm_symbol(event.get("symbol") or "-")
         option_type = normalize_option_type(event.get("option_type")) or "-"
         position_side = _event_position_side(event) or str(event.get("position_side") or "").strip().lower()
@@ -1343,7 +1354,7 @@ def project_assigned_stock_lifecycle(
             )
             continue
         option_premium_attribution = _option_premium_attribution(option_rows)
-        lot_id = _assigned_lot_id(event_id)
+        lot_id = assigned_stock_lot_id_for_event(event_id)
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))

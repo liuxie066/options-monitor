@@ -71,12 +71,20 @@ def render_inbound_text(*, intent: ControlCommand | None, tool_result: dict[str,
 def render_attribution_preview(operation: dict[str, Any]) -> str:
     preview = operation["preview"]
     lines = [f"归属预览｜{operation['payload']['account']}"]
-    target = preview["target"]
     for index, fact in enumerate(preview["members"], 1):
+        target = preview["targets"][fact["lot_id"]]
         contract = fact["contract_key"]
         ref = fact["broker_account_ref"]
         side = "卖出开仓" if fact["position_side"] == "short" else "买入开仓"
-        current = {"pending": "待归属", "ordinary": "普通单腿", "conflict": "归属冲突"}.get(fact["status"], fact.get("strategy") or "待核实")
+        relations = []
+        if fact.get("wheel_branch_id"):
+            relations.append(f"Wheel 批次 {fact['wheel_branch_id']}：{fact['contracts']} 张")
+        relations.extend(f"Wheel 分支 {row['wheel_branch_id']}：{row['contracts']} 张（股票批次 {row['stock_lot_id']}）"
+                         for row in fact.get("wheel_call_allocations") or [])
+        if fact.get("strategy_group_id"):
+            relations.append(f"Combo Yield {fact['strategy_group_id']}")
+        current = "；".join(relations) or {"pending": "待归属", "ordinary": "普通单腿", "conflict": "归属冲突"}.get(
+            fact["status"], fact.get("strategy") or "待核实")
         try:
             gross = quantize_money(to_decimal(fact["price"], field_name="price") * contract_share_quantity(fact["contracts"], fact["multiplier"]))
             amount = f"{fact['currency']} {gross:.2f}"
@@ -92,6 +100,8 @@ def render_attribution_preview(operation: dict[str, Any]) -> str:
         ])
         if fact.get("reason_codes"):
             lines.append("当前提示｜" + "、".join(fact["reason_codes"]))
+    lines.extend(["将解除的冲突｜" + ("、".join(preview["conflict_event_ids"]) or "无"),
+                  "仍保留的冲突｜" + ("、".join(preview["remaining_conflict_event_ids"]) or "无")])
     lines.extend(["本次只调整归属，成交金额和数量不变；覆盖和风险提示仍单独核对。",
         "本次归属准入已通过，确认时将重新核对。",
         f"确认：/confirm attribution {operation['operation_id']}",
