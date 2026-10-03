@@ -102,7 +102,6 @@ def broker_settlement_multiplier_evidence(event: TradeEvent) -> dict[str, Any] |
         or not source_event_id
         or source_event_id not in str(raw.get("source_event_id") or "").split("|")
         or not str(stock.get("futu_account_id") or "").strip()
-        or not str(stock.get("order_id") or "").strip()
         or str(stock.get("symbol") or "").strip().upper()
         != event.contract_key.underlying_symbol
     ):
@@ -123,12 +122,13 @@ def broker_settlement_multiplier_evidence(event: TradeEvent) -> dict[str, Any] |
         or multiplier != recorded_multiplier
     ):
         return None
+    order_id = str(stock.get("order_id") or "")
     return {
         "schema_version": "wheel_assignment_multiplier_evidence.v1",
         "source_assignment_event_id": event.event_id,
         "source_event_id": source_event_id,
         "futu_account_id": str(stock["futu_account_id"]),
-        "order_id": str(stock["order_id"]),
+        "order_id": order_id if order_id.strip() else None,
         "symbol": event.contract_key.underlying_symbol,
         "contracts": event.contracts,
         "shares": int(shares),
