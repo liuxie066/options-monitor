@@ -438,8 +438,6 @@ def test_tick_account_execution_isolates_one_account_exception(
                 "lx": {"should_run": False, "reason": "not_due"},
                 "sy": {"should_run": False, "reason": "not_due"},
             },
-            state_path=tmp_path / "scheduler.json",
-            scheduler_schedule_key="schedule",
             runlog=SimpleNamespace(
                 safe_event=lambda step, status, **kwargs: events.append(
                     {"step": step, "status": status, **kwargs}
@@ -615,8 +613,6 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
                     "scheduler_decision": {"scheduled_scan_target_market": None},
                 },
             },
-            state_path=tmp_path / "scheduler_state.json",
-            scheduler_schedule_key="schedule",
             runlog=SimpleNamespace(),
             audit_helper=SimpleNamespace(audit=lambda *_args, **_kwargs: None),
         )
@@ -1220,3 +1216,65 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
         and event.get("error_code") == "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
         for event in events
     )
+
+
+@pytest.mark.parametrize("first_smoke", [True, False])
+@pytest.mark.parametrize("trigger_source", ["manual", "cron"])
+def test_main_smoke_and_normal_admit_independently_and_each_deduplicates(
+    tmp_path, monkeypatch, first_smoke, trigger_source,
+) -> None:
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from src.application import multi_account_tick as mod
+    from src.application.tick_guard_flow import TickGuardOutcome
+
+    cfg = tmp_path / "config.us.json"
+    _write_market_config(cfg, "us", [])
+    events = []
+    scheduler_modes = []
+
+    class RunLogger:
+        def __init__(self, base):
+            self.run_id = f"audit-{len(events)}"
+
+        def safe_event(self, *args, **kwargs):
+            events.append((args, kwargs))
+
+    def guard(request):
+        return TickGuardOutcome(
+            True, 0, request.base_cfg, request.accounts,
+            request.default_account, ZoneInfo("Asia/Shanghai"),
+        )
+
+    claim = mod.state_repo.claim_idempotency_record
+    _patch_runtime_bootstrap(monkeypatch, mod, tmp_path / "runtime", RunLogger, guard)
+    # Keep actual claim/completion persistence; only operational dependencies are stubbed.
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", claim)
+    monkeypatch.setattr(mod, "build_trigger_context", lambda: {"source": trigger_source})
+    build = mod.build_tick_idempotency_context
+    monkeypatch.setattr(mod, "build_tick_idempotency_context", lambda **kwargs: build(
+        **kwargs, now_utc=datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+    ))
+
+    def scheduler(request):
+        scheduler_modes.append(request.smoke)
+        return SimpleNamespace(should_continue=True, context=SimpleNamespace(
+            markets_to_run=["US"], scheduler_markets=["US"],
+            state_path=tmp_path / "scheduler.json", scheduler_schedule_key="schedule",
+            scheduler_ms=0, scheduler_decision={}, scheduler_view={},
+            notify_decision_by_account={},
+            scan_decision_by_account={"lx": {"should_run": False}},
+            should_run_global=False, reason_global="not_due",
+        ))
+
+    monkeypatch.setattr(mod, "build_tick_scheduler_context", scheduler)
+    argv = ["--config", str(cfg), "--accounts", "lx", "--no-send"]
+    for smoke in (first_smoke, not first_smoke):
+        invocation = argv + (["--smoke"] if smoke else [])
+        assert mod.main(invocation) == 0
+        assert mod.main(invocation) == 0
+    assert scheduler_modes == [first_smoke, not first_smoke]
+    assert sum(
+        kwargs.get("message") == "duplicate tick execution skipped"
+        for _, kwargs in events
+    ) == 2

@@ -121,3 +121,34 @@ def test_complete_tick_idempotency_records_terminal_failure(tmp_path) -> None:
     assert payload["status"] == "unsupported_failed"
     assert payload["trigger_kind"] == "scheduled"
     assert payload["error_code"] == "daily_brief_multi_market_delivery_unsupported"
+
+
+def test_smoke_identity_preserves_normal_key_and_existing_scope_dimensions() -> None:
+    from pathlib import Path
+    from src.application.tick_run_context import build_tick_idempotency_context
+
+    common = {
+        "cfg_path": Path("/isolated/config.us.json"),
+        "market_config": "us",
+        "accounts": ["lx"],
+        "trigger_kind": "scheduled",
+        "trigger_job_id": "om-tick-us",
+        "now_utc": datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+    }
+    normal = build_tick_idempotency_context(**common)
+    assert normal.key == "055c5b782976cfa77b6fc579903d58fc269149b50598b2630f64cdfdcb3214f8"
+    smoke = build_tick_idempotency_context(**common, smoke=True)
+    assert smoke.key != normal.key
+    assert smoke.key != build_tick_idempotency_context(
+        **(common | {"trigger_job_id": "om-tick-us|smoke"}),
+    ).key
+    assert smoke.key == build_tick_idempotency_context(**common, smoke=True).key
+    for override in (
+        {"market_config": "hk"}, {"accounts": ["sy"]},
+        {"trigger_kind": "manual"}, {"symbols": "NVDA"},
+        {"no_send": True}, {"experience": True}, {"trigger_job_id": "other-job"},
+    ):
+        for mode in (False, True):
+            assert build_tick_idempotency_context(**(common | override), smoke=mode).key != (
+                smoke.key if mode else normal.key
+            )

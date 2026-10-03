@@ -92,7 +92,6 @@ def _request(
     accounts: list[str],
     workers: int,
     force: bool,
-    trigger_kind: str = "manual",
 ):
     from src.application.tick_account_execution import TickAccountExecutionRequest
 
@@ -142,11 +141,8 @@ def _request(
             }
             for idx, account in enumerate(accounts)
         },
-        state_path=tmp_path / "scheduler_state.json",
-        scheduler_schedule_key="schedule",
         runlog=_RunLog(),
         audit_helper=_Audit(),
-        trigger_kind=trigger_kind,
     )
 
 
@@ -581,7 +577,6 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         accounts=["lx", "sy"],
         workers=2,
         force=False,
-        trigger_kind="scheduled",
     )
     request = replace(
         request,
