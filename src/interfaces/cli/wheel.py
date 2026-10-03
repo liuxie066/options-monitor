@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import src.application.wheel as wheel_application
+from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
 from src.application.agent_tool_contracts import (
     AgentToolError,
     build_error_payload,
@@ -299,6 +300,7 @@ def _coverage(
     repo: Any,
     cfg: dict[str, Any],
     *,
+    runtime_root: Path,
     account: str,
     batch: dict[str, Any],
     as_of_ms: int,
@@ -309,6 +311,7 @@ def _coverage(
     return load_shared_coverage_fact(
         repo,
         config=cfg,
+        runtime_root=runtime_root,
         account=account,
         symbol=str(batch.get("symbol") or ""),
         broker=str(batch.get("broker") or portfolio.get("broker") or "富途"),
@@ -321,6 +324,7 @@ def _cash_capacity(
     repo: Any,
     cfg: dict[str, Any],
     *,
+    runtime_root: Path,
     account: str,
     branch: dict[str, Any],
     as_of_ms: int,
@@ -330,6 +334,7 @@ def _cash_capacity(
     return load_shared_cash_capacity_fact(
         repo,
         config=cfg,
+        runtime_root=runtime_root,
         account=account,
         broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=as_of_ms,
@@ -506,6 +511,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 _cash_capacity(
                     repo,
                     cfg,
+                    runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
                     account=args.account,
                     branch=branch,
                     as_of_ms=instant,
@@ -516,7 +522,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.wheel_command == "intent":
         snapshot = load_wheel_candidate_snapshot(
-            base=config_path.parent,
+            base=Path(args.runtime_root or config_path.parent).resolve(),
             run_id=args.run_id,
             account=args.account,
         )
@@ -524,18 +530,15 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             _coverage(
                 repo,
                 cfg,
+                runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
                 account=args.account,
                 batch=branch,
                 as_of_ms=instant,
                 source_identity=args.request_id,
             )
             if args.direction == "call"
-            else _cash_capacity(
-                repo,
-                cfg,
-                account=args.account,
-                branch=branch,
-                as_of_ms=instant,
+            else load_wheel_candidate_cash_fact(
+                base=Path(args.runtime_root or config_path.parent).resolve(), snapshot=snapshot,
             )
         )
         resolved = resolve_wheel_config(
@@ -548,7 +551,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             **common,
             candidate_snapshot=snapshot,
             current_strategy_policy_sha256=current_wheel_candidate_policy_hash(
-                base=config_path.parent, run_id=args.run_id, account=args.account,
+                base=Path(args.runtime_root or config_path.parent).resolve(), run_id=args.run_id, account=args.account,
                 config_path=config_path, config=cfg, snapshot=snapshot,
             ),
             final_candidate_id=args.final_candidate_id,
@@ -556,6 +559,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             expires_at_ms=args.expires_at_ms,
             broker_order_id=args.broker_order_id,
             capacity_fact=capacity_fact,
+            runtime_config=cfg,
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
             account_configured=resolved["account_configured"],
             activation_descriptor=resolved.get("activation_descriptor"),
@@ -566,6 +570,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             _coverage(
                 repo,
                 cfg,
+                runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
                 account=args.account,
                 batch=branch,
                 as_of_ms=instant,
@@ -575,6 +580,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             else _cash_capacity(
                 repo,
                 cfg,
+                runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
                 account=args.account,
                 branch=branch,
                 as_of_ms=instant,

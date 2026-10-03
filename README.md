@@ -33,6 +33,7 @@ trade_events -> projection -> position_lots
 
 - `config.yaml` 是人工编辑源；生成的 JSON 是运行快照，不是日常手工编辑入口。
 - 本地 SQLite 是期权交易与持仓事实源；Feishu 不承载 `option_positions` 镜像。
+- Futu 账户现金由共享入口读取并判定可信度；扫描、查询、报告、Wheel 和指派情景采用同一套现金标准，有效期统一由 `runtime.portfolio_context_ttl_sec` 控制，缺少证据时明确标为不可用。
 - 普通手工 `tick` 不自动发送 scheduled ordinary notification；生产调度使用受保护的 `tick-cron`。
 - `./om-agent spec` 是 Tool Gateway 工具名、输入 schema、风险级别和副作用的权威清单。
 - 缺少行情、费用、历史汇率、事件或身份事实时，系统显式返回 missing、partial 或 not-evaluable，不补造数据。

@@ -87,6 +87,7 @@ def _lot_contract_scalars(fields: Mapping[str, Any]) -> tuple[Any, Any]:
     return strike, expiration_ymd
 
 
+from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_contract import sha256_text
 from src.application.runtime_config_paths import authoritative_config_yaml_path
@@ -1964,11 +1965,8 @@ def _wheel_linkage_result(
 
 
 def _put_portfolio_context(capacity_fact: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "capacity_authority": capacity_fact.get("cash_authority") or {},
-        "capacity_identity_hash": capacity_fact.get("cash_authority_hash"),
-        "cash_by_currency": capacity_fact.get("cash_by_currency"),
-    }
+    return {**dict(capacity_fact.get("cash_evidence") or {}),
+            "cash_snapshot": capacity_fact.get("cash_snapshot")}
 
 
 def _bound_put_capacity_fact(
@@ -1999,6 +1997,7 @@ def _create_wheel_put_intent(
     request_id: str,
     actor: str,
     capacity_fact: Mapping[str, Any],
+    runtime_config: Mapping[str, Any],
     new_intent_enabled: bool,
     account_configured: bool,
     market: str,
@@ -2100,12 +2099,16 @@ def _create_wheel_put_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
-        source_observed_at = (
-            capacity_fact.get("source_observed_at")
-            or (capacity_fact.get("cash_authority") or {}).get("source_observed_at")
+        portfolio = _put_portfolio_context(capacity_fact)
+        confirmed_cash = evaluate_account_cash_snapshot(
+            portfolio, config=runtime_config, account=account,
+            evaluated_at=datetime.now(timezone.utc),
         )
-        if not broker_capacity_observation_is_fresh(source_observed_at):
-            raise ValueError("Wheel Put broker capacity observation is stale or unavailable")
+        if confirmed_cash["max_age_sec"] != portfolio.get("max_age_sec"):
+            raise ValueError("Wheel Put cash policy changed; repreview required")
+        portfolio["cash_snapshot"] = confirmed_cash
+        if not cash_snapshot_is_usable(portfolio):
+            raise ValueError("Wheel Put cash evidence stale or unavailable; repreview required")
         decision_snapshot = decision_state_snapshot_from_locked_rows(
             sqlite_repo, rows,
             account=account,
@@ -2115,7 +2118,7 @@ def _create_wheel_put_intent(
         )
         current_capacity = revalidate_selected_wheel_put_candidate_from_rows(
             account=account,
-            portfolio_context=_put_portfolio_context(capacity_fact),
+            portfolio_context=portfolio,
             position_lots=sqlite_repo.list_position_lots(conn=conn),
             lifecycle_rows=rows,
             broker=str(
@@ -2210,6 +2213,7 @@ def create_wheel_intent(
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
+    runtime_config: Mapping[str, Any] | None = None,
     broker_order_id: str | None = None,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
@@ -2235,6 +2239,7 @@ def create_wheel_intent(
             request_id=str(request_id or "").strip(),
             actor=str(actor or "").strip(),
             capacity_fact=capacity_fact,
+            runtime_config=runtime_config or {},
             new_intent_enabled=new_intent_enabled,
             account_configured=account_configured,
             market=market_value,

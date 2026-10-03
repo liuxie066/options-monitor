@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import math
 from typing import Any, Callable, Mapping, Sequence
 
@@ -1033,3 +1034,77 @@ def _consistent_pools(
         first = items[0]
         out[key] = first if all(abs(item - first) <= 1e-6 for item in items[1:]) else None
     return out
+
+
+def evaluate_cash_snapshot(
+    context: Mapping[str, Any], *, expected_authority: Mapping[str, Any],
+    evaluated_at: datetime, max_age_sec: Any,
+) -> dict[str, Any]:
+    """Evaluate cash evidence only; clocks, config and I/O belong to the caller."""
+    reasons: set[str] = set()
+    if context.get("portfolio_source_name") != "futu":
+        reasons.add("CASH_SOURCE_INVALID")
+    authority = context.get("capacity_authority")
+    authority = authority if isinstance(authority, Mapping) else {}
+    fields = ("logical_account", "futu_account_id", "trd_env", "market")
+    if (authority.get("source") != "opend" or authority.get("status") != "available"
+            or expected_authority.get("trd_env") not in {"REAL", "SIMULATE"}
+            or expected_authority.get("market") not in {"us", "hk"}
+            or any(not expected_authority.get(key) or authority.get(key) != expected_authority[key]
+                   for key in fields)):
+        reasons.add("CASH_IDENTITY_MISMATCH")
+    filters = context.get("filters")
+    if (not isinstance(filters, Mapping)
+            or filters.get("account") != expected_authority.get("logical_account")
+            or context.get("source_account_identifiers") != [expected_authority.get("futu_account_id")]):
+        reasons.add("CASH_IDENTITY_MISMATCH")
+    amounts = context.get("cash_by_currency")
+    if not isinstance(amounts, Mapping) or not amounts:
+        reasons.add("CASH_AMOUNT_INVALID")
+    else:
+        for currency, raw in amounts.items():
+            value = _to_float(raw)
+            if (not isinstance(currency, str) or len(currency) != 3
+                    or not currency.isascii() or not currency.isalpha() or currency != currency.upper()
+                    or value is None or not math.isfinite(value)):
+                reasons.add("CASH_AMOUNT_INVALID")
+    errors = context.get("cash_balance_unavailable_by_row")
+    if context.get("cash_balance_reliable") is not True or not isinstance(errors, Mapping) or errors:
+        reasons.add("CASH_BALANCE_UNRELIABLE")
+    source_status = context.get("cash_source_observation_status", context.get("source_observation_status"))
+    if source_status == "stale":
+        reasons.add("CASH_OBSERVATION_STALE")
+    elif source_status not in (None, "trusted"):
+        reasons.add("CASH_BALANCE_UNRELIABLE")
+    if context.get("cash_provider_error"):
+        reasons.add("CASH_PROVIDER_UNAVAILABLE")
+    ttl_valid = type(max_age_sec) is int and max_age_sec > 0
+    if not ttl_valid:
+        reasons.add("CASH_TTL_INVALID")
+    now_valid = isinstance(evaluated_at, datetime) and evaluated_at.utcoffset() is not None
+    if not now_valid:
+        reasons.add("CASH_EVALUATION_TIME_INVALID")
+    observed_raw = context.get("cash_source_observed_at")
+    observed = None
+    try:
+        if not isinstance(observed_raw, str):
+            raise ValueError("cash time missing")
+        observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
+        if observed.utcoffset() is None:
+            raise ValueError("cash time requires timezone")
+    except (ValueError, TypeError, OverflowError):
+        reasons.add("CASH_OBSERVATION_MISSING")
+        observed = None
+    if observed is not None and now_valid:
+        age = (evaluated_at - observed).total_seconds()
+        if age < 0:
+            reasons.add("CASH_OBSERVATION_IN_FUTURE")
+        elif ttl_valid and age > max_age_sec:
+            reasons.add("CASH_OBSERVATION_STALE")
+    status = "unknown" if reasons - {"CASH_OBSERVATION_STALE"} else "stale" if reasons else "fresh"
+    return {
+        "status": status, "reason_codes": sorted(reasons),
+        "source_observed_at": observed_raw if isinstance(observed_raw, str) else None,
+        "evaluated_at": evaluated_at.isoformat() if now_valid else None,
+        "max_age_sec": max_age_sec if ttl_valid else None,
+    }

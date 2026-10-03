@@ -11,7 +11,7 @@ FAKE_FUTU_ACC_ID_SY = "123456789012345680"
 
 @pytest.fixture(autouse=True)
 def _offline_market_fx(monkeypatch):
-    monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda: None)
+    monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda **_: None)
 
 
 def _futu_context(*, balance_rows=None, position_rows=None, account: str = "lx", **overrides):
@@ -703,7 +703,8 @@ def test_build_futu_portfolio_context_ignores_legacy_balance_aliases_and_cash() 
     assert out["cash_source"] == "empty"
     assert out["cash_balance_reliable"] is False
     assert out["cash_balance_unavailable_by_row"] == {
-        "balance_snapshot": "supported_cash_field_missing"
+        "balance_row_1.cash_components": "supported_cash_field_missing",
+        "balance_row_2.cash_components": "supported_cash_field_missing",
     }
 
 
@@ -772,7 +773,7 @@ def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> N
     assert out["cash_by_currency"] == {}
     assert out["cash_balance_reliable"] is False
     assert out["cash_balance_unavailable_by_row"] == {
-        "balance_snapshot": "supported_cash_field_missing"
+        "balance_row_1.cash_components": "supported_cash_field_missing",
     }
 
 

@@ -94,3 +94,131 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 单片 A：删除扫描全局链和只为它服务的测试/文档声明，同时保持账户级风险计算与候选排序。覆盖成功信号 ①②③，无前置切片。实现 owner：`strategy_policy.py`、`pipeline_context.py`、`prepared_portfolio_context.py`、`short_vol_risk_context.py`、`portfolio_context_builder.py`、`portfolio_context_service.py`；相关测试及当前文档 owner 随行为同步更新。用直接与预备入口的回归测试证明无全局读取/缓存写入；保留账户期权共享缓存刷新测试，并把现有 `_global_*` 跨标的排序 fixture 改成账户现金、股票和 `option_ctx`，断言 CSP 具体风险值、缺失原因与排序。CC 只核对既有行为。保留独立 Feishu 命令测试，删除人为打开恒假门的测试。按实际消失的顶层函数和导入，向追加式 `docs/public_surface_retirements.json` 登记；旧条目不改。逐处修正 `README.md`、`CONFIGURATION_GUIDE.md`、`docs/AGENT_GETTING_STARTED.md`、`docs/INDEX.md`、`docs/STRATEGY_ARCHITECTURE.md` 的当前能力说明，保留独立 Feishu 命令与 Portfolio Exposure 配置的事实。运行受影响测试、完整项目必需检查、静态全局符号/缓存引用检查及文档/公共面 guardrails。
 
 风险与边界：运行环境可能留有旧全局缓存，但本次源码不再读取，物理清理须另行授权和目标绑定。现有“期权上下文缺失时集中度可能仍可计算”的静态线索由 CSP 风险 owner 后续单独核实，不借退役改动扩大失败语义。先前设计中关于 Feishu 观察时间的结论仍是历史事实，退役后不再是扫描门禁；若将来重新引入跨账户风险，需另行定义业务需求、上游覆盖及观察时间合同，不能复活旧死分支。
+
+
+## 账户现金读取与可信度统一设计（2026-10-03，待实施）
+
+### 批准目标与边界
+
+用户要求全项目同一业务语义使用同一套标准，并明确当前不存在“必须实时调用”和“允许短时缓存”两类现金需求。2026-10-03 用户确认 Brainstorm 后进入 Save Design；按已推荐的 full 流程记录。本节是本任务的唯一设计正文，四路独立建议已收齐，用户已确认 P1–P5 修订方向；本版供 Planreview 审查，尚未实现。
+
+目标：Futu 账户现金的读取、缓存复用、源观察时间、身份与可信度判定只有一个责任入口和一套实现；扫描、查询、报告、Wheel 和指派情景消费同一结论。相同事实、配置和评价时间产生相同现金金额、状态与原因。不同观测时刻允许金额变化；策略抵押、预留、汇率可计算性仍由各自既有 owner 决定。
+
+范围包括所有当前 Futu 账户现金消费者及其数据投影、封存、CLI/Tool facade。非目标：lot 身份、合约乘数、期权抵押与结算政策、股票覆盖规则、PM non-Futu 估值、独立 Feishu Holdings 命令；不新增数据源、缓存服务、场景模式或配置键。本轮不包含提交、推送、PR、合并、发布、升级及任何生产数据或服务变更。
+
+### 代码依据与复用决定
+
+依据为本地 `origin/main` 指向的 `2643e48d632f1de6b7118a1b7130477f07683922`，不是本次联网刷新后的远端状态。共享 checkout HEAD 为 `73a8da096f5e06b1a87ecb1592e5ca9830579071`，已有其他任务改动；本节点只追加本节和任务记录。进入 Impl 前刷新基线、核对相关变化并隔离实现。下表描述设计时源码，不代表已发生生产故障。
+
+| 责任位置 | 已核实行为 | 本次改法 |
+| --- | --- | --- |
+| `src/application/account_config.py` 的 `build_account_portfolio_source_plan` | 账户来源已固定 Futu | 复用来源和账户配置解析；不重新引入 Holdings 回退 |
+| `src/application/futu_portfolio_context.py` 的 fetch/build | 构建现金组成、可靠性、物理账户 authority、源时间及持仓快照 | 继续作为唯一 Futu 金额归一化 owner；补足现金观测时间、严格资金行与零值保留；隔离后续持仓/FX 失败 |
+| `src/application/portfolio_context_service.py` 的 `load_account_portfolio_context` | 按文件时间与传入 TTL 用缓存；账户校验只覆盖部分身份字段 | 收口有效配置、现金评价、缓存选择、单次刷新与结果；校验实际账户及环境 |
+| `src/application/pipeline_context.py`、`src/application/prepared_portfolio_context.py` | 使用共享 loader，但 TTL 由调用方传入；prepared 绑定 run 配置、payload hash 和 FX | 统一从有效配置解析现金 TTL；透传共享结果并保留封存链 |
+| `src/application/cash_headroom_query.py` | 强制 TTL 为 0；私有 freshness 拒绝所有 account_cache，混合现金和 FX 判断 | 删除场景强制刷新和私有现金标准；保留派生金额/汇率缺口表达 |
+| `src/application/daily_decision_brief_service.py` | 用 as_of_utc、可靠性和可选状态组合判断现金 | 消费封存时共享结论，历史渲染不调用当前 broker |
+| `src/application/sell_put_cash.py`、`src/application/short_vol_risk_context.py` | 前者自行读可靠性字段；后者直接将现金加入 NAV | 共用可信度结果；现金不可用时依赖现金的容量/NAV 明确不可用 |
+| `src/application/wheel/capacity.py`、`src/application/wheel/workflows.py` | 直接 fetch，现金检查分散；确认现金时使用默认 TTL | 经共享读取入口；确认时用有效配置和当前时间复核同一标准 |
+| `src/application/portfolio_assignment_scenario.py` | 直接 fetch；Futu 综合证据固定 300 秒，另查 cash_balance_reliable | 现金接入共享标准；综合证据区分现金、持仓、行情各自结果 |
+| `src/application/runtime_portfolio_snapshot.py` | broker_cash 白名单未包含现金可靠性与评价结果；section freshness 固定 not_applicable | 保留传输层 freshness 合同，在 cash facts 中完整绑定现金结论 |
+| `src/application/agent_tools/materialization.py` | 查询输出使用字段白名单 | 加入现金结论，确保实际 Tool 输出保留原因与源时间 |
+
+检索覆盖 `src`、`domain` 中共享 loader、Futu fetch、cash_by_currency、cash_balance_reliable、cash_source_observation_status 的引用，并读取上述责任实现。`domain/services/source_adapters.py` 负责映射既有 payload；`src/application/trades/attribution.py` 的容量 hash、Wheel 的 `_put_portfolio_context` 重建也必须透传现金结论。`portfolio_context_builder.py` 的独立 Feishu 命令不是账户现金回退，保留。
+
+纯现金证据判定放入现有 `domain/domain/risk_capacity.py`，复用其金额检查与现金容量职责；应用层负责配置、I/O 和身份解析。计划增加一个纯函数 `evaluate_cash_snapshot`，不增加服务类、接口、工厂或独立策略框架；纯函数不读取时钟、配置文件或缓存，不导入 src。
+
+### 唯一现金合同
+
+1. **金额**：继续使用 Futu builder 的 cash_by_currency 与 cash_components_by_currency；net_cash_power 只保留现有独立展示语义，不能代替现金。现金表必须非空、币种有效、值为有限数值且不能是 bool；必需证据缺项、资金响应部分失败、现金可靠性未明确为 true 均不可用；可选 SDK 字段未返回的含义按下表处理。合法零值和负值保留。正常化币种别名沿用现有 owner；不能把畸形值丢弃后当作完整余额，也不能为缺失币种凭空补零。
+2. **身份**：从当前有效配置复用账户映射和环境解析。Futu 来源、逻辑账户、唯一物理账户、交易环境、运行市场必须匹配；filters、capacity_authority 和 source_account_identifiers 互相矛盾或缺少必要绑定时不可用。不得借用另一市场/账户/运行根目录的缓存。现金池仍按原物理账户语义计算，不将 US/HK 余额重复相加。
+3. **观察时间**：现金只使用独立的 cash_source_observed_at；不能回退到现有 source_observed_at（其在 FX/持仓查询后才赋值）。缺失或无效均不可用，builder 不得默认当前时间补现金时间。禁止用文件 mtime、as_of_utc、读取缓存的时间替换源时间。时区缺失、未来时间、无法解析均不可用。直接取数的现金时间在资金响应成功返回后立即捕获，早于任何 FX/持仓查询；后续持仓/报价慢不能把早先现金重新标新，持仓仍保留自己的观测时间。
+4. **有效期**：唯一配置为 runtime.portfolio_context_ttl_sec；缺省使用 config_defaults 的 900 秒，只在共享应用 owner 解析一次。可信条件包含 `0 <= evaluated_at - observed_at <= ttl`。显式非整数、bool、零和负值作为无效配置报不可用，并由配置校验提示；不再允许调用方通过 0 偷换为强制实时模式。该约束属于拟实施行为，旧环境若用了 0，后续升级前须经现有配置流程单独处理；本任务不改真实配置。
+5. **可靠性**：cash_balance_reliable 必须为 true，cash_balance_unavailable_by_row 不得有错误；上游显式 stale/untrusted/unknown 不可提升为可信。正常 Futu builder 未给 observation_status 时，可由完整身份、时间和可靠性证据判为可信；不会仅凭 context_source=futu_direct 判可信。account_cache 和 futu_direct 是读取来源标签，不影响同一事实的可信结论。
+6. **结果**：在 portfolio context 中增加一个必要的 `cash_snapshot` 对象，字段为 status（fresh/stale/unknown）、reason_codes、source_observed_at、evaluated_at、max_age_sec。金额继续保存在原字段，不另存一份。fresh 表示可供后续业务计算，stale 表示超龄或上游明确过期，unknown 表示证据/身份/数值/配置不可用。多个原因去重并稳定排序；unknown 优先于 stale。统一原因至少覆盖 CASH_SOURCE_INVALID、CASH_IDENTITY_MISMATCH、CASH_OBSERVATION_MISSING、CASH_OBSERVATION_IN_FUTURE、CASH_OBSERVATION_STALE、CASH_BALANCE_UNRELIABLE、CASH_AMOUNT_INVALID、CASH_TTL_INVALID、CASH_PROVIDER_UNAVAILABLE。用户文案由原有展示层翻译。
+7. **失败输出**：只允许 fresh 现金进入容量计算；无效/部分原始值可留作诊断，但必须携带不可用状态，不能出现在“可用现金”结果中。已有 cash_balance_reliable 表达上游完整性；整体可信度只由 cash_snapshot 表达，不能再根据前者单独批准。FX 缺失不把原币现金变成不可信；涉及换算的派生值依既有 FX owner 返回不可用及原因。
+
+共享纯函数显式接收原始 context、从配置解析的预期 authority、评价时间和 TTL，返回上述结果；数值校验复用现有工具并补足 finite 判定。共享应用 owner 提供一个消费结论的小函数：对象缺失/格式无效直接 unavailable，不能通过猜测旧字段恢复 fresh。消费者只读该结果，不复制时间、账户或 reliable 判断。对当前操作需要重新评价时，仍调用同一个纯函数并传入当前配置和时间。
+
+### Futu 资金字段与局部失败（P1、P2、P5）
+
+资金行在 source owner 严格解析；身份过滤前先拒绝非映射坏行，不能静默丢弃后声称响应完整。每个选中账户资金行至少有一个明确、有限的受支持组成；存在空组成行、非法组成或 provider 明确部分失败，整个现金结果不可用。保持原支持资产范围，不要求八个币种字段全部返回。
+
+| 字段/输入 | 本地合同 |
+| --- | --- |
+| hk_cash/us_cash/cn_cash/jp_cash/sg_cash/au_cash/ca_cash/my_cash | 对应 HKD/USD/CNY/JPY/SGD/AUD/CAD/MYR；有限数值（含数字字符串）按原币计入，显式 0 必须保留键，负值保留 |
+| fund_assets/mmf_assets/money_fund_assets | 同一基金组成的别名，沿用现有行币种解析；只计一次。多个明确返回的别名必须数值一致，否则视为冲突，不重复相加 |
+| 字段不存在、None、空串、-、N/A | SDK 未返回该可选组成；跳过该组成且保留原始缺值证据，不推断为零或该币种不适用。至少一个明确组成且无其他错误才满足现有资金行合同 |
+| bool、NaN、Inf、非数值字符串 | 非法值，不能作为未返回跳过；该行及现金结果不可用 |
+| cash、net_cash_power | 不作为上述组成的回退；net_cash_power 保持独立展示 |
+| 相同物理账户/环境/行币种的重复行 | 归一化后的受支持组成、缺值集合和身份一致才去重一次；任何余额或缺值冲突均不可用，禁止 first-wins |
+
+此处“完整”仅指现有受支持资金响应合同；不声称 SDK 已返回所有可能币种或账户资产。原始行/既有错误字段保存诊断，不增设币种政策配置。[Futu 资金接口](https://openapi.futunn.com/futu-api-doc/trade/get-funds.html) 及本机 SDK 10.10.7008 的 cashInfoList 解析支持“未返回不等于零”的区分。测试覆盖单个合法组成、全未返回、合法行混坏行、零余额与冲突重复。
+
+资金查询失败时现金不可用；资金查询成功后先固定现金时间，FX、持仓或 include_options 的条款补全失败不得抹掉该现金事实。FX 使用原缺失状态；持仓使用现有 position_snapshot_input 的 completeness=partial/unknown、quality=unavailable 和 error，不得以空 rows 伪装 complete。仅已完成的阶段能标完整。异常在阶段边界处理，取消/进程超时继续向外终止，不能捕获成成功或在截止后补请求。
+
+现金独立成功不代表完整 portfolio 成功：共享 reader 返回分项证据；归属、CC、依赖股票的 NAV 和综合指派情景须保留各自持仓门禁。尤其 short_vol_risk_context 不得把缺 stocks_by_symbol 当作零股票加现金计算总 NAV。runtime snapshot 的 broker_positions completeness 从真实持仓快照产生，不能从 prepared manifest 的载入成功推导 complete；source binding 校验相应核对原 payload 的分项证据。broker_cash 可保留可信现金，综合状态保留部分失败。A1 比较现金结论，不能要求所有综合业务状态相同。
+
+### 读取、缓存与封存
+
+共享读取顺序：有效配置和期望身份 → 读取指定目录现有 portfolio_context.json → 共享评价 → fresh 且包含本次所需数据则复用 → 否则最多一次 Futu 刷新 → 对刷新结果运行同一评价 → 返回完整 context 和现金结论。缓存 JSON 损坏等视为未命中；刷新失败不退回过期余额，错误统一映射为不可用，保留原本的日志与故障通道。取消/超时不再补发请求。
+
+state_dir、runtime root、run_id、account 继续由既有入口绑定；共享 loader 不搜索其他根目录或其他 run 的缓存。不同目录使用相同读取规则，本轮不建立全局现金缓存仓库，也不承诺不同观测时刻读取同一快照。只读入口继续 write_cache=False；prepared 继续通过现有封存写入路径产出，不修改已封存 payload。允许写缓存的入口使用既有 atomic_write_json，避免并发半文件；缓存读取失败可以刷新，但写入失败不得悄悄伪报已缓存。
+
+FX 注入在共享 reader 完成缓存/刷新选择后作用于返回副本：调用方明确传入的当前 FX observation 覆盖缓存 FX，明确传入 None/空值时清除旧 FX 并返回缺失状态；未提供该参数才走原 FX owner。区分“未传”和“明确缺失”只需现有参数或一个内部哨兵，不加策略模式。prepared 原有后置覆盖并入此处；不修改原缓存对象、封存文件、现金金额或现金时间。缓存命中且有显式 FX 时 broker 调用为零。
+
+write_cache=False 必须贯穿嵌套 FX owner（包括 lock 文件），不是仅禁止 portfolio_context.json 写入。Wheel worker 显式接受由入口绑定 runtime root 的 FX observation 或 cache path，并向 current_exchange_rate_snapshot 传递 write_cache=False；禁止按源码目录推导运行缓存。隔离测试递归检查 portfolio、FX、lock 文件均无创建/改写。
+
+将应用层直接 fetch 移入共享 reader：现金查询和指派情景传递既有 FX observation；Wheel worker 保留 include_options、进程隔离、10 秒截止和取消。需要完整股票/期权快照时，loader 复用现有 position_snapshot_scope_errors 检查覆盖；对归属的 60 秒持仓门槛沿用原规则，缓存不满足时仅在共享 loader 内刷新一次。现金始终使用同一 TTL；持仓失败阻断归属，但必须表达为持仓证据失败。该附加检查只用于请求持仓的既有用途，不增加现金场景模式。
+
+Live 查询在共享 loader 完成时评价；一次扫描在输入准备时固定评价结果并在同次运行复用。Wheel 预览保存该现金事实，确认属于新的决策时刻：在既有确认边界重核源时间、当前有效 TTL 与身份，已过期或配置改变则要求重新预览；不能用新现金悄悄确认旧预览，也不将网络 I/O 放进账本写锁。现金结论及原始现金证据纳入现有 capacity identity/hash；运行评价时钟不作为唯一变化理由强制每次预览失效，比较原始事实与当次策略参数。
+
+Wheel 确认的落点：复用 candidate snapshot 已有 kind=portfolio 依赖及 hash，加载其绑定的 prepared manifest/payload 或原 portfolio_context 文件，并校验 run/account/root/hash；不新增现金快照文件或全局仓库。CLI 和 Tool 当前确认前调用实时 _cash_capacity 的路径改为读此绑定事实；依赖文件已变化/缺失即要求重新预览。将同一现金原始证据、当前有效 TTL/预期 authority 与确认时间传给 create_wheel_intent → Put 确认；_put_portfolio_context 必须保留这些证据。确认只调用共享纯评价，随后沿原事务重核最新 ledger/reservation；不在锁中联网。现金事实指纹覆盖金额、来源/身份、独立现金时间、可靠性与 TTL，排除 evaluated_at 及由它产生的 status/reason_codes；完整封存 payload hash 仍包含整个 cash_snapshot。TTL/身份变化或过期拒绝新确认；已持久化相同 request 的幂等读回保持在新鲜度检查之前，不能因事后过期破坏回执读取。测试同时覆盖 CLI、Tool、API 与幂等重试。
+
+Prepared manifest/payload hash、run FX hash、run config hash 继续覆盖同一事实。新运行必须封存 cash_snapshot 和 cash_source_observed_at；runtime snapshot 的 broker_cash facts 和真实 tool 投影必须带出它们、cash_balance_reliable、cash_balance_unavailable_by_row 及原始来源状态。原 snapshot section 的 not_applicable freshness 不承担业务现金可信度，校验器不能据其放行现金，相关消费者读取现金字段结论。
+
+历史兼容限定在已有 artifact 读取入口：有封存结论的报告原样重放，不以当前时钟判过期，不发 broker 请求。旧封存缺少 cash_snapshot 时，仅当原绑定的配置、源现金事实、独立可信现金观测时间、可信的当次评价时刻都齐全，才在内存中调用同一评价函数重建；否则显示现金证据不足。不得以当前配置/文件 mtime 补旧证据，也不重写原内容、hash 或已持久化报告。结构化 runtime snapshot 的 broker_cash section 新写入使用 v2，原 v1 按其固定字段集合与原 hash 校验；顶层和其他 section 版本保持原合同。仅该 section 按版本分派固定字段集合，拒绝混合形状及未知字段，不引入通用 schema 迁移器。旧结构解码成功不代表现金可用于当前决策。实现时必须用旧 payload fixture 验证这些行为。
+
+### 消费者迁移与退役
+
+| 消费链 | 必须发生的业务变化 | 应保持 |
+| --- | --- | --- |
+| 直接扫描、prepared → CSP/Combo risk | 共用 reader；缺现金证据时现金容量和依赖现金的 NAV 不可用；真实零/负值保留 | 候选公式、抵押结算、CC 股票门槛 |
+| cash headroom → CLI、Tool、footer | 移除 ttl=0 和私有现金 freshness；输出共享状态/时间/原因，CNY 换算不足独立呈现 | 原有字段和 facade，金额换算 owner |
+| prepared → Daily Brief / runtime snapshot | 传递封存结论、原始可靠性，renderer 不补查现金 | run/config/FX/hash 绑定和历史稳定性 |
+| Wheel preview → confirm | 经 reader，按当前有效配置复核同一现金标准；缺字段预览不可批准 | 预览证明、账本指纹、预留及确认事务 |
+| 成交归属 observation → capacity check | 同入口、同现金结论，指纹包含现金判断依据 | 60 秒持仓对账、10 秒进程预算、取消、只读观测 |
+| portfolio assignment → portfolio evidence | Futu cash 标准与其他入口一致；固定 300 秒不得再用于现金判定；综合状态如实保留持仓/报价缺口 | PM non-Futu、估值与行情自身合同 |
+
+退役现金查询 `_cash_freshness` 中现金判断分支、各消费者 cash_balance_reliable/observation_status 的批准逻辑、Wheel Put 默认 TTL 判断、指派情景固定 300 秒现金判断。broker_capacity_observation_is_fresh 若仍有 CC 股票消费者，保留其股票职责并清晰命名/隔离，禁止 Put 继续调用。保留 builder 的证据生成、domain 计算函数的数值防御、显示层的状态投影；这些不构成第二套现金策略。需删除的公共符号先查 imports、动态注册、exports 和 facade，按项目要求登记 public_surface_retirements，不能仅凭关键词未命中就删除。
+
+### 验收与实现切片
+
+| 验收 | 可观察结果 | 验证入口 |
+| --- | --- | --- |
+| A1 同一标准 | 同样事实、有效配置、评价时间，各消费者金额和现金 status/reason_codes 一致 | 共享参数化 fixture 贯穿直接扫描、prepared、查询、Brief、Wheel、指派应用入口 |
+| A2 缓存与时间 | 旧在线缓存缺独立现金时间只刷新一次；FX/持仓延迟不能续期现金；新文件旧源时间被刷新；旧文件新源时间可用；TTL 边界等号可用、超出不可用；未来/缺时区/缺时间不可用；显式无效 TTL 可见 | 共享 loader + 配置校验 + 真实 query/prepared facade 的 fetch 计数 |
+| A3 金额与身份 | 零、负值保留；可选缺值不伪造零；坏行、冲突别名/重复行、NaN/Inf/bool、空/部分结果不可用；账户、物理 ID、环境、市场不匹配无法复用 | Futu builder/loader 与 domain 判断，跨账户缓存回归 |
+| A4 故障与副作用 | 后续 FX/持仓失败保留可信现金并阻断依赖失败项的综合计算；取消/超时不补请求；只读模式含嵌套 FX/lock 无写入，无真实 provider/ledger/通知调用 | stub gateway、临时目录、worker cancellation 和写入 spy |
+| A5 封存与传递 | cash_snapshot 经 prepared、runtime projection、Tool 白名单传递；晚一天重渲染相同报告不变；旧证据缺失有明确原因 | prepared、runtime snapshot、Daily Brief、Tool 输出与旧 artifact fixture |
+| A6 既有资金安全 | 可信现金不能清除未决结算/预留；确认原事实超龄/TTL身份变化被拒绝，持久幂等读回不受事后超龄影响；缓存命中新 FX 生效、明确缺失不回用旧 FX；持仓门槛及 FX hash 保留 | Wheel preview/confirm、成交归属、CSP/Combo、汇率回归 |
+| A7 唯一实现 | 所有 Futu 账户现金读取经共享 owner，无场景 ttl=0、独立 300 秒现金规则、reliable-only 批准或动态入口遗漏 | 真实消费者清单、静态调用/导出复核及 A1 集成用例 |
+
+切片 1：共享证据判定、配置解析、loader 刷新、Futu 严格资金归一化/时间修正、FX 注入和后续 I/O 局部失败；覆盖 A2/A3/A4，建立 A1 的共用 fixture。包含必要调用签名适配，使当前消费者仍可运行，但不在这一片宣布全项目统一。
+
+切片 2：全体业务消费者、封存/投影和历史读取接入；覆盖 A1/A5/A6，移除重复判断，保留真实入口的只读与故障合同。依赖切片 1。
+
+切片 3：真实 CLI/Tool/scan/prepared/Wheel/assignment 一致性验收、动态入口/旧分支退役检查与必需门禁；覆盖 A7 并复核 A1–A6。依赖切片 2，不增加业务功能。每片完成按 Devflow 展示验证并等待确认。
+
+优先扩充现有测试：tests/test_futu_portfolio_context.py、tests/test_pipeline_context_shared_context.py、tests/test_prepared_portfolio_context.py、tests/test_query_sell_put_cash_futu.py、tests/test_risk_capacity.py、tests/test_daily_decision_brief_service.py、tests/test_runtime_portfolio_snapshot.py、tests/test_portfolio_assignment_scenario.py 及 Wheel/成交归属入口测试。仅在跨消费者 fixture 无合适 owner 时新增一个集成测试文件。测试必须断言业务数值、具体原因、provider 调用次数和副作用；不能只 mock 返回 fresh 后声称入口已统一。
+
+实现验证使用隔离 fixture、固定时钟、stub provider，拒绝真实网络、配置/账本/服务写入。完整任务 diff 经项目 om-pre-push-checks、相关回归、静态导入/依赖与公共面检查；本节点只有文档检查，不把设计测试计划当作已通过证据。
+
+### 风险与推进条件
+
+- 旧测试和旧缓存可能缺少物理身份、时区或可靠性字段：修正有效 fixture，旧在线缓存刷新，不能保留消费者宽松回退。
+- 显式零 TTL 将从“禁用缓存”转为无效配置；设计审查必须核对所有作者入口与已提交配置样例，记录迁移提示。无生产盘点或修改授权，不声称环境已就绪。
+- 归属一次观测同时包含现金与持仓；本设计保留独立的持仓完整性/60 秒要求。不得为实现缓存复用降低该要求，亦不得将此要求冒充第二套现金 TTL。
+- 历史 schema 和新 cash facts 的投影校验需要旧 fixture 证明；不放宽整体 hash/source binding 校验来接纳新字段。
+- 同期存在 lot/归属任务修改 Wheel 与 trades 模块。Impl 刷新基线后检查合入情况；保留他人工作，若实际责任边界改变则在当前设计补证并重新确认，不复制旧实现。
+- 当前未读取生产现金、未执行业务测试。四路独立建议及采纳确认已完成；Planreview 结果记录在任务状态和审查报告，最终节点确认前不进入 Impl。

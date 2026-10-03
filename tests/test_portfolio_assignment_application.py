@@ -8,6 +8,20 @@ from urllib.parse import urlsplit
 import pytest
 
 from src.application import portfolio_assignment_scenario as application
+from cash_evidence_helpers import cash_portfolio, cash_config
+
+
+@pytest.fixture(autouse=True)
+def cash_runtime(monkeypatch, tmp_path):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 24, 1, 0, 0, tzinfo=timezone.utc)
+    from src.application import portfolio_context_service
+    monkeypatch.setattr(portfolio_context_service, "datetime", Clock)
+    monkeypatch.setattr(application, "datetime", Clock)
+    monkeypatch.setattr(application, "repo_base", lambda: tmp_path)
+
 
 
 class _Response:
@@ -76,15 +90,15 @@ def _patch_positions(monkeypatch, positions, *, holdings_enabled=False, approved
         lambda accounts: (
             positions,
             "config.us.json",
-            {"portfolio_management": {"enabled": True}, "portfolio": {"holdings": {"enabled": holdings_enabled, **({"approved_non_futu_brokers": {"lx": approved if approved is not None else ["银行"]}} if holdings_enabled else {})}}},
+            {**cash_config(), "portfolio_management": {"enabled": True}, "portfolio": {"holdings": {"enabled": holdings_enabled, **({"approved_non_futu_brokers": {"lx": approved if approved is not None else ["银行"]}} if holdings_enabled else {})}}},
         ),
     )
     monkeypatch.setattr(
         application,
         "fetch_futu_portfolio_context",
-        lambda *, cfg, account, exchange_rate_observation: (
+        lambda *, cfg, account, exchange_rate_observation, **_kwargs: (
             futu_context
-            or {
+            or cash_portfolio({
                 "source_observed_at": "2026-07-24T01:00:00Z",
                 "cash_by_currency": {"CNY": 0},
                 "cash_balance_reliable": True,
@@ -92,7 +106,7 @@ def _patch_positions(monkeypatch, positions, *, holdings_enabled=False, approved
                 "position_snapshot_input": {"rows": [], "errors": []},
                 "exchange_rates": None,
                 "exchange_rate_status": "unavailable",
-            }
+            })
         ),
     )
     monkeypatch.setattr(application, "_read_futu_quotes", lambda *_args, **_kwargs: (futu_quotes or [], []))
@@ -238,15 +252,15 @@ def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypat
     }
     reads = []
     monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
-        [], "config.us.json", {"portfolio": {"holdings": {"enabled": False}}},
+        [], "config.us.json", {**cash_config(), "account_settings": {**cash_config()["account_settings"], **cash_config("sy")["account_settings"]}, "portfolio": {"holdings": {"enabled": False}}},
     ))
     monkeypatch.setattr(application, "current_exchange_rate_snapshot", lambda **_kwargs: reads.append("fx") or observation)
     monkeypatch.setattr(application, "project_exchange_rate_snapshot", lambda *_args, **_kwargs: observation)
 
-    def read_context(*, cfg, account, exchange_rate_observation):
+    def read_context(*, cfg, account, exchange_rate_observation, **_kwargs):
         assert exchange_rate_observation is observation
         reads.append(account)
-        return {
+        return cash_portfolio({
             "source_observed_at": "2026-07-24T01:00:00Z",
             "cash_by_currency": {"CNY": 1},
             "cash_balance_reliable": True,
@@ -254,7 +268,7 @@ def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypat
             "exchange_rates": observation,
             "exchange_rate_status": "ready",
             "filters": {"account": account},
-        }
+        }, account=account)
 
     monkeypatch.setattr(application, "fetch_futu_portfolio_context", read_context)
     monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: pytest.fail("PM read while off"))
@@ -271,6 +285,13 @@ def test_query_keeps_shared_fx_cache_read_only(monkeypatch, tmp_path, existing_c
     from src.infrastructure import exchange_rates as fx
 
     now = datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+    from src.application import portfolio_context_service
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(portfolio_context_service, "datetime", Clock)
+    monkeypatch.setattr(application, "datetime", SimpleNamespace(now=lambda _tz: now))
     monkeypatch.setattr(fx, "_utc_now", lambda: now)
     monkeypatch.setattr(application, "repo_base", lambda: tmp_path)
     cache = tmp_path / "output_shared" / "state" / "rate_cache.json"
@@ -293,14 +314,14 @@ def test_query_keeps_shared_fx_cache_read_only(monkeypatch, tmp_path, existing_c
         "HKDCNY": pair(0.92, "2026-09-30T11:00:00+00:00"),
     }})
     monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
-        [], "config.us.json", {"portfolio": {"holdings": {"enabled": False}}},
+        [], "config.us.json", {**cash_config(), "account_settings": {**cash_config()["account_settings"], **cash_config("sy")["account_settings"]}, "portfolio": {"holdings": {"enabled": False}}},
     ))
-    monkeypatch.setattr(application, "fetch_futu_portfolio_context", lambda **_kwargs: {
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", lambda **_kwargs: cash_portfolio({
         "source_observed_at": now.isoformat(),
         "cash_by_currency": {"CNY": 1},
         "cash_balance_reliable": True,
         "position_snapshot_input": {"rows": [], "errors": []},
-    })
+    }))
 
     result = application.query_portfolio_assignment_scenario(["lx"])
 
@@ -321,20 +342,20 @@ def test_query_holiday_fx_keeps_cash_valuation_but_withholds_coverage(monkeypatc
         },
     }}
     monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
-        [], "config.hk.json", {"portfolio": {"holdings": {"enabled": False}}},
+        [], "config.hk.json", {**cash_config(), "account_settings": {**cash_config()["account_settings"], **cash_config("sy")["account_settings"]}, "portfolio": {"holdings": {"enabled": False}}},
     ))
     monkeypatch.setattr(application, "current_exchange_rate_snapshot", lambda **_kwargs: snapshot)
 
-    def read_context(*, cfg, account, exchange_rate_observation):
-        return {
-            "source_observed_at": "2026-10-02T01:42:00+00:00",
+    def read_context(*, cfg, account, exchange_rate_observation, **_kwargs):
+        return cash_portfolio({
+            "source_observed_at": "2026-07-24T01:00:00Z",
             "cash_by_currency": {"HKD": 100},
             "cash_balance_reliable": True,
             "position_snapshot_input": {"rows": [], "errors": []},
             "exchange_rates": exchange_rate_observation,
             "exchange_rate_status": "unavailable_stale",
             "filters": {"account": account},
-        }
+        }, account=account)
 
     monkeypatch.setattr(application, "fetch_futu_portfolio_context", read_context)
     result = application.query_portfolio_assignment_scenario(["lx"])
@@ -419,7 +440,7 @@ def test_query_missing_futu_quote_is_partial_without_pm_fallback(monkeypatch):
     _patch_positions(
         monkeypatch,
         [],
-        futu_context={
+        futu_context=cash_portfolio({
             "source_observed_at": "2026-07-24T01:00:00Z",
             "cash_by_currency": {"CNY": 100},
             "cash_balance_reliable": True,
@@ -435,7 +456,7 @@ def test_query_missing_futu_quote_is_partial_without_pm_fallback(monkeypatch):
             },
             "exchange_rates": None,
             "exchange_rate_status": "unavailable",
-        },
+        }),
     )
     monkeypatch.setattr(
         application,
@@ -485,7 +506,7 @@ def test_scoped_old_pm_input_error_is_source_failure() -> None:
 def test_query_old_enabled_config_without_broker_approval_skips_pm(monkeypatch):
     _patch_positions(monkeypatch, [], holdings_enabled=True)
     monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
-        [], "config.us.json", {"portfolio": {"holdings": {"enabled": True}}},
+        [], "config.us.json", {**cash_config(), "portfolio": {"holdings": {"enabled": True}}},
     ))
     monkeypatch.setattr(application, "read_portfolio_valuation_evidence",
                         lambda **_kwargs: pytest.fail("PM must not be read before broker approval"))
@@ -533,7 +554,7 @@ def test_query_uses_futu_baseline_and_only_optional_non_futu_pm_rows(
     expected_cash,
     expected_codes,
 ):
-    context = {
+    context = cash_portfolio({
         "source_observed_at": "2026-07-24T01:00:00Z",
         "cash_by_currency": {"CNY": 125000},  # Futu cash plus its fund_assets/MMF
         "cash_balance_reliable": True,
@@ -557,7 +578,7 @@ def test_query_uses_futu_baseline_and_only_optional_non_futu_pm_rows(
         },
         "exchange_rates": None,
         "exchange_rate_status": "unavailable",
-    }
+    })
     _patch_positions(
         monkeypatch,
         [],
@@ -619,7 +640,7 @@ def test_query_fails_closed_when_futu_baseline_is_unavailable(monkeypatch):
 
     assert result["status"] == "unavailable"
     assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
-    assert any("OpenD down" in warning for warning in result["warnings"])
+    assert "CASH_PROVIDER_UNAVAILABLE" in result["snapshot"]["cash_snapshots"]["lx"]["reason_codes"]
 
 
 def test_query_marks_incomplete_futu_cash_and_unknown_pm_broker_partial(monkeypatch):
@@ -627,7 +648,7 @@ def test_query_marks_incomplete_futu_cash_and_unknown_pm_broker_partial(monkeypa
         monkeypatch,
         [],
         holdings_enabled=True,
-        futu_context={
+        futu_context=cash_portfolio({
             "source_observed_at": "2026-07-24T01:00:00Z",
             "cash_by_currency": {"CNY": 100},
             "cash_balance_reliable": False,
@@ -635,7 +656,7 @@ def test_query_marks_incomplete_futu_cash_and_unknown_pm_broker_partial(monkeypa
             "position_snapshot_input": {"rows": [], "errors": []},
             "exchange_rates": None,
             "exchange_rate_status": "unavailable",
-        },
+        }),
     )
     evidence = _valuation_response()
     evidence["scope"].update({"holdings_scope": "non_futu", "broker_inventory": {"lx": {"brokers": [{"broker": "Futu", "classification": "futu", "row_count": 1}]}}})
@@ -655,14 +676,14 @@ def test_query_marks_incomplete_futu_cash_and_unknown_pm_broker_partial(monkeypa
 def test_futu_cash_uses_observed_currency_rate():
     rows, warnings = application._futu_holdings(
         "lx",
-        {
+        cash_portfolio({
             "cash_by_currency": {"HKD": 100},
             "cash_balance_reliable": True,
             "stocks_by_symbol": {},
             "position_snapshot_input": {"rows": [], "errors": []},
             "exchange_rates": {"rates": {"HKDCNY": 0.92}},
             "exchange_rate_status": "ready",
-        },
+        }),
         {},
     )
 
@@ -672,7 +693,7 @@ def test_futu_cash_uses_observed_currency_rate():
 
 def test_futu_holdings_requires_full_position_snapshot():
     with pytest.raises(ValueError, match="stock snapshot is missing"):
-        application._futu_holdings("lx", {"cash_by_currency": {"CNY": 0}, "stocks_by_symbol": {}}, {})
+        application._futu_holdings("lx", cash_portfolio({"cash_by_currency": {"CNY": 0}, "stocks_by_symbol": {}, "position_snapshot_input": None}), {})
 
 
 def test_call_assignment_does_not_count_pm_futu_stock_copy(monkeypatch):
@@ -695,7 +716,7 @@ def test_call_assignment_does_not_count_pm_futu_stock_copy(monkeypatch):
             }
         ],
         holdings_enabled=True,
-        futu_context={
+        futu_context=cash_portfolio({
             "source_observed_at": "2026-07-24T01:00:00Z",
             "cash_by_currency": {"CNY": 0},
             "cash_balance_reliable": True,
@@ -711,7 +732,7 @@ def test_call_assignment_does_not_count_pm_futu_stock_copy(monkeypatch):
             },
             "exchange_rates": None,
             "exchange_rate_status": "unavailable",
-        },
+        }),
     )
     evidence = _valuation_response()
     monkeypatch.setattr(application, "_read_futu_quotes", lambda *_args, **_kwargs: ([_futu_quote("NVDA", 120)], []))
@@ -737,3 +758,33 @@ def test_query_returns_business_unavailable_when_option_ledger_is_down(monkeypat
     assert result["status"] == "unavailable"
     assert result["summary"]["assignment_count"] == 0
     assert any("ledger down" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_assignment_evaluates_cash_after_provider_returns(tmp_path, monkeypatch, future):
+    from datetime import timedelta
+    from src.application import portfolio_context_service
+    start = datetime(2026, 7, 24, 1, tzinfo=timezone.utc)
+    clock = [start]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    for module in (application, portfolio_context_service):
+        monkeypatch.setattr(module, "datetime", Clock)
+    monkeypatch.setattr(application, "_load_runtime_and_positions",
+        lambda _: ([], str(tmp_path / "config.us.json"), cash_config()))
+    monkeypatch.setattr(application, "current_exchange_rate_snapshot", lambda **_: {})
+    monkeypatch.setattr(application, "project_exchange_rate_snapshot", lambda *a, **kw: {})
+    monkeypatch.setattr(application, "_read_futu_quotes", lambda *a, **kw: ([], []))
+    def fetch(**kwargs):
+        clock[0] += timedelta(milliseconds=1)
+        observed = clock[0] + (timedelta(seconds=1) if future else timedelta())
+        return cash_portfolio({"cash_source_observed_at": observed.isoformat(),
+            "source_observed_at": observed.isoformat(), "cash_by_currency": {"CNY": 100}})
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", fetch)
+    result = application.query_portfolio_assignment_scenario(["lx"])
+    snapshot = result["snapshot"]["cash_snapshots"]["lx"]
+    assert snapshot["status"] == ("unknown" if future else "fresh")
+    assert snapshot["reason_codes"] == (["CASH_OBSERVATION_IN_FUTURE"] if future else [])
+    assert list(tmp_path.iterdir()) == []

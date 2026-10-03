@@ -441,6 +441,83 @@ def load_wheel_candidate_snapshot(*, base: Path, run_id: str, account: str) -> d
     return payload
 
 
+def load_wheel_candidate_cash_fact(*, base: Path, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the preview's hash-bound portfolio without fetching replacement cash."""
+    from hashlib import sha256
+    from src.application.prepared_portfolio_context import PreparedPortfolioContextError, load_prepared_portfolio_context
+    from src.application.portfolio_context_service import cash_snapshot_evidence
+
+    from src.application.prepared_option_positions_context import (
+        PREPARED_OPTION_POSITIONS_MANIFEST_NAME, PreparedOptionPositionsContextError,
+        load_prepared_option_positions_context,
+    )
+
+    try:
+        run, account = str(snapshot["run_id"]), str(snapshot["account"])
+        dependencies = normalize_dependencies(snapshot.get("dependencies") or [], verify_root=base)
+        dependency = next(row for row in dependencies if row["kind"] == "portfolio")
+        state_path, compatibility_path = account_run_config_paths(base=base, run_id=run, account=account)
+        config = load_published_account_run_config(
+            base=base, run_id=run, account=account, state_path=state_path,
+            compatibility_path=compatibility_path, account_config_sha256=snapshot["account_config_sha256"],
+        )
+        def read_dependency(row):
+            relpath = row.get("relpath")
+            if not relpath:
+                raise WheelCandidateSnapshotError("dependency path missing; repreview required")
+            path = (base / relpath).resolve()
+            if path.parent != state_path.parent.resolve():
+                raise WheelCandidateSnapshotError("dependency run/account mismatch")
+            raw = read_account_run_state_bytes_safely(base=base, run_id=run, account=account, name=path.name)
+            if sha256(raw).hexdigest() != row["sha256"]:
+                raise WheelCandidateSnapshotError("dependency hash changed")
+            return path, raw
+
+        path, raw = read_dependency(dependency)
+        if path.name == "prepared_portfolio_context.v1.json":
+            portfolio = load_prepared_portfolio_context(
+                manifest_path=path, expected_base=base, expected_run_id=run, expected_account=account,
+                expected_account_config_sha256=snapshot["account_config_sha256"],
+                expected_manifest_sha256=dependency["sha256"], expected_runtime_config=config,
+            )
+        elif path.name == "portfolio_context.json":
+            portfolio = json.loads(raw)
+        else:
+            raise WheelCandidateSnapshotError("portfolio dependency artifact invalid")
+        if not isinstance(portfolio, Mapping):
+            raise WheelCandidateSnapshotError("portfolio dependency unavailable")
+        # The preview cash allocation used the ledger context's frozen FX.
+        ledger_dependency = next(row for row in dependencies if row["kind"] == "ledger")
+        ledger_path, ledger_raw = read_dependency(ledger_dependency)
+        if ledger_path.name == PREPARED_OPTION_POSITIONS_MANIFEST_NAME:
+            options = load_prepared_option_positions_context(
+                manifest_path=ledger_path, expected_base=base, expected_run_id=run, expected_account=account,
+                expected_account_config_sha256=snapshot["account_config_sha256"],
+                expected_manifest_sha256=ledger_dependency["sha256"], expected_runtime_config=config,
+            )
+        elif ledger_path.name == "option_positions_context.json":
+            options = json.loads(ledger_raw)
+        else:
+            raise WheelCandidateSnapshotError("ledger dependency artifact invalid")
+        if not isinstance(options, Mapping):
+            raise WheelCandidateSnapshotError("ledger dependency unavailable")
+        return {
+            "cash_evidence": cash_snapshot_evidence(portfolio),
+            "cash_snapshot": portfolio.get("cash_snapshot"),
+            "cash_authority": portfolio.get("capacity_authority"),
+            "cash_authority_hash": portfolio.get("capacity_identity_hash"),
+            "cash_by_currency": portfolio.get("cash_by_currency"),
+            "source_observed_at": portfolio.get("cash_source_observed_at"),
+            "fx_snapshot": options.get("exchange_rates") or {},
+        }
+
+    except (OSError, ValueError, AccountRunConfigError, WheelCandidateSnapshotError,
+            PreparedPortfolioContextError, PreparedOptionPositionsContextError) as exc:
+        # The writer reads durable request receipts before checking new intent evidence.
+        # Missing/changed preview evidence must fail new intents without blocking replay.
+        return {"cash_evidence_error": str(exc)}
+
+
 __all__ = [
     "WHEEL_CANDIDATE_SNAPSHOT_FILE",
     "WHEEL_CANDIDATE_SNAPSHOT_FILE_V1",
@@ -451,6 +528,7 @@ __all__ = [
     "WheelCandidateSnapshotError",
     "current_wheel_candidate_policy_hash",
     "load_wheel_candidate_snapshot",
+    "load_wheel_candidate_cash_fact",
     "seal_wheel_candidate_snapshot",
     "validate_wheel_candidate_snapshot",
 ]
