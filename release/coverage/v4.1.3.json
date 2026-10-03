@@ -1,0 +1,308 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.3",
+  "base": {
+    "tag": "v4.1.2",
+    "commit": "7a2500f817e3d2718d591086f864b3e9315c3f53"
+  },
+  "reviewed_head": "edb2eab33aef2680179fc7752a6ee8e0c28a1e81",
+  "commits": [
+    {
+      "sha": "bcddf1471731d300aa1feac3638274393cd0b00e",
+      "subject": "fix(fx): unify current rate facts and CNY brief display"
+    },
+    {
+      "sha": "256f87a5df8c6b1ac6f4d8bdde8f27b4592faf49",
+      "subject": "chore(git): merge origin/main into FX branch"
+    },
+    {
+      "sha": "895489ecc0675d19c673455b93fec8c223116b04",
+      "subject": "docs(fx): record retired observation cache writer"
+    },
+    {
+      "sha": "6276aadcf4b3bf85fb10d94b20a664c0e76612c6",
+      "subject": "fix(fx): retain legacy observation capture fallback"
+    },
+    {
+      "sha": "2643e48d632f1de6b7118a1b7130477f07683922",
+      "subject": "Merge pull request #427 from liuxie066/codex/unified-current-fx"
+    },
+    {
+      "sha": "4de6366e96c815eb43eea075b5bbb972c2835db7",
+      "subject": "fix(cash): unify account cash reads and trust policy"
+    },
+    {
+      "sha": "f49b2777e3d92cd648b14354e13a3aad7b8f67f0",
+      "subject": "Merge pull request #428 from liuxie066/codex/cash-read-trust-unified"
+    },
+    {
+      "sha": "3837da9cd35e13791a4ab1af617677963c81837a",
+      "subject": "fix(multiplier): unify validation and trusted economic reads"
+    },
+    {
+      "sha": "ba3a0028ccb4eded115f9c196260a41eed5696e4",
+      "subject": "merge(main): integrate current cash evidence contract"
+    },
+    {
+      "sha": "1b5c4b9df5a68c733e75405a2cefc6c3e7e485a8",
+      "subject": "Merge pull request #429 from liuxie066/codex/option-multiplier-unified"
+    },
+    {
+      "sha": "1beb1531fa72604eb199182ae1e5e20a1ec934e6",
+      "subject": "chore(gateflow): accept plan for lot-identity-unified"
+    },
+    {
+      "sha": "bba88fbcb68f5a158cbe34f20c076488fd611ee3",
+      "subject": "fix(ledger): unify lot identity and attribution decisions"
+    },
+    {
+      "sha": "7db4f7c82a75f5657f42b8224277d7381642ca26",
+      "subject": "chore(gateflow): accept deepreview for lot-identity-unified"
+    },
+    {
+      "sha": "8c81814b3a8f55dc935ec9e600f7753cb59b741c",
+      "subject": "Merge pull request #430 from liuxie066/codex/lot-identity-unified"
+    },
+    {
+      "sha": "c45cdc8303fac304ef46777da6c0810d08001273",
+      "subject": "chore(gateflow): accept plan for validation simplification"
+    },
+    {
+      "sha": "c7fc9e4e1ac391ee822c1b9f2dd34a439628e1dc",
+      "subject": "fix(wheel): accept settlement multiplier without stock order id"
+    },
+    {
+      "sha": "18c93768bb2f49e70e72e988c9ed1b49fe75af5a",
+      "subject": "refactor(performance): remove unused formal option mark path"
+    },
+    {
+      "sha": "516587397ad3a876050585a13d6e4f58383a44f1",
+      "subject": "chore(gateflow): accept deepreview for validation simplification"
+    },
+    {
+      "sha": "eff4c4c32081d82b84a5bbf4f61f1d25481041cf",
+      "subject": "Merge pull request #431 from liuxie066/codex/validation-simplification-20261003"
+    },
+    {
+      "sha": "bfce6b00e948a2f6f386d6bb46cb54c4cc8b0230",
+      "subject": "fix(ledger): accept legacy contract keys in attribution"
+    },
+    {
+      "sha": "edb2eab33aef2680179fc7752a6ee8e0c28a1e81",
+      "subject": "Merge pull request #432 from liuxie066/codex/fix-attribution-legacy-contract-key"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Daily Brief 优先展示人民币现金，并保留原币明细；同一次运行的汇率证据在现金、组合与 Wheel 判断中复用，节假日展示沿用最后一次已验证汇率。",
+      "commits": [
+        "bcddf1471731d300aa1feac3638274393cd0b00e",
+        "6276aadcf4b3bf85fb10d94b20a664c0e76612c6",
+        "2643e48d632f1de6b7118a1b7130477f07683922"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "统一账户现金的来源时间、身份和有效期判定；缺失、过期或不可信的金额不再被当作可用现金，真实零值仍保留。",
+      "commits": [
+        "4de6366e96c815eb43eea075b5bbb972c2835db7",
+        "f49b2777e3d92cd648b14354e13a3aad7b8f67f0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "统一期权乘数校验与经济计算，拒绝缺失或非法乘数，避免隐式 100 倍回退及历史成交状态误判。",
+      "commits": [
+        "3837da9cd35e13791a4ab1af617677963c81837a",
+        "1b5c4b9df5a68c733e75405a2cefc6c3e7e485a8"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "统一期权 Lot 身份和 ordinary、Wheel、Combo 归属提交；缺少来源身份或归属证据冲突时拒绝持久化，重试保持幂等。",
+      "commits": [
+        "bba88fbcb68f5a158cbe34f20c076488fd611ee3",
+        "8c81814b3a8f55dc935ec9e600f7753cb59b741c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复 Wheel 股票交收已有可信成交与数量证据时，因可选股票订单号缺失而误判乘数证据无效的问题。",
+      "commits": [
+        "c7fc9e4e1ac391ee822c1b9f2dd34a439628e1dc",
+        "eff4c4c32081d82b84a5bbf4f61f1d25481041cf"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复历史期权成交的合约键带有 `position_key` 时，人工策略归属预览与确认失败的问题。",
+      "commits": [
+        "bfce6b00e948a2f6f386d6bb46cb54c4cc8b0230",
+        "edb2eab33aef2680179fc7752a6ee8e0c28a1e81"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "256f87a5df8c6b1ac6f4d8bdde8f27b4592faf49",
+      "reason": "仅将当时的 main 合入汇率开发分支；本批次对外行为由对应功能提交与 PR 合并提交覆盖。"
+    },
+    {
+      "commit": "895489ecc0675d19c673455b93fec8c223116b04",
+      "reason": "仅记录退役汇率观察缓存写入者的设计说明，没有独立用户或运行行为变化。"
+    },
+    {
+      "commit": "ba3a0028ccb4eded115f9c196260a41eed5696e4",
+      "reason": "仅将已覆盖的现金证据契约合入乘数开发分支，没有独立于两项 Release Note 的行为变化。"
+    },
+    {
+      "commit": "1beb1531fa72604eb199182ae1e5e20a1ec934e6",
+      "reason": "仅记录 Lot 身份方案的流程确认，没有独立用户或运行行为变化。"
+    },
+    {
+      "commit": "7db4f7c82a75f5657f42b8224277d7381642ca26",
+      "reason": "仅记录 Lot 身份代码审查的流程确认，没有独立用户或运行行为变化。"
+    },
+    {
+      "commit": "c45cdc8303fac304ef46777da6c0810d08001273",
+      "reason": "仅记录校验精简方案的流程确认，没有独立用户或运行行为变化。"
+    },
+    {
+      "commit": "18c93768bb2f49e70e72e988c9ed1b49fe75af5a",
+      "reason": "仅删除无生产调用的正式期权估值路径，没有改变现有用户或运行行为。"
+    },
+    {
+      "commit": "516587397ad3a876050585a13d6e4f58383a44f1",
+      "reason": "仅记录校验精简代码审查的流程确认，没有独立用户或运行行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bcddf1471731d300aa1feac3638274393cd0b00e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/427"
+      ]
+    },
+    {
+      "commit": "256f87a5df8c6b1ac6f4d8bdde8f27b4592faf49",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/427"
+      ]
+    },
+    {
+      "commit": "895489ecc0675d19c673455b93fec8c223116b04",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/427"
+      ]
+    },
+    {
+      "commit": "6276aadcf4b3bf85fb10d94b20a664c0e76612c6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/427"
+      ]
+    },
+    {
+      "commit": "2643e48d632f1de6b7118a1b7130477f07683922",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/427"
+      ]
+    },
+    {
+      "commit": "4de6366e96c815eb43eea075b5bbb972c2835db7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/428"
+      ]
+    },
+    {
+      "commit": "f49b2777e3d92cd648b14354e13a3aad7b8f67f0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/428"
+      ]
+    },
+    {
+      "commit": "3837da9cd35e13791a4ab1af617677963c81837a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/429"
+      ]
+    },
+    {
+      "commit": "ba3a0028ccb4eded115f9c196260a41eed5696e4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/429"
+      ]
+    },
+    {
+      "commit": "1b5c4b9df5a68c733e75405a2cefc6c3e7e485a8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/429"
+      ]
+    },
+    {
+      "commit": "1beb1531fa72604eb199182ae1e5e20a1ec934e6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/430"
+      ]
+    },
+    {
+      "commit": "bba88fbcb68f5a158cbe34f20c076488fd611ee3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/430"
+      ]
+    },
+    {
+      "commit": "7db4f7c82a75f5657f42b8224277d7381642ca26",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/430"
+      ]
+    },
+    {
+      "commit": "8c81814b3a8f55dc935ec9e600f7753cb59b741c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/430"
+      ]
+    },
+    {
+      "commit": "c45cdc8303fac304ef46777da6c0810d08001273",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/431"
+      ]
+    },
+    {
+      "commit": "c7fc9e4e1ac391ee822c1b9f2dd34a439628e1dc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/431"
+      ]
+    },
+    {
+      "commit": "18c93768bb2f49e70e72e988c9ed1b49fe75af5a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/431"
+      ]
+    },
+    {
+      "commit": "516587397ad3a876050585a13d6e4f58383a44f1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/431"
+      ]
+    },
+    {
+      "commit": "eff4c4c32081d82b84a5bbf4f61f1d25481041cf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/431"
+      ]
+    },
+    {
+      "commit": "bfce6b00e948a2f6f386d6bb46cb54c4cc8b0230",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/432"
+      ]
+    },
+    {
+      "commit": "edb2eab33aef2680179fc7752a6ee8e0c28a1e81",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/432"
+      ]
+    }
+  ]
+}
