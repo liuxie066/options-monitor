@@ -11,6 +11,7 @@ import pytest
 from conftest import phase2_opening_row
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.cash_facts import broker_settlement_multiplier_evidence
 from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
@@ -794,6 +795,45 @@ def test_broker_assignment_refreshes_wheel_evidence_after_fee_sync(tmp_path) -> 
     assert ready["phase"] == "ready"
     assert ready["multiplier"] == 10
     assert ready["principal_anchor"] == "1000.000000"
+
+
+def test_broker_assignment_without_stock_order_id_keeps_multiplier_proof(tmp_path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _persist_put_open(repo, multiplier=10, raw_payload={})
+    _open_activation(repo)
+    payload = _broker_assignment_payload(10, actual_fee=True)
+    del payload["stock_settlement"]["order_id"]
+    assignment = _put_event(
+        event_id="put-assignment",
+        event_type="assignment",
+        multiplier=10,
+        raw_payload=payload,
+    )
+    evidence = broker_settlement_multiplier_evidence(assignment)
+    assert evidence is not None
+    assert evidence["order_id"] is None
+    assert evidence["multiplier"] == 10
+    assert broker_settlement_multiplier_evidence(
+        replace(
+            assignment,
+            raw_payload={
+                **assignment.raw_payload,
+                "stock_settlement": {
+                    **payload["stock_settlement"],
+                    "order_id": " stock-order ",
+                },
+            },
+        )
+    )["order_id"] == " stock-order "
+    assert broker_settlement_multiplier_evidence(
+        replace(assignment, raw_payload={**assignment.raw_payload, "source_event_id": "other"})
+    ) is None
+
+    result = persist_trade_event_objects_atomically(repo, [assignment])[0].to_dict()
+    branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert result["wheel_event_id"]
+    assert branch["phase"] == "ready"
+    assert branch["multiplier"] == 10
 
 
 def test_lifecycle_allocation_writer_creates_blocked_assignment_branch(tmp_path):
