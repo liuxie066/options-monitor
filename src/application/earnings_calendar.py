@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
@@ -656,22 +658,37 @@ def load_earnings_evidence_for_candidate(
     """Read one immutable run-shared OpenD earnings projection fail closed."""
 
     market_norm = str(market or "").strip().upper()
-    path = Path(input_root) / "earnings_calendar" / f"{market_norm}.json"
+    snapshot, unavailable = _load_candidate_earnings_snapshot(
+        input_root=input_root, market=market_norm,
+    )
+    if unavailable is not None:
+        return unavailable
+    assert snapshot is not None
+    return _candidate_earnings_from_snapshot(
+        snapshot, input_root=input_root, market=market_norm,
+        symbol=symbol, expiration=expiration,
+    )
+
+
+def _load_candidate_earnings_snapshot(
+    *, input_root: Path, market: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    path = Path(input_root) / "earnings_calendar" / f"{market}.json"
     try:
         snapshot = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return _candidate_earnings_unavailable(
+        return None, _candidate_earnings_unavailable(
             "earnings_calendar_snapshot_missing",
             artifact_path=path,
         )
     except Exception as exc:
-        return _candidate_earnings_unavailable(
+        return None, _candidate_earnings_unavailable(
             "earnings_calendar_snapshot_invalid",
             artifact_path=path,
             error=f"{type(exc).__name__}: {exc}",
         )
     if not isinstance(snapshot, dict):
-        return _candidate_earnings_unavailable(
+        return None, _candidate_earnings_unavailable(
             "earnings_calendar_snapshot_invalid",
             artifact_path=path,
         )
@@ -679,18 +696,27 @@ def load_earnings_evidence_for_candidate(
     try:
         validate_earnings_calendar_snapshot(
             snapshot,
-            expected_market=market_norm,
+            expected_market=market,
         )
     except Exception as exc:
-        return _candidate_earnings_unavailable(
+        return None, _candidate_earnings_unavailable(
             "earnings_calendar_snapshot_identity_invalid",
             artifact_path=path,
             snapshot_hash=recorded_hash or None,
             error=f"{type(exc).__name__}: {exc}",
         )
+    return snapshot, None
+
+
+def _candidate_earnings_from_snapshot(
+    snapshot: dict[str, Any],
+    *, input_root: Path, market: str, symbol: str, expiration: str,
+) -> dict[str, Any]:
+    path = Path(input_root) / "earnings_calendar" / f"{market}.json"
+    recorded_hash = str(snapshot.get("snapshot_hash") or "")
     try:
         identity = resolve_symbol_identity(symbol)
-        if identity is None or identity.market != market_norm:
+        if identity is None or identity.market != market:
             raise ValueError("symbol market mismatch")
         projection = _project_earnings_for_expiry(
             snapshot,
@@ -772,16 +798,30 @@ def annotate_candidates_with_earnings_evidence(
     if candidates is None or not isinstance(candidates, pd.DataFrame) or candidates.empty:
         return candidates
     rows: list[dict[str, Any]] = []
+    snapshots: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None]] = {}
+    evidence_by_candidate: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in candidates.to_dict("records"):
         payload = dict(row)
-        payload.update(
-            load_earnings_evidence_for_candidate(
-                input_root=input_root,
-                market=str(payload.get("market") or ""),
-                symbol=str(payload.get("symbol") or ""),
-                expiration=str(payload.get("expiration") or ""),
+        market = str(payload.get("market") or "").strip().upper()
+        symbol = str(payload.get("symbol") or "")
+        expiration = str(payload.get("expiration") or "")
+        key = (market, symbol, expiration)
+        if market not in snapshots:
+            snapshots[market] = _load_candidate_earnings_snapshot(
+                input_root=input_root, market=market,
             )
-        )
+        if key not in evidence_by_candidate:
+            snapshot, unavailable = snapshots[market]
+            if unavailable is not None:
+                evidence_by_candidate[key] = unavailable
+            else:
+                assert snapshot is not None
+                evidence_by_candidate[key] = _candidate_earnings_from_snapshot(
+                    snapshot, input_root=input_root, market=market,
+                    symbol=symbol, expiration=expiration,
+                )
+        # DataFrame object cells remain independently mutable for each row.
+        payload.update(deepcopy(evidence_by_candidate[key]))
         rows.append(payload)
     out = pd.DataFrame(rows)
     for field in (name for name in out.columns if name.startswith("earnings_")):

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
+from domain.domain import combo_reconciliation as reconciliation
+
 from domain.domain.combo_reconciliation import (
     AMBIGUOUS,
     EXACT_DELIVERED_CANDIDATE,
@@ -242,3 +246,108 @@ def test_physical_identity_blocks_cross_account_pair_and_legacy_records():
     call.pop("broker_account_ref")
     result = match_post_trade_combo_pairs(lots=[put, call])
     assert result["inferences"] == []
+
+
+@pytest.mark.parametrize("scenario", [
+    "ties", "weighted", "forbidden", "all_forbidden", "mixed",
+    "duplicate_lots", "shared_open_events", "cross_side_lot_ids",
+])
+def test_forced_pairs_match_exhaustive_oracle_and_preserve_permutations(monkeypatch, scenario):
+    puts = [
+        _lot(f"put-{i}", option_type="put", strike=100 + i * 5,
+             trade_time_ms=BASE_TIME_MS + 1_000)
+        for i in range(2)
+    ]
+    calls = [
+        _lot(f"call-{i}", option_type="call", strike=110 + i * 10,
+             trade_time_ms=BASE_TIME_MS + 2_000)
+        for i in range(2)
+    ]
+    lots = [*puts, *calls]
+    exposures = [] if scenario == "ties" else [
+        _exposure(delivery_confirmed=True),
+        _exposure(put_strike=105, call_strike=120,
+                  occurrence_id="occ-2", exposure_id="exp-2"),
+    ]
+    if scenario == "mixed":
+        lots.extend([
+            _lot("other-expiry", option_type="call", strike=130,
+                 trade_time_ms=BASE_TIME_MS + 2_000, expiration_ymd="2026-09-18"),
+            {**puts[0], "record_id": "grouped", "open_event_id": "open-grouped",
+             "strategy_group_id": "existing-group"},
+        ])
+    if scenario == "duplicate_lots":
+        lots.append(dict(puts[0]))
+    elif scenario == "shared_open_events":
+        lots.append({**puts[0], "record_id": "put-shared-open"})
+    elif scenario == "cross_side_lot_ids":
+        lots[-1] = {**calls[-1], "record_id": puts[0]["record_id"]}
+    unfiltered = match_post_trade_combo_pairs(lots=lots, exposures=exposures)
+    forbidden = []
+    if scenario == "forbidden":
+        forbidden = [next(item["inference_id"] for item in unfiltered["inferences"]
+                          if item["put_record_id"] == "put-0" and item["call_record_id"] == "call-0")]
+    elif scenario == "all_forbidden":
+        forbidden = [item["inference_id"] for item in unfiltered["inferences"]]
+    original_inputs = deepcopy((lots, exposures, forbidden))
+    solve = reconciliation._maximum_weight_matching
+    observed = []
+
+    def tracked_solve(edges, *, forbidden_ids=None):
+        result = solve(edges, forbidden_ids=forbidden_ids)
+        observed.append((tuple(edges), result))
+        return result
+
+    monkeypatch.setattr(reconciliation, "_maximum_weight_matching", tracked_solve)
+    results = []
+    for ordered_lots, ordered_exposures in (
+        (lots, exposures), (list(reversed(lots)), list(reversed(exposures))),
+    ):
+        observed.clear()
+        actual = match_post_trade_combo_pairs(
+            lots=ordered_lots, exposures=ordered_exposures,
+            forbidden_inference_ids=forbidden,
+        )
+        edges, (score, selected) = observed[0]
+        # The old algorithm re-solved every edge, regardless of selection.
+        exhaustive_forced = {
+            edge.inference_id for edge in edges
+            if solve(edges, forbidden_ids={edge.inference_id})[0] < score
+        }
+        assert {item["inference_id"] for item in actual["inferences"]
+                if item["status"] == PROPOSAL_READY} == exhaustive_forced
+        assert {item["inference_id"] for item in actual["inferences"]
+                if item["status"] == AMBIGUOUS} == {edge.inference_id for edge in edges} - exhaustive_forced
+        assert {item["inference_id"] for item in actual["inferences"]
+                if item["selected_in_one_optimum"]} == selected
+        assert actual["proposal_ready_count"] == sum(
+            edge.inference_id in exhaustive_forced for edge in edges
+        )
+        assert actual["optimum_score"] == str(score)
+        assert len(observed) <= 1 + len(edges)
+        if scenario in {"duplicate_lots", "shared_open_events", "cross_side_lot_ids"}:
+            assert len(observed) == 1 + len(edges)
+        results.append(actual)
+    assert results[0] == results[1]
+    assert (lots, exposures, forbidden) == original_inputs
+
+
+def test_dense_ambiguous_graph_only_resolves_selected_edges(monkeypatch):
+    lots = [
+        _lot(f"{kind}-{i}", option_type=kind, strike=100 if kind == "put" else 110,
+             trade_time_ms=BASE_TIME_MS + 1_000)
+        for kind in ("put", "call") for i in range(4)
+    ]
+    solve = reconciliation._maximum_weight_matching
+    calls = []
+
+    def tracked_solve(edges, *, forbidden_ids=None):
+        calls.append(forbidden_ids)
+        return solve(edges, forbidden_ids=forbidden_ids)
+
+    monkeypatch.setattr(reconciliation, "_maximum_weight_matching", tracked_solve)
+    result = match_post_trade_combo_pairs(lots=lots)
+    assert result["legal_edge_count"] == 16
+    assert result["ambiguous_count"] == 16
+    assert result["proposal_ready_count"] == 0
+    assert len(calls) == 5
