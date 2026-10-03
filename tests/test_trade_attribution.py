@@ -33,11 +33,12 @@ def test_attribution_preserves_manual_decision_and_reports_late_conflict():
     assert result.status == "linked"
 
 
-def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path):
+def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path, monkeypatch):
     import pytest
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.api import (assert_trade_attribution_unclaimed,
-        read_trade_attribution_facts, record_trade_ordinary_attribution)
+        read_trade_attribution_facts, read_trade_attribution_snapshot)
+    from src.application.trades import attribution
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.ledger.writer import persist_trade_event_object
 
@@ -55,16 +56,21 @@ def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path)
     original = repo.list_trade_events()[0]
     fact, = read_trade_attribution_facts(repo, account="lx")
     assert fact["ordinary_previewable"]
-    args = dict(account="lx", execution_key=fact["execution_key"], expected_input_hash=fact["input_hash"],
-                request_id="op:1", actor="wechat:user", now_ms=2000)
-    record_trade_ordinary_attribution(repo, **args)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    context = dict(config={"accounts": ["lx"], "market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}, market="us", combo_evidence={"complete": True},
+                   capacity_observation={}, combo_mode="confirm")
+    view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", now_ms=2000, **context)
+    args = dict(account="lx", execution_key=fact["execution_key"], expected_input_hash=view["rows"][0]["input_hash"],
+                request_id="op:1", actor="wechat:user", candidate_id="ordinary", manual=True, **context)
+    attribution.apply_trade_attribution(repo, **args, apply_changes=False)
     assert len(repo.list_trade_events()) == 1
-    result = record_trade_ordinary_attribution(repo, **args, apply_changes=True)
+    result = attribution.apply_trade_attribution(repo, **args)
     assert result["status"] == "ordinary" and result["origin"] == "manual"
-    repeated = record_trade_ordinary_attribution(repo, **args, apply_changes=True)
+    repeated = attribution.apply_trade_attribution(repo, **args)
     assert repeated["write_applied"] is False
-    equivalent = record_trade_ordinary_attribution(repo, **{**args, "request_id": "op:2"}, apply_changes=True)
-    assert equivalent["ledger_event_ids"] == result["ledger_event_ids"]
+    with pytest.raises(ValueError, match="evidence changed"):
+        attribution.apply_trade_attribution(repo, **{**args, "request_id": "op:2"})
     assert repo.list_trade_events()[0] == original
     assert len(repo.list_trade_events()) == 2
     with pytest.raises(ValueError, match="manually excluded"):

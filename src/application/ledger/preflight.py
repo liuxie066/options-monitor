@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from dataclasses import replace
 from typing import Any
 
@@ -1055,7 +1057,7 @@ def _manual_open_ledger_inputs(
         currency=currency_resolved,
         source="cli_manual_open",
         multiplier=require_option_multiplier(fields.get("multiplier")),
-        lot_id=f"lot_{event_id}",
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
         raw_payload={
             "source": "om option-positions",
             "mode": "manual_open",
@@ -1131,7 +1133,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
         currency=resolve_open_currency(fields.get("symbol"), fields.get("currency")),
         source="opend_push",
         multiplier=require_option_multiplier(fields.get("multiplier")),
-        lot_id=f"lot_{event_id}",
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
         raw_payload=dict(raw_payload),
     )
     return resolved_deal, fields, event

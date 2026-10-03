@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -256,7 +258,7 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
         row["record_id"]: row["fields"] for row in rows["account_position_lots"]
         if row["record_id"] != assignment.target_lot_id
     }
-    target_stock_lot_id = f"assigned-stock-{assignment.event_id}"
+    target_stock_lot_id = assigned_stock_lot_id_for_event(assignment.event_id)
 
     def disjoint_settlement(event: Any) -> bool:
         fields = other_lots.get(event.target_lot_id)

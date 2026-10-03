@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from copy import deepcopy
 import hashlib
 import json
@@ -215,17 +217,6 @@ def _preview_event_to_trade_event(payload: dict[str, Any]) -> TradeEvent:
     return event
 
 
-def _open_event_lot_id(event: dict[str, Any]) -> str:
-    event_id = str(event.get("event_id") or "").strip()
-    if not event_id:
-        return ""
-    if str(event.get("source_type") or "").strip().lower() == "bootstrap_snapshot":
-        payload_lot_id = str(_event_payload(event).get("lot_record_id") or "").strip()
-        if payload_lot_id:
-            return payload_lot_id
-    return f"lot_{event_id}"
-
-
 def _same_trade_event_contract(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_strike = safe_float(left.get("strike"))
     right_strike = safe_float(right.get("strike"))
@@ -246,7 +237,7 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
     target_event_id = str(target.get("event_id") or "").strip()
     if normalize_position_effect(target.get("position_effect")) != "open":
         return []
-    target_lot_id = _open_event_lot_id(target)
+    target_lot_id = lot_id_for_open_event(_preview_event_to_trade_event(target))
     target_position_side = _event_position_side(target)
     target_sort_key = _event_sort_key(target)
     voided_event_ids: set[str] = set()
@@ -1110,7 +1101,7 @@ def _opend_trade_time_correction_plan(
     common = {
         "operation": "opend_trade_time_correction",
         "target_event_id": target_id,
-        "target_lot_id": event.lot_id or f"lot_{event.event_id}",
+        "target_lot_id": lot_id_for_open_event(event),
         "before_trade_time_ms": stored_time_ms,
         "after_trade_time_ms": requested_time_ms,
         "evidence_order_ids": evidence_order_ids,

@@ -141,7 +141,8 @@ def project_assigned_stock_lifecycle_from_rows(
     current_fields = {item.lot_id: item.fields for item in published.lots}
     # The strategy-metadata family is read from the event layer now (design
     # §7.5), so each lot is handed the metadata its own events declare.
-    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(selected_rows)
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(
+        [row for row in selected_rows if _event_time_ms(row) <= instant])
     selected_ids = {
         str(row.get("event_id") or "").strip()
         for row in selected_rows

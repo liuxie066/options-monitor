@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.trades.attribution import confirm_wheel_call_linkage, confirm_wheel_linkage
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,6 @@ from src.application.performance.service import build_option_period_performance
 from src.application.wheel import (
     build_wheel_read_model,
     cancel_wheel_call_intent,
-    confirm_wheel_call_linkage,
     create_wheel_call_intent,
     end_wheel_lifecycle,
     load_wheel_candidate_snapshot,
@@ -48,7 +48,6 @@ from src.application.wheel.capacity import (
 )
 from src.application.wheel.workflows import (
     cancel_wheel_intent,
-    confirm_wheel_linkage,
     create_wheel_intent,
     reject_wheel_linkage,
 )
@@ -729,9 +728,8 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             return result, [], meta
         result = confirm_wheel_call_linkage(
             repo,
-            **args,
-            coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
-            market=str(payload.get("config_key") or ""),
+            **{key: value for key, value in args.items() if key != "as_of_ms"},
+            config=cfg, runtime_root=repo.ledger_store.runtime_root,
         )
         return result, [], meta
 
@@ -871,15 +869,10 @@ def _wheel_linkage_tool(
                 reason=str(payload.get("reason") or ""),
             )
             return result, [], meta
-        capacity_fact = (
-            _wheel_coverage(repo, cfg, payload, branch, instant)
-            if direction == "call"
-            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
-        )
         result = confirm_wheel_linkage(
             repo,
-            **args,
-            capacity_fact=capacity_fact,
+            **{key: value for key, value in args.items() if key not in {"market", "as_of_ms"}},
+            config=cfg, runtime_root=repo.ledger_store.runtime_root,
         )
         return result, [], meta
 
@@ -1613,7 +1606,7 @@ WHEEL_CALL_LINKAGE_TOOL = build_agent_tool(
         },
         "call_record_id": {"type": "string", "minLength": 1},
         "linkage_candidate_id": {"type": "string", "minLength": 1},
-        "expected_input_hash": {"type": "string", "minLength": 1},
+        "expected_input_hash": {"type": "string", "minLength": 1, "description": "confirm: trade_attribution_read prepare_confirmation=true input_hash; reject: linkage input_snapshot_hash"},
         "reason": "reject-only reason",
     },
     handler=_wheel_call_linkage_tool,
@@ -1683,7 +1676,7 @@ WHEEL_LINKAGE_TOOL = build_agent_tool(
         },
         "option_record_id": {"type": "string", "minLength": 1},
         "linkage_candidate_id": {"type": "string", "minLength": 1},
-        "expected_input_hash": {"type": "string", "minLength": 1},
+        "expected_input_hash": {"type": "string", "minLength": 1, "description": "confirm: trade_attribution_read prepare_confirmation=true input_hash; reject: linkage input_snapshot_hash"},
         "reason": "reject-only reason",
     },
     handler=_wheel_linkage_tool,
@@ -1811,16 +1804,17 @@ from src.application.trades.attribution import trade_attribution_read
 
 TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
     name="trade_attribution_read",
-    description="只读查看当前账户成交的策略归属、待核实原因和确认条件。",
+    description="只读查看当前账户成交归属；prepare_confirmation=true 时观察当前容量，生成确认所需的完整 input_hash。",
     handler=trade_attribution_read,
     requires=(),
     pure_read=True,
     allow_additional_input=False,
     bot_input_fields=("config_key", "account", "symbol", "execution_key", "status", "cursor", "limit"),
-    capabilities=("positions", "local_read"),
+    capabilities=("positions",),
     input_schema={
         "config_key": {"type": "string", "enum": ["us", "hk"]},
         "config_path": "host supplied runtime config path",
+        "prepare_confirmation": {"type": "boolean", "description": "Observe current capacity to prepare a confirmation input_hash; false keeps the default local-only read."},
         "account": {"type": "string", "required": True, "minLength": 1},
         "execution_key": "optional canonical execution identity",
         "symbol": "optional canonical underlying symbol",

@@ -266,6 +266,8 @@ def test_source_effect_enrichment_checks_applied_allocation_at_ledger_facades(tm
             record_normalized_trade_event(repo, enriched)
     else:
         assert replay.reason == "ledger_recorded"
+        assert replay.operations[0].lot_id == before_lots[0]["record_id"]
+        assert before_events[0]["lot_id"] is None
         assert record_normalized_trade_event(repo, enriched).to_dict()["created"] is False
     assert repo.list_trade_events() == before_events
     assert repo.list_position_lots() == before_lots

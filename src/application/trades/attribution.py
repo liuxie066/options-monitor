@@ -10,36 +10,32 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
 from src.application.ledger.api import (
+    lot_id_for_open_event, write_trade_attribution_decision, read_trade_attribution_decision,
     ledger_resource_identity, open_trade_reconciliation_evidence_repo,
-    read_trade_attribution_facts, resolve_ledger_store, resolve_position_data_config_path,
+    resolve_ledger_store, resolve_position_data_config_path,
     ledger_store_write_guard,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
     read_trade_attribution_snapshot, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
-    with_sqlite_repo_transaction, adopt_post_trade_combo_pair,
-    read_trade_attribution_policy, record_trade_attribution_conflict,
+    with_sqlite_repo_transaction, record_trade_attribution_conflict,
 )
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.write_contract import write_control
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
-from domain.domain.strategy_membership import resolve_trade_attribution
+from domain.domain.strategy_membership import resolve_trade_attribution, resolve_option_strategy_membership
 from domain.domain.combo_reconciliation import delivered_combo_exposures_for_lot
 from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
-from domain.domain.wheel.intents import resolve_wheel_fill_intent
-from domain.domain.wheel import effective_wheel_events
+from domain.domain.wheel.intents import resolve_wheel_fill_intent, plan_wheel_call_intent_consume, plan_wheel_put_intent_consume
+from domain.domain.wheel import effective_wheel_events, project_wheel_linkage_candidates
 from domain.domain.ledger.position_fields import effective_contracts_open
-from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.ledger.position_fields import build_open_adjustment_patch_contract, effective_multiplier
+from domain.domain.ledger.position_fields import build_open_adjustment_patch_contract
 from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
-from src.application.ledger.api import (assert_trade_attribution_unclaimed,
-    capture_trade_event_decision_projection_fence, finalize_trade_event_decision_projection,
-    run_position_projection_in_transaction)
+from src.application.ledger.api import (assert_trade_attribution_unclaimed)
 from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.wheel.capacity import trade_attribution_capacity_check
 from src.application.daily_decision_brief_repository import read_combo_candidate_exposures
-from src.application.wheel.workflows import confirm_wheel_call_linkage, confirm_wheel_linkage
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -53,16 +49,14 @@ def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _multi_wheel_call_attribution(
-    active: Any, conn: Any, *, rows: Mapping[str, Any], view: Mapping[str, Any],
-    current: Mapping[str, Any], branch_ids: tuple[str, ...], account: str, market: str,
-    request_id: str, actor: str, instant: int, apply_changes: bool,
-    capacity_observation: Mapping[str, Any], stop_event: Any, config: Mapping[str, Any],
+    *, view: Mapping[str, Any], current: Mapping[str, Any], branch_ids: tuple[str, ...],
+    decided_execution_keys: set[str],
 ) -> dict[str, Any]:
     if (current["status"] not in {"pending", "conflict"} or current["position_side"] != "short"
             or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"]
             or current["reason_codes"] and set(current["reason_codes"]) != {"multiple_strategy_candidates"}):
         raise ValueError("Wheel Call allocation requires one complete, unclaimed short Call fill")
-    if len(branch_ids) != current["contracts"] or len(set(branch_ids)) < 2:
+    if len(branch_ids) != current["contracts"] or not branch_ids:
         raise ValueError("Wheel Call allocation must account for every contract")
     if current["contracts_open"] != current["contracts"]:
         raise ValueError("Wheel Call allocation requires the original fill to be fully open")
@@ -81,11 +75,16 @@ def _multi_wheel_call_attribution(
         if set(candidate["reason_codes"]) - {"wheel_branch_capacity_exceeded", "competing_fills_exceed_capacity"}:
             raise ValueError("Wheel Call allocation branch evidence is incomplete")
         competing = [row for row in view["rows"] if row["lot_id"] != current["lot_id"]
+                     and row["execution_key"] not in decided_execution_keys
                      and row["status"] in {"pending", "conflict"}
                      and not (row.get("wheel_branch_id") or row.get("wheel_call_allocations")
                               or row.get("strategy_group_id"))
                      and any(item["candidate_id"] == "wheel:" + branch_id for item in row["candidates"])]
-        if competing or candidate["competition_available_shares"] is None or count * multiplier > candidate["competition_available_shares"]:
+        own = sum(row["contracts"] for row in current.get("wheel_call_allocations") or [] if row["wheel_branch_id"] == branch_id)
+        own += current["contracts_open"] if current.get("wheel_branch_id") == branch_id else 0
+        if (competing or candidate["competition_available_shares"] is None
+                or len(decided_execution_keys) == 1
+                and count * multiplier > candidate["competition_available_shares"] + own * multiplier):
             raise ValueError("Wheel Call allocation exceeds unclaimed branch capacity")
         allocations.append({"stock_lot_id": branch["stock_lot_id"], "wheel_branch_id": branch_id,
                             "contracts": count})
@@ -95,63 +94,7 @@ def _multi_wheel_call_attribution(
     candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
     preview = {**current, "candidate_id": candidate_id, "wheel_call_allocations": allocations,
                "write_applied": False}
-    if not apply_changes:
-        return preview
-    if stop_event is not None and stop_event.is_set():
-        raise ValueError("attribution cancelled")
-    assert_trade_attribution_unclaimed(rows["trade_events"], [current["lot_id"]])
-    fields = active.get_position_lot_fields(current["lot_id"], conn=conn)
-    patch = build_open_adjustment_patch_contract(fields, strategy="wheel", leg_role="wheel_call",
-                                                  wheel_call_allocations=allocations, as_of_ms=instant)
-    contract = current["contract_key"]
-    event = TradeEvent(
-        event_id="wheel-call-allocations-confirmed:" + canonical_sha256({
-            "account": account, "lot_id": current["lot_id"], "request_id": request_id,
-            "allocations": allocations})[:24],
-        event_type="adjust", event_time_ms=instant,
-        contract_key=ContractKey.from_values(
-            broker=contract["broker"], account=account, underlying_symbol=contract["underlying_symbol"],
-            option_type="call", strike=contract["strike"], expiration_ymd=contract["expiration_ymd"]),
-        contracts=0, price=0, currency=current["currency"], source="wheel_linkage",
-        multiplier=float(effective_multiplier(fields) or 0), target_lot_id=current["lot_id"],
-        raw_payload={
-            "schema_version": "wheel_call_allocations_confirmed.v1", "market": market,
-            "target_lot_id": current["lot_id"], "adjust_target_source_event_id": current["open_event_id"],
-            "wheel_linkage_request_id": request_id, "input_snapshot_hash": current["input_hash"],
-            "actor": actor, "patch": patch.to_dict(), "attribution_origin": "manual",
-            "attribution_request_id": request_id, "attribution_policy_version": ATTRIBUTION_POLICY_VERSION,
-            "attribution_candidate_id": candidate_id, "attribution_candidate_ids": current["candidate_ids"],
-        })
-    fence = capture_trade_event_decision_projection_fence(active, conn=conn)
-    runtime = run_position_projection_in_transaction(active, [event], conn=conn, mode="fast_if_safe")
-    if runtime.created_flags != (True,):
-        raise ValueError("Wheel Call allocation unexpectedly replayed")
-    finalize_trade_event_decision_projection(active, conn=conn, fence=fence, events=[event],
-                                             created_flags=runtime.created_flags)
-    after_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
-    after = next(row for row in trade_attribution_facts_from_events(after_rows["trade_events"], account=account)
-                 if row["execution_key"] == current["execution_key"])
-    if (after["status"] != "linked" or after["origin"] != "manual"
-            or parse_wheel_call_allocations(after["wheel_call_allocations"]) != normalized):
-        raise ValueError("Wheel Call allocation durable readback failed")
-    after_model = build_wheel_read_model_from_rows(after_rows, account=account, as_of_ms=instant, market=market)
-    for _stock, branch_id, contracts in normalized:
-        branch = next((row for row in after_model["wheel_branches"]
-                       if row["wheel_branch_id"] == branch_id), None)
-        before_committed = branch_by_id[branch_id]["active_option_committed_shares"]
-        if (branch is None or branch["integrity_status"] != "trusted"
-                or before_committed is None
-                or branch["active_option_committed_shares"] != before_committed + contracts * multiplier):
-            raise ValueError("Wheel Call allocation branch readback failed")
-    capacity = trade_attribution_capacity_check(
-        config=config,        fact=current, facts=trade_attribution_facts_from_events(rows["trade_events"], account=account),
-        wheel_read_model=view["wheel_model"], observation=capacity_observation,
-        now_ms=int(time.time() * 1000))
-    if capacity["status"] != "available":
-        raise ValueError("Wheel Call allocation capacity changed before commit")
-    if stop_event is not None and stop_event.is_set():
-        raise ValueError("attribution cancelled before commit")
-    return {**after, "write_applied": True}
+    return preview
 
 
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
@@ -180,7 +123,7 @@ def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, ru
 
 def _branch_account_ref(branch: Mapping[str, Any], rows: Mapping[str, Any]) -> dict[str, Any] | None:
     events = {row["event_id"]: row for row in rows["trade_events"]}
-    opens = {row.get("lot_id") or "lot_" + row["event_id"]: row
+    opens = {lot_id_for_open_event(row): row
              for row in events.values() if row.get("event_type") == "open"}
     starts = {row["event_id"]: row for row in rows["account_wheel_events"]}
     start = starts.get(branch.get("start_event_id"), {})
@@ -239,10 +182,12 @@ def build_trade_attribution_view(
                                             monitoring_readiness=readiness)
     capacity_model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=now_ms)
     branches = model["wheel_branches"]
-    wheel_events, wheel_errors = effective_wheel_events(rows["account_wheel_events"], as_of_ms=now_ms, trade_events=rows["trade_events"],
+    conflict_statuses = {}
+    wheel_events, _wheel_errors = effective_wheel_events(rows["account_wheel_events"], as_of_ms=now_ms, trade_events=rows["trade_events"],
+        conflict_statuses=conflict_statuses,
         known_trade_event_ids={event["event_id"] for event in rows["trade_events"]})
     blocked_executions = {execution for event in wheel_events if event["event_type"] == "wheel_attribution_conflict"
-        and "strategy_attribution_conflict" in wheel_errors.get((account, event["wheel_branch_id"]), set())
+        and not conflict_statuses[event["event_id"]]["resolved"]
         for execution in event["payload"]["execution_keys"]}
     exposures = list(combo_evidence.get("exposures") or [])
     combos = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
@@ -396,7 +341,9 @@ def build_trade_attribution_view(
         "positions": sorted(({key: row.get(key) for key in ("instrument_ref", "position_side", "quantity")}
                              for row in snapshot.get("rows") or []), key=canonical_sha256),
         "scope": snapshot.get("scope"), "completeness": snapshot.get("completeness"), "errors": snapshot.get("errors"),
-        "cash_evidence": cash_snapshot_evidence(portfolio),
+        # Re-observation clocks may change; freshness is rechecked before commit.
+        "cash_evidence": {key: value for key, value in cash_snapshot_evidence(portfolio).items()
+                          if key not in {"cash_source_observed_at", "capacity_identity_hash", "capacity_authority"}},
         "fx_rates": (portfolio.get("exchange_rates") or {}).get("rates"), "fx_status": portfolio.get("exchange_rate_status"),
     }
     results = []
@@ -429,6 +376,10 @@ def build_trade_attribution_view(
         semantic = {"fact_hash": fact["input_hash"], "candidates": proposals, "policy": wheel_config.get("policy_hash"),
                     "complete": complete, "enabled": enabled, "capacity": capacity_semantic,
                     "account_facts": sorted((item["open_event_id"], item["input_hash"]) for item in account_facts),
+                    "combo_inferences": sorted(({key: pair.get(key) for key in (
+                        "inference_id", "status", "input_snapshot_hash", "put_lot_snapshot", "call_lot_snapshot",
+                        "proposal_expires_at_ms", "strategy_group_id")} for pair in rows.get("account_combo_inferences") or []),
+                        key=lambda pair: pair["inference_id"]),
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
         results.append({**fact, "status": resolution.status, "candidate_ids": list(resolution.candidate_ids),
             "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
@@ -436,7 +387,8 @@ def build_trade_attribution_view(
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "coverage": next((branch.get("coverage") for branch in branches if branch["wheel_branch_id"] == fact["wheel_branch_id"]), None),
             "direction": fact["contract_key"]["option_type"]})
-    return {"rows": results, "wheel_model": capacity_model, "combo_evidence": dict(combo_evidence)}
+    return {"rows": results, "wheel_model": capacity_model, "combo_evidence": dict(combo_evidence),
+            "conflict_statuses": conflict_statuses}
 
 
 def apply_trade_attribution(
@@ -444,115 +396,309 @@ def apply_trade_attribution(
     candidate_id: str, expected_input_hash: str, request_id: str, actor: str,
     combo_evidence: Mapping[str, Any], capacity_observation: Mapping[str, Any], combo_mode: str,
     stop_event: Any = None, manual: bool = False, apply_changes: bool = True,
-    wheel_branch_ids: tuple[str, ...] = (),
+    wheel_branch_ids: tuple[str, ...] = (), conflict_event_ids: tuple[str, ...] = (),
+    member_decisions: tuple[Mapping[str, Any], ...] = (),
+    before_commit: Any = None,
+    reference: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Re-arbitrate under the ledger transaction, then reuse the existing narrow writers."""
+    """One arbitration and patch path for preview, single and complete decisions."""
     if not all((execution_key, candidate_id, expected_input_hash, request_id, actor)):
         raise ValueError("attribution requires complete request identity")
+    if (not isinstance(manual, bool) or any(not isinstance(value, str) or not value.strip()
+                                           for value in conflict_event_ids)):
+        raise ValueError("attribution decision mode or conflict identity is invalid")
+    if conflict_event_ids and not manual:
+        raise ValueError("conflict resolution requires a manual decision")
+    requested = list(member_decisions) or [{"execution_key": execution_key, "candidate_id": candidate_id,
+                                          "wheel_branch_ids": list(wheel_branch_ids)}]
+    if any(not isinstance(item, Mapping) or set(item) - {"execution_key", "candidate_id", "wheel_branch_ids", "wheel_call_allocations"}
+           or any(not isinstance(item.get(key), str) or not item[key].strip() for key in ("execution_key", "candidate_id"))
+           or not isinstance(item.get("wheel_branch_ids", []), (list, tuple))
+           or any(not isinstance(value, str) or not value.strip() for value in item.get("wheel_branch_ids", []))
+           for item in requested):
+        raise ValueError("attribution member decision is invalid")
+    requested = [{"execution_key": item["execution_key"], "candidate_id": item["candidate_id"],
+                  "wheel_branch_ids": sorted(item.get("wheel_branch_ids") or []),
+                  **({"wheel_call_allocations": [dict(stock_lot_id=stock, wheel_branch_id=branch, contracts=count)
+                       for stock, branch, count in parse_wheel_call_allocations(item["wheel_call_allocations"])]}
+                     if "wheel_call_allocations" in item else {})} for item in requested]
+    primary = [item for item in requested if item["execution_key"] == execution_key]
+    if len(primary) != 1 or primary[0]["candidate_id"] != candidate_id:
+        raise ValueError("attribution primary member differs from the decision")
+    if wheel_branch_ids and sorted(wheel_branch_ids) != primary[0]["wheel_branch_ids"]:
+        raise ValueError("attribution primary allocation differs from the decision")
+    if (len({item["execution_key"] for item in requested}) != len(requested)
+            or len(set(conflict_event_ids)) != len(conflict_event_ids)):
+        raise ValueError("attribution decision contains duplicate members or conflicts")
+    request_content = {"account": account, "market": market, "actor": actor, "manual": manual,
+        "members": sorted(requested, key=lambda item: item["execution_key"]),
+        "conflict_event_ids": sorted(conflict_event_ids), "input_hash": expected_input_hash}
+    if reference is not None:
+        request_content["reference"] = dict(reference)
 
     def run(active: Any, conn: Any) -> dict[str, Any]:
         rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
-        existing = [row for row in trade_attribution_facts_from_events(rows["trade_events"], account=account)
-                    if row["execution_key"] == execution_key]
-        if len(existing) != 1:
+        facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
+        by_key = {row["execution_key"]: row for row in facts if row["execution_key"]}
+        if execution_key not in by_key or len(by_key) != len([row for row in facts if row["execution_key"]]):
             raise ValueError("attribution execution is not unique")
-        fact = existing[0]
-        if wheel_branch_ids:
-            if not manual or candidate_id != "wheel-multi:" + canonical_sha256(sorted(wheel_branch_ids))[:24]:
-                raise ValueError("Wheel Call allocation identity is invalid")
-            if fact["status"] == "linked":
-                linked = fact.get("wheel_call_allocations") or []
-                if sorted(row["wheel_branch_id"] for row in linked for _ in range(row["contracts"])) != sorted(wheel_branch_ids):
-                    raise ValueError("Wheel Call allocation conflicts with durable membership")
-                return {**fact, "write_applied": False}
-        existing_target = ("wheel:" + fact["wheel_branch_id"] if fact["wheel_branch_id"] else
-                           "combo:" + fact["strategy_group_id"] if fact["strategy_group_id"] else None)
-        if existing_target:
-            if candidate_id != existing_target:
-                raise ValueError("attribution target conflicts with durable membership")
-            return {**fact, "write_applied": False}
-        if fact["status"] == "ordinary" and fact["origin"] == "manual":
-            raise ValueError("manual ordinary decision cannot be overwritten")
+        instant = int(time.time() * 1000)
+        prior = read_trade_attribution_decision(rows, account=account, request_id=request_id,
+            request_content=request_content, now_ms=instant)
+        if prior is not None:
+            return {**by_key[execution_key], **prior, "write_applied": False}
+        if manual and any(item["candidate_id"].startswith("combo:") for item in requested):
+            mode = combo_reconciliation_mode_for_account(config, account=account)
+            if mode not in {"confirm", "auto"}:
+                raise ValueError(f"Combo confirmation is disabled for account {account}: effective mode={mode}")
         if stop_event is not None and stop_event.is_set():
             raise ValueError("attribution cancelled")
-        instant = int(time.time() * 1000)
         view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
             combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode)
         current = next(row for row in view["rows"] if row["execution_key"] == execution_key)
+        if reference is None and not conflict_event_ids and not member_decisions and current["status"] == "linked" and not by_key[execution_key]["reason_codes"]:
+            fact = by_key[execution_key]
+            existing_target = ("wheel:" + fact["wheel_branch_id"] if fact["wheel_branch_id"] else
+                               "combo:" + fact["strategy_group_id"] if fact["strategy_group_id"] else None)
+            if fact.get("wheel_call_allocations"):
+                existing_branches = sorted(row["wheel_branch_id"] for row in fact["wheel_call_allocations"]
+                                           for _ in range(row["contracts"]))
+                existing_target = "wheel-multi:" + canonical_sha256(existing_branches)[:24]
+                if not manual or sorted(wheel_branch_ids) != existing_branches:
+                    raise ValueError("Wheel Call allocation conflicts with durable membership")
+            if candidate_id != existing_target:
+                raise ValueError("attribution target conflicts with durable membership")
+            return {**fact, "write_applied": False}
         if current["input_hash"] != expected_input_hash:
-            raise ValueError("attribution evidence changed; create a new preview")
-        if wheel_branch_ids:
-            return _multi_wheel_call_attribution(
-                active, conn, rows=rows, view=view, current=current, branch_ids=wheel_branch_ids,
-                account=account, market=market, request_id=request_id, actor=actor,
-                instant=instant, apply_changes=apply_changes,
-                capacity_observation=capacity_observation, stop_event=stop_event, config=config)
-        chosen = next((row for row in current["candidates"] if row["candidate_id"] == candidate_id), None)
-        if chosen is None or not current["evidence_complete"]:
-            raise ValueError("attribution candidate evidence is incomplete")
-        allowed_manual_reasons = {"combo_confirmation_required", "combo_not_unique_delivered_pair"}
-        if (not manual and current["selected_candidate_id"] != candidate_id
-                or set(chosen["reason_codes"]) - (allowed_manual_reasons if manual else set())):
-            raise ValueError("attribution candidate is not admissible")
-        members = [row for row in view["rows"] if row["lot_id"] in chosen["member_lot_ids"]]
-        if len(members) != len(chosen["member_lot_ids"]) or any(
-                row["reason_codes"] and not row["ordinary_previewable"] for row in members):
-            raise ValueError("attribution member identity or dependencies changed")
-        if not manual and any(row["selected_candidate_id"] != candidate_id for row in members):
-            raise ValueError("attribution members have competing strategies")
-        if not apply_changes:
-            return {**current, "write_applied": False}
-        attribution_metadata = {"attribution_origin": "manual" if manual else "intent" if chosen.get("intent_id") else "rule",
-            "attribution_request_id": request_id, "attribution_policy_version": ATTRIBUTION_POLICY_VERSION,
-            "attribution_candidate_id": candidate_id, "actor": actor,
-            "attribution_candidate_ids": current["candidate_ids"]}
-        if chosen["strategy"] == "wheel":
-            for member in sorted(members, key=lambda row: (row["event_time_ms"], row["open_event_id"])):
-                member_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
-                member_model = build_wheel_read_model_from_rows(member_rows, account=account, as_of_ms=instant, market=market)
-                direction = member["contract_key"]["option_type"]
-                linkage = next((row for row in member_model["linkage_candidates"]
-                    if row["option_record_id"] == member["lot_id"] and row["wheel_branch_id"] == chosen["wheel_branch_id"]), None)
-                if linkage is None:
-                    raise ValueError("Wheel linkage no longer admissible")
-                capacity = {"account": account, "symbol": member["contract_key"]["underlying_symbol"],
-                            "status": "available", "capacity_identity_hash": current["input_hash"]}
-                common = dict(account=account, linkage_candidate_id=linkage["linkage_candidate_id"],
-                    expected_input_hash=linkage["input_snapshot_hash"], expected_batch_generation_hash=linkage["batch_generation_hash"],
-                    request_id=request_id + ":" + member["open_event_id"], actor=actor, market=market, apply_changes=True, as_of_ms=instant, conn=conn,
-                    attribution_metadata=attribution_metadata)
-                if direction == "call":
-                    confirm_wheel_call_linkage(active, call_lot_id=member["lot_id"], lot_id=linkage["stock_lot_id"],
-                                               coverage_fact=capacity, **common)
-                else:
-                    confirm_wheel_linkage(active, option_lot_id=member["lot_id"], wheel_branch_id=chosen["wheel_branch_id"],
-                                          direction=direction, capacity_fact=capacity, **common)
+            raise ValueError("attribution evidence changed; use trade_attribution_read prepare_confirmation=true input_hash to create a new preview")
+        if reference is not None:
+            if reference.get("kind") == "combo":
+                matches = [item for item in current["candidates"] if item["candidate_id"] == candidate_id
+                    and (item.get("inference") or {}).get("inference_id") == reference.get("inference_id")]
+            elif reference.get("kind") == "wheel":
+                model = view["wheel_model"]
+                proposals = (model["linkage_candidates"] if reference.get("direction") == "call" else
+                    project_wheel_linkage_candidates(model["wheel_branches"], rows["account_position_lots"], rows["account_wheel_events"]))
+                matches = [item for item in proposals
+                    if item.get("call_record_id", item.get("option_record_id")) == current["lot_id"]
+                    and item.get("linkage_candidate_id") == reference.get("linkage_candidate_id")
+                    and item.get("batch_generation_hash") == reference.get("batch_generation_hash")
+                    and "wheel:" + str(item.get("wheel_branch_id") or item.get("stock_lot_id")) == candidate_id]
+            else:
+                raise ValueError("unknown attribution reference")
+            if len(matches) != 1:
+                raise ValueError("attribution reference is stale or unavailable")
+        conflicts = [row for row in rows["account_wheel_events"] if row["event_id"] in conflict_event_ids]
+        if (len(conflicts) != len(conflict_event_ids) or any(row["event_type"] != "wheel_attribution_conflict"
+                or row["account"] != account or view["conflict_statuses"].get(row["event_id"], {}).get("resolved") for row in conflicts)):
+            raise ValueError("attribution conflict target is unavailable")
+        generations = {branch["wheel_branch_id"]: branch["batch_generation_hash"] for branch in view["wheel_model"]["wheel_branches"]}
+        if any(row["wheel_branch_id"] not in generations for row in conflicts):
+            raise ValueError("attribution conflict branch generation is unavailable")
+        if conflicts:
+            # Exclude only selected conflict records, after binding the real snapshot.
+            selected = set(conflict_event_ids)
+            evaluation_rows = {**rows, "account_wheel_events": [row for row in rows["account_wheel_events"]
+                if row["event_id"] not in selected and (row.get("payload") or {}).get("conflict_event_id") not in selected]}
+            view = build_trade_attribution_view(evaluation_rows, config=config, account=account, market=market,
+                now_ms=instant, combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode)
         else:
-            pair = chosen["inference"]
-            active.upsert_combo_pair_inference(pair, conn=conn)
-            adopt_post_trade_combo_pair(repo=active, inference_id=pair["inference_id"], expected_input_hash=pair["input_snapshot_hash"],
-                actor=actor, apply_changes=True, effective_now_ms=instant, require_unique_auto_match=not manual,
-                exposures=combo_evidence.get("exposures") or [], conn=conn, attribution_metadata=attribution_metadata)
-        # The target was already included in occupancy before the adjustment. Validate
-        # freshness again immediately before the enclosing transaction can commit.
-        capacity_facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
-        for member in members:
-            if member["position_side"] != "short":
+            evaluation_rows = rows
+        evaluated = {row["execution_key"]: row for row in view["rows"]}
+        decisions = {item["execution_key"]: dict(item) for item in requested}
+        if not conflicts and len(decisions) == 1:
+            chosen = next((item for item in evaluated[execution_key]["candidates"] if item["candidate_id"] == candidate_id), None)
+            if chosen:
+                decisions = {row["execution_key"]: {"execution_key": row["execution_key"], "candidate_id": candidate_id}
+                             for row in view["rows"] if row["lot_id"] in chosen["member_lot_ids"]}
+                if wheel_branch_ids:
+                    decisions[execution_key]["wheel_branch_ids"] = list(wheel_branch_ids)
+        required = {key for row in conflicts for key in row["payload"]["execution_keys"]} if conflicts else set(decisions)
+        expanded = set()
+        while required - expanded:
+            key = next(iter(required - expanded))
+            expanded.add(key)
+            fact = by_key.get(key)
+            if fact is None or key not in decisions:
                 continue
-            check = trade_attribution_capacity_check(config=config, fact=member, facts=capacity_facts, wheel_read_model=view["wheel_model"],
-                observation=capacity_observation, now_ms=int(time.time() * 1000), consumed_reservation=chosen.get("consumed_reservation"))
-            if check["status"] != "available":
-                raise ValueError("attribution capacity changed before commit")
+            item = decisions[key]
+            if fact["strategy_group_id"]:
+                required.update(row["execution_key"] for row in facts if row["strategy_group_id"] == fact["strategy_group_id"])
+            chosen = next((value for value in evaluated[key]["candidates"] if value["candidate_id"] == item["candidate_id"]), None)
+            if chosen and chosen["strategy"] == "combo_yield":
+                required.update(row["execution_key"] for row in facts if row["lot_id"] in chosen["member_lot_ids"])
+        if required != decisions.keys():
+            raise ValueError("attribution requires an explicit complete member decision: " + str(sorted(required)))
+        plans, intent_events = [], []
+        branches = {row["wheel_branch_id"]: row for row in view["wheel_model"]["wheel_branches"]}
+        for key, item in sorted(decisions.items()):
+            fact, proposed = by_key[key], evaluated[key]
+            target = item["candidate_id"]
+            if fact["reason_codes"] or not proposed["evidence_complete"]:
+                raise ValueError("attribution member identity or dependencies changed")
+            if not conflicts:
+                assert_trade_attribution_unclaimed(rows["trade_events"], [fact["lot_id"]])
+            fields = active.get_position_lot_fields(fact["lot_id"], conn=conn)
+            choice = next((value for value in proposed["candidates"] if value["candidate_id"] == target), None)
+            allocations = item.get("wheel_branch_ids") or []
+            if target == "ordinary":
+                if not manual:
+                    raise ValueError("ordinary attribution requires a manual decision")
+                kwargs = {"strategy": resolve_option_strategy_membership(fact["contract_key"], fact["position_side"], {}).strategy}
+                action = "ordinary"
+            elif allocations:
+                if not manual or target != "wheel-multi:" + canonical_sha256(sorted(allocations))[:24]:
+                    raise ValueError("Wheel Call allocation identity is invalid")
+                multi = _multi_wheel_call_attribution(view=view,
+                    current={**proposed, "status": "pending", "reason_codes": []}, branch_ids=tuple(allocations),
+                    decided_execution_keys=set(decisions))
+                if "wheel_call_allocations" in item and parse_wheel_call_allocations(item["wheel_call_allocations"]) != parse_wheel_call_allocations(multi["wheel_call_allocations"]):
+                    raise ValueError("Wheel allocation stock identity differs from the decision")
+                kwargs = {"strategy": "wheel", "leg_role": "wheel_call", "wheel_call_allocations": multi["wheel_call_allocations"]}
+                action = "wheel"
+            else:
+                allowed = {"combo_confirmation_required", "combo_not_unique_delivered_pair"} if manual else set()
+                if conflicts:
+                    allowed |= {"combo_member_unavailable", "wheel_branch_capacity_exceeded", "competing_fills_exceed_capacity"}
+                if (choice is None or set(choice["reason_codes"]) - allowed
+                        or not manual and proposed["selected_candidate_id"] != target):
+                    raise ValueError("attribution candidate is not admissible")
+                action = "wheel" if choice["strategy"] == "wheel" else "combo"
+                if action == "wheel":
+                    branch = branches[choice["wheel_branch_id"]]
+                    direction = fact["contract_key"]["option_type"]
+                    kwargs = {"strategy": "wheel", "leg_role": "wheel_" + direction,
+                        "source_wheel_branch_id": branch["wheel_branch_id"],
+                        "source_lot_id": branch.get("stock_lot_id") if direction == "call" else None}
+                    fill = next(row for row in rows["trade_events"] if row["event_id"] == fact["open_event_id"])
+                    intent = resolve_wheel_fill_intent(branch, fill, [*evaluation_rows["account_wheel_events"], *intent_events],
+                        now_ms=instant, known_trade_event_ids={row["event_id"] for row in rows["trade_events"]})
+                    if intent["reason_codes"]:
+                        raise ValueError("Wheel intent is unavailable")
+                    if intent["intent"]:
+                        planner = plan_wheel_call_intent_consume if direction == "call" else plan_wheel_put_intent_consume
+                        payload = intent["intent"].get("payload") or {}
+                        intent_events.append(planner(branch, intent["intent"], fill,
+                            {"account": account, "symbol": branch["symbol"], "status": "available",
+                             "shares_available_for_cover": fact["contracts"] * fact["multiplier"],
+                             **{field: payload.get(field) for field in ("capacity_identity_hash", "cash_reservation_currency", "cash_reservation_amount")}},
+                            recorded_at_ms=instant))
+                else:
+                    pair = choice["inference"]
+                    kwargs = {"strategy": "combo_yield", "strategy_group_id": pair["strategy_group_id"],
+                        "leg_role": "funding_put" if fact["lot_id"] == pair["put_record_id"] else "participation_call"}
+            patch = build_open_adjustment_patch_contract(fields, as_of_ms=instant, **kwargs).to_dict()
+            plans.append({"fact": fact, "patch": patch, "action": action, "candidate_id": target,
+                "candidate_ids": proposed["candidate_ids"], "origin": "intent" if choice and choice.get("intent_id") else "rule",
+                "inference": choice.get("inference") if choice else None})
+        if before_commit is not None:
+            before_commit()
+        if not apply_changes:
+            conn.execute("SAVEPOINT attribution_preview")
+        result = write_trade_attribution_decision(active, conn=conn, account=account, request_id=request_id,
+            actor=actor, input_hash=expected_input_hash, plans=plans, conflicts=conflicts,
+            branch_generations=generations, now_ms=instant, manual=manual, wheel_events=intent_events,
+            request_content=request_content)
+        after_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
+        after_model = build_wheel_read_model_from_rows(after_rows, account=account, as_of_ms=instant)
+        after_facts = trade_attribution_facts_from_events(after_rows["trade_events"], account=account)
+        targets = {plan["patch"].get("source_wheel_branch_id") for plan in plans}
+        targets.update(value["wheel_branch_id"] for plan in plans for value in plan["patch"].get("wheel_call_allocations") or [])
+        for branch in after_model["wheel_branches"]:
+            if branch["wheel_branch_id"] in targets and branch["integrity_status"] != "trusted":
+                raise ValueError("attribution final Wheel capacity or membership is invalid")
+            if branch["wheel_branch_id"] in targets:
+                unit = "shares" if branch["direction"] == "call" else "contracts"
+                available = branch.get("shares_remaining" if unit == "shares" else "remaining_contracts")
+                committed = branch.get("active_option_committed_" + unit)
+                reserved = branch.get("active_intent_reserved_" + unit)
+                if available is None or committed is None or committed + (reserved or 0) > available:
+                    raise ValueError("attribution final Wheel capacity exceeded")
+        for plan in plans:
+            if plan["fact"]["position_side"] == "short":
+                check = trade_attribution_capacity_check(config=config, fact=plan["fact"], facts=after_facts, wheel_read_model=after_model,
+                    observation=capacity_observation, now_ms=int(time.time() * 1000))
+                if check["status"] != "available":
+                    raise ValueError("attribution capacity changed before commit")
         if stop_event is not None and stop_event.is_set():
             raise ValueError("attribution cancelled before commit")
-        after = trade_attribution_facts_from_events(active.list_trade_events(conn=conn), account=account)
-        result = next(row for row in after if row["execution_key"] == execution_key)
-        target = "wheel:" + result["wheel_branch_id"] if result["wheel_branch_id"] else "combo:" + str(result["strategy_group_id"])
-        if result["status"] != "linked" or target != candidate_id:
-            raise ValueError("attribution durable readback failed")
-        return {**result, "write_applied": True}
+        if before_commit is not None:
+            before_commit()
+        after = next(row for row in after_facts
+                     if row["execution_key"] == execution_key)
+        if not apply_changes:
+            conn.execute("ROLLBACK TO attribution_preview")
+            conn.execute("RELEASE attribution_preview")
+            return {**current, **result, "write_applied": False, "members": plans,
+                "request_content": request_content,
+                "conflict_event_ids": list(conflict_event_ids), "branch_generations": generations,
+                **({"wheel_call_allocations": plans[0]["patch"]["wheel_call_allocations"]}
+                   if plans[0]["patch"].get("wheel_call_allocations") else {})}
+        return {**after, **result}
 
     return with_sqlite_repo_transaction(repo, run, require_projection_publication=True)
+
+
+def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], account: str,
+                                   runtime_root: Path) -> dict[str, Any]:
+    from src.application.wheel.capacity import observe_trade_attribution_capacity
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root)
+    market = runtime_config_market(config).lower()
+    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
+        now_ms=int(time.time() * 1000), focus_open_event_id=None)
+    return {"config": config, "market": market, "combo_evidence": evidence,
+        "capacity_observation": observation, "combo_mode": combo_reconciliation_mode_for_account(config, account=account)}
+
+
+def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mapping[str, Any],
+    runtime_root: Path, expected_input_hash: str, request_id: str, actor: str, apply_changes: bool,
+    option_lot_id: str | None = None, wheel_branch_id: str | None = None, stock_lot_id: str | None = None,
+    direction: str | None = None, linkage_candidate_id: str | None = None,
+    expected_batch_generation_hash: str | None = None, inference_id: str | None = None,
+) -> dict[str, Any]:
+    """Adapt existing lot/inference references; admission and writing have one owner.
+
+    expected_input_hash comes from trade_attribution_read(prepare_confirmation=True).
+    Historical linkage/proposal hashes cannot authorize a new attribution decision.
+    """
+    context = {"config": config, "market": runtime_config_market(config).lower(),
+        "combo_mode": combo_reconciliation_mode_for_account(config, account=account),
+        "combo_evidence": {}, "capacity_observation": {}}
+    rows = read_trade_attribution_snapshot(repo, account=account, market=context["market"])
+    if inference_id:
+        pairs = [row for row in rows["account_combo_inferences"] if row["inference_id"] == inference_id]
+        if len(pairs) != 1:
+            raise ValueError("combo inference is unavailable")
+        pair = pairs[0]
+        option_lot_id = pair["put_record_id"]
+        candidate_id = "combo:" + pair["strategy_group_id"]
+        reference = {"kind": "combo", "inference_id": inference_id}
+    else:
+        if stock_lot_id:
+            model = build_wheel_read_model_from_rows(rows, account=account, market=context["market"],
+                as_of_ms=int(time.time() * 1000))
+            branches = [row for row in model["wheel_branches"] if row.get("stock_lot_id") == stock_lot_id]
+            if len(branches) != 1:
+                raise ValueError("Wheel stock lot has no unique branch")
+            wheel_branch_id = branches[0]["wheel_branch_id"]
+        candidate_id = "wheel:" + str(wheel_branch_id or "")
+        reference = {"kind": "wheel", "direction": direction, "linkage_candidate_id": linkage_candidate_id,
+            "batch_generation_hash": expected_batch_generation_hash}
+    facts = [row for row in trade_attribution_facts_from_events(rows["trade_events"], account=account)
+             if row["lot_id"] == option_lot_id]
+    if len(facts) != 1 or not facts[0]["execution_key"]:
+        raise ValueError("attribution source execution identity is unavailable")
+    if not any((row.get("raw_payload") or {}).get("attribution_request_id") == request_id for row in rows["trade_events"]):
+        context = read_trade_attribution_context(repo, config=config, account=account, runtime_root=runtime_root)
+    result = apply_trade_attribution(repo, account=account, execution_key=facts[0]["execution_key"],
+        candidate_id=candidate_id, expected_input_hash=expected_input_hash, request_id=request_id,
+        actor=actor, apply_changes=apply_changes, manual=True, reference=reference, **context)
+    return {**result, "attribution_status": result["status"], "dry_run": not apply_changes,
+        "request_id": request_id, "option_record_id": option_lot_id,
+        "event_id": result["proof_event_ids"][0],
+        "status": (("dry_run" if not apply_changes else "adopted" if result["write_applied"] else "already_confirmed")
+                   if inference_id else ("planned" if not apply_changes else "confirmed" if result["write_applied"] else "idempotent"))}
 
 
 def reconcile_trade_attribution_account(
@@ -646,12 +792,16 @@ def attribution_runtime(*, config_key: str | None, config_path: str | None, acco
 
 
 def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    prepare_confirmation = payload.get("prepare_confirmation", False)
+    if not isinstance(prepare_confirmation, bool):
+        raise AgentToolError(code="INPUT_ERROR", message="prepare_confirmation 必须为布尔值。")
     repo, config, authority, _mapping = attribution_runtime(
         config_key=payload.get("config_key"), config_path=payload.get("config_path"), account=payload.get("account"))
     account = str(payload["account"]).strip().lower()
     market = runtime_config_market(config).lower()
     cursor_key = canonical_sha256({"tool": "trade_attribution_read", "account": account, "market": market,
-                                   "runtime_root": authority["runtime_root"], "config_path": authority.get("config_path")})
+                                   "runtime_root": authority["runtime_root"], "config_path": authority.get("config_path"),
+                                   "prepare_confirmation": prepare_confirmation})
     execution = str(payload.get("execution_key") or "").strip()
     raw_symbol = str(payload.get("symbol") or "").strip()
     identity = resolve_symbol_identity(raw_symbol) if raw_symbol else None
@@ -678,10 +828,14 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
             cursor = state["last_open_event_id"]
         except TradeEventPaginationError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=f"归属分页 cursor 无效或已过期，请重新查询：{exc}") from exc
+    context = (read_trade_attribution_context(repo, config=config, account=account,
+        runtime_root=Path(authority["runtime_root"])) if prepare_confirmation else None)
     snapshot = read_trade_attribution_snapshot(repo, account=account, market=market)
     now = int(time.time() * 1000)
-    evidence = read_attribution_combo_evidence(snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now)
+    evidence = context["combo_evidence"] if context else read_attribution_combo_evidence(
+        snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now)
     view = build_trade_attribution_view(snapshot, config=config, account=account, market=market, now_ms=now, combo_evidence=evidence,
+        capacity_observation=context["capacity_observation"] if context else None,
         combo_mode=combo_reconciliation_mode_for_account(config, account=account))
     rows = view["rows"]
     rows = [row for row in rows if (not filters["execution_key"] or row["execution_key"] == filters["execution_key"])
@@ -694,7 +848,8 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
             "next_cursor": encode_evidence_cursor({"tool": "trade_attribution_read", "filters": filters,
                 "last_open_event_id": page[-1]["open_event_id"]}, cursor_key) if len(rows) > limit else None,
             "evidence_scope": "canonical_ledger_and_local_candidates", "evidence_complete": all(row["evidence_complete"] for row in page),
-            "capacity_observed": False}, [], {}
+            "capacity_observed": bool(context and context["capacity_observation"].get("portfolio")),
+            "prepare_confirmation": prepare_confirmation}, [], {}
 
 
 def run_attribution_admin(args: Any, *, config: dict[str, Any], config_path: Path,
@@ -739,3 +894,26 @@ def run_attribution_admin(args: Any, *, config: dict[str, Any], config_path: Pat
         return apply_trade_attribution_migration(store.sqlite_path, manifest=manifest,
             backup_path=args.backup_path, writers_stopped=args.writers_stopped)
     raise ValueError("unknown attribution administration action")
+
+
+def confirm_wheel_call_linkage(repo: Any, *, account: str, call_lot_id: str, lot_id: str,
+    linkage_candidate_id: str, expected_input_hash: str, expected_batch_generation_hash: str,
+    request_id: str, actor: str, config: Mapping[str, Any], runtime_root: Path,
+    apply_changes: bool = False,
+) -> dict[str, Any]:
+    return apply_referenced_trade_attribution(repo, account=account, option_lot_id=call_lot_id,
+        stock_lot_id=lot_id, direction="call", linkage_candidate_id=linkage_candidate_id,
+        expected_input_hash=expected_input_hash, expected_batch_generation_hash=expected_batch_generation_hash,
+        request_id=request_id, actor=actor, config=config, runtime_root=runtime_root, apply_changes=apply_changes)
+
+
+
+def confirm_wheel_linkage(repo: Any, *, account: str, option_lot_id: str, wheel_branch_id: str,
+    direction: str, linkage_candidate_id: str, expected_input_hash: str, expected_batch_generation_hash: str,
+    request_id: str, actor: str, config: Mapping[str, Any], runtime_root: Path,
+    apply_changes: bool = False,
+) -> dict[str, Any]:
+    return apply_referenced_trade_attribution(repo, account=account, option_lot_id=option_lot_id,
+        wheel_branch_id=wheel_branch_id, direction=direction, linkage_candidate_id=linkage_candidate_id,
+        expected_input_hash=expected_input_hash, expected_batch_generation_hash=expected_batch_generation_hash,
+        request_id=request_id, actor=actor, config=config, runtime_root=runtime_root, apply_changes=apply_changes)

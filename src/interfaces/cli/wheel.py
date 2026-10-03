@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.trades.attribution import confirm_wheel_linkage
 
 import argparse
 import json
@@ -34,7 +35,6 @@ from src.application.wheel.capacity import (
 )
 from src.application.wheel.workflows import (
     cancel_wheel_intent,
-    confirm_wheel_linkage,
     create_wheel_intent,
     reject_wheel_linkage,
 )
@@ -202,7 +202,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             required=True,
         )
         command.add_argument("--linkage-candidate-id", required=True)
-        command.add_argument("--expected-input-hash", required=True)
+        command.add_argument("--expected-input-hash", required=True, help=("trade_attribution_read prepare_confirmation=true input_hash (full attribution snapshot)" if action == "confirm" else "linkage candidate input_snapshot_hash"))
         if action == "reject":
             command.add_argument("--reason", required=True)
         _add_common(command)
@@ -566,33 +566,13 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             policy_sha256=str(resolved.get("policy_sha256") or ""),
         )
     if args.linkage_action == "confirm":
-        capacity_fact = (
-            _coverage(
-                repo,
-                cfg,
-                runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
-                account=args.account,
-                batch=branch,
-                as_of_ms=instant,
-                source_identity=args.request_id,
-            )
-            if args.direction == "call"
-            else _cash_capacity(
-                repo,
-                cfg,
-                runtime_root=Path(args.runtime_root or config_path.parent).resolve(),
-                account=args.account,
-                branch=branch,
-                as_of_ms=instant,
-            )
-        )
         return confirm_wheel_linkage(
             repo,
-            **common,
+            **{key: value for key, value in common.items() if key not in {"market", "as_of_ms"}},
             option_lot_id=args.option_record_id,
             linkage_candidate_id=args.linkage_candidate_id,
             expected_input_hash=args.expected_input_hash,
-            capacity_fact=capacity_fact,
+            config=cfg, runtime_root=repo.ledger_store.runtime_root,
         )
     return reject_wheel_linkage(
         repo,

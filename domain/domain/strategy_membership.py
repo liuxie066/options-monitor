@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+from domain.domain.trade_execution import execution_identity_from_input
 
 from domain.domain.strategy_vocab import (
     STRATEGY_COMBO_YIELD,
@@ -13,6 +15,107 @@ from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 
 if TYPE_CHECKING:
     from domain.domain.ledger.identity import ContractKey
+
+
+POSITION_LOT_STRATEGY_PATCH_FIELDS = (
+    "strategy", "leg_role", "strategy_group_id", "source_stock_lot_id",
+    "source_wheel_branch_id", "wheel_call_allocations", "strategy_snapshot",
+)
+
+
+def validate_attribution_decision(
+    decision: Mapping[str, Any], *, events: Sequence[Mapping[str, Any]],
+    opening_lot_ids: Mapping[str, str], as_of_ms: int,
+) -> tuple[Mapping[str, Any], ...]:
+    """Validate a complete durable decision against active, time-bounded facts.
+
+    The caller supplies canonical opening IDs and excludes validated voids. This
+    owner depends on source facts only, never on Wheel or Combo read models.
+    """
+    if (decision.get("schema_version") != "attribution_decision.v1"
+            or any(not decision.get(key) for key in
+                   ("account", "request_id", "actor", "input_hash", "members"))):
+        raise ValueError("attribution decision identity is incomplete")
+    members = decision["members"]
+    conflicts = decision.get("conflict_event_ids")
+    if (not isinstance(members, list) or any(not isinstance(member, Mapping) for member in members)
+            or not isinstance(conflicts, list)
+            or any(not isinstance(value, str) or not value for value in conflicts)
+            or len(set(conflicts)) != len(conflicts)
+            or not isinstance(decision.get("branch_generations"), Mapping)
+            or not isinstance(decision.get("manual"), bool)
+            or not decision.get("policy_version")):
+        raise ValueError("attribution decision members or conflicts are invalid")
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for event in events:
+        if int(event.get("event_time_ms") or 0) > as_of_ms:
+            continue
+        key = str(event.get("event_id") or "")
+        if key in by_id and by_id[key] != event:
+            raise ValueError("attribution source event identity conflicts")
+        by_id[key] = event
+    for field in ("execution_key", "open_event_id", "lot_id", "proof_event_id"):
+        values = [member.get(field) for member in members]
+        if any(not isinstance(value, str) or not value for value in values) or len(set(values)) != len(values):
+            raise ValueError("attribution decision member identity is not unique")
+    proofs = []
+    physical_accounts = []
+    for member in members:
+        opening = by_id.get(member["open_event_id"], {})
+        proof = by_id.get(member["proof_event_id"], {})
+        raw = proof.get("raw_payload") or {}
+        patch = raw.get("patch") or {}
+        after = member.get("after")
+        before = member.get("before")
+        if (not isinstance(patch, Mapping) or not isinstance(after, Mapping) or not isinstance(before, Mapping)
+                or set(after) != set(POSITION_LOT_STRATEGY_PATCH_FIELDS)
+                or set(before) != set(POSITION_LOT_STRATEGY_PATCH_FIELDS)
+                or set(patch) - {*POSITION_LOT_STRATEGY_PATCH_FIELDS, "last_action_at"}
+                or any(patch.get(key) != after[key] for key in after)):
+            raise ValueError("attribution decision patch differs from its member")
+        if (opening.get("event_type") != "open" or proof.get("event_type") != "adjust"
+                or opening_lot_ids.get(member["open_event_id"]) != member["lot_id"]
+                or list(opening_lot_ids.values()).count(member["lot_id"]) != 1
+                or proof.get("target_lot_id") != member["lot_id"]
+                or (opening.get("contract_key") or {}).get("account") != decision["account"]
+                or proof.get("contract_key") != opening.get("contract_key")
+                or proof.get("currency") != opening.get("currency")
+                or proof.get("multiplier") != opening.get("multiplier")
+                or int(opening.get("event_time_ms") or 0) > int(proof.get("event_time_ms") or 0)
+                or proof.get("contracts") != 0 or float(proof.get("price") or 0) != 0
+                or float(proof.get("fees") or 0) != 0
+                or raw.get("attribution_decision") != decision
+                or raw.get("attribution_request_id") != decision["request_id"]
+                or raw.get("adjust_target_source_event_id") != member["open_event_id"]
+                or raw.get("attribution_policy_version") != decision["policy_version"]
+                or raw.get("actor") != decision["actor"]
+                or (raw.get("attribution_origin") != "manual" if decision.get("manual", True)
+                    else raw.get("attribution_origin") not in {"rule", "intent"})
+                or proof.get("source") not in {"trade_attribution", "wheel_linkage", "post_trade_combo_reconciliation"}
+                or execution_identity_from_input((opening.get("raw_payload") or {}).get("execution_input") or {})
+                != member["execution_key"]):
+            raise ValueError("attribution decision proof or opening is invalid")
+        resolved = resolve_strategy_metadata({key: value for key, value in after.items() if value is not None})
+        if resolved.issues:
+            raise ValueError("attribution decision strategy metadata conflicts")
+        membership = resolve_option_strategy_membership(opening["contract_key"], opening.get("position_side") or
+            ("short" if (opening.get("raw_payload") or {}).get("side") == "sell" else "long"),
+            {key: value for key, value in after.items() if value is not None},
+            valid_combo_group_ids={str(after.get("strategy_group_id") or "")})
+        if membership.issues or (resolved.metadata.wheel_call_allocations and
+                sum(row[2] for row in resolved.metadata.wheel_call_allocations) != opening.get("contracts")):
+            raise ValueError("attribution decision relationship or quantity is invalid")
+        if not decision.get("manual", True) and (conflicts or strategy_metadata_has_owner(
+                {key: value for key, value in before.items() if value is not None})):
+            raise ValueError("automatic attribution cannot transfer an existing relationship")
+        proofs.append(proof)
+        ref = ((opening.get("raw_payload") or {}).get("execution_input") or {}).get("broker_account_ref") or {}
+        physical_accounts.append(tuple(ref.get(key) for key in ("broker_id", "external_account_id", "environment")))
+    if any(not all(ref) for ref in physical_accounts) or len(set(physical_accounts)) != 1:
+        raise ValueError("attribution decision physical accounts differ")
+    if len({int(proof["event_time_ms"]) for proof in proofs}) != 1:
+        raise ValueError("attribution decision proof times differ")
+    return tuple(proofs)
 
 
 @dataclass(frozen=True)
@@ -197,14 +300,15 @@ def resolve_strategy_metadata(
 
 
 def resolve_option_strategy_membership(
-    contract_key: ContractKey,
+    contract_key: ContractKey | Mapping[str, Any],
     position_side: str,
     payload: Mapping[str, Any] | None,
     *,
     valid_combo_group_ids: set[str] | frozenset[str] = frozenset(),
     source_id: str = "",
 ) -> OptionStrategyMembership:
-    leg_type = f"{'sell' if position_side == 'short' else 'buy'}_{contract_key.option_type}"
+    option_type = contract_key.get("option_type") if isinstance(contract_key, Mapping) else contract_key.option_type
+    leg_type = f"{'sell' if position_side == 'short' else 'buy'}_{option_type}"
     default = "csp" if leg_type == "sell_put" else "cc" if leg_type == "sell_call" else "unassigned"
     parent = "csp" if leg_type == "sell_put" else "cc" if leg_type == "sell_call" else None
     resolved = resolve_strategy_metadata(payload, source_id=source_id)

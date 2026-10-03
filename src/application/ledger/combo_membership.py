@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -7,11 +10,14 @@ from domain.domain.combo_identity import (
     FUNDING_PUT_ROLES,
     PARTICIPATION_CALL_ROLES,
     validate_combo_identity,
+    build_combo_identity_intent, identity_from_intent,
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.ledger import TradeEvent
+from domain.domain.ledger import TradeEvent, ContractKey
+from domain.domain.ledger.position_fields import effective_contracts, effective_multiplier
 from domain.domain.ledger.projection import _valid_combo_pair
 from domain.domain.strategy_membership import resolve_strategy_metadata
+from domain.domain.wheel import lot_strategy_metadata_from_trade_events
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.queries import project_trade_event_log
 from src.application.payload_helpers import text as _group_id
@@ -143,11 +149,12 @@ def resolve_combo_group_membership(
         )
     )
     reasons: set[str] = set()
-    if len(current_members) != 2:
+    released = not current_members and group_value in history.released_groups
+    if len(current_members) != 2 and not released:
         reasons.add("combo_group_current_member_count_invalid")
     if len(historical_ids) != 2:
         reasons.add("combo_group_historical_member_count_invalid")
-    if set(current_members) != historical_ids:
+    if set(current_members) != historical_ids and not released:
         reasons.add("combo_group_current_history_mismatch")
     if external_ids:
         reasons.add("combo_group_cross_account_member")
@@ -155,14 +162,14 @@ def resolve_combo_group_membership(
         reasons.add("combo_group_cross_symbol_member")
     if retag_events:
         reasons.add("combo_group_retag_history_present")
-    if len(current_account_ids) != 2 or len(bindings) != 2:
+    if (len(current_account_ids) != 2 or len(bindings) != 2) and not released:
         reasons.add("combo_group_account_binding_count_invalid")
     roles = {item["role"] for item in bindings}
     sp_lc_roles = (
         len(roles.intersection(FUNDING_PUT_ROLES)) == 1
         and len(roles.intersection(PARTICIPATION_CALL_ROLES)) == 1
     )
-    if not sp_lc_roles and roles != {"short_call", "long_put"}:
+    if not sp_lc_roles and roles != {"short_call", "long_put"} and not released:
         reasons.add("combo_group_roles_invalid")
     if any(item["strategy"] != "combo_yield" for item in bindings):
         reasons.add("combo_group_strategy_invalid")
@@ -194,7 +201,7 @@ def resolve_combo_group_membership(
     fact = {
         "membership_schema_version": COMBO_GROUP_MEMBERSHIP_SCHEMA,
         "group_id": group_value,
-        "status": "exact" if not reasons else "conflict",
+        "status": "released" if released and not reasons else "exact" if not reasons else "conflict",
         "current_account_member_record_ids": current_account_ids,
         "global_current_member_count": len(current_members),
         "global_historical_member_count": len(historical_ids),
@@ -454,6 +461,14 @@ def validate_combo_group_membership(
             or reason_codes != []
         ):
             reasons.add("combo_group_exact_membership_invalid")
+    elif item.get("status") == "released":
+        if (item.get("global_current_member_count") != 0 or item.get("global_historical_member_count") != 2
+                or item.get("external_member_count") != 0 or item.get("retag_event_count") != 0
+                or item.get("cross_account_member_present") is not False
+                or item.get("cross_symbol_member_present") is not False or lot_ids != [] or bindings != []
+                or item.get("external_membership_hash") != canonical_sha256([])
+                or item.get("retag_history_hash") != canonical_sha256([]) or reason_codes != []):
+            reasons.add("combo_group_released_membership_invalid")
     elif item.get("status") == "conflict":
         if not reason_codes:
             reasons.add("combo_group_conflict_reasons_missing")
@@ -468,6 +483,7 @@ def validate_combo_group_membership(
 
 @dataclass(frozen=True)
 class _GroupHistory:
+    released_groups: set[str]
     historical_by_group: dict[str, set[str]]
     retag_by_group: dict[str, list[tuple[str, str, str, str]]]
     open_bindings: dict[str, dict[str, Any]]
@@ -510,17 +526,19 @@ def _effective_group_history(
     historical: dict[str, set[str]] = {}
     retags: dict[str, list[tuple[str, str, str, str]]] = {}
     open_bindings: dict[str, dict[str, Any]] = {}
+    released: set[str] = set()
+    handled: set[str] = set()
+    accepted: set[str] = set()
+    lot_strategy_metadata_from_trade_events(effective, accepted_proof_event_ids=accepted)
     for item in effective:
         event_type = _text(item.get("event_type"), lower=True)
         event_id = _text(item.get("event_id"))
         raw = item.get("raw_payload")
         payload = dict(raw) if isinstance(raw, Mapping) else {}
         if event_type == "open":
-            lot_id = _text(
-                item.get("lot_id")
-                or payload.get("record_id")
-                or f"lot_{event_id}"
-            )
+            lot_id = lot_id_for_open_event(item)
+            if lot_id in open_bindings and open_bindings[lot_id]["open_event_id"] != event_id:
+                raise ValueError("duplicate_lot_id")
             fields = (
                 dict(payload.get("fields") or {})
                 if isinstance(payload.get("fields"), Mapping)
@@ -581,6 +599,49 @@ def _effective_group_history(
             continue
         if "strategy_group_id" not in patch:
             continue
+        decision = payload.get("attribution_decision")
+        if decision is not None:
+            if event_id in handled:
+                continue
+            try:
+                if event_id not in accepted:
+                    raise ValueError("attribution decision was not accepted by replay")
+                members = decision["members"]
+                changes = {member["lot_id"]: member for member in members}
+                affected = {str(member[side].get("strategy_group_id") or "")
+                            for member in members for side in ("before", "after")} - {""}
+                final = {**group_by_record, **{key: str(member["after"].get("strategy_group_id") or "")
+                                             for key, member in changes.items()}}
+                for group in affected:
+                    prior_ids = {key for key, value in group_by_record.items() if value == group}
+                    final_ids = {key for key, value in final.items() if value == group}
+                    if not prior_ids <= changes.keys() or len(final_ids) not in {0, 2}:
+                        raise ValueError("attribution Combo member closure is incomplete")
+                    history_ids = historical.get(group, set())
+                    if history_ids and final_ids and history_ids != final_ids:
+                        raise ValueError("attribution cannot change immutable Combo identity")
+                    if final_ids:
+                        roles = {changes[key]["after"].get("leg_role") for key in final_ids}
+                        if roles not in ({"funding_put", "participation_call"}, {"short_call", "long_put"}):
+                            raise ValueError("attribution Combo roles are invalid")
+                for group in affected:
+                    final_ids = {key for key, value in final.items() if value == group}
+                    if final_ids:
+                        historical.setdefault(group, set()).update(final_ids)
+                        released.discard(group)
+                    else:
+                        released.add(group)
+                for key, member in changes.items():
+                    group_by_record[key] = final[key]
+                    binding_by_record[key] = {field: _text(member["after"].get(field))
+                        for field in ("strategy_group_id", "leg_role", "strategy")}
+                handled.update(member["proof_event_id"] for member in members)
+                continue
+            except (TypeError, ValueError, KeyError, AttributeError):
+                # An incomplete or forged decision cannot authorize a retag.
+                for group in {_group_id(group_by_record.get(lot_id)), _group_id(patch.get("strategy_group_id"))} - {""}:
+                    retags.setdefault(group, []).append((event_id, lot_id, group, "invalid_decision"))
+                continue
         before = group_by_record.get(lot_id, "")
         after = _group_id(patch.get("strategy_group_id"))
         group_by_record[lot_id] = after
@@ -599,6 +660,7 @@ def _effective_group_history(
             retags.setdefault(before, []).append(occurrence)
             retags.setdefault(after, []).append(occurrence)
     return _GroupHistory(
+        released_groups=released,
         historical_by_group=historical,
         retag_by_group=retags,
         open_bindings=open_bindings,
@@ -735,8 +797,33 @@ def _controlled_pair_adoption(
         if row.get("event_type") == "adjust"
         and row.get("target_lot_id") == binding["record_id"]
         and opening.event_time_ms < (_integer(row.get("event_time_ms")) or 0) < instant
-        and row.get("source") == "post_trade_combo_reconciliation"
+        and row.get("source") in {"post_trade_combo_reconciliation", "trade_attribution"}
+        and row.get("event_id") not in voided_ids
     ]
+    candidates.sort(key=lambda row: (int(row["event_time_ms"]), row["event_id"]))
+    if candidates and "attribution_decision" in (candidates[-1].get("raw_payload") or {}):
+        decision = candidates[-1]["raw_payload"]["attribution_decision"]
+        try:
+            accepted: set[str] = set()
+            current = lot_strategy_metadata_from_trade_events(
+                [row for row in rows if int(row.get("event_time_ms") or 0) < instant],
+                accepted_proof_event_ids=accepted)
+            if candidates[-1]["event_id"] not in accepted:
+                return None
+            member = next(row for row in decision["members"] if row["lot_id"] == binding["record_id"])
+            if (any(current.get(member["lot_id"], {}).get(key) != value for key, value in member["after"].items())
+                    or member["open_event_id"] != opening.event_id or member["after"]["strategy"] != "combo_yield"
+                    or member["after"]["strategy_group_id"] != group_id or member["after"]["leg_role"] != role):
+                return None
+            return decision["request_id"], int(candidates[-1]["event_time_ms"])
+        except (TypeError, ValueError, KeyError, StopIteration):
+            return None
+    # Legacy adoption can only claim an unowned opening; complete decisions
+    # above also prove an explicitly authorized transfer from an existing owner.
+    metadata = resolve_strategy_metadata(opening.raw_payload, source_id=opening.event_id)
+    if metadata.issues or any((metadata.metadata.strategy, metadata.metadata.strategy_group_id,
+                               metadata.metadata.leg_role)):
+        return None
     if len(candidates) != 1:
         return None
     row = candidates[0]
@@ -793,6 +880,7 @@ def resolve_combo_assignment_proof(
     if instant <= 0 or not assignment.target_lot_id:
         return None, "combo_assignment_source_invalid"
     rows = [dict(row) for row in trade_events]
+    strategy_rows = [row for row in rows if (_integer(row.get("event_time_ms")) or 0) < instant]
     prefix = [
         row for row in rows
         if _text(row.get("event_type"), lower=True) != "void"
@@ -809,7 +897,7 @@ def resolve_combo_assignment_proof(
             group_id=group_id,
             account=assignment.contract_key.account,
             expected_symbol=assignment.contract_key.underlying_symbol,
-            trade_events=prefix,
+            trade_events=strategy_rows,
             projected_position_lots=projected.lots,
         )
     except (TypeError, ValueError):
@@ -890,24 +978,20 @@ def resolve_combo_assignment_proof(
             and metadata.metadata.leg_role in roles
         ):
             continue
-        if (
-            variant != "csp_lc" or metadata.issues
-            or any((metadata.metadata.strategy, metadata.metadata.strategy_group_id,
-                    metadata.metadata.leg_role))
-        ):
+        if variant != "csp_lc" or metadata.issues:
             return None, "combo_assignment_open_identity_unproven"
         adopted_roles.append((label, (put_binding if label == "put" else call_binding)["role"]))
     if adopted_roles:
         if len(adopted_roles) != 2:
             return None, "combo_assignment_open_identity_unproven"
         voided_ids = {
-            target for row in rows
+            target for row in strategy_rows
             for target in [valid_void_target_event_id(row)]
             if target
         }
         proofs = [
             _controlled_pair_adoption(
-                rows, binding=put_binding if label == "put" else call_binding,
+                strategy_rows, binding=put_binding if label == "put" else call_binding,
                 opening=leg_events[label], group_id=group_id, role=role,
                 instant=instant, voided_ids=voided_ids,
             )
@@ -964,3 +1048,60 @@ __all__ = [
     "resolve_combo_group_membership",
     "validate_combo_group_membership",
 ]
+
+
+def _identity_leg(record: Mapping[str, Any], *, open_event_id: str, group_id: str, leg_role: str) -> dict[str, Any]:
+    fields = dict(record["fields"])
+    contract = ContractKey.from_values(**{key: _lot_contract_value(fields, key, flat)
+        for key, flat in (("broker", "broker"), ("account", "account"), ("underlying_symbol", "symbol"),
+            ("option_type", "option_type"), ("strike", "strike"), ("expiration_ymd", "expiration_ymd"))})
+    return {"strategy_group_id": group_id, "strategy": "combo_yield", "leg_role": leg_role,
+        "broker": contract.broker, "account": contract.account, "symbol": contract.underlying_symbol,
+        "contracts": effective_contracts(fields), "open_event_id": open_event_id,
+        "record_id": record["record_id"], "contract_key": contract.to_dict(),
+        "currency": str(fields.get("currency") or "").strip().upper(),
+        "multiplier": require_option_multiplier(fields.get("multiplier")), "strike": float(contract.strike),
+        "expiration_ymd": contract.expiration_ymd}
+
+def publish_combo_pair_identity(sqlite_repo: Any, *, conn: Any, inference: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Validate and persist the immutable pair after all member patches are visible."""
+    group_id = str(inference["strategy_group_id"])
+    events = sqlite_repo.list_trade_events(conn=conn)
+    projection_lots = sqlite_repo.list_position_lots(conn=conn)
+    projected_by_id = {
+        str(item.get("record_id") or ""): item
+        for item in projection_lots
+    }
+    put_leg = _identity_leg(
+        projected_by_id[str(inference["put_record_id"])],
+        open_event_id=str(inference["put_open_event_id"]),
+        group_id=group_id,
+        leg_role="funding_put",
+    )
+    call_leg = _identity_leg(
+        projected_by_id[str(inference["call_record_id"])],
+        open_event_id=str(inference["call_open_event_id"]),
+        group_id=group_id,
+        leg_role="participation_call",
+    )
+    intent = build_combo_identity_intent(first_leg=put_leg, second_leg=call_leg)
+    identity = identity_from_intent(
+        intent,
+        first_leg=put_leg,
+        second_leg=call_leg,
+    )
+    membership = resolve_combo_group_membership(
+        group_id=group_id,
+        account=str(inference["account"]),
+        expected_symbol=str(inference["symbol"]),
+        trade_events=events,
+        projected_position_lots=projection_lots,
+    )
+    if (
+        membership.fact.get("status") != "exact"
+        or set(membership.fact.get("current_account_member_record_ids") or [])
+        != {str(inference["put_record_id"]), str(inference["call_record_id"])}
+    ):
+        raise ValueError("post-trade Combo adoption membership is not exact")
+    sqlite_repo.insert_strategy_group_identity(identity, conn=conn)
+    return identity, membership

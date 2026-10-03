@@ -1163,7 +1163,9 @@ def _scope_diagnostics(
     opens_by_lot: dict[str, TradeEvent] = {}
     for event, _event_diagnostics in validated_events:
         events_by_id.setdefault(event.event_id, []).append(event)
-        if event.event_type == "open":
+        if event.event_type == "open" and not any(
+            item.severity == "error" for item in _event_diagnostics
+        ):
             opens_by_lot[lot_id_for_open_event(event)] = event
     lots_by_id = {lot.lot_id: lot for lot in lots}
 

@@ -14,6 +14,8 @@ from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.option_position_identity import normalize_side
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.api import (
+    lot_id_for_open_event,
+    valid_void_target_event_id,
     list_position_lot_snapshots,
     position_projection_verify_state,
     project_trade_event_log,
@@ -162,7 +164,9 @@ def _event_record_refs(event: dict[str, object]) -> set[str]:
         str(payload.get("void_target_event_id") or "").strip(),
         str(payload.get("target_event_id") or "").strip(),
     }
-    refs.update(f"lot_{item}" for item in list(refs) if item and not item.startswith("lot_"))
+    refs.add(str(event.get("target_lot_id") or "").strip())
+    if event.get("event_type") == "open":
+        refs.add(lot_id_for_open_event(event))
     return {item for item in refs if item}
 
 
@@ -249,13 +253,18 @@ def build_lot_event_history(repo, *, base: Path, lot_id: str) -> list[dict[str, 
     fields = current.get("fields") or {} if current is not None else {}
     if not isinstance(fields, dict):
         fields = {}
+    events = trade_event_log(repo)
+    matched_ids = {str(event["event_id"]) for event in events
+                   if requested_lot_id in _event_record_refs(event)}
+    matched_ids.update(str(event["event_id"]) for event in events
+                       if valid_void_target_event_id(event) in matched_ids)
     history = [
         _event_to_history_row(event, fallback_lot_id=lot_id)
-        for event in trade_event_log(repo)
+        for event in events
         if (
             _event_matches_lot(event, lot_id=requested_lot_id, fields=fields)
             if current is not None
-            else requested_lot_id in _event_record_refs(event)
+            else str(event["event_id"]) in matched_ids
         )
     ]
     if not history:

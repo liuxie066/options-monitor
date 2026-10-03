@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 import hashlib
 import json
 from typing import Any, Sequence
@@ -521,7 +523,7 @@ def persist_manual_open_event(
     existing_result = _existing_trade_event_result(
         repo,
         event_id=event_id,
-        lot_id=f"lot_{event_id}",
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
     )
     if existing_result is not None:
         if request_id_value:
@@ -568,7 +570,7 @@ def persist_manual_open_event(
         currency=resolved_currency,
         source="cli_manual_open",
         multiplier=require_option_multiplier(multiplier),
-        lot_id=f"lot_{event_id}",
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
         raw_payload={
             "source": "om option-positions",
             "source_type": "manual_trade_event",

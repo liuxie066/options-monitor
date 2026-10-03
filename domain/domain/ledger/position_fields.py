@@ -26,6 +26,7 @@ from domain.domain.option_position_identity import (
     resolve_open_currency,
 )
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD, canonical_strategy_id
+from domain.domain.strategy_membership import POSITION_LOT_STRATEGY_PATCH_FIELDS as POSITION_LOT_STRATEGY_PATCH_FIELDS
 
 
 class _Unset:
@@ -39,15 +40,6 @@ _PatchValue = int | float | str | dict[str, Any] | list[dict[str, Any]] | None |
 PRICE_DECIMAL_PLACES = 3
 _PRICE_QUANTUM = Decimal(1).scaleb(-PRICE_DECIMAL_PLACES)
 
-POSITION_LOT_STRATEGY_PATCH_FIELDS = (
-    "strategy",
-    "leg_role",
-    "strategy_group_id",
-    "source_stock_lot_id",
-    "source_wheel_branch_id",
-    "wheel_call_allocations",
-    "strategy_snapshot",
-)
 LEGACY_POSITION_LOT_PATCH_FIELDS = ("yield_enhancement_mode",)
 
 # §7.1: ``position_id`` is retired, so it is not a patch field and must never be

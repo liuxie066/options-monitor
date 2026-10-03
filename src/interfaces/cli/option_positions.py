@@ -6,6 +6,8 @@ trade-events / position-lots model.
 
 from __future__ import annotations
 
+from src.application.trades.attribution import apply_referenced_trade_attribution
+
 import argparse
 import json
 import sqlite3
@@ -21,7 +23,6 @@ from domain.domain.ledger.position_fields import (
 from src.application.config_loader import resolve_data_config_path
 from src.application.ledger.api import (
     activate_position_projection_checkpoints,
-    adopt_post_trade_combo_pair,
     adopt_existing_combo_identity,
     apply_current_decision_projection_migration,
     apply_position_projection_migration,
@@ -358,12 +359,12 @@ def _combo_reconcile_exposures(
     return [exposures[key] for key in sorted(exposures)]
 
 
-def _require_combo_confirmation_mode(
+def _combo_confirmation_config_path(
     *,
     base: Path,
     args: argparse.Namespace,
     inference: dict[str, Any],
-) -> dict[str, str]:
+) -> Path:
     market = str(inference.get("market") or "").strip().lower()
     explicit = str(getattr(args, "config", "") or "").strip()
     if explicit:
@@ -376,16 +377,9 @@ def _require_combo_confirmation_mode(
         )
     if not config_path.exists():
         raise SystemExit(
-            f"confirm-combo apply requires a runtime config with account mode=confirm or auto: {config_path}"
+            f"confirm-combo requires a runtime config: {config_path}"
         )
-    config = _load_json_object(config_path)
-    account = normalize_account(inference.get("account"))
-    mode = combo_reconciliation_mode_for_account(config, account=account)
-    if mode not in {"confirm", "auto"}:
-        raise SystemExit(
-            f"confirm-combo apply is disabled for account {account}: effective mode={mode}"
-        )
-    return {"account": account, "mode": mode, "config_path": str(config_path)}
+    return config_path
 
 
 def _register_basic_ledger_parsers(sub: Any) -> None:
@@ -977,13 +971,13 @@ def _register_combo_parsers(sub: Any) -> None:
         parser = sub.add_parser(command, help=help_text)
         _add_runtime_root_arg(parser)
         parser.add_argument("--inference-id", required=True)
-        parser.add_argument("--expected-input-hash", required=True)
+        parser.add_argument("--expected-input-hash", required=True, help=("trade_attribution_read prepare_confirmation=true input_hash for the inference funding Put" if command == "confirm-combo" else "inference input_snapshot_hash"))
         parser.add_argument("--actor", required=True)
         if command == "confirm-combo":
             parser.add_argument(
                 "--config",
                 default=None,
-                help="runtime config used to verify this account has combo reconciliation mode=confirm",
+                help="runtime config for shared Combo attribution admission and recovery",
             )
         if command == "supersede-combo":
             parser.add_argument("--reason", required=True)
@@ -2791,23 +2785,21 @@ def main(argv: list[str] | None = None) -> int:
         if existing is None:
             raise SystemExit(f"combo inference not found: {args.inference_id}")
         if args.cmd == "confirm-combo":
-            mode_evidence = None
-            if apply_changes:
-                mode_evidence = _require_combo_confirmation_mode(
-                    base=base,
-                    args=args,
-                    inference=existing,
-                )
-            out = adopt_post_trade_combo_pair(
-                repo=repo,
+            config_path = _combo_confirmation_config_path(base=base, args=args, inference=existing)
+            config = _load_json_object(config_path)
+            account = normalize_account(existing["account"])
+            out = apply_referenced_trade_attribution(
+                repo=repo, account=account,
+                config=config, runtime_root=repo.ledger_store.runtime_root,
                 inference_id=args.inference_id,
                 expected_input_hash=args.expected_input_hash,
-                actor=args.actor,
-                apply_changes=apply_changes,
+                request_id="combo-confirm:" + args.inference_id,
+                actor=args.actor, apply_changes=apply_changes,
             )
-            if mode_evidence is not None:
-                out["confirmation_mode"] = mode_evidence
-            write_applied = out.get("status") == "adopted"
+            out["confirmation_mode"] = {"account": account,
+                "mode": combo_reconciliation_mode_for_account(config, account=account),
+                "config_path": str(config_path)}
+            write_applied = out.get("write_applied", False)
             rollback_hint = "use supersede-combo to append-only void both adoption events"
         elif args.cmd == "supersede-combo":
             out = supersede_post_trade_combo_pair(

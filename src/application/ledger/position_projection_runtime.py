@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from collections import deque
 from dataclasses import dataclass, replace
 import hashlib
@@ -849,7 +851,7 @@ def _try_fast_path(
     for event in tail_events:
         if event.get("event_type") != "open":
             continue
-        lot_id = str(event.get("lot_id") or f"lot_{event.get('event_id') or ''}")
+        lot_id = lot_id_for_open_event(event)
         if lot_id in tail_open_events:
             return "new_lot_id_collision"
         tail_open_events[lot_id] = str(event.get("event_id") or "")

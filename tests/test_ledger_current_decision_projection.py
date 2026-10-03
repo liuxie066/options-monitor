@@ -2706,11 +2706,6 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
             "run_position_projection_in_transaction",
             "_finish_trade_event_decision_projection",
         ),
-        combo_reconciliation.adopt_post_trade_combo_pair: (
-            "_validate_inference_against_current_ledger",
-            "identity",
-            "_finish_trade_event_decision_projection",
-        ),
         combo_reconciliation.supersede_post_trade_combo_pair: (
             "membership_after",
             "run_position_projection_in_transaction",
