@@ -21,6 +21,7 @@ from domain.domain.cash_secured_utils import (
     read_cash_secured_total_cny,
 )
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.trade_contract_identity import require_option_multiplier
 from domain.domain.risk_capacity import (
     SellPutEffectiveCash,
     compute_sell_put_effective_cash,
@@ -28,6 +29,13 @@ from domain.domain.risk_capacity import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 
 log = logging.getLogger(__name__)
+
+
+def _option_multiplier(value: Any) -> int | None:
+    try:
+        return require_option_multiplier(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _cash_secured_context_unavailable_reason(
@@ -97,7 +105,7 @@ def sell_put_opening_capacity_inputs(
 
     try:
         strike_value = float(strike)
-        multiplier_value = float(multiplier)
+        multiplier_value = require_option_multiplier(multiplier)
     except (TypeError, ValueError):
         return {
             "put_cash_capacity_available": False,
@@ -228,11 +236,10 @@ def enrich_sell_put_candidates_with_cash(
             out["strike"] if "strike" in out else pd.Series(index=out.index, dtype=float),
             errors="coerce",
         )
-        multiplier = pd.to_numeric(
-            out["multiplier"]
+        multiplier = (
+            out["multiplier"].map(_option_multiplier)
             if "multiplier" in out
-            else pd.Series(index=out.index, dtype=float),
-            errors="coerce",
+            else pd.Series(index=out.index, dtype=float)
         )
         required = strike * multiplier
         valid = strike.gt(0) & multiplier.gt(0)
@@ -375,7 +382,7 @@ def enrich_sell_put_candidates_with_cash(
     # Cash requirement
     try:
         if 'multiplier' in df_sp_lab.columns:
-            m = pd.to_numeric(df_sp_lab['multiplier'], errors='coerce')
+            m = df_sp_lab['multiplier'].map(_option_multiplier)
         else:
             m = pd.Series([pd.NA] * len(df_sp_lab), index=df_sp_lab.index, dtype='float64')
 
@@ -476,7 +483,7 @@ def enrich_sell_put_candidates_with_cash(
         required_native = None
         try:
             strike_value = float(row.get('strike'))
-            multiplier_value = float(row.get('multiplier'))
+            multiplier_value = require_option_multiplier(row.get('multiplier'))
             if strike_value > 0 and multiplier_value > 0:
                 required_native = strike_value * multiplier_value
         except (TypeError, ValueError):

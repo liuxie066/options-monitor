@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -290,3 +291,156 @@ def test_sqlite_repo_stores_stock_event_asset_type_and_quantity_unit(tmp_path: P
     listed = repo.list_trade_events()
     assert listed[0]["asset_type"] == "stock"
     assert listed[0]["quantity_unit"] == "share"
+
+
+@pytest.mark.parametrize("raw", [None, "", 0, -1, 100.5, True, False, "100.00000000000000001", float("nan"), float("inf")])
+def test_invalid_multiplier_retains_event_identity_but_cannot_be_written(tmp_path, raw):
+    from domain.domain.ledger.events import validate_trade_event
+
+    original = _canonical_event(multiplier=raw)
+    payload = original.to_dict()
+    decoded, diagnostics = stored_trade_event_to_ledger_event(payload)
+    assert decoded is not None
+    assert decoded.event_id == original.event_id
+    assert any(d.code == "event_multiplier_invalid" for d in diagnostics)
+    for event in (original, TradeEvent.from_dict(payload), decoded):
+        assert any(d.code == "event_multiplier_invalid" for d in validate_trade_event(event))
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "invalid.sqlite3")
+    with pytest.raises(ValueError, match="event_multiplier_invalid"):
+        repo.upsert_trade_event(original)
+    assert repo.list_trade_events() == []
+    assert repo.list_position_lots() == []
+
+
+def test_absent_multiplier_is_unknown_in_all_event_entry_points():
+    from domain.domain.ledger.events import validate_trade_event
+
+    kwargs = _canonical_event_kwargs()
+    kwargs.pop("multiplier")
+    direct = TradeEvent(**kwargs)
+    payload = _canonical_event().to_dict()
+    payload.pop("multiplier")
+    decoded, diagnostics = stored_trade_event_to_ledger_event(payload)
+    assert decoded is not None
+    assert any(d.code == "event_multiplier_invalid" for d in diagnostics)
+    for event in (direct, TradeEvent.from_dict(payload), decoded):
+        assert event.multiplier is None
+        assert any(d.code == "event_multiplier_invalid" for d in validate_trade_event(event))
+
+
+@pytest.mark.parametrize("raw", [100, 500, 1000, "500", Decimal("1000")])
+def test_valid_multiplier_is_normalized_and_preserves_option_value(raw):
+    encoded = encode_trade_event_for_storage(_canonical_event(multiplier=raw))
+    event, errors = stored_trade_event_to_ledger_event(encoded.payload)
+    assert event is not None and errors == []
+    assert type(event.multiplier) is int
+    assert event.multiplier == int(raw)
+    projection = project_stored_trade_events_to_position_lots([encoded.payload])
+    assert not projection.has_errors
+    assert projection.lots[0].fields["multiplier"] == int(raw)
+    close = _canonical_event(event_id="unit-close", event_type="close", event_time_ms=2000,
+                             price=Decimal("0.5"), multiplier=raw, target_lot_id="lot_open-aapl",
+                             raw_payload={"side": "buy"})
+    closed = project_stored_trade_events_to_position_lots([encoded.payload, close.to_dict()])
+    assert not closed.has_errors
+    assert Decimal(closed.lots[0].fields["realized_pnl"]) == Decimal(int(raw)) / 2
+
+
+@pytest.mark.parametrize("patch_value", [None, "", True, 0, -1, 100.5, "100.00000000000000001"])
+def test_nested_adjust_multiplier_cannot_bypass_top_level_validation(patch_value):
+    event = _canonical_event(event_id="adjust", event_type="adjust", contracts=0, price=0,
+                             target_lot_id="lot_open-aapl", raw_payload={"patch": {"multiplier": patch_value}})
+    with pytest.raises(ValueError, match="event_multiplier_invalid"):
+        encode_trade_event_for_storage(event)
+    from domain.domain.ledger import PositionLot
+
+    lot = PositionLot.from_open_event(_canonical_event(), lot_id="lot_open-aapl")
+    with pytest.raises(ValueError, match="multiplier"):
+        lot.apply_adjust(event)
+    projected = project_stored_trade_events_to_position_lots([_canonical_event().to_dict(), event.to_dict()])
+    assert projected.has_errors
+    assert projected.lots[0].fields["multiplier"] == 100
+
+
+def test_existing_valid_void_preserves_replacement_of_missing_multiplier_history():
+    bad = _canonical_event().to_dict()
+    bad.pop("multiplier")
+    void = _canonical_event(event_id="void", event_type="void", event_time_ms=2000,
+                            contracts=0, price=0, target_event_id=bad["event_id"])
+    replacement = _canonical_event(event_id="replacement", event_time_ms=3000,
+                                   lot_id="replacement-lot", multiplier=500)
+    rejected = project_stored_trade_events_to_position_lots([bad, replacement.to_dict()])
+    assert rejected.has_errors
+    resolved = project_stored_trade_events_to_position_lots([bad, void.to_dict(), replacement.to_dict()])
+    assert not resolved.has_errors
+    assert [lot.lot_id for lot in resolved.lots] == ["replacement-lot"]
+    assert resolved.lots[0].fields["multiplier"] == 500
+    invalid_void = {**void.to_dict(), "target_event_id": "unknown"}
+    assert project_stored_trade_events_to_position_lots([bad, invalid_void]).has_errors
+
+
+def test_stock_event_without_multiplier_remains_share_based():
+    event = _canonical_event(contract_key=_stock_contract_key(), asset_type="stock",
+                             contracts=Decimal("2.5"), multiplier=None, raw_payload={"side": "buy"})
+    restored, errors = stored_trade_event_to_ledger_event(encode_trade_event_for_storage(event).payload)
+    assert errors == []
+    assert restored is not None and restored.multiplier == 0
+    assert restored.quantity_unit == "share" and restored.contracts == Decimal("2.5")
+
+
+@pytest.mark.parametrize("key_patch", [
+    {"account": "sy"},
+    {"broker": "ibkr"},
+    {"underlying_symbol": "NVDA"},
+    {"option_type": "call"},
+    {"strike": Decimal("155")},
+    {"expiration_ymd": "2026-07-17"},
+])
+@pytest.mark.parametrize("event_type", ["void", "repair"])
+def test_wrong_control_target_identity_cannot_hide_bad_multiplier(key_patch, event_type):
+    bad = _canonical_event(multiplier="100.00000000000000001").to_dict()
+    control = _canonical_event(
+        event_id="bad-control", event_type=event_type, event_time_ms=2000,
+        contracts=0, price=0, target_event_id=bad["event_id"],
+        contract_key=replace(_contract_key(), **key_patch),
+    )
+    result = project_stored_trade_events_to_position_lots([bad, control.to_dict()])
+    assert result.has_errors
+    assert result.lots == []
+    assert any(d.event_id == bad["event_id"] and d.code == "event_multiplier_invalid"
+               for d in result.diagnostics)
+    assert any(d.event_id == control.event_id and d.code == "target_event_contract_mismatch"
+               for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("event_type", ["void", "repair"])
+def test_control_before_target_cannot_hide_bad_multiplier(event_type):
+    bad = _canonical_event(multiplier=None).to_dict()
+    control = _canonical_event(
+        event_id="early-control", event_type=event_type, event_time_ms=999,
+        contracts=0, price=0, target_event_id=bad["event_id"],
+    )
+    result = project_stored_trade_events_to_position_lots([bad, control.to_dict()])
+    assert result.has_errors
+    assert any(d.event_id == bad["event_id"] and d.code == "event_multiplier_invalid"
+               for d in result.diagnostics)
+    assert any(d.event_id == control.event_id and d.code == "target_event_time_invalid"
+               for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("void_time", [1000, 2000])
+def test_valid_void_preserves_backdated_replacement_and_equal_target_time(void_time):
+    bad = _canonical_event(multiplier=None).to_dict()
+    void = _canonical_event(
+        event_id="valid-void", event_type="void", event_time_ms=void_time,
+        contracts=0, price=0, target_event_id=bad["event_id"],
+    )
+    replacement = _canonical_event(
+        event_id="replacement", event_time_ms=1000, lot_id="replacement-lot", multiplier=500,
+    )
+    result = project_stored_trade_events_to_position_lots(
+        [bad, void.to_dict(), replacement.to_dict()]
+    )
+    assert not result.has_errors
+    assert [lot.lot_id for lot in result.lots] == ["replacement-lot"]
+    assert result.lots[0].fields["multiplier"] == 500

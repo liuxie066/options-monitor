@@ -595,6 +595,7 @@ def test_full_replay_mismatch_blocks_position_consumers() -> None:
 
 def _void_event(*, event_id: str, target_event_id: str) -> dict:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="void",
         event_time_ms=1_700_000_001_000,
@@ -676,6 +677,7 @@ def test_non_lot_materializing_events_alone_do_not_fail_the_replay_check() -> No
         repo=_LedgerRepo(
             [
                 TradeEvent(
+                    multiplier=100,
                     event_id="event-verify-1",
                     event_type="verification",
                     event_time_ms=1_700_000_000_000,

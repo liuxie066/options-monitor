@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from domain.domain.trade_contract_identity import require_option_multiplier
 from src.infrastructure.io_utils import utc_now
 
 """Multiplier cache and resolver.
@@ -136,7 +138,7 @@ def get_cached_multiplier(cache: dict[str, Any], symbol: str) -> int | None:
             v = cache.get(sym)
             if not isinstance(v, dict):
                 continue
-            m = int(v.get("multiplier") or 0)
+            m = require_option_multiplier(v.get("multiplier"))
             if m > 0:
                 return m
         except Exception:
@@ -159,7 +161,7 @@ def get_cached_multiplier_source(cache: dict[str, Any], symbol: str) -> str | No
         if not isinstance(item, dict):
             continue
         try:
-            if int(item.get("multiplier") or 0) > 0:
+            if _positive_int(item.get("multiplier")) is not None:
                 return str(item.get("source") or "cache")
         except Exception:
             continue
@@ -168,14 +170,9 @@ def get_cached_multiplier_source(cache: dict[str, Any], symbol: str) -> str | No
 
 def _positive_int(value: Any) -> int | None:
     try:
-        if value in (None, ""):
-            return None
-        out = int(float(value))
-        if out > 0:
-            return out
-    except Exception:
+        return require_option_multiplier(value)
+    except ValueError:
         return None
-    return None
 
 
 def resolve_multiplier_with_source_and_diagnostics(
@@ -208,9 +205,13 @@ def resolve_multiplier_with_source_and_diagnostics(
     diagnostics["attempted_sources"].append(
         {
             "source": "payload",
-            "status": "missing" if multiplier in (None, "") else "invalid",
+            "status": "missing" if multiplier is None else "invalid",
         }
     )
+
+    if multiplier is not None:
+        diagnostics["message"] = "source multiplier must be a positive integer"
+        return None, None, diagnostics
 
     if not sym:
         diagnostics["attempted_sources"].append({"source": "contract_metadata", "status": "skipped_no_symbol"})
@@ -270,11 +271,12 @@ def resolve_multiplier_with_source_and_diagnostics(
         )
         receipt_hash = str(getattr(refreshed, "source_receipt_sha256", None) or "").strip().lower()
         receipt_available = len(receipt_hash) == 64 and all(c in "0123456789abcdef" for c in receipt_hash)
-        if refreshed.ok and refreshed.multiplier and int(refreshed.multiplier) > 0 and (not cached or receipt_available):
+        refreshed_multiplier = _positive_int(refreshed.multiplier)
+        if refreshed.ok and refreshed_multiplier is not None and (not cached or receipt_available):
             update = store_multiplier(
                 {},
                 sym,
-                int(refreshed.multiplier),
+                refreshed_multiplier,
                 source="opend",
                 source_receipt_sha256=getattr(
                     refreshed,
@@ -293,12 +295,12 @@ def resolve_multiplier_with_source_and_diagnostics(
                     entry["multiplier_evidence_hash"]
                 )
             diagnostics["selected_source"] = "opend"
-            diagnostics["attempted_sources"].append({"source": "opend", "status": "resolved", "value": int(refreshed.multiplier)})
-            return int(refreshed.multiplier), "opend", diagnostics
+            diagnostics["attempted_sources"].append({"source": "opend", "status": "resolved", "value": refreshed_multiplier})
+            return refreshed_multiplier, "opend", diagnostics
         diagnostics["attempted_sources"].append(
             {
                 "source": "opend",
-                "status": "miss" if not refreshed.error else "error",
+                "status": "invalid" if refreshed.ok and refreshed_multiplier is None else ("miss" if not refreshed.error else "error"),
                 "error": refreshed.error or ("multiplier_receipt_unavailable" if cached and not receipt_available else None),
             }
         )
@@ -353,8 +355,8 @@ def refresh_via_opend(
                 mv = r.get("multiplier")
                 if mv is None:
                     continue
-                m0 = int(float(mv))
-                if m0 > 0:
+                m0 = _positive_int(mv)
+                if m0 is not None:
                     m = m0
                     break
             except Exception:
@@ -379,6 +381,7 @@ def store_multiplier(
     source: str = "opend",
     source_receipt_sha256: str | None = None,
 ) -> dict[str, Any]:
+    multiplier = require_option_multiplier(multiplier)
     canonical_symbol = normalize_symbol(symbol)
     entry = {
         "multiplier": int(multiplier),
@@ -552,7 +555,7 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
             store_multiplier(
                 cache,
                 sym,
-                int(r.multiplier),
+                r.multiplier,
                 source="opend",
                 source_receipt_sha256=r.source_receipt_sha256,
             )

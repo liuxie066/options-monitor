@@ -20,6 +20,7 @@ from domain.domain.trade_execution import (
 )
 from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     normalize_contract_expiration,
     normalize_position_effect,
     normalize_trade_side,
@@ -231,7 +232,10 @@ def normalize_trade_deal(
     )
     base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[3]
     raw_multiplier = _pick(src, "multiplier", "contract_multiplier", "lot_size")
-    multiplier = normalize_optional_int(raw_multiplier)
+    try:
+        multiplier = require_option_multiplier(raw_multiplier)
+    except ValueError:
+        multiplier = None
     source_multiplier_errors = _source_multiplier_errors(src) if asset_type == "option" else []
     invalid_source_multiplier = bool(source_multiplier_errors)
     if invalid_source_multiplier:

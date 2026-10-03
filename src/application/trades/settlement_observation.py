@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
@@ -1100,7 +1102,7 @@ def _stock_settlement_candidate(
                 or 0
             )
         )
-        multiplier = int(lifecycle_case.get("multiplier") or 100)
+        multiplier = require_option_multiplier(lifecycle_case.get("multiplier"))
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return None
     trade_time_ms = _row_trade_time_ms(

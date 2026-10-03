@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1090 (`src`: 542, `domain`: 88, `scripts`: 14, `tests`: 446)
-- Internal import edges: 7854 total, 3433 production/script edges excluding tests
+- Python files scanned: 1096 (`src`: 542, `domain`: 88, `scripts`: 14, `tests`: 452)
+- Internal import edges: 7982 total, 3453 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,26 +31,26 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|556| domain
+  application -->|574| domain
   application -->|4| domain_services
-  application -->|170| infrastructure
+  application -->|168| infrastructure
   application -->|53| storage
   domain_services -->|6| domain
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
   interfaces -->|164| application
-  interfaces -->|1| domain
+  interfaces -->|2| domain
   interfaces -->|4| infrastructure
   scripts -->|39| application
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3373| application
-  tests -->|415| domain
+  tests -->|3460| application
+  tests -->|429| domain
   tests -->|2| domain_services
-  tests -->|234| infrastructure
-  tests -->|255| interfaces
+  tests -->|235| infrastructure
+  tests -->|256| interfaces
   tests -->|28| scripts
   tests -->|28| storage
 ```
@@ -59,8 +59,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 556 |
-| application | infrastructure | 170 |
+| application | domain | 574 |
+| application | infrastructure | 168 |
 | interfaces | application | 164 |
 | application | storage | 53 |
 | scripts | application | 39 |
@@ -70,19 +70,19 @@ flowchart LR
 | scripts | domain | 5 |
 | application | domain_services | 4 |
 | interfaces | infrastructure | 4 |
+| interfaces | domain | 2 |
 | domain_services | storage | 2 |
 | scripts | infrastructure | 2 |
-| interfaces | domain | 1 |
 | storage | domain | 1 |
 
 ### Test Layer Edges
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3373 |
-| tests | domain | 415 |
-| tests | interfaces | 255 |
-| tests | infrastructure | 234 |
+| tests | application | 3460 |
+| tests | domain | 429 |
+| tests | interfaces | 256 |
+| tests | infrastructure | 235 |
 | tests | scripts | 28 |
 | tests | storage | 28 |
 | tests | domain_services | 2 |
@@ -93,12 +93,12 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 240 |
+| src.application | domain.domain | 249 |
 | src.interfaces | src.application | 129 |
-| src.application.ledger | domain.domain | 123 |
-| src.application | src.infrastructure | 120 |
-| src.application.ledger | domain.domain.ledger | 59 |
-| src.application.trades | domain.domain | 51 |
+| src.application.ledger | domain.domain | 127 |
+| src.application | src.infrastructure | 119 |
+| src.application.ledger | domain.domain.ledger | 60 |
+| src.application.trades | domain.domain | 53 |
 | src.application.trades | src.application | 43 |
 | src.application | domain.storage | 41 |
 | src.application | src.application.ledger | 32 |
@@ -106,18 +106,18 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | scripts | src.application | 32 |
 | src.application.trades | src.application.ledger | 30 |
 | src.application.inbound | src.application | 27 |
+| domain.domain.ledger | domain.domain | 26 |
 | src.application | domain.domain.engine | 25 |
 | src.application.positions | src.application | 25 |
-| domain.domain.ledger | domain.domain | 25 |
 | src.application.multi_tick | src.application | 23 |
 | domain.domain | domain.domain.ledger | 20 |
 | src.application | src.application.settings | 19 |
 | src.application.ledger | src.application | 18 |
 | src.application | domain.domain.ledger | 17 |
+| src.application.positions | domain.domain | 17 |
 | src.application | src.application.multi_tick | 16 |
 | src.application | src.application.trades | 16 |
-| src.application.positions | domain.domain | 16 |
-| src.application.ledger | src.infrastructure | 15 |
+| src.application.ledger | src.infrastructure | 14 |
 | src.application | src.application.positions | 13 |
 | src.application.trades | src.infrastructure | 13 |
 | src.interfaces | src.application.trades | 13 |
@@ -125,8 +125,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.multi_tick | src.infrastructure | 10 |
 | src.application.positions | domain.storage | 9 |
 | src.infrastructure | src.application | 9 |
+| src.application.positions | domain.domain.ledger | 8 |
 | src.application | src.application.research | 7 |
-| src.application.positions | domain.domain.ledger | 7 |
 | src.application.positions | src.infrastructure | 7 |
 | src.application.setup | src.application | 7 |
 | src.application.multi_tick | domain.domain | 6 |
@@ -184,12 +184,12 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.symbol_identity | 81 |
 | src.application.ledger.api | 78 |
 | src.application.agent_tool_config | 71 |
-| src.infrastructure.io_utils | 57 |
+| domain.domain.trade_contract_identity | 67 |
+| src.infrastructure.io_utils | 56 |
 | domain.domain.decision_state_fingerprint | 53 |
 | src.application.account_config | 52 |
-| domain.domain.trade_contract_identity | 52 |
-| domain.domain.ledger.position_fields | 51 |
-| domain.domain.option_position_identity | 49 |
+| domain.domain.ledger.position_fields | 52 |
+| domain.domain.option_position_identity | 50 |
 | src.application.runtime_paths | 30 |
 | domain.domain.ledger | 30 |
 | src.application.settings | 28 |
@@ -203,13 +203,13 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.api | 44 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.pipeline_watchlist | 30 |
+| src.interfaces.cli.option_positions | 30 |
 | src.application.agent_tools.runtime_status_impl | 29 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.daily_decision_brief_service | 29 |
 | src.application.ledger.queries | 29 |
 | src.application.multi_account_tick | 29 |
 | src.interfaces.cli.main | 29 |
-| src.interfaces.cli.option_positions | 29 |
 | src.application.agent_tools.config | 26 |
 | src.application.ledger.writer_common | 26 |
 | src.application.wheel.workflows | 26 |

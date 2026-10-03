@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import (
+    _UNSET,
     EXPIRE_AUTO_CLOSE,
     PositionLotPatch,
     build_close_patch_contract,
@@ -20,7 +21,7 @@ from domain.domain.lifecycle_allocation import (
     allocate_stock_settlement,
     validate_stock_settlement_allocation_group,
 )
-from domain.domain.trade_contract_identity import normalize_trade_side, contract_share_quantity, stock_settlement_side
+from domain.domain.trade_contract_identity import normalize_trade_side, contract_share_quantity, stock_settlement_side, require_option_multiplier
 from domain.domain.money import to_decimal
 from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
@@ -345,7 +346,7 @@ def persist_manual_adjust_event_with_ledger(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -422,7 +423,7 @@ def record_manual_position_adjustments(
         item.setdefault("strike", None)
         item.setdefault("expiration_ymd", None)
         item.setdefault("premium_per_share", None)
-        item.setdefault("multiplier", None)
+        item.setdefault("multiplier", _UNSET)
         item.setdefault("opened_at_ms", None)
         item.setdefault("as_of_ms", None)
         normalized.append({"record_id": lot_id, **item})
@@ -1714,6 +1715,7 @@ def preview_lifecycle_expire_close(
     operations: list[dict[str, Any]] = []
     for match in close_target_resolution.matches:
         fields = _current_record_fields(repo, lot_id=match.lot_id)
+        require_option_multiplier(fields.get("multiplier"))
         ledger_preflight = preflight_broker_trade_close(
             repo,
             lot_id=match.lot_id,
@@ -1948,7 +1950,7 @@ def preview_manual_position_adjust(
     strike: float | None,
     expiration_ymd: str | None,
     premium_per_share: float | None,
-    multiplier: float | None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -2001,7 +2003,7 @@ def record_manual_position_adjust(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -2062,7 +2064,7 @@ def preview_broker_trade_open(deal: Any) -> BrokerTradeOpenPreviewResult:
         "contracts": int(getattr(deal, "contracts", 0) or 0),
         "currency": str(getattr(deal, "currency", "") or ""),
         "strike": (float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
-        "multiplier": float(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None,
+        "multiplier": getattr(deal, "multiplier", None),
         "expiration_ymd": (str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
         "premium_per_share": float(raw_price) if raw_price not in (None, "") else None,
         "note": (

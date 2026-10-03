@@ -10,6 +10,7 @@ import re
 from typing import Any, Iterable
 
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     canonical_contract_symbol, derive_position_side, normalize_contract_expiration,
     normalize_contract_option_type, normalize_position_effect, normalize_trade_side,
 )
@@ -488,13 +489,12 @@ def _futu_asset_type(src: dict[str, Any], option_info: dict[str, Any]) -> str | 
 def _source_multiplier_errors(src: dict[str, Any]) -> list[str]:
     supplied = {}
     for key in ("multiplier", "contract_multiplier", "lot_size"):
-        if src.get(key) in (None, ""):
+        if key not in src:
             continue
         try:
-            value = canonical_decimal(str(src[key]) if isinstance(src[key], float) else src[key])
-        except (ValueError, TypeError):
-            value = None
-        supplied[key] = _positive_int(value)
+            supplied[key] = require_option_multiplier(src[key])
+        except ValueError:
+            supplied[key] = None
     errors = [f"invalid:instrument_ref.multiplier:source_field:{key}" for key, value in supplied.items() if value is None or value <= 0]
     if len({value for value in supplied.values() if value is not None and value > 0}) > 1:
         errors.append("invalid:instrument_ref.multiplier:source_alias_conflict")

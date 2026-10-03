@@ -285,7 +285,7 @@ def _trade_event_from_application_payload(payload: dict[str, Any]) -> TradeEvent
         price=float(payload.get("price") or 0),
         currency=str(payload.get("currency") or ""),
         source=str(payload.get("source") or payload.get("source_name") or ""),
-        multiplier=float(payload.get("multiplier") or 0),
+        multiplier=payload.get("multiplier"),
         fees=float(payload.get("fees") or 0),
         target_lot_id=_optional_id(payload.get("target_lot_id")),
         target_event_id=_optional_id(payload.get("target_event_id")),

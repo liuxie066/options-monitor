@@ -7,8 +7,9 @@ from typing import Any, Callable, Mapping, Protocol, cast
 from domain.domain.trade_execution import normalize_execution_input
 
 from src.application.positions.context_cache import invalidate_option_positions_context_cache
-from src.application.trades.deal_identity import broker_deal_key
+from src.application.trades.deal_identity import broker_deal_key, broker_deal_key_from_payload
 from src.application.trades.inbox import TradePayloadClaimLost
+from src.application.trades.state import is_durable_processed_deal, lookup_deal_state_entry
 from src.application.trades.lifecycle import (
     lifecycle_deal_economic_hash,
 )
@@ -135,10 +136,12 @@ def _record_failed_deal_state(
     result_dict: dict[str, Any],
     write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
     upsert_deal_state_fn: Callable[..., dict[str, Any]],
-    deal_key: str | None = None,
+    source_deal_key: str | None = None,
 ) -> dict[str, Any]:
-    deal_id = str(deal_key or result_dict.get("deal_id") or "").strip()
-    if not deal_id:
+    deal_id = str(result_dict.get("deal_id") or "").strip()
+    if (not deal_id or lookup_deal_state_entry(state, deal_id) is not None
+            or lookup_deal_state_entry(state, source_deal_key) is not None):
+        # Normalization failed, so this attempt cannot replace existing source facts.
         return state
     prior_receipt = _prior_receipt(state, deal_id)
     payload = {
@@ -371,6 +374,7 @@ def _finalize_trade_payload_result(
     append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
     source: str,
+    state_deal_key: str | None = None,
 ) -> dict[str, Any]:
     if _is_ignored_non_option_result(result_dict):
         return result_dict
@@ -419,7 +423,8 @@ def _finalize_trade_payload_result(
     )
     if apply_changes:
         deal_id = (
-            str(broker_deal_key(deal) if deal is not None else "").strip()
+            str(state_deal_key or "").strip()
+            or str(broker_deal_key(deal) if deal is not None else "").strip()
             or str(result_dict.get("deal_id") or "").strip()
             or str(getattr(deal, "deal_id", "") or "").strip()
             or _payload_deal_id(effective_payload)
@@ -562,6 +567,7 @@ def process_trade_payload(
             audit_path,
             build_trade_intake_audit_event("failed", source=source, payload=effective_payload, result=result_dict),
         )
+        source_deal_key = broker_deal_key_from_payload(effective_payload, account_mapping=account_mapping)
         if apply_changes:
             state = _record_failed_deal_state(
                 state=state,
@@ -569,6 +575,7 @@ def process_trade_payload(
                 result_dict=result_dict,
                 write_trade_intake_state_fn=write_trade_intake_state_fn,
                 upsert_deal_state_fn=upsert_deal_state_fn,
+                source_deal_key=source_deal_key,
             )
         return _finalize_trade_payload_result(
             result_dict=result_dict,
@@ -583,6 +590,7 @@ def process_trade_payload(
             append_trade_intake_audit_fn=append_trade_intake_audit_fn,
             on_result_fn=on_result_fn,
             source=source,
+            state_deal_key=(source_deal_key if lookup_deal_state_entry(state, source_deal_key) else None),
         )
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", source=source, deal=deal))
     if apply_changes:
@@ -641,8 +649,19 @@ def process_trade_payload(
         ),
     )
     deal_key = broker_deal_key(deal)
-    economic_payload_hash = lifecycle_deal_economic_hash(deal)
-    if apply_changes and deal_key:
+    source_rejected = result_dict.get("status") in {"unresolved", "failed"} and (
+        result_dict.get("reason") == "broker_deal_economic_conflict"
+        or bool((result_dict.get("diagnostics") or {}).get("errors"))
+    )
+    # Rejected source facts are audit-only when this identity already has state.
+    # Preserve both confirmed facts and an unresolved source's retry eligibility.
+    # Initial invalid inputs still get an unresolved record, without an economic hash.
+    ledger_confirmed = result_dict.get("status") == "applied" or _is_terminal_ledger_result(result_dict)
+    preserve_source_state = (
+        source_rejected and lookup_deal_state_entry(state, deal_key) is not None
+    ) or (is_durable_processed_deal(state, deal_key) and not ledger_confirmed)
+    economic_payload_hash = None if source_rejected or preserve_source_state else lifecycle_deal_economic_hash(deal)
+    if apply_changes and deal_key and not preserve_source_state:
         if result_dict.get("status") == "applied" or _is_terminal_ledger_result(result_dict):
             reconciled_terminal = result_dict.get("status") != "applied"
             state = upsert_deal_state_fn(

@@ -21,7 +21,7 @@ from domain.domain.lifecycle_allocation import (
 )
 from domain.domain.option_lifecycle import derive_lifecycle_read_model, pending_close_quantities
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
-from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues
+from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues, require_option_multiplier
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
     LifecycleAttemptAuditEnvelope,
@@ -1683,6 +1683,9 @@ def _terminal_event(
             fields, lot_contract_key, "position_side", "position_side", "side"
         ),
     )
+    multiplier = require_option_multiplier(fields.get("multiplier"))
+    if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+        raise ValueError("unsupported_contract_multiplier")
     contracts = int(allocation.get("contracts_allocated") or 0)
     event_price = (
         float(evidence.get("price") or 0)
@@ -1702,11 +1705,7 @@ def _terminal_event(
         price=event_price,
         currency=str(evidence.get("currency") or fields.get("currency") or ""),
         source="lifecycle_reconciliation",
-        multiplier=float(
-            lifecycle_case.get("multiplier")
-            or fields.get("multiplier")
-            or 100
-        ),
+        multiplier=multiplier,
         target_lot_id=lot_id,
         raw_payload={
             "schema_version": "lifecycle_terminal_event.v2",
@@ -1775,17 +1774,17 @@ def _allocated_stock_settlements(
     rows = [dict(item) for item in allocations]
     if terminal_type not in {"assignment", "exercise"} or not isinstance(source, dict):
         return {}
+    multiplier = require_option_multiplier(lifecycle_case.get("multiplier"))
+    for item in rows:
+        if require_option_multiplier(lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get("multiplier")) != multiplier:
+            raise ValueError("unsupported_contract_multiplier")
     return allocate_stock_settlement(
         source,
         (
             {
                 "target_lot_id": str(item.get("target_lot_id") or ""),
                 "contracts_allocated": item.get("contracts_allocated"),
-                "multiplier": lifecycle_case.get("multiplier")
-                or lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get(
-                    "multiplier"
-                )
-                or 100,
+                "multiplier": require_option_multiplier(lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get("multiplier")),
             }
             for item in rows
         ),

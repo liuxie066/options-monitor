@@ -340,8 +340,9 @@ def test_resolve_unknown_buy_call_prefers_existing_short_call_close() -> None:
     assert result.diagnostics["position_effect_inference"]["decision"] == "close"
 
 
-def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_pending() -> None:
-    repo = FakeRepo([_record("rec1", 100, 3)])
+def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_pending(tmp_path) -> None:
+    repo = _open_lot(tmp_path, symbol="0700.HK", contracts=3, strike=480, currency="HKD",
+                     expiration_ymd="2026-04-29", opened_at_ms=100)
 
     result = resolve_trade_deal(
         _deal(
@@ -2785,3 +2786,124 @@ def test_manual_required_stock_ambiguity_uses_guarded_recovery_without_delivery(
     assert new_outbox and all(row["status"] == "suppressed" for row in new_outbox)
     assert len([row for row in repo.list_trade_events() if row.get("event_type") == "assignment"]) == 1
     assert _process_payload(stock, recover_skipped=True, **kwargs)["reason"] == "duplicate"
+
+
+@pytest.mark.parametrize("raw", [None, "", True, 0, -1, 100.5, "100.00000000000000001"])
+@pytest.mark.parametrize("price", [0, 0.1])
+def test_close_multiplier_invalid_preview_and_write_leave_database_unchanged(tmp_path, raw, price):
+    from src.application.ledger.api import record_normalized_trade_event
+
+    repo = _open_lot(tmp_path, multiplier=500)
+    deal = _deal(symbol="TIGR", contracts=1, strike=6, expiration_ymd="2026-05-22",
+                 trade_time_ms=1779468493916, currency="USD", price=price, multiplier=raw)
+    with repo._connect() as conn:
+        before = tuple(conn.iterdump())
+    for apply in (False, True):
+        result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=apply)
+        assert result.status == "unresolved"
+        assert "multiplier" in result.reason
+        assert result.operations == []
+    with pytest.raises(ValueError, match="event_multiplier_invalid"):
+        record_normalized_trade_event(repo, deal)
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("price", [0, 0.1])
+def test_close_source_target_multiplier_conflict_blocks_preview_and_apply(tmp_path, price):
+    repo = _open_lot(tmp_path, multiplier=500)
+    deal = _deal(symbol="TIGR", contracts=1, strike=6, expiration_ymd="2026-05-22",
+                 trade_time_ms=1779468493916, currency="USD", price=price, multiplier=100)
+    with repo._connect() as conn:
+        before = tuple(conn.iterdump())
+    for apply in (False, True):
+        result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=apply)
+        assert result.status == "unresolved"
+        assert result.reason == "unsupported_contract_multiplier"
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("multiplier", [500, 1000])
+def test_zero_close_uses_actual_multiplier_in_case_and_events(tmp_path, multiplier):
+    repo = _open_lot(tmp_path, multiplier=multiplier)
+    deal = _deal(symbol="TIGR", contracts=1, strike=6, expiration_ymd="2026-05-22",
+                 trade_time_ms=1779468493916, currency="USD", price=0, multiplier=multiplier)
+    assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False).status == "dry_run"
+    assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True).status == "applied"
+    assert repo.list_trade_lifecycle_cases()[0]["multiplier"] == multiplier
+    assert all(event["multiplier"] == multiplier for event in repo.list_trade_events())
+    stock = _deal(deal_id="actual-unit-stock", order_id="actual-unit-stock-order", symbol="TIGR",
+                  option_type=None, side="buy", position_effect=None, contracts=multiplier,
+                  price=6, strike=None, multiplier=None, expiration_ymd=None, currency="USD",
+                  trade_time_ms=1779468500000, raw_payload={"deal_id": "actual-unit-stock", "code": "US.TIGR"})
+    result = resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert (result.status, result.action) == ("applied", "assignment")
+    assignment = next(event for event in repo.list_trade_events() if event["event_type"] == "assignment")
+    assert assignment["multiplier"] == multiplier
+    assert assignment["raw_payload"]["stock_settlement"]["shares"] == multiplier
+    # A successful retry refreshes only projection verification timestamps.
+    def durable_snapshot():
+        metadata_tables = ("position_projection_heads", "position_projection_source_state")
+        with repo._connect() as conn:
+            metadata = tuple(tuple(tuple(row)[:-1] for row in conn.execute(f"SELECT * FROM {table}"))
+                             for table in metadata_tables)
+            economic = tuple(line for line in conn.iterdump()
+                             if not line.startswith(tuple(f'INSERT INTO "{table}"' for table in metadata_tables)))
+        return metadata, economic
+
+    after = durable_snapshot()
+    resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert durable_snapshot() == after
+
+
+def test_zero_close_rechecks_multiplier_after_preview(tmp_path):
+    import json
+
+    repo = _open_lot(tmp_path, multiplier=500)
+    deal = _deal(symbol="TIGR", contracts=1, strike=6, expiration_ymd="2026-05-22",
+                 trade_time_ms=1779468493916, currency="USD", price=0, multiplier=500)
+    assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False).status == "dry_run"
+    row = repo.list_position_lots()[0]
+    fields = dict(row["fields"])
+    fields.pop("multiplier")
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_lots SET fields_json=? WHERE lot_id=?", (json.dumps(fields), row["record_id"]))
+        conn.commit()
+        before = tuple(conn.iterdump())
+    result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+    assert result.status == "unresolved" and "multiplier" in result.reason
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("raw", [None, True, "100.00000000000000001"])
+def test_strict_execution_multiplier_cannot_be_repaired_from_dto_or_lot(tmp_path, raw):
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.ledger.api import record_normalized_trade_event
+
+    repo = _open_lot(tmp_path, multiplier=500)
+    payload = {
+        "broker_account_ref": {"broker_account_id": "account-1", "broker_id": "futu",
+                               "external_account_id": "REAL_1", "environment": "REAL", "account_label": "lx"},
+        "instrument_ref": {"asset_type": "option", "symbol": "TIGR", "market": "US", "currency": "USD",
+                           "option_type": "put", "strike": "6", "expiration_ymd": "2026-05-22", "multiplier": raw},
+        "external_id_namespace": "futu-us-deals", "external_execution_id": "strict-unit",
+        "external_order_namespace": "futu-orders", "external_order_id": "strict-order",
+        "side": "buy", "position_effect": "close", "quantity": "1", "price": "0.1", "currency": "USD",
+        "occurred_at_utc": "2026-05-22T16:00:00Z", "evidence_refs": ["synthetic-test"],
+    }
+    if raw is None:
+        payload["instrument_ref"].pop("multiplier")
+    deal = replace(normalize_trade_deal(payload), multiplier=500)
+    with repo._connect() as conn:
+        before = tuple(conn.iterdump())
+    for apply in (False, True):
+        result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=apply)
+        assert result.status == "unresolved" and result.reason == "execution_admission_failed"
+        assert any("multiplier" in error for error in result.diagnostics["errors"])
+        assert result.operations == []
+    with pytest.raises(ValueError, match="multiplier"):
+        record_normalized_trade_event(repo, deal)
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before

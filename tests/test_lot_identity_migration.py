@@ -643,6 +643,7 @@ def test_yield_mode_is_reconstructed_from_an_adjust_event(tmp_path: Path) -> Non
 
     repo = _repository(path)
     event = TradeEvent(
+            multiplier=100,
             event_id="adjust-yield-mode",
             event_type="adjust",
             event_time_ms=4_000,

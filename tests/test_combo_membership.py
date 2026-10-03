@@ -50,6 +50,7 @@ def _open(
         option_type=option_type,
     )
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,
@@ -80,6 +81,7 @@ def _adjust(
     event_time_ms: int = 1_700_000_000_100,
 ) -> dict:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="adjust",
         event_time_ms=event_time_ms,
@@ -95,6 +97,7 @@ def _adjust(
 
 def _void(event_id: str, target_event_id: str) -> dict:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="void",
         event_time_ms=1_700_000_000_200,
@@ -401,6 +404,7 @@ def test_cc_lp_assignment_proof_rejects_post_open_retagging() -> None:
         event["raw_payload"].pop("strategy")
         event["raw_payload"].pop("strategy_group_id")
         retags.append(TradeEvent(
+            multiplier=100,
             event_id=f"retag-{role}", event_type="adjust", event_time_ms=1_500,
             contract_key=_contract(option_type=event["contract_key"]["option_type"]),
             contracts=0, price=0, currency="USD", source="test",

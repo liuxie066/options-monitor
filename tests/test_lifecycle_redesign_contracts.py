@@ -2252,3 +2252,61 @@ def test_lifecycle_delivery_status_cache_skips_unchanged_history(
     assert "revision unavailable" in status_state[
         "lifecycle_delivery"
     ]["error"]
+
+
+@pytest.mark.parametrize("raw", [None, True, 100.5, "100.00000000000000001"])
+def test_expiry_discovery_rejects_invalid_actual_lot_multiplier_without_writes(tmp_path, raw):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "units.sqlite3")
+    persist_trade_event_object(repo, _open_event())
+    row = repo.list_position_lots()[0]
+    fields = dict(row["fields"])
+    fields["multiplier"] = raw
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_lots SET fields_json=? WHERE lot_id=?", (json.dumps(fields), row["record_id"]))
+        conn.commit()
+        before = tuple(conn.iterdump())
+    for apply in (False, True):
+        with pytest.raises(ValueError, match="multiplier"):
+            discover_lifecycle_cases(repo, account="lx", observed_at_ms=expiration_observation_start_ms(EXPIRATION_YMD, "US"),
+                                     apply_changes=apply)
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("raw", [None, True, "100.00000000000000001"])
+def test_expiry_terminal_preview_and_apply_reject_invalid_multiplier(tmp_path, raw):
+    from src.application.ledger.api import preview_lifecycle_expire_close, record_lifecycle_expire_close
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "terminal-units.sqlite3")
+    persist_trade_event_object(repo, _open_event())
+    row = repo.list_position_lots()[0]
+    fields = dict(row["fields"], multiplier=raw)
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_lots SET fields_json=? WHERE lot_id=?", (json.dumps(fields), row["record_id"]))
+        conn.commit()
+        before = tuple(conn.iterdump())
+    args = dict(broker="futu", account="lx", symbol="NVDA", option_type="put", position_side="short",
+                strike=100, expiration_ymd=EXPIRATION_YMD, contracts_to_close=1,
+                event_time_ms=expiration_observation_start_ms(EXPIRATION_YMD, "US"))
+    with pytest.raises(ValueError, match="multiplier"):
+        preview_lifecycle_expire_close(repo, **args)
+    with pytest.raises(ValueError, match="multiplier"):
+        record_lifecycle_expire_close(repo, **args, case_id=None, evidence_ids=[])
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("field_owner", ["case", "lot"])
+@pytest.mark.parametrize("raw", [None, True, "100.00000000000000001", 500])
+def test_reconciliation_terminal_requires_valid_matching_original_units(tmp_path, field_owner, raw):
+    from src.application.trades.lifecycle_reconciliation import _terminal_event
+
+    repo, case_id, observed_at_ms = _case_with_option_anchor(tmp_path)
+    case = dict(repo.get_trade_lifecycle_case(case_id))
+    fields = dict(repo.get_position_lot_fields("lot-1"))
+    (case if field_owner == "case" else fields)["multiplier"] = raw
+    with pytest.raises(ValueError, match="multiplier"):
+        _terminal_event({"lot-1": fields}, lifecycle_case=case,
+                        evidence={"event_time_ms": observed_at_ms + 1},
+                        allocation={"target_lot_id": "lot-1", "terminal_type": "expire_close",
+                                    "contracts_allocated": 1, "canonical_terminal_event_id": "terminal-unit"})

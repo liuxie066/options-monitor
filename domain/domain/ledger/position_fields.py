@@ -7,7 +7,7 @@ import math
 from typing import Any
 from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -300,14 +300,12 @@ def effective_strike(fields: dict[str, Any]) -> float | None:
     return None
 
 
-def effective_multiplier(fields: dict[str, Any]) -> float | None:
-    # ``note.multiplier`` fallback retired (write-side-definition §4/§0.9).
-    # ``multiplier`` keeps its top-level key in the converged payload, so the
-    # primary read itself does not move.
-    multiplier = safe_float(fields.get("multiplier"))
-    if multiplier is not None:
-        return float(multiplier)
-    return None
+def effective_multiplier(fields: dict[str, Any]) -> int | None:
+    # Only the canonical field supplies option units; notes are not evidence.
+    try:
+        return require_option_multiplier(fields.get("multiplier"))
+    except ValueError:
+        return None
 
 
 # §7.1: ``build_position_id`` and its ``_fmt_strike`` helper are retired. The
@@ -451,7 +449,7 @@ def build_position_lot_fields(
 
     if multiplier is None:
         raise ValueError(f"{option_type} option requires multiplier")
-    multiplier = _required_positive_float(multiplier, "multiplier")
+    multiplier = require_option_multiplier(multiplier)
     cash_secured = None
     if side == "short" and option_type == "put":
         cash_secured = calc_cash_secured(strike, multiplier, contracts)
@@ -471,9 +469,7 @@ def build_position_lot_fields(
     note_kv: dict[str, str] = {}
 
     opened_at = int(opened_at_ms or now_ms())
-    normalized_multiplier = None
-    if multiplier is not None:
-        normalized_multiplier = int(float(multiplier)) if float(multiplier).is_integer() else float(multiplier)
+    normalized_multiplier = multiplier
     strategy_snapshot_value = (
         strip_retired_strategy_metadata(strategy_snapshot) or None
         if isinstance(strategy_snapshot, dict)
@@ -628,7 +624,7 @@ def build_open_adjustment_patch_contract(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: _PatchValue = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -641,14 +637,13 @@ def build_open_adjustment_patch_contract(
 ) -> PositionLotPatch:
     if isinstance(strategy_snapshot, dict):
         strategy_snapshot = strip_retired_strategy_metadata(strategy_snapshot) or None
-    if all(
+    if multiplier is _UNSET and all(
         value is None
         for value in (
             contracts,
             strike,
             expiration_ymd,
             premium_per_share,
-            multiplier,
             opened_at_ms,
             strategy,
             leg_role,
@@ -678,8 +673,8 @@ def build_open_adjustment_patch_contract(
         raise ValueError("cannot change contracts on a closed lot unless it equals contracts_closed")
 
     next_strike = _required_positive_float(strike, "strike") if strike is not None else effective_strike(fields)
-    next_multiplier = (
-        _required_positive_float(multiplier, "multiplier") if multiplier is not None else effective_multiplier(fields)
+    next_multiplier = require_option_multiplier(
+        fields.get("multiplier") if multiplier is _UNSET else multiplier
     )
 
     next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
@@ -726,12 +721,8 @@ def build_open_adjustment_patch_contract(
         patch_strike = next_strike
     if premium_per_share is not None:
         patch_premium = normalize_trade_price(premium_per_share, "premium_per_share")
-    if multiplier is not None:
-        assert next_multiplier is not None
-        if float(next_multiplier).is_integer():
-            patch_multiplier = int(float(next_multiplier))
-        else:
-            patch_multiplier = float(next_multiplier)
+    if multiplier is not _UNSET:
+        patch_multiplier = next_multiplier
     if expiration_ymd is not None:
         assert parsed_exp_ms is not None
         patch_expiration = int(parsed_exp_ms)
@@ -739,18 +730,18 @@ def build_open_adjustment_patch_contract(
         patch_opened_at = int(opened_at_ms)
 
     if side == "short" and option_type == "put" and (
-        contracts is not None or strike is not None or multiplier is not None
+        contracts is not None or strike is not None or multiplier is not _UNSET
     ):
         if next_strike is None:
             raise ValueError("short put adjustment requires strike")
         if next_multiplier is None:
             raise ValueError("short put adjustment requires multiplier")
-        patch_cash_secured = float(calc_cash_secured(float(next_strike), float(next_multiplier), next_contracts))
+        patch_cash_secured = float(calc_cash_secured(float(next_strike), next_multiplier, next_contracts))
 
-    if side == "short" and option_type == "call" and (contracts is not None or multiplier is not None):
+    if side == "short" and option_type == "call" and (contracts is not None or multiplier is not _UNSET):
         if next_multiplier is None:
             raise ValueError("short call adjustment requires multiplier")
-        patch_underlying_locked = _short_call_locked_shares(float(next_multiplier), next_contracts)
+        patch_underlying_locked = _short_call_locked_shares(next_multiplier, next_contracts)
 
     return PositionLotPatch(
         contracts=patch_contracts,
@@ -781,7 +772,7 @@ def build_open_adjustment_patch(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: _PatchValue = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,

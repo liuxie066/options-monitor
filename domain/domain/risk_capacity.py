@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Callable, Mapping, Sequence
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
@@ -307,13 +307,9 @@ def compute_sell_call_share_capacity(
     ):
         return _result("share_capacity_facts_inconsistent")
 
-    multiplier_v = _to_float(multiplier)
-    multiplier_int = int(multiplier_v) if multiplier_v is not None else 0
-    if (
-        multiplier_v is None
-        or multiplier_int <= 0
-        or float(multiplier_int) != multiplier_v
-    ):
+    try:
+        multiplier_int = require_option_multiplier(multiplier)
+    except (TypeError, ValueError):
         return _result("invalid_multiplier")
 
     covered_contracts = max(0, available) // multiplier_int
@@ -350,12 +346,9 @@ def compute_short_call_locked_shares(
             locked = float(locked) / float(total_contracts) * float(open_contracts)
         return max(0, int(locked))
 
-    multiplier_v = _to_float(multiplier)
-    if multiplier_v is None or multiplier_v <= 0:
-        return None
     try:
-        return contract_share_quantity(open_contracts, multiplier_v)
-    except ValueError:
+        return contract_share_quantity(open_contracts, multiplier)
+    except (TypeError, ValueError):
         return None
 
 
@@ -492,13 +485,12 @@ def compute_short_put_cash_secured(
 
     if cash_secured is None:
         strike_v = _to_float(strike)
-        multiplier_v = _to_float(multiplier)
-        if strike_v is None or multiplier_v is None or multiplier_v <= 0:
+        if strike_v is None:
             return None
         basis_contracts = total_contracts if total_contracts > 0 else open_contracts
         try:
-            cash_secured = strike_v * contract_share_quantity(basis_contracts, multiplier_v)
-        except ValueError:
+            cash_secured = strike_v * contract_share_quantity(basis_contracts, multiplier)
+        except (TypeError, ValueError):
             return None
 
     if total_contracts > 0 and open_contracts < total_contracts:
@@ -551,7 +543,10 @@ def allocate_opening_share_capacity(
         account = str(row.get("account") or "").strip().lower()
         symbol = str(row.get("symbol") or "").strip().upper()
         claim_id = str(row.get("claim_id") or "").strip()
-        multiplier = _positive_exact_int(row.get("multiplier"))
+        try:
+            multiplier = require_option_multiplier(row.get("multiplier"))
+        except (TypeError, ValueError):
+            multiplier = 0
         requested = _positive_exact_int(row.get("requested_contracts"))
         if not account or not symbol or not claim_id or not multiplier or not requested:
             invalid_indexes.add(index)
@@ -675,7 +670,7 @@ def withdraw_opening_share_capacity_grants(
         before = remaining.setdefault(pool, int(row["capacity_before"]))
         claim_id = str(row.get("claim_id") or "").strip()
         granted = 0 if claim_id in rejected else int(row.get("granted_contracts") or 0)
-        multiplier = int(row.get("multiplier") or 0)
+        multiplier = require_option_multiplier(row.get("multiplier"))
         granted_shares = contract_share_quantity(granted, multiplier)
         after = before - granted_shares
         if min(before, granted, multiplier, granted_shares, after) < 0:
@@ -712,17 +707,17 @@ def _cash_claim_reservation(
     )
     if amount is None:
         strike = _to_float(raw.get("strike"))
-        multiplier = _to_float(raw.get("multiplier"))
+        multiplier = raw.get("multiplier")
         contracts = _to_float(
             raw.get("requested_contracts")
             or raw.get("granted_contracts")
             or raw.get("contracts")
             or 1
         )
-        if None not in {strike, multiplier, contracts}:
+        if strike is not None and contracts is not None:
             try:
                 amount = float(strike) * contract_share_quantity(contracts, multiplier)
-            except ValueError:
+            except (TypeError, ValueError):
                 return None
     if not currency or amount is None or amount <= 0:
         return None
@@ -956,7 +951,7 @@ def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> lis
         else:
             pool_key = (account, capacity_scope, symbol.lower())
             pool = share_pools.get(pool_key)
-            multiplier = _to_float(row.get("multiplier"))
+            multiplier = row.get("multiplier")
             try:
                 required = contract_share_quantity(contracts, multiplier)
             except (TypeError, ValueError):

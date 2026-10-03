@@ -21,6 +21,8 @@ from src.application.ledger import api as ledger_api
 
 _CONTROL_GRAPH_CODES = {
     "target_event_ambiguous",
+    "target_event_contract_mismatch",
+    "target_event_time_invalid",
     "target_event_not_found",
     "target_event_self_reference",
     "target_event_type_invalid",

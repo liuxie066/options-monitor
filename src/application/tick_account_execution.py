@@ -55,8 +55,10 @@ from src.application.close_advice_required_data import (
     publish_close_advice_required_data_plan,
     resolve_bound_close_advice_required_data_plan,
 )
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.ledger.api import (
-    list_position_lot_snapshots,
+    attach_event_strategy_metadata,
+    decision_state_snapshot,
     open_position_ledger_from_data_config,
     resolve_position_data_config_path,
 )
@@ -244,7 +246,7 @@ def _build_close_advice_barrier_plan(
         for account, reason in (unavailable_by_account or {}).items()
     }
     if position_records_by_account is None:
-        records_by_path: dict[Path, list[dict[str, Any]]] = {}
+        repos_by_path: dict[Path, Any] = {}
         for account in sorted(scanning_configs):
             config = scanning_configs[account]
             close_cfg = (
@@ -260,18 +262,23 @@ def _build_close_advice_barrier_plan(
                     cfg=config,
                     config_path=request.cfg_path,
                 ).resolve()
-                if data_config_path not in records_by_path:
+                if data_config_path not in repos_by_path:
                     _resolved_path, repo = open_position_ledger_from_data_config(
                         base=request.base,
                         data_config=data_config_path,
                     )
-                    records_by_path[data_config_path] = list(
-                        list_position_lot_snapshots(
-                            repo,
-                            base=request.base,
-                        )
-                    )
-                records_by_account[account] = records_by_path[data_config_path]
+                    repos_by_path[data_config_path] = repo
+                snapshot = decision_state_snapshot(
+                    repos_by_path[data_config_path],
+                    account=account,
+                    portfolio_scope_id=portfolio_scope_id(account),
+                )
+                if snapshot.get("snapshot_status") != "trusted":
+                    unavailable[account] = "option_decision_snapshot_unavailable"
+                    continue
+                records_by_account[account] = attach_event_strategy_metadata(
+                    snapshot["account_position_lots"], snapshot.get("trade_events"),
+                )
             except Exception as exc:
                 unavailable[account] = (
                     f"position_ledger_unavailable:{type(exc).__name__}"

@@ -416,6 +416,7 @@ def test_external_cc_lp_same_batch_known_void_blocks_assignment(tmp_path):
     _open_activation(repo)
     call, put, assignment = _cc_lp_events()
     void = TradeEvent(
+        multiplier=put.multiplier,
         event_id="void-combo-put", event_type="void", event_time_ms=3_000,
         contract_key=put.contract_key, contracts=0, price=0, currency="USD",
         source="test", target_event_id=put.event_id,
@@ -627,13 +628,15 @@ def test_arbitrary_multiplier_source_is_not_trusted(tmp_path) -> None:
 
 def test_fractional_multiplier_is_rejected_before_assignment(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    with pytest.raises(ValueError, match="whole number"):
-        _put_event(
-            event_id="put-assignment",
-            event_type="assignment",
-            multiplier=10.5,
-            raw_payload=_assignment_payload(10.5),
-        )
+    event = _put_event(
+        event_id="put-assignment",
+        event_type="assignment",
+        multiplier=10.5,
+        raw_payload=_assignment_payload(10.5),
+    )
+    assert event.multiplier == 10.5  # Historical nodes retain the invalid source.
+    with pytest.raises(ValueError, match="event_multiplier_invalid"):
+        persist_trade_event_objects_atomically(repo, [event])
 
     assert not any(
         row["event_type"] == "assignment" for row in repo.list_trade_events()

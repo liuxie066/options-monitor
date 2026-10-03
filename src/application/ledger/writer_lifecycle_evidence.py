@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from collections import Counter
 from dataclasses import replace
 
@@ -50,7 +52,6 @@ from .writer_common import (
     datetime,
     effective_contracts_open,
     effective_expiration_ymd,
-    effective_multiplier,
     effective_strike,
     expiration_observation_start_ms,
     finalize_current_decision_projection,
@@ -575,6 +576,7 @@ def accept_option_close_evidence_atomically(
     """Create/reuse one lifecycle_case.v2 and accept zero-price close evidence."""
 
     identity = dict(contract_identity or {})
+    multiplier = require_option_multiplier(identity.get("multiplier"))
     evidence_payload = dict(evidence or {})
 
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
@@ -651,6 +653,8 @@ def accept_option_close_evidence_atomically(
             )
             if lifecycle_case is None:
                 raise ValueError("lifecycle evidence case is missing")
+            if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             bound_futu_account_id = str(
                 lifecycle_case.get("futu_account_id") or ""
             ).strip()
@@ -711,6 +715,10 @@ def accept_option_close_evidence_atomically(
             position_side=position_side,
         )
         active_lot_ids = {lot_id for lot_id, _remaining, _opened_at in matching_lots}
+        for row in position_lots:
+            if str(row.get("record_id") or "") in active_lot_ids:
+                if require_option_multiplier((row.get("fields") or {}).get("multiplier")) != multiplier:
+                    raise ValueError("unsupported_contract_multiplier")
         cases = [
             item
             for item in sqlite_repo.list_trade_lifecycle_cases(
@@ -768,9 +776,11 @@ def accept_option_close_evidence_atomically(
                 "option_type": contract_key.option_type,
                 "strike": float(contract_key.strike),
                 "currency": normalize_currency(identity.get("currency")),
-                "multiplier": float(identity.get("multiplier") or 100),
+                "multiplier": multiplier,
             }
         else:
+            if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             bound_futu_account_id = str(
                 lifecycle_case.get("futu_account_id") or ""
             ).strip()
@@ -1000,6 +1010,9 @@ def record_zero_price_option_close_atomically(
     """Adopt a broker close anchor and its economic close in one transaction."""
     from .writer_lifecycle_allocation import apply_lifecycle_allocation_atomically
 
+    if require_option_multiplier(base_event.multiplier) != require_option_multiplier(contract_identity.get("multiplier")):
+        raise ValueError("unsupported_contract_multiplier")
+
     def _plan(case: dict[str, Any], anchor: dict[str, Any]) -> tuple[list[dict[str, Any]], list[Any]]:
         case_id = str(case["case_id"])
         evidence_id = str(anchor["evidence_id"])
@@ -1189,8 +1202,6 @@ def discover_expired_lifecycle_cases_atomically(
             strike = lot_contract_value(fields, lot_contract_key, "strike")
             if strike in (None, ""):
                 strike = effective_strike(fields)
-            # ``multiplier`` keeps its top-level key in the converged payload.
-            multiplier = effective_multiplier(fields)
             try:
                 contract_key = ContractKey.from_values(
                     broker=lot_contract_value(fields, lot_contract_key, "broker", "broker"),
@@ -1230,6 +1241,7 @@ def discover_expired_lifecycle_cases_atomically(
             if lot_id in target_owner:
                 skipped_targeted_lot_ids.append(lot_id)
                 continue
+            multiplier = require_option_multiplier(fields.get("multiplier"))
             group = eligible_groups.setdefault(
                 position_key_for(contract_key, position_side),
                 {
@@ -1237,10 +1249,12 @@ def discover_expired_lifecycle_cases_atomically(
                     "position_side": position_side,
                     "market": market,
                     "currency": normalize_currency(fields.get("currency")),
-                    "multiplier": float(multiplier or 100.0),
+                    "multiplier": multiplier,
                     "target_contracts_by_lot": {},
                 },
             )
+            if group["multiplier"] != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             group["target_contracts_by_lot"][lot_id] = contracts_open
 
         decision_accounts = sorted(

@@ -186,7 +186,7 @@ def test_build_pipeline_context_keeps_account_context_for_underwriting(
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> None:
+def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path, monkeypatch) -> None:
     import src.application.pipeline_context as pc
 
     shared_portfolio = {
@@ -208,6 +208,9 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
         },
     }
 
+    monkeypatch.setattr(pc, "decision_state_snapshot", lambda *_a, **_k: {"snapshot_status": "trusted"})
+    for context in shared_option["by_account"].values():
+        context["decision_snapshot_status"] = "trusted"
     counts = {"portfolio": 0, "option": 0}
     old_is_fresh = pc.is_fresh
     old_fetch_futu_portfolio_context = pc.fetch_futu_portfolio_context

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
@@ -1116,7 +1118,7 @@ def _combo_adjust_event(
         price=0.0,
         currency=str(fields.get("currency") or ""),
         source="post_trade_combo_reconciliation",
-        multiplier=float(effective_multiplier(fields) or 100.0),
+        multiplier=require_option_multiplier(fields.get("multiplier")),
         target_lot_id=str(record.lot_id),
         raw_payload={
             "source": "post_trade_combo_reconciliation",
@@ -1197,7 +1199,7 @@ def _identity_leg(
         "record_id": lot_id,
         "contract_key": contract_key.to_dict(),
         "currency": str(fields.get("currency") or "").strip().upper(),
-        "multiplier": float(effective_multiplier(fields) or 0),
+        "multiplier": require_option_multiplier(fields.get("multiplier")),
         "strike": float(strike or 0),
         "expiration_ymd": (
             str(expiration_ymd).strip() if expiration_ymd is not None else None
@@ -1231,7 +1233,7 @@ def _combo_void_event(
         price=0.0,
         currency=str(target.get("currency") or ""),
         source="post_trade_combo_reconciliation",
-        multiplier=float(target.get("multiplier") or 100.0),
+        multiplier=require_option_multiplier(target.get("multiplier")),
         target_event_id=target_event_id,
         raw_payload={
             "source": "post_trade_combo_reconciliation",
