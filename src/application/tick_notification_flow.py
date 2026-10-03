@@ -76,8 +76,6 @@ from src.infrastructure.io_utils import read_json, utc_now
 @dataclass(frozen=True)
 class TickNotificationRequest:
     base: Path
-    cfg_path: Path
-    state_path: Path
     scheduler_schedule_key: str
     base_cfg: dict[str, Any]
     run_id: str
@@ -87,7 +85,6 @@ class TickNotificationRequest:
     no_send: bool
     bj_tz: ZoneInfo
     audit_helper: Any
-    vpy: Path
     complete_tick_idempotency_fn: Callable[..., None]
     repo_root: Path | None = None
     markets_to_run: tuple[str, ...] | list[str] = ()

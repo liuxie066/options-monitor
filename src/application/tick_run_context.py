@@ -34,6 +34,7 @@ def build_tick_idempotency_context(
     symbols: str | None = None,
     no_send: bool = False,
     experience: bool = False,
+    smoke: bool = False,
     trigger_job_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> TickIdempotencyContext:
@@ -57,6 +58,8 @@ def build_tick_idempotency_context(
 
     key = sha256(
         (
+            # Prefix before the absolute path keeps smoke separate and normal keys unchanged.
+            f"{'smoke|' if smoke else ''}"
             f"{Path(cfg_path).resolve()}|{market_cfg}|{normalized_trigger_kind}|"
             f"{','.join(sorted(idempotency_accounts))}|"
             f"{work_scope}|"

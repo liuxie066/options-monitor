@@ -187,8 +187,6 @@ def _request(
     }
     request = mod.TickNotificationRequest(
         base=tmp_path,
-        cfg_path=tmp_path / f"config.{markets_to_run[0].lower()}.json",
-        state_path=tmp_path / "scheduler_state.json",
         scheduler_schedule_key="schedule",
         base_cfg=config or _config(),
         run_id=run_id,
@@ -198,7 +196,6 @@ def _request(
         no_send=no_send,
         bj_tz=ZoneInfo("Asia/Shanghai"),
         audit_helper=_Audit(),
-        vpy=Path("python3"),
         complete_tick_idempotency_fn=lambda **kwargs: completions.append(dict(kwargs)),
         markets_to_run=markets_to_run,
         scheduler_markets=markets_to_run,

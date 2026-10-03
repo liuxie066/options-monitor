@@ -187,13 +187,10 @@ class TickAccountExecutionRequest:
     smoke: bool
     no_send: bool
     scan_decision_by_account: dict[str, dict[str, Any]]
-    state_path: Path
-    scheduler_schedule_key: str
     runlog: Any
     audit_helper: Any
     repo_root: Path | None = None
     symbols_arg: str | None = None
-    trigger_kind: str = "manual"
     experience: bool = False
 
 

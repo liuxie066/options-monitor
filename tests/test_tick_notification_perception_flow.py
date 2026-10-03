@@ -35,8 +35,6 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
 
     request = mod.TickNotificationRequest(
         base=tmp_path,
-        cfg_path=tmp_path / "config.us.json",
-        state_path=tmp_path / "state.json",
         scheduler_schedule_key="us",
         base_cfg={"notifications": {"provider": "feishu_app", "target": "https://example.invalid/webhook/token"}},
         run_id="run_no_account",
@@ -49,7 +47,6 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
             audit=lambda event_type, action, **kwargs: audits.append((event_type, action, kwargs)),
             guard_mark_success=lambda: None,
         ),
-        vpy=Path("python3"),
         complete_tick_idempotency_fn=lambda **kwargs: completions.append(dict(kwargs)),
         markets_to_run=("US",),
         scheduler_markets=("US",),

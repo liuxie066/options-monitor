@@ -294,8 +294,6 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
     }
     request = mod.TickNotificationRequest(
         base=tmp_path,
-        cfg_path=tmp_path / "config.us.json",
-        state_path=tmp_path / "scheduler_state.json",
         scheduler_schedule_key="us",
         base_cfg=config,
         run_id="run-manual",
@@ -305,7 +303,6 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
         no_send=False,
         bj_tz=ZoneInfo("Asia/Shanghai"),
         audit_helper=_Audit(),
-        vpy=Path("python3"),
         complete_tick_idempotency_fn=lambda **kwargs: completions.append(dict(kwargs)),
         markets_to_run=("US",),
         scheduler_markets=("US",),
