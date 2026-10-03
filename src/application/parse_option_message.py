@@ -26,6 +26,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
+from domain.domain.trade_contract_identity import require_option_multiplier
 from src.application.multiplier_cache import resolve_multiplier_with_source
 from domain.domain.option_position_identity import infer_currency_from_symbol as infer_position_currency_from_symbol
 from domain.domain.symbol_identity import canonical_symbol
@@ -286,7 +287,8 @@ def parse_option_message_text(
         opt_type = parse_option_type(raw2)
         side = parse_side(raw2)
         strike = parse_float_after(['strike', '行权价', '行权'], raw2)
-        multiplier = parse_int_after(['乘数', 'multiplier'], raw2)
+        multiplier_match = re.search(r'(?:乘数|multiplier)\s*[:=：]?\s*([^\s,，]*)', raw2, flags=re.I)
+        multiplier = multiplier_match.group(1) if multiplier_match else None
         premium = parse_float_after(['成本', 'premium', '权利金', 'close_price', 'close price', '平仓价', '平倉價', '价格', '價格', 'price'], raw2)
         contracts = parse_contracts(raw2)
         account = parse_account(raw2, accounts=accounts)
@@ -307,6 +309,11 @@ def parse_option_message_text(
             port=11111,
             limit_expirations=1,
         )
+
+    try:
+        multiplier = require_option_multiplier(multiplier)
+    except ValueError:
+        multiplier = None
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, premium is not None, contracts, account, currency])
 

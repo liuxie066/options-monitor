@@ -149,9 +149,11 @@ def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkey
     assert captured_required_data["want_call"] is True
 
 
+@pytest.mark.parametrize("raw_multiplier", ["100.00000000000000001", "500", "1000"])
 def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
     monkeypatch,
     tmp_path: Path,
+    raw_multiplier: str,
 ) -> None:
     import src.application.symbol_monitoring as mod
 
@@ -204,7 +206,8 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
                     "snapshot_id": "snapshot-1",
                     "receipt_relpath": "receipt.json",
                 },
-                b"symbol,option_type\nNVDA,put\n",
+                ("symbol,option_type,multiplier,chain_multiplier,snapshot_multiplier\n"
+                 f"NVDA,put,{raw_multiplier},{raw_multiplier},{raw_multiplier}\n").encode(),
             )
         },
         unavailable={},
@@ -229,7 +232,8 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
 
     assert out[0]["candidate_count"] == 0
     assert scan_kwargs["required_data_frame"].to_dict("records") == [
-        {"symbol": "NVDA", "option_type": "put"}
+        {"symbol": "NVDA", "option_type": "put", "multiplier": raw_multiplier,
+         "chain_multiplier": raw_multiplier, "snapshot_multiplier": raw_multiplier}
     ]
 
 

@@ -38,6 +38,7 @@ def _event(
     opend_host: str = "127.0.0.1",
 ) -> TradeEvent:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,

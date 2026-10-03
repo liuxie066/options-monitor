@@ -763,3 +763,17 @@ def test_build_open_adjustment_patch_recalculates_risk_fields() -> None:
     assert "cash_secured_amount" not in short_call_patch
     assert short_put_patch["cash_secured_amount"] == 30000.0
     assert "underlying_share_locked" not in short_put_patch
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+@pytest.mark.parametrize("raw", [True, 100.5, "100.00000000000000001", None, ""])
+def test_option_field_builders_reject_invalid_original_multiplier(side, raw):
+    from domain.domain.ledger.position_fields import effective_multiplier
+
+    assert effective_multiplier({"multiplier": raw}) is None
+    with pytest.raises(ValueError, match="multiplier"):
+        build_position_lot_fields(**_cmd(side=side, multiplier=raw))
+    fields = build_position_lot_fields(**_cmd(side=side, multiplier=500))
+    with pytest.raises(ValueError, match="multiplier"):
+        build_open_adjustment_patch_contract(fields, multiplier=raw)
+    assert not build_open_adjustment_patch_contract(fields, premium_per_share=2).has("multiplier")

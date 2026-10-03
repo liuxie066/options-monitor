@@ -584,7 +584,7 @@ def test_fully_closed_pending_put_still_blocks_cash_capacity(monkeypatch: pytest
 
 
 @pytest.mark.parametrize("mismatch", [False, True])
-def test_closed_option_leg_keeps_cash_reserved_on_conflict_or_stale_lot(
+def test_closed_option_leg_uses_bound_snapshot_and_preserves_conflict(
     monkeypatch: pytest.MonkeyPatch, mismatch: bool,
 ) -> None:
     monkeypatch.setattr(
@@ -612,7 +612,9 @@ def test_closed_option_leg_keeps_cash_reserved_on_conflict_or_stale_lot(
     )
 
     assert ctx["cash_secured_total_by_ccy"] == {"HKD": 40_000.0}
-    assert ctx["cash_secured_unavailable_by_symbol"] == {}
+    assert ctx["cash_secured_unavailable_by_symbol"] == (
+        {"3690.HK": "option_close_settlement_pending"} if mismatch else {}
+    )
 
 
 def test_build_context_excludes_closed_or_zero_open_records() -> None:

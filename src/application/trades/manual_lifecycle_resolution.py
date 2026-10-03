@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from datetime import datetime
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -334,6 +336,9 @@ def _build_correction_void_event(
         expiration_ymd=lifecycle_case.get("expiration_ymd")
         or target_event.get("expiration_ymd"),
     )
+    multiplier = require_option_multiplier(target_event.get("multiplier"))
+    if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+        raise ValueError("unsupported_contract_multiplier")
     void_id = "lifecycle_correction_void_" + canonical_hash(
         {
             "case_id": lifecycle_case.get("case_id"),
@@ -350,11 +355,7 @@ def _build_correction_void_event(
         price=0,
         currency=str(target_event.get("currency") or ""),
         source="manual_lifecycle_correction",
-        multiplier=float(
-            lifecycle_case.get("multiplier")
-            or target_event.get("multiplier")
-            or 100
-        ),
+        multiplier=multiplier,
         target_event_id=target_event_id,
         raw_payload={
             "schema_version": "lifecycle_correction_void.v1",

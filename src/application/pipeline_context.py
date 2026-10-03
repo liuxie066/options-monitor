@@ -15,7 +15,7 @@ Design constraints:
 from pathlib import Path
 from typing import Mapping
 
-from src.application.account_config import build_account_portfolio_source_plan
+from src.application.account_config import accounts_from_config, build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
     STRATEGY_FAMILY_SOURCE,
@@ -28,6 +28,7 @@ from src.infrastructure.io_utils import atomic_write_json, is_fresh, load_cached
 from src.application.ledger.api import (
     decision_state_snapshot,
     list_position_lot_snapshots,
+    position_lot_risk_view,
     open_position_ledger,
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
@@ -70,13 +71,15 @@ def _load_option_position_records(data_config: str) -> tuple[object, list[dict]]
 def _decision_snapshots_for_records(
     repo: object,
     records: list[dict],
+    *,
+    accounts: tuple[str, ...] = (),
 ) -> dict[str, dict]:
     accounts = sorted(
-        {
-            str((item.get("fields") or {}).get("account") or "").strip().lower()
+        {str(account).strip().lower() for account in accounts if str(account).strip()} | {
+            account
             for item in records
             if isinstance(item, dict)
-            and str((item.get("fields") or {}).get("account") or "").strip()
+            and (account := position_lot_risk_view(item).account)
         }
     )
     return {
@@ -139,13 +142,20 @@ def load_option_positions_context(
     shared_state_dir: Path | None,
     log,
     exchange_rate_observation: Mapping | None = None,
+    runtime_config: dict | None = None,
 ) -> tuple[dict | None, bool]:
     """Best-effort load position-lot context.
 
     Returns (context, refreshed).
     """
     try:
+        requested_accounts = (account,) if account else tuple(accounts_from_config(runtime_config, fallback=()))
+        if not requested_accounts:
+            raise ValueError("aggregate option context requires configured account scope")
+        current_decision_snapshot: dict | None = None
+
         def _is_exact_account(context: dict, *, source: str) -> bool:
+            nonlocal current_decision_snapshot
             try:
                 validate_option_positions_context_account(
                     context,
@@ -164,6 +174,23 @@ def load_option_positions_context(
                         f"{context.get('strategy_family_source')!r}, expected "
                         f"{STRATEGY_FAMILY_SOURCE!r})"
                     )
+                if source in {"account_cache", "shared_slice"}:
+                    if not account:
+                        # Aggregate contexts have no single decision snapshot;
+                        # rebuild through the per-account decision owners.
+                        return False
+                    if current_decision_snapshot is None:
+                        normalized_account = str(account).strip().lower()
+                        current_decision_snapshot = decision_state_snapshot(
+                            open_position_ledger(Path(data_config)),
+                            account=normalized_account,
+                            portfolio_scope_id=portfolio_scope_id(normalized_account),
+                        )
+                    if (
+                        current_decision_snapshot.get("snapshot_status") != "trusted"
+                        or context.get("decision_snapshot_status") != "trusted"
+                    ):
+                        raise ValueError("cached option context has no trusted current decision snapshot")
                 return True
             except ValueError as exc:
                 log(
@@ -219,6 +246,7 @@ def load_option_positions_context(
             decision_snapshots = _decision_snapshots_for_records(
                 _repo,
                 records,
+                accounts=requested_accounts,
             )
             shared_ctx = build_shared_option_positions_context(
                 records,
@@ -248,6 +276,8 @@ def load_option_positions_context(
             pass
 
         # Fallback: direct per-account fetch path.
+        if not account:
+            raise ValueError("aggregate option context requires per-account decision snapshots")
         _repo, records = _load_option_position_records(data_config)
         rates = (exchange_rate_observation if exchange_rate_observation is not None
                  else _load_option_position_exchange_rates(base=base, state_dir=shared_root, log=log))
@@ -482,6 +512,7 @@ def build_pipeline_context(
             shared_state_dir=shared_state_dir,
             log=log,
             exchange_rate_observation=direct_fx,
+            runtime_config=cfg,
         )
 
     if direct_fx is not None:

@@ -3996,3 +3996,29 @@ def test_malformed_latest_legacy_observation_fails_closed(
     assert repo.get_trade_lifecycle_settlement_admission_head(
         case_id=case_id
     ) is None
+
+
+@pytest.mark.parametrize("multiplier", [None, True, 100.5, "100.00000000000000001", 0, 500, 1000])
+def test_settlement_matching_requires_actual_integral_multiplier(multiplier):
+    from src.application.trades.settlement_observation import _stock_settlement_candidate
+    from src.application.trades.lifecycle import _stock_matches_lifecycle_contract_terms, _stock_settlement_contracts
+
+    valid = type(multiplier) is int and multiplier > 0
+    shares = multiplier * 2 if valid else 1000
+    case = {"symbol": "NVDA", "option_type": "put", "position_side": "short", "strike": 100,
+            "multiplier": multiplier, "contracts": 2, "futu_account_id": "1001"}
+    evidence = {"side": "buy", "stock_qty": shares, "stock_price": 100, "futu_account_id": "1001"}
+    assert _stock_matches_lifecycle_contract_terms(case, evidence, strict_price=True) is valid
+    if valid:
+        assert _stock_settlement_contracts(case, evidence) == 2
+    else:
+        with pytest.raises(ValueError, match="multiplier"):
+            _stock_settlement_contracts(case, evidence)
+    row = {**_stock_settlement_deal("units", trade_time_ms=1000), "qty": shares}
+    candidate = _stock_settlement_candidate(row, lifecycle_case=case, account="lx", futu_account_id="1001",
+                                            timezone="America/New_York", settlement_deadline_ms=2000)
+    assert (candidate is not None) is valid
+    if valid:
+        row["qty"] += 1
+        assert _stock_settlement_candidate(row, lifecycle_case=case, account="lx", futu_account_id="1001",
+                                           timezone="America/New_York", settlement_deadline_ms=2000) is None

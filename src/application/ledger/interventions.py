@@ -22,6 +22,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     canonical_contract_symbol,
     normalize_contract_expiration,
     normalize_position_effect,
@@ -167,7 +168,7 @@ def _void_trade_event(
         price=0.0,
         currency=normalize_currency(target.get("currency")),
         source="cli_trade_event_repair" if repair_event_id else "cli_manual_void",
-        multiplier=float(safe_float(target.get("multiplier")) or 100.0),
+        multiplier=require_option_multiplier(target.get("multiplier")),
         target_event_id=str(target_event_id),
         raw_payload=raw_payload,
     )
@@ -197,7 +198,7 @@ def _repair_trade_event(*, event_id: str, core: dict[str, Any], raw_payload: dic
         price=float(core.get("price") or 0.0),
         currency=normalize_currency(core.get("currency")),
         source="cli_trade_event_repair",
-        multiplier=float(safe_float(core.get("multiplier")) or 100.0),
+        multiplier=require_option_multiplier(core.get("multiplier")),
         fees=float(core.get("fees") or 0.0),
         target_lot_id=target_lot_id,
         lot_id=(str(raw_payload.get("lot_id") or raw_payload.get("lot_record_id") or "").strip() or None),
@@ -619,7 +620,7 @@ def build_manual_void_preview(
 
 
 def _repair_override_payload(overrides: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in dict(overrides or {}).items() if value not in (None, "")}
+    return {key: value for key, value in dict(overrides or {}).items() if key == "multiplier" or value not in (None, "")}
 
 
 def is_order_identity_repair_request(overrides: dict[str, Any]) -> bool:
@@ -1395,8 +1396,7 @@ def _normalized_repair_core_event(target: dict[str, Any], overrides: dict[str, A
     merged["contracts"] = int(safe_float(merged.get("contracts")) or 0)
     merged["price"] = float(safe_float(merged.get("price")) or 0.0)
     merged["strike"] = safe_float(merged.get("strike"))
-    raw_multiplier = safe_float(merged.get("multiplier"))
-    merged["multiplier"] = int(float(raw_multiplier)) if raw_multiplier is not None else None
+    merged["multiplier"] = require_option_multiplier(merged.get("multiplier"))
     merged["expiration_ymd"] = normalize_contract_expiration(merged.get("expiration_ymd"))
     merged["currency"] = normalize_currency(merged.get("currency"))
     merged["trade_time_ms"] = int(safe_float(merged.get("trade_time_ms")) or now_ms())
@@ -1520,6 +1520,7 @@ def build_manual_repair_preview(
         downstream_dependencies=downstream_dependencies, source_state=source_state,
         overrides=overrides, repair_reason=repair_reason,
     )
+    require_option_multiplier(target.get("multiplier"))
     core = _normalized_repair_core_event(target, overrides)
     void_event_id, repair_event_id = _manual_repair_event_ids(
         target_event_id=target_event_id,

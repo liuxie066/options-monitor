@@ -933,6 +933,7 @@ def prepare_close_advice_inputs_tool(
             state_dir=state_dir,
             shared_state_dir=shared_dir,
             log=logs.append,
+            runtime_config=cfg,
         )
     except SystemExit as exc:
         raise AgentToolError(

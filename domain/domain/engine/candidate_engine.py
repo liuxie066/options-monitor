@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 
 
 CANDIDATE_ENGINE_SCHEMA_VERSION = "1.0"
@@ -328,6 +328,16 @@ def _required_positive_float(raw: dict[str, Any], field: str) -> float:
 
 def _required_positive_int(raw: dict[str, Any], field: str) -> int:
     value = _required_positive_float(raw, field)
+    if field in {"multiplier", "chain_multiplier", "snapshot_multiplier"}:
+        try:
+            return require_option_multiplier(raw.get(field))
+        except ValueError as exc:
+            raise CandidateCalculationError(
+                f"{field}_not_integer",
+                f"{field} must be a positive integer",
+                metric_value=raw.get(field),
+                threshold="positive integer",
+            ) from exc
     integer = int(value)
     if float(integer) != value:
         raise CandidateCalculationError(

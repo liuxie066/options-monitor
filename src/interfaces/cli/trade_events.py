@@ -48,7 +48,7 @@ def _repair_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "contracts": args.contracts,
         "price": args.price,
         "strike": args.strike,
-        "multiplier": args.multiplier,
+        **({"multiplier": args.multiplier} if args.multiplier is not None else {}),
         "expiration_ymd": args.exp,
         "currency": args.currency,
         "trade_time_ms": args.trade_time_ms,

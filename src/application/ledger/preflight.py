@@ -5,6 +5,7 @@ from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
 from domain.domain.ledger.position_fields import (
+    _UNSET,
     EXPIRE_AUTO_CLOSE,
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
@@ -22,7 +23,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency, normalize_side
-from domain.domain.trade_contract_identity import derive_trade_side
+from domain.domain.trade_contract_identity import derive_trade_side, require_option_multiplier
 from domain.domain.ledger.identity import position_key_for
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import effective_import_diagnostics, import_stored_trade_events
@@ -135,7 +136,7 @@ def preflight_manual_adjust(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -619,7 +620,7 @@ def _preflight_lot_close(
         price=float(normalized_close_price),
         currency=normalize_currency(current_fields.get("currency")),
         source=source,
-        multiplier=float(effective_multiplier(current_fields) or 100),
+        multiplier=require_option_multiplier(current_fields.get("multiplier")),
         target_lot_id=resolved_lot_id,
         raw_payload={
             "record_id": resolved_lot_id,
@@ -673,7 +674,7 @@ def _preflight_lot_adjust(
     strike: float | None,
     expiration_ymd: str | None,
     premium_per_share: float | None,
-    multiplier: float | None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None,
     as_of_ms: int | None,
     source: str,
@@ -771,7 +772,7 @@ def _build_lot_adjust_preflight_candidate(
     strike: float | None,
     expiration_ymd: str | None,
     premium_per_share: float | None,
-    multiplier: float | None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None,
     as_of_ms: int | None,
     source: str,
@@ -874,7 +875,7 @@ def _build_lot_adjust_preflight_candidate(
         ),
         currency=normalize_currency(adjusted_fields.get("currency") or current_fields.get("currency")),
         source=source,
-        multiplier=float(effective_multiplier(adjusted_fields) or effective_multiplier(current_fields) or 100),
+        multiplier=require_option_multiplier(current_fields.get("multiplier")),
         target_lot_id=resolved_lot_id,
         raw_payload={
             "record_id": resolved_lot_id,
@@ -1053,7 +1054,7 @@ def _manual_open_ledger_inputs(
         price=float(fields["premium"]),
         currency=currency_resolved,
         source="cli_manual_open",
-        multiplier=float(effective_multiplier(fields) or 100),
+        multiplier=require_option_multiplier(fields.get("multiplier")),
         lot_id=f"lot_{event_id}",
         raw_payload={
             "source": "om option-positions",
@@ -1100,11 +1101,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
             if getattr(resolved_deal, "strike", None) is not None
             else None
         ),
-        multiplier=(
-            float(getattr(resolved_deal, "multiplier"))
-            if getattr(resolved_deal, "multiplier", None) is not None
-            else None
-        ),
+        multiplier=getattr(resolved_deal, "multiplier", None),
         expiration_ymd=(str(getattr(resolved_deal, "expiration_ymd", "") or "").strip() or None),
         premium_per_share=(
             float(getattr(resolved_deal, "price"))
@@ -1133,7 +1130,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
         price=float(fields["premium"]),
         currency=resolve_open_currency(fields.get("symbol"), fields.get("currency")),
         source="opend_push",
-        multiplier=float(effective_multiplier(fields) or 100),
+        multiplier=require_option_multiplier(fields.get("multiplier")),
         lot_id=f"lot_{event_id}",
         raw_payload=dict(raw_payload),
     )

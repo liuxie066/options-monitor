@@ -751,6 +751,7 @@ def test_complete_split_requires_every_unique_active_allocation(legacy, quantiti
             broker="futu", account="lx", underlying_symbol="NVDA", option_type="put", strike=100, expiration_ymd="2026-09-18",
                 ),
         contracts=0, price=0, currency="USD", source="manual",
+        multiplier=rows[1]["multiplier"],
         target_event_id=rows[1]["event_id"],
     ).to_dict()
     assert completed_ledger_deal_keys([*rows, void]) == set()

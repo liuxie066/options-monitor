@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.money import canonical_decimal_text, to_decimal
 from domain.domain.strategy_membership import resolve_strategy_metadata
+from domain.domain.trade_contract_identity import require_option_multiplier
 
 
 RESUMABLE_PROJECTION_STATE_SCHEMA = "resumable_projection_state.v1"
@@ -360,13 +361,7 @@ class ResumableLotState:
                 field_name="premium_open",
                 nonnegative=True,
             )
-            multiplier = int(
-                _finite_float(
-                    self.multiplier,
-                    field_name="multiplier",
-                    positive=True,
-                )
-            )
+            multiplier = require_option_multiplier(self.multiplier)
             shares_opened = None
             shares_open = None
             shares_closed = None

@@ -14,7 +14,7 @@ from domain.domain.ledger.position_fields import (
     safe_float,
 )
 from domain.domain.option_position_identity import normalize_side
-from domain.domain.trade_contract_identity import derive_trade_side
+from domain.domain.trade_contract_identity import derive_trade_side, require_option_multiplier
 
 
 @dataclass(frozen=True)
@@ -161,7 +161,7 @@ def position_lot_snapshot_to_open_event(
             price=float(safe_float(fields.get("premium")) or 0.0),
             currency=str(fields.get("currency") or ""),
             source=source,
-            multiplier=float(effective_multiplier(fields) or 100),
+            multiplier=require_option_multiplier(fields.get("multiplier")),
             lot_id=lot_id,
             raw_payload=raw_payload,
         )

@@ -661,7 +661,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     )
     monkeypatch.setattr(
         mod,
-        "list_position_lot_snapshots",
+        "decision_state_snapshot",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("close-advice planning must reuse prepared rows")
         ),
@@ -1737,7 +1737,7 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
         "prepare_option_positions_contexts": "ledger_prepare",
         "prepare_portfolio_contexts": "portfolio_prepare",
         "open_position_ledger_from_data_config": "ledger_open",
-        "list_position_lot_snapshots": "ledger_list",
+        "decision_state_snapshot": "ledger_list",
     }.items():
         monkeypatch.setattr(mod, attribute, _forbidden(counter))
     monkeypatch.setattr(

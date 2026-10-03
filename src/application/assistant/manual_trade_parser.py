@@ -148,9 +148,7 @@ def _build_open_draft(
     multiplier, multiplier_source, multiplier_diagnostics = _resolve_multiplier(
         symbol=canonical or raw_symbol,
         explicit_multiplier=(
-            _parse_float_value(labeled, ("multiplier",))
-            or fill.get("multiplier")
-            or _extract_after_label(text, ("multiplier", "乘数"))
+            labeled.get("multiplier", _extract_after_label(text, ("multiplier", "乘数"), raw=True))
         ),
         runtime_config=runtime_config,
         config_path=config_path,
@@ -305,9 +303,9 @@ def _build_assignment_draft(
         (_extract_symbol(text, accounts=accounts), "text"),
     )
     canonical = _canonicalize_symbol(raw_symbol, runtime_config=runtime_config)
-    multiplier, multiplier_source, multiplier_diagnostics = _resolve_lifecycle_multiplier(
+    multiplier, multiplier_source, multiplier_diagnostics = _resolve_multiplier(
         symbol=canonical or raw_symbol,
-        explicit_multiplier=_parse_float_value(labeled, ("multiplier",)) or _extract_after_label(text, ("multiplier", "乘数")),
+        explicit_multiplier=labeled.get("multiplier", _extract_after_label(text, ("multiplier", "乘数"), raw=True)),
         runtime_config=runtime_config,
         config_path=config_path,
         repo_base=repo_base,
@@ -570,39 +568,6 @@ def _assignment_stock_side(*, option_type: Any, position_side: Any) -> str | Non
     return None
 
 
-def _resolve_lifecycle_multiplier(
-    *,
-    symbol: Any,
-    explicit_multiplier: Any,
-    runtime_config: dict[str, Any] | None,
-    config_path: str | Path | None,
-    repo_base: Path,
-    allow_opend_refresh: bool,
-) -> tuple[float | None, str | None, dict[str, Any]]:
-    multiplier, source, diagnostics = _resolve_multiplier(
-        symbol=symbol,
-        explicit_multiplier=explicit_multiplier,
-        runtime_config=runtime_config,
-        config_path=config_path,
-        repo_base=repo_base,
-        allow_opend_refresh=allow_opend_refresh,
-    )
-    if multiplier:
-        return multiplier, source, diagnostics
-    if _looks_like_us_standard_symbol(symbol):
-        attempts = list(diagnostics.get("attempted_sources") or [])
-        attempts.append({"source": "us_standard_default", "status": "resolved", "value": 100})
-        diagnostics = {**diagnostics, "attempted_sources": attempts, "selected_source": "us_standard_default"}
-        diagnostics.pop("message", None)
-        return 100.0, "us_standard_default", diagnostics
-    return multiplier, source, diagnostics
-
-
-def _looks_like_us_standard_symbol(symbol: Any) -> bool:
-    text = str(symbol or "").strip().upper()
-    return re.fullmatch(r"[A-Z]{1,8}(?:\.[A-Z]{1,4})?", text) is not None and not text.endswith(".HK")
-
-
 def _resolve_multiplier(
     *,
     symbol: Any,
@@ -787,12 +752,13 @@ def _extract_contracts(text: str) -> int | None:
     return None
 
 
-def _extract_after_label(text: str, labels: tuple[str, ...]) -> float | None:
+def _extract_after_label(text: str, labels: tuple[str, ...], *, raw: bool = False) -> float | str | None:
     for label in labels:
-        pattern = rf"{re.escape(label)}\s*[:=：]?\s*{_NUMBER_RE.pattern}"
+        value_pattern = r"([^\s,，]*)" if raw else _NUMBER_RE.pattern
+        pattern = rf"{re.escape(label)}\s*[:=：]?\s*{value_pattern}"
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            return float(match.group(1))
+            return match.group(1) if raw else float(match.group(1))
     return None
 
 

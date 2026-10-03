@@ -1918,7 +1918,7 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         price=float(getattr(deal, "price", 0.0) or 0.0),
         currency=normalize_currency(getattr(deal, "currency", None)),
         source="opend_push",
-        multiplier=float(getattr(deal, "multiplier", None) or 100),
+        multiplier=getattr(deal, "multiplier", None),
         fees=0.0,
         target_lot_id=str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip() or None,
         raw_payload=raw_payload,

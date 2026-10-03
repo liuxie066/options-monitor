@@ -33,6 +33,7 @@ def _trade_event(asset_type: str = "option", quantity_unit: str | None = None, *
         "currency": "USD",
         "source": "api",
         "asset_type": asset_type,
+        "multiplier": 100 if asset_type == "option" else None,
         "quantity_unit": quantity_unit,
         "raw_payload": {"fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}},
     }

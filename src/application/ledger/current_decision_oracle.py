@@ -55,9 +55,15 @@ def _oracle_assigned_stock_report(
         <= now_ms
         or valid_void_target_event_id(item) is not None
     ]
-    events, diagnostics = import_stored_trade_events(event_rows)
+    events, _diagnostics = import_stored_trade_events(event_rows)
     projected = project_stored_trade_events_to_position_lots(event_rows)
-    del diagnostics
+    from src.application.ledger.assigned_stock_projection import (
+        _require_trusted_assigned_stock_projection,
+    )
+
+    _require_trusted_assigned_stock_projection(
+        projected.diagnostics, events, account=account,
+    )
     current_fields_by_lot_id = {
         item.lot_id: item.fields for item in projected.lots
     }

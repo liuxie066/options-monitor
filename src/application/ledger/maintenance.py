@@ -26,7 +26,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, contract_share_quantity, stock_settlement_side
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, contract_share_quantity, stock_settlement_side, require_option_multiplier
 from domain.domain.money import to_decimal
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
@@ -237,7 +237,7 @@ def persist_expire_auto_close_event(
         fields=fields,
         operation="expire_auto_close",
     )
-    multiplier = effective_multiplier(fields)
+    multiplier = require_option_multiplier(fields.get("multiplier"))
     strike = _lot_strike(fields)
     target_source_event_id = _lot_open_event_id(fields)
     trade_time_ms = _close_event_trade_time_ms(
@@ -261,7 +261,7 @@ def persist_expire_auto_close_event(
         price=0.0,
         currency=normalize_currency(fields.get("currency")),
         source="auto_close_expired_positions",
-        multiplier=(float(multiplier) if multiplier is not None else 100.0),
+        multiplier=multiplier,
         target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
@@ -560,6 +560,16 @@ def build_expired_close_decisions(
         )
         eligible_after_dt = exp_ms_to_datetime(eligible_after_ms)
         should_close = int(as_of_ms) >= int(eligible_after_ms)
+        if should_close:
+            try:
+                require_option_multiplier(fields.get("multiplier"))
+            except ValueError as exc:
+                decisions.append(ExpiredCloseDecision(
+                    lot_id=lot_id, position_key=position_key, expiration_ms=int(exp_ms),
+                    effective_exp_source=exp_source, should_close=False, reason=str(exc),
+                    skip_reason="invalid_multiplier", contracts_open=contracts_open, patch=None,
+                ))
+                continue
         manual_skip_reason = str(fields.get("_auto_close_skip_reason") or "").strip()
         if should_close and manual_skip_reason:
             decisions.append(

@@ -100,6 +100,7 @@ def _event(
         "adjust",
     }
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type=event_type,
         event_time_ms=event_time_ms,
@@ -370,6 +371,7 @@ def test_backfill_preserves_voided_legacy_event_with_non_positive_time(
     path = tmp_path / "legacy-voided-invalid-time.sqlite3"
     target = _event("legacy-close", event_time_ms=10, event_type="close")
     void = TradeEvent(
+        multiplier=target.multiplier,
         event_id="void-legacy-close",
         event_type="void",
         event_time_ms=20,

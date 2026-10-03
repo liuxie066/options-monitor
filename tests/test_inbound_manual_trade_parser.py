@@ -173,6 +173,7 @@ def test_manual_trade_draft_converts_futu_close_fill_side_to_position_side(tmp_p
 
 
 def test_manual_trade_draft_parses_futu_assignment_notice(tmp_path: Path) -> None:
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", {"PDD": {"multiplier": 100, "source": "cache"}})
     message = (
         "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
@@ -202,11 +203,12 @@ def test_manual_trade_draft_parses_futu_assignment_notice(tmp_path: Path) -> Non
     assert diagnostics["fill_parser_source"] == "futu_lifecycle_notice"
     assert diagnostics["trade_side_raw"] == -2
     assert diagnostics["position_side"] == "short"
-    assert diagnostics["multiplier_source"] == "us_standard_default"
+    assert diagnostics["multiplier_source"] == "cache"
     assert diagnostics["missing_fields"] == []
 
 
 def test_manual_trade_draft_parses_futu_early_assignment_notice(tmp_path: Path) -> None:
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", {"PDD": {"multiplier": 100, "source": "cache"}})
     message = (
         "记录一张被指派平仓，sy账户，衍生品提醒: 期权提前被指派通知: 您的保证金综合账户(2905) - "
         "证券所持有的-1张PDD 260626 78.00P期权已提前被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
@@ -328,3 +330,38 @@ def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.Monke
     assert "multiplier" in draft["diagnostics"]["missing_fields"]
     assert draft["diagnostics"]["multiplier_resolution_attempts"]
     assert draft["diagnostics"]["multiplier_resolution_message"] == "recognized 0700.HK but multiplier could not be resolved"
+
+
+@pytest.mark.parametrize("operation", ["manual_open", "manual_assignment"])
+@pytest.mark.parametrize("raw", ["100.00000000000000001", "100.5", "0", "-1", "nan", "inf", "", "100junk"])
+@pytest.mark.parametrize("label", ["multiplier=", "乘数 "])
+def test_manual_message_invalid_multiplier_cannot_use_valid_cache(tmp_path, operation, raw, label):
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", {"PDD": {"multiplier": 500, "source": "cache"}})
+    draft = build_manual_trade_draft(operation,
+        raw_text=f"sy symbol=PDD option_type=put side=short contracts=1 strike=85 exp=2026-06-18 premium=1 {label}{raw}",
+        **_draft_kwargs(tmp_path, config_key="us"))
+    assert draft["diagnostics"]["multiplier_source"] is None
+    assert draft["diagnostics"]["multiplier_resolution_attempts"][0]["status"] == "invalid"
+    assert not draft["arguments"].get("stock_qty")
+    assert not draft["arguments"].get("multiplier")
+
+
+def test_us_assignment_message_without_multiplier_keeps_quantity_unknown(tmp_path):
+    draft = build_manual_trade_draft("manual_assignment",
+        raw_text="sy 证券所持有的-2张PDD 260618 85.00P期权已被指派",
+        **_draft_kwargs(tmp_path, config_key="us"))
+    assert not draft["arguments"].get("stock_qty")
+    assert draft["diagnostics"]["multiplier_source"] is None
+    assert "stock_qty" in draft["diagnostics"]["missing_fields"]
+
+
+@pytest.mark.parametrize("raw", [True, "100.00000000000000001", "100.5", float("nan"), float("inf")])
+def test_manual_operation_args_reject_original_multiplier(raw):
+    from src.application.assistant.manual_trade_operations import _manual_open_args
+    from src.application.agent_tool_contracts import AgentToolError
+
+    with pytest.raises(AgentToolError) as exc:
+        _manual_open_args({"account": "lx", "symbol": "NVDA", "option_type": "put", "side": "short",
+                           "contracts": 1, "strike": 100, "multiplier": raw, "expiration_ymd": "2026-09-18",
+                           "premium_per_share": 1})
+    assert exc.value.code == "INPUT_ERROR"

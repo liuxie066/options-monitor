@@ -431,3 +431,18 @@ def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fal
     assert deal.expiration_ymd == "2026-05-28"
     assert deal.multiplier == 1000
     assert deal.multiplier_source == "opend"
+
+
+@pytest.mark.parametrize("key", ["multiplier", "contract_multiplier", "lot_size"])
+@pytest.mark.parametrize("raw", [None, "", True, 0, -1, 100.5, "100.00000000000000001", float("inf")])
+def test_invalid_payload_multiplier_alias_cannot_fall_back(tmp_path, monkeypatch, key, raw):
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json",
+               {"9992.HK": {"multiplier": 500, "source": "opend"}})
+    monkeypatch.setattr("src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics",
+                        lambda **_: pytest.fail("explicit invalid payload must not resolve from fallback"))
+    deal = normalize_trade_deal(_futu_option_code_payload("invalid", **{key: raw}), repo_base=tmp_path)
+    assert deal.multiplier is None
+    assert deal.normalization_diagnostics["multiplier_resolution"]["attempted_sources"] == [
+        {"source": "payload", "status": "invalid"},
+    ]
+    assert any("source_field:" + key in error for error in deal.execution_input["errors"])

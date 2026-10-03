@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import math
+
+from domain.domain.trade_contract_identity import require_option_multiplier
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -60,10 +62,10 @@ def _finite_float(value: Any) -> float | None:
 
 
 def _positive_int(value: Any) -> int | None:
-    number = _finite_float(value)
-    if number is None or number <= 0 or not number.is_integer():
+    try:
+        return require_option_multiplier(value)
+    except (TypeError, ValueError):
         return None
-    return int(number)
 
 
 def _optional_bool(value: Any) -> bool | None:
@@ -362,6 +364,10 @@ def normalize_option_observation(
     snapshot_multiplier = (
         next(iter(snapshot_multiplier_values))
         if len(snapshot_multiplier_values) == 1
+        and all(
+            value is None or (isinstance(value, str) and not value.strip()) or _positive_int(value) is not None
+            for value in (snapshot.get("option_contract_size"), snapshot.get("option_contract_multiplier"))
+        )
         else None
     )
     multiplier = (

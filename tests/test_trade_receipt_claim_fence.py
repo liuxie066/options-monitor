@@ -158,6 +158,8 @@ def test_normalize_failure_state_write_requires_current_claim(tmp_path, monkeypa
         assert len(results) == 1 and results[0]["status"] == "failed"
         state = load_trade_intake_state(state_path)
         assert state["processed_deal_ids"] == {}
+        assert set(state["failed_deal_ids"]) == {payload["deal_id"]}
+        assert state["unresolved_deal_ids"] == {}
         failed = state["failed_deal_ids"][payload["deal_id"]]
         assert failed["reason"] == "exception:OSError"
         assert failed["receipt"]["delivery_confirmed"] is True
