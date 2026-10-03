@@ -18,7 +18,6 @@ from domain.domain.performance.models import (
     normalize_currency,
     to_decimal,
 )
-from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
 @dataclass(frozen=True)
@@ -383,12 +382,10 @@ def _row_matches_position(row: Mapping[str, Any], position: OptionValuationPosit
 def build_option_valuation_mark_fact(
     position: OptionValuationPosition,
     snapshot_rows: Sequence[Mapping[str, Any]],
-    source_binding: Mapping[str, Any] | None = None,
-    formal_time_bounds: tuple[int, int] | None = None,
     *,
     fallback_ms: int | None = None,
 ) -> ValuationMarkFact:
-    """Normalize one exact option mark from live or already-frozen rows."""
+    """Normalize one exact live option mark."""
 
     candidates = [dict(row) for row in snapshot_rows if _row_matches_position(row, position)]
     if len(candidates) != 1:
@@ -401,60 +398,18 @@ def build_option_valuation_mark_fact(
     if price is None or mark_kind is None:
         raise ValueError(mark_error or "option mark is missing")
 
-    if formal_time_bounds is None:
-        if fallback_ms is None:
-            raise ValueError("live option mark requires fallback_ms")
-        effective_at_ms, observed_at_ms, timestamp_fallback = _snapshot_capture_times_ms(
-            row,
-            fallback_ms=int(fallback_ms),
-        )
-        quality: dict[str, Any] = {"persistence": "live_unpersisted"}
-        if timestamp_fallback:
-            quality["timestamp_fallback"] = True
-        source = "realtime_snapshot"
-        source_id = f"{code}:{observed_at_ms}"
-        raw = _json_safe(row)
-    else:
-        minimum_ms, maximum_ms = (int(formal_time_bounds[0]), int(formal_time_bounds[1]))
-        if minimum_ms <= 0 or maximum_ms < minimum_ms:
-            raise ValueError("formal option mark time bounds are invalid")
-        effective_at_ms = _aware_datetime_ms(row.get("snapshot_requested_at_utc"))
-        observed_at_ms = _aware_datetime_ms(row.get("snapshot_received_at_utc"))
-        if effective_at_ms is None or observed_at_ms is None:
-            raise ValueError("formal option mark source time is missing")
-        if (
-            observed_at_ms < effective_at_ms
-            or effective_at_ms < minimum_ms
-            or observed_at_ms > maximum_ms
-        ):
-            raise ValueError("formal option mark source time is outside the point window")
-        binding = dict(source_binding or {})
-        artifact_sha256 = str(binding.get("artifact_sha256") or "").strip()
-        artifact_ref = str(binding.get("artifact_ref") or "").strip()
-        row_identity = canonical_sha256(_json_safe(row))
-        if len(artifact_sha256) != 64 or not artifact_ref:
-            raise ValueError("formal option mark source binding is incomplete")
-        source = "required_data_snapshot"
-        source_id = canonical_sha256(
-            {
-                "artifact_sha256": artifact_sha256,
-                "row_identity": row_identity,
-                "instrument_key": position.instrument.instrument_key,
-                "market_code": code,
-            }
-        )
-        quality = {
-            "persistence": "sealed_artifact",
-            "artifact_ref": artifact_ref,
-            "artifact_sha256": artifact_sha256,
-            "source_row_identity": row_identity,
-        }
-        raw = {
-            "artifact_ref": artifact_ref,
-            "artifact_sha256": artifact_sha256,
-            "source_row_identity": row_identity,
-            "market_code": code,
-        }
+    if fallback_ms is None:
+        raise ValueError("live option mark requires fallback_ms")
+    effective_at_ms, observed_at_ms, timestamp_fallback = _snapshot_capture_times_ms(
+        row,
+        fallback_ms=int(fallback_ms),
+    )
+    quality: dict[str, Any] = {"persistence": "live_unpersisted"}
+    if timestamp_fallback:
+        quality["timestamp_fallback"] = True
+    source = "realtime_snapshot"
+    source_id = f"{code}:{observed_at_ms}"
+    raw = _json_safe(row)
 
     return ValuationMarkFact(
         fact_id=None,
