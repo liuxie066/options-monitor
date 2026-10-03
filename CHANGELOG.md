@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 4.1.4 - 2026-10-04
+
+### Improvements
+- 减少 Combo 匹配、财报证据标注、Wheel 投影、账户决策最终化和 Close-advice 报告回退中的重复计算与读取，保持现有结果和失败语义。
+
 ## 4.1.3 - 2026-10-03
 
 ### Improvements
