@@ -32,6 +32,8 @@ def validate_attribution_decision(
     The caller supplies canonical opening IDs and excludes validated voids. This
     owner depends on source facts only, never on Wheel or Combo read models.
     """
+    from domain.domain.ledger.events import TradeEvent
+
     if (decision.get("schema_version") != "attribution_decision.v1"
             or any(not decision.get(key) for key in
                    ("account", "request_id", "actor", "input_hash", "members"))):
@@ -78,7 +80,7 @@ def validate_attribution_decision(
                 or list(opening_lot_ids.values()).count(member["lot_id"]) != 1
                 or proof.get("target_lot_id") != member["lot_id"]
                 or (opening.get("contract_key") or {}).get("account") != decision["account"]
-                or proof.get("contract_key") != opening.get("contract_key")
+                or TradeEvent.from_dict(proof).contract_key != TradeEvent.from_dict(opening).contract_key
                 or proof.get("currency") != opening.get("currency")
                 or proof.get("multiplier") != opening.get("multiplier")
                 or int(opening.get("event_time_ms") or 0) > int(proof.get("event_time_ms") or 0)

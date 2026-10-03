@@ -352,6 +352,45 @@ def test_global_writer_commits_once_and_rolls_back_on_precommit_cancellation(tmp
     assert [row for row in repo.list_trade_events() if row["event_type"] == "open"] == [row for row in before if row["event_type"] == "open"]
 
 
+@pytest.mark.parametrize("decision", ["wheel", "ordinary"])
+def test_attribution_accepts_historical_contract_key_with_position_key(tmp_path, monkeypatch, decision):
+    from src.application.trades.attribution import apply_trade_attribution
+
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute("""UPDATE trade_events
+            SET event_json = json_set(event_json, '$.contract_key.position_key', 'legacy-position')
+            WHERE event_id = 'unlinked-call-open-1'""")
+    stored_open = next(row for row in repo.list_trade_events() if row["event_id"] == "unlinked-call-open-1")
+    assert stored_open["contract_key"]["position_key"] == "legacy-position"
+
+    evidence = {"complete": True, "exposures": []}
+    view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        config=config, account="lx", market="us", now_ms=4000, combo_evidence=evidence)
+    call = next(row for row in view["rows"] if row["open_event_id"] == stored_open["event_id"])
+    args = dict(account="lx", market="us", config=config, execution_key=call["execution_key"],
+        candidate_id=call["selected_candidate_id"] if decision == "wheel" else "ordinary",
+        manual=decision == "ordinary", expected_input_hash=call["input_hash"],
+        request_id="legacy-contract-key", actor="fixture:operator", combo_evidence=evidence,
+        capacity_observation={}, combo_mode="confirm")
+    before = repo.list_trade_events()
+    assert not apply_trade_attribution(repo, **args, apply_changes=False)["write_applied"]
+    assert repo.list_trade_events() == before
+    result = apply_trade_attribution(repo, **args)
+    assert result["write_applied"] and result["status"] == ("linked" if decision == "wheel" else "ordinary")
+    assert not apply_trade_attribution(repo, **args)["write_applied"]
+    assert len(repo.list_trade_events()) == len(before) + 1
+    proof = next(row for row in repo.list_trade_events() if row["event_id"] in result["proof_event_ids"])
+    assert "position_key" not in proof["contract_key"]
+    assert next(row for row in repo.list_trade_events() if row["event_id"] == stored_open["event_id"]) == stored_open
+    from domain.domain.wheel import lot_strategy_metadata_from_trade_events
+    changed = deepcopy(repo.list_trade_events())
+    next(row for row in changed if row["event_id"] == proof["event_id"])["contract_key"]["strike"] = "111"
+    accepted = set()
+    lot_strategy_metadata_from_trade_events(changed, accepted_proof_event_ids=accepted)
+    assert proof["event_id"] not in accepted
+
+
 def test_view_and_writer_keep_other_market_capacity_obligations(tmp_path, monkeypatch):
     from dataclasses import replace
     from domain.domain.ledger import ContractKey

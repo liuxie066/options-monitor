@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 修复历史期权成交的合约键带有 `position_key` 时，人工策略归属预览与确认失败的问题。
+
 ## 4.1.2 - 2026-10-02
 
 ### Bug Fixes
