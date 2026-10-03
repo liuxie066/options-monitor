@@ -24,12 +24,14 @@ from domain.domain.option_lifecycle import (
     PENDING_STATUSES,
 )
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     canonical_contract_symbol,
     derive_position_side,
     normalize_contract_expiration,
 )
 from src.application.ledger.api import (
     record_zero_price_option_close,
+    accept_option_close_evidence,
     BrokerTradeOperation,
     futu_compatibility_source_key,
     canonical_source_economic_payload,
@@ -121,7 +123,7 @@ def lifecycle_deal_economic_hash(
             evidence_type="stock_settlement_leg",
             case_id=None,
         )
-    elif _is_zero_price_option_close(deal):
+    elif deal.option_type and deal.position_effect == "close":
         role = "option_anchor"
         payload = {
             **deal.to_dict(),
@@ -152,9 +154,21 @@ def _resolve_zero_price_option_close(
     wheel_start_enabled: bool = False,
     notification_status: str = "pending",
 ) -> LifecycleTradeResolution:
-    if not apply_changes:
-        return _preview_zero_price_option_close(deal, repo=repo)
-
+    resolution = dict(deal.normalization_diagnostics.get("multiplier_resolution") or {})
+    if deal.multiplier is None and not resolution.get("errors"):
+        return LifecycleTradeResolution(
+            handled=True, status="unresolved", action="lifecycle",
+            reason="missing_required_fields:multiplier",
+            diagnostics={"retryable": True, "missing_fields": ["multiplier"],
+                         "multiplier_resolution": resolution},
+        )
+    try:
+        require_option_multiplier(deal.multiplier)
+    except ValueError as exc:
+        return LifecycleTradeResolution(
+            handled=True, status="unresolved", action="lifecycle",
+            reason="invalid_required_fields:multiplier", diagnostics={"retryable": False, "error": str(exc)},
+        )
     source_event_id = _futu_source_key(deal)
     evidence = _evidence_from_deal(
         deal,
@@ -193,9 +207,14 @@ def _resolve_zero_price_option_close(
         ),
         "market": symbol_market(deal.symbol),
         "currency": deal.currency,
-        "multiplier": deal.multiplier or 100,
+        "multiplier": require_option_multiplier(deal.multiplier),
     }
     try:
+        if not apply_changes:
+            accept_option_close_evidence(
+                repo, contract_identity=contract_identity, evidence=evidence, apply_changes=False,
+            )
+            return _preview_zero_price_option_close(deal, repo=repo)
         accepted = record_zero_price_option_close(
             repo,
             deal=deal,
@@ -1041,7 +1060,7 @@ def _case_from_option_deal(deal: NormalizedTradeDeal) -> dict[str, Any]:
     expiration = normalize_contract_expiration(deal.expiration_ymd)
     strike = float(deal.strike) if deal.strike is not None else None
     contracts = int(deal.contracts or 0)
-    multiplier = int(deal.multiplier or 100)
+    multiplier = require_option_multiplier(deal.multiplier)
     case_key = _case_key(
         broker=broker,
         account=account,
@@ -1526,7 +1545,7 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
             "strike": strike,
             "expiration_ymd": expiration_ymd,
             "contracts": contracts,
-            "multiplier": int(effective_multiplier(fields) or 100),
+            "multiplier": effective_multiplier(fields),
         }
         key = (
             case["account"], case["symbol"], case["option_type"],
@@ -1775,7 +1794,7 @@ def _stock_matches_lifecycle_contract_terms(
     ):
         return False
     try:
-        multiplier = int(case.get("multiplier") or 100)
+        multiplier = require_option_multiplier(case.get("multiplier"))
         expected_qty = _lifecycle_case_contracts(case) * multiplier
         actual_qty = abs(int(stock_evidence.get("stock_qty") or 0))
     except Exception:
@@ -1802,7 +1821,7 @@ def _stock_settlement_contracts(
     case: dict[str, Any],
     stock_evidence: dict[str, Any],
 ) -> int:
-    multiplier = int(case.get("multiplier") or 100)
+    multiplier = require_option_multiplier(case.get("multiplier"))
     shares = abs(int(stock_evidence.get("stock_qty") or 0))
     if multiplier <= 0 or shares <= 0 or shares % multiplier != 0:
         raise ValueError("stock settlement shares must be a positive contract multiple")

@@ -197,6 +197,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
                 strike=420,
                 contracts=2,
                 contracts_open=2,
+                multiplier=1000,
                 expiration=exp_ms,
                 position_key="0700_HK_20260618_420P_short",
             )
@@ -264,6 +265,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
                 strike=85,
                 contracts=2,
                 contracts_open=2,
+                multiplier=100,
                 expiration=exp_ms,
                 position_key="PDD_20260618_85P_short",
             )

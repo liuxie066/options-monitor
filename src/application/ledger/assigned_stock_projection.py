@@ -9,6 +9,8 @@ from domain.domain.assigned_stock import (
     assigned_stock_trade_event_row,
     project_assigned_stock_lifecycle,
 )
+from domain.domain.ledger.events import LedgerDiagnostic, TradeEvent
+from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import (
     StockInstrumentKey,
     ValuationMarkFact,
@@ -73,6 +75,45 @@ def _raw_quote_rows(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
 
 
+def _require_trusted_assigned_stock_projection(
+    diagnostics: list[LedgerDiagnostic],
+    events: list[TradeEvent],
+    *,
+    account: str | None,
+    broker: str | None = None,
+) -> None:
+    """Keep scoped economics unavailable when the authoritative event graph is invalid."""
+    events_by_id: dict[str, list[TradeEvent]] = {}
+    for event in events:
+        if event is not None:
+            events_by_id.setdefault(event.event_id, []).append(event)
+    account_filter = str(account or "").strip().lower()
+    broker_filter = normalize_broker(str(broker or "").strip())
+    errors = set()
+    for diagnostic in diagnostics:
+        if diagnostic.severity != "error":
+            continue
+        affected = list(events_by_id.get(diagnostic.event_id, ()))
+        unknown = not affected
+        for event in tuple(affected):
+            if event.target_event_id:
+                targets = events_by_id.get(event.target_event_id, ())
+                unknown = unknown or not targets
+                affected.extend(targets)
+        diagnostic_in_scope = bool(diagnostic.account or diagnostic.broker) and (
+            (not account_filter or not diagnostic.account or diagnostic.account == account_filter)
+            and (not broker_filter or not diagnostic.broker or diagnostic.broker == broker_filter)
+        )
+        if unknown or diagnostic_in_scope or any(
+            (not account_filter or event.contract_key.account == account_filter)
+            and (not broker_filter or event.contract_key.broker == broker_filter)
+            for event in affected
+        ):
+            errors.add(diagnostic.code)
+    if errors:
+        raise ValueError("assigned-stock ledger projection is untrusted: " + ", ".join(sorted(errors)))
+
+
 def project_assigned_stock_lifecycle_from_rows(
     rows: Mapping[str, Any],
     *,
@@ -91,6 +132,11 @@ def project_assigned_stock_lifecycle_from_rows(
         and (_event_time_ms(row) <= instant or valid_void_target_event_id(row) is not None)
     ]
     published = project_trade_event_log(selected_rows)
+    events = [stored_trade_event_to_ledger_event(row)[0] for row in selected_rows]
+    _require_trusted_assigned_stock_projection(
+        published.diagnostics, [event for event in events if event is not None],
+        account=account, broker=broker,
+    )
     projection = published.ledger_projection
     current_fields = {item.lot_id: item.fields for item in published.lots}
     # The strategy-metadata family is read from the event layer now (design
@@ -102,7 +148,6 @@ def project_assigned_stock_lifecycle_from_rows(
         for row in selected_rows
         if str(row.get("event_id") or "").strip()
     }
-    events = [stored_trade_event_to_ledger_event(row)[0] for row in selected_rows]
     return project_assigned_stock_lifecycle(
         [
             assigned_stock_trade_event_row(event)

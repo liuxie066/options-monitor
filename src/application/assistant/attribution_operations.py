@@ -18,6 +18,7 @@ from src.application.trades.attribution import (attribution_runtime, build_trade
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from src.application.futu_quote_routing import runtime_config_market, resolve_futu_quote_route
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
+from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.wheel.config import resolve_wheel_config
 from src.application.wheel.capacity import observe_trade_attribution_capacity
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -66,6 +67,7 @@ def _admission_config_hash(config: dict[str, Any], *, account: str) -> str:
         "wheel": {key: wheel[key] for key in (
             "account_configured", "activation_descriptor", "policy_hash", "enabled_for_new_lifecycle")},
         "combo_mode": combo_reconciliation_mode_for_account(config, account=account),
+        "cash_max_age_sec": cash_snapshot_ttl_sec(config),
         "physical_accounts": resolve_futu_account_ids(config, account=account),
         "portfolio": {key: portfolio.get(key) for key in ("host", "port", "trd_env")},
         "quote": {"status": quote.status, "host": quote.host, "port": quote.port},
@@ -75,7 +77,7 @@ def _admission_config_hash(config: dict[str, Any], *, account: str) -> str:
 def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str, Any], account: str,
                       open_event_id: str | None) -> dict[str, Any]:
     # Provider I/O is outside both the audit claim and the ledger writer lock.
-    observation = observe_trade_attribution_capacity(config=config, account=account)
+    observation = observe_trade_attribution_capacity(config=config, account=account, runtime_root=Path(authority["runtime_root"]))
     market = runtime_config_market(config).lower()
     rows = read_trade_attribution_snapshot(repo, account=account, market=market)
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=Path(authority["runtime_root"]),

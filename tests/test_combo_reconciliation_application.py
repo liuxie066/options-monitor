@@ -40,6 +40,7 @@ def _event(
     execution = {"external_id_namespace": "futu.deal", "external_execution_id": event_id,
         "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL", "account_label": "lx"}}
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,

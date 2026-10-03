@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from domain.domain.trade_contract_identity import contract_key
+from domain.domain.trade_contract_identity import contract_key, require_option_multiplier
 
 from src.application.ledger.api import (
     lot_id_for_open_event,
@@ -205,7 +205,7 @@ def _missing_required_fields_diagnostics(deal: NormalizedTradeDeal, missing: lis
     normalization = dict(getattr(deal, "normalization_diagnostics", {}) or {})
     multiplier_resolution = dict(normalization.get("multiplier_resolution") or {})
     symbol_info = dict(normalization.get("symbol") or {})
-    retryable = set(missing) == {"multiplier"}
+    retryable = set(missing) == {"multiplier"} and not multiplier_resolution.get("errors")
     return {
         "retryable": retryable,
         "missing_fields": list(missing),
@@ -254,8 +254,7 @@ def _required_open_invalid(deal: NormalizedTradeDeal) -> list[str]:
     except Exception:
         invalid.append("strike")
     try:
-        if deal.multiplier is not None and int(deal.multiplier) <= 0:
-            invalid.append("multiplier")
+        require_option_multiplier(deal.multiplier)
     except Exception:
         invalid.append("multiplier")
     return invalid
@@ -263,6 +262,7 @@ def _required_open_invalid(deal: NormalizedTradeDeal) -> list[str]:
 
 def _required_close_missing(deal: NormalizedTradeDeal) -> list[str]:
     src = {
+        "multiplier": deal.multiplier,
         "deal_id": deal.deal_id,
         "account": deal.internal_account,
         "symbol": deal.symbol,
@@ -286,12 +286,12 @@ def match_close_positions(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
 
 def match_close_targets(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> CloseTargetResolution:
     try:
+        multiplier = require_option_multiplier(deal.multiplier)
         resolution = resolve_broker_trade_close_targets(repo, deal=deal)
         for match in resolution.matches:
             fields = match.candidate.raw_fields
-            if deal.multiplier is not None and fields.get("multiplier") is not None:
-                if float(fields["multiplier"]) != deal.multiplier:
-                    raise ValueError("unsupported_contract_multiplier")
+            if require_option_multiplier(fields.get("multiplier")) != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             if fields.get("deliverable"):
                 raise ValueError("unsupported_contract_deliverable")
         return resolution
@@ -363,7 +363,7 @@ def resolve_trade_deal(
             recorded = completed_ledger_execution_events(events, deal)
         except ValueError as exc:
             return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
-                            diagnostics={"retryable": False})
+                            diagnostics={"retryable": False, "errors": [str(exc)]})
         if recorded:
             effective_actions = {
                 "close" if event.get("event_type") in {"close", "expire_close", "assignment", "exercise"}
@@ -372,7 +372,8 @@ def resolve_trade_deal(
             }
             if len(effective_actions) != 1 or None in effective_actions:
                 return _failure(status="unresolved", action=None, reason="trade_execution_applied_action_conflict",
-                                deal=deal, diagnostics={"retryable": False})
+                                deal=deal, diagnostics={"retryable": False,
+                                                       "errors": ["trade_execution_applied_action_conflict"]})
             effective_action = effective_actions.pop()
             if execution.get("external_order_id") and execution.get("external_order_namespace"):
                 legacy_rows = [row for row in recorded if not execution_identity_from_input(
@@ -399,11 +400,11 @@ def resolve_trade_deal(
                         recorded = reconcile_normalized_execution_order_identity(repo, deal)
                     except ValueError as exc:
                         return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
-                                        diagnostics={"retryable": False})
+                                        diagnostics={"retryable": False, "errors": [str(exc)]})
                     if not recorded:
                         return _failure(
                             status="unresolved", action=None, reason="trade_execution_order_binding_event_missing", deal=deal,
-                            diagnostics={"retryable": False},
+                            diagnostics={"retryable": False, "errors": ["trade_execution_order_binding_event_missing"]},
                         )
             notifications_fn = getattr(repo, "list_trade_lifecycle_notifications", None)
             from src.application.ledger.api import futu_compatibility_source_key
@@ -430,13 +431,23 @@ def resolve_trade_deal(
             )
     state_entry = _deal_state_entry(state, deal)
     economic_hash = lifecycle_deal_economic_hash(deal)
-    if state_entry is not None and economic_hash:
+    if state_entry is not None:
         existing_economic_hash = str(
             state_entry[1].get("economic_payload_hash") or ""
         ).strip()
+        comparison_hash = economic_hash
+        prior_diagnostics = dict(state_entry[1].get("diagnostics") or {})
+        if (
+            _state_entry_is_retryable_unresolved(state_entry)
+            and prior_diagnostics.get("missing_fields") == ["multiplier"]
+            and not (prior_diagnostics.get("multiplier_resolution") or {}).get("errors")
+        ):
+            # Only the unresolved derived multiplier may change on recovery.
+            # The remaining broker economic facts must still match exactly.
+            comparison_hash = lifecycle_deal_economic_hash(replace(deal, multiplier=None))
         if (
             existing_economic_hash
-            and existing_economic_hash != economic_hash
+            and existing_economic_hash != comparison_hash
         ):
             return _failure(
                 status="failed",
@@ -642,6 +653,7 @@ def resolve_trade_deal(
             action="close",
             reason="missing_required_fields:" + ",".join(missing),
             deal=deal,
+            diagnostics=_missing_required_fields_diagnostics(deal, missing),
         )
     try:
         close_target_resolution = match_close_targets(repo, deal)

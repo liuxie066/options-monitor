@@ -337,6 +337,7 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             price=2,
             currency="USD",
             source="test",
+            multiplier=100,
             lot_id="put-lot",
             # §9.2 step 3: the short put side travels as the trade side.
             raw_payload={"side": "sell"},
@@ -350,6 +351,7 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             price=1,
             currency="USD",
             source="test",
+            multiplier=100,
             target_lot_id="put-lot",
             # §9.2 step 3: closing the short put is a buy.
             raw_payload={"side": "buy"},
@@ -363,6 +365,7 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             price=0,
             currency="USD",
             source="test",
+            multiplier=100,
             target_event_id="put-close",
         ),
     ]

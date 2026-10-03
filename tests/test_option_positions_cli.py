@@ -1959,6 +1959,7 @@ def test_option_positions_cli_adopt_combo_identity_dry_run(
             price=2.0,
             currency="HKD",
             source="test",
+            multiplier=100,
             lot_id=f"lot-{event_id}",
             raw_payload={
                 "fields": {
@@ -2425,3 +2426,14 @@ def test_lifecycle_receipt_cli_applied_idle_reports_no_write(
     assert payload["write_applied"] is False
     assert calls == []
     assert repo.list_trade_lifecycle_notification_batches() == []
+
+
+@pytest.mark.parametrize("value", ["100.00000000000000001", "100.5", "nan", "inf", "0", "-1"])
+def test_adjust_cli_validates_multiplier_before_float_conversion(monkeypatch, value):
+    import src.interfaces.cli.option_positions as cli_mod
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo",
+                        lambda **_: pytest.fail("invalid raw CLI multiplier must fail before opening the ledger"))
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["adjust", "--record-id", "lot-1", "--multiplier", value, "--dry-run"])
+    assert exc.value.code == 2

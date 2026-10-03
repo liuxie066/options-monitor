@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from domain.domain.trade_contract_identity import require_option_multiplier
 from src.application.payload_helpers import required_text
 
 
@@ -564,11 +565,9 @@ def _validate_required_data_scan_blob_payload(
         if item.get("row_identity") != expected_identity:
             raise RequiredDataBlobError("required-data multiplier row identity mismatch")
         try:
-            multiplier = float(item.get("multiplier"))
+            multiplier = float(require_option_multiplier(item.get("multiplier")))
         except (TypeError, ValueError) as exc:
             raise RequiredDataBlobError("required-data multiplier is invalid") from exc
-        if not math.isfinite(multiplier) or multiplier <= 0:
-            raise RequiredDataBlobError("required-data multiplier is invalid")
         raw_multiplier = rows[index].get("multiplier")
         try:
             raw_number = float(raw_multiplier)
@@ -652,14 +651,14 @@ def _materialize_csv_unchecked(payload: Mapping[str, Any]) -> bytes:
     overrides = list(projection["multiplier_overrides"])
     if not overrides:
         return initial
-    frame = pd.read_csv(io.BytesIO(initial))
+    frame = pd.read_csv(io.BytesIO(initial), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
     if len(frame.index) != len(rows) or list(frame.columns) != columns:
         raise RequiredDataBlobError("required-data materialized frame shape mismatch")
     for item in overrides:
         index = int(item["row_index"])
         if _row_identity(frame.iloc[index].to_dict()) != item["row_identity"]:
             raise RequiredDataBlobError("required-data materialized row identity mismatch")
-        frame.loc[index, "multiplier"] = float(item["multiplier"])
+        frame.loc[index, "multiplier"] = str(float(item["multiplier"]))
     buffer = io.StringIO()
     frame.to_csv(buffer, index=False)
     return buffer.getvalue().encode("utf-8")
@@ -698,12 +697,12 @@ def _projection_overrides(
         if changed != ["multiplier"]:
             raise RequiredDataBlobError("required-data CSV differs outside multiplier enrichment")
         try:
-            multiplier = float(final["multiplier"])
+            multiplier = float(require_option_multiplier(final["multiplier"]))
             provider_multiplier = float(provider["multiplier"])
         except (TypeError, ValueError):
             provider_multiplier = math.nan
             try:
-                multiplier = float(final["multiplier"])
+                multiplier = float(require_option_multiplier(final["multiplier"]))
             except (TypeError, ValueError) as exc:
                 raise RequiredDataBlobError("required-data CSV multiplier enrichment is invalid") from exc
         if (

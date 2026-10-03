@@ -208,7 +208,7 @@ def build_trade_attribution_view(
         if any(lot not in by_lot or by_lot[lot]["reason_codes"] or by_lot[lot].get("origin") == "manual" for lot in members):
             reasons.append("combo_member_unavailable")
         if members[0] in by_lot:
-            reasons.extend(trade_attribution_capacity_check(fact=by_lot[members[0]], facts=account_facts,
+            reasons.extend(trade_attribution_capacity_check(config=config, fact=by_lot[members[0]], facts=account_facts,
                 wheel_read_model=capacity_model, observation=capacity_observation or {}, now_ms=now_ms)["reason_codes"])
         for lot in members:
             if lot in candidates:
@@ -283,7 +283,7 @@ def build_trade_attribution_view(
             except (KeyError, TypeError, ValueError):
                 available = None
                 reasons.append("wheel_branch_capacity_unavailable")
-            check = trade_attribution_capacity_check(fact=fact, facts=account_facts, wheel_read_model=capacity_model,
+            check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
                 observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=consumed_reservation)
             reasons.extend(check["reason_codes"])
             candidates[lot].append({"candidate_id": "wheel:" + branch_id, "strategy": "wheel", "eligible": not reasons,
@@ -318,7 +318,7 @@ def build_trade_attribution_view(
                     reasons.add("wheel_branch_capacity_exceeded")
             candidate["consumed_reservation"]["contracts"] = credit
             candidate["member_lot_ids"] = member_ids
-            reasons.update(trade_attribution_capacity_check(fact=fact, facts=account_facts, wheel_read_model=capacity_model,
+            reasons.update(trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
                 observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])["reason_codes"])
             candidate["reason_codes"] = sorted(reasons)
             candidate["eligible"] = not reasons
@@ -335,12 +335,15 @@ def build_trade_attribution_view(
                 demands[key] = demands.get(key, 0) + fact["contracts"] * int(fact["multiplier"])
     portfolio = (capacity_observation or {}).get("portfolio") or {}
     snapshot = portfolio.get("position_snapshot_input") or {}
+    from src.application.portfolio_context_service import cash_snapshot_evidence
     capacity_semantic = {
         "authority": {key: value for key, value in (portfolio.get("capacity_authority") or {}).items() if key != "source_observed_at"},
         "positions": sorted(({key: row.get(key) for key in ("instrument_ref", "position_side", "quantity")}
                              for row in snapshot.get("rows") or []), key=canonical_sha256),
         "scope": snapshot.get("scope"), "completeness": snapshot.get("completeness"), "errors": snapshot.get("errors"),
-        "cash": portfolio.get("cash_by_currency"), "cash_reliable": portfolio.get("cash_balance_reliable"),
+        # Re-observation clocks may change; freshness is rechecked before commit.
+        "cash_evidence": {key: value for key, value in cash_snapshot_evidence(portfolio).items()
+                          if key not in {"cash_source_observed_at", "capacity_identity_hash", "capacity_authority"}},
         "fx_rates": (portfolio.get("exchange_rates") or {}).get("rates"), "fx_status": portfolio.get("exchange_rate_status"),
     }
     results = []
@@ -613,7 +616,7 @@ def apply_trade_attribution(
                     raise ValueError("attribution final Wheel capacity exceeded")
         for plan in plans:
             if plan["fact"]["position_side"] == "short":
-                check = trade_attribution_capacity_check(fact=plan["fact"], facts=after_facts, wheel_read_model=after_model,
+                check = trade_attribution_capacity_check(config=config, fact=plan["fact"], facts=after_facts, wheel_read_model=after_model,
                     observation=capacity_observation, now_ms=int(time.time() * 1000))
                 if check["status"] != "available":
                     raise ValueError("attribution capacity changed before commit")
@@ -639,7 +642,7 @@ def apply_trade_attribution(
 def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], account: str,
                                    runtime_root: Path) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
-    observation = observe_trade_attribution_capacity(config=dict(config), account=account)
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root)
     market = runtime_config_market(config).lower()
     rows = read_trade_attribution_snapshot(repo, account=account, market=market)
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
@@ -713,7 +716,7 @@ def reconcile_trade_attribution_account(
     if not selected or stop_event is not None and stop_event.is_set():
         return {"status": "idle", "checked": 0, "next_cursor": ""}
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
-    observation = observe_trade_attribution_capacity(config=dict(config), account=account, stop_event=stop_event)
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
     result = {"checked": 0, "linked": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():

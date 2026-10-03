@@ -55,7 +55,7 @@ def _load_required_data_puts(
     else:
         path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         except Exception:
             return pd.DataFrame()
     if df.empty or "option_type" not in df.columns:

@@ -620,7 +620,7 @@ def test_conflict_preview_identifies_released_and_target_branch(tmp_path, monkey
     assert repo.list_trade_events() == before
 
 
-@pytest.mark.parametrize("change", ["wheel_off", "activation", "policy", "combo_mode", "capacity", "quote", "unrelated", "after_commit"])
+@pytest.mark.parametrize("change", ["wheel_off", "activation", "policy", "combo_mode", "capacity", "quote", "cash_ttl", "unrelated", "after_commit"])
 def test_control_rechecks_business_admission_with_same_authority(tmp_path, monkeypatch, change):
     from copy import deepcopy
     from test_attribution_conflict_decision import _scope, _view, _call, _args, _conflict, _statuses
@@ -660,6 +660,8 @@ def test_control_rechecks_business_admission_with_same_authority(tmp_path, monke
             updated["trade_intake"] = {"combo_reconciliation": {"accounts": {"lx": "observe"}}}
         elif change == "capacity":
             updated["account_settings"]["lx"]["futu"]["host"] = "changed-capacity-host"
+        elif change == "cash_ttl":
+            updated["runtime"] = {"portfolio_context_ttl_sec": 1}
         elif change == "quote":
             updated["symbols"] = [{"symbol": "3690.HK", "fetch": {"source": "opend", "host": "changed-quote-host"}}]
         else:

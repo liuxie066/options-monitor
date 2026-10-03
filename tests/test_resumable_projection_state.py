@@ -1190,3 +1190,33 @@ def test_stock_resumable_state_rejects_share_balance_mismatch() -> None:
     ).encode()
     with pytest.raises(ValueError, match="share balance"):
         ResumableProjectionState.from_json_bytes(invalid_bytes)
+
+
+@pytest.mark.parametrize("raw", [None, True, 0, -1, 100.5, Decimal("100.5"), "100.00000000000000001"])
+def test_checkpoint_multiplier_validates_independent_state_before_conversion(raw):
+    from dataclasses import replace
+
+    event = _event("open-unit", "open", 1000, key=_key(), lot_id="unit-lot")
+    result = project_resumable_trade_events([event])
+    assert result.state is not None
+    state = result.state.active_lots[0]
+    with pytest.raises(ValueError, match="multiplier"):
+        replace(state, multiplier=raw)
+    payload = state.to_dict()
+    payload["multiplier"] = raw
+    with pytest.raises(ValueError, match="multiplier"):
+        ResumableLotState.from_dict(payload)
+
+
+@pytest.mark.parametrize("raw", [None, "", 0, -1, True, False, 100.5, "100.00000000000000001", float("nan"), float("inf")])
+def test_invalid_multiplier_tail_and_full_replay_report_same_error(raw):
+    from dataclasses import replace
+
+    valid = _event("valid-unit", "open", 1000, key=_key(), lot_id="valid-unit-lot")
+    invalid = replace(_event("invalid-unit", "open", 2000, key=_key(), lot_id="bad-unit-lot"), multiplier=raw)
+    initial = project_resumable_trade_events([valid])
+    full = project_resumable_trade_events([valid, invalid])
+    tail = project_resumable_trade_events([invalid], initial_state=initial.state, entry_mode="tail")
+    assert [(d.event_id, d.code) for d in full.diagnostics] == [(d.event_id, d.code) for d in tail.diagnostics]
+    assert any(d.code == "event_multiplier_invalid" for d in tail.diagnostics)
+    assert not tail.eligible

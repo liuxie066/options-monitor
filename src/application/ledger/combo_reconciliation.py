@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -743,7 +745,7 @@ def _combo_void_event(
         price=0.0,
         currency=str(target.get("currency") or ""),
         source="post_trade_combo_reconciliation",
-        multiplier=float(target.get("multiplier") or 100.0),
+        multiplier=require_option_multiplier(target.get("multiplier")),
         target_event_id=target_event_id,
         raw_payload={
             "source": "post_trade_combo_reconciliation",

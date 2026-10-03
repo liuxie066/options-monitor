@@ -19,6 +19,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.symbol_identity import canonical_symbol
 from domain.domain.risk_capacity import (
     compute_short_call_locked_shares,
@@ -27,6 +28,8 @@ from domain.domain.risk_capacity import (
 from domain.domain.wheel.projection import STRATEGY_METADATA_KEYS
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.ledger.api import (
+    attach_event_strategy_metadata,
+    decision_state_snapshot,
     RiskPositionView,
     lifecycle_evidence_facts,
     position_lot_risk_view,
@@ -197,6 +200,23 @@ def build_context(
     observed_at_utc = observed_at_dt.astimezone(timezone.utc).isoformat()
     broker_norm = normalize_broker(broker)
     account_norm = normalize_account(account) if account else None
+    if decision_snapshot is not None:
+        if (
+            decision_snapshot.get("snapshot_status") != "trusted"
+            or normalize_account(decision_snapshot.get("normalized_account")) != account_norm
+        ):
+            return _empty_context(
+                broker_norm=broker_norm,
+                account=account,
+                account_norm=account_norm,
+                rates=rates,
+                raw_selected_count=len(records),
+                as_of_utc=observed_at_utc,
+            )
+        records = attach_event_strategy_metadata(
+            decision_snapshot.get("account_position_lots") or [],
+            decision_snapshot.get("trade_events"),
+        )
     selected_items: list[RiskPositionView] = []
     for rec in records:
         view = position_lot_risk_view(rec)
@@ -460,7 +480,7 @@ def build_shared_context(
     observed_at: datetime | None = None,
 ) -> JsonDict:
     broker_norm = normalize_broker(broker)
-    account_labels = {
+    account_labels = set(decision_snapshots_by_account or {}) | {
         normalized
         for raw in (accounts or [])
         if (normalized := normalize_account(raw))
@@ -475,13 +495,29 @@ def build_shared_context(
         if acct:
             account_labels.add(acct)
     snapshots = decision_snapshots_by_account or {}
+    aggregate_records = records
+    aggregate_unavailable = False
+    if decision_snapshots_by_account is not None:
+        aggregate_records = []
+        aggregate_unavailable = not account_labels
+        for acct in sorted(account_labels):
+            snapshot = snapshots.get(acct) or {}
+            if (
+                snapshot.get("snapshot_status") != "trusted"
+                or normalize_account(snapshot.get("normalized_account")) != acct
+            ):
+                aggregate_unavailable = True
+                continue
+            aggregate_records.extend(attach_event_strategy_metadata(
+                snapshot.get("account_position_lots") or [], snapshot.get("trade_events"),
+            ))
     by_account = {
         acct: build_context(
             records,
             broker=broker_norm,
             account=acct,
             rates=rates,
-            decision_snapshot=snapshots.get(acct),
+            decision_snapshot=(snapshots.get(acct) or {}) if decision_snapshots_by_account is not None else None,
             lifecycle_now_ms=lifecycle_now_ms,
             observed_at=observed_at,
         )
@@ -494,10 +530,11 @@ def build_shared_context(
         "as_of_utc": observed_at_dt.astimezone(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm},
         "all_accounts": build_context(
-            records,
+            aggregate_records,
             broker=broker_norm,
             account=None,
             rates=rates,
+            decision_snapshot={} if aggregate_unavailable else None,
             observed_at=observed_at_dt,
         ),
         "by_account": by_account,
@@ -727,7 +764,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch projected position lot context")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
-    parser.add_argument("--account", default=None)
+    parser.add_argument("--account", default=None, help="可信经济上下文所需账户；省略时输出不可用状态")
     parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
     parser.add_argument("--state-dir", default="output_shared/state", help="Directory for outputs (default: output_shared/state)")
@@ -761,14 +798,25 @@ def main():
     )
     broker = normalize_broker(args.broker)
 
-    ctx = build_context(records, broker=broker, account=args.account, rates=rates)
+    account = normalize_account(args.account) if args.account else None
+    # This CLI has no configured aggregate scope. Only an explicit account can
+    # obtain economic context; raw lots remain available through inspection.
+    snapshot = decision_state_snapshot(
+        _repo, account=account, portfolio_scope_id=portfolio_scope_id(account),
+    ) if account else {}
+    ctx = build_context(
+        records, broker=broker, account=account, rates=rates, decision_snapshot=snapshot,
+    )
 
     atomic_write_json(out_path, ctx)
     if args.shared_out:
         shared_out = Path(args.shared_out)
         if not shared_out.is_absolute():
             shared_out = (base / shared_out).resolve()
-        atomic_write_json(shared_out, build_shared_context(records, broker=broker, rates=rates))
+        atomic_write_json(shared_out, build_shared_context(
+            [], broker=broker, rates=rates,
+            decision_snapshots_by_account={account: snapshot} if account else {},
+        ))
 
     if not args.quiet:
         print(f"[DONE] option positions context -> {out_path}")

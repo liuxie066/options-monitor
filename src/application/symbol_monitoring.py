@@ -272,7 +272,7 @@ def run_symbol_monitoring(
 
     def _capture_required_data_csv_bytes(csv_bytes: bytes) -> None:
         nonlocal required_data_frame
-        required_data_frame = pd.read_csv(io.BytesIO(csv_bytes))
+        required_data_frame = pd.read_csv(io.BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
 
     if not frozen_required_data:
         try:

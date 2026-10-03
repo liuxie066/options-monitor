@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.position_fields import _UNSET
+
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1440,7 +1442,7 @@ def execute_manual_adjust(
     strike: float | None,
     expiration_ymd: str | None,
     premium_per_share: float | None,
-    multiplier: float | None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None,
     strategy: str | None = None,
     leg_role: str | None = None,

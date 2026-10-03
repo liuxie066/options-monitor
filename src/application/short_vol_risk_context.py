@@ -9,6 +9,7 @@ from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.numeric_helpers import float_or_none as _float
 
 
@@ -33,10 +34,22 @@ def build_portfolio_risk_context(
 
     unavailable: list[str] = []
     warnings: list[str] = []
+    position_snapshot = portfolio_ctx.get("position_snapshot_input")
+    stocks = portfolio_ctx.get("stocks_by_symbol")
+    positions_unavailable = not isinstance(stocks, dict) or not isinstance(position_snapshot, dict) or (
+        position_snapshot.get("completeness") != "complete"
+        or position_snapshot.get("quality", {}).get("status") != "ready"
+        or bool(position_snapshot.get("errors"))
+    )
+    if positions_unavailable:
+        unavailable.append("broker_positions_unavailable")
+    cash_usable = cash_snapshot_is_usable(portfolio_ctx)
+    if not cash_usable:
+        unavailable.append("broker_cash_snapshot_unavailable")
     nav_cny = 0.0
 
     cash_by_currency = portfolio_ctx.get("cash_by_currency")
-    if isinstance(cash_by_currency, dict):
+    if cash_usable and isinstance(cash_by_currency, dict):
         for ccy, raw_amount in cash_by_currency.items():
             amount_cny = amount_to_cny(raw_amount, ccy, exchange_rate_converter=exchange_rate_converter)
             if amount_cny is None:
@@ -45,7 +58,6 @@ def build_portfolio_risk_context(
             nav_cny += float(amount_cny)
 
     stock_value_by_symbol: dict[str, float] = {}
-    stocks = portfolio_ctx.get("stocks_by_symbol")
     if isinstance(stocks, dict):
         for raw_symbol, raw_stock in stocks.items():
             if not isinstance(raw_stock, dict):
@@ -76,7 +88,7 @@ def build_portfolio_risk_context(
     unavailable.extend(short_put_unavailable)
 
     return PortfolioRiskContext(
-        nav_cny=nav_cny if nav_cny > 0 else None,
+        nav_cny=nav_cny if nav_cny > 0 and cash_usable and not positions_unavailable and not any(reason.startswith("cash_fx_missing:") for reason in unavailable) else None,
         stock_value_cny_by_symbol=stock_value_by_symbol,
         short_put_assignment_cny_by_symbol=short_put_by_symbol,
         short_put_assignment_total_cny=short_put_total,

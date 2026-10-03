@@ -422,3 +422,26 @@ def test_summarize_cc_lp_result() -> None:
     )
     assert summary["candidate_count"] == 1
     assert summary["status"] == "candidates_found"
+
+
+@pytest.mark.parametrize("raw", ["100.00000000000000001", "True", "100.5", "0", "500", "1000"])
+def test_cc_lp_scan_validates_put_multiplier_before_float(tmp_path, raw):
+    valid = raw in {"500", "1000"}
+    call_multiplier = int(raw) if valid else 100
+    root = _write_required_data(
+        tmp_path, call_rows=[_call_row(multiplier=call_multiplier)],
+        put_rows=[_put_row(multiplier=raw)],
+    )
+    result = run_cc_lp_scan(**_cc_lp_scan_kwargs(
+        root,
+        stock={"shares": 1000, "can_sell_qty": 1000, "shares_locked": 0, "avg_cost": 90.0},
+        run_sell_call_scan_fn=lambda **_: pd.DataFrame([_scan_call_row(multiplier=call_multiplier)]),
+    ))
+    if valid:
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["multiplier"] == int(raw)
+        assert row["put_total_cost"] > 2.2 * int(raw)
+        assert row["net_credit"] > 0
+    else:
+        assert result.empty

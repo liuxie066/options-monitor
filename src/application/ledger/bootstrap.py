@@ -17,7 +17,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, require_option_multiplier
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.current_decision_runtime import (
     capture_trade_event_decision_projection_fence,
@@ -128,15 +128,15 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         return None
     raw_fields = dict(fields)
     raw_fields["broker"] = broker
-    raw_multiplier = safe_float(fields.get("multiplier"))
+    raw_multiplier = fields.get("multiplier")
     expiration_ymd = str(fields.get("expiration_ymd") or exp_ms_to_ymd(fields.get("expiration")) or "").strip() or None
     event_id = _stable_bootstrap_event_id(source_name, lot_id, raw_fields)
     multiplier_evidence = None
-    if (
-        raw_multiplier is not None
-        and raw_multiplier > 0
-        and raw_multiplier == int(raw_multiplier)
-    ):
+    try:
+        validated_multiplier = require_option_multiplier(raw_multiplier)
+    except ValueError:
+        validated_multiplier = None
+    if validated_multiplier is not None:
         source_receipt_sha256 = canonical_sha256(
             {
                 "source": source_name,
@@ -148,7 +148,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
             "schema_version": "contract_multiplier_evidence.v1",
             "source": "bootstrap_snapshot",
             "canonical_symbol": _canonical_trade_symbol(fields.get("symbol")),
-            "multiplier": int(raw_multiplier),
+            "multiplier": validated_multiplier,
             "source_receipt_id": event_id,
             "source_receipt_sha256": source_receipt_sha256,
         }
@@ -209,7 +209,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         price=float(safe_float(fields.get("premium")) or 0.0),
         currency=normalize_currency(fields.get("currency")),
         source=source_name,
-        multiplier=(float(raw_multiplier) if raw_multiplier is not None else 100.0),
+        multiplier=raw_multiplier,
         lot_id=lot_id,
         raw_payload=raw_payload,
     )

@@ -72,6 +72,7 @@ def _event(
     event_time_ms: int,
 ) -> TradeEvent:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,

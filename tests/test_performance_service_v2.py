@@ -338,3 +338,16 @@ def test_service_classifies_tuple_and_control_graph_failures() -> None:
     with pytest.raises(OptionPerformanceReadError) as graph_error:
         _build_report(_Repo([missing_target]))
     assert graph_error.value.reason_codes == ("ledger_control_graph_invalid",)
+
+
+@pytest.mark.parametrize("mismatch", ["contract", "time"])
+def test_service_rejects_control_target_identity_and_time_errors(mismatch):
+    original = _event("open", "open", "2026-09-01T10:00:00")
+    void = _event("void", "void", "2026-09-02T11:00:00", target_event_id="open")
+    if mismatch == "contract":
+        void = replace(void, contract_key=replace(void.contract_key, underlying_symbol="AAPL"))
+    else:
+        void = replace(void, event_time_ms=original.event_time_ms - 1)
+    with pytest.raises(OptionPerformanceReadError) as caught:
+        _build_report(_Repo([original.to_dict(), void.to_dict()]))
+    assert caught.value.reason_codes == ("ledger_control_graph_invalid",)

@@ -251,15 +251,23 @@ def contract_key(
     )
 
 
+def require_option_multiplier(value: Any) -> int:
+    """Validate the original option unit before any lossy conversion."""
+    unit = to_decimal(value, field_name="multiplier")
+    if unit <= 0:
+        raise ValueError("multiplier must be > 0")
+    if unit != unit.to_integral_value():
+        raise ValueError("multiplier must be a positive integer")
+    return int(unit)
+
+
 def contract_share_quantity(contracts: Any, multiplier: Any) -> int:
     """Convert canonical option units without truncation or multiplier defaults."""
     count = to_decimal(contracts, field_name="contracts")
-    unit = to_decimal(multiplier, field_name="multiplier")
+    unit = require_option_multiplier(multiplier)
     if count < 0 or count != count.to_integral_value():
         raise ValueError("contracts must be a nonnegative integer")
-    if unit <= 0 or unit != unit.to_integral_value():
-        raise ValueError("multiplier must be a positive integer")
-    return int(count) * int(unit)
+    return int(count) * unit
 
 
 def stock_settlement_unit_issues(

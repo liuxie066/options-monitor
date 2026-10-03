@@ -447,6 +447,28 @@ def _append_target_event_graph_diagnostics(
             )
             continue
         target = targets[0]
+        if event.contract_key != target.contract_key:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_contract_mismatch",
+                    message="void/repair must have the target event's contract identity",
+                    details={"target_event_id": target_id},
+                )
+            )
+        # A replacement may retain the original trade time; its separate void
+        # still records a control action at or after the event it invalidates.
+        if event.event_time_ms < target.event_time_ms:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_time_invalid",
+                    message="void/repair cannot precede its target event",
+                    details={"target_event_id": target_id},
+                )
+            )
         if target.event_type in forbidden_target_types:
             diagnostics.append(
                 LedgerDiagnostic(

@@ -1295,12 +1295,13 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert context["open_positions_min"][0]["last_option_close_received_at_ms"] == frozen_model[
         "last_option_close_received_at_ms"
     ]
+    from cash_evidence_helpers import cash_portfolio, cash_config
     gaps: list[dict] = []
     funds, _ = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "cash_by_currency": {"USD": 1000},
             "as_of_utc": datetime.fromtimestamp((now_ms - 3_600_000) / 1000, tz=timezone.utc).isoformat(),
-        },
+        }),
         option_positions_context=context,
         data_gaps=gaps,
     )
@@ -1308,14 +1309,14 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     from src.application.wheel.capacity import load_shared_cash_capacity_fact
     monkeypatch.setattr(
         "src.application.wheel.capacity.fetch_futu_portfolio_context",
-        lambda **_kwargs: {
+        lambda **_kwargs: cash_portfolio({
             "capacity_authority": {"status": "available", "logical_account": "lx"},
             "cash_by_currency": {"USD": 100_000},
             "cash_balance_reliable": True,
-        },
+        }),
     )
     wheel_fact = load_shared_cash_capacity_fact(
-        repo, config={}, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
+        repo, config=cash_config(), runtime_root=tmp_path, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
     )
     assert wheel_fact["status"] == "unavailable"
     assert wheel_fact["reason"] == "option_cash_secured_unavailable"
@@ -1331,12 +1332,12 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         tz=timezone.utc,
     ).isoformat()
     refreshed_funds, _ = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "cash_by_currency": {"USD": 1000},
             "as_of_utc": refreshed_at,
             "source_observed_at": refreshed_at,
             "context_source": "futu_direct",
-        },
+        }),
         option_positions_context=context,
         data_gaps=[],
     )
@@ -2252,3 +2253,61 @@ def test_lifecycle_delivery_status_cache_skips_unchanged_history(
     assert "revision unavailable" in status_state[
         "lifecycle_delivery"
     ]["error"]
+
+
+@pytest.mark.parametrize("raw", [None, True, 100.5, "100.00000000000000001"])
+def test_expiry_discovery_rejects_invalid_actual_lot_multiplier_without_writes(tmp_path, raw):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "units.sqlite3")
+    persist_trade_event_object(repo, _open_event())
+    row = repo.list_position_lots()[0]
+    fields = dict(row["fields"])
+    fields["multiplier"] = raw
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_lots SET fields_json=? WHERE lot_id=?", (json.dumps(fields), row["record_id"]))
+        conn.commit()
+        before = tuple(conn.iterdump())
+    for apply in (False, True):
+        with pytest.raises(ValueError, match="multiplier"):
+            discover_lifecycle_cases(repo, account="lx", observed_at_ms=expiration_observation_start_ms(EXPIRATION_YMD, "US"),
+                                     apply_changes=apply)
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("raw", [None, True, "100.00000000000000001"])
+def test_expiry_terminal_preview_and_apply_reject_invalid_multiplier(tmp_path, raw):
+    from src.application.ledger.api import preview_lifecycle_expire_close, record_lifecycle_expire_close
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "terminal-units.sqlite3")
+    persist_trade_event_object(repo, _open_event())
+    row = repo.list_position_lots()[0]
+    fields = dict(row["fields"], multiplier=raw)
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_lots SET fields_json=? WHERE lot_id=?", (json.dumps(fields), row["record_id"]))
+        conn.commit()
+        before = tuple(conn.iterdump())
+    args = dict(broker="futu", account="lx", symbol="NVDA", option_type="put", position_side="short",
+                strike=100, expiration_ymd=EXPIRATION_YMD, contracts_to_close=1,
+                event_time_ms=expiration_observation_start_ms(EXPIRATION_YMD, "US"))
+    with pytest.raises(ValueError, match="multiplier"):
+        preview_lifecycle_expire_close(repo, **args)
+    with pytest.raises(ValueError, match="multiplier"):
+        record_lifecycle_expire_close(repo, **args, case_id=None, evidence_ids=[])
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("field_owner", ["case", "lot"])
+@pytest.mark.parametrize("raw", [None, True, "100.00000000000000001", 500])
+def test_reconciliation_terminal_requires_valid_matching_original_units(tmp_path, field_owner, raw):
+    from src.application.trades.lifecycle_reconciliation import _terminal_event
+
+    repo, case_id, observed_at_ms = _case_with_option_anchor(tmp_path)
+    case = dict(repo.get_trade_lifecycle_case(case_id))
+    fields = dict(repo.get_position_lot_fields("lot-1"))
+    (case if field_owner == "case" else fields)["multiplier"] = raw
+    with pytest.raises(ValueError, match="multiplier"):
+        _terminal_event({"lot-1": fields}, lifecycle_case=case,
+                        evidence={"event_time_ms": observed_at_ms + 1},
+                        allocation={"target_lot_id": "lot-1", "terminal_type": "expire_close",
+                                    "contracts_allocated": 1, "canonical_terminal_event_id": "terminal-unit"})

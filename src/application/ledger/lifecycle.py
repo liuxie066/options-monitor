@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -220,6 +222,7 @@ def _persist_lifecycle_close_events(
         if match.candidate is None:
             raise ValueError(f"{normalized_event_type} close target is missing candidate fields")
         fields = dict(match.candidate.raw_fields)
+        require_option_multiplier(fields.get("multiplier"))
         ledger_preflight = preflight_broker_trade_close(
             repo,
             lot_id=lot_id,
@@ -460,7 +463,7 @@ def _lifecycle_close_event(
         if raw_strike is not None
         else effective_strike(fields)
     )
-    multiplier = effective_multiplier(fields)
+    multiplier = require_option_multiplier(fields.get("multiplier"))
     canonical_event_id = str(event_id or "").strip() or f"{event_type}-{lot_id}-{uuid.uuid4().hex}"
     raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
     strategy_payload = strategy_metadata_fields_from_payload(fields)
@@ -498,7 +501,7 @@ def _lifecycle_close_event(
         price=0.0,
         currency=normalize_currency(fields.get("currency")),
         source=source,
-        multiplier=(float(multiplier) if multiplier is not None else 100.0),
+        multiplier=multiplier,
         target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option lifecycle",

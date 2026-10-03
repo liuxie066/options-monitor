@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.trade_contract_identity import require_option_multiplier
 
 
 def _as_float(value: Any) -> float | None:
@@ -83,6 +84,12 @@ class CandidateContractInput:
 
     @classmethod
     def from_row(cls, row: pd.Series, *, mode: str) -> "CandidateContractInput":
+        multipliers: dict[str, int | None] = {}
+        for field in ("multiplier", "chain_multiplier", "snapshot_multiplier"):
+            try:
+                multipliers[field] = require_option_multiplier(row.get(field))
+            except (TypeError, ValueError):
+                multipliers[field] = None
         return cls(
             mode=str(mode),
             symbol=str(row.get("symbol") or "").strip().upper(),
@@ -128,9 +135,9 @@ class CandidateContractInput:
             stock_type=str(row.get("stock_type") or "").strip(),
             option_sec_status=str(row.get("option_sec_status") or "").strip(),
             option_suspension=(None if pd.isna(row.get("option_suspension")) else bool(row.get("option_suspension"))),
-            chain_multiplier=_as_float(row.get("chain_multiplier")),
-            snapshot_multiplier=_as_float(row.get("snapshot_multiplier")),
-            multiplier=_as_float(row.get("multiplier")),
+            chain_multiplier=multipliers["chain_multiplier"],
+            snapshot_multiplier=multipliers["snapshot_multiplier"],
+            multiplier=multipliers["multiplier"],
             opening_contract_status=str(row.get("opening_contract_status") or "").strip(),
             opening_contract_reason_codes=str(row.get("opening_contract_reason_codes") or "").strip(),
         )

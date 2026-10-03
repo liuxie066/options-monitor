@@ -103,7 +103,7 @@ def _frames_from_snapshot(
         for symbol in symbols:
             try:
                 _entry, csv_bytes = snapshot.resolve(symbol)
-                frames[symbol] = pd.read_csv(BytesIO(csv_bytes))
+                frames[symbol] = pd.read_csv(BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
             except (FrozenRequiredDataUnavailable, pd.errors.ParserError) as exc:
                 unavailable[symbol] = getattr(exc, "reason", "required_data_invalid")
         return frames, unavailable

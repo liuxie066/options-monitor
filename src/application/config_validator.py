@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.config_defaults import cash_snapshot_ttl_sec
+
 from difflib import get_close_matches
 import math
 import sys
@@ -1182,6 +1184,10 @@ def validate_config(cfg: dict):
 
     set_watchlist_config(cfg, syms)
 
+    try:
+        cash_snapshot_ttl_sec(cfg)
+    except ValueError as exc:
+        die(str(exc))
     runtime = cfg.get('runtime') or {}
     if runtime and not isinstance(runtime, dict):
         die('runtime must be an object')

@@ -1,6 +1,9 @@
 from __future__ import annotations
 from src.application.trades.attribution import confirm_wheel_call_linkage
 
+from cash_evidence_helpers import cash_portfolio, cash_config
+from src.application.portfolio_context_service import cash_snapshot_evidence
+
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -133,6 +136,18 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         _revalidate,
     )
 
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(1, timezone.utc)
+    monkeypatch.setattr(wheel_workflows, "datetime", Clock)
+    original_create = wheel_workflows.create_wheel_intent
+    request = {}
+    def capture_request(active, **kwargs):
+        if not request:
+            request.update(kwargs)
+        return original_create(active, **kwargs)
+    monkeypatch.setattr(wheel_workflows, "create_wheel_intent", capture_request)
     result = wheel_workflows.create_wheel_intent(
         repo,
         candidate_snapshot=snapshot,
@@ -146,10 +161,9 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         expires_at_ms=2_000,
         request_id="request-1",
         actor="tester",
+        runtime_config=cash_config(),
         capacity_fact={
-            "cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()},
-            "cash_authority_hash": "authority-1",
-            "cash_by_currency": {"USD": 20_000},
+            "cash_evidence": cash_snapshot_evidence(cash_portfolio({"cash_by_currency": {"USD": 20_000}, "source_observed_at": "1970-01-01T00:00:01+00:00"})),
             "fx_snapshot": {"rates": {}},
         },
         new_intent_enabled=True,
@@ -174,7 +188,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     assert result["dry_run"] is True
     assert result["write_applied"] is False
 
-    with pytest.raises(ValueError, match="broker capacity observation"):
+    with pytest.raises(ValueError, match="repreview required"):
         wheel_workflows.create_wheel_intent(
             repo, candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
             account="lx", wheel_branch_id="wheel-put-1", direction="put",
@@ -192,7 +206,21 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
         )
     assert len(revalidations) == 1
+    def delayed_transaction(active, call, **kwargs):
+        class ExpiredClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(902, timezone.utc)
+        monkeypatch.setattr(wheel_workflows, "datetime", ExpiredClock)
+        return call(active, object())
+    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction", delayed_transaction)
+    with pytest.raises(ValueError, match="repreview required"):
+        original_create(repo, **{**request, "apply_changes": True})
+    assert len(revalidations) == 1
 
+    monkeypatch.setattr(wheel_workflows, "datetime", Clock)
+    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction",
+        lambda active, call, **kwargs: call(active, object()))
     candidate.pop("capacity_identity_hash")
     with pytest.raises(ValueError, match="capacity identity"):
         wheel_workflows.create_wheel_intent(
@@ -201,7 +229,8 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
             expected_batch_generation_hash="generation-1", expires_at_ms=2_000,
             request_id="request-missing-hash", actor="tester",
-            capacity_fact={"cash_authority": {"status": "available", "source_observed_at": datetime.now(timezone.utc).isoformat()}},
+            runtime_config=cash_config(),
+            capacity_fact={"cash_evidence": cash_snapshot_evidence(cash_portfolio({"cash_by_currency": {"USD": 20000}, "source_observed_at": "1970-01-01T00:00:01+00:00"}))},
             new_intent_enabled=True, account_configured=True, market="us",
             activation_descriptor={
                 "market": "us", "account": "lx", "generation": 1,
@@ -242,6 +271,43 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     assert revalidations[0]["lifecycle_rows"] is rows
     assert revalidations[0]["position_lots"] == position_lots
     assert revalidations[0]["opening_put_candidates"] == [{"symbol": "MSFT"}]
+
+    previous_revalidations = len(revalidations)
+    confirm = dict(
+        candidate_snapshot=snapshot, current_strategy_policy_sha256="b" * 64,
+        account="lx", wheel_branch_id="wheel-put-1", direction="put",
+        final_candidate_id="candidate-1", expected_snapshot_hash="snapshot-1",
+        expected_batch_generation_hash="generation-1", expires_at_ms=2_000_000,
+        request_id="request-cash-contract", actor="tester", runtime_config=cash_config(),
+        capacity_fact={"cash_evidence": cash_snapshot_evidence(cash_portfolio({
+            "cash_by_currency": {"USD": 20000},
+            "source_observed_at": "1970-01-01T00:00:01+00:00"})), "fx_snapshot": {"rates": {}}},
+        new_intent_enabled=True, account_configured=True, market="us",
+        activation_descriptor={"market": "us", "account": "lx", "generation": 1,
+            "activated_at_ms": 500, "deactivated_at_ms": None, "policy_hash": "a" * 64},
+        policy_sha256="a" * 64, apply_changes=False, as_of_ms=1_000,
+    )
+    for changed in (
+        {"runtime_config": {**cash_config(), "runtime": {"portfolio_context_ttl_sec": 600}}},
+        {"runtime_config": cash_config(account_id="other-account")},
+    ):
+        with pytest.raises(ValueError, match="repreview required"):
+            wheel_workflows.create_wheel_intent(repo, **{**confirm, **changed})
+    assert len(revalidations) == previous_revalidations
+    rows["account_wheel_events"].append({
+        "event_type": "wheel_put_intent_created", "event_id": "persisted-event",
+        "intent_id": "persisted-intent", "stock_lot_id": None, "wheel_branch_id": "wheel-put-1",
+        "payload": {"request_id": "request-cash-contract", "actor": "tester",
+            "final_candidate_id": "candidate-1", "snapshot_hash": "snapshot-1",
+            "batch_generation_hash": "generation-1", "expires_at_ms": 2_000_000, "market": "us"},
+    })
+    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction", delayed_transaction)
+    replay = wheel_workflows.create_wheel_intent(repo, **{**confirm, "as_of_ms": 3_000_000,
+        "runtime_config": {}, "capacity_fact": {}, "new_intent_enabled": False})
+    assert replay["status"] == "idempotent"
+    assert replay["event_id"] == "persisted-event"
+    assert replay["write_applied"] is False
+    assert len(revalidations) == previous_revalidations
 
 
 def test_put_linkage_rejection_preview_uses_canonical_branch(

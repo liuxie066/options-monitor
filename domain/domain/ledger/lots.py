@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.fees import FeeBasis, fee_fact_for_event
 from domain.domain.ledger.identity import ContractKey, position_key_for
@@ -252,7 +252,10 @@ class PositionLot:
             contracts_closed=contracts_closed,
             status=str(_patch_value(patch, "status", "close" if contracts_open == 0 else "open")).strip().lower(),
             premium_open=_patch_decimal(patch, "premium", self.premium_open),
-            multiplier=_patch_int(patch, "multiplier", self.multiplier),
+            multiplier=(
+                require_option_multiplier(patch.value("multiplier") if patch.has("multiplier") else self.multiplier)
+                if self.contract_key.asset_type != "stock" else self.multiplier
+            ),
             currency=str(_patch_value(patch, "currency", self.currency)).strip() or self.currency,
             last_event_id=event.event_id,
         )

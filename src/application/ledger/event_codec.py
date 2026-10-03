@@ -199,7 +199,7 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
             price=payload.get("price"),
             currency=str(payload.get("currency") or ""),
             source=str(payload.get("source") or ""),
-            multiplier=float(payload.get("multiplier") or 0.0),
+            multiplier=payload.get("multiplier"),
             fees=payload.get("fees"),
             target_lot_id=_optional_id(payload.get("target_lot_id")),
             target_event_id=_optional_id(payload.get("target_event_id")),

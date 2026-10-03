@@ -82,7 +82,7 @@ def _load_required_data_rows(
     else:
         path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         except (FileNotFoundError, pd.errors.EmptyDataError):
             return pd.DataFrame()
     if df.empty or "option_type" not in df.columns:

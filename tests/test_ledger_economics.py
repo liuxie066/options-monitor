@@ -65,6 +65,7 @@ def _void(event_id: str, *, key: ContractKey, target_event_id: str) -> TradeEven
         price=0,
         currency="USD",
         source="test",
+        multiplier=100,
         target_event_id=target_event_id,
     )
 

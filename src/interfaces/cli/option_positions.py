@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from domain.domain.trade_contract_identity import require_option_multiplier
 from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
@@ -401,7 +402,7 @@ def _register_basic_ledger_parsers(sub: Any) -> None:
     p_add.add_argument('--contracts', type=int, required=True)
     p_add.add_argument('--currency', default=None, choices=['USD', 'HKD', 'CNY'], help='optional; inferred from symbol when omitted (.HK => HKD, otherwise USD)')
     p_add.add_argument('--strike', type=float, required=True, help='option strike')
-    p_add.add_argument('--multiplier', type=float, required=True, help='contract multiplier')
+    p_add.add_argument('--multiplier', type=require_option_multiplier, required=True, help='contract multiplier')
     p_add.add_argument('--exp', required=True, help='YYYY-MM-DD')
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
     p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for CC locking shares')
@@ -882,7 +883,7 @@ def _register_store_maintenance_parsers(sub: Any) -> None:
     p_adjust.add_argument('--strike', type=float, default=None)
     p_adjust.add_argument('--exp', default=None, help='YYYY-MM-DD')
     p_adjust.add_argument('--premium-per-share', type=float, default=None)
-    p_adjust.add_argument('--multiplier', type=float, default=None)
+    p_adjust.add_argument('--multiplier', type=require_option_multiplier, default=None)
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
     p_adjust.add_argument('--strategy', default=None, help='strategy marker, e.g. combo_yield')
     p_adjust.add_argument('--leg-role', default=None, help='strategy leg role, e.g. enhancement_call')
@@ -2647,7 +2648,7 @@ def main(argv: list[str] | None = None) -> int:
                 strike=args.strike,
                 expiration_ymd=((args.exp or '').strip() or None),
                 premium_per_share=args.premium_per_share,
-                multiplier=args.multiplier,
+                **({"multiplier": args.multiplier} if args.multiplier is not None else {}),
                 opened_at_ms=args.opened_at_ms,
                 strategy=args.strategy,
                 leg_role=args.leg_role,

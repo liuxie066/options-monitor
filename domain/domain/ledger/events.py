@@ -3,13 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-import math
 from typing import Any
 
 from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.money import canonical_decimal_text, coerce_decimal, to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     derive_position_side,
     derive_trade_side,
     normalize_asset_type,
@@ -58,7 +58,7 @@ class TradeEvent:
     price: Decimal
     currency: str
     source: str
-    multiplier: int = 100
+    multiplier: Any = None  # Invalid historical input is retained for diagnostics.
     fees: Decimal = Decimal("0")
     target_lot_id: str | None = None
     target_event_id: str | None = None
@@ -88,13 +88,13 @@ class TradeEvent:
         if asset_type == "stock":
             object.__setattr__(self, "multiplier", 0)
         else:
-            raw_multiplier = float(self.multiplier or 0)
-            if not math.isfinite(raw_multiplier):
-                object.__setattr__(self, "multiplier", 0)
-            elif raw_multiplier != int(raw_multiplier):
-                raise ValueError("multiplier must be a whole number")
+            try:
+                multiplier = require_option_multiplier(self.multiplier)
+            except ValueError:
+                # Keep the event in the historical target graph; writes validate.
+                pass
             else:
-                object.__setattr__(self, "multiplier", int(raw_multiplier))
+                object.__setattr__(self, "multiplier", multiplier)
         object.__setattr__(
             self,
             "quantity_unit",
@@ -190,7 +190,7 @@ class TradeEvent:
             price=payload.get("price"),
             currency=payload.get("currency"),
             source=payload.get("source") or payload.get("source_name"),
-            multiplier=payload.get("multiplier", 100),
+            multiplier=payload.get("multiplier"),
             fees=payload.get("fees", 0.0),
             target_lot_id=payload.get("target_lot_id"),
             target_event_id=payload.get("target_event_id"),
@@ -319,16 +319,24 @@ def validate_trade_event(event: TradeEvent) -> list[LedgerDiagnostic]:
                 details={"currency": event.currency},
             )
         )
-    if event.asset_type != "stock" and (not math.isfinite(event.multiplier) or event.multiplier <= 0):
-        diagnostics.append(
-            LedgerDiagnostic(
-                event_id=event.event_id,
-                severity="error",
-                code="event_multiplier_invalid",
-                message="multiplier must be finite and > 0",
-                details={"multiplier": event.multiplier},
-            )
-        )
+    if event.asset_type != "stock":
+        multipliers = {"multiplier": event.multiplier}
+        patch = event.raw_payload.get("patch")
+        if event.event_type == "adjust" and isinstance(patch, Mapping) and "multiplier" in patch:
+            multipliers["patch.multiplier"] = patch["multiplier"]
+        for field_name, value in multipliers.items():
+            try:
+                require_option_multiplier(value)
+            except ValueError as exc:
+                diagnostics.append(
+                    LedgerDiagnostic(
+                        event_id=event.event_id,
+                        severity="error",
+                        code="event_multiplier_invalid",
+                        message=str(exc),
+                        details={"field": field_name, "multiplier": value},
+                    )
+                )
     if not event.price.is_finite() or event.price < 0:
         diagnostics.append(
             LedgerDiagnostic(

@@ -21,24 +21,29 @@ from domain.domain.cash_secured_utils import (
     read_cash_secured_total_cny,
 )
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.trade_contract_identity import require_option_multiplier
 from domain.domain.risk_capacity import (
     SellPutEffectiveCash,
     compute_sell_put_effective_cash,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 
 log = logging.getLogger(__name__)
+
+
+def _option_multiplier(value: Any) -> int | None:
+    try:
+        return require_option_multiplier(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _cash_secured_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
     portfolio_ctx: dict[str, Any] | None,
 ) -> str:
-    if isinstance(portfolio_ctx, dict) and (
-        portfolio_ctx.get("cash_balance_reliable") is False
-        or portfolio_ctx.get("cash_source_observation_status", portfolio_ctx.get("source_observation_status"))
-        not in (None, "trusted")
-    ):
+    if not isinstance(portfolio_ctx, dict) or not cash_snapshot_is_usable(portfolio_ctx):
         return "broker_cash_snapshot_unavailable"
     if not isinstance(option_ctx, dict):
         return "option_positions_cash_secured_context_unavailable"
@@ -97,7 +102,7 @@ def sell_put_opening_capacity_inputs(
 
     try:
         strike_value = float(strike)
-        multiplier_value = float(multiplier)
+        multiplier_value = require_option_multiplier(multiplier)
     except (TypeError, ValueError):
         return {
             "put_cash_capacity_available": False,
@@ -107,21 +112,6 @@ def sell_put_opening_capacity_inputs(
         return {
             "put_cash_capacity_available": False,
             "put_cash_capacity_reason": "assignment_requirement_or_portfolio_context_invalid",
-        }
-
-    portfolio_source = str(
-        portfolio_ctx.get("portfolio_source_name") or ""
-    ).strip().lower()
-    authority = portfolio_ctx.get("capacity_authority")
-    if portfolio_source and (
-        portfolio_source != "futu"
-        or not isinstance(authority, dict)
-        or authority.get("status") != "available"
-    ):
-        return {
-            "put_cash_required": strike_value * multiplier_value,
-            "put_cash_capacity_available": False,
-            "put_cash_capacity_reason": "physical_account_capacity_authority_unavailable",
         }
 
     option_ctx = portfolio_ctx.get("option_ctx")
@@ -228,11 +218,10 @@ def enrich_sell_put_candidates_with_cash(
             out["strike"] if "strike" in out else pd.Series(index=out.index, dtype=float),
             errors="coerce",
         )
-        multiplier = pd.to_numeric(
-            out["multiplier"]
+        multiplier = (
+            out["multiplier"].map(_option_multiplier)
             if "multiplier" in out
-            else pd.Series(index=out.index, dtype=float),
-            errors="coerce",
+            else pd.Series(index=out.index, dtype=float)
         )
         required = strike * multiplier
         valid = strike.gt(0) & multiplier.gt(0)
@@ -308,16 +297,18 @@ def enrich_sell_put_candidates_with_cash(
     cash_avail_total_cny = None
     cash_free_total_cny = None
     try:
-        cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if isinstance(portfolio_ctx, dict) else {}
+        cash_usable = isinstance(portfolio_ctx, dict) and cash_snapshot_is_usable(portfolio_ctx)
+        cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if cash_usable else {}
         v = cash_by_ccy.get('USD')
         cash_avail = float(v) if v is not None else None
 
         cny = cash_by_ccy.get('CNY')
         cash_avail_cny = float(cny) if cny is not None else None
-        cash_avail_total_cny = _sum_cash_total_cny(
-            cash_by_ccy,
-            exchange_rate_converter=exchange_rate_converter,
-        )
+        if cash_usable:
+            cash_avail_total_cny = _sum_cash_total_cny(
+                cash_by_ccy,
+                exchange_rate_converter=exchange_rate_converter,
+            )
 
         if cash_avail_cny is not None:
             cash_free_cny = (cash_avail_cny - used_total_cny) if used_total_cny is not None else None
@@ -375,7 +366,7 @@ def enrich_sell_put_candidates_with_cash(
     # Cash requirement
     try:
         if 'multiplier' in df_sp_lab.columns:
-            m = pd.to_numeric(df_sp_lab['multiplier'], errors='coerce')
+            m = df_sp_lab['multiplier'].map(_option_multiplier)
         else:
             m = pd.Series([pd.NA] * len(df_sp_lab), index=df_sp_lab.index, dtype='float64')
 
@@ -453,9 +444,7 @@ def enrich_sell_put_candidates_with_cash(
     df_sp_lab['futu_account_id'] = capacity_authority.get("futu_account_id", pd.NA)
     df_sp_lab['capacity_trd_env'] = capacity_authority.get("trd_env", pd.NA)
     df_sp_lab['capacity_market'] = capacity_authority.get("market", pd.NA)
-    df_sp_lab['capacity_source_observed_at'] = capacity_authority.get(
-        "source_observed_at", pd.NA
-    )
+    df_sp_lab['capacity_source_observed_at'] = portfolio_ctx.get("cash_source_observed_at", pd.NA) if isinstance(portfolio_ctx, dict) else pd.NA
     df_sp_lab['capacity_authority_status'] = capacity_authority.get(
         "status", pd.NA
     )
@@ -476,7 +465,7 @@ def enrich_sell_put_candidates_with_cash(
         required_native = None
         try:
             strike_value = float(row.get('strike'))
-            multiplier_value = float(row.get('multiplier'))
+            multiplier_value = require_option_multiplier(row.get('multiplier'))
             if strike_value > 0 and multiplier_value > 0:
                 required_native = strike_value * multiplier_value
         except (TypeError, ValueError):

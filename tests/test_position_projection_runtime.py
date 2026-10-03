@@ -1345,3 +1345,39 @@ def test_close_without_explicit_time_keeps_monotonic_default(tmp_path: Path, mon
     result = preflight_manual_close(repo, lot_id="lot-a", contracts_to_close=1,
         close_price=0.5, close_reason="default time")
     assert result.event_time_ms == 3_001
+
+
+@pytest.mark.parametrize("missing_history", [False, True])
+def test_new_multiplier_rules_reject_old_checkpoint_and_never_publish_bad_history(tmp_path, missing_history):
+    from src.application.ledger.api import decision_state_snapshot
+    from src.application.positions.context_builder import build_context
+    from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot
+
+    repo = _repo(tmp_path)
+    _seed_open(repo)
+    _enable(repo)
+    old_lots = repo.list_position_lots()
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_projection_source_state SET projector_implementation_fingerprint=?", ("0" * 64,))
+        if missing_history:
+            row = conn.execute("SELECT event_json FROM trade_events WHERE event_id='open'").fetchone()
+            payload = json.loads(row[0])
+            payload.pop("multiplier")
+            conn.execute("UPDATE trade_events SET event_json=? WHERE event_id='open'", (json.dumps(payload),))
+        conn.commit()
+    assert read_current_position_projection(repo, account="lx")["status"] != "trusted"
+    if not missing_history:
+        refreshed = _fast(repo, [])
+        assert refreshed.mode_used == "full"
+        assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
+        return
+    before_events = repo.list_trade_events()
+    with pytest.raises(ValueError, match="event_multiplier_invalid"):
+        _fast(repo, [])
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == old_lots
+    assert read_current_position_projection(repo, account="lx")["status"] != "trusted"
+    snapshot = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-lx")
+    assert snapshot["snapshot_status"] != "trusted"
+    context = build_context(old_lots, broker="futu", account="lx", decision_snapshot=snapshot)
+    assert cash_secured_unavailable_for_cash_snapshot(context, {}) == "option_decision_snapshot_unavailable"

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import src.application.wheel as wheel_application
+from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
 from src.application.agent_tools.operations_impl import (
     normalize_option_positions_read_input,
     option_positions_read_tool,
@@ -568,6 +569,7 @@ def _wheel_coverage(
     return load_shared_coverage_fact(
         repo,
         config=cfg,
+        runtime_root=Path(str(payload["runtime_root"])).resolve(),
         account=str(payload.get("account") or ""),
         symbol=str(batch.get("symbol") or ""),
         broker=str(batch.get("broker") or portfolio.get("broker") or "富途"),
@@ -588,6 +590,7 @@ def _wheel_cash_capacity(
     return load_shared_cash_capacity_fact(
         repo,
         config=cfg,
+        runtime_root=Path(str(payload["runtime_root"])).resolve(),
         account=str(payload.get("account") or ""),
         broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=instant,
@@ -638,6 +641,7 @@ def _wheel_end_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str],
 def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         common = _wheel_common(payload, instant=instant)
         if payload["action"] == "cancel":
@@ -697,7 +701,8 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
 
 def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         common = _wheel_common(payload, instant=instant)
         args = {
@@ -775,6 +780,7 @@ def _wheel_intent_tool(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         branch, direction, common = _neutral_wheel_context(
             repo,
@@ -784,7 +790,7 @@ def _wheel_intent_tool(
         capacity_fact = (
             _wheel_coverage(repo, cfg, payload, branch, instant)
             if direction == "call"
-            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
+            else (_wheel_cash_capacity(repo, cfg, payload, branch, instant) if payload["action"] == "cancel" else {})
         )
         if payload["action"] == "cancel":
             result = cancel_wheel_intent(
@@ -806,6 +812,8 @@ def _wheel_intent_tool(
             run_id=str(payload.get("run_id") or ""),
             account=str(payload.get("account") or ""),
         )
+        if direction == "put":
+            capacity_fact = load_wheel_candidate_cash_fact(base=snapshot_base, snapshot=snapshot)
         resolved = resolve_wheel_config(
             cfg,
             str(payload.get("account") or ""),
@@ -825,6 +833,7 @@ def _wheel_intent_tool(
             expires_at_ms=int(payload.get("expires_at_ms") or 0),
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             capacity_fact=capacity_fact,
+            runtime_config=cfg,
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
             account_configured=resolved["account_configured"],
             activation_descriptor=resolved.get("activation_descriptor"),
@@ -839,7 +848,8 @@ def _wheel_linkage_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         branch, direction, common = _neutral_wheel_context(
             repo,
@@ -873,7 +883,8 @@ def _wheel_branch_decision_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         account = str(payload.get("account") or "")
         branch = _wheel_branch(

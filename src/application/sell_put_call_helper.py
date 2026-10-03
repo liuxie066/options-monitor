@@ -35,6 +35,7 @@ from domain.domain.candidate_defaults import (
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.trade_contract_identity import require_option_multiplier
 from src.application.candidate_models import CandidateContractInput
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.combo_yield_config import (
@@ -156,7 +157,10 @@ def _put_leg_from_sell_put_row(row: dict[str, Any]) -> ComboYieldLeg | None:
     bid = _safe_float(row.get("bid"))
     ask = _safe_float(row.get("ask"))
     mid = _safe_float(row.get("mid"))
-    multiplier = _safe_float(row.get("multiplier"))
+    try:
+        multiplier = require_option_multiplier(row.get("multiplier"))
+    except (TypeError, ValueError):
+        return None
     if not contract_symbol or not expiration or not currency or not symbol:
         return None
     if None in (dte, strike, spot, bid, ask, mid, multiplier):
@@ -549,7 +553,7 @@ def _load_required_data(
         df = required_data_frame.copy()
     else:
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         except EmptyDataError:
             return pd.DataFrame()
         except Exception as exc:

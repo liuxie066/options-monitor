@@ -11,11 +11,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.infrastructure.io_utils import safe_read_csv
 
 
 def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir: Path, symbol: str) -> None:
-    """Best-effort: fill missing/invalid multiplier in required_data.csv based on local cache."""
+    """Best-effort: fill missing multiplier in required_data.csv based on local cache."""
     try:
         from src.application import multiplier_cache
 
@@ -31,22 +30,19 @@ def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir
         if not parsed.exists() or parsed.stat().st_size <= 0:
             return
 
-        df = safe_read_csv(parsed)
+        df = pd.read_csv(parsed, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         if df.empty:
             return
 
         if 'multiplier' not in df.columns:
-            df['multiplier'] = float(m)
+            df['multiplier'] = str(float(m))
         else:
-            try:
-                mm = pd.to_numeric(df['multiplier'], errors='coerce')
-                bad = mm.isna() | (mm <= 0)
-                if bad.any():
-                    df.loc[bad, 'multiplier'] = float(m)
-                else:
-                    return
-            except Exception:
-                df['multiplier'] = float(m)
+            # CSV empty cells encode absent provider values. Preserve explicit
+            # invalid tokens for the shared multiplier validator to reject.
+            missing = df['multiplier'].eq('')
+            if not missing.any():
+                return
+            df.loc[missing, 'multiplier'] = str(float(m))
 
         df.to_csv(parsed, index=False)
     except Exception:

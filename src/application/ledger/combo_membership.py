@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.ledger.events import lot_id_for_open_event
+from domain.domain.trade_contract_identity import require_option_multiplier
 
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
@@ -1059,7 +1060,7 @@ def _identity_leg(record: Mapping[str, Any], *, open_event_id: str, group_id: st
         "contracts": effective_contracts(fields), "open_event_id": open_event_id,
         "record_id": record["record_id"], "contract_key": contract.to_dict(),
         "currency": str(fields.get("currency") or "").strip().upper(),
-        "multiplier": float(effective_multiplier(fields) or 0), "strike": float(contract.strike),
+        "multiplier": require_option_multiplier(fields.get("multiplier")), "strike": float(contract.strike),
         "expiration_ymd": contract.expiration_ymd}
 
 def publish_combo_pair_identity(sqlite_repo: Any, *, conn: Any, inference: Mapping[str, Any]) -> tuple[Any, Any]:
