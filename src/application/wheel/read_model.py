@@ -5,16 +5,13 @@ from typing import Any, Mapping
 from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
-    attach_lot_strategy_metadata,
-    lot_strategy_metadata_from_trade_events,
     project_wheel_branches,
     project_wheel_coverage,
     project_wheel_linkage_candidates,
-    project_wheel_lifecycles,
 )
 from src.application.ledger.api import (
     project_assigned_stock_lifecycle_from_rows,
-    project_position_lots_from_trade_facts,
+    project_position_lots_and_assigned_stock_from_rows,
 )
 
 
@@ -30,26 +27,11 @@ def _candidate_rows(snapshot: Mapping[str, Any] | None) -> list[Mapping[str, Any
     return [snapshot]
 
 
-def _dict_rows(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
-
-
 def _event_time_ms(row: Mapping[str, Any], field: str) -> int:
     try:
         return int(row.get(field) or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _branch_from_legacy_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
-    branch = dict(batch)
-    lot_id = str(branch.get("stock_lot_id") or "").strip()
-    branch.setdefault("wheel_branch_id", lot_id)
-    branch.setdefault("parent_branch_id", None)
-    branch.setdefault("direction", "call")
-    return branch
 
 
 def _legacy_call_batch(branch: Mapping[str, Any]) -> dict[str, Any]:
@@ -81,31 +63,6 @@ def _legacy_call_batches(branches: list[dict[str, Any]]) -> list[dict[str, Any]]
         if str(branch.get("direction") or "call").strip().lower() == "call"
         and str(branch.get("stock_lot_id") or "").strip()
     ]
-
-
-def _split_lifecycle_projection(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if isinstance(value, Mapping):
-        batches = _dict_rows(value.get("batches"))
-        branches = _dict_rows(value.get("wheel_branches"))
-        if not branches:
-            branches = [_branch_from_legacy_batch(batch) for batch in batches]
-        if not batches:
-            batches = _legacy_call_batches(branches)
-        return batches, branches
-
-    rows = _dict_rows(value)
-    if any("wheel_branch_id" in row or "direction" in row for row in rows):
-        return _legacy_call_batches(rows), rows
-    return rows, [_branch_from_legacy_batch(batch) for batch in rows]
-
-
-def _includes_branch_projection(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        return isinstance(value.get("wheel_branches"), list)
-    return any(
-        "wheel_branch_id" in row or "direction" in row
-        for row in _dict_rows(value)
-    )
 
 
 def _attach_candidates(
@@ -169,48 +126,19 @@ def build_wheel_read_model_from_rows(
         if isinstance(item, Mapping)
         and _event_time_ms(item, "occurred_at_ms") <= instant
     ]
-    projected = project_position_lots_from_trade_facts(trade_events)
-    # The strategy-metadata family is read from the event layer now (design
-    # §7.5), so every lot this read model scopes carries the metadata its own
-    # events declare -- the linkage checks below read it off the lot fields.
-    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(trade_events)
     scoped_rows = {
         **dict(rows),
         "trade_events": trade_events,
         "account_wheel_events": wheel_events,
-        "account_position_lots": [
-            {
-                "record_id": item.lot_id,
-                "fields": attach_lot_strategy_metadata(
-                    {"record_id": item.lot_id, "fields": dict(item.fields)},
-                    strategy_by_lot_id,
-                ),
-            }
-            for item in projected.lots
-        ],
     }
-    assigned_stock = build_assigned_stock_projection_from_rows(
-        scoped_rows,
-        account=account_value,
-        as_of_ms=instant,
+    position_lots, assigned_stock = project_position_lots_and_assigned_stock_from_rows(
+        scoped_rows, account=account_value, as_of_ms=instant,
     )
-    lifecycle_projection = project_wheel_lifecycles(
-        wheel_events,
-        trade_events,
-        scoped_rows["account_position_lots"],
-        assigned_stock,
-        instant,
+    scoped_rows["account_position_lots"] = position_lots
+    wheel_branches = project_wheel_branches(
+        wheel_events, trade_events, position_lots, assigned_stock, instant,
     )
-    batches, wheel_branches = _split_lifecycle_projection(lifecycle_projection)
-    if not _includes_branch_projection(lifecycle_projection):
-        wheel_branches = project_wheel_branches(
-            wheel_events,
-            trade_events,
-            scoped_rows["account_position_lots"],
-            assigned_stock,
-            instant,
-        )
-        batches = _legacy_call_batches(wheel_branches)
+    batches = _legacy_call_batches(wheel_branches)
     market_value = str(market or "").strip().upper()
     if market_value:
         if market_value not in {"US", "HK"}:

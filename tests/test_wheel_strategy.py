@@ -385,15 +385,11 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
                 ],
             )
         )
-        return {"batches": [], "wheel_branches": []}
+        return []
 
     monkeypatch.setattr(
-        "src.application.wheel.read_model.project_wheel_lifecycles",
+        "src.application.wheel.read_model.project_wheel_branches",
         _capture,
-    )
-    monkeypatch.setattr(
-        "src.application.wheel.read_model.build_assigned_stock_projection_from_rows",
-        lambda *_args, **_kwargs: {},
     )
     rows = {"trade_events": [event.to_dict() for event in events]}
 

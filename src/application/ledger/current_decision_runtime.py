@@ -265,6 +265,7 @@ def finalize_current_decision_projection(
         to_build.append(account)
 
     rows: dict[str, dict[str, Any]] = {}
+    shared_trade_events: list[dict[str, Any]] | None = None
     for account in to_build:
         inputs = repo.read_current_decision_projection_inputs(
             account,
@@ -274,7 +275,9 @@ def finalize_current_decision_projection(
         event_assigned_after = assigned_after.get(account)
         # Complete account history is needed for multi-member proofs and voids;
         # a lot's last event alone cannot establish current membership.
-        carrier_events = [row for row in repo.list_trade_events(conn=conn)
+        if shared_trade_events is None:
+            shared_trade_events = repo.list_trade_events(conn=conn)
+        carrier_events = [row for row in shared_trade_events
                           if (row.get("contract_key") or {}).get("account") == account
                           and int(row.get("event_time_ms") or 0) <= updated_at_ms]
         family_by_lot_id = lot_strategy_metadata_from_trade_events(carrier_events)

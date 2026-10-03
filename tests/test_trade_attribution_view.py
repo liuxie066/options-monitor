@@ -142,14 +142,13 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
     assert "broker_ledger_positions_mismatch" in mismatched["reason_codes"]
     assert "account_stock_capacity_exceeded" in mismatched["reason_codes"]
     from test_wheel_strategy import _started_event, _assignment_trade, _assigned_stock
-    from domain.domain.wheel import build_wheel_event, project_wheel_lifecycles, WHEEL_EVENT_SCHEMA_V1
+    from domain.domain.wheel import build_wheel_event, project_wheel_branches, WHEEL_EVENT_SCHEMA_V1
     intent = build_wheel_event(event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1, event_type="wheel_call_intent_created",
         occurred_at_ms=2100, recorded_at_ms=2101, intent_id="invalid-units",
         payload={"contracts": 1, "multiplier": "100.5", "expires_at_ms": now + 9000})
-    from src.application.wheel.read_model import _branch_from_legacy_batch
-    branches = [_branch_from_legacy_batch(branch) for branch in project_wheel_lifecycles(
-        [_started_event(), intent], [_assignment_trade()], [], _assigned_stock(), now)]
+    branches = project_wheel_branches(
+        [_started_event(), intent], [_assignment_trade()], [], _assigned_stock(), now)
     unknown = trade_attribution_capacity_check(**{**args, "wheel_read_model": {"wheel_branches": branches}}, now_ms=now)
     assert "capacity_basis_unavailable" in unknown["reason_codes"]
     for conflict_type in ("creation", "consumption"):
@@ -162,8 +161,8 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
             event_type="wheel_call_intent_created" if conflict_type == "creation" else "wheel_call_intent_consumed",
             occurred_at_ms=2200, recorded_at_ms=2200, intent_id="conflicted", source_trade_event_id="unknown-fill",
             payload={"contracts": 1, "multiplier": 100, "expires_at_ms": now + 9000})
-        branch = _branch_from_legacy_batch(project_wheel_lifecycles(
-            [_started_event(), created, conflicting], [_assignment_trade()], [], _assigned_stock(), now)[0])
+        branch = project_wheel_branches(
+            [_started_event(), created, conflicting], [_assignment_trade()], [], _assigned_stock(), now)[0]
         assert not branch["active_intent_ids"] and branch["active_intent_reserved_shares"] is None
         assert "intent_" + conflict_type + "_conflict" in branch["reason_codes"]
         check = lambda value: trade_attribution_capacity_check(**{**args, "wheel_read_model": {"wheel_branches": [value]}}, now_ms=now)
