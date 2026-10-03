@@ -99,6 +99,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/symbol_identity.py",
     ),
     "domain/domain/strategy_membership.py": (
+        "domain/domain/ledger/events.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/strategy_vocab.py",
         "domain/domain/trade_execution.py",
@@ -137,7 +138,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "f3f0a605de6e3f2ef2f48c1892bc6cdc7fd13af8f60d7842530f28ea6c2809fd"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "8772171ea90d0dbbb5dbef4aefaa434726ba8fd05ee44854110dfcb9e9122cbc"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):
