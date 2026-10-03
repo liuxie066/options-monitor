@@ -48,7 +48,6 @@ def _load_portfolio_ctx(
     tmp_path: Path,
     *,
     account: str = "lx",
-    ttl_sec: int = 3600,
     runtime_config: dict | None = None,
     portfolio_source: str = "auto",
 ):
@@ -61,7 +60,7 @@ def _load_portfolio_ctx(
         data_config="x.json",
         market="富途",
         account=account,
-        ttl_sec=ttl_sec,
+
         state_dir=(root / "state").resolve(),
         shared_state_dir=(root / "shared").resolve(),
         log=logs.append,
@@ -247,7 +246,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
             data_config="x.json",
             market="富途",
             account="lx",
-            ttl_sec=3600,
+
             state_dir=(root / "acct_lx_state").resolve(),
             shared_state_dir=shared_dir,
             log=logs.append,
@@ -257,7 +256,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> No
             data_config="x.json",
             market="富途",
             account="sy",
-            ttl_sec=3600,
+
             state_dir=(root / "acct_sy_state").resolve(),
             shared_state_dir=shared_dir,
             log=logs.append,
@@ -527,7 +526,7 @@ def test_load_portfolio_context_auto_prefers_futu_when_available(tmp_path: Path)
             "portfolio_source_name": "futu",
         }
 
-        out, logs = _load_portfolio_ctx(tmp_path, ttl_sec=0)
+        out, logs = _load_portfolio_ctx(tmp_path, )
         assert out is not None
         assert out["portfolio_source_name"] == "futu"
         assert out["context_source"] == "futu_direct"
@@ -586,8 +585,10 @@ def test_load_portfolio_context_auto_does_not_fall_back_when_futu_unavailable(tm
     try:
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
 
-        out, logs = _load_portfolio_ctx(tmp_path, ttl_sec=0)
-        assert out is None
+        out, logs = _load_portfolio_ctx(tmp_path, )
+        assert out["cash_snapshot"]["status"] == "unknown"
+        assert "CASH_PROVIDER_UNAVAILABLE" in out["cash_snapshot"]["reason_codes"]
+        assert not out.get("cash_by_currency")
         assert any("opend down" in line for line in logs)
     finally:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
@@ -618,7 +619,9 @@ def test_load_portfolio_context_auto_ignores_local_holdings_cache_when_futu_fail
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
 
         out, logs = _load_portfolio_ctx(tmp_path)
-        assert out is None
+        assert out["cash_snapshot"]["status"] == "unknown"
+        assert "CASH_PROVIDER_UNAVAILABLE" in out["cash_snapshot"]["reason_codes"]
+        assert not out.get("cash_by_currency")
         assert any("opend down" in line for line in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
@@ -728,7 +731,16 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
 
         def _load_cached(path: Path):  # type: ignore[no-untyped-def]
             if path.name == "portfolio_context.json":
+                from datetime import datetime, timezone
                 return {
+                    "cash_source_observed_at": datetime.now(timezone.utc).isoformat(),
+                    "cash_balance_reliable": True,
+                    "cash_balance_unavailable_by_row": {},
+                    "source_account_identifiers": ["123"],
+                    "capacity_authority": {
+                        "status": "available", "source": "opend", "logical_account": "user1",
+                        "futu_account_id": "123", "trd_env": "REAL", "market": "us",
+                    },
                     "as_of_utc": "2026-04-14T00:00:00+00:00",
                     "filters": {"broker": "富途", "account": "user1"},
                     "cash_by_currency": {"USD": 88000.0},
@@ -751,7 +763,8 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
 
         runtime_cfg = {
             "accounts": ["user1"],
-            "account_settings": {"user1": {"type": "futu"}},
+            "account_settings": {"user1": {"type": "futu", "futu": {"account_id": "123", "trd_env": "REAL"}}},
+            "_resolved": {"market": "us"},
             "portfolio": {"source": "auto", "base_currency": "CNY"},
         }
         out, logs = _load_portfolio_ctx(tmp_path, account="user1", runtime_config=runtime_cfg)

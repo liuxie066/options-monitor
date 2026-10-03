@@ -29,6 +29,7 @@ from domain.domain.cash_secured_utils import (
 )
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
 from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
 from src.application.strategy_scan_failures import (
@@ -1488,6 +1489,13 @@ def _load_portfolio_context(
             expected_manifest_sha256=sha256_bytes(manifest_bytes),
             expected_runtime_config=account_config,
         )
+        if context is None and isinstance(manifest.get("cash_snapshot"), dict):
+            snapshot = manifest["cash_snapshot"]
+            if snapshot.get("status") in {"unknown", "stale"}:
+                context = {"cash_snapshot": snapshot}
+                data_gaps.append({"scope": "source", "kind": "portfolio_context",
+                    "path": _source_path(run_account_dir, manifest_path),
+                    "reason": "prepared_portfolio_context_unavailable"})
         if not isinstance(context, dict):
             raise PreparedPortfolioContextError(
                 "prepared portfolio context is unavailable"
@@ -1580,17 +1588,8 @@ def _build_funds(
     data_gaps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
     cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
-    portfolio_as_of = _parse_datetime(portfolio_context.get("as_of_utc"))
-    cash_source_status = portfolio_context.get(
-        "cash_source_observation_status",
-        portfolio_context.get("source_observation_status"),
-    )
-    cash_total_reliable = (
-        cash_total is not None
-        and portfolio_as_of is not None
-        and portfolio_context.get("cash_balance_reliable") is not False
-        and cash_source_status in (None, "trusted")
-    )
+    portfolio_as_of = _parse_datetime(portfolio_context.get("cash_source_observed_at"))
+    cash_total_reliable = cash_snapshot_is_usable(portfolio_context)
     if not cash_total_reliable:
         data_gaps.append(
             {
@@ -1701,7 +1700,8 @@ def _build_funds(
     return (
         {
             "as_of_utc": max(as_of_values).astimezone(timezone.utc).isoformat() if as_of_values else "",
-            "cash_total_by_currency": cash_total or {},
+            "cash_total_by_currency": (cash_total or {}) if cash_total_reliable else {},
+            "cash_snapshot": portfolio_context.get("cash_snapshot"),
             "option_opening_available_by_currency": opening,
             "cash_total_cny": cash_total_cny,
             "cash_secured_total_cny": secured_total_cny,

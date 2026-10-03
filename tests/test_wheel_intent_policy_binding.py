@@ -1,4 +1,8 @@
 """Current opening policy must agree with sealed evidence before any new intent."""
+import json
+from hashlib import sha256
+from cash_evidence_helpers import cash_config, cash_portfolio
+from src.application.portfolio_context_service import cash_snapshot_evidence
 from copy import deepcopy
 from datetime import datetime, timezone
 
@@ -52,7 +56,7 @@ def _patch_cli(monkeypatch, *, runtime, config, repo, resolved, capacity) -> Non
     monkeypatch.setattr(cli, "_now_ms", lambda: 5_000)
     monkeypatch.setattr(cli, "resolve_wheel_config", lambda *_a, **_k: resolved)
     monkeypatch.setattr(cli, "_coverage", lambda *_a, **_k: capacity)
-    monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
+    monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: pytest.fail("create must use original cash"))
 
 
 def _patch_agent(monkeypatch, *, runtime, config, repo, resolved, capacity) -> None:
@@ -60,7 +64,7 @@ def _patch_agent(monkeypatch, *, runtime, config, repo, resolved, capacity) -> N
     monkeypatch.setattr(agent, "_wheel_now_ms", lambda _: 5_000)
     monkeypatch.setattr(agent, "resolve_wheel_config", lambda *_a, **_k: resolved)
     monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
-    monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
+    monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: pytest.fail("create must use original cash"))
 
 
 def _cli_intent_args(branch, direction, *, run_id, expected_snapshot_hash):
@@ -79,6 +83,12 @@ def _agent_payload(branch, direction, *, run_id, expected_snapshot_hash):
 
 
 def _environment(tmp_path, direction, monkeypatch):
+    if direction == "put":
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(5, timezone.utc)
+        monkeypatch.setattr(workflows, "datetime", Clock)
     repo, _, stock_id = _assign_short_put(tmp_path, wheel_start_enabled=direction == "call")
     if direction == "put":
         key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
@@ -120,6 +130,8 @@ def _environment(tmp_path, direction, monkeypatch):
     capacity = {"account": "lx", "symbol": "NVDA", "capacity_identity_hash": "capacity", "status": "available",
                 "source_observed_at": observed_at,
                 "shares_eligible": 100, "shares_locked": 0, "shares_reserved": 0, "shares_available_for_cover": 100}
+    if direction == "put":
+        capacity["cash_evidence"] = cash_snapshot_evidence(_cash())
     if direction == "call":
         decision = decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
             source_observed_at=observed_at, current_decision_now_ms=5_000)
@@ -135,6 +147,7 @@ def _request(branch, snapshot, capacity, resolved):
                 direction=branch["direction"], final_candidate_id="candidate", expected_snapshot_hash="snapshot",
                 expected_batch_generation_hash=branch["batch_generation_hash"], expires_at_ms=10_000,
                 request_id="intent-request", actor="tester", capacity_fact=capacity,
+                **({"runtime_config": cash_config()} if branch["direction"] == "put" else {}),
                 new_intent_enabled=True, account_configured=True, market="us", activation_descriptor=resolved["activation_descriptor"],
                 policy_sha256=resolved["policy_sha256"], as_of_ms=5_000)
 
@@ -179,8 +192,14 @@ def test_new_intent_rejects_old_policy_and_allows_restored_policy(tmp_path, monk
 def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entry):
     direction = "put" if entry.endswith("put") else "call"
     repo, branch, snapshot, capacity, resolved = _environment(tmp_path, direction, monkeypatch)
-    config = deepcopy(POLICY_B)
+    config = {**cash_config(), **deepcopy(POLICY_B)}
     runtime = tmp_path / "config.us.json"
+    if direction == "put":
+        retained = {**cash_config(), **deepcopy(POLICY_A)}
+        retained["portfolio"]["account"] = "lx"
+        authority = publish_account_run_config(base=tmp_path, run_id="old-run", account="lx", config=retained)
+        snapshot.update(run_id="old-run", account_config_sha256=authority.account_config_sha256,
+                        dependencies=_cash_dependencies(tmp_path, "old-run"))
     before = repo.list_wheel_events(account="lx")
     if entry.startswith("cli"):
         _patch_cli(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
@@ -189,7 +208,7 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
         with pytest.raises(ValueError, match="candidate strategy policy changed"):
             cli.execute(args)
         config.clear()
-        config.update(deepcopy(POLICY_A))
+        config.update({**cash_config(), **deepcopy(POLICY_A)})
         assert cli.execute(args)["status"] == "planned"
     else:
         _patch_agent(monkeypatch, runtime=runtime, config=config, repo=repo, resolved=resolved, capacity=capacity)
@@ -205,7 +224,7 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
         with pytest.raises(AgentToolError, match="candidate strategy policy changed"):
             tool.call(payload)
         config.clear()
-        config.update(deepcopy(POLICY_A))
+        config.update({**cash_config(), **deepcopy(POLICY_A)})
         assert tool.call(payload)[0]["status"] == "planned"
     assert repo.list_wheel_events(account="lx") == before
 
@@ -215,7 +234,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
     direction = "put" if entry.endswith("put") else "call"
     repo, branch, fixture, capacity, resolved = _environment(tmp_path, direction, monkeypatch)
     runtime = tmp_path / "config.us.json"
-    config = {**deepcopy(POLICY_A), "symbols": [
+    config = {**cash_config(), **deepcopy(POLICY_A), "symbols": [
         {"symbol": "NVDA", "broker": "futu", "sell_put": {"min_dte": 30}},
         {"symbol": "AAPL", "broker": "futu"},
     ]}
@@ -235,7 +254,8 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
     snapshot = seal_wheel_candidate_snapshot(
         base=tmp_path, run_id="scoped", account="lx", market="us",
         account_config_sha256=authority.account_config_sha256,
-        strategy_policy_sha256=strategy_policy_hash(retained), dependencies=_dependencies(),
+        strategy_policy_sha256=strategy_policy_hash(retained),
+        dependencies=_cash_dependencies(tmp_path, "scoped") if direction == "put" else _dependencies(),
         scope_results=[{"symbol": "NVDA", "direction": direction,
                         "status": "completed", "candidate_count": 1}], batches=[batch],
     )
@@ -287,7 +307,21 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
             args.apply = args.confirm = True
         else:
             payload.update(apply=True, confirm=True)
+        if direction == "put":
+            original_clock = workflows.datetime
+            class ExpiredClock(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return cls.fromtimestamp(906, timezone.utc)
+            # Both public facades still submit historical as_of_ms=5000.
+            monkeypatch.setattr(workflows, "datetime", ExpiredClock)
+            with pytest.raises(error, match="repreview required"):
+                invoke()
+            assert repo.list_wheel_events(account="lx") == before
+            monkeypatch.setattr(workflows, "datetime", original_clock)
         assert invoke()["write_applied"] is True
+        if direction == "put":
+            monkeypatch.setattr(workflows, "datetime", ExpiredClock)
         accepted_events = repo.list_wheel_events(account="lx")
         authority.state_path.unlink()
         config["wheel"]["call"]["min_dte"] = 7
@@ -295,3 +329,20 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         assert replay["status"] == "idempotent"
         assert replay["write_applied"] is False
         assert repo.list_wheel_events(account="lx") == accepted_events
+
+
+def _cash():
+    return cash_portfolio({"cash_by_currency": {"USD": 20000},
+                           "source_observed_at": "1970-01-01T00:00:05+00:00"})
+
+
+def _cash_dependencies(base, run_id):
+    deps = _dependencies()
+    state = base / "output_runs" / run_id / "accounts/lx/state"
+    for kind, name, payload in (("portfolio", "portfolio_context.json", _cash()),
+                               ("ledger", "option_positions_context.json", {"exchange_rates": {"rates": {}}})):
+        path = state / name
+        path.write_text(json.dumps(payload))
+        deps = [{"kind": kind, "relpath": str(path.relative_to(base)),
+                 "sha256": sha256(path.read_bytes()).hexdigest()} if row["kind"] == kind else row for row in deps]
+    return deps

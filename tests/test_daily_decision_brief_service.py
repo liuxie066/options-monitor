@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cash_evidence_helpers import cash_portfolio
+
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -30,10 +32,10 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
     state_dir.mkdir(exist_ok=True)
     (state_dir / "portfolio_context.json").write_text(
         json.dumps(
-            {
+            cash_portfolio({
                 "as_of_utc": "2026-07-17T13:59:00+00:00",
                 "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
-            }
+            })
         ),
         encoding="utf-8",
     )
@@ -1236,11 +1238,11 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path, mo
     state_dir = account_dir / "state"
     (state_dir / "portfolio_context.json").write_text(
         json.dumps(
-            {
+            cash_portfolio({
                 "as_of_utc": "2026-07-17T13:59:00+00:00",
                 "cash_by_currency": {"HKD": 1_104_060.32},
                 "fx_snapshot_sha256": "a" * 64,
-            }
+            })
         ),
         encoding="utf-8",
     )
@@ -1387,13 +1389,13 @@ def test_prepared_portfolio_context_is_used_when_legacy_file_is_absent(
         account="lx",
         config=config,
     )
-    context = {
+    context = cash_portfolio({
         "as_of_utc": "2026-07-17T13:59:00+00:00",
         "source_observed_at": "2026-07-17T13:59:00+00:00",
         "filters": {"account": "lx"},
         "portfolio_source_name": "futu",
         "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
-    }
+    })
     payload_bytes = (
         json.dumps(
             context,
@@ -2873,10 +2875,10 @@ def test_daily_brief_funds_do_not_offer_explicitly_stale_broker_cash() -> None:
     from src.application.daily_decision_brief_service import _build_funds
     gaps: list[dict[str, Any]] = []
     funds, cash_reliable = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_by_currency": {"HKD": 100_000},
             "cash_balance_reliable": True, "cash_source_observation_status": "stale",
-        },
+        }),
         option_positions_context={
             "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_secured_total_by_ccy": {},
             "cash_secured_total_cny": 0, "cash_secured_unavailable_by_symbol": {},
@@ -2887,7 +2889,7 @@ def test_daily_brief_funds_do_not_offer_explicitly_stale_broker_cash() -> None:
     assert funds["available"] is False
     assert funds["option_opening_available_by_currency"] == {}
     assert funds["cash_total_cny"] is None
-    assert funds["cash_total_by_currency"] == {"HKD": 100_000.0}
+    assert funds["cash_total_by_currency"] == {}
 
 
 def test_funds_require_every_needed_pair_but_cny_zero_needs_no_fx(monkeypatch) -> None:
@@ -2907,7 +2909,7 @@ def test_funds_require_every_needed_pair_but_cny_zero_needs_no_fx(monkeypatch) -
         "cash_secured_unavailable_by_symbol": {},
         "exchange_rates": {"pairs": {"HKDCNY": pair}},
     }
-    portfolio = {"as_of_utc": options["as_of_utc"], "cash_by_currency": {"HKD": 100, "USD": -1}}
+    portfolio = cash_portfolio({"as_of_utc": options["as_of_utc"], "cash_by_currency": {"HKD": 100, "USD": -1}})
     funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=options, data_gaps=[])
     assert funds["cash_total_cny"] is None
     assert funds["option_opening_available_cny"] is None
@@ -2943,10 +2945,10 @@ def test_funds_reject_conflicting_run_fx_hashes(monkeypatch) -> None:
         "observed_at_utc": "2026-09-30T07:01:00+00:00",
     }}}
     funds, _ = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "as_of_utc": "2026-10-02T01:43:00+00:00", "cash_by_currency": {"HKD": 100},
             "exchange_rates": observation, "fx_snapshot_sha256": "a" * 64,
-        },
+        }),
         option_positions_context={
             "as_of_utc": "2026-10-02T01:43:00+00:00", "cash_secured_total_by_ccy": {},
             "cash_secured_unavailable_by_symbol": {}, "exchange_rates": observation,

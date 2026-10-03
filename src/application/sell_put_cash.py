@@ -26,6 +26,7 @@ from domain.domain.risk_capacity import (
     compute_sell_put_effective_cash,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +35,7 @@ def _cash_secured_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
     portfolio_ctx: dict[str, Any] | None,
 ) -> str:
-    if isinstance(portfolio_ctx, dict) and (
-        portfolio_ctx.get("cash_balance_reliable") is False
-        or portfolio_ctx.get("cash_source_observation_status", portfolio_ctx.get("source_observation_status"))
-        not in (None, "trusted")
-    ):
+    if not isinstance(portfolio_ctx, dict) or not cash_snapshot_is_usable(portfolio_ctx):
         return "broker_cash_snapshot_unavailable"
     if not isinstance(option_ctx, dict):
         return "option_positions_cash_secured_context_unavailable"
@@ -107,21 +104,6 @@ def sell_put_opening_capacity_inputs(
         return {
             "put_cash_capacity_available": False,
             "put_cash_capacity_reason": "assignment_requirement_or_portfolio_context_invalid",
-        }
-
-    portfolio_source = str(
-        portfolio_ctx.get("portfolio_source_name") or ""
-    ).strip().lower()
-    authority = portfolio_ctx.get("capacity_authority")
-    if portfolio_source and (
-        portfolio_source != "futu"
-        or not isinstance(authority, dict)
-        or authority.get("status") != "available"
-    ):
-        return {
-            "put_cash_required": strike_value * multiplier_value,
-            "put_cash_capacity_available": False,
-            "put_cash_capacity_reason": "physical_account_capacity_authority_unavailable",
         }
 
     option_ctx = portfolio_ctx.get("option_ctx")
@@ -308,16 +290,18 @@ def enrich_sell_put_candidates_with_cash(
     cash_avail_total_cny = None
     cash_free_total_cny = None
     try:
-        cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if isinstance(portfolio_ctx, dict) else {}
+        cash_usable = isinstance(portfolio_ctx, dict) and cash_snapshot_is_usable(portfolio_ctx)
+        cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if cash_usable else {}
         v = cash_by_ccy.get('USD')
         cash_avail = float(v) if v is not None else None
 
         cny = cash_by_ccy.get('CNY')
         cash_avail_cny = float(cny) if cny is not None else None
-        cash_avail_total_cny = _sum_cash_total_cny(
-            cash_by_ccy,
-            exchange_rate_converter=exchange_rate_converter,
-        )
+        if cash_usable:
+            cash_avail_total_cny = _sum_cash_total_cny(
+                cash_by_ccy,
+                exchange_rate_converter=exchange_rate_converter,
+            )
 
         if cash_avail_cny is not None:
             cash_free_cny = (cash_avail_cny - used_total_cny) if used_total_cny is not None else None
@@ -453,9 +437,7 @@ def enrich_sell_put_candidates_with_cash(
     df_sp_lab['futu_account_id'] = capacity_authority.get("futu_account_id", pd.NA)
     df_sp_lab['capacity_trd_env'] = capacity_authority.get("trd_env", pd.NA)
     df_sp_lab['capacity_market'] = capacity_authority.get("market", pd.NA)
-    df_sp_lab['capacity_source_observed_at'] = capacity_authority.get(
-        "source_observed_at", pd.NA
-    )
+    df_sp_lab['capacity_source_observed_at'] = portfolio_ctx.get("cash_source_observed_at", pd.NA) if isinstance(portfolio_ctx, dict) else pd.NA
     df_sp_lab['capacity_authority_status'] = capacity_authority.get(
         "status", pd.NA
     )

@@ -24,11 +24,9 @@ from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
     portfolio_context_account_mismatch_reason,
-    with_context_source,
 )
 from src.infrastructure.io_utils import (
     atomic_write_json,
-    is_fresh,
     load_cached_json,
 )
 from src.application.source_receipts import sha256_bytes
@@ -45,7 +43,6 @@ from functools import partial
 from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
 from src.application.current_fx_run import load_run_fx_snapshot
 from src.infrastructure.exchange_rates import (
-    exchange_rate_observation_status,
     project_exchange_rate_snapshot,
 )
 
@@ -438,6 +435,8 @@ def prepare_portfolio_contexts(
                 manifest["reason"] = str(
                     result.get("reason") or "portfolio_context_worker_failed"
                 ).strip()
+                if isinstance(result.get("cash_snapshot"), dict):
+                    manifest["cash_snapshot"] = result["cash_snapshot"]
                 if result.get("error_type"):
                     manifest["error_type"] = str(result["error_type"])
                 if result.get("error_code"):
@@ -680,6 +679,7 @@ def run_worker(request_path: Path) -> int:
         _required_text(request.get("shared_state_dir"), "shared_state_dir")
     ).resolve()
     logs: list[str] = []
+    context: dict[str, Any] | None = None
     try:
         account_config_sha256 = _required_text(
             request.get("account_config_sha256"),
@@ -716,7 +716,6 @@ def run_worker(request_path: Path) -> int:
             account=account,
         )
         portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-        runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
         data_config = resolve_data_config_path(
             base=base,
             data_config=portfolio_cfg.get("data_config"),
@@ -733,30 +732,21 @@ def run_worker(request_path: Path) -> int:
             if sealed_hash != fx_hash:
                 raise PreparedPortfolioContextError("worker FX snapshot mismatch")
             fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
-            fetch_fn = lambda **kwargs: fetch_futu_portfolio_context(
-                **kwargs, exchange_rate_observation=fx_observation,
-            )
-        else:
-            fetch_fn = fetch_futu_portfolio_context
         context = load_account_portfolio_context(
             market=broker,
             account=account,
-            ttl_sec=int(runtime.get("portfolio_context_ttl_sec", 900) or 0),
             state_dir=state_dir,
             log=logs.append,
             runtime_config=cfg,
             portfolio_source=str(source),
-            fetch_futu_portfolio_context_fn=fetch_fn,
-            is_fresh_fn=is_fresh,
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            exchange_rate_cache_path=base / "output_shared" / "state" / "rate_cache.json",
+            **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
             load_json_fn=load_cached_json,
             write_cache=False,
         )
         if fx_hash is not None:
             context = dict(context)
-            context["exchange_rates"] = fx_observation
-            context["exchange_rate_status"] = exchange_rate_observation_status(
-                fx_observation, max_age_hours=24,
-            )
             context["fx_snapshot_sha256"] = fx_hash
         source_name, source_account = _resolve_context_source_binding(
             config=cfg,
@@ -805,6 +795,10 @@ def run_worker(request_path: Path) -> int:
             "error_type": type(exc).__name__,
             "logs": logs[-20:],
         }
+    if result["status"] == "unavailable" and isinstance(context, dict):
+        snapshot = context.get("cash_snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("status") in {"unknown", "stale"}:
+            result["cash_snapshot"] = snapshot
     result_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(result_path, result)
     return 0

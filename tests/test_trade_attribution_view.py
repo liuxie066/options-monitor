@@ -1,3 +1,4 @@
+from cash_evidence_helpers import cash_portfolio, cash_config
 import pytest
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -128,7 +129,7 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
         "futu_account_id": "1001", "trd_env": "REAL", "market": "us"}, "position_snapshot_input": snapshot}}
     fact = {"account": "lx", "broker_account_ref": ref, "contracts_open": 1, "position_side": "short", "multiplier": 100, "currency": "USD",
             "contract_key": {"underlying_symbol": "NVDA", "option_type": "call", "strike": "100", "expiration_ymd": "2026-12-18"}}
-    args = dict(fact=fact, facts=[fact], observation=observation, wheel_read_model={"wheel_branches": []})
+    args = dict(config=cash_config(account_id="1001"), fact=fact, facts=[fact], observation=observation, wheel_read_model={"wheel_branches": []})
     result = trade_attribution_capacity_check(**args, now_ms=now)
     assert result["status"] == "available", result
     unrelated = deepcopy(fact)
@@ -468,14 +469,21 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units():
          "option_type": "PUT", "option_strike_price": 25, "strike_time": "2026-12-18", "multiplier": 100},
     ], broker_account_ref={**ref, "account_label": "lx", "broker_account_id": "futu:REAL:1001"},
         markets=["US", "HK"], asset_types=["stock", "option"], observed_at_utc=observed, completeness="complete")
-    portfolio = {"capacity_authority": {"status": "available", "logical_account": "lx", "futu_account_id": "1001",
+    portfolio = cash_portfolio({"cash_source_observed_at": observed, "capacity_authority": {"status": "available", "logical_account": "lx", "futu_account_id": "1001",
         "trd_env": "REAL", "market": "us"}, "position_snapshot_input": snapshot, "cash_balance_reliable": True,
         "cash_by_currency": {"USD": 0, "HKD": 20000}, "exchange_rates": {"rates": {"USDCNY": 7, "HKDCNY": 0.9}},
-        "exchange_rate_status": "ready"}
+        "exchange_rate_status": "ready"}, account_id="1001")
     fact = {"account": "lx", "broker_account_ref": ref, "contracts_open": 1, "position_side": "short", "multiplier": 100,
             "currency": "USD", "contract_key": {"underlying_symbol": "NVDA", "option_type": "put", "strike": "25.0", "expiration_ymd": "2026-12-18"}}
-    args = dict(fact=fact, facts=[fact], observation={"portfolio": portfolio}, wheel_read_model={"wheel_branches": []}, now_ms=now)
+    args = dict(config=cash_config(account_id="1001"), fact=fact, facts=[fact], observation={"portfolio": portfolio}, wheel_read_model={"wheel_branches": []}, now_ms=now)
     assert trade_attribution_capacity_check(**args)["status"] == "available"
+    original = deepcopy(portfolio)
+    short_policy = {**args["config"], "runtime": {"portfolio_context_ttl_sec": 1}}
+    # Position evidence is still fresh; only the cash policy expires at commit.
+    expired = trade_attribution_capacity_check(**{**args, "config": short_policy, "now_ms": now + 2000})
+    assert expired["reason_codes"] == ["cash_capacity_unavailable"]
+    assert portfolio == original
+    snapshot = portfolio["position_snapshot_input"]
     # An HK obligation consumes the same FX pool as the new US Put.
     hk = deepcopy(fact)
     hk["currency"] = "HKD"
@@ -509,13 +517,13 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units():
     assert "broker_ledger_positions_mismatch" in trade_attribution_capacity_check(**args)["reason_codes"]
 
 
-def _blocked_capacity_worker(connection, config, account):
+def _blocked_capacity_worker(connection, config, account, runtime_root):
     import time
     time.sleep(60)
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_provider_budget_terminates_its_worker(monkeypatch, cancel):
+def test_provider_budget_terminates_its_worker(monkeypatch, tmp_path, cancel):
     import multiprocessing
     import time
     from threading import Event, Timer
@@ -530,7 +538,7 @@ def test_provider_budget_terminates_its_worker(monkeypatch, cancel):
         clock = time.monotonic
         start = clock()
         monkeypatch.setattr(time, "monotonic", lambda: clock() + (11 if clock() - start > 0.15 else 0))
-    result = capacity.observe_trade_attribution_capacity(config={}, account="lx", stop_event=stop)
+    result = capacity.observe_trade_attribution_capacity(config={}, account="lx", runtime_root=tmp_path, stop_event=stop)
     assert result["error"] == ("cancelled" if cancel else "provider_timeout")
     assert {child.pid for child in multiprocessing.active_children()} <= existing
     if cancel:
@@ -617,3 +625,42 @@ def test_rejected_combo_does_not_reappear_as_placeholder_but_new_pair_competes(t
         assert [candidate["candidate_id"] for candidate in put["candidates"]] == ["combo-exposure:exposure-1"]
         assert not combo_attribution_candidates_from_rows(rows, account="lx", runtime_environment="",
             exposures=[_exposure()], effective_now_ms=BASE_TIME_MS + 3000, include_claimed=True)["inferences"]
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkeypatch, cached):
+    import json
+    import src.application.wheel.capacity as capacity
+    from cash_evidence_helpers import cash_config, cash_portfolio
+
+    portfolio = cash_portfolio({"cash_by_currency": {"USD": 500}, "exchange_rates": {"stale": True}})
+    state = tmp_path / "output_accounts/lx/state"
+    state.mkdir(parents=True)
+    if cached:
+        (state / "portfolio_context.json").write_text(json.dumps(portfolio))
+    before = {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    calls = []
+    def fetch(**kw):
+        calls.append(kw)
+        assert kw["write_cache"] is False
+        assert kw["include_options"] is True
+        assert kw["exchange_rate_cache_path"] == tmp_path / "output_shared/state/rate_cache.json"
+        assert kw["exchange_rate_observation"] is None
+        return portfolio
+    def fx(**kw):
+        assert kw == {"cache_path": tmp_path / "output_shared/state/rate_cache.json", "write_cache": False}
+        raise RuntimeError("FX unavailable")
+    monkeypatch.setattr(capacity, "fetch_futu_portfolio_context", fetch)
+    monkeypatch.setattr(capacity, "current_exchange_rate_snapshot", fx)
+    class Connection:
+        def send(self, value):
+            self.result = value
+        def close(self):
+            self.closed = True
+    connection = Connection()
+    capacity._attribution_capacity_worker(connection, cash_config(), "lx", tmp_path)
+    assert connection.closed
+    assert connection.result["portfolio"]["cash_snapshot"]["status"] == "fresh"
+    assert connection.result["portfolio"]["exchange_rates"] is None
+    assert len(calls) == (0 if cached else 1)
+    assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before

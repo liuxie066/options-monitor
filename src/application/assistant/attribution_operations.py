@@ -41,7 +41,7 @@ def _response(operation_id: str, status: str, result: dict[str, Any]) -> dict[st
 def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str, Any], account: str,
                       open_event_id: str) -> dict[str, Any]:
     # Provider I/O is outside both the audit claim and the ledger writer lock.
-    observation = observe_trade_attribution_capacity(config=config, account=account)
+    observation = observe_trade_attribution_capacity(config=config, account=account, runtime_root=Path(authority["runtime_root"]))
     market = runtime_config_market(config).lower()
     rows = read_trade_attribution_snapshot(repo, account=account, market=market)
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=Path(authority["runtime_root"]),

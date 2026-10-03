@@ -240,7 +240,13 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
   --input-json '{"config_key":"us","action":"events","account":"lx","position_effect":"close","limit":5}'
 ```
 
-`query_cash_headroom` 是 pure-read，并以 `write_cache=false` 查询，不持久化本次 cash query。`option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
+`query_cash_headroom` 是 pure-read，并以 `write_cache=false` 查询，不持久化本次 cash query。
+
+现金读取与扫描、Wheel、指派情景共用 `portfolio_context_service`：只按独立现金源时间和有效配置 `runtime.portfolio_context_ttl_sec`（缺省 900 秒，必须为正整数）决定缓存复用；`get_portfolio_context` 不再接受单独的 `ttl_sec`。
+
+返回的 `cash_snapshot` 包含 `status`（fresh/stale/unknown）、`reason_codes`、`source_observed_at`、`evaluated_at` 和 `max_age_sec`；仅 fresh 可用于现金容量。FX 缺失影响换算值，不改变原币现金可信度。历史报告保留封存时判定，缺少原现金证据时保持不可用。
+
+`option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
 
 `option_positions_read action=events` 读取 canonical SQLite `trade_events`，不会读取报价：
 
