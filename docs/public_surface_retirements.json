@@ -170,6 +170,11 @@
       "module": "src/infrastructure/exchange_rates.py",
       "name": "save_exchange_rate_observation",
       "reason": "The standalone observation cache writer was retired; current_exchange_rate_snapshot now validates and caches each pair as part of one sealed FX fact."
+    },
+    {
+      "module": "src/application/portfolio_context_service.py",
+      "name": "FreshnessChecker",
+      "reason": "Cash cache selection now evaluates independent source time and effective runtime.portfolio_context_ttl_sec through the shared cash snapshot owner; per-call file freshness callbacks and their type alias are retired."
     }
   ]
 }

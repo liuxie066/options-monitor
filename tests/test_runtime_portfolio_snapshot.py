@@ -133,6 +133,7 @@ def _owner_assembly_kwargs() -> dict:
         **sections["broker_cash"]["facts"],
         **sections["broker_positions"]["facts"],
         "source_observed_at": portfolio_manifest["source_as_of_utc"],
+        "position_snapshot_input": {"completeness": "complete", "quality": {"status": "ready"}, "errors": []},
     }
     portfolio_payload_bytes = canonical_json_bytes(portfolio_payload)
     portfolio_manifest["payload_sha256"] = sha256_bytes(portfolio_payload_bytes)
@@ -521,3 +522,37 @@ def test_benchmark_gate_measures_valid_path_and_faults() -> None:
     assert history_fault["forbidden_history_executable_spy_calls"] == 1
     assert history_fault["production_artifact_read_calls"] == 0
     assert "forbidden_history_executable_spy_calls" in history_fault["violations"]
+
+
+@pytest.mark.parametrize("positions_complete", [True, False])
+def test_v2_cash_preserves_verdict_and_binds_real_position_completeness(positions_complete):
+    from cash_evidence_helpers import cash_portfolio
+    assembly = _owner_assembly_kwargs()
+    original = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    original["position_snapshot_input"]["completeness"] = "complete" if positions_complete else "partial"
+    for key in ("capacity_authority", "filters", "source_account_identifiers", "portfolio_source_name"):
+        original.pop(key, None)
+    payload = cash_portfolio(original)
+    raw = canonical_json_bytes(payload)
+    manifest = json.loads(assembly["prepared_portfolio_manifest_bytes"])
+    manifest["payload_sha256"] = sha256_bytes(raw)
+    manifest["portfolio_context_relpath"] = f"portfolio_context.{manifest['payload_sha256']}.json"
+    assembly.update(prepared_portfolio_payload_bytes=raw, prepared_portfolio_manifest_bytes=canonical_json_bytes(manifest))
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    cash = snapshot["sections"]["broker_cash"]
+    assert cash["schema_version"] == "runtime_portfolio_snapshot.broker_cash.v2"
+    assert cash["facts"]["cash_snapshot"] == payload["cash_snapshot"]
+    assert snapshot["sections"]["broker_positions"]["completeness"]["status"] == ("complete" if positions_complete else "unavailable")
+    assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
+    # Even a recomputed section hash cannot detach the projection from its original source.
+    cash["facts"]["cash_balance_reliable"] = not cash["facts"]["cash_balance_reliable"]
+    cash["content_sha256"] = sha256_bytes(canonical_json_bytes(cash["facts"]))
+    with pytest.raises(RuntimePortfolioSnapshotError, match="projection differs"):
+        _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references)
+
+
+def test_legacy_cash_schema_rejects_mixed_v2_fields():
+    kwargs = _current_scale_kwargs()
+    kwargs["sections"]["broker_cash"]["facts"]["cash_snapshot"] = None
+    with pytest.raises(RuntimePortfolioSnapshotError):
+        build_runtime_portfolio_snapshot(**kwargs)

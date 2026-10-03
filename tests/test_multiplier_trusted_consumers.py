@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from cash_evidence_helpers import cash_config, cash_portfolio
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import decision_state_snapshot, list_position_lot_snapshots
 from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
@@ -122,14 +124,16 @@ def test_cash_query_refuses_bad_history_with_fresh_broker_cash(tmp_path, monkeyp
     repo = _ledger(tmp_path)
     _break_history(repo, clear_lots=clear_lots)
     monkeypatch.setattr(mod, "open_position_ledger", lambda *_a, **_k: repo)
-    monkeypatch.setattr(mod, "load_account_portfolio_context", lambda **_k: {
+    portfolio = cash_portfolio({
         "portfolio_source_name": "futu", "cash_by_currency": {"USD": 100000},
         "source_observed_at": datetime.now(timezone.utc).isoformat(),
         "source_observation_status": "trusted", "cash_balance_reliable": True,
     })
+    assert mod.cash_snapshot_is_usable(portfolio)
+    monkeypatch.setattr(mod, "load_account_portfolio_context", lambda **_k: portfolio)
     payload = mod.query_sell_put_cash(
         base_dir=tmp_path, data_config=tmp_path / "fixture.json", account="lx", market="futu",
-        no_exchange_rates=True, output_format="json", write_cache=False,
+        no_exchange_rates=True, output_format="json", write_cache=False, runtime_config=cash_config(),
     )
     assert payload["cash_secured_usage_reliable"] is False
     assert payload["cash_secured_unavailable_reason"] == "option_decision_snapshot_unavailable"

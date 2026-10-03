@@ -7,6 +7,7 @@ import json
 import urllib.request
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from domain.domain.portfolio_assignment_scenario import (
@@ -34,6 +35,7 @@ from src.infrastructure.portfolio_management_client import (
     PortfolioManagementHTTPError,
 )
 from src.application.payload_helpers import parse_utc as _iso_datetime
+from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context, infer_futu_portfolio_settings
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, resolve_opend_fetch_limits
@@ -163,7 +165,7 @@ def _load_runtime_and_positions(
     )
     return (
         list_open_short_assignment_rows(repo, accounts=list(accounts)),
-        str(config_path.name),
+        str(config_path.resolve()),
         cfg,
     )
 
@@ -245,7 +247,8 @@ def _snapshot_payload(
         "pm_supplement": portfolio_evidence.get("pm_supplement") or {"enabled": False, "status": "disabled", "included_rows": 0},
         "options_observed_at": options_observed_at,
         "max_source_skew_seconds": (format(max_skew, ".6f") if max_skew is not None else None),
-        "runtime_config": runtime_config_name,
+        "runtime_config": Path(runtime_config_name).name,
+        "cash_snapshots": portfolio_evidence.get("cash_snapshots", {}),
     }
 
 
@@ -402,7 +405,7 @@ def _read_futu_quotes(
 
 
 def _futu_evidence(accounts: Sequence[str], contexts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    observed = {account: context.get("source_observed_at") for account, context in contexts.items()}
+    observed = {account: (context.get("position_snapshot_input") or {}).get("observed_at_utc") for account, context in contexts.items()}
     now = datetime.now(timezone.utc)
     stale_accounts = [
         account
@@ -410,6 +413,7 @@ def _futu_evidence(accounts: Sequence[str], contexts: Mapping[str, Mapping[str, 
         if (source_time := _iso_datetime(raw_time)) is None
         or not 0 <= (now - source_time).total_seconds() <= 300
     ]
+    stale_accounts = sorted(set(stale_accounts) | {account for account, context in contexts.items() if not cash_snapshot_is_usable(context)})
     snapshot_ids = {
         account: (context.get("position_snapshot_input") or {}).get("snapshot_id")
         for account, context in contexts.items()
@@ -444,9 +448,9 @@ def _futu_context_error(account: str, context: Mapping[str, Any]) -> str | None:
     snapshot = context.get("position_snapshot_input")
     if not isinstance(cash, Mapping) or not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("rows"), list):
         return f"{account}: Futu cash or stock snapshot is missing"
-    if context.get("cash_balance_reliable") is not True:
+    if not cash_snapshot_is_usable(context):
         return f"{account}: Futu cash snapshot is incomplete"
-    if snapshot.get("errors"):
+    if snapshot.get("errors") or snapshot.get("completeness") != "complete" or (snapshot.get("quality") or {}).get("status") != "ready":
         return f"{account}: Futu stock snapshot has scope errors"
     filters = context.get("filters")
     if isinstance(filters, Mapping) and filters.get("account") != account:
@@ -562,13 +566,14 @@ def query_portfolio_assignment_scenario(
             option_positions=[],
             snapshot=snapshot,
         )
+    runtime_root = Path(runtime_config_name).parent if Path(runtime_config_name).is_absolute() else repo_base()
     futu_contexts: dict[str, dict[str, Any]] = {}
     futu_error: str | None = None
     fx_snapshot: Mapping[str, Any] | None = None
     capacity_fx: Mapping[str, Any] | None = None
     try:
         fx_snapshot = current_exchange_rate_snapshot(
-            cache_path=repo_base() / "output_shared" / "state" / "rate_cache.json",
+            cache_path=runtime_root / "output_shared" / "state" / "rate_cache.json",
             write_cache=False,
         )
         fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="display")
@@ -577,8 +582,12 @@ def query_portfolio_assignment_scenario(
         fx_observation = None
     try:
         for account in normalized_accounts:
-            futu_contexts[account] = fetch_futu_portfolio_context(
-                cfg=runtime_config,
+            futu_contexts[account] = load_account_portfolio_context(
+                runtime_config=runtime_config, market="富途", portfolio_source="futu",
+                state_dir=runtime_root / "output_accounts" / account / "state",
+                log=lambda _: None, fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+                exchange_rate_cache_path=runtime_root / "output_shared" / "state" / "rate_cache.json",
+                write_cache=False, required_position_asset_types=("stock",),
                 account=account,
                 exchange_rate_observation=fx_observation,
             )
@@ -734,6 +743,7 @@ def query_portfolio_assignment_scenario(
                     account: context.get("source_observed_at") for account, context in futu_contexts.items()
                 }
 
+    evidence["cash_snapshots"] = {account: context.get("cash_snapshot") for account, context in futu_contexts.items()}
     snapshot = _snapshot_payload(
         accounts=normalized_accounts,
         option_positions=option_positions,

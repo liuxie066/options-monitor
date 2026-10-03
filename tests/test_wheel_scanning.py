@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cash_evidence_helpers import cash_portfolio
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -644,7 +646,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
         wheel_read_model=model,
         wheel_scan=scan,
         opening_put_candidates=[],
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -653,7 +655,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
             "cash_secured_by_currency": {},
             "wheel_intent_reservations": [],
             "fx_snapshot": {"rates": {}},
-        },
+        }),
         exchange_rate_converter=converter,
     )
 
@@ -714,7 +716,7 @@ def test_wheel_pending_put_branch_remains_visible_without_required_data() -> Non
 
 def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
     allocation = revalidate_selected_wheel_put_candidate(
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -735,7 +737,7 @@ def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
                     }
                 ]
             },
-        },
+        }),
         final_candidate={
             "claim_id": "wheel:put:branch-a",
             "wheel_branch_id": "branch-a",
@@ -798,7 +800,7 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
             "capacity_claims": [],
         },
         opening_put_candidates=[],
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -807,7 +809,7 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
             "cash_secured_by_currency": {},
             "wheel_intent_reservations": [],
             "fx_snapshot": {"rates": {}},
-        },
+        }),
         exchange_rate_converter=_converter(),
     )
 
@@ -952,11 +954,11 @@ def test_partial_coverage_scans_only_uncommitted_unreserved_shares(direction):
 def test_shared_wheel_capacity_blocks_pending_settlement_even_after_cash_or_stock_refresh() -> None:
     put_fact = build_shared_cash_capacity_fact(
         account="lx",
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "capacity_authority": {"status": "available", "logical_account": "lx"},
             "cash_by_currency": {"HKD": 100_000},
             "source_observed_at": "2026-09-30T03:00:48+00:00",
-        },
+        }),
         option_context={
             "decision_snapshot_status": "trusted",
             "cash_secured_total_by_ccy": {},
@@ -987,10 +989,10 @@ def test_wheel_put_preview_invalidates_when_source_evidence_changes_without_cash
     def fact(fingerprint: str) -> dict:
         return build_shared_cash_capacity_fact(
             account="lx",
-            portfolio_context={
+            portfolio_context=cash_portfolio({
                 "capacity_authority": {"status": "available", "logical_account": "lx"},
                 "cash_by_currency": {"USD": 20_000},
-            },
+            }),
             option_context={
                 "decision_snapshot_status": "trusted",
                 "decision_state_fingerprint": fingerprint,
@@ -1032,10 +1034,10 @@ def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: py
     with pytest.raises(ValueError, match="no longer has cash capacity"):
         revalidate_selected_wheel_put_candidate_from_rows(
             account="lx",
-            portfolio_context={
+            portfolio_context=cash_portfolio({
                 "capacity_authority": {"status": "available", "logical_account": "lx"},
                 "cash_by_currency": {"USD": 20_000},
-            },
+            }),
             position_lots=[], lifecycle_rows={}, broker="futu", as_of_ms=1_000,
             fx_snapshot={}, decision_snapshot={"snapshot_status": "source_untrusted"},
             final_candidate={
@@ -1047,10 +1049,10 @@ def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: py
 
 def test_wheel_capacity_facts_require_trusted_decision_snapshot() -> None:
     put = build_shared_cash_capacity_fact(
-        account="lx", portfolio_context={
+        account="lx", portfolio_context=cash_portfolio({
             "capacity_authority": {"status": "available", "logical_account": "lx"},
             "cash_by_currency": {"USD": 20_000},
-        },
+        }),
         option_context={"cash_secured_total_by_ccy": {}},
         wheel_read_model={"wheel_branches": []}, fx_snapshot={},
     )

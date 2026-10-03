@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from cash_evidence_helpers import cash_portfolio
+
 from domain.domain.engine.candidate_engine import CandidateCalculationError, calculate_opening_candidate_metrics
 from domain.domain.risk_capacity import (
     allocate_opening_share_capacity, allocate_portfolio_capacity_shadow,
@@ -141,7 +143,7 @@ def test_sell_put_cash_facade_and_dataframe_keep_invalid_requirements_unavailabl
 
     valid = type(raw) is int
     converter = CurrencyConverter(ExchangeRates())
-    portfolio = {"cash_by_currency": {"USD": 1_000_000}, "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_by_ccy": {}, "cash_secured_total_cny": 0}}
+    portfolio = cash_portfolio({"cash_by_currency": {"USD": 1_000_000}, "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_by_ccy": {}, "cash_secured_total_cny": 0}})
     capacity = sell_put_opening_capacity_inputs(symbol="NVDA", strike=100, multiplier=raw, currency="USD", portfolio_ctx=portfolio, exchange_rate_converter=converter)
     assert capacity["put_cash_capacity_available"] is valid
     assert capacity.get("put_cash_required") == (100 * raw if valid else None)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cash_evidence_helpers import cash_portfolio
+
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +29,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     import src.application.cash_headroom_query as m
 
     def fake_fetch_futu_portfolio_context(**_kwargs):  # type: ignore[no-untyped-def]
-        return {
+        return cash_portfolio({
             "cash_by_currency": {"CNY": 130000.0, "USD": 1000.0},
             "cash_components_by_currency": {
                 "CNY": {"cn_cash": 130000.0},
@@ -40,7 +42,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             "portfolio_source_name": "futu",
             "context_source": "futu_direct",
             "source_observed_at": datetime.now(timezone.utc).isoformat(),
-        }
+        }, account_id=FAKE_FUTU_ACC_ID_LX)
 
     with _patched(
         m,
@@ -64,6 +66,8 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             out_dir=str(out_dir),
             base_dir=BASE,
             runtime_config={
+                "_resolved": {"market": "us"},
+                "account_settings": {"lx": {"futu": {"account_id": FAKE_FUTU_ACC_ID_LX, "trd_env": "REAL"}}},
                 "portfolio": {"source": "auto", "base_currency": "CNY"},
                 "trade_intake": {"account_mapping": {"futu": {FAKE_FUTU_ACC_ID_LX: "lx"}}},
             },
@@ -72,8 +76,8 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
 
     assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 130000.0
-    assert result["cash_free_cny"] is None
-    assert result["freshness"]["status"] == "unknown"
+    assert result["cash_free_cny"] == 58000.0
+    assert result["freshness"]["status"] == "fresh"
     assert result["cash_source"] == "futu_cash_like_assets"
     assert result["cash_components_by_currency"] == {
         "CNY": {"cn_cash": 130000.0},
@@ -113,7 +117,7 @@ def test_query_sell_put_cash_uses_futu_context_for_second_account(tmp_path: Path
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "sy"
-        return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()}
+        return cash_portfolio({"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()})
 
     with _patched(
         m,
@@ -155,7 +159,7 @@ def test_query_sell_put_cash_uses_configured_futu_account(tmp_path: Path) -> Non
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "sy"
-        return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()}
+        return cash_portfolio({"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu", "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat()})
 
     with _patched(
         m,
@@ -201,7 +205,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "lx"
-        return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"}
+        return cash_portfolio({"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "futu"})
 
     with _patched(
         m,
@@ -263,12 +267,12 @@ def test_query_sell_put_cash_keeps_closed_put_pending_after_newer_cash() -> None
 
     with _patched(
         m,
-        load_account_portfolio_context=lambda **_kwargs: {
+        load_account_portfolio_context=lambda **_kwargs: cash_portfolio({
             "cash_by_currency": {"CNY": 130000.0},
             "portfolio_source_name": "futu",
             "context_source": "futu_direct",
             "source_observed_at": "2026-09-30T03:00:48+00:00",
-        },
+        }),
         _load_option_position_records=lambda *_a, **_k: (object(), []),
         decision_state_snapshot=lambda *_a, **_k: snapshot,
         build_option_positions_context=build_context,
@@ -287,11 +291,11 @@ def test_query_sell_put_cash_does_not_offer_stale_broker_cash_as_free_capacity()
     import src.application.cash_headroom_query as m
     with _patched(
         m,
-        load_account_portfolio_context=lambda **_kwargs: {
+        load_account_portfolio_context=lambda **_kwargs: cash_portfolio({
             "cash_by_currency": {"CNY": 130_000.0},
             "portfolio_source_name": "futu", "context_source": "futu_direct",
             "source_observed_at": "2020-01-01T00:00:00+00:00", "cash_balance_reliable": True,
-        },
+        }, evaluated_at=datetime.now(timezone.utc)),
         _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
         decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
         build_option_positions_context=lambda *_args, **_kwargs: {
@@ -313,10 +317,10 @@ def test_query_sell_put_cash_rejects_malformed_settlement_blockers() -> None:
     import src.application.cash_headroom_query as m
     with _patched(
         m,
-        load_account_portfolio_context=lambda **_kwargs: {
+        load_account_portfolio_context=lambda **_kwargs: cash_portfolio({
             "cash_by_currency": {"CNY": 130_000.0}, "portfolio_source_name": "futu",
             "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat(),
-        },
+        }),
         _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
         decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
         build_option_positions_context=lambda *_args, **_kwargs: {

@@ -92,40 +92,39 @@ def _decision_snapshots_for_records(
     }
 
 
+_PORTFOLIO_FX_NOT_PROVIDED = object()
+
+
 def load_portfolio_context(
     *,
     data_config: str,
     market: str,
     account: str | None,
-    ttl_sec: int,
     base: Path,
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
     runtime_config: dict | None = None,
     portfolio_source: str | None = None,
-    exchange_rate_observation: Mapping | None = None,
+    exchange_rate_observation: Mapping | None | object = _PORTFOLIO_FX_NOT_PROVIDED,
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
     try:
         ctx = load_account_portfolio_context(
             market=market,
             account=account,
-            ttl_sec=ttl_sec,
             state_dir=state_dir,
             log=log,
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
-            fetch_futu_portfolio_context_fn=(
-                (lambda **kwargs: fetch_futu_portfolio_context(
-                    **kwargs, exchange_rate_observation=exchange_rate_observation,
-                )) if exchange_rate_observation is not None else fetch_futu_portfolio_context
-            ),
-            is_fresh_fn=is_fresh,
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            exchange_rate_cache_path=(shared_state_dir or state_dir) / "rate_cache.json",
+            **({"exchange_rate_observation": exchange_rate_observation} if exchange_rate_observation is not _PORTFOLIO_FX_NOT_PROVIDED else {}),
             load_json_fn=load_cached_json,
         )
-        snap = adapt_holdings_context(ctx)
-        _persist_source_snapshot(base, snap)
+        if isinstance(ctx.get("cash_by_currency"), dict) and isinstance(ctx.get("stocks_by_symbol"), dict):
+            snap = adapt_holdings_context(ctx)
+            _persist_source_snapshot(base, snap)
         return ctx
     except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
@@ -425,7 +424,6 @@ def build_pipeline_context(
 
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
-    ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if is_scheduled else 60) or 0)
     direct_fx: Mapping | None = None
     if prepared_portfolio_context_manifest is None and prepared_option_positions_context_manifest is None:
         try:
@@ -464,7 +462,6 @@ def build_pipeline_context(
             data_config=str(data_config),
             market=str(broker),
             account=(str(account) if account else None),
-            ttl_sec=ttl_port_ctx,
             state_dir=state_dir,
             shared_state_dir=shared_state_dir,
             log=log,

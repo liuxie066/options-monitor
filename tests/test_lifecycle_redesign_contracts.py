@@ -1295,12 +1295,13 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert context["open_positions_min"][0]["last_option_close_received_at_ms"] == frozen_model[
         "last_option_close_received_at_ms"
     ]
+    from cash_evidence_helpers import cash_portfolio, cash_config
     gaps: list[dict] = []
     funds, _ = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "cash_by_currency": {"USD": 1000},
             "as_of_utc": datetime.fromtimestamp((now_ms - 3_600_000) / 1000, tz=timezone.utc).isoformat(),
-        },
+        }),
         option_positions_context=context,
         data_gaps=gaps,
     )
@@ -1308,14 +1309,14 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     from src.application.wheel.capacity import load_shared_cash_capacity_fact
     monkeypatch.setattr(
         "src.application.wheel.capacity.fetch_futu_portfolio_context",
-        lambda **_kwargs: {
+        lambda **_kwargs: cash_portfolio({
             "capacity_authority": {"status": "available", "logical_account": "lx"},
             "cash_by_currency": {"USD": 100_000},
             "cash_balance_reliable": True,
-        },
+        }),
     )
     wheel_fact = load_shared_cash_capacity_fact(
-        repo, config={}, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
+        repo, config=cash_config(), runtime_root=tmp_path, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
     )
     assert wheel_fact["status"] == "unavailable"
     assert wheel_fact["reason"] == "option_cash_secured_unavailable"
@@ -1331,12 +1332,12 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         tz=timezone.utc,
     ).isoformat()
     refreshed_funds, _ = _build_funds(
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "cash_by_currency": {"USD": 1000},
             "as_of_utc": refreshed_at,
             "source_observed_at": refreshed_at,
             "context_source": "futu_direct",
-        },
+        }),
         option_positions_context=context,
         data_gaps=[],
     )

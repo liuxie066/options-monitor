@@ -312,3 +312,14 @@ __all__ = [
     "default_config",
     "default_config_sha256",
 ]
+
+
+def cash_snapshot_ttl_sec(config: dict[str, Any]) -> int:
+    """Resolve the single account-cash age limit from effective runtime config."""
+    runtime = config.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime must be an object")
+    value = runtime.get("portfolio_context_ttl_sec", DEFAULT_CONFIG["defaults"]["runtime"]["portfolio_context_ttl_sec"])
+    if type(value) is not int or value <= 0:
+        raise ValueError("runtime.portfolio_context_ttl_sec must be a positive integer")
+    return value
