@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1100 (`src`: 542, `domain`: 88, `scripts`: 14, `tests`: 456)
-- Internal import edges: 8206 total, 3495 production/script edges excluding tests
+- Internal import edges: 8206 total, 3494 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|589| domain
+  application -->|588| domain
   application -->|4| domain_services
   application -->|170| infrastructure
   application -->|53| storage
@@ -47,7 +47,7 @@ flowchart LR
   scripts -->|2| infrastructure
   storage -->|1| domain
   tests -->|3597| application
-  tests -->|462| domain
+  tests -->|463| domain
   tests -->|2| domain_services
   tests -->|241| infrastructure
   tests -->|261| interfaces
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 589 |
+| application | domain | 588 |
 | application | infrastructure | 170 |
 | interfaces | application | 167 |
 | application | storage | 53 |
@@ -80,7 +80,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | tests | application | 3597 |
-| tests | domain | 462 |
+| tests | domain | 463 |
 | tests | interfaces | 261 |
 | tests | infrastructure | 241 |
 | tests | scripts | 28 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 252 |
+| src.application | domain.domain | 251 |
 | src.application.ledger | domain.domain | 131 |
 | src.interfaces | src.application | 130 |
 | src.application | src.infrastructure | 121 |
@@ -187,8 +187,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.trade_contract_identity | 68 |
 | src.infrastructure.io_utils | 57 |
 | domain.domain.ledger.position_fields | 53 |
-| domain.domain.decision_state_fingerprint | 53 |
 | src.application.account_config | 52 |
+| domain.domain.decision_state_fingerprint | 52 |
 | domain.domain.option_position_identity | 50 |
 | src.application.runtime_paths | 30 |
 | domain.domain.ledger.events | 30 |
