@@ -1902,6 +1902,42 @@ def test_polled_settlement_generation_drift_writes_no_evidence(
     assert repo.list_trade_lifecycle_notifications() == []
 
 
+def test_missing_evidence_review_writes_only_proven_settlement_deadline(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    summaries = []
+
+    def record_advance(_repo, **kwargs):
+        summaries.append(kwargs["derived_summary"])
+        return {"status": "updated"}
+
+    monkeypatch.setattr(reconciliation, "advance_lifecycle_case_state", record_advance)
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {},
+    )
+    for policy_hash, expected_deadline in ((None, None), ("2" * 64, 200)):
+        result = reconciliation._reconcile_deadline_without_effective_pairing(
+            object(),
+            lifecycle_case={"case_id": "case-nvda"},
+            read_model={
+                "lifecycle_evidence_status": "missing",
+                "reason_state": "needs_review",
+                "pending_until_ms": 200,
+                "timing_policy_hash": policy_hash,
+                "lifecycle_generation_token": "generation",
+            },
+            now_ms=201,
+            apply_changes=True,
+        )
+        assert result is not None
+        assert summaries[-1]["settlement_deadline_ms"] == expected_deadline
+        assert summaries[-1]["timing_policy_hash"] == policy_hash
+
+
 def test_due_reconciliation_skips_superseded_legacy_empty_case() -> None:
     class _LegacyOnlyRepo:
         def list_trade_lifecycle_cases(

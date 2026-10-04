@@ -446,6 +446,7 @@ def _pending_lifecycle_case(*, contracts: int = 1) -> tuple[dict, dict]:
 
 def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None:
     lifecycle_case, read_model = _pending_lifecycle_case()
+    read_model["timing_policy_hash"] = "2" * 64
     dataset, state = _position_dataset(
         snapshot=_snapshot(qty=0),
         lifecycle_cases=[lifecycle_case],
@@ -463,6 +464,20 @@ def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None
         "expected_lifecycle_pending_count": 1,
     }
     assert state["position_mismatches"] == {}
+
+
+def test_position_lifecycle_unbound_review_wait_does_not_cover_mismatch() -> None:
+    lifecycle_case, read_model = _pending_lifecycle_case()
+    dataset, _state = _position_dataset(
+        snapshot=_snapshot(qty=0),
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+        day_end_strict=True,
+    )
+
+    assert dataset["status"] == "untrusted"
+    assert dataset["checks"][1]["reason_code"] != "POSITIONS_PENDING_LIFECYCLE"
+    assert dataset["checks"][1]["observed"]["mismatch_count"] == 1
 
 
 def test_contract_terms_drift_precedes_active_lifecycle_coverage() -> None:
@@ -739,6 +754,38 @@ def test_lifecycle_deadline_handles_friday_weekend_and_holiday() -> None:
         trading_days=trading_days,
         first_deep_reconcile_at=first_deep,
     ) == datetime(2026, 7, 7, 15, tzinfo=timezone.utc)
+
+
+
+def test_lifecycle_quality_does_not_use_unbound_review_wait_as_deadline() -> None:
+    case = {
+        "case_id": "unbound-us",
+        "account": "lx",
+        "market": "US",
+        "symbol": "NVDA",
+        "status": "waiting_settlement_evidence",
+    }
+    review_until_ms = int(datetime(2026, 7, 7, tzinfo=timezone.utc).timestamp() * 1000)
+    for now_ms in (review_until_ms - 1, review_until_ms + 1):
+        now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        datasets = build_lifecycle_datasets(
+            cases=[case],
+            evidence_rows=[],
+            account="lx",
+            market="us",
+            observed_at_utc=now.isoformat(),
+            now=now,
+            trading_days=[],
+            first_deep_by_case={},
+            read_models_by_case={
+                "unbound-us": {
+                    "pending_until_ms": review_until_ms,
+                    "timing_policy_hash": None,
+                }
+            },
+        )
+        assert datasets[0]["status"] == "unavailable"
+        assert datasets[0]["checks"][0]["reason_code"] == "LIFECYCLE_DEADLINE_UNAVAILABLE"
 
 
 def test_regression_eleven_overdue_lifecycle_cases_are_classified_stale() -> None:
