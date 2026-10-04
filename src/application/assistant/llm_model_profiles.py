@@ -16,7 +16,6 @@ from src.application.llm_provider_registry import (
 from src.application.settings import build_effective_env
 from src.application.secret_store import SecretProvider, resolve_secret_status
 from src.infrastructure.secret_store.factory import build_secret_provider
-from src.application.write_contract import attach_write_contract
 
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -346,37 +345,6 @@ def switch_active_model_profile(config_doc: dict[str, Any], *, name: str) -> tup
     return out, profile
 
 
-def write_model_config_update(
-    *,
-    config_path: str | Path,
-    before_doc: dict[str, Any],
-    after_doc: dict[str, Any],
-    apply: bool,
-    action: str,
-    payload: dict[str, Any],
-    repo_root: Path | None = None,
-    expected_source_sha256: str | None = None,
-) -> dict[str, Any]:
-    from src.application.config_features import publish_feature_document
-    from src.application.config_authoring_transaction import config_source_sha256
-    from src.application.config_yaml import load_yaml_config_file
-    path = Path(config_path).expanduser().resolve()
-    source_sha = config_source_sha256(path)
-    if load_yaml_config_file(path) != before_doc:
-        raise AgentToolError(code="STALE_PREVIEW", message="model authoring source changed before publication")
-    transaction = publish_feature_document(
-        repo_root=repo_root or Path(__file__).resolve().parents[3], config_path=path,
-        config_doc=after_doc, apply=apply, expected_source_sha256=expected_source_sha256 or source_sha,
-    )
-    return attach_write_contract(
-        {"ok": True, "action": action, "config_yaml_path": str(path),
-         "changed": before_doc != after_doc, **payload, **transaction},
-        dry_run=not apply, write_applied=apply, backup_path=transaction["backup_path"],
-        audit_id=transaction["audit_id"], generate_audit_id=False,
-        rollback_hint=f"restore {transaction['backup_path']} and rebuild the generation" if apply else None,
-    )
-
-
 def model_catalog() -> dict[str, Any]:
     return provider_catalog_payload()
 
@@ -477,5 +445,4 @@ __all__ = [
     "parse_model_profiles",
     "resolve_authoring_assistant_config",
     "switch_active_model_profile",
-    "write_model_config_update",
 ]

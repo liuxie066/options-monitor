@@ -13,6 +13,7 @@ from typing import Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
+from src.interfaces.cli.command_environment import command_environment
 from src.interfaces.cli.setup_ops import _default_setup_dir, run_setup_init
 
 Run = Callable[[list[str]], int]
@@ -28,6 +29,11 @@ def terminal_run(run: Run, argv: list[str]) -> int:
             return int(exc.code or 0)
         print(exc.code)
         return 2
+
+
+def _instance_run(run: Run, argv: list[str], *, source: Path, repo_root: Path) -> int:
+    with command_environment([*argv, "--runtime-root", str(source.parent)], repo_root=repo_root):
+        return terminal_run(run, argv)
 
 
 def _yes(prompt: str, input_fn: Input) -> bool:
@@ -191,11 +197,11 @@ def manage_secrets(run: Run, *, input_fn: Input = input) -> int:
 def daily_management(run: Run, *, input_fn: Input = input,
                      repo_base_fn: Callable[[], Path] = repo_base, source: Path | None = None) -> int:
     caller = run
-    run = lambda argv: terminal_run(caller, argv)
     source = source or resolve_yaml_config_path(None, repo_root=repo_base_fn())
     if not source.is_file():
         print("尚未找到 config.yaml，请先运行 om setup init。")
         return 2
+    run = lambda argv: _instance_run(caller, argv, source=source, repo_root=repo_base_fn())
     while True:
         print(f"\n日常管理 · {source}\n  1  查看结果与状态\n  2  账户与标的\n"
               "  3  通知与 Bot\n  4  策略与全局持仓风险\n  5  运行与维护\n  0  返回")
@@ -208,9 +214,7 @@ def daily_management(run: Run, *, input_fn: Input = input,
             if choice == "1":
                 task = _choose("查看", ("status", "brief"), input_fn, "status")
                 if task == "brief":
-                    from src.interfaces.cli.command_environment import command_environment
-                    with command_environment(["daily-brief", "--runtime-root", str(source.parent)], repo_root=repo_base_fn()):
-                        run(["daily-brief", "latest"])
+                    run(["daily-brief", "latest"])
                 else:
                     market = _market(document, input_fn)
                     run(["status", "--config-path", str(source.parent / f"config.{market}.json")])
@@ -267,12 +271,12 @@ def first_install(
     default_dir_fn: Callable[[], Path] = _default_setup_dir,
 ) -> int:
     caller = run
-    run = lambda argv: terminal_run(caller, argv)
     if args.output_dir:
         source = Path(args.output_dir).expanduser().resolve() / "config.yaml"
     else:
         current = resolve_yaml_config_path(None, repo_root=repo_base_fn())
         source = current if current.is_file() else default_dir_fn() / "config.yaml"
+    run = lambda argv: _instance_run(caller, argv, source=source, repo_root=repo_base_fn())
     print(f"配置与运行目录：{source.parent}")
     print("富途 OpenAPI/OpenD：请先安装并登录 OpenD；OM 不负责启动 OpenD。\n"
           "使用 OpenD 账户列表中的数字 ID；真实账户选 REAL，测试账户选 SIMULATE。")

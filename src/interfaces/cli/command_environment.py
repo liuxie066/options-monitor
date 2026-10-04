@@ -52,20 +52,23 @@ def command_environment(
         if candidate.is_file():
             env_file = str(candidate)
     try:
-        if env_file or allow_discovery:
-            bootstrap_process_env(
-                repo_root=repo_root, env_file=env_file,
-                include_local_env_file=allow_discovery and not root,
-            )
-        # The selected instance takes precedence over an env-file's runtime pointer.
-        if root:
-            os.environ["OM_RUNTIME_ROOT"] = str(Path(root).expanduser().resolve())
-        changed = {key for key in before.keys() | os.environ.keys() if before.get(key) != os.environ.get(key)}
+        try:
+            if env_file or allow_discovery:
+                bootstrap_process_env(
+                    repo_root=repo_root, env_file=env_file,
+                    include_local_env_file=allow_discovery and not root,
+                )
+            # The selected instance takes precedence over an env-file's runtime pointer.
+            if root:
+                os.environ["OM_RUNTIME_ROOT"] = str(Path(root).expanduser().resolve())
+        finally:
+            # Bootstrap can fail after setting some keys; those also belong to us.
+            changed = {key for key in before.keys() | os.environ.keys() if before.get(key) != os.environ.get(key)}
         with runtime_root_scope(root, source=source):
             yield
     finally:
         # Restore only our bootstrap keys; unrelated command state is not ours.
-        for key in locals().get("changed", set()):
+        for key in changed:
             if key in before:
                 os.environ[key] = before[key]
             else:

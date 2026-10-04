@@ -14,7 +14,7 @@ from src.application.account_config import (
 )
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import configured_markets, normalize_config_market
+from src.application.config_primitives import configured_markets, normalize_config_market, normalize_trd_env
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path, resolve_yaml_runtime_config
 from src.application.write_contract import attach_write_contract
 
@@ -448,13 +448,6 @@ def _remove_explicit_account_references(config_doc: dict[str, Any], *, account: 
             for item in normalize_accounts(notifications.get("cash_footer_accounts"), fallback=())
             if item != account
         ]
-
-
-def normalize_trd_env(value: Any) -> str:
-    environment = str(value or "").strip().upper()
-    if environment not in {"REAL", "SIMULATE"}:
-        raise AgentToolError(code="INPUT_ERROR", message="trd_env must be REAL or SIMULATE")
-    return environment
 
 
 def _prepare_market(config_doc: dict[str, Any], *, market: str, symbols: list[str] | None,

@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from src.application.account_config import normalize_account_label, parse_lossless_integer
-from src.application.config_yaml_accounts import normalize_trd_env
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
+from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml, normalize_trd_env
 from src.application.config_primitives import resolve_config_path as _resolve_path
 from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
 from src.application.config_yaml_symbols import symbol_strategy_override
 from src.application.config_authoring_transaction import _prepare_generation
 from src.application.runtime_paths import read_runtime_root_record
+from src.application.symbol_calibration import require_calibrated_symbol
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
 
@@ -68,7 +68,13 @@ def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, market: str) 
         )
     seen: set[str] = set()
     deduped: list[str] = []
-    for symbol in values:
+    for raw_symbol in values:
+        calibrated = require_calibrated_symbol(
+            raw_symbol, error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        )
+        if str(calibrated.market).lower() != market:
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol belongs to {calibrated.market}, not {market}")
+        symbol = str(calibrated.canonical_symbol)
         if symbol in seen:
             continue
         seen.add(symbol)
@@ -87,7 +93,9 @@ def _normalize_symbol_policies(
         raise AgentToolError(code="INPUT_ERROR", message="symbol policies must be keyed by symbol")
     normalized: dict[str, dict[str, Any]] = {}
     for raw_symbol, fields in raw.items():
-        symbol = str(raw_symbol or "").strip().upper()
+        symbol = str(require_calibrated_symbol(
+            raw_symbol, error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        ).canonical_symbol)
         if symbol in normalized:
             raise AgentToolError(code="INPUT_ERROR", message=f"duplicate symbol policy: {symbol}")
         if not isinstance(fields, dict):
@@ -146,6 +154,7 @@ def _starter_yaml_payload(
     return {
         "accounts": accounts,
         "markets": markets,
+        "symbol_defaults": {"fetch": {"host": futu_host, "port": futu_port}},
         "notifications": {"enabled": False},
         "assistant": {
             "enabled": False,

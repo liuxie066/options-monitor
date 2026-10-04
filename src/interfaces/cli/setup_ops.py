@@ -9,11 +9,12 @@ from typing import Any, Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.setup import run_setup_check
-from src.application.config_yaml_init import _normalize_markets, init_yaml_config
+from src.application.config_yaml_init import _normalize_markets, _normalize_symbols, init_yaml_config
 from src.application.config_yaml_init import create_starter_config
 from src.application.platform_profile import current_platform_profile
 from src.application.runtime_paths import read_runtime_root_record, runtime_root_record_path
 from src.application.settings import build_effective_env
+from src.application.symbol_calibration import canonical_symbol_for_write
 
 
 def add_symbol_policy_arguments(parser: argparse.ArgumentParser) -> None:
@@ -36,6 +37,9 @@ def _keyed_symbol_values(values: list[str] | None, *, option: str) -> dict[str, 
         symbol, value = symbol.strip().upper(), value.strip()
         if not separator or not symbol or not value:
             raise AgentToolError(code="INPUT_ERROR", message=f"{option} expects SYMBOL=VALUE")
+        symbol = canonical_symbol_for_write(
+            symbol, error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        )
         if symbol in result:
             raise AgentToolError(code="INPUT_ERROR", message=f"duplicate {option} for {symbol}")
         result[symbol] = value
@@ -55,8 +59,8 @@ def symbol_policies_from_args(
         for name in ("symbol_strategy", "csp_min_strike", "csp_max_strike", "cc_min_strike", "cc_max_strike")
     }
     ordered = list(dict.fromkeys(
-        str(symbol).strip().upper()
-        for market in markets for symbol in (symbols[market] or []) if str(symbol).strip()
+        symbol for market in markets if symbols[market]
+        for symbol in _normalize_symbols(symbols[market], market=market)
     ))
     unknown = set().union(*(set(items) for items in fields.values())) - set(ordered)
     if unknown:

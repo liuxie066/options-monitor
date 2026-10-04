@@ -64,6 +64,45 @@ def test_environment_restored_after_exception_and_explicit_file_wins(tmp_path, m
     assert os.environ["OM_ENV_FILE"] == str(explicit)
 
 
+def test_partial_bootstrap_failure_restores_recipient_and_next_instance(tmp_path, monkeypatch):
+    import os
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "caller")
+    invalid = tmp_path / "invalid.env"
+    invalid.write_bytes(b"OM_FEISHU_BOT_USER_OPEN_ID=from-a\nINVALID=bad\x00value\n")
+    with pytest.raises(ValueError, match="null byte"):
+        with command_environment(["status", "--env-file", str(invalid)], repo_root=tmp_path):
+            pytest.fail("invalid bootstrap must not enter command")
+    assert os.environ["OM_FEISHU_BOT_USER_OPEN_ID"] == "caller"
+    assert "OM_ENV_FILE" not in os.environ
+    with command_environment(["status", "--runtime-root", str(tmp_path / "b")], repo_root=tmp_path):
+        assert os.environ["OM_FEISHU_BOT_USER_OPEN_ID"] == "caller"
+        assert resolve_runtime_root(repo_root=tmp_path).runtime_root == tmp_path / "b"
+
+
+@pytest.mark.parametrize("journey", ["first", "daily"])
+def test_journey_selected_instance_overrides_caller_runtime_for_doctor_and_scan(source, tmp_path, monkeypatch, journey):
+    import os
+    old = tmp_path / "old-instance"
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(old))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    seen = []
+    def dispatch(argv):
+        # Exercise the same nested scope as the public dispatcher without I/O.
+        with command_environment(argv, repo_root=REPO):
+            seen.append((argv[0], resolve_runtime_root(repo_root=REPO).runtime_root))
+        return 0
+    if journey == "first":
+        args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
+        rc = first_install(args, dispatch, input_fn=_answers("y", "y", "n", "n", "y", "n", "n"))
+    else:
+        rc = daily_management(dispatch, source=source, input_fn=_answers("5", "doctor", "y", "5", "run", "y", "n", "0"))
+    assert rc == 0
+    assert seen == [("doctor", source.parent), ("run", source.parent)]
+    assert os.environ["OM_RUNTIME_ROOT"] == str(old)
+
+
 def test_menu_symbol_edit_preserves_other_bounds_and_publishes(source):
     assert manage_symbols(cli.main, source, input_fn=_answers("edit", "NVDA", "", "", "120", "", "", "", "y")) == 0
     document = yaml.safe_load(source.read_text())

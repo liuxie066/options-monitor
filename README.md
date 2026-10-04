@@ -172,15 +172,15 @@ om config explain --source yaml --market us \
 
 ```bash
 OM_CONFIG_DIR="$(cat "$HOME/.config/options-monitor/runtime-root")"
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send --force
 ```
 
-`--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
+`--force` 让这次手动扫描跳过计划时段限制。`--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
 
 示例中的 `lx` 换成初始化时选择的账户标签。检查结果后，可继续手工扫描：
 
 ```bash
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --force
 ```
 
 计划内扫描和普通通知使用 guarded scheduler：
@@ -372,8 +372,9 @@ om-agent run --tool healthcheck \
 |---|---|
 | 人工配置 | `config.yaml` |
 | US/HK 运行快照 | `config.us.json` / `config.hk.json` |
-| Assistant 运行快照 | 本地 init 为 `config.assistant.json`；服务 profile 通常使用 `resolved/config.assistant.json` |
-| Secrets / 写入开关 | env-file |
+| Bot 运行快照 | `om setup init` 默认生成 `<runtime_root>/resolved/config.assistant.json`；高级命令可显式指定输出位置 |
+| 普通设置 / 写入开关 | `options-monitor.env` 或显式选择的 env-file |
+| Secrets | macOS Keychain / Linux systemd 加密凭证，使用 `om secrets` 管理，见 [密钥存储](docs/SECRET_STORAGE.md) |
 | 期权事实 | `<runtime_root>/output_shared/state/option_positions.sqlite3` |
 | 单次运行 | `<runtime_root>/output_runs/<run_id>/` |
 | 共享状态与报告 | `<runtime_root>/output_shared/` |
@@ -409,6 +410,8 @@ Feishu 在本项目中的角色：
 - 删除 runtime outputs、state、cache、SQLite 或历史证据。
 
 ## 部署与运维
+
+运行 `om` →「日常管理」→「运行与维护」→「service」，可以预览并确认安装、启动或停止服务。安装定义与启动分开确认；也可直接使用 `om service install/start/stop`，默认只预览。平台要求和确认参数见 [安装指南](docs/GETTING_STARTED.md#6-可选长期运行服务)。
 
 代码目录与运行目录必须分离。典型 Linux 布局：
 

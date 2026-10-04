@@ -26,13 +26,13 @@ from src.application.assistant.llm_model_profiles import (
     model_catalog,
     parse_model_profiles,
     switch_active_model_profile,
-    write_model_config_update,
 )
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
+from src.application.config_features import write_model_config_update
 
 
 def _dumps(payload: dict[str, Any]) -> str:

@@ -18,6 +18,82 @@ from src.interfaces.cli.symbols import main as symbols_main
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("market,symbol,added", [("us", "NVDA", "AAPL"), ("hk", "0700.HK", "0005.HK")])
+@pytest.mark.parametrize("environment", ["REAL", "SIMULATE"])
+def test_setup_selected_endpoint_reaches_quote_route_and_future_symbols(tmp_path, market, symbol, added, environment):
+    from src.application.account_config import resolve_account_futu_settings
+    from src.application.futu_quote_routing import resolve_futu_quote_route
+
+    root = tmp_path / "runtime"
+    args = parse_args(["setup", "init", "--output-dir", str(root), "--market", market,
+                       f"--{market}-symbol", symbol, "--symbol-strategy", f"{symbol}=csp",
+                       "--csp-max-strike", f"{symbol}=100", "--futu-acc-id", "12345",
+                       "--futu-host", "127.0.0.2", "--futu-port", "22222", "--trd-env", environment, "--apply"])
+    _, applied = run_setup_init(args, repo_base_fn=lambda: REPO, input_is_tty=lambda: False,
+                                user_home=tmp_path / "home")
+    assert applied
+    source = root / "config.yaml"
+    assert symbols_main(["add", added, "--market", market, "--strategy", "csp", "--csp-max-strike", "100",
+                         "--config-yaml", str(source), "--apply"]) == 0
+    runtime = json.loads((root / f"config.{market}.json").read_text())
+    account = resolve_account_futu_settings(runtime, account="lx")
+    route = resolve_futu_quote_route(runtime)
+    assert (account["host"], account["port"], account["trd_env"]) == ("127.0.0.2", 22222, environment)
+    assert (route.host, route.port) == ("127.0.0.2", 22222)
+    assert len(route.members) == 2
+    assert all((item["fetch"]["host"], item["fetch"]["port"]) == ("127.0.0.2", 22222) for item in runtime["symbols"])
+
+
+@pytest.mark.parametrize("raw,canonical", [("700", "0700.HK"), ("HK.00700", "0700.HK"), ("POP", "9992.HK")])
+def test_setup_alias_policy_remains_manageable_through_daily_symbol_commands(tmp_path, raw, canonical):
+    root = tmp_path / "runtime"
+    args = parse_args(["setup", "init", "--output-dir", str(root), "--market", "hk",
+                       "--hk-symbol", raw, "--hk-symbol", "0005.HK",
+                       "--symbol-strategy", f"{canonical}=csp", "--csp-max-strike", f"{raw}=100",
+                       "--symbol-strategy", "0005.HK=cc", "--cc-min-strike", "0005.HK=50",
+                       "--futu-acc-id", "12345", "--trd-env", "REAL", "--apply"])
+    _, applied = run_setup_init(args, repo_base_fn=lambda: REPO, input_is_tty=lambda: False,
+                                user_home=tmp_path / "home")
+    assert applied
+    source = root / "config.yaml"
+    document = yaml.safe_load(source.read_text())
+    assert document["markets"]["hk"]["symbols"] == [canonical, "0005.HK"]
+    assert document["markets"]["hk"]["overrides"][canonical]["sell_put"]["max_strike"] == 100
+    scope = ["--market", "hk", "--config-yaml", str(source)]
+    assert symbols_main(["edit", raw, "--set", "sell_put.max_strike=90", *scope, "--apply"]) == 0
+    with pytest.raises(SystemExit, match="already exists"):
+        symbols_main(["add", canonical, "--strategy", "csp", "--csp-max-strike", "100", *scope, "--apply"])
+    assert symbols_main(["rm", raw, *scope, "--apply"]) == 0
+    assert yaml.safe_load(source.read_text())["markets"]["hk"]["symbols"] == ["0005.HK"]
+
+
+@pytest.mark.parametrize("symbols,policies,error", [
+    (["NVDA"], {"NVDA": {"strategy": "csp", "csp_max_strike": 100}}, "belongs to US, not hk"),
+    (["700"], {"700": {"strategy": "csp", "csp_max_strike": 100},
+               "0700.HK": {"strategy": "cc", "cc_min_strike": 200}}, "duplicate symbol policy"),
+])
+def test_starter_rejects_wrong_market_or_conflicting_alias_policies_before_write(tmp_path, symbols, policies, error):
+    with pytest.raises(AgentToolError, match=error):
+        init_yaml_config(repo_root=REPO, output_config_yaml_path=tmp_path / "config.yaml", markets=["hk"],
+                         hk_symbols=symbols, symbol_policies=policies, futu_acc_id="12345")
+    assert not list(tmp_path.iterdir())
+
+
+def test_new_market_account_canonicalizes_initial_symbols_and_policies(tmp_path):
+    from src.application.futu_quote_routing import resolve_futu_quote_route
+
+    source = _source(tmp_path)
+    result = mutate_yaml_account_config(repo_root=REPO, config_path=source, action="add", market="hk",
+                                        account_label="lx", symbols=["700", "HK.00700"],
+                                        symbol_policies={"700": {"strategy": "cc", "cc_min_strike": 400}}, apply=True)
+    assert result["write_applied"] is True
+    document = yaml.safe_load(source.read_text())
+    assert document["markets"]["hk"]["symbols"] == ["0700.HK"]
+    assert document["markets"]["hk"]["overrides"]["0700.HK"]["covered_call"]["min_strike"] == 400
+    route = resolve_futu_quote_route(json.loads((tmp_path / "config.hk.json").read_text()))
+    assert (route.host, route.port) == ("127.0.0.2", 11112)
+
+
 def _source(tmp_path: Path) -> Path:
     source = tmp_path / "config.yaml"
     init_yaml_config(repo_root=REPO, output_config_yaml_path=source, runtime_output_dir=tmp_path,
