@@ -142,7 +142,7 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
         calls.append(kwargs)
         return {"tool_name": "healthcheck", "ok": True, "data": {"status": "pass"}}
 
-    monkeypatch.setattr(cli, "bootstrap_process_env", _bootstrap_process_env)
+    monkeypatch.setattr("src.interfaces.cli.command_environment.bootstrap_process_env", _bootstrap_process_env)
     monkeypatch.setattr(cli, "run_healthcheck", _healthcheck)
 
     rc = cli.main(["healthcheck", "--config-key", "us", "--env-file", str(env_file)])
@@ -164,7 +164,7 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
     assert bootstrap_calls == [{
         "repo_root": cli.repo_base(),
         "env_file": str(env_file),
-        "include_local_env_file": True,
+        "include_local_env_file": False,
     }]
 
 
@@ -494,13 +494,13 @@ assistant:
     assert "rebuild_hint" in data
 
 
-def test_no_local_env_file_flag_prevents_process_env_bootstrap() -> None:
-    import src.interfaces.cli.main as cli
-
-    assert cli._should_bootstrap_process_env(["assistant", "llm-check"]) is True
-    assert cli._should_bootstrap_process_env(["healthcheck", "--env-file", "prod.env"]) is False
-    assert cli._should_bootstrap_process_env(["assistant", "llm-check", "--no-local-env-file"]) is False
-    assert cli._should_bootstrap_process_env(["support", "bundle", "--no-local-env-file"]) is False
+def test_no_local_env_file_flag_prevents_process_env_bootstrap(monkeypatch, tmp_path) -> None:
+    from src.interfaces.cli.command_environment import command_environment
+    calls = []
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.setattr("src.interfaces.cli.command_environment.bootstrap_process_env", lambda **kwargs: calls.append(kwargs))
+    with command_environment(["assistant", "llm-check", "--no-local-env-file"], repo_root=tmp_path, discover_local=True):
+        assert calls == []
 
 
 def test_assistant_commands_command_renders_catalog(capsys) -> None:
@@ -711,7 +711,7 @@ def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path)
         calls.append((name, payload))
         return _runtime_status_envelope()
 
-    monkeypatch.setattr(cli, "bootstrap_process_env", _bootstrap_process_env)
+    monkeypatch.setattr("src.interfaces.cli.command_environment.bootstrap_process_env", _bootstrap_process_env)
     monkeypatch.setattr(cli, "execute_tool", _execute_tool)
 
     rc = cli.main(["status", "--config-key", "us", "--env-file", str(env_file), "--json"])
@@ -723,7 +723,7 @@ def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path)
     assert bootstrap_calls == [{
         "repo_root": cli.repo_base(),
         "env_file": str(env_file),
-        "include_local_env_file": True,
+        "include_local_env_file": False,
     }]
 
 
@@ -1484,6 +1484,8 @@ def test_config_symbol_set_delegates_to_yaml_authoring(monkeypatch, capsys, tmp_
         "covered_call_enabled": True,
         "covered_call_min_strike": 85.0,
         "sell_put_enabled": False,
+        "sell_put_max_strike": None,
+        "expected_source_sha256": None,
         "combo_yield_enabled": True,
         "rebuild_runtime_root": str(runtime_root),
         "apply": True,

@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import stat
+from typing import Iterator
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.settings import build_effective_env
+
+
+_command_runtime_root: ContextVar[RuntimeRootResolution | None] = ContextVar("command_runtime_root", default=None)
+
+
+@contextmanager
+def runtime_root_scope(runtime_root: str | Path | None, *, source: str = "argument") -> Iterator[None]:
+    """Bind nested consumers to the instance explicitly selected by the caller."""
+    if runtime_root is None:
+        yield
+        return
+    token = _command_runtime_root.set(RuntimeRootResolution(Path(runtime_root).expanduser().resolve(), source))
+    try:
+        yield
+    finally:
+        _command_runtime_root.reset(token)
 
 
 @dataclass(frozen=True)
@@ -30,6 +49,10 @@ def resolve_runtime_root(
     """
     if runtime_root is not None and str(runtime_root).strip():
         return RuntimeRootResolution(Path(runtime_root).expanduser().resolve(), "argument")
+
+    scoped_root = _command_runtime_root.get()
+    if scoped_root is not None:
+        return scoped_root
 
     env = build_effective_env(environ=environ).values
     env_root = str(env.get("OM_RUNTIME_ROOT") or "").strip()
@@ -77,4 +100,4 @@ def read_runtime_root_record(record: Path, *, require_config: bool = True) -> Pa
         ) from exc
 
 
-__all__ = ["RuntimeRootResolution", "resolve_runtime_root", "runtime_root_record_path", "read_runtime_root_record"]
+__all__ = ["RuntimeRootResolution", "resolve_runtime_root", "runtime_root_scope", "runtime_root_record_path", "read_runtime_root_record"]

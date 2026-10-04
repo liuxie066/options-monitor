@@ -10,12 +10,12 @@ def command_guide() -> str:
     return """Options Monitor (om)
 
 首次安装
-  om setup init                       选择市场、账户、标的、策略和行权价；预览后确认
+  om setup init                       配置一个账户及标的，再逐项选择通知、Bot 和常驻服务
   富途 OpenAPI/OpenD                  安装并登录 OpenD；用 om accounts edit 核对端点，om doctor 检查连接
   om settings doctor --format text     检查普通设置
   om secrets status --format text      查看脱敏的凭证状态；用 om secrets set 录入
   通知通道（需要通知时）               选择 Feishu App 或 WeChat ClawBot；用 om channel status 检查
-  Bot LLM（需要 Bot 问答时）           用 om assistant model catalog 选模型、录入凭证并检查
+  Bot LLM（需要 Bot 问答时）           om bot configure；终端隐藏录入密钥
   om setup check --format text         检查离线配置和安装条件；不验证外部连接或投递
 
 日常管理（按任务选择）
@@ -23,7 +23,12 @@ def command_guide() -> str:
   om daily-brief latest              查看已有决策简报
   om symbols list                    查看单市场标的；双市场时指定 --market
   om symbols add --help              新增标的；编辑和删除见 om symbols --help
-  om accounts edit --help            调整账户
+  om accounts list                   查看账户映射；新增、编辑、删除见 om accounts --help
+  om channel configure               配置或关闭通知通道
+  om bot configure                   配置或关闭 Bot；模型管理用 om bot model
+  om holdings configure              开启全局持仓风险中的可选 Holdings 来源
+  om close-advice configure           开关平仓建议，保留历史结果
+  om wheel --help                    Wheel 激活与策略确认；Combo 用 symbols edit 的高级字段
   om doctor --help                   排查运行问题
   om run --help                      手动运行任务
   om service --help                  管理服务
@@ -35,78 +40,35 @@ def command_guide() -> str:
   om help all                        查看全部顶层命令
 
 结构化工具给外部 Agent/脚本使用：om-agent spec；om-agent run --tool <name> --input-json '<json>'。
-om assistant / om bot 是 OM 自身的消息与 Bot 功能，不是 Tool Gateway。
+om bot 是 OM 自身的消息与问答功能；assistant 保留兼容。Feishu 接入用 om channel feishu，inbound 保留兼容。
 
 在交互式终端直接运行 om，可按首次安装或日常管理选择任务；写入操作遵循各命令的预览和确认要求。
 """
 
 
 def interactive_home(run: Callable[[list[str]], int], *, input_fn: Callable[[str], str] = input) -> int:
-    first_run_guides = {
-        "2": "富途 OpenAPI/OpenD：按富途官方步骤安装并登录 OpenD；用 om accounts edit --help 核对账户 ID、host 和 port；按市场运行 om doctor --config-key us 或 om doctor --config-key hk 检查连接。OM 不负责启动 OpenD。\n",
-        "5": "通知通道：需要通知时选择 Feishu App 或 WeChat ClawBot。WeChat 用 om channel wechat-clawbot connect 绑定；Feishu 配置见 CONFIGURATION_GUIDE.md，密钥用 om secrets set 录入。用 om channel status 检查本地状态；它不证明消息已送达。\n",
-        "6": "Bot LLM：需要 Bot 问答时，先运行 om assistant model catalog，再分别查看 om assistant model add --help 和 om assistant model use --help；用 om secrets set 录入对应 API key，最后运行 om assistant model check --active；检查不调用模型。\n",
-    }
-    sections = {
-        "1": ("首次安装", {
-            "1": ("初始化配置（预览后确认）", ["setup", "init"]),
-            "2": ("接入富途 OpenAPI/OpenD（步骤）", None),
-            "3": ("检查普通设置（只读）", ["settings", "doctor", "--format", "text"]),
-            "4": ("查看凭证状态（脱敏）", ["secrets", "status", "--format", "text"]),
-            "5": ("配置通知通道（需要通知时）", None),
-            "6": ("配置 Bot LLM（需要 Bot 问答时）", None),
-            "7": ("检查离线配置和安装条件（只读）", ["setup", "check", "--format", "text"]),
-        }),
-        "2": ("日常管理", {
-            "1": ("查看运行状态", ["status"]),
-            "2": ("查看最新决策简报", ["daily-brief", "latest"]),
-            "3": ("运行诊断", ["doctor"]),
-            "4": ("查看监控标的", ["symbols", "list"]),
-        }),
-    }
-    section: str | None = None
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.journeys import daily_management
+
     while True:
-        if section is None:
-            sys.stdout.write("\nOptions Monitor\n  1  首次安装\n  2  日常管理\n  3  命令与高级功能\n  0  退出\n")
-        else:
-            title, actions = sections[section]
-            sys.stdout.write(f"\n{title}\n")
-            for key, (label, _) in actions.items():
-                sys.stdout.write(f"  {key}  {label}\n")
-            sys.stdout.write("  0  返回\n")
+        sys.stdout.write("\nOptions Monitor\n  1  首次安装或继续引导\n  2  日常管理\n  3  命令与高级功能\n  0  退出\n")
         try:
             choice = input_fn("请选择：").strip()
+            if choice == "0":
+                return 0
+            if choice == "1":
+                run(["setup", "init"])
+            elif choice == "2":
+                daily_management(run, input_fn=input_fn)
+            elif choice == "3":
+                sys.stdout.write("\n" + command_guide())
+            else:
+                sys.stdout.write("请选择菜单中的编号。\n")
+        except AgentToolError as exc:
+            sys.stdout.write(f"{exc}\n")
         except (EOFError, KeyboardInterrupt):
             sys.stdout.write("\n")
             return 0
-        if choice == "0":
-            if section is None:
-                return 0
-            section = None
-        elif section is None and choice in sections:
-            section = choice
-        elif section is None and choice == "3":
-            sys.stdout.write("\n" + command_guide())
-        elif section is not None and choice in sections[section][1]:
-            command = sections[section][1][choice][1]
-            if section == "1" and command is None:
-                sys.stdout.write("\n" + first_run_guides[choice])
-                continue
-            if command in (["status"], ["doctor"], ["symbols", "list"]):
-                try:
-                    market = input_fn("市场 [us/hk]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    sys.stdout.write("\n")
-                    return 0
-                if market not in {"us", "hk"}:
-                    sys.stdout.write("请输入 us 或 hk。\n")
-                    continue
-                option = "--market" if command[0] == "symbols" else "--config-key"
-                command = [*command, option, market]
-            sys.stdout.write("\n")
-            run(command)
-        else:
-            sys.stdout.write("请选择菜单中的编号。\n")
 
 
 def render_setup_check(data: dict[str, Any]) -> str:

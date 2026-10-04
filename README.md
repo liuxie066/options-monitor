@@ -110,13 +110,15 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup init
 ```
 
-它会询问配置目录、市场、账户标签、富途账户 ID，以及每个标的的策略和行权价边界。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。标的不能为空，也不会填入示例标的；预览实际选择，输入 `yes` 后才写入。成功时会把目录记在 `~/.config/options-monitor/runtime-root`，新终端无需再次设置 `OM_RUNTIME_ROOT`，并已生成运行快照。若富途账户 ID 留空，按命令输出使用 `om accounts edit` 预览并更新；然后检查：
+引导显示平台默认目录，依次填写市场、OpenD 地址、REAL/SIMULATE 环境、账户标签、富途账户 ID 和监控标的。首次完成一个账户，之后在日常管理中添加账户；同市场账户共享标的。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。账户 ID 和标的不能为空，也不会填入示例标的。预览实际选择，输入 `yes` 后才保存 YAML、运行快照及 `~/.config/options-monitor/runtime-root` 目录记录。
+
+通知通道、Bot LLM 和常驻服务逐项询问，可以跳过；新配置的通知与 Bot 默认关闭。密钥在终端隐藏输入。服务安装、启动分别预览确认；首次手动运行默认不发通知。重新运行 `om setup init` 可以继续可选步骤，已保存的配置保留。然后检查：
 
 ```bash
 om setup check --format text
 ```
 
-非交互预览须指定市场、标的及每个标的的策略边界，例如 `om setup init --dry-run --market us --us-symbol AAPL --symbol-strategy AAPL=csp --csp-max-strike AAPL=100 --output-dir <path>`（替换标的和价格；多个标的重复相应参数）。核对预览后将 `--dry-run` 改成 `--apply` 才写入。CC 使用 `--symbol-strategy SYMBOL=cc --cc-min-strike SYMBOL=PRICE`；两种策略都选时两个必填边界都要给。完整的初始化参数、YAML 校验与快照重建见 `om setup init --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时拒绝覆盖；中断后若留下文件，先核对冲突清单再重试。`om setup check` 默认检查当前配置中的市场，也可用 `--market us` / `--market hk` 指定；它检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。已有 `OM_RUNTIME_ROOT` 或服务显式目录仍优先于用户记录。
+脚本化初始化使用 `om setup init --help` 中的完整参数；写入需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
 
 之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Assistant 的运行快照：
 
@@ -128,7 +130,17 @@ om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --app
 
 将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`；选 CC 时须给 `--cc-min-strike`，选 both 时两项都要给。CSP 下限和 CC 上限可选，详见 `om symbols add --help`。`NVDA` 会识别为美股，`0700.HK` 会识别为港股；`--market` 可省略，若指定则必须与标的一致。只配置一个市场时，`om symbols list` 也可省略 `--market`；配置多个市场时需指定。
 
-`om help` 和 `om --help` 按“首次安装”和“日常管理”列出任务；完整顶层命令用 `om help all` 查看。首次安装从 `om setup init` 开始，还需接入富途 OpenAPI/OpenD 并检查连接；需要通知或 Bot 问答时，分别配置通知通道和 Bot LLM。普通设置、凭证与 `om setup check` 是离线检查，不证明 OpenD 登录、消息送达或模型 API 可用。具体步骤见 [首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。日常管理从 `om status`、`om daily-brief latest` 查看结果，通过 `om symbols` 和 `om accounts` 调整监控范围，按需使用 `om doctor`、`om run`、`om service` 和 `om update`。脚本化的 `om config init` 保留在高级配置命令中。结构化集成使用 `om-agent spec` 和 `om-agent run`，两者的完整边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
+在终端运行 `om`，日常菜单提供结果与状态、账户与标的、通知与 Bot、策略与全局持仓风险、运行维护五组任务。也可以直接调用：
+
+| 任务 | 命令 |
+|---|---|
+| 查看账户或标的 | `om accounts list`、`om symbols list` |
+| 配置通知与 Bot | `om channel configure`、`om bot configure` |
+| 配置可选 Holdings 来源 | `om holdings configure`；依赖同机 PM，只补充全局持仓风险中的非富途资产 |
+| 开关平仓建议 | `om close-advice configure` |
+| 管理常驻服务 | `om service install`、`om service start`、`om service stop`；默认预览 |
+
+`om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
 ### 2. 只读检查
 

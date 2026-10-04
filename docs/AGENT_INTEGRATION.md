@@ -245,10 +245,12 @@ write trade state, or send notifications. Archive pull is a dry run unless
 
 ## Inbound Remote Messages
 
-Use `./om assistant handle` when a remote messaging gateway needs to send user text into OM:
+Human-facing names are `om bot` and `om channel feishu`. Legacy `assistant` / `inbound` aliases remain compatible; internal configuration keys are unchanged.
+
+Use `./om bot handle` when a remote messaging gateway needs to send user text into OM:
 
 ```bash
-./om assistant handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
+./om bot handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
 This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
@@ -274,16 +276,16 @@ OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 ```
 
 The remote capability surface is intentionally smaller than the full
-`om-agent` manifest. Inspect it with `./om assistant capabilities --format json`
+`om-agent` manifest. Inspect it with `./om bot capabilities --format json`
 and keep boundary decisions in [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways
-should call only `./om assistant handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+should call only `./om bot handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 
 For Feishu event JSON specifically, use the thin adapter:
 
 ```bash
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
-./om inbound feishu --input-file feishu_event.json --format text
+./om channel feishu event --input-file feishu_event.json --format text
 ```
 
 It extracts `im.message.receive_v1` text fields and then delegates to the same Inbound control path.
@@ -291,8 +293,8 @@ It extracts `im.message.receive_v1` text fields and then delegates to the same I
 For the full Feishu loop, run the long-connection service:
 
 ```bash
-./om inbound feishu-ws --check
-./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
+./om channel feishu serve --check
+./om channel feishu serve --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
 The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. Successful Bot replies and deterministic replies that contain rich Markdown are rendered as display-only Feishu Card JSON 2.0 Markdown so tables remain readable; short plain Control replies and errors stay as text. The reply outbox persists the final transport envelope before delivery, retries that exact envelope with a stable UUID, and remains compatible with legacy text rows. New envelopes also retain a top-level flattened `text` copy so a code rollback can drain pending rows through the legacy sender. A confirmed permanent card rejection may use the envelope's flattened text fallback; ambiguous or transient failures retry the original card.

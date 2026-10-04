@@ -37,34 +37,30 @@ def test_root_help_is_task_based_and_full_help_remains_available(capsys) -> None
     assert "trade-events" in full
 
 
-def test_interactive_menu_groups_first_run_and_daily_tasks(capsys) -> None:
+def test_interactive_menu_groups_first_run_and_daily_tasks(capsys, monkeypatch) -> None:
+    from src.interfaces.cli import journeys
     selected: list[list[str]] = []
-    answers = iter(("1", "1", "2", "3", "4", "5", "6", "7", "0", "2", "1", "us", "2", "3", "hk", "4", "hk", "0", "3", "0"))
+    daily = []
+    monkeypatch.setattr(journeys, "daily_management", lambda *args, **kwargs: daily.append(True) or 0)
+    answers = iter(("1", "2", "3", "0"))
     assert interactive_home(lambda args: selected.append(args) or 0, input_fn=lambda _prompt: next(answers)) == 0
-    assert selected == [
-        ["setup", "init"],
-        ["settings", "doctor", "--format", "text"],
-        ["secrets", "status", "--format", "text"],
-        ["setup", "check", "--format", "text"],
-        ["status", "--config-key", "us"],
-        ["daily-brief", "latest"],
-        ["doctor", "--config-key", "hk"],
-        ["symbols", "list", "--market", "hk"],
-    ]
+    assert selected == [["setup", "init"]]
+    assert daily == [True]
     output = capsys.readouterr().out
     assert "首次安装" in output and "日常管理" in output
-    assert "OM 不负责启动 OpenD" in output
-    assert "它不证明消息已送达" in output
-    assert "检查不调用模型" in output
+    assert "om bot configure" in output
+    assert "om holdings configure" in output
     assert "高级与完整命令" in output
 
 
-def test_interactive_symbol_list_requires_explicit_market(capsys) -> None:
+def test_daily_management_without_config_returns_to_menu(capsys, monkeypatch, tmp_path) -> None:
+    from src.interfaces.cli import journeys
+    monkeypatch.setattr(journeys, "resolve_yaml_config_path", lambda *args, **kwargs: tmp_path / "missing.yaml")
     selected: list[list[str]] = []
-    answers = iter(("2", "4", "invalid", "0", "0"))
+    answers = iter(("2", "0"))
     assert interactive_home(lambda args: selected.append(args) or 0, input_fn=lambda _prompt: next(answers)) == 0
     assert selected == []
-    assert "请输入 us 或 hk" in capsys.readouterr().out
+    assert "请先运行 om setup init" in capsys.readouterr().out
 
 
 def test_setup_text_shows_next_steps_without_changing_json_default(monkeypatch, capsys) -> None:

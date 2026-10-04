@@ -90,6 +90,8 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 .env/options-monitor.env
 ```
 
+完成 `om setup init` 后，推荐从 `om` 日常菜单管理配置和服务。普通设置默认位于所选运行目录的 `options-monitor.env`；通知、Bot 和秘密存储分别配置。`om service install`、`om service start` 和 `om service stop` 均先预览，确认后才执行。详见[首次运行指南](GETTING_STARTED.md#6-可选长期运行服务)。下面的 `service render` 保留给需要单独检查或导出服务文件的高级使用者。
+
 如果要渲染 launchd 服务，推荐把 env-file 放在 Mac 的 Application Support：
 
 ```bash

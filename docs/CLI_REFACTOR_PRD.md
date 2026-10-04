@@ -41,7 +41,7 @@
 
 这些新决定替代旧稿“开启全局持仓风险”“Holdings 是风险功能启用前提”的要求。有效任务名称改为“纳入 Holdings 数据”；不新增 Portfolio Exposure 总开关。旧账户退役与存量迁移由会话 `01a0ed2b-1dc8-7c33-baed-63127ed62982` 负责。
 
-## 3. 当前实现与需要补齐的能力
+## 3. 设计时的实现基线与缺口
 
 核查基线：`codex/setup-symbol-selection`，HEAD `3085bca9dd5055061c7e62efc7df4bee0884ce04`，包含原有未提交的 CLI、配置、测试和文档改动。该检出与本地 main 已有差异，本轮未 fetch，不能称作远端最新代码；未检查部署状态。
 
@@ -224,7 +224,7 @@ macOS 与 Linux 使用相同任务、术语和结果判定，底层分别复用�
 
 ## 8. 验收计划
 
-本节均为目标验收计划，未运行实现测试或外部验收。A1–A12 的行为同时依赖已确认边界和本文标注的交互建议；新增建议获确认后才成为完整实现合同。
+本节为目标验收标准，已纳入 2026-10-04 确认的实施范围。源码验证与真实环境验收分开记录；后者须在授权的目标环境进行。具体实现与测试证据以交付 PR 为准。
 
 | ID | 输入与场景 | 可观察通过条件 | 证明方法、环境与边界 |
 |---|---|---|---|
@@ -276,7 +276,7 @@ macOS 与 Linux 使用相同任务、术语和结果判定，底层分别复用�
 - [portfolio](../src/interfaces/cli/portfolio_ops.py) 保留 assignment-scenario；[运行入口](../src/interfaces/cli/run_ops.py) → [体验模式门禁](../src/application/experience_mode.py)；核对 SIMULATE、手动与 no-send。
 - [操作入口](../src/interfaces/cli/operator_ops.py)、[服务入口](../src/interfaces/cli/service_ops.py) 及 Astra 读取的其他领域命令；[version](../src/application/version_check.py) 与 [upgrade check](../src/application/service_upgrade.py) 的版本来源和运行实例处理不同。
 
-本轮仅运行帮助命令、静态阅读与文档检查；未运行真实扫描、通知、模型调用、账户读取或服务变更；未对每个高级业务领域做完整代码审计。34项处置中的高级保留是兼容选择，不代表这些实现已通过缺陷审查。
+设计阶段仅运行帮助命令、静态阅读与文档检查；后续实施增加隔离配置、菜单、服务与回执回归测试。未运行真实扫描、通知、模型调用、账户读取或服务变更。34 项处置中的高级保留是兼容选择，不代表所有业务领域已完成全面审计。
 
 外部参考只支持交互机制，不决定 OM 的业务边界：[Command Line Interface Guidelines](https://clig.dev/#help) 支持帮助发现、明确反馈、TTY交互与可脚本化操作；[GitHub CLI 完整命令参考](https://cli.github.com/manual/gh_help_reference) 展示核心与附加命令分组。本文据此建议渐进展示，未把“少量推荐入口”等同于删除高级能力。
 
