@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import re
-import shutil
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +13,10 @@ from src.application.llm_provider_registry import (
     require_provider_spec,
     resolve_output_reservation,
 )
-from src.application.config_primitives import dump_yaml
 from src.application.settings import build_effective_env
 from src.application.secret_store import SecretProvider, resolve_secret_status
 from src.infrastructure.secret_store.factory import build_secret_provider
 from src.application.write_contract import attach_write_contract
-from src.infrastructure.io_utils import atomic_write_text
 
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -358,27 +354,26 @@ def write_model_config_update(
     apply: bool,
     action: str,
     payload: dict[str, Any],
+    repo_root: Path | None = None,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
+    from src.application.config_features import publish_feature_document
+    from src.application.config_authoring_transaction import config_source_sha256
+    from src.application.config_yaml import load_yaml_config_file
     path = Path(config_path).expanduser().resolve()
-    yaml_text = dump_yaml(after_doc)
-    backup_path = None
-    if apply:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        backup_path = _backup_existing_config(path)
-        atomic_write_text(path, yaml_text, encoding="utf-8")
+    source_sha = config_source_sha256(path)
+    if load_yaml_config_file(path) != before_doc:
+        raise AgentToolError(code="STALE_PREVIEW", message="model authoring source changed before publication")
+    transaction = publish_feature_document(
+        repo_root=repo_root or Path(__file__).resolve().parents[3], config_path=path,
+        config_doc=after_doc, apply=apply, expected_source_sha256=expected_source_sha256 or source_sha,
+    )
     return attach_write_contract(
-        {
-            "ok": True,
-            "action": action,
-            "config_yaml_path": str(path),
-            "changed": before_doc != after_doc,
-            **payload,
-            "yaml": yaml_text,
-        },
-        dry_run=not bool(apply),
-        write_applied=bool(apply),
-        backup_path=backup_path,
-        rollback_hint=f"restore {backup_path} to {path}" if backup_path else f"rerun the command or edit {path}",
+        {"ok": True, "action": action, "config_yaml_path": str(path),
+         "changed": before_doc != after_doc, **payload, **transaction},
+        dry_run=not apply, write_applied=apply, backup_path=transaction["backup_path"],
+        audit_id=transaction["audit_id"], generate_audit_id=False,
+        rollback_hint=f"restore {transaction['backup_path']} and rebuild the generation" if apply else None,
     )
 
 
@@ -469,14 +464,6 @@ def _llm_identity(raw: dict[str, Any]) -> dict[str, Any]:
         "context_window_tokens": raw.get("context_window_tokens"),
     }
 
-
-def _backup_existing_config(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    backup_path = path.with_name(f"{path.name}.bak.{stamp}")
-    shutil.copy2(path, backup_path)
-    return backup_path
 
 
 __all__ = [

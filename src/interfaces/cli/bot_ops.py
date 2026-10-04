@@ -20,6 +20,10 @@ from src.application.bot.local_harness import run_local_request
 def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
     bot = subparsers.add_parser("bot", help="run Bot v2 local read-only tasks")
     bot_sub = bot.add_subparsers(dest="bot_command", required=True)
+    from src.interfaces.cli.assistant_ops import register_assistant_subcommands
+    from src.interfaces.cli.feature_ops import add_feature_configure_parser
+    register_assistant_subcommands(bot_sub)
+    add_feature_configure_parser(bot_sub, "bot")
 
     run = bot_sub.add_parser("run", help="run one local read-only Bot question")
     run.add_argument("--text", required=True)
@@ -110,7 +114,13 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
     return bot
 
 
-def handle_bot_command(args: argparse.Namespace) -> dict[str, Any]:
+def handle_bot_command(args: argparse.Namespace) -> dict[str, Any] | int:
+    if getattr(args, "assistant_command", None):
+        from src.interfaces.cli.assistant_ops import handle_assistant_command
+        return handle_assistant_command(args)
+    if args.bot_command == "configure":
+        from src.interfaces.cli.feature_ops import run_feature_configure
+        return run_feature_configure(args)
     received_monotonic = time.monotonic()
     if args.bot_command == "migrate":
         from src.application.bot.migration import migrate_bot

@@ -44,6 +44,22 @@ def _set(source: Path, enabled: bool, **kwargs):
     )
 
 
+def test_holdings_preview_binds_explicit_pm_origin(monkeypatch, tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    origins = []
+    def probe(_config, *, service_url=None):
+        origins.append(service_url)
+        return {"status": "ready_empty", "approved_non_futu_brokers": {"lx": []}}
+    monkeypatch.setattr(inclusion, "_probe_holdings", probe)
+    preview = _set(source, True, service_url="http://127.0.0.1:8765")
+    with pytest.raises(AgentToolError, match="STALE_PREVIEW"):
+        _set(source, True, service_url="http://127.0.0.1:8766", apply=True, confirm=True,
+             expected_source_sha256=preview["source_revision"]["before_sha256"],
+             expected_preview_sha256=preview["preview_sha256"])
+    assert origins == ["http://127.0.0.1:8765", "http://127.0.0.1:8766"]
+    assert not (tmp_path / "config.us.json").exists()
+
+
 def test_holdings_default_is_disabled_in_system_and_market_snapshot(tmp_path: Path) -> None:
     source = _source(tmp_path)
     assert DEFAULT_CONFIG["defaults"]["portfolio"]["holdings"]["enabled"] is False

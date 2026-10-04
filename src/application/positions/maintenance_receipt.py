@@ -15,7 +15,7 @@ from src.application.notification_delivery_adapter import (
     normalize_notification_delivery_result,
     select_notification_delivery_adapter,
 )
-from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
 from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_iso_time_beijing
 from src.infrastructure.io_utils import utc_now as _utc_now
@@ -65,6 +65,11 @@ def send_auto_close_receipt(
     route_resolver: Callable[..., dict[str, Any]] = resolve_notification_route_from_config,
     adapter_selector: Callable[[Any], Any] = select_notification_delivery_adapter,
 ) -> dict[str, Any]:
+    if not notifications_enabled(config):
+        out = {"enabled": False, "status": "skipped", "reason": "notifications_disabled",
+               "delivery_confirmed": False, "message_id": None}
+        _attach_receipt_identity(out, receipt_key=receipt_key, receipt_key_fields=receipt_key_fields)
+        return out
     cfg = resolve_auto_close_receipt_config(receipt_config)
     decision = decide_auto_close_receipt(
         receipt_config=cfg,

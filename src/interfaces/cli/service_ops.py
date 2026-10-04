@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.service_cleanup import service_cleanup
+from src.application.runtime_paths import resolve_runtime_root
+from src.application.service_lifecycle import service_lifecycle
 from src.application.service_deploy import (
     load_service_profile,
     render_service_bundle,
@@ -34,6 +37,26 @@ from src.application.write_contract import attach_write_contract
 def add_service_update_commands(subparsers: Any) -> None:
     service = subparsers.add_parser("service", help="render and inspect platform service definitions")
     service_sub = service.add_subparsers(dest="service_command", required=True)
+    for action, help_text in (("install", "preview or install services without starting them"),
+                              ("start", "preview or start this instance's services"),
+                              ("stop", "preview or stop this instance's services")):
+        lifecycle = service_sub.add_parser(action, help=help_text)
+        lifecycle.add_argument("--repo-root", default=None)
+        lifecycle.add_argument("--runtime-root", default=None)
+        lifecycle.add_argument("--config-yaml", default=None)
+        lifecycle.add_argument("--env-file", default=None)
+        lifecycle.add_argument("--profile-path", default=None)
+        lifecycle.add_argument("--target", choices=("systemd", "launchd"), default=None)
+        lifecycle.add_argument("--deploy-user", default=None, help="Linux: owner of the runtime; required when running as root")
+        lifecycle.add_argument("--confirm", action="store_true", help="apply the exact previously reviewed preview")
+        lifecycle.add_argument("--expected-preview-sha256", default=None)
+        if action == "install":
+            lifecycle.add_argument("--accounts", nargs="+", default=None)
+            lifecycle.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
+            lifecycle.add_argument("--include-opend", action="store_true")
+            lifecycle.add_argument("--include-feishu-ws", action="store_true")
+            lifecycle.add_argument("--include-wechat-clawbot", action="store_true")
+            lifecycle.add_argument("--channel-market", choices=("us", "hk"), default=None)
     service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
     service_render.add_argument("--target", required=True, choices=("systemd", "launchd"))
     service_render.add_argument("--repo-root", default=None)
@@ -306,11 +329,23 @@ def handle_service_update_command(
     capture_preserved_timer_activation_states_fn: Callable[..., dict[str, dict[str, str]]] = capture_preserved_timer_activation_states,
     migrate_service_credentials_fn: Callable[..., dict[str, Any]] = migrate_service_credentials,
     service_cleanup_fn: Callable[..., dict[str, Any]] = service_cleanup,
+    service_lifecycle_fn: Callable[..., dict[str, Any]] = service_lifecycle,
     service_upgrade_check_fn: Callable[..., dict[str, Any]] = service_upgrade_check,
     service_upgrade_verify_fn: Callable[..., dict[str, Any]] = service_upgrade_verify,
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
+    if args.command == "service" and args.service_command in {"install", "start", "stop"}:
+        repo = args.repo_root or repo_base_fn()
+        runtime = resolve_runtime_root(repo_root=repo, runtime_root=args.runtime_root).runtime_root
+        options = {key: getattr(args, key) for key in ("config_yaml", "env_file", "profile_path", "target", "deploy_user")}
+        if args.service_command == "install":
+            options["env_file"] = args.env_file or os.environ.get("OM_ENV_FILE")
+            options.update({key: getattr(args, key) for key in ("accounts", "markets", "include_opend", "include_feishu_ws", "include_wechat_clawbot", "channel_market")})
+        data = service_lifecycle_fn(args.service_command, repo_root=repo, runtime_root=runtime,
+                                    confirm=args.confirm, expected_preview_sha256=args.expected_preview_sha256, **options)
+        return build_response(tool_name=f"service.{args.service_command}", ok=bool(data.get("ok")), data=data)
+
     if args.command == "service" and args.service_command == "render":
         bundle = render_service_bundle_fn(
             target=args.target,

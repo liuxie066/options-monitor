@@ -28,6 +28,12 @@ from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT
 def add_channel_commands(subparsers: Any) -> None:
     channel = subparsers.add_parser("channel", help="manage first-class message channels")
     channel_sub = channel.add_subparsers(dest="channel_command", required=True)
+    from src.interfaces.cli.feature_ops import add_feature_configure_parser
+    from src.interfaces.cli.inbound_ops import register_feishu_transport_commands
+    add_feature_configure_parser(channel_sub, "channel")
+    feishu = channel_sub.add_parser("feishu", help="Feishu events and long connection")
+    register_feishu_transport_commands(feishu.add_subparsers(dest="feishu_command", required=True),
+                                       event_name="event", serve_name="serve")
 
     status = channel_sub.add_parser("status", help="inspect first-class message channel health")
     status.add_argument("--runtime-root", default=None)
@@ -120,7 +126,13 @@ def handle_channel_command(
     check_serve_settings_fn: Callable[..., dict[str, Any]] = check_wechat_clawbot_serve_settings,
     serve_fn: Callable[..., Any] = serve_wechat_clawbot,
     channel_status_response_fn: Callable[..., dict[str, Any]] = channel_status_response,
-) -> dict[str, Any]:
+) -> dict[str, Any] | int:
+    if args.channel_command == "configure":
+        from src.interfaces.cli.feature_ops import run_feature_configure
+        return run_feature_configure(args, repo_base_fn=repo_base_fn)
+    if args.channel_command == "feishu":
+        from src.interfaces.cli.inbound_ops import handle_inbound_command
+        return handle_inbound_command(args)
     base = repo_base_fn()
     if args.channel_command == "status":
         environ = None

@@ -9,12 +9,23 @@ from src.application.notification_delivery_adapter import resolve_feishu_bot_sen
 NotificationRouteResolver = Callable[..., dict[str, Any]]
 
 
+def notifications_enabled(config: dict[str, Any] | None) -> bool:
+    """Omitted legacy setting remains enabled; only explicit false opts out."""
+    notifications = (config or {}).get("notifications")
+    return not isinstance(notifications, dict) or notifications.get("enabled") is not False
+
+
 def resolve_notification_delivery_route(
     *,
     config: dict[str, Any] | None,
     route_resolver: NotificationRouteResolver = resolve_notification_route_from_config,
 ) -> dict[str, Any]:
     """Resolve the canonical delivery route used by notifications and receipts."""
+    if not notifications_enabled(config):
+        notifications = dict((config or {}).get("notifications") or {})
+        return {"notifications": notifications, "enabled": False,
+                "disabled_reason": "notifications_disabled", "provider": notifications.get("provider"),
+                "channel": notifications.get("channel"), "target": None}
     route = route_resolver(config=config or {})
     route = route if isinstance(route, dict) else {}
     notifications = route.get("notifications") if isinstance(route.get("notifications"), dict) else {}
@@ -24,6 +35,8 @@ def resolve_notification_delivery_route(
         target = resolve_feishu_bot_send_target(notifications=notifications)
     return {
         **route,
+        "enabled": True,
+        "disabled_reason": None,
         "notifications": notifications,
         "provider": provider,
         "channel": route.get("channel"),

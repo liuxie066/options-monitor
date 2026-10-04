@@ -27,7 +27,7 @@ from src.application.notification_delivery_adapter import (
     normalize_notification_delivery_result,
     select_notification_delivery_adapter,
 )
-from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
 from src.application.notification_shells import render_system_notice
 from src.application.secret_resolver import resolve_feishu_bot_config
 
@@ -121,6 +121,9 @@ def _fallback_route(base: Path, primary_provider: str) -> dict | None:
 
 
 def _send(base: Path, config: dict | None, message: str, key: str) -> dict:
+    if not notifications_enabled(config):
+        return {"delivery_confirmed": False, "provider": None, "fallback_used": False,
+                "attempted": False, "reason": "notifications_disabled"}
     try:
         route = resolve_notification_delivery_route(config=config or {})
     except Exception:
@@ -175,7 +178,7 @@ def _send(base: Path, config: dict | None, message: str, key: str) -> dict:
 def _audit_delivery(base: Path, *, run_id: str, incident: dict, recovery: bool = False) -> None:
     event = state_repo.normalize_audit_event({
         "event_type": "system_alert", "action": "recovery_delivery" if recovery else "failure_delivery",
-        "status": "ok" if incident.get("delivery_confirmed") else "error", "run_id": run_id,
+        "status": "skipped" if incident.get("reason") == "notifications_disabled" else "ok" if incident.get("delivery_confirmed") else "error", "run_id": run_id,
         "account": incident.get("account"), "error_code": incident.get("failure_code"),
         "fallback_used": incident.get("fallback_used", False),
         "extra": {"provider": incident.get("provider"),
@@ -201,8 +204,9 @@ def system_alert_delivery_status(base: Path, *, state_path: Path | None = None) 
                 "active_count": 0, "fallback_used": False, "provider": None}
     active = [value for value in state.values() if isinstance(value, dict) and value.get("status") == "failed"]
     latest = max(active, key=lambda item: str(item.get("last_attempt_at") or ""), default={})
-    unconfirmed = any(item.get("delivery_confirmed") is not True for item in active)
-    return {"status": "degraded" if unconfirmed else "confirmed" if active else "unknown",
+    enabled = [item for item in active if item.get("delivery") != "disabled"]
+    unconfirmed = any(item.get("delivery_confirmed") is not True for item in enabled)
+    return {"status": "degraded" if unconfirmed else "confirmed" if enabled else "disabled" if active else "unknown",
             "reason_code": "SYSTEM_ALERT_DELIVERY_UNCONFIRMED" if unconfirmed else None,
             "active_count": len(active), "fallback_used": bool(latest.get("fallback_used")),
             "provider": latest.get("provider")}
@@ -233,7 +237,7 @@ def report_system_failure(
         now = datetime.now(timezone.utc)
         previous = state.get(key)
         active = isinstance(previous, dict) and previous.get("status") == "failed"
-        if active:
+        if active and notifications_enabled(config):
             try:
                 prior = datetime.fromisoformat(str(previous.get("last_attempt_at") or previous["reserved_at"]))
                 if (now - prior).total_seconds() < max(1, silence_seconds):
@@ -265,9 +269,11 @@ def report_system_failure(
         state = _read_state(path)
         if isinstance(state.get(key), dict) and state[key].get("reserved_at") == incident_at and state[key].get("last_attempt_at") == now.isoformat():
             state[key].update(delivery)
-            state[key]["delivery"] = "confirmed" if delivery["delivery_confirmed"] else "unconfirmed" if delivery["attempted"] else "journal"
+            state[key]["delivery"] = "disabled" if delivery.get("reason") == "notifications_disabled" else "confirmed" if delivery["delivery_confirmed"] else "unconfirmed" if delivery["attempted"] else "journal"
             atomic_write_json(path, state)
     _audit_delivery(base, run_id=run_id, incident={**state.get(key, {}), **delivery})
+    if delivery.get("reason") == "notifications_disabled":
+        return "suppressed"
     if not delivery["delivery_confirmed"]:
         print(f"<3>SYSTEM_ALERT_UNCONFIRMED {failure_code} provider={delivery['provider'] or '-'}", file=sys.stderr)
     return "confirmed" if delivery["delivery_confirmed"] else "unconfirmed" if delivery["attempted"] else "unconfigured"
@@ -278,6 +284,8 @@ def report_system_recovery(
     failure_code: str, stage: str, message: str | None = None,
     notify: bool = True, allow_without_incident: bool = False,
 ) -> str:
+    disabled = not notifications_enabled(config)
+    notify = notify and not disabled
     key = _fingerprint(unit, market, account, failure_code, stage)
     path = base / "output_shared" / "state" / "system_alerts.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,11 +296,11 @@ def report_system_recovery(
             previous = {"status": "failed", "reserved_at": datetime.now(timezone.utc).isoformat()}
         if not isinstance(previous, dict):
             return "no_incident"
-        retry = previous.get("status") == "recovered" and previous.get("recovery_delivery") == "unknown" and notify
+        retry = previous.get("status") == "recovered" and previous.get("recovery_delivery") == "unknown" and (notify or disabled)
         if previous.get("status") != "failed" and not retry:
             return "no_incident"
         now = datetime.now(timezone.utc)
-        if retry:
+        if retry and notify:
             try:
                 last_attempt = datetime.fromisoformat(str(previous["recovery_last_attempt_at"]))
                 if (now - last_attempt).total_seconds() < _SILENCE_SECONDS:
@@ -304,9 +312,13 @@ def report_system_recovery(
         state[key] = {**previous, "status": "recovered",
                       "recovered_at": previous.get("recovered_at") or attempt_at,
                       "recovery_last_attempt_at": attempt_at,
-                      "recovery_delivery": "unknown" if notify else "disabled"}
+                      "recovery_delivery": "unknown" if notify else "disabled",
+                      "recovery_delivery_confirmed": False}
         atomic_write_json(path, _prune_state(state))
     if not notify:
+        if disabled:
+            retire_system_failure(base=base, unit=unit, market=market, account=account,
+                                  failure_code="SYSTEM_RECOVERY_DELIVERY_UNCONFIRMED", stage="recovery_delivery")
         return "suppressed"
     message = message or render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
     try:
@@ -403,7 +415,7 @@ def report_system_meta_signal(
             current = _read_state(path)
             if isinstance(current.get(key), dict) and current[key].get("reserved_at") == state[key].get("reserved_at"):
                 current[key].update(delivery)
-                current[key]["delivery"] = "confirmed" if delivery["delivery_confirmed"] else "unconfirmed" if delivery["attempted"] else "journal"
+                current[key]["delivery"] = "disabled" if delivery.get("reason") == "notifications_disabled" else "confirmed" if delivery["delivery_confirmed"] else "unconfirmed" if delivery["attempted"] else "journal"
                 atomic_write_json(path, current)
         _audit_delivery(base, run_id=run_id, incident={"account": account, "failure_code": failure_code,
                                                     "stage": stage, **delivery}, recovery=not degraded)

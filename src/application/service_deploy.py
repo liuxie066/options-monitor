@@ -575,6 +575,8 @@ def _systemd_secret_bindings(
     *,
     service_names: list[str],
     assistant_credential_name: str | None,
+    feature_configs: dict[str, dict[str, Any]] | None = None,
+    inbound_operations_enabled: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     available = set(service_names)
     bindings: dict[str, list[str]] = {}
@@ -609,6 +611,29 @@ def _systemd_secret_bindings(
         INBOUND_OPERATION_HMAC_KEY,
         assistant_credential_name,
     )
+    if feature_configs is not None:
+        # New installations bind only credentials consumed by enabled features.
+        # PM Holdings uses the local PM service, not the retired Feishu table.
+        def feishu_notifications(market: str | None = None) -> bool:
+            configs = [feature_configs[market]] if market in feature_configs else feature_configs.values()
+            for config in configs:
+                notifications = config.get("notifications") or {}
+                if notifications.get("enabled") is not False and (
+                    notifications.get("provider") or notifications.get("channel")
+                ) == "feishu_app":
+                    return True
+            return False
+
+        for service_name, values in bindings.items():
+            market_match = re.search(r"-(us|hk)\.service$", service_name)
+            market = market_match.group(1) if market_match else None
+            needed = set(values)
+            needed.discard(FEISHU_HOLDINGS_APP_SECRET)
+            if service_name != "options-monitor-feishu-ws.service" and not feishu_notifications(market):
+                needed.discard(FEISHU_BOT_APP_SECRET)
+            if not inbound_operations_enabled:
+                needed.discard(INBOUND_OPERATION_HMAC_KEY)
+            bindings[service_name] = [value for value in values if value in needed]
     return {name: tuple(values) for name, values in sorted(bindings.items()) if values}
 
 
@@ -736,6 +761,9 @@ def _systemd_unit(
         ]
     )
     if env_file is not None:
+        # The CLI bootstrap must retain this explicit selection instead of
+        # discovering a different runtime/options-monitor.env file.
+        lines.append(_systemd_environment_assignment("OM_ENV_FILE", env_file))
         lines.append(_systemd_environment_file(env_file))
     lines.append("ExecStart=" + _systemd_join_args(exec_args))
     if timeout_start_sec is not None:
@@ -984,6 +1012,7 @@ def render_service_bundle(
     include_quality_monitoring: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
+    feature_aware_credentials: bool = False,
     secret_credential_delivery: str | None = DEFAULT_SECRET_CREDENTIAL_DELIVERY,
     secret_credential_store_root: str | Path | None = None,
     feishu_agent_credential_helper_path: str | Path | None = None,
@@ -1702,9 +1731,27 @@ def render_service_bundle(
             )
 
         if include_secret_credentials:
+            feature_configs = None
+            inbound_operations_enabled = False
+            if feature_aware_credentials:
+                if config_yaml_path is None:
+                    raise ValueError("feature-aware credentials require config_yaml")
+                feature_configs = {
+                    market: resolve_yaml_runtime_config(
+                        repo_root=repo, market=market, config_path=config_yaml_path
+                    )[0]
+                    for market in market_values
+                }
+                assistant_config, _ = resolve_yaml_assistant_config(repo_root=repo, config_path=config_yaml_path)
+                if not AssistantSettings.from_runtime_config(assistant_config).llm.enabled:
+                    assistant_credential_name = None
+                effective = build_effective_env(environ={}, env_file=env_file_path)
+                inbound_operations_enabled = str(effective.get("OM_INBOUND_OPERATIONS_ENABLED")).lower() in {"1", "true", "yes"}
             secret_credential_bindings = _systemd_secret_bindings(
                 service_names=service_names,
                 assistant_credential_name=assistant_credential_name,
+                feature_configs=feature_configs,
+                inbound_operations_enabled=inbound_operations_enabled,
             )
             secret_deploy_user = str(systemd_user or "root")
             for consumer, logical_names in secret_credential_bindings.items():
@@ -2120,6 +2167,7 @@ def render_service_bundle(
         secret_credentials={
             "enabled": True,
             "backend": "systemd",
+            **({"binding_policy": "enabled-consumers-v1"} if feature_aware_credentials else {}),
             "delivery": secret_delivery,
             "store_root": str(secret_store_root),
             **(

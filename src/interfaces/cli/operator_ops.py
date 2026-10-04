@@ -22,6 +22,8 @@ def add_operator_commands(subparsers: Any) -> None:
     close_advice.add_argument("--config-path", default=None)
     close_advice.add_argument("--account", default=None)
     close_advice.add_argument("--output-dir", default=None)
+    from src.interfaces.cli.feature_ops import add_feature_configure_parser
+    add_feature_configure_parser(close_advice.add_subparsers(dest="close_advice_command"), "close-advice")
 
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
@@ -51,6 +53,9 @@ def handle_operator_command(
         )
 
     if args.command == "close-advice":
+        if getattr(args, "close_advice_command", None) == "configure":
+            from src.interfaces.cli.feature_ops import run_feature_configure
+            return run_feature_configure(args)
         return run_close_advice_fn(
             config_key=args.config_key,
             config_path=args.config_path,

@@ -59,7 +59,7 @@ from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
     finalize_no_account_notification,
 )
-from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
 from src.application.notification_delivery_adapter import (
     notification_target_reference,
     select_notification_delivery_adapter,
@@ -171,6 +171,19 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
     results_count = len(request.results)
+
+    if not notifications_enabled(request.base_cfg):
+        request.runlog.safe_event("notify", "skip", message="notifications_disabled")
+        _run_post_delivery_sidecars_best_effort(request)
+        return finish_success(
+            lambda: finalize_no_account_notification(
+                base=request.base, run_id=request.run_id, runlog=request.runlog,
+                results=request.results, tick_metrics=request.tick_metrics,
+                no_send=True, state_repo=state_repo, utc_now_fn=utc_now,
+                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
+                on_success=request.audit_helper.guard_mark_success, reason="notifications_disabled",
+            ), status="completed", message="notifications_disabled",
+        )
 
     if str(request.trigger_kind or "manual").strip().lower() != "scheduled":
         reason = "non_scheduled_ordinary_notification_disabled"
