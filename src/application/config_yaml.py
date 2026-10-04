@@ -117,7 +117,14 @@ SYMBOL_OVERRIDE_AUTHORING_FIELDS = {
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
-    return (repo_root / "config.yaml").resolve()
+    runtime = resolve_runtime_root(repo_root=repo_root)
+    return (runtime.runtime_root / "config.yaml").resolve()
+
+
+def resolve_yaml_config_path(raw: str | Path | None, *, repo_root: Path) -> Path:
+    if raw is not None and str(raw).strip():
+        return _resolve_path(raw, default=repo_root / "config.yaml")
+    return default_yaml_config_path(repo_root=repo_root)
 
 
 def default_yaml_output_config_path(*, repo_root: Path, market: str, runtime_root: str | Path | None = None) -> Path:
@@ -906,7 +913,7 @@ def resolve_yaml_runtime_config(
     system_config_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_market = _normalize_market(market)
-    yaml_path = _resolve_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     explicit_system_path = bool(system_config_path is not None and str(system_config_path).strip())
     system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root)) if explicit_system_path else None
     system_cfg = None if system_path is not None else default_config()
@@ -1086,7 +1093,7 @@ def resolve_yaml_assistant_config(
     config_path: str | Path | None = None,
     system_config_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    yaml_path = _resolve_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     explicit_system_path = bool(system_config_path is not None and str(system_config_path).strip())
     system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root)) if explicit_system_path else None
     system_doc = load_yaml_config_file(system_path) if system_path is not None else default_config()

@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.interfaces.cli.main import parse_args
@@ -21,16 +22,101 @@ def test_setup_init_requires_terminal_or_explicit_mode(tmp_path: Path) -> None:
     assert not (tmp_path / "config").exists()
 
 
+def test_setup_init_requires_user_symbols_before_writing(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us", "--apply"])
+    with pytest.raises(AgentToolError, match="us symbols are required"):
+        run_setup_init(args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: False, user_home=tmp_path / "home")
+    assert not target.exists()
+
+
+def test_setup_init_rejects_symbol_without_strategy_before_writing(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    args = parse_args([
+        "setup", "init", "--output-dir", str(target), "--market", "us",
+        "--us-symbol", "AAPL", "--apply",
+    ])
+    with pytest.raises(AgentToolError, match="symbol-strategy"):
+        run_setup_init(args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: False, user_home=tmp_path / "home")
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("policy_args, error", [
+    (["--symbol-strategy", "AAPL=csp"], "csp-max-strike"),
+    (["--symbol-strategy", "AAPL=cc"], "cc-min-strike"),
+    (["--symbol-strategy", "AAPL=csp", "--csp-max-strike", "AAPL=0"], "positive number"),
+    (["--symbol-strategy", "AAPL=csp", "--csp-max-strike", "TSLA=100"], "unselected symbol"),
+])
+def test_setup_init_rejects_incomplete_symbol_policy_without_writing(
+    tmp_path: Path, policy_args: list[str], error: str,
+) -> None:
+    target = tmp_path / "config"
+    args = parse_args([
+        "setup", "init", "--output-dir", str(target), "--market", "us",
+        "--us-symbol", "AAPL", *policy_args, "--apply",
+    ])
+    with pytest.raises(AgentToolError, match=error):
+        run_setup_init(args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: False, user_home=tmp_path / "home")
+    assert not target.exists()
+
+
+def test_setup_init_maps_two_market_strategies_to_runtime(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    args = parse_args([
+        "setup", "init", "--output-dir", str(target), "--market", "us", "--market", "hk",
+        "--us-symbol", "AAPL", "--hk-symbol", "0005.HK",
+        "--symbol-strategy", "AAPL=csp", "--csp-max-strike", "AAPL=100",
+        "--symbol-strategy", "0005.HK=cc", "--cc-min-strike", "0005.HK=50",
+        "--apply",
+    ])
+    output, applied = run_setup_init(
+        args, repo_base_fn=lambda: Path(__file__).resolve().parents[1],
+        input_is_tty=lambda: False, user_home=tmp_path / "home",
+    )
+    assert applied
+    assert "AAPL：CSP=on max_strike=100.0" in output
+    assert "0005.HK：CSP=off" in output
+    document = yaml.safe_load((target / "config.yaml").read_text(encoding="utf-8"))
+    assert document["markets"]["us"]["overrides"]["AAPL"] == {
+        "sell_put": {"enabled": True, "max_strike": 100.0}, "covered_call": {"enabled": False},
+    }
+    assert document["markets"]["hk"]["overrides"]["0005.HK"] == {
+        "sell_put": {"enabled": False}, "covered_call": {"enabled": True, "min_strike": 50.0},
+    }
+    us = json.loads((target / "config.us.json").read_text(encoding="utf-8"))["symbols"][0]
+    hk = json.loads((target / "config.hk.json").read_text(encoding="utf-8"))["symbols"][0]
+    assert us["sell_put"]["max_strike"] == 100.0
+    assert us["sell_call"]["enabled"] is False
+    assert hk["sell_put"]["enabled"] is False
+    assert hk["sell_call"]["min_strike"] == 50.0
+
+
+def test_setup_init_preview_uses_only_user_symbols(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us",
+                       "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+                       "--csp-max-strike", "AAPL=100", "--dry-run"])
+    preview, applied = run_setup_init(args, repo_base_fn=lambda: tmp_path,
+                                      input_is_tty=lambda: False, user_home=tmp_path / "home")
+    assert not applied
+    assert "US AAPL" in preview
+    assert "AAPL：CSP=on max_strike=100.0" in preview
+    assert "NVDA" not in preview
+    assert not target.exists()
+
+
 def test_setup_init_preview_and_cancel_leave_target_untouched(tmp_path: Path) -> None:
     target = tmp_path / "config"
-    preview_args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us", "--dry-run"])
+    preview_args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us",
+                               "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+                               "--csp-max-strike", "AAPL=100", "--dry-run"])
     preview, applied = run_setup_init(preview_args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: False, user_home=tmp_path / "home")
     assert not applied
     assert "config.us.json" in preview
     assert "仅预览，未写入" in preview
     assert not target.exists()
 
-    answers = iter(("", "us", "", "123456", "no"))
+    answers = iter(("", "us", "", "123456", "AAPL", "csp", "100", "", "no"))
     interactive_args = parse_args(["setup", "init", "--output-dir", str(target)])
     cancelled, applied = run_setup_init(
         interactive_args,
@@ -46,19 +132,21 @@ def test_setup_init_preview_and_cancel_leave_target_untouched(tmp_path: Path) ->
 
 def test_setup_init_preview_explains_higher_priority_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "other"))
-    args = parse_args(["setup", "init", "--output-dir", str(tmp_path / "runtime"), "--market", "us", "--dry-run"])
+    args = parse_args(["setup", "init", "--output-dir", str(tmp_path / "runtime"), "--market", "us",
+                       "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+                       "--csp-max-strike", "AAPL=100", "--dry-run"])
     preview, applied = run_setup_init(args, repo_base_fn=lambda: tmp_path,
                                       input_is_tty=lambda: False, user_home=tmp_path / "home")
     assert not applied
     assert "仍优先于新记录" in preview
     assert "富途账户 ID 尚未填写" in preview
-    assert "默认标的" in preview
+    assert "监控标的：US AAPL" in preview
     assert not (tmp_path / "home").exists()
 
 def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, capsys) -> None:
     target = tmp_path / "config"
     args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us"])
-    answers = iter(("", "", "", "123456", "yes"))
+    answers = iter(("", "", "", "123456", "AAPL", "csp", "100", "", "yes"))
 
     def answer(prompt: str) -> str:
         if prompt.startswith("确认写入"):
@@ -78,11 +166,17 @@ def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, caps
     assert (target / "config.us.json").is_file()
     assert (target / "resolved" / "config.assistant.json").is_file()
     assert not (target / "config.hk.json").exists()
+    assert "hk:" not in (target / "config.yaml").read_text(encoding="utf-8")
+    assert "NVDA" not in (target / "config.yaml").read_text(encoding="utf-8")
+    override = yaml.safe_load((target / "config.yaml").read_text(encoding="utf-8"))["markets"]["us"]["overrides"]["AAPL"]
+    assert override == {"sell_put": {"enabled": True, "max_strike": 100.0}, "covered_call": {"enabled": False}}
     assert "sy:" not in (target / "config.yaml").read_text(encoding="utf-8")
     assert "已写入并回读文件" in output
     assert "运行目录已记住" in output
+    assert "$EDITOR" not in output
+    assert "om symbols list --market us" in output
     assert (tmp_path / "home" / ".config" / "options-monitor" / "runtime-root").read_text() == str(target) + "\n"
-    assert "om config build --source yaml --market us" in output
+    assert "om setup check --format text" in output
     from src.application.agent_tool_config import load_runtime_config
     from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 
@@ -90,6 +184,24 @@ def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, caps
     readiness = evaluate_runtime_config_readiness(config, repo_root=tmp_path,
                                                   runtime_config_path=path, explicit_market="us", config_key="us")
     assert readiness["freshness"]["ok"] is True
+
+
+def test_setup_init_guides_placeholder_account_repair(tmp_path: Path) -> None:
+    target = tmp_path / "config"
+    args = parse_args([
+        "setup", "init", "--output-dir", str(target), "--market", "us",
+        "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+        "--csp-max-strike", "AAPL=100", "--apply",
+    ])
+    output, applied = run_setup_init(
+        args, repo_base_fn=lambda: Path(__file__).resolve().parents[1],
+        input_is_tty=lambda: False, user_home=tmp_path / "home",
+    )
+
+    assert applied is True
+    assert "om accounts edit --market us --account-label lx --futu-acc-id ACCOUNT_ID" in output
+    assert f"--config-yaml {target / 'config.yaml'} --apply --confirm" in output
+    assert "om setup check --format text" in output
 
 
 def test_create_starter_success_has_no_unsafe_delete_hint(tmp_path: Path) -> None:
@@ -101,6 +213,7 @@ def test_create_starter_success_has_no_unsafe_delete_hint(tmp_path: Path) -> Non
         runtime_output_dir=target,
         assistant_output_config_path=target / "resolved" / "config.assistant.json",
         markets=["us"],
+        us_symbols=["AAPL"],
         record_path=record,
     )
     assert result["write_applied"] is True
@@ -126,7 +239,9 @@ def test_setup_init_rejects_existing_config_without_overwriting(tmp_path: Path) 
     target.mkdir()
     source = target / "config.yaml"
     source.write_text("existing\n", encoding="utf-8")
-    args = parse_args(["setup", "init", "--output-dir", str(target), "--dry-run"])
+    args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us",
+                       "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+                       "--csp-max-strike", "AAPL=100", "--dry-run"])
     with pytest.raises(AgentToolError, match="already exists"):
         run_setup_init(args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: False, user_home=tmp_path / "home")
     assert source.read_text(encoding="utf-8") == "existing\n"
@@ -149,7 +264,7 @@ def test_setup_init_race_preserves_other_file_and_cleans_own_files(monkeypatch, 
         create_starter_config(repo_root=Path(__file__).resolve().parents[1],
                               output_config_yaml_path=target / "config.yaml", runtime_output_dir=target,
                               assistant_output_config_path=target / "resolved" / "config.assistant.json",
-                              markets=["us"], record_path=record)
+                              markets=["us"], us_symbols=["AAPL"], record_path=record)
     assert (target / "config.yaml").read_text() == "created elsewhere\n"
     assert not (target / "config.us.json").exists()
     assert not (target / "resolved" / "config.assistant.json").exists()
@@ -177,7 +292,7 @@ def test_setup_init_failure_preserves_modified_created_file(monkeypatch, tmp_pat
         create_starter_config(repo_root=Path(__file__).resolve().parents[1],
                               output_config_yaml_path=target / "config.yaml", runtime_output_dir=target,
                               assistant_output_config_path=target / "resolved" / "config.assistant.json",
-                              markets=["us"], record_path=record)
+                              markets=["us"], us_symbols=["AAPL"], record_path=record)
     assert captured.value.details["preserved"] == [str(target / "config.us.json")]
     assert (target / "config.us.json").read_text() == "modified after publish\n"
     assert not (target / "config.yaml").exists()

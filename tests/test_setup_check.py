@@ -96,18 +96,72 @@ def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch
         runtime_output_dir=tmp_path,
         assistant_output_config_path=tmp_path / "resolved" / "config.assistant.json",
         markets=["us"],
+        us_symbols=["AAPL"],
     )
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
 
-    out = run_setup_check(repo_root=repo, markets=["us"], include_local_env_file=False)
+    out = run_setup_check(repo_root=repo, include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
+    assert out["markets"] == ["us"]
+    assert "config.hk" not in checks
     assert out["summary"]["ok"] is False
     assert out["summary"]["bot_ready"] is False
     assert checks["config.us"]["status"] == "error"
     assert "REPLACE_WITH_FUTU_ACCOUNT_ID" in checks["config.us"]["message"]
+    assert "om setup init" not in out["next_steps"]
+    assert any("om accounts edit --market us" in step for step in out["next_steps"])
     assert checks["bot.model_context"]["status"] == "ok"
     assert checks["bot.session_path"]["status"] == "warn"
+
+
+def test_first_run_account_repair_and_symbol_add_keep_one_market_ready(monkeypatch, tmp_path: Path) -> None:
+    from src.application.config_yaml_init import init_yaml_config
+    from src.interfaces.cli.main import main as cli_main
+    from src.interfaces.cli.symbols import main as symbols_main
+
+    repo = Path(__file__).resolve().parents[1]
+    source = tmp_path / "config.yaml"
+    init_yaml_config(
+        repo_root=repo, output_config_yaml_path=source, runtime_output_dir=tmp_path,
+        assistant_output_config_path=tmp_path / "resolved" / "config.assistant.json",
+        markets=["us"], us_symbols=["AAPL"],
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+
+    assert cli_main([
+        "accounts", "edit", "--market", "us", "--account-label", "lx",
+        "--futu-acc-id", "123456", "--config-yaml", str(source), "--apply", "--confirm",
+    ]) == 0
+    assert symbols_main([
+        "add", "TSLA", "--strategy", "csp", "--csp-max-strike", "100",
+        "--market", "us", "--config-yaml", str(source), "--apply",
+    ]) == 0
+
+    checked = run_setup_check(repo_root=repo, include_local_env_file=False)
+    configs = {item["name"]: item for item in checked["checks"] if item["name"].startswith("config.")}
+    assert checked["markets"] == ["us"]
+    assert configs["config.us"]["status"] == "ok"
+    assert "config.hk" not in configs
+    assert "om setup init" not in checked["next_steps"]
+
+
+def test_setup_check_rebuilds_missing_snapshot_from_existing_yaml(monkeypatch, tmp_path: Path) -> None:
+    from src.application.config_yaml_init import init_yaml_config
+
+    repo = Path(__file__).resolve().parents[1]
+    init_yaml_config(
+        repo_root=repo, output_config_yaml_path=tmp_path / "config.yaml",
+        runtime_output_dir=tmp_path, markets=["us"], us_symbols=["AAPL"],
+    )
+    (tmp_path / "config.us.json").unlink()
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+
+    checked = run_setup_check(repo_root=repo, include_local_env_file=False)
+    config = next(item for item in checked["checks"] if item["name"] == "config.us")
+    assert config["hint"].startswith("om config build --source yaml --market us")
+    assert config["hint"].endswith("--dry-run")
+    assert "om setup init" not in checked["next_steps"]
 
 
 def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Path) -> None:

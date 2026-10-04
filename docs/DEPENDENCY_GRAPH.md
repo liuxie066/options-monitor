@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1079 (`src`: 537, `domain`: 87, `scripts`: 14, `tests`: 441)
-- Internal import edges: 7606 total, 3340 production/script edges excluding tests
+- Python files scanned: 1080 (`src`: 537, `domain`: 87, `scripts`: 14, `tests`: 442)
+- Internal import edges: 7613 total, 3343 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3247| application
+  tests -->|3251| application
   tests -->|409| domain
   tests -->|2| domain_services
   tests -->|220| infrastructure
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3247 |
+| tests | application | 3251 |
 | tests | domain | 409 |
 | tests | interfaces | 249 |
 | tests | infrastructure | 220 |
@@ -125,10 +125,10 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.storage | 9 |
 | src.application.trades | domain.domain.ledger | 9 |
 | src.infrastructure | src.application | 9 |
+| src.application.setup | src.application | 8 |
 | src.application | src.application.research | 7 |
 | src.application.positions | domain.domain.ledger | 7 |
 | src.application.positions | src.infrastructure | 7 |
-| src.application.setup | src.application | 7 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.infrastructure | domain.domain | 6 |
 | src.interfaces | src.application.ledger | 6 |
@@ -179,14 +179,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 107 |
+| src.application.agent_tool_contracts | 108 |
 | src.application.payload_helpers | 96 |
 | domain.domain.symbol_identity | 78 |
 | src.application.ledger.api | 73 |
-| src.application.agent_tool_config | 69 |
+| src.application.agent_tool_config | 70 |
 | src.infrastructure.io_utils | 57 |
 | domain.domain.trade_contract_identity | 52 |
-| src.application.account_config | 51 |
+| src.application.account_config | 50 |
 | domain.domain.ledger.position_fields | 50 |
 | domain.domain.option_position_identity | 48 |
 | domain.domain.decision_state_fingerprint | 47 |

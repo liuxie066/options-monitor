@@ -42,13 +42,13 @@ python3.12 -m venv .venv
 
 ```bash
 ./om setup check
-./om config init --output config.yaml --runtime-output-dir . --futu-acc-id <futu-account-id>
+./om config init --market us --us-symbol YOUR_US_SYMBOL --symbol-strategy YOUR_US_SYMBOL=csp --csp-max-strike YOUR_US_SYMBOL=YOUR_MAX_STRIKE --output config.yaml --runtime-output-dir . --futu-acc-id YOUR_FUTU_ACCOUNT_ID
 ```
 
 首次初始化通常会生成：
 
 - `config.yaml`
-- `config.us.json` 和 `config.hk.json`
+- 所选市场的快照（上例为 `config.us.json`）
 - `config.assistant.json`
 
 默认最小配置下：

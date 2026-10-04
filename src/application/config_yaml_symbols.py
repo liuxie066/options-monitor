@@ -1,20 +1,66 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
 from typing import Any
 
 from src.application.account_config import normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import normalize_config_market, resolve_config_path
+from src.application.config_primitives import normalize_config_market
 from src.application.config_yaml import (
-    default_yaml_config_path,
     load_yaml_config_file,
+    resolve_yaml_config_path,
 )
 from src.application.symbol_calibration import require_calibrated_symbol
 from src.application.symbol_mutations import default_use_for_enabled_sides, set_path
 from src.application.write_contract import attach_write_contract
+
+
+def symbol_strategy_override(
+    *,
+    strategy: str | None,
+    csp_min_strike: Any = None,
+    csp_max_strike: Any = None,
+    cc_min_strike: Any = None,
+    cc_max_strike: Any = None,
+) -> dict[str, Any]:
+    mode = str(strategy or "").strip().lower()
+    if mode not in {"csp", "cc", "both"}:
+        raise AgentToolError(code="INPUT_ERROR", message="symbol requires --strategy csp|cc|both")
+    csp = mode in {"csp", "both"}
+    cc = mode in {"cc", "both"}
+    if csp and csp_max_strike is None:
+        raise AgentToolError(code="INPUT_ERROR", message="CSP requires --csp-max-strike")
+    if cc and cc_min_strike is None:
+        raise AgentToolError(code="INPUT_ERROR", message="CC requires --cc-min-strike")
+    if not csp and (csp_min_strike is not None or csp_max_strike is not None):
+        raise AgentToolError(code="INPUT_ERROR", message="CSP strike requires --strategy csp|both")
+    if not cc and (cc_min_strike is not None or cc_max_strike is not None):
+        raise AgentToolError(code="INPUT_ERROR", message="CC strike requires --strategy cc|both")
+
+    override: dict[str, Any] = {
+        "sell_put": {"enabled": csp},
+        "covered_call": {"enabled": cc},
+    }
+    for side, key, low, high in (
+        ("CSP", "sell_put", csp_min_strike, csp_max_strike),
+        ("CC", "covered_call", cc_min_strike, cc_max_strike),
+    ):
+        for label, raw in (("min", low), ("max", high)):
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=f"{side} {label} strike must be a positive number") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise AgentToolError(code="INPUT_ERROR", message=f"{side} {label} strike must be a positive number")
+            override[key][f"{label}_strike"] = value
+        if low is not None and high is not None and override[key]["min_strike"] > override[key]["max_strike"]:
+            raise AgentToolError(code="INPUT_ERROR", message=f"{side} min strike exceeds max strike")
+    return override
 
 
 def set_yaml_symbol_config(
@@ -45,7 +91,7 @@ def set_yaml_symbol_config(
             message="at least one symbol setting is required",
             hint="Pass --covered-call-enabled, --covered-call-min-strike, --sell-put-enabled, --sell-put-max-strike, or --combo-yield-enabled.",
     )
-    config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     market_key = normalize_config_market(market)
     loaded_source_sha = config_source_sha256(config_yaml_path)
     after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
@@ -113,7 +159,7 @@ def mutate_yaml_symbol_config(
     if action not in {"add", "edit", "remove"}:
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manage_symbols action: {action}")
     market_key = normalize_config_market(market)
-    config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     loaded_source_sha = config_source_sha256(config_yaml_path)
     after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
     summary = _mutate_generic_symbol_config(after_doc, market=market_key, action=action, payload=payload)
@@ -273,6 +319,21 @@ def _build_generic_add_override(
     market: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    if payload.get("inherit_defaults") is True:
+        sets = payload.get("set")
+        if sets is None:
+            return {}
+        if not isinstance(sets, dict) or not sets:
+            raise AgentToolError(code="INPUT_ERROR", message="add set must be a non-empty object")
+        override: dict[str, Any] = {}
+        for raw_path, value in sets.items():
+            set_path(
+                override,
+                _authoring_edit_path(override, str(raw_path)),
+                value,
+                error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+            )
+        return override
     sell_put_enabled = bool(payload.get("sell_put_enabled", False))
     sell_call_enabled = bool(payload.get("sell_call_enabled", False))
     if sell_put_enabled:

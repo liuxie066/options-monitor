@@ -313,7 +313,7 @@ Treat `./om-agent` as a local Tool Gateway command.
 Recommended environment:
 
 - keep repo-local `config.us.json` / `config.hk.json` as generated runtime snapshots
-- complete first-time initialization with `./om config init --output config.yaml --runtime-output-dir .`
+- complete first-time initialization with `./om setup init` interactively, or supply `--market`, matching `--us-symbol` / `--hk-symbol`, and each symbol's `--symbol-strategy` with required CSP/CC strike bounds to `./om config init`
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want a Tool Gateway business/config write
 - use `$RUNTIME/service.profile.json` from `./om service render` when production paths are not repo-local

@@ -4,6 +4,7 @@ import importlib.util
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from typing import Any, Iterable
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
+from src.application.config_yaml import load_yaml_config_file
 from src.application.platform_profile import PlatformProfile, current_platform_profile
 from src.application.bot.model_config import ModelSettings, load_assistant_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
@@ -30,7 +32,6 @@ def run_setup_check(
     include_local_env_file: bool = True,
 ) -> dict[str, Any]:
     root = Path(repo_root).expanduser().resolve()
-    selected_markets = _normalize_markets(markets)
     checks: list[dict[str, Any]] = []
 
     def add(name: str, status: str, message: str, value: Any | None = None, hint: str | None = None) -> None:
@@ -114,6 +115,8 @@ def run_setup_check(
         include_local_env_file=include_local_env_file,
     )
     runtime = resolve_runtime_root(repo_root=root, environ=effective_env.values, user_home=Path.home())
+    configured_markets = _configured_markets(runtime.runtime_root)
+    selected_markets = _normalize_markets(markets) if markets is not None else configured_markets or ["us", "hk"]
 
     repo_assistant_config = root / "config.assistant.json"
     resolved_assistant_config = runtime.runtime_root / "resolved" / "config.assistant.json"
@@ -212,21 +215,42 @@ def run_setup_check(
     )
 
     config_ok_markets: list[str] = []
+    config_steps: list[str] = []
+    repair_accounts: set[str] = set()
+    source_path = runtime.runtime_root / "config.yaml"
     for market in selected_markets:
         config_path = runtime.runtime_root / f"config.{market}.json"
         if not config_path.exists():
+            if source_path.is_file() and market in configured_markets:
+                command = (f"om config build --source yaml --market {market}"
+                           f" --config-yaml {shlex.quote(str(source_path))} --output {shlex.quote(str(config_path))}")
+                hint = f"{command} --dry-run"
+                config_steps.extend((hint, command))
+            elif source_path.is_file():
+                hint = f"config.yaml does not configure {market.upper()}; add the market before building its snapshot."
+                config_steps.append(hint)
+            else:
+                hint = "om setup init (previews an external config directory before writing)"
+                config_steps.append("om setup init")
             add(
                 f"config.{market}",
                 "error",
                 f"{market.upper()} runtime config is missing",
                 {"config_path": str(config_path)},
-                hint="om setup init (previews an external config directory before writing)",
+                hint=hint,
             )
             continue
         try:
             _path, cfg = load_runtime_config(config_key=market, config_path=config_path)
         except AgentToolError as exc:
-            add(f"config.{market}", "error", exc.message, {"config_path": str(config_path)}, hint=exc.hint)
+            if source_path.is_file():
+                repair = (f"om config build --source yaml --market {market}"
+                          f" --config-yaml {shlex.quote(str(source_path))} --output {shlex.quote(str(config_path))}")
+                config_steps.extend((f"{repair} --dry-run", repair))
+            else:
+                repair = "Restore config.yaml from a trusted backup before rebuilding the runtime snapshot."
+                config_steps.append(repair)
+            add(f"config.{market}", "error", exc.message, {"config_path": str(config_path)}, hint=repair)
             continue
         account_settings = cfg.get("account_settings") if isinstance(cfg, dict) else None
         placeholder_accounts = [
@@ -238,12 +262,25 @@ def run_setup_check(
             and settings["futu"].get("account_id") == DEFAULT_FUTU_ACCOUNT_ID
         ] if isinstance(account_settings, dict) else []
         if placeholder_accounts:
+            if source_path.is_file():
+                for account in placeholder_accounts:
+                    if account in repair_accounts:
+                        continue
+                    repair_accounts.add(account)
+                    command = (f"om accounts edit --market {market} --account-label {account}"
+                               f" --futu-acc-id ACCOUNT_ID --config-yaml {shlex.quote(str(source_path))}")
+                    config_steps.extend(("将 ACCOUNT_ID 换成真实数字，先预览再确认写入：",
+                                         command, f"{command} --apply --confirm"))
+                hint = "Use om accounts edit to preview the real Futu account ID, then publish with --apply --confirm."
+            else:
+                hint = "Restore config.yaml from a trusted backup before editing the Futu account ID."
+                config_steps.append(hint)
             add(
                 f"config.{market}",
                 "error",
                 f"{market.upper()} Futu account ID is still {DEFAULT_FUTU_ACCOUNT_ID}",
                 {"config_path": str(config_path), "accounts": placeholder_accounts},
-                hint="Set the Futu account ID in config.yaml, then rebuild the selected market config.",
+                hint=hint,
             )
             continue
         readiness = evaluate_runtime_config_readiness(
@@ -254,6 +291,7 @@ def run_setup_check(
             config_key=market,
         )
         if not readiness["ok"]:
+            config_steps.append(f"om config validate --config-path {config_path} --market {market}")
             add(
                 f"config.{market}",
                 "error",
@@ -294,7 +332,7 @@ def run_setup_check(
 
     next_steps = _next_steps(
         config_ok_markets=config_ok_markets,
-        selected_markets=selected_markets,
+        config_steps=config_steps,
         settings=settings,
         profile=profile,
     )
@@ -327,6 +365,21 @@ def _normalize_markets(markets: Iterable[str] | None) -> list[str]:
         if item in {"us", "hk"} and item not in out:
             out.append(item)
     return out or ["us", "hk"]
+
+
+def _configured_markets(runtime_root: Path) -> list[str]:
+    source = runtime_root / "config.yaml"
+    if source.is_file():
+        try:
+            document = load_yaml_config_file(source)
+            market_doc = document.get("markets")
+            if isinstance(market_doc, dict):
+                configured = [market for market in ("us", "hk") if market in market_doc]
+                if configured:
+                    return configured
+        except (AgentToolError, OSError, UnicodeError):
+            pass
+    return [market for market in ("us", "hk") if (runtime_root / f"config.{market}.json").is_file()]
 
 
 def _read_text(path: Path) -> str:
@@ -371,14 +424,11 @@ def _service_probe(markets: list[str]) -> dict[str, Any]:
 def _next_steps(
     *,
     config_ok_markets: list[str],
-    selected_markets: list[str],
+    config_steps: list[str],
     settings: dict[str, Any],
     profile: PlatformProfile,
 ) -> list[str]:
-    steps: list[str] = []
-    missing_markets = [market for market in selected_markets if market not in config_ok_markets]
-    if missing_markets:
-        steps.append("om setup init")
+    steps: list[str] = list(dict.fromkeys(config_steps))
     settings_summary_raw = settings.get("summary")
     settings_summary: dict[str, Any] = settings_summary_raw if isinstance(settings_summary_raw, dict) else {}
     if int(settings_summary.get("warning_count") or 0) or int(settings_summary.get("error_count") or 0):

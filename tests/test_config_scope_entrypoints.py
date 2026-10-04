@@ -37,12 +37,3 @@ def test_trade_auto_intake_requires_explicit_config() -> None:
         auto_intake.parse_args(["--once"])
 
     assert exc.value.code == 2
-
-
-def test_symbols_cli_requires_explicit_config() -> None:
-    from src.interfaces.cli import symbols
-
-    with pytest.raises(SystemExit) as exc:
-        symbols.main(["list"])
-
-    assert exc.value.code == 2

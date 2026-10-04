@@ -57,7 +57,7 @@ trade_events -> projection -> position_lots
 | Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
-本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
+本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工任务按“首次安装”和“日常管理”在 `om help` 中组织；完整顶层命令见 `om help all`。结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
 
 ### 轮转策略
 
@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 "$HOME/.local/bin/om" setup init
 ```
 
-第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；`setup init` 需待包含本功能的 Release 发布后才可用。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
+第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；具体参数以安装版的 `om setup init --help` 为准。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
 
 安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper；不会创建生产配置、写入 secrets、安装服务或启动定时任务。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
 
@@ -109,23 +109,32 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup init
 ```
 
-它会询问配置目录、市场、账户标签和富途账户 ID，预览目标文件与默认选择，输入 `yes` 后才写入。成功时会把目录记在 `~/.config/options-monitor/runtime-root`，新终端无需再次设置 `OM_RUNTIME_ROOT`。编辑生成的 `config.yaml` 后，按输出命令校验并重建快照，然后检查：
+它会询问配置目录、市场、账户标签、富途账户 ID，以及每个标的的策略和行权价边界。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。标的不能为空，也不会填入示例标的；预览实际选择，输入 `yes` 后才写入。成功时会把目录记在 `~/.config/options-monitor/runtime-root`，新终端无需再次设置 `OM_RUNTIME_ROOT`，并已生成运行快照。若富途账户 ID 留空，按命令输出使用 `om accounts edit` 预览并更新；然后检查：
 
 ```bash
-om setup check --market us --format text
+om setup check --format text
 ```
 
-非交互预览用 `om setup init --dry-run --output-dir <path>`；完整的初始化参数、YAML 校验与快照重建见 `om config --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时拒绝覆盖；中断后若留下文件，先核对冲突清单再重试。`om setup check` 检查所选市场的离线配置与安装条件，Bot 单独报告；它不验证券商登录或通知可达。已有 `OM_RUNTIME_ROOT` 或服务显式目录仍优先于用户记录。
+非交互预览须指定市场、标的及每个标的的策略边界，例如 `om setup init --dry-run --market us --us-symbol AAPL --symbol-strategy AAPL=csp --csp-max-strike AAPL=100 --output-dir <path>`（替换标的和价格；多个标的重复相应参数）。核对预览后将 `--dry-run` 改成 `--apply` 才写入。CC 使用 `--symbol-strategy SYMBOL=cc --cc-min-strike SYMBOL=PRICE`；两种策略都选时两个必填边界都要给。完整的初始化参数、YAML 校验与快照重建见 `om setup init --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时拒绝覆盖；中断后若留下文件，先核对冲突清单再重试。`om setup check` 默认检查当前配置中的市场，也可用 `--market us` / `--market hk` 指定；它检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。已有 `OM_RUNTIME_ROOT` 或服务显式目录仍优先于用户记录。
+
+之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Assistant 的运行快照：
+
+```bash
+om symbols list --market us
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --apply
+```
+
+将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`；选 CC 时须给 `--cc-min-strike`，选 both 时两项都要给。CSP 下限和 CC 上限可选，详见 `om symbols add --help`。`NVDA` 会识别为美股，`0700.HK` 会识别为港股；`--market` 可省略，若指定则必须与标的一致。只配置一个市场时，`om symbols list` 也可省略 `--market`；配置多个市场时需指定。
+
+`om help` 和 `om --help` 按“首次安装”和“日常管理”列出任务；完整顶层命令用 `om help all` 查看。首次安装从 `om setup init` 开始，还需接入富途 OpenAPI/OpenD 并检查连接；需要通知或 Bot 问答时，分别配置通知通道和 Bot LLM。普通设置、凭证与 `om setup check` 是离线检查，不证明 OpenD 登录、消息送达或模型 API 可用。具体步骤见 [首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。日常管理从 `om status`、`om daily-brief latest` 查看结果，通过 `om symbols` 和 `om accounts` 调整监控范围，按需使用 `om doctor`、`om run`、`om service` 和 `om update`。脚本化的 `om config init` 保留在高级配置命令中。结构化集成使用 `om-agent spec` 和 `om-agent run`，两者的完整边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
 ### 2. 只读检查
 
 ```bash
-om-agent run --tool config_validate \
-  --input-json '{"config_key":"us"}'
-om-agent run --tool healthcheck \
-  --input-json '{"config_key":"us"}'
-om-agent run --tool runtime_status \
-  --input-json '{"config_key":"us"}'
+om config validate --config-key us
+om doctor --config-key us
+om status --config-key us
 ```
 
 生产 release 目录通常没有 repo-local config。检查生产 runtime 时应显式传真实路径：

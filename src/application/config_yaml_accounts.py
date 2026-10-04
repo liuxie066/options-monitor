@@ -13,8 +13,8 @@ from src.application.account_config import (
 )
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import normalize_config_market, resolve_config_path
-from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
+from src.application.config_primitives import normalize_config_market
+from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
 from src.application.write_contract import attach_write_contract
 
 
@@ -47,7 +47,7 @@ def mutate_yaml_account_config(
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported account action: {action}")
     market_key = normalize_config_market(market)
     account = _normalize_account_label(account_label)
-    config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     loaded_source_sha = config_source_sha256(config_yaml_path)
     after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
 

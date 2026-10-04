@@ -282,6 +282,8 @@ def test_config_init_rejects_same_account_roles_before_writes(tmp_path: Path, dr
             runtime_output_dir=runtime,
             account_label="lx",
             external_holdings_account="LX",
+            us_symbols=["AAPL"],
+            hk_symbols=["0005.HK"],
             dry_run=dry_run,
         )
     assert exc_info.value.code == "INPUT_ERROR"

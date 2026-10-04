@@ -118,7 +118,7 @@ def _dumps(payload: dict[str, Any]) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="options-monitor unified CLI")
+    parser = argparse.ArgumentParser(prog="om", description="options-monitor operator CLI; use `om help` for tasks, `om-agent spec` for structured tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_diagnostic_commands(sub)
@@ -159,7 +159,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_daily_brief_commands(sub)
     add_quality_commands(sub)
 
-    sub.add_parser("symbols", help="manage monitored symbols")
+    sub.add_parser("symbols", help="manage monitored symbols in config.yaml")
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("wheel", help="Wheel lifecycle operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
@@ -205,9 +205,14 @@ def main(argv: list[str] | None = None) -> int:
             return interactive_home(main)
         sys.stdout.write(command_guide())
         return 0
-    if actual_argv == ["help"]:
+    if actual_argv in (["help"], ["--help"], ["-h"]):
         sys.stdout.write(command_guide())
         return 0
+    if actual_argv == ["help", "all"]:
+        try:
+            parse_args(["--help"])
+        except SystemExit as exc:
+            return int(exc.code)
     if argv is None and _should_bootstrap_process_env(actual_argv):
         bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
     if actual_argv and actual_argv[0] == "agent":

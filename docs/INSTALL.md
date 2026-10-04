@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 "$HOME/.local/bin/om" setup init
 ```
 
-`setup init` 需待包含本功能的 Release 发布后才可用；安装器始终安装已发布版本，不安装 `main` 上尚未发布的改动。
+安装器始终安装已发布版本，不安装 `main` 上尚未发布的改动；新 CLI 参数以所安装版本的 `om setup init --help` 为准。
 
 安装输出会明确打印解析到的 release tag，例如：
 

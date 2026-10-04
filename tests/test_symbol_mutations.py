@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
+from src.application.account_config import normalize_accounts
 from src.application.symbol_calibration import calibrate_symbol, require_calibrated_symbol
 from src.application.symbol_mutations import add_symbol_entry, find_symbol_entry, normalize_symbol
 
@@ -47,12 +45,15 @@ def test_find_symbol_entry_matches_alias_against_canonical_symbol() -> None:
     assert found == {"symbol": "9992.HK"}
 
 
-def test_symbols_cli_add_normalizes_accounts_as_labels() -> None:
-    from src.interfaces.cli.symbols import cmd_add
-
+def test_symbol_add_normalizes_accounts_as_labels() -> None:
     cfg = {"symbols": []}
 
-    cmd_add(cfg, "NVDA", "put_base", 8, True, False, accounts=[" LX ", "sy", "lx"])
+    add_symbol_entry(
+        cfg, symbol="NVDA", use="put_base", limit_expirations=8,
+        sell_put_enabled=True, sell_call_enabled=False,
+        accounts=[" LX ", "sy", "lx"],
+        normalize_accounts=lambda value: normalize_accounts(value, fallback=()),
+    )
 
     assert cfg["symbols"][0]["symbol"] == "NVDA"
     assert cfg["symbols"][0]["accounts"] == ["lx", "sy"]
@@ -64,31 +65,3 @@ def test_add_symbol_entry_defaults_use_from_enabled_sides() -> None:
     add_symbol_entry(cfg, symbol="NVDA", sell_put_enabled=True, sell_call_enabled=True)
 
     assert cfg["symbols"][0]["use"] == ["put_base", "call_base"]
-
-
-def test_symbols_cli_list_reads_config_path(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli import symbols as symbols_cli
-
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(
-        json.dumps(
-            {
-                "symbols": [
-                    {
-                        "symbol": "NVDA",
-                        "accounts": ["lx"],
-                        "sell_put": {"enabled": True, "max_strike": 120},
-                        "sell_call": {"enabled": False},
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    assert symbols_cli.main(["--config", str(cfg_path), "list"]) == 0
-
-    out = capsys.readouterr().out
-    assert "# options-monitor symbols" in out
-    assert "NVDA" in out

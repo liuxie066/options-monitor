@@ -23,23 +23,26 @@
 
 ## 初始化
 
-首次安装使用 `om setup init`（源码 checkout 用 `./om setup init`）。它先预览，确认后创建 YAML、所选市场快照、Assistant 快照，并在 `~/.config/options-monitor/runtime-root` 记住目录。已有目标拒绝覆盖；默认目录只在没有显式配置路径或有效 `OM_RUNTIME_ROOT` 时使用。已有记录损坏或指向失效目录时会报错，需由操作者核对；从未建立记录则沿用源码目录的兼容默认值。
+首次安装使用 `om setup init`（源码 checkout 用 `./om setup init`）。它会询问所选市场的监控标的，以及每个标的的 CSP/CC 策略和行权价边界。CSP 必填最高行权价，CC 必填最低行权价；CSP 最低和 CC 最高可选。至少输入一个标的，不填示例值；先预览实际标的、策略和目标，确认后创建 YAML、所选市场快照、Assistant 快照，并在 `~/.config/options-monitor/runtime-root` 记住目录。已有目标拒绝覆盖；默认目录只在没有显式配置路径或有效 `OM_RUNTIME_ROOT` 时使用。已有记录损坏或指向失效目录时会报错，需由操作者核对；从未建立记录则沿用源码目录的兼容默认值。
 
 下列 `config init` 是完整参数入口，不会建立上述用户级目录记录。在源码 checkout 中：
 
 ```bash
 ./om config init \
+  --market us \
+  --us-symbol AAPL \
+  --symbol-strategy AAPL=csp \
+  --csp-max-strike AAPL=100 \
   --output config.yaml \
   --runtime-output-dir .
 ```
 
-安装后的全局命令可去掉 `./`。
+把 `AAPL` 和 `100` 换成自己的标的与最高行权价；多个标的重复标的、策略与必要边界参数。若选择港股则使用 `--market hk --hk-symbol`；CC 使用 `--symbol-strategy SYMBOL=cc --cc-min-strike SYMBOL=PRICE`。安装后的全局命令可去掉 `./`。
 
-`config init` 默认生成：
+上例生成：
 
 - `config.yaml`
 - `config.us.json`
-- `config.hk.json`
 - `config.assistant.json`
 
 已有目标文件时默认拒绝覆盖；先检查差异，不要直接使用 `--force` 覆盖生产文件。首次运行检查用 `om setup check --market us --format text`；占位富途账户 ID 和缺少市场快照阻断离线配置就绪，Bot 就绪单独显示。
@@ -91,6 +94,20 @@ portfolio_management:
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
+
+## 维护监控标的
+
+人工入口是 `om symbols`：`list` 查看 YAML 中该市场的清单，`add`、`rm`、`edit` 默认只预览；确认后追加 `--apply`，会校验并发布 YAML 与运行快照。未指定 `--config-yaml` 时使用当前运行目录中的 `config.yaml`；操作另一实例须显式指定文件。生成的 `config.us.json` / `config.hk.json` 不是此命令的输入或写入目标。
+
+```bash
+om symbols list --market us
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --apply
+om symbols edit YOUR_SYMBOL --set sell_put.enabled=false
+om symbols rm YOUR_SYMBOL
+```
+
+将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`：CSP 必须给 `--csp-max-strike`，CC 必须给 `--cc-min-strike`；可选 `--csp-min-strike`、`--cc-max-strike`。`NVDA` 会识别为 US，`0700.HK` 会识别为 HK；`--market` 可省略，但显式指定时必须与标的一致。只配置一个市场时，`list` 可省略 `--market`；多个市场时需指定。新增标的只覆盖明确选择的策略开关与行权价边界，其余设置继承现有默认配置。`edit --set` 修改 `markets.<market>.overrides.<symbol>` 下的相对路径；列表值使用 JSON 写法，例如 `--set 'accounts=["lx"]'`。高级单项设置也可用 `om config symbol set --help`。删除市场最后一个标的会被配置验证拒绝。Agent 的结构化入口是 `om-agent run --tool manage_symbols`，其写入门禁另见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
 ## Symbol 扫描并发
 

@@ -1350,6 +1350,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
         runtime_output_dir=runtime_dir,
         futu_acc_id="12345678",
         account_label="lx",
+        us_symbols=["AAPL"],
+        hk_symbols=["0005.HK"],
     )
 
     assert out["ok"] is True
@@ -1370,10 +1372,13 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert set(payload["assistant"]["models"]) == {"deepseek-default"}
     assert "max_output_tokens" not in payload["assistant"]["models"]["deepseek-default"]
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
-    assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
+    assert payload["markets"]["us"]["symbols"] == ["AAPL"]
+    assert payload["markets"]["hk"]["symbols"] == ["0005.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
     hk_cfg = json.loads((runtime_dir / "config.hk.json").read_text(encoding="utf-8"))
     assistant_cfg = json.loads((runtime_dir / "config.assistant.json").read_text(encoding="utf-8"))
+    assert [item["symbol"] for item in us_cfg["symbols"]] == ["AAPL"]
+    assert [item["symbol"] for item in hk_cfg["symbols"]] == ["0005.HK"]
     assert us_cfg[GENERATED_KEY]["source_format"] == "yaml"
     assert "assistant" not in us_cfg
     assert "inbound" not in us_cfg
@@ -1392,6 +1397,24 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 1_000_000
     assert assistant_cfg["assistant"]["llm"].get("max_output_tokens") is None
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+
+
+@pytest.mark.parametrize("market", ["us", "hk"])
+def test_config_init_requires_explicit_symbols_without_writing(tmp_path: Path, market: str) -> None:
+    output_path = tmp_path / "config.yaml"
+    with pytest.raises(AgentToolError, match=f"{market} symbols are required"):
+        init_yaml_config(repo_root=REPO_ROOT, output_config_yaml_path=output_path,
+                         markets=[market], dry_run=False)
+    assert not output_path.exists()
+
+
+def test_config_init_hk_only_has_no_us_market_or_sample_symbols(tmp_path: Path) -> None:
+    out = init_yaml_config(repo_root=REPO_ROOT, output_config_yaml_path=tmp_path / "config.yaml",
+                           markets=["hk"], hk_symbols=["0005.HK"], dry_run=True)
+    payload = yaml.safe_load(out["yaml"])
+    assert list(payload["markets"]) == ["hk"]
+    assert payload["markets"]["hk"]["symbols"] == ["0005.HK"]
+    assert "0700.HK" not in out["yaml"]
 
 
 @pytest.mark.parametrize(
@@ -1419,6 +1442,8 @@ def test_config_init_invalid_account_scope_has_dry_run_apply_parity_and_preserve
                 runtime_output_dir=runtime_dir,
                 dry_run=dry_run,
                 force=True,
+                us_symbols=["AAPL"],
+                hk_symbols=["0005.HK"],
                 **invalid_scope,
             )
         assert output_path.read_text(encoding="utf-8") == preserved
@@ -1438,6 +1463,10 @@ def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
         str(output_path),
         "--runtime-output-dir",
         str(runtime_dir),
+        "--us-symbol", "AAPL",
+        "--hk-symbol", "0005.HK",
+        "--symbol-strategy", "AAPL=csp", "--csp-max-strike", "AAPL=100",
+        "--symbol-strategy", "0005.HK=cc", "--cc-min-strike", "0005.HK=50",
         "--dry-run",
     ])
 
@@ -1449,6 +1478,19 @@ def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
     assert "markets:" in out["yaml"]
     assert not output_path.exists()
     assert not runtime_dir.exists()
+
+
+def test_config_init_cli_rejects_bare_symbol(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    output_path = tmp_path / "config.yaml"
+    rc = main([
+        "config", "init", "--market", "us", "--us-symbol", "AAPL",
+        "--output", str(output_path),
+    ])
+    assert rc == 2
+    assert "symbol-strategy" in capsys.readouterr().out
+    assert not output_path.exists()
 
 
 def test_yaml_config_requires_explicit_market(tmp_path: Path) -> None:

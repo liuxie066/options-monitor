@@ -22,6 +22,8 @@
 | `./om-agent` | 外部 agent、脚本、结构化集成 | JSON manifest 与单工具 JSON envelope |
 | `./om assistant` / `./om bot` | 消息入口与 Bot | Control / Bot，不属于 Tool Gateway |
 
+人工命令可用 `om help` 按场景查找，完整参数用 `om <命令> --help`。例如 `om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE` 默认预览并从标的识别市场，追加 `--apply` 后通过 YAML 配置事务重建快照；应先把占位符换成自己的标的和行权价上限。`om-agent run --tool manage_symbols` 是同一配置源的结构化 Agent 入口。两者均不应直接编辑生成的 JSON。
+
 `om-agent` 不维护对话状态，不负责多步规划，也不是自动交易 Agent。
 
 ## Manifest
@@ -74,12 +76,17 @@
 - `healthcheck`
 - `config_validate`
 - `runtime_status`
+- `scheduled_tasks_read`
 - `runtime_runs`
 - `runtime_logs`
 - `scheduler_status`
 - `operation_timeline`
+- `quality_status`
 - `version_check`
 - `version_update`
+- `project_context`
+- `project_files`
+- `receipt_read`
 
 ### 候选与 symbol
 
@@ -93,6 +100,7 @@
 ### 收益与桥接
 
 - `option_performance_report`
+- `trade_attribution_read`
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
@@ -108,6 +116,16 @@
 - `get_portfolio_context`
 - `portfolio_query`
 - `portfolio_assignment_scenario`
+
+### Wheel 生命周期
+
+- `wheel_end`
+- `wheel_call_intent`
+- `wheel_call_linkage`
+- `wheel_intent`
+- `wheel_linkage`
+- `wheel_branch_decision`
+- `wheel_activation`
 
 ### Close Advice
 

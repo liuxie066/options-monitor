@@ -13,9 +13,10 @@ from src.application.config_yaml import (
     explain_yaml_config_key,
     validate_yaml_runtime_config,
 )
-from src.application.config_yaml_init import init_yaml_config
+from src.application.config_yaml_init import _normalize_markets, init_yaml_config
 from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_readiness import require_runtime_config_readiness
+from src.interfaces.cli.setup_ops import add_symbol_policy_arguments, symbol_policies_from_args
 
 
 def add_config_commands(subparsers: Any) -> None:
@@ -29,8 +30,11 @@ def add_config_commands(subparsers: Any) -> None:
     init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
     init_config.add_argument("--external-holdings-account", default="sy")
     init_config.add_argument("--no-external-holdings", action="store_true")
-    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None)
-    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None)
+    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
+                             help="required for US; repeat for each monitored symbol")
+    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None,
+                             help="required for HK; repeat for each monitored symbol")
+    add_symbol_policy_arguments(init_config)
     init_config.add_argument("--no-build", action="store_true", help="only write config.yaml; do not build runtime JSON")
     init_config.add_argument("--dry-run", action="store_true", help="preview starter YAML without writing files")
     init_config.add_argument("--force", action="store_true")
@@ -284,6 +288,11 @@ def handle_config_command(
             external_holdings_account=None if bool(args.no_external_holdings) else args.external_holdings_account,
             us_symbols=args.us_symbols,
             hk_symbols=args.hk_symbols,
+            symbol_policies=symbol_policies_from_args(
+                args,
+                symbols={"us": args.us_symbols, "hk": args.hk_symbols},
+                markets=_normalize_markets(args.market),
+            ),
             build=not bool(args.no_build),
             dry_run=bool(args.dry_run),
             force=bool(args.force),
