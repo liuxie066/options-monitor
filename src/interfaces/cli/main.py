@@ -8,7 +8,6 @@ from typing import Any
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.pipeline_runtime import main as run_scan_pipeline
-from src.application.settings import bootstrap_process_env
 from src.application.version_check import check_version_update
 from src.interfaces.cli.account_ops import (
     add_account,
@@ -24,6 +23,8 @@ from src.interfaces.cli.assistant_ops import (
     handle_assistant_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
+from src.interfaces.cli.command_environment import command_environment
+from src.interfaces.cli.feature_ops import add_holdings_commands, run_feature_configure
 from src.interfaces.cli.home import command_guide, interactive_home, render_credential_readiness, render_settings_doctor, render_setup_check
 from src.interfaces.cli.inbound_ops import (
     add_inbound_commands,
@@ -118,7 +119,7 @@ def _dumps(payload: dict[str, Any]) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="options-monitor unified CLI")
+    parser = argparse.ArgumentParser(prog="om", description="options-monitor operator CLI; use `om help` for tasks, `om-agent spec` for structured tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_diagnostic_commands(sub)
@@ -135,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_operator_commands(sub)
 
     add_channel_commands(sub)
+    add_holdings_commands(sub)
 
     add_account_commands(sub)
 
@@ -159,7 +161,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_daily_brief_commands(sub)
     add_quality_commands(sub)
 
-    sub.add_parser("symbols", help="manage monitored symbols")
+    sub.add_parser("symbols", help="manage monitored symbols in config.yaml")
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("wheel", help="Wheel lifecycle operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
@@ -174,42 +176,21 @@ def _print(payload: dict[str, Any]) -> int:
     return 0 if payload.get("ok", True) else 2
 
 
-def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
-    if "--no-local-env-file" in actual_argv:
-        return False
-    if "--env-file" in actual_argv:
-        return False
-    if actual_argv and actual_argv[0] in {"settings", "setup"}:
-        return False
-    return True
-
-
-def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
-    if not hasattr(args, "env_file"):
-        return
-    if not getattr(args, "env_file", None):
-        return
-    if args.command not in {"healthcheck", "doctor", "status", "inbound", "assistant", "bot"}:
-        return
-    bootstrap_process_env(
-        repo_root=repo_base(),
-        env_file=getattr(args, "env_file", None),
-        include_local_env_file=not bool(getattr(args, "no_local_env_file", False)),
-    )
-
-
 def _main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     if not actual_argv:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            return interactive_home(main)
+            return interactive_home(lambda command: main(command, discover_local=True))
         sys.stdout.write(command_guide())
         return 0
-    if actual_argv == ["help"]:
+    if actual_argv in (["help"], ["--help"], ["-h"]):
         sys.stdout.write(command_guide())
         return 0
-    if argv is None and _should_bootstrap_process_env(actual_argv):
-        bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
+    if actual_argv == ["help", "all"]:
+        try:
+            parse_args(["--help"])
+        except SystemExit as exc:
+            return int(exc.code)
     if actual_argv and actual_argv[0] == "agent":
         actual_argv[0] = "assistant"
     if actual_argv and actual_argv[0] == "scan-pipeline":
@@ -231,7 +212,6 @@ def _main(argv: list[str] | None = None) -> int:
 
         return int(run_symbols_cli(actual_argv[1:]))
     args = parse_args(actual_argv)
-    _bootstrap_runtime_env_from_args(args)
     try:
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
             return handle_observability_command(
@@ -258,7 +238,8 @@ def _main(argv: list[str] | None = None) -> int:
             )
 
         if args.command == "bot":
-            return _print(handle_bot_command(args))
+            result = handle_bot_command(args)
+            return result if isinstance(result, int) else _print(result)
 
         if args.command == "inbound":
             return handle_inbound_command(
@@ -284,7 +265,11 @@ def _main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "channel":
-            return _print(handle_channel_command(args, repo_base_fn=repo_base))
+            result = handle_channel_command(args, repo_base_fn=repo_base)
+            return result if isinstance(result, int) else _print(result)
+
+        if args.command == "holdings":
+            return _print(run_feature_configure(args, repo_base_fn=repo_base))
 
         if args.command == "accounts":
             return _print(handle_account_command(
@@ -372,6 +357,10 @@ def _main(argv: list[str] | None = None) -> int:
 
         if args.command in {"setup", "multiplier-cache"}:
             if args.command == "setup" and args.setup_command == "init":
+                if sys.stdin.isatty() and not (args.dry_run or args.apply):
+                    from src.interfaces.cli.journeys import first_install
+                    return first_install(args, lambda command: main(command, discover_local=True),
+                                         base_init=run_setup_init, repo_base_fn=repo_base)
                 output, _applied = run_setup_init(args, repo_base_fn=repo_base)
                 sys.stdout.write(output)
                 return 0
@@ -393,9 +382,15 @@ def _main(argv: list[str] | None = None) -> int:
     raise SystemExit(f"unsupported command: {args.command}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, discover_local: bool = False) -> int:
     try:
-        return _main(argv)
+        with command_environment(
+            list(sys.argv[1:] if argv is None else argv), repo_root=repo_base(),
+            discover_local=argv is None or discover_local,
+        ):
+            return _main(argv)
+    except AgentToolError as err:
+        return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
     except ValueError as exc:
         err = AgentToolError(code="CONFIG_ERROR", message=str(exc))
         return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))

@@ -7,19 +7,19 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.application.account_config import normalize_account_label
+from src.application.account_config import normalize_account_label, parse_lossless_integer
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
+from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml, normalize_trd_env
 from src.application.config_primitives import resolve_config_path as _resolve_path
 from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
+from src.application.config_yaml_symbols import symbol_strategy_override
 from src.application.config_authoring_transaction import _prepare_generation
 from src.application.runtime_paths import read_runtime_root_record
+from src.application.symbol_calibration import require_calibrated_symbol
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
 
 
-DEFAULT_US_SYMBOLS = ("NVDA", "FUTU", "GOOGL")
-DEFAULT_HK_SYMBOLS = ("0700.HK", "9992.HK")
 DEFAULT_FUTU_ACCOUNT_ID = "REPLACE_WITH_FUTU_ACCOUNT_ID"
 
 
@@ -58,12 +58,23 @@ def _normalize_futu_account_id(raw: str | None) -> str:
     return text
 
 
-def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, defaults: tuple[str, ...]) -> list[str]:
+def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, market: str) -> list[str]:
     values = [str(item or "").strip().upper() for item in (raw or []) if str(item or "").strip()]
-    out = values or list(defaults)
+    if not values:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"{market} symbols are required",
+            hint=f"Pass at least one --{market}-symbol or enter monitored symbols during setup init.",
+        )
     seen: set[str] = set()
     deduped: list[str] = []
-    for symbol in out:
+    for raw_symbol in values:
+        calibrated = require_calibrated_symbol(
+            raw_symbol, error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        )
+        if str(calibrated.market).lower() != market:
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol belongs to {calibrated.market}, not {market}")
+        symbol = str(calibrated.canonical_symbol)
         if symbol in seen:
             continue
         seen.add(symbol)
@@ -71,47 +82,85 @@ def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, defaults: tup
     return deduped
 
 
+def _normalize_symbol_policies(
+    raw: dict[str, dict[str, Any]] | None,
+    *,
+    symbols: list[str],
+) -> dict[str, dict[str, Any]] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise AgentToolError(code="INPUT_ERROR", message="symbol policies must be keyed by symbol")
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_symbol, fields in raw.items():
+        symbol = str(require_calibrated_symbol(
+            raw_symbol, error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        ).canonical_symbol)
+        if symbol in normalized:
+            raise AgentToolError(code="INPUT_ERROR", message=f"duplicate symbol policy: {symbol}")
+        if not isinstance(fields, dict):
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol policy must be an object: {symbol}")
+        unknown = set(fields) - {"strategy", "csp_min_strike", "csp_max_strike", "cc_min_strike", "cc_max_strike"}
+        if unknown:
+            raise AgentToolError(code="INPUT_ERROR", message=f"unknown symbol policy fields for {symbol}: {', '.join(sorted(unknown))}")
+        normalized[symbol] = symbol_strategy_override(
+            strategy=fields.get("strategy"),
+            csp_min_strike=fields.get("csp_min_strike"),
+            csp_max_strike=fields.get("csp_max_strike"),
+            cc_min_strike=fields.get("cc_min_strike"),
+            cc_max_strike=fields.get("cc_max_strike"),
+        )
+    missing = set(symbols) - set(normalized)
+    extra = set(normalized) - set(symbols)
+    if missing or extra:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"symbol policies mismatch: missing={', '.join(sorted(missing)) or '-'}; unknown={', '.join(sorted(extra)) or '-'}",
+        )
+    return normalized
+
+
 def _starter_yaml_payload(
     *,
+    selected_markets: list[str],
     account_label: str,
     futu_account_id: str,
     us_symbols: list[str],
     hk_symbols: list[str],
+    symbol_overrides: dict[str, dict[str, Any]] | None,
+    futu_host: str,
+    futu_port: int,
+    trd_env: str,
 ) -> dict[str, Any]:
     accounts: dict[str, Any] = {
         account_label: {
             "type": "futu",
             "futu_account_id": futu_account_id,
+            "futu": {"host": futu_host, "port": futu_port, "trd_env": trd_env},
         }
     }
-    us_market: dict[str, Any] = {
-        "accounts": [account_label],
-        "symbols": us_symbols,
-    }
-    if "FUTU" in us_symbols:
-        us_market["overrides"] = {
-            "FUTU": {
-                "sell_put": {
-                    "dte": [20, 45],
-                    "strike": [55, 85],
-                }
-            }
-        }
+    markets: dict[str, Any] = {}
+    if "us" in selected_markets:
+        us_market: dict[str, Any] = {"accounts": [account_label], "symbols": us_symbols}
+        if symbol_overrides is not None:
+            us_market["overrides"] = {symbol: symbol_overrides[symbol] for symbol in us_symbols}
+        markets["us"] = us_market
+    if "hk" in selected_markets:
+        hk_market: dict[str, Any] = {"accounts": [account_label], "symbols": hk_symbols}
+        if symbol_overrides is not None:
+            hk_market["overrides"] = {symbol: symbol_overrides[symbol] for symbol in hk_symbols}
+        markets["hk"] = hk_market
 
     return {
         "accounts": accounts,
-        "markets": {
-            "us": us_market,
-            "hk": {
-                "accounts": [account_label],
-                "symbols": hk_symbols,
-            },
-        },
+        "markets": markets,
+        "symbol_defaults": {"fetch": {"host": futu_host, "port": futu_port}},
+        "notifications": {"enabled": False},
         "assistant": {
-            "enabled": True,
+            "enabled": False,
             "context_window_messages": 8,
             "bot": {
-                "enabled": True,
+                "enabled": False,
                 "toolsets": {
                     "portfolio": False,
                 },
@@ -179,9 +228,13 @@ def init_yaml_config(
     assistant_output_config_path: str | Path | None = None,
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
+    futu_host: str = "127.0.0.1",
+    futu_port: int = 11111,
+    trd_env: str = "REAL",
     account_label: str | None = None,
     us_symbols: list[str] | tuple[str, ...] | None = None,
     hk_symbols: list[str] | tuple[str, ...] | None = None,
+    symbol_policies: dict[str, dict[str, Any]] | None = None,
     build: bool = True,
     dry_run: bool = False,
     force: bool = False,
@@ -189,8 +242,16 @@ def init_yaml_config(
     selected_markets = _normalize_markets(list(markets) if markets is not None else None)
     account = _normalize_account_label(account_label)
     futu_id = _normalize_futu_account_id(futu_acc_id)
-    us_symbol_values = _normalize_symbols(us_symbols, defaults=DEFAULT_US_SYMBOLS)
-    hk_symbol_values = _normalize_symbols(hk_symbols, defaults=DEFAULT_HK_SYMBOLS)
+    environment = normalize_trd_env(trd_env)
+    host = str(futu_host).strip()
+    if not host or any(char.isspace() for char in host):
+        raise AgentToolError(code="INPUT_ERROR", message="futu_host must be a non-empty host without whitespace")
+    parsed_port = parse_lossless_integer(futu_port)
+    if parsed_port is None or not 1 <= parsed_port <= 65535:
+        raise AgentToolError(code="INPUT_ERROR", message="futu_port must be between 1 and 65535")
+    us_symbol_values = _normalize_symbols(us_symbols, market="us") if "us" in selected_markets else []
+    hk_symbol_values = _normalize_symbols(hk_symbols, market="hk") if "hk" in selected_markets else []
+    symbol_overrides = _normalize_symbol_policies(symbol_policies, symbols=us_symbol_values + hk_symbol_values)
     output_path = _resolve_path(output_config_yaml_path, default=repo_root / "config.yaml")
     output_dir = _resolve_path(runtime_output_dir, default=output_path.parent)
     runtime_outputs = {
@@ -215,10 +276,15 @@ def init_yaml_config(
             )
 
     yaml_payload = _starter_yaml_payload(
+        selected_markets=selected_markets,
         account_label=account,
         futu_account_id=futu_id,
+        futu_host=host,
+        futu_port=parsed_port,
+        trd_env=environment,
         us_symbols=us_symbol_values,
         hk_symbols=hk_symbol_values,
+        symbol_overrides=symbol_overrides,
     )
     yaml_text = _dump_yaml(yaml_payload)
     validation: dict[str, Any] = {}
@@ -291,7 +357,11 @@ def init_yaml_config(
         "source_format": "yaml",
         "config_yaml_path": str(output_path),
         "markets": selected_markets,
+        "market_symbols": {market: us_symbol_values if market == "us" else hk_symbol_values for market in selected_markets},
+        "symbol_policies": symbol_overrides,
         "account_label": account,
+        "futu_host": host, "futu_port": parsed_port, "trd_env": environment,
+        "ready": False,
         "futu_account_id_placeholder": futu_id == DEFAULT_FUTU_ACCOUNT_ID,
         "runtime_output_dir": str(output_dir),
         "runtime_config_paths": {market: str(path) for market, path in runtime_outputs.items()},

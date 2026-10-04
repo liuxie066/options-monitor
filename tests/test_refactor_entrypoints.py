@@ -24,7 +24,10 @@ def _cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
     proc = _run([str((ROOT / "om").resolve()), "--help"], cwd=tmp_path, check=True)
-    assert "usage:" in proc.stdout
+    assert "首次安装" in proc.stdout and "日常管理" in proc.stdout
+    assert "om help all" in proc.stdout
+    full = _run([str((ROOT / "om").resolve()), "help", "all"], cwd=tmp_path, check=True)
+    assert full.stdout.startswith("usage: om ") and "trade-events" in full.stdout
 
     agent_proc = _run([str((ROOT / "om-agent").resolve()), "spec"], cwd=tmp_path, check=True)
     payload = json.loads(agent_proc.stdout)

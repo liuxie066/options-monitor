@@ -38,7 +38,9 @@ def test_scheduler_cli_rejects_run_if_due_before_runtime_resolution(
         calls.append("unexpected")
         raise AssertionError("run-if-due must fail before runtime or adapter access")
 
-    monkeypatch.setattr(cli, "repo_base", _unexpected_call)
+    # Main may read the code root to bind ordinary command settings; the rejected
+    # operation must still avoid runtime resolution and scheduler execution.
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
     monkeypatch.setattr(cli, "run_scheduler", _unexpected_call)
     monkeypatch.setattr(scheduler_ops, "resolve_runtime_root", _unexpected_call)
 

@@ -1,206 +1,168 @@
-"""Manage monitored symbols in options-monitor runtime configs."""
+"""Human CLI for the authoritative YAML monitored-symbol list."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
-from src.application.account_config import normalize_accounts
-from src.application.config_sections import (
-    resolve_watchlist_config,
-    set_watchlist_config,
-)
-from src.application.config_validator import validate_config
-from src.application.runtime_config_paths import write_json_atomic
-from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
-from src.application.write_contract import attach_write_contract
+from src.application.agent_tool_config import repo_base
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import normalize_config_market
+from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path, resolve_yaml_runtime_config
+from src.application.config_yaml_symbols import mutate_yaml_symbol_config, symbol_strategy_override
+from src.application.symbol_calibration import calibrate_symbol
 
 
-def load_json(path: Path) -> dict:
-    if not path.exists() or path.stat().st_size <= 0:
-        raise SystemExit(f"config not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _save_validated_json(path: Path, data: dict) -> None:
-    canonical = set_watchlist_config(data, resolve_watchlist_config(data))
-    validate_config(dict(canonical))
-    write_json_atomic(path, canonical)
-
-
-def parse_value(s: str) -> Any:
-    raw = str(s or "").strip()
-    if raw.lower() in ("true", "false"):
-        return raw.lower() == "true"
-    if raw.lower() in ("null", "none"):
+def parse_value(raw: str) -> Any:
+    text = raw.strip()
+    if text.startswith(("[", "{")):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=f"invalid JSON value for --set: {text}") from exc
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    if text.lower() in {"null", "none"}:
         return None
     try:
-        if "." in raw:
-            return float(raw)
-        return int(raw)
-    except Exception:
-        return raw
+        return float(text) if "." in text else int(text)
+    except ValueError:
+        return text
 
 
-def cmd_list(cfg: dict, fmt: str) -> None:
-    rows = []
-    for e in (cfg.get("symbols") or []):
-        rows.append(
-            {
-                "symbol": e.get("symbol"),
-                "use": e.get("use"),
-                "accounts": e.get("accounts"),
-                "put": bool((e.get("sell_put") or {}).get("enabled", False)),
-                "call": bool((e.get("sell_call") or {}).get("enabled", False)),
-                "put_strike": [(e.get("sell_put") or {}).get("min_strike"), (e.get("sell_put") or {}).get("max_strike")],
-                "put_dte": [(e.get("sell_put") or {}).get("min_dte"), (e.get("sell_put") or {}).get("max_dte")],
-            }
-        )
-    if fmt == "json":
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
-        return
-    if not rows:
-        print("(no symbols)")
-        return
-    print("# options-monitor symbols")
-    for r in rows:
-        acct = r.get("accounts")
-        acct_txt = "all" if not acct else ",".join([str(x) for x in acct])
-        print(
-            f"- {r['symbol']}: put={'on' if r['put'] else 'off'} call={'on' if r['call'] else 'off'} | "
-            f"accounts={acct_txt} | put strike {r['put_strike'][0]}~{r['put_strike'][1]} | "
-            f"put dte {r['put_dte'][0]}~{r['put_dte'][1]} | use={r['use']}"
-        )
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="om symbols", description="Manage monitored symbols in config.yaml")
+    scope = argparse.ArgumentParser(add_help=False)
+    scope.add_argument("--market", choices=("us", "hk"),
+                       help="optional for recognizable symbols or a single configured market")
+    scope.add_argument("--config-yaml", "--config", dest="config_yaml", default=None,
+                       help="authoritative config.yaml; defaults to the active runtime root")
+    scope.add_argument("--format", choices=("text", "json"), default="text")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list", parents=[scope], help="list this market's monitored symbols")
+    for name in ("add", "rm", "edit"):
+        command = commands.add_parser(name, parents=[scope], help=f"preview or apply a YAML symbol {name}")
+        command.add_argument("symbol")
+        if name == "add":
+            command.add_argument("--strategy", choices=("csp", "cc", "both"),
+                                 help="required: enable CSP, CC, or both")
+            command.add_argument("--csp-min-strike", type=float, help="optional CSP lower strike bound")
+            command.add_argument("--csp-max-strike", type=float, help="required when CSP is enabled")
+            command.add_argument("--cc-min-strike", type=float, help="required when CC is enabled")
+            command.add_argument("--cc-max-strike", type=float, help="optional CC upper strike bound")
+        command.add_argument("--expected-source-sha256", default=None, help="source revision from the preview")
+        command.add_argument("--rebuild-runtime-root", default=None,
+                             help="generated snapshot directory; defaults to the YAML directory")
+        mode = command.add_mutually_exclusive_group()
+        mode.add_argument("--dry-run", action="store_true", help="preview only (the default)")
+        mode.add_argument("--apply", action="store_true", help="publish YAML and generated snapshots")
+        if name == "edit":
+            command.add_argument("--set", action="append", default=[], metavar="PATH=VALUE",
+                                 help="set one YAML strategy override; repeat as needed")
+    return parser
 
 
-def cmd_add(cfg: dict, symbol: str, use: str | None, limit_exp: int, put: bool, call: bool, accounts: list[str] | None = None):
-    return add_symbol_entry(
-        cfg,
-        symbol=symbol,
-        use=use,
-        limit_expirations=limit_exp,
-        sell_put_enabled=put,
-        sell_call_enabled=call,
-        accounts=accounts,
-        normalize_accounts=lambda value: normalize_accounts(value, fallback=()),
-        error_factory=SystemExit,
+def _edit_values(values: list[str]) -> dict[str, Any]:
+    if not values:
+        raise AgentToolError(code="INPUT_ERROR", message="edit requires at least one --set PATH=VALUE")
+    result: dict[str, Any] = {}
+    for item in values:
+        if "=" not in item or not item.split("=", 1)[0].strip():
+            raise AgentToolError(code="INPUT_ERROR", message=f"invalid --set: {item}; expected PATH=VALUE")
+        path, value = item.split("=", 1)
+        result[path.strip()] = parse_value(value)
+    return result
+
+
+def _add_values(args: argparse.Namespace) -> dict[str, Any]:
+    override = symbol_strategy_override(
+        strategy=args.strategy,
+        csp_min_strike=args.csp_min_strike,
+        csp_max_strike=args.csp_max_strike,
+        cc_min_strike=args.cc_min_strike,
+        cc_max_strike=args.cc_max_strike,
     )
-
-
-def cmd_rm(cfg: dict, symbol: str):
-    return remove_symbol_entry(cfg, symbol=symbol, error_factory=SystemExit)
-
-
-def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
-    patch: dict[str, Any] = {}
-    for s in sets:
-        if "=" not in s:
-            raise SystemExit(f"invalid --set: {s} (expected path=value)")
-        k, v = s.split("=", 1)
-        patch[k.strip()] = parse_value(v)
-    return edit_symbol_entry(cfg, symbol=symbol, sets=patch, error_factory=SystemExit)
+    return {f"{side}.{key}": value for side, fields in override.items() for key, value in fields.items()}
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Manage options-monitor monitored symbols config")
-    ap.add_argument("--config", required=True)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    p_list = sub.add_parser("list")
-    p_list.add_argument("--format", choices=["text", "json"], default="text")
-    p_add = sub.add_parser("add")
-    p_add.add_argument("symbol")
-    p_add.add_argument("--use", default=None)
-    p_add.add_argument("--limit-exp", type=int, default=8)
-    p_add.add_argument("--put", action="store_true")
-    p_add.add_argument("--call", action="store_true")
-    p_add.add_argument("--accounts", nargs="*", default=None)
-    p_add.add_argument("--dry-run", action="store_true")
-    p_add.add_argument("--apply", action="store_true")
-    p_add.add_argument("--format", choices=["text", "json"], default="text")
-    p_rm = sub.add_parser("rm")
-    p_rm.add_argument("symbol")
-    p_rm.add_argument("--dry-run", action="store_true")
-    p_rm.add_argument("--apply", action="store_true")
-    p_rm.add_argument("--format", choices=["text", "json"], default="text")
-    p_edit = sub.add_parser("edit")
-    p_edit.add_argument("symbol")
-    p_edit.add_argument("--set", action="append", default=[])
-    p_edit.add_argument("--dry-run", action="store_true")
-    p_edit.add_argument("--apply", action="store_true")
-    p_edit.add_argument("--format", choices=["text", "json"], default="text")
-    args = ap.parse_args(argv)
+    args = _parser().parse_args(argv)
+    try:
+        add_values = _add_values(args) if args.command == "add" else None
+        source = resolve_yaml_config_path(args.config_yaml, repo_root=repo_base())
+        if source.suffix.lower() not in {".yaml", ".yml"}:
+            raise AgentToolError(code="INPUT_ERROR", message="symbols requires a config.yaml authoring source, not generated JSON")
+        document = load_yaml_config_file(source)
+        markets = document.get("markets")
+        configured = [name for name in ("us", "hk") if isinstance(markets, dict) and name in markets]
+        if args.command == "list":
+            if not configured:
+                raise AgentToolError(code="CONFIG_ERROR", message="config.yaml has no configured markets")
+            if not args.market and len(configured) > 1:
+                raise AgentToolError(code="INPUT_ERROR", message="list requires --market when multiple markets are configured")
+            market = normalize_config_market(args.market or configured[0])
+            market_doc = markets.get(market) if isinstance(markets, dict) else None
+            if not isinstance(market_doc, dict) or not isinstance(market_doc.get("symbols"), list):
+                raise AgentToolError(code="CONFIG_ERROR", message=f"config.yaml missing markets.{market}.symbols")
+            runtime, _ = resolve_yaml_runtime_config(repo_root=repo_base(), market=market, config_path=source)
+            payload = {
+                "market": market, "config_yaml_path": str(source),
+                "symbols": market_doc["symbols"], "effective": runtime["symbols"],
+            }
+            if args.format == "json":
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"{market.upper()} 监控标的（{source}）")
+                for entry in payload["effective"]:
+                    put = bool((entry.get("sell_put") or {}).get("enabled"))
+                    call = bool((entry.get("sell_call") or {}).get("enabled"))
+                    print(f"  {entry['symbol']}: CSP={'on' if put else 'off'} CC={'on' if call else 'off'}")
+            return 0
 
-    base = Path(__file__).resolve().parents[3]
-    cfg_path = Path(args.config)
-    if not cfg_path.is_absolute():
-        cfg_path = (base / cfg_path).resolve()
-    cfg = load_json(cfg_path)
-    if args.cmd == "list":
-        cmd_list(cfg, args.format)
-        return 0
-    if args.cmd == "add" and not (args.put or args.call):
-        raise SystemExit("add requires at least one of: --put, --call")
-    if args.cmd == "edit" and not args.set:
-        raise SystemExit("edit requires at least one --set path=value")
-    preview_cfg = deepcopy(cfg)
-    summary = _apply_command(preview_cfg, args)
-    write_requested = bool(args.apply)
-    if args.dry_run and write_requested:
-        raise SystemExit("--dry-run cannot be combined with --apply")
-    payload = attach_write_contract(
-        summary.public_payload(),
-        dry_run=not write_requested,
-        write_applied=write_requested,
-        rollback_hint=f"restore {cfg_path} from version control or revert this symbol mutation",
-    )
-    if not write_requested:
+        calibration = calibrate_symbol(args.symbol, config=document)
+        if calibration.status != "ok" or not calibration.market:
+            raise AgentToolError(code="INPUT_ERROR", message=calibration.message)
+        inferred_market = calibration.market.lower()
+        market = normalize_config_market(args.market or inferred_market)
+        if market != inferred_market:
+            raise AgentToolError(code="INPUT_ERROR", message=f"{args.symbol} belongs to {inferred_market}, not {market}")
+        action = {"rm": "remove"}.get(args.command, args.command)
+        mutation: dict[str, Any] = {"action": action, "symbol": args.symbol}
+        if action == "add":
+            mutation["inherit_defaults"] = True
+            mutation["set"] = add_values
+        if action == "edit":
+            mutation["set"] = _edit_values(args.set)
+        result = mutate_yaml_symbol_config(
+            repo_root=repo_base(), market=market, payload=mutation,
+            config_path=source, rebuild_runtime_root=args.rebuild_runtime_root,
+            apply=bool(args.apply), expected_source_sha256=args.expected_source_sha256,
+        )
         if args.format == "json":
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
-            _print_preview(summary.public_payload(), cfg_path=cfg_path)
+            summary = result["summary"]
+            state = "已写入 YAML 并重建快照" if result["write_applied"] else "预览，未写入"
+            print(f"{state}：{summary['action']} {summary['canonical_symbol']} · {source}")
+            print("共享账户：" + ", ".join(summary["affected_accounts"]))
+            if action != "remove":
+                entry = summary["after_effective"]
+                for label, key in (("CSP", "sell_put"), ("CC", "sell_call")):
+                    setting = entry[key]
+                    bounds = " ".join(
+                        f"{bound}_strike={setting[bound + '_strike']}"
+                        for bound in ("min", "max") if bound + "_strike" in setting
+                    )
+                    print(f"  {label}: {'on' if setting['enabled'] else 'off'}{(' · ' + bounds) if bounds else ''}")
+            if not result["write_applied"]:
+                print("源版本：" + result["source_revision"]["before_sha256"])
+                print("确认后追加 --apply --expected-source-sha256 " + result["source_revision"]["before_sha256"])
+            elif result.get("backup_path"):
+                print(f"配置备份：{result['backup_path']}")
         return 0
-    _save_validated_json(cfg_path, preview_cfg)
-    if args.format == "json":
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        print(f"[DONE] {summary.action} {summary.canonical_symbol} -> {cfg_path}")
-    return 0
-
-
-def _apply_command(cfg: dict, args: argparse.Namespace):
-    if args.cmd == "add":
-        return cmd_add(cfg, args.symbol, args.use, args.limit_exp, args.put, args.call, accounts=args.accounts)
-    if args.cmd == "rm":
-        return cmd_rm(cfg, args.symbol)
-    if args.cmd == "edit":
-        return cmd_edit(cfg, args.symbol, args.set)
-    raise SystemExit("unknown cmd")
-
-
-def _print_preview(summary: dict[str, Any], *, cfg_path: Path) -> None:
-    cal = summary.get("calibration") if isinstance(summary.get("calibration"), dict) else {}
-    action_text = {"add": "新增", "edit": "修改", "remove": "删除"}.get(str(summary.get("action")), str(summary.get("action")))
-    lines = [
-        "监控标的变更预览",
-        f"操作：{action_text}",
-        f"输入：{summary.get('raw_symbol') or '-'}",
-        f"校准为：{summary.get('canonical_symbol') or '-'}",
-        f"市场：{cal.get('market') or '-'}",
-        f"Futu code：{cal.get('futu_code') or '-'}",
-        f"来源：{cal.get('source_kind') or '-'}",
-        f"配置：{cfg_path}",
-    ]
-    changed_paths = summary.get("changed_paths")
-    if isinstance(changed_paths, list) and changed_paths:
-        lines.append("变更：" + "、".join(str(item) for item in changed_paths))
-    existing = str(summary.get("existing_symbol") or "").strip()
-    if existing:
-        lines.append(f"匹配现有记录：{existing}")
-    lines.extend(["", "未写入配置。确认写入请追加 --apply。"])
-    print("\n".join(lines))
+    except AgentToolError as exc:
+        raise SystemExit(f"{exc.code}: {exc.message}") from exc
 
 
 if __name__ == "__main__":

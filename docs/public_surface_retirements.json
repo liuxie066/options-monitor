@@ -2,6 +2,11 @@
   "description": "Declared public names that were deliberately retired from src/, domain/ and scripts/. Append-only: an entry is never deleted, because the gate reads this file to explain every name that disappeared between two revisions. The one exception is a \"*\" entry whose module has come back -- it is then false, and the gate only lets it be dropped, never rewritten. See docs/GUARDRAILS.md section B.",
   "retirements": [
     {
+      "module": "src/application/assistant/llm_model_profiles.py",
+      "name": "write_model_config_update",
+      "reason": "Model publication moved to src.application.config_features.write_model_config_update so the profile resolver used by config generation no longer imports its own publisher. Human bot/assistant model add/use commands retain their contract; Python callers must import the authoring owner."
+    },
+    {
       "module": "domain/domain/ledger/position_fields.py",
       "name": "upsert_note_kv",
       "reason": "Note-key/value upsert retired with the note-as-fact path: exp/multiplier are no longer written into note, because facts live in structured keys; merge_note is the surviving note writer."
@@ -215,6 +220,31 @@
       "module": "src/application/portfolio_context_service.py",
       "name": "FreshnessChecker",
       "reason": "Cash cache selection now evaluates independent source time and effective runtime.portfolio_context_ttl_sec through the shared cash snapshot owner; per-call file freshness callbacks and their type alias are retired."
+    },
+    {
+      "module": "src/interfaces/cli/symbols.py",
+      "name": "cmd_add",
+      "reason": "The runtime JSON symbol writer was retired; human symbol changes now use the config.yaml authoring transaction."
+    },
+    {
+      "module": "src/interfaces/cli/symbols.py",
+      "name": "cmd_edit",
+      "reason": "The runtime JSON symbol writer was retired; human symbol changes now use the config.yaml authoring transaction."
+    },
+    {
+      "module": "src/interfaces/cli/symbols.py",
+      "name": "cmd_list",
+      "reason": "The runtime JSON symbol reader was retired; human symbol listing now reads config.yaml and resolves effective settings."
+    },
+    {
+      "module": "src/interfaces/cli/symbols.py",
+      "name": "cmd_rm",
+      "reason": "The runtime JSON symbol writer was retired; human symbol changes now use the config.yaml authoring transaction."
+    },
+    {
+      "module": "src/interfaces/cli/symbols.py",
+      "name": "load_json",
+      "reason": "The runtime JSON symbol reader was retired; human symbol listing now reads config.yaml and resolves effective settings."
     }
   ]
 }

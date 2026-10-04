@@ -280,6 +280,10 @@ def test_config_init_creates_only_futu_account(tmp_path: Path, dry_run: bool) ->
         output_config_yaml_path=output,
         runtime_output_dir=runtime,
         account_label="lx",
+        us_symbols=["AAPL"],
+        hk_symbols=["0005.HK"],
+        symbol_policies={"AAPL": {"strategy": "csp", "csp_max_strike": 100},
+                         "0005.HK": {"strategy": "cc", "cc_min_strike": 10}},
         dry_run=dry_run,
     )
     assert result["ok"] is True

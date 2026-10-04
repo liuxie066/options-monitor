@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Improvements
+- 首次安装与日常菜单接入可执行的账户、标的、通知、Bot、全局持仓风险和服务流程；新增 `channel/bot/holdings/close-advice configure` 与预览确认式 `service install/start/stop`。可选功能可跳过；普通设置写入实例 env，密钥经终端隐藏输入和既有系统存储。通知显式关闭同时约束定时投递、回执与系统告警，旧配置保持原默认行为。
+- `bot` 统一承载模型、能力和消息入口，`channel feishu event/serve` 提供飞书接入；保留 `assistant/inbound` 兼容。账户和标的变更发布同一代运行快照，同市场账户共享标的。菜单子命令隔离实例环境；手动扫描使用 `--force --no-send`，并如实保留失败与未验证状态。
+- 人工 CLI 首页与帮助按“首次安装”和“日常管理”组织任务；首次安装明确列出富途 OpenAPI/OpenD、通知通道和 Bot LLM 接入，并区分离线检查与外部就绪。`om --help` 显示任务入口，`om help all` 保留完整顶层命令表。`om config init` 仍可用于高级脚本化初始化，不再与 `om setup init` 并列推荐。
+- 首次 `om setup init` 要求用户提供所选市场的监控标的并预览实际清单；缺少标的时不写配置，未选市场和示例标的不再进入新建 YAML。
+- 人工 `om symbols` 改为维护权威 `config.yaml` 并重建运行快照，默认写入前预览；原先 `--config` 指向运行 JSON 的写法需改用 `--config-yaml` 指向 YAML，策略字段改用 `edit --set`。`om help` 按场景区分人工命令与 `om-agent` 结构化工具。
+- 人工 `om symbols add/rm/edit` 可从标的自动识别 US/HK 市场；显式 `--market` 与标的冲突时拒绝。单市场配置下 `list` 也可省略 `--market`。
+- 人工 `om symbols add` 现在要求明确选择 CSP、CC 或两者；CSP 必填 `max_strike`，CC 必填 `min_strike`，另一端边界可选。预览会显示策略和填写的行权价边界。
+- 首次 `om setup init` 与高级 `om config init` 也要求逐个标的填写策略和必要的行权价边界；交互引导和预览会显示实际生效值。
+
 ## 4.1.4 - 2026-10-04
 
 ### Improvements

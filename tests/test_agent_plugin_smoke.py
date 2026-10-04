@@ -5100,12 +5100,15 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
     assert out["data"]["authoring"]["source_format"] == "yaml"
 
 
-def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("max_strike", [None, 120])
+def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path: Path, max_strike) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    _config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path, market="hk")
+    config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path, market="hk")
+    before = {path: path.read_bytes() for path in (config_yaml, cfg_path)}
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
+    strike = {} if max_strike is None else {"sell_put_max_strike": max_strike}
     out = run_tool(
         "manage_symbols",
         {
@@ -5115,13 +5118,22 @@ def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path
             "sell_put_enabled": True,
             "sell_put_min_dte": 20,
             "sell_put_max_dte": 45,
+            **strike,
             "confirm": True,
         },
     )
 
+    if max_strike is None:
+        assert out["ok"] is False
+        assert out["error"]["code"] == "INPUT_ERROR"
+        assert out["error"]["message"] == "9988.HK CSP requires max_strike"
+        assert {path: path.read_bytes() for path in before} == before
+        return
+
     assert out["ok"] is True
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert [item["symbol"] for item in current["symbols"]] == ["0700.HK", "9988.HK"]
+    assert current["symbols"][1]["sell_put"]["max_strike"] == max_strike
 
 
 def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path: Path) -> None:

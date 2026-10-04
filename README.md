@@ -58,7 +58,7 @@ trade_events -> projection -> position_lots
 | Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
-本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
+本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工任务按“首次安装”和“日常管理”在 `om help` 中组织；完整顶层命令见 `om help all`。结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
 
 ### 轮转策略
 
@@ -94,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 "$HOME/.local/bin/om" setup init
 ```
 
-第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；`setup init` 需待包含本功能的 Release 发布后才可用。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
+第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；具体参数以安装版的 `om setup init --help` 为准。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
 
 安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper；不会创建生产配置、写入 secrets、安装服务或启动定时任务。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
 
@@ -110,23 +110,44 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup init
 ```
 
-它会询问配置目录、市场、账户标签和富途账户 ID，预览目标文件与默认选择，输入 `yes` 后才写入。成功时会把目录记在 `~/.config/options-monitor/runtime-root`，新终端无需再次设置 `OM_RUNTIME_ROOT`。编辑生成的 `config.yaml` 后，按输出命令校验并重建快照，然后检查：
+引导显示平台默认目录，依次填写市场、OpenD 地址、REAL/SIMULATE 环境、账户标签、富途账户 ID 和监控标的。首次完成一个账户，之后在日常管理中添加账户；同市场账户共享标的。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。账户 ID 和标的不能为空，也不会填入示例标的。预览实际选择，输入 `yes` 后才保存 YAML、运行快照及 `~/.config/options-monitor/runtime-root` 目录记录。
+
+通知通道、Bot LLM 和常驻服务逐项询问，可以跳过；新配置的通知与 Bot 默认关闭。密钥在终端隐藏输入。服务安装、启动分别预览确认；首次手动运行默认不发通知。重新运行 `om setup init` 可以继续可选步骤，已保存的配置保留。然后检查：
 
 ```bash
-om setup check --market us --format text
+om setup check --format text
 ```
 
-非交互预览用 `om setup init --dry-run --output-dir <path>`；完整的初始化参数、YAML 校验与快照重建见 `om config --help`、[CONFIGS.md](CONFIGS.md) 和 [配置指南](CONFIGURATION_GUIDE.md)。目标文件已存在时拒绝覆盖；中断后若留下文件，先核对冲突清单再重试。`om setup check` 检查所选市场的离线配置与安装条件，Bot 单独报告；它不验证券商登录或通知可达。已有 `OM_RUNTIME_ROOT` 或服务显式目录仍优先于用户记录。
+脚本化初始化使用 `om setup init --help` 中的完整参数；写入需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
+
+之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Assistant 的运行快照：
+
+```bash
+om symbols list --market us
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE
+om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --apply
+```
+
+将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`；选 CC 时须给 `--cc-min-strike`，选 both 时两项都要给。CSP 下限和 CC 上限可选，详见 `om symbols add --help`。`NVDA` 会识别为美股，`0700.HK` 会识别为港股；`--market` 可省略，若指定则必须与标的一致。只配置一个市场时，`om symbols list` 也可省略 `--market`；配置多个市场时需指定。
+
+在终端运行 `om`，日常菜单提供结果与状态、账户与标的、通知与 Bot、策略与全局持仓风险、运行维护五组任务。也可以直接调用：
+
+| 任务 | 命令 |
+|---|---|
+| 查看账户或标的 | `om accounts list`、`om symbols list` |
+| 配置通知与 Bot | `om channel configure`、`om bot configure` |
+| 配置可选 Holdings 来源 | `om holdings configure`；依赖同机 PM，只补充全局持仓风险中的非富途资产 |
+| 开关平仓建议 | `om close-advice configure` |
+| 管理常驻服务 | `om service install`、`om service start`、`om service stop`；默认预览 |
+
+`om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
 ### 2. 只读检查
 
 ```bash
-om-agent run --tool config_validate \
-  --input-json '{"config_key":"us"}'
-om-agent run --tool healthcheck \
-  --input-json '{"config_key":"us"}'
-om-agent run --tool runtime_status \
-  --input-json '{"config_key":"us"}'
+om config validate --config-key us
+om doctor --config-key us
+om status --config-key us
 ```
 
 生产 release 目录通常没有 repo-local config。检查生产 runtime 时应显式传真实路径：
@@ -151,15 +172,15 @@ om config explain --source yaml --market us \
 
 ```bash
 OM_CONFIG_DIR="$(cat "$HOME/.config/options-monitor/runtime-root")"
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send --force
 ```
 
-`--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
+`--force` 让这次手动扫描跳过计划时段限制。`--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
 
 示例中的 `lx` 换成初始化时选择的账户标签。检查结果后，可继续手工扫描：
 
 ```bash
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx
+om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --force
 ```
 
 计划内扫描和普通通知使用 guarded scheduler：
@@ -351,8 +372,9 @@ om-agent run --tool healthcheck \
 |---|---|
 | 人工配置 | `config.yaml` |
 | US/HK 运行快照 | `config.us.json` / `config.hk.json` |
-| Assistant 运行快照 | 本地 init 为 `config.assistant.json`；服务 profile 通常使用 `resolved/config.assistant.json` |
-| Secrets / 写入开关 | env-file |
+| Bot 运行快照 | `om setup init` 默认生成 `<runtime_root>/resolved/config.assistant.json`；高级命令可显式指定输出位置 |
+| 普通设置 / 写入开关 | `options-monitor.env` 或显式选择的 env-file |
+| Secrets | macOS Keychain / Linux systemd 加密凭证，使用 `om secrets` 管理，见 [密钥存储](docs/SECRET_STORAGE.md) |
 | 期权事实 | `<runtime_root>/output_shared/state/option_positions.sqlite3` |
 | 单次运行 | `<runtime_root>/output_runs/<run_id>/` |
 | 共享状态与报告 | `<runtime_root>/output_shared/` |
@@ -388,6 +410,8 @@ Feishu 在本项目中的角色：
 - 删除 runtime outputs、state、cache、SQLite 或历史证据。
 
 ## 部署与运维
+
+运行 `om` →「日常管理」→「运行与维护」→「service」，可以预览并确认安装、启动或停止服务。安装定义与启动分开确认；也可直接使用 `om service install/start/stop`，默认只预览。平台要求和确认参数见 [安装指南](docs/GETTING_STARTED.md#6-可选长期运行服务)。
 
 代码目录与运行目录必须分离。典型 Linux 布局：
 

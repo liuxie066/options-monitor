@@ -1539,6 +1539,7 @@ def _expected_bundle_from_profile(
         "include_quality_monitoring": include_quality_monitoring,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
+        "feature_aware_credentials": secret_credentials.get("binding_policy") == "enabled-consumers-v1",
         "secret_credential_delivery": (
             secret_credentials.get("delivery")
             or DEFAULT_SECRET_CREDENTIAL_DELIVERY

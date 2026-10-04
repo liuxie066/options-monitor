@@ -23,6 +23,7 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.notification_delivery_route import (
     resolve_notification_delivery_route,
+    notifications_enabled,
 )
 from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_trade_time_beijing
@@ -254,6 +255,8 @@ def _build_plan(
     reason: str,
     route_resolver: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
+    if not notifications_enabled(config):
+        raise ValueError("notifications_disabled: receipt compensation is disabled")
     account_value = str(account).strip().lower()
     canonical_ids = _canonical_deal_ids(deal_ids, account=account_value)
     reason_value = str(reason or "").strip()

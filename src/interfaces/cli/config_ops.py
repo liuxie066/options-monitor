@@ -13,10 +13,11 @@ from src.application.config_yaml import (
     explain_yaml_config_key,
     validate_yaml_runtime_config,
 )
-from src.application.config_yaml_init import init_yaml_config
+from src.application.config_yaml_init import _normalize_markets, init_yaml_config
 from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.config_yaml_holdings import set_yaml_holdings_inclusion
 from src.application.runtime_config_readiness import require_runtime_config_readiness
+from src.interfaces.cli.setup_ops import add_symbol_policy_arguments, symbol_policies_from_args
 
 
 def add_config_commands(subparsers: Any) -> None:
@@ -27,9 +28,15 @@ def add_config_commands(subparsers: Any) -> None:
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
     init_config.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     init_config.add_argument("--futu-acc-id", default=None, help="Futu account id; omitted keeps a placeholder in config.yaml")
+    init_config.add_argument("--futu-host", default="127.0.0.1")
+    init_config.add_argument("--futu-port", type=int, default=11111)
+    init_config.add_argument("--trd-env", choices=("REAL", "SIMULATE"), default="REAL")
     init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
-    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None)
-    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None)
+    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
+                             help="required for US; repeat for each monitored symbol")
+    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None,
+                             help="required for HK; repeat for each monitored symbol")
+    add_symbol_policy_arguments(init_config)
     init_config.add_argument("--no-build", action="store_true", help="only write config.yaml; do not build runtime JSON")
     init_config.add_argument("--dry-run", action="store_true", help="preview starter YAML without writing files")
     init_config.add_argument("--force", action="store_true")
@@ -82,6 +89,8 @@ def add_config_commands(subparsers: Any) -> None:
     symbol_set.add_argument("--covered-call-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--covered-call-min-strike", type=float, default=None)
     symbol_set.add_argument("--sell-put-enabled", type=_parse_bool_value, default=None)
+    symbol_set.add_argument("--sell-put-max-strike", type=float, default=None)
+    symbol_set.add_argument("--expected-source-sha256", default=None)
     symbol_set.add_argument("--combo-yield-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--rebuild-runtime-root", default=None)
     symbol_set.add_argument("--apply", action="store_true")
@@ -289,9 +298,15 @@ def handle_config_command(
             runtime_output_dir=args.runtime_output_dir,
             markets=args.market,
             futu_acc_id=args.futu_acc_id,
+            futu_host=args.futu_host, futu_port=args.futu_port, trd_env=args.trd_env,
             account_label=args.account_label,
             us_symbols=args.us_symbols,
             hk_symbols=args.hk_symbols,
+            symbol_policies=symbol_policies_from_args(
+                args,
+                symbols={"us": args.us_symbols, "hk": args.hk_symbols},
+                markets=_normalize_markets(args.market),
+            ),
             build=not bool(args.no_build),
             dry_run=bool(args.dry_run),
             force=bool(args.force),
@@ -319,6 +334,8 @@ def handle_config_command(
                 covered_call_enabled=args.covered_call_enabled,
                 covered_call_min_strike=args.covered_call_min_strike,
                 sell_put_enabled=args.sell_put_enabled,
+                sell_put_max_strike=getattr(args, "sell_put_max_strike", None),
+                expected_source_sha256=getattr(args, "expected_source_sha256", None),
                 combo_yield_enabled=args.combo_yield_enabled,
                 rebuild_runtime_root=args.rebuild_runtime_root,
                 apply=bool(args.apply),

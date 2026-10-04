@@ -144,7 +144,18 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
             check=True,
             env=env,
         )
-        assert "usage:" in help_proc.stdout
+        assert "首次安装" in help_proc.stdout and "日常管理" in help_proc.stdout
+        assert "om setup init" in help_proc.stdout and "om help all" in help_proc.stdout
+        full_help_proc = subprocess.run(
+            ["om", "help", "all"],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        assert full_help_proc.stdout.startswith("usage: om ")
+        assert "trade-events" in full_help_proc.stdout
 
         setup_proc = subprocess.run(
             ["om", "setup", "check"],
@@ -187,6 +198,12 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
                 str(runtime_configs),
                 "--futu-acc-id",
                 "12345678",
+                "--us-symbol", "NVDA",
+                "--symbol-strategy", "NVDA=csp",
+                "--csp-max-strike", "NVDA=100",
+                "--hk-symbol", "0700.HK",
+                "--symbol-strategy", "0700.HK=cc",
+                "--cc-min-strike", "0700.HK=400",
             ],
             cwd=str(outside),
             capture_output=True,
@@ -199,6 +216,12 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
         assert config_yaml.exists()
         assert (runtime_configs / "config.us.json").exists()
         assert (runtime_configs / "config.hk.json").exists()
+        us = json.loads((runtime_configs / "config.us.json").read_text())
+        hk = json.loads((runtime_configs / "config.hk.json").read_text())
+        assert [item["symbol"] for item in us["symbols"]] == ["NVDA"]
+        assert [item["symbol"] for item in hk["symbols"]] == ["0700.HK"]
+        assert us["symbols"][0]["sell_put"]["max_strike"] == 100
+        assert hk["symbols"][0]["sell_call"]["min_strike"] == 400
 
         validate_proc = subprocess.run(
             ["om", "config", "validate", "--source", "yaml", "--market", "us", "--config-yaml", str(config_yaml)],

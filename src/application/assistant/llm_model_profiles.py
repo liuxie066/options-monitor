@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import re
-import shutil
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +13,9 @@ from src.application.llm_provider_registry import (
     require_provider_spec,
     resolve_output_reservation,
 )
-from src.application.config_primitives import dump_yaml
 from src.application.settings import build_effective_env
 from src.application.secret_store import SecretProvider, resolve_secret_status
 from src.infrastructure.secret_store.factory import build_secret_provider
-from src.application.write_contract import attach_write_contract
-from src.infrastructure.io_utils import atomic_write_text
 
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -350,38 +345,6 @@ def switch_active_model_profile(config_doc: dict[str, Any], *, name: str) -> tup
     return out, profile
 
 
-def write_model_config_update(
-    *,
-    config_path: str | Path,
-    before_doc: dict[str, Any],
-    after_doc: dict[str, Any],
-    apply: bool,
-    action: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    path = Path(config_path).expanduser().resolve()
-    yaml_text = dump_yaml(after_doc)
-    backup_path = None
-    if apply:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        backup_path = _backup_existing_config(path)
-        atomic_write_text(path, yaml_text, encoding="utf-8")
-    return attach_write_contract(
-        {
-            "ok": True,
-            "action": action,
-            "config_yaml_path": str(path),
-            "changed": before_doc != after_doc,
-            **payload,
-            "yaml": yaml_text,
-        },
-        dry_run=not bool(apply),
-        write_applied=bool(apply),
-        backup_path=backup_path,
-        rollback_hint=f"restore {backup_path} to {path}" if backup_path else f"rerun the command or edit {path}",
-    )
-
-
 def model_catalog() -> dict[str, Any]:
     return provider_catalog_payload()
 
@@ -470,14 +433,6 @@ def _llm_identity(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _backup_existing_config(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    backup_path = path.with_name(f"{path.name}.bak.{stamp}")
-    shutil.copy2(path, backup_path)
-    return backup_path
-
 
 __all__ = [
     "LlmModelProfile",
@@ -490,5 +445,4 @@ __all__ = [
     "parse_model_profiles",
     "resolve_authoring_assistant_config",
     "switch_active_model_profile",
-    "write_model_config_update",
 ]

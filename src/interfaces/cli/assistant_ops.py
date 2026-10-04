@@ -26,13 +26,13 @@ from src.application.assistant.llm_model_profiles import (
     model_catalog,
     parse_model_profiles,
     switch_active_model_profile,
-    write_model_config_update,
 )
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
+from src.application.config_features import write_model_config_update
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -71,6 +71,10 @@ def _assistant_settings_for_cli(
 
 def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_sub = parser.add_subparsers(dest="assistant_command", required=True)
+    register_assistant_subcommands(assistant_sub)
+
+
+def register_assistant_subcommands(assistant_sub: Any) -> None:
     assistant_handle = assistant_sub.add_parser("handle", help="handle one local or remote assistant message")
     assistant_handle.add_argument("--text", required=True)
     assistant_handle.add_argument("--sender", dest="sender_id", default="local")
@@ -126,10 +130,12 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_model_add.add_argument("--replace", action="store_true")
     assistant_model_add.add_argument("--activate", action="store_true")
     assistant_model_add.add_argument("--apply", action="store_true")
+    assistant_model_add.add_argument("--expected-source-sha256", default=None)
     assistant_model_use = assistant_model_sub.add_parser("use", help="switch assistant.active_model")
     assistant_model_use.add_argument("name")
     assistant_model_use.add_argument("--config-yaml", default=None)
     assistant_model_use.add_argument("--apply", action="store_true")
+    assistant_model_use.add_argument("--expected-source-sha256", default=None)
     assistant_model_check = assistant_model_sub.add_parser("check", help="check one configured model profile")
     assistant_model_check.add_argument("name", nargs="?")
     assistant_model_check.add_argument("--active", action="store_true")
@@ -171,6 +177,14 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_upgrade_worker.add_argument("--no-local-env-file", action="store_true")
     assistant_upgrade_worker.add_argument("--no-final-receipt", action="store_true")
     assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_handle.set_defaults(assistant_command="handle")
+    assistant_commands.set_defaults(assistant_command="commands")
+    assistant_capabilities.set_defaults(assistant_command="capabilities")
+    assistant_llm_check.set_defaults(assistant_command="llm-check")
+    assistant_model.set_defaults(assistant_command="model")
+    assistant_pending.set_defaults(assistant_command="pending")
+    assistant_audit.set_defaults(assistant_command="audit")
+    assistant_upgrade_worker.set_defaults(assistant_command="upgrade-worker")
 
 
 def _model_config_yaml_path(raw: str | None, *, repo_base_fn: Callable[[], Path] = repo_base) -> Path:
@@ -370,6 +384,8 @@ def handle_assistant_command(
                 after_doc=after_doc,
                 apply=bool(args.apply),
                 action="add",
+                repo_root=repo_base_fn(),
+                expected_source_sha256=getattr(args, "expected_source_sha256", None),
                 payload={
                     "profile": profile.public_payload(active=bool(args.activate)),
                     "active_model": (
@@ -390,10 +406,12 @@ def handle_assistant_command(
                 after_doc=after_doc,
                 apply=bool(args.apply),
                 action="use",
+                repo_root=repo_base_fn(),
+                expected_source_sha256=getattr(args, "expected_source_sha256", None),
                 payload={
                     "profile": profile.public_payload(active=True),
                     "active_model": profile.name,
-                    "rebuild_hint": "run `om config build-assistant --source yaml` after applying this change",
+                    "rebuild_hint": "apply publishes and verifies runtime snapshots; reload running Bot services separately",
                 },
             )
             return _print(build_response(tool_name="assistant.model.use", ok=True, data=data))

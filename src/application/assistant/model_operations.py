@@ -22,7 +22,7 @@ from src.application.assistant.operation_policy import enforce_model_write_allow
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_yaml import default_yaml_assistant_config_path, default_yaml_config_path, load_yaml_config_file
+from src.application.config_yaml import default_yaml_assistant_config_path, default_yaml_config_path, load_yaml_config_file, resolve_yaml_config_path
 from src.application.runtime_config_freshness import GENERATED_KEY
 from src.application.config_yaml import RESOLVED_KEY
 from src.application.payload_helpers import optional_text as _optional_text
@@ -327,7 +327,7 @@ def render_model_response(
 
 def _load_config_for_payload(payload: dict[str, Any]) -> tuple[Path, Path, dict[str, Any]]:
     config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    config_yaml_path = _resolve_path(config.get("config_yaml_path"), default=default_yaml_config_path(repo_root=repo_base()))
+    config_yaml_path = resolve_yaml_config_path(config.get("config_yaml_path"), repo_root=repo_base())
     assistant_config_path = _resolve_path(
         config.get("assistant_config_path"),
         default=default_yaml_assistant_config_path(repo_root=repo_base()),
@@ -379,7 +379,7 @@ def _config_yaml_path_from_json(path: Path, *, repo_root: Path) -> Path | None:
         _generated_source_path(payload),
     ):
         if candidate:
-            return _resolve_path(candidate, default=default_yaml_config_path(repo_root=repo_root), repo_root=repo_root)
+            return _resolve_path(candidate, default=repo_root / "config.yaml", repo_root=repo_root)
     return None
 
 

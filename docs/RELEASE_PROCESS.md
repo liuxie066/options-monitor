@@ -243,7 +243,7 @@ VERSION="$(cat VERSION)"
   tests/test_inbound_control.py \
   tests/test_setup_check.py \
   tests/test_cli_operator_commands.py
-./om config init --dry-run --output /tmp/options-monitor-config.yaml --runtime-output-dir /tmp/options-monitor-runtime-config
+./om config init --market us --us-symbol NVDA --symbol-strategy NVDA=csp --csp-max-strike NVDA=100 --dry-run --output /tmp/options-monitor-config.yaml --runtime-output-dir /tmp/options-monitor-runtime-config
 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
 ./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run

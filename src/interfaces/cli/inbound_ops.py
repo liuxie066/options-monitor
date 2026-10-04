@@ -28,7 +28,12 @@ def _print(payload: dict[str, Any]) -> int:
 def add_inbound_commands(subparsers: Any) -> None:
     inbound = subparsers.add_parser("inbound", help="handle channel transport adapters")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
-    inbound_feishu = inbound_sub.add_parser("feishu", help="handle one Feishu event payload through assistant control")
+    register_feishu_transport_commands(inbound_sub)
+
+
+def register_feishu_transport_commands(inbound_sub: Any, *, event_name: str = "feishu", serve_name: str = "feishu-ws") -> None:
+    inbound_feishu = inbound_sub.add_parser(event_name, help="handle one Feishu event payload through assistant control")
+    inbound_feishu.set_defaults(inbound_command="feishu")
     feishu_input = inbound_feishu.add_mutually_exclusive_group(required=True)
     feishu_input.add_argument("--input-json", default=None)
     feishu_input.add_argument("--input-file", default=None)
@@ -40,7 +45,8 @@ def add_inbound_commands(subparsers: Any) -> None:
     inbound_feishu.add_argument("--env-file", default=None)
     inbound_feishu.add_argument("--no-local-env-file", action="store_true")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
-    inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
+    inbound_ws = inbound_sub.add_parser(serve_name, help="serve the Feishu App long-connection inbound client")
+    inbound_ws.set_defaults(inbound_command="feishu-ws")
     inbound_ws.add_argument("--config-key", default=None, choices=("us", "hk"))
     inbound_ws.add_argument("--config-path", default=None)
     inbound_ws.add_argument("--assistant-config", default=None)

@@ -27,6 +27,13 @@ def normalize_config_market(value: str) -> str:
     return market
 
 
+def normalize_trd_env(value: Any) -> str:
+    environment = str(value or "").strip().upper()
+    if environment not in {"REAL", "SIMULATE"}:
+        raise AgentToolError(code="INPUT_ERROR", message="trd_env must be REAL or SIMULATE")
+    return environment
+
+
 def resolve_config_path(raw: str | Path | None, *, default: Path) -> Path:
     if raw is None or not str(raw).strip():
         return default.resolve()

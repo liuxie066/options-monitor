@@ -283,7 +283,7 @@ def _parse_symbol_command(command: str, args: list[str]) -> ControlCommand:
         return _intent("symbol_list")
     if action in {"add", "new"}:
         if len(args) < 2:
-            raise _bad_arg(command, "", "格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+            raise _bad_arg(command, "", "格式：/symbol add <symbol> put sell_put.max_strike=<price> 或 call sell_call.min_strike=<price>；可同时选择 put call，并补充 min/max_strike、use、limit_exp。")
         return _intent("symbol_add", _symbol_add_args(args[1:]))
     if action in {"edit", "set"}:
         if len(args) < 3:
@@ -318,10 +318,15 @@ def _symbol_add_args(args: list[str]) -> dict[str, object]:
                 out["limit_expirations"] = _positive_int(value, key)
             elif key == "accounts":
                 accounts.extend(item.strip() for item in value.split(",") if item.strip())
+            elif key in {f"{side}.{bound}_strike" for side in ("sell_put", "sell_call", "covered_call") for bound in ("min", "max")}:
+                field = key.replace("covered_call.", "sell_call.").replace(".", "_")
+                if field in out:
+                    raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"重复的 symbol add 参数：{key}")
+                out[field] = value  # Numeric/range validation belongs to the symbol authoring owner.
             else:
-                raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+                raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> put sell_put.max_strike=<price> 或 call sell_call.min_strike=<price>；可同时选择 put call，并补充 min/max_strike、use、limit_exp。")
         else:
-            raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+            raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> put sell_put.max_strike=<price> 或 call sell_call.min_strike=<price>；可同时选择 put call，并补充 min/max_strike、use、limit_exp。")
     if accounts:
         out["accounts"] = accounts
     return out

@@ -25,7 +25,7 @@ def holdings_included(config: dict[str, Any]) -> bool:
     return holdings.get("enabled") is True if isinstance(holdings, dict) else False
 
 
-def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
+def _probe_holdings(config: dict[str, Any], *, service_url: str | None = None) -> dict[str, Any]:
     configured = config.get("accounts")
     if not isinstance(configured, list) or not configured:
         raise ValueError("OM configured accounts are unavailable")
@@ -34,12 +34,20 @@ def _probe_holdings(config: dict[str, Any]) -> dict[str, Any]:
     )
     if not candidate_accounts:
         raise ValueError("OM configured accounts are unavailable")
+    client = None
+    if service_url is not None:
+        from src.application.portfolio_management import portfolio_management_enabled
+        from src.infrastructure.portfolio_management_client import PortfolioManagementClient
+        if not portfolio_management_enabled(config):
+            raise ValueError("portfolio_management.enabled is false")
+        client = PortfolioManagementClient(service_url=service_url)
     evidence = read_portfolio_valuation_evidence(
         accounts=candidate_accounts,
         supplemental_codes=[],
         price_timeout=10,
         runtime_config=config,
         holdings_scope="non_futu",
+        client=client,
     )
     inventory = non_futu_broker_inventory(evidence, candidate_accounts)
     quality = evidence.get("freshness")
@@ -82,6 +90,7 @@ def _preview_sha256(transaction: dict[str, Any], *, enabled: bool) -> str:
         "source_revision": transaction["source_revision"],
         "enabled": enabled,
         "approved_non_futu_brokers": transaction.get("approved_non_futu_brokers"),
+        "service_url": transaction.get("service_url"),
         "markets": {market: item["output_config_path"] for market, item in transaction["markets"].items()},
         "assistant": transaction["assistant"]["output_config_path"],
     }
@@ -138,7 +147,14 @@ def set_yaml_holdings_inclusion(
     confirm: bool = False,
     expected_source_sha256: str | None = None,
     expected_preview_sha256: str | None = None,
+    service_url: str | None = None,
 ) -> dict[str, Any]:
+    if service_url is not None:
+        from src.infrastructure.portfolio_management_client import PortfolioManagementConfigError, resolve_portfolio_service_origin
+        try:
+            service_url = resolve_portfolio_service_origin(service_url)
+        except PortfolioManagementConfigError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     source = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
     before_sha = config_source_sha256(source)
     if apply and (not confirm or expected_source_sha256 != before_sha):
@@ -163,7 +179,7 @@ def set_yaml_holdings_inclusion(
         current, _meta = resolve_yaml_runtime_config(repo_root=repo_root, market=markets[0], config_path=source)
         current["accounts"] = list(doc.get("accounts") or {})
         try:
-            preflight = _probe_holdings(current)
+            preflight = _probe_holdings(current, service_url=service_url) if service_url is not None else _probe_holdings(current)
             approved = preflight["approved_non_futu_brokers"]
             if set(approved) != set(current["accounts"]):
                 raise ValueError("PM broker approval does not cover all configured accounts")
@@ -189,6 +205,8 @@ def set_yaml_holdings_inclusion(
         expected_source_sha256=before_sha,
     )
     preview["approved_non_futu_brokers"] = holdings.get("approved_non_futu_brokers") if enabled else None
+    if service_url is not None:
+        preview["service_url"] = service_url
     preview_sha = _preview_sha256(preview, enabled=enabled)
     if apply and expected_preview_sha256 != preview_sha:
         raise AgentToolError(
@@ -225,6 +243,7 @@ def set_yaml_holdings_inclusion(
             "effect_scope": "assignment_scenario",
             "effect_note": "When enabled, assignment distribution includes PM Holdings from non-Futu brokers; Futu stocks, cash and MMF come from OpenD.",
             "preview_sha256": preview_sha,
+            "service_url": preview.get("service_url"),
             "preflight": preflight,
             "config_yaml_path": str(source),
             "runtime_root": str(target_root),

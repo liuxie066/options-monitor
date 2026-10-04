@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from domain.domain.multi_tick import resolve_notification_route_from_config
-from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
@@ -73,6 +73,9 @@ def send_trade_intake_receipt(
     inbox_id: str | None = None,
     inbox_claim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not notifications_enabled(config):
+        return {"enabled": False, "status": "skipped", "reason": "notifications_disabled",
+                "delivery_confirmed": False, "message_id": None}
     cfg = dict(receipt_config or {})
     decision = decide_trade_intake_receipt(
         receipt_config=cfg,
@@ -492,7 +495,7 @@ def resolve_trade_lifecycle_notification_batch_route(
     target = str(route.get("target") or "").strip()
     provider = str(route.get("provider") or "").strip()
     channel = str(route.get("channel") or "").strip()
-    if not target or not provider or not channel:
+    if route.get("enabled") is False or not target or not provider or not channel:
         return {**route, "route_available": False}
     return {
         **route,
@@ -597,6 +600,10 @@ def send_trade_lifecycle_outbox_payload(
         select_notification_delivery_adapter
     ),
 ) -> dict[str, Any]:
+    if not notifications_enabled(config):
+        return {"status": "explicit_failed", "explicit_pre_acceptance_failure": True,
+                "error": "notifications are disabled", "delivery_confirmed": False,
+                "classification_evidence": {"preflight": "notifications_disabled"}}
     cfg = dict(receipt_config or {})
     if cfg.get("enabled", True) is False:
         return {

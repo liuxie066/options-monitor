@@ -271,7 +271,7 @@ def _scoped_runtime_logs(payload):
     resolution = resolve_runtime_root(repo_root=repo_base())
     deadline, cancelled = _QUERY_CONTEXT.get()
     try:
-        if resolution.source not in {"env:OM_RUNTIME_ROOT", "user_record"}:
+        if resolution.source not in {"argument", "env:OM_RUNTIME_ROOT", "user_record"}:
             raise ProjectReaderError("runtime_root_unavailable")
         data = load_run_diagnostics(runtime_root=resolution, scope=scope, account=account,
             run_id=run_id, limit=payload.get("limit", 20), cursor=payload.get("cursor"),
@@ -307,7 +307,7 @@ def _scoped_runtime_runs(payload):
         account = scope["accounts"][0]
     query = {"account": account, "run_id": run_id, "scanned_only": bool(payload.get("scanned_only"))}
     try:
-        if resolution.source not in {"env:OM_RUNTIME_ROOT", "user_record"}:
+        if resolution.source not in {"argument", "env:OM_RUNTIME_ROOT", "user_record"}:
             raise ProjectReaderError("runtime_root_unavailable")
         with reader_query_context():
             descriptor = _directory(resolution.runtime_root, "", deadline, cancelled)
