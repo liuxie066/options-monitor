@@ -3,11 +3,25 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 
 OPEND_SOURCE = "opend_account_funds_conversion"
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _local_utc(hour: int, minute: int = 0, *, day: int = 30) -> str:
+    return datetime(2026, 9, day, hour, minute, tzinfo=_SHANGHAI).astimezone(timezone.utc).isoformat()
+
+
+def _pair(rate: float, *, quote_hour: int = 11, day: int = 30, source: str = "tencent_quote") -> dict:
+    return {
+        "rate": rate, "source": source,
+        "quote_at_utc": _local_utc(quote_hour, day=day),
+        "observed_at_utc": _local_utc(quote_hour, 1, day=day),
+    }
 
 
 def _write_cache(path: Path, rates: dict, source: str, *, timestamp: str | None = None) -> Path:
@@ -25,19 +39,24 @@ def _write_cache(path: Path, rates: dict, source: str, *, timestamp: str | None 
     return path
 
 
-def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+def test_get_rates_or_fetch_latest_uses_verified_cache_when_provider_fails(tmp_path: Path, monkeypatch) -> None:
+    from src.infrastructure import exchange_rates
 
-    cache_path = _write_cache(tmp_path / "rate_cache.json", {"USDCNY": 7.2, "HKDCNY": 0.92}, OPEND_SOURCE)
+    monkeypatch.setattr(exchange_rates, "_utc_now", lambda: datetime.fromisoformat(_local_utc(12)))
+    monkeypatch.setattr(exchange_rates, "fetch_market_exchange_rates", lambda: None)
+    cache_path = tmp_path / "rate_cache.json"
+    cache_path.write_text(json.dumps({"schema_version": 2, "pairs": {
+        "USDCNY": _pair(7.2), "HKDCNY": _pair(0.92),
+    }}), encoding="utf-8")
 
-    out = get_exchange_rates_or_fetch_latest(
+    out = exchange_rates.get_exchange_rates_or_fetch_latest(
         cache_path=cache_path,
         max_age_hours=24,
     )
 
     assert out is not None
     assert out["rates"] == {"USDCNY": 7.2, "HKDCNY": 0.92}
-    assert out["source"] == "opend_account_funds_conversion"
+    assert out["source"] == "tencent_quote"
 
 
 def test_get_rates_or_fetch_latest_fetches_when_cache_missing(
@@ -49,12 +68,10 @@ def test_get_rates_or_fetch_latest_fetches_when_cache_missing(
     cache_path = tmp_path / "state" / "rate_cache.json"
     messages: list[str] = []
 
+    monkeypatch.setattr(exchange_rates, "_utc_now", lambda: datetime.fromisoformat(_local_utc(12)))
+
     def _fake_fetch():
-        return {
-            "source": "tencent_quote",
-            "rates": {"USDCNY": 6.74, "HKDCNY": 0.86},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return {"pairs": {"USDCNY": _pair(6.74), "HKDCNY": _pair(0.86)}}
 
     monkeypatch.setattr(exchange_rates, "fetch_market_exchange_rates", _fake_fetch)
 
@@ -66,10 +83,10 @@ def test_get_rates_or_fetch_latest_fetches_when_cache_missing(
 
     assert out is not None
     assert out["rates"] == {"USDCNY": 6.74, "HKDCNY": 0.86}
-    assert cache_path.exists()
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["schema_version"] == 2
 
 
-def test_get_rates_or_fetch_latest_falls_back_to_stale_cache(tmp_path: Path, monkeypatch) -> None:
+def test_get_rates_or_fetch_latest_rejects_unverified_legacy_cache(tmp_path: Path, monkeypatch) -> None:
     from src.infrastructure import exchange_rates
 
     cache_path = tmp_path / "state" / "rate_cache.json"
@@ -85,30 +102,7 @@ def test_get_rates_or_fetch_latest_falls_back_to_stale_cache(tmp_path: Path, mon
 
     out = exchange_rates.get_exchange_rates_or_fetch_latest(cache_path=cache_path, max_age_hours=24, log=messages.append)
 
-    assert out is not None
-    assert out["rates"] == {"USDCNY": 7.28, "HKDCNY": 0.94}
-    assert any("stale cache" in msg for msg in messages)
-
-
-def test_save_exchange_rate_observation_preserves_provider_timestamp(
-    tmp_path: Path,
-) -> None:
-    from src.infrastructure.exchange_rates import save_exchange_rate_observation
-
-    cache_path = tmp_path / "rate_cache.json"
-    observed_at = "2026-08-06T01:02:03+00:00"
-    save_exchange_rate_observation(
-        cache_path,
-        {
-            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-            "timestamp": observed_at,
-            "source": "opend_account_funds_conversion",
-        },
-    )
-
-    saved = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert saved["timestamp"] == observed_at
-    assert saved["source"] == "opend_account_funds_conversion"
+    assert out is None
 
 
 def test_exchange_rate_observation_without_timestamp_is_stale() -> None:
@@ -122,20 +116,18 @@ def test_exchange_rate_observation_without_timestamp_is_stale() -> None:
             },
             max_age_hours=24,
         )
-        == "unavailable_stale"
+        == "unavailable"
     )
 
 
-def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) -> None:
+def test_load_exchange_rate_info_rejects_cache_without_pair_times(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import load_exchange_rate_info
 
     cache_path = _write_cache(tmp_path / "rate_cache.json", {"USDCNY": 7.21}, OPEND_SOURCE)
 
     out = load_exchange_rate_info(cache_path=cache_path, fetch_latest_on_miss=False)
 
-    assert out is not None
-    assert out["rates"] == {"USDCNY": 7.21}
-    assert out["source"] == "opend_account_funds_conversion"
+    assert out is None
 
 
 def test_exchange_rate_cache_rejects_non_opend_source(tmp_path: Path) -> None:
@@ -159,7 +151,6 @@ def test_exchange_rate_boundaries_reject_invalid_present_rate(
     from src.infrastructure.exchange_rates import (
         exchange_rate_observation_status,
         get_cached_exchange_rates,
-        save_exchange_rate_observation,
     )
 
     payload = {
@@ -172,11 +163,6 @@ def test_exchange_rate_boundaries_reject_invalid_present_rate(
 
     assert exchange_rate_observation_status(payload, max_age_hours=24) == "unavailable"
     assert get_cached_exchange_rates(cache_path=cache_path, max_age_hours=24) is None
-
-    saved_path = tmp_path / "saved_rate_cache.json"
-    save_exchange_rate_observation(saved_path, payload, log=lambda _message: None)
-    assert not saved_path.exists()
-
 
 def test_get_usd_per_cny_uses_shared_state_cache(tmp_path: Path, monkeypatch) -> None:
     from src.infrastructure import exchange_rates
@@ -209,9 +195,11 @@ def test_parse_tencent_response() -> None:
 def test_parse_sina_response() -> None:
     from src.infrastructure.exchange_rates import _parse_sina
 
+    usd = ["15:10:06", "6.7382", *(["0"] * 15), "2026-08-17"]
+    hkd = ["15:10:12", "0.8586", *(["0"] * 15), "2026-08-17"]
     text = (
-        'var hq_str_fx_susdcny="6.7382,6.7392,6.7322,150";\n'
-        'var hq_str_fx_shkdcny="0.8586,0.8593,0.8593,10";\n'
+        f'var hq_str_fx_susdcny="{",".join(usd)}";\n'
+        f'var hq_str_fx_shkdcny="{",".join(hkd)}";\n'
     )
     rates = _parse_sina(text)
     assert rates["USDCNY"] == 6.7382

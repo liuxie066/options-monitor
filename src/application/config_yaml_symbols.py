@@ -8,7 +8,7 @@ from typing import Any
 from src.application.account_config import normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import normalize_config_market
+from src.application.config_primitives import configured_markets, normalize_config_market
 from src.application.config_yaml import (
     load_yaml_config_file,
     resolve_yaml_config_path,
@@ -115,7 +115,7 @@ def set_yaml_symbol_config(
         config_yaml_path=config_yaml_path,
         config_doc=after_doc,
         runtime_root=runtime_root,
-        markets=_markets_in_doc(after_doc),
+        markets=configured_markets(after_doc),
         include_assistant=True,
         apply=bool(apply),
         backup=bool(backup),
@@ -173,7 +173,7 @@ def mutate_yaml_symbol_config(
         config_yaml_path=config_yaml_path,
         config_doc=after_doc,
         runtime_root=runtime_root,
-        markets=_markets_in_doc(after_doc),
+        markets=configured_markets(after_doc),
         include_assistant=True,
         apply=bool(apply),
         backup=bool(backup),
@@ -621,17 +621,6 @@ def _use_templates(value: Any) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     raise AgentToolError(code="CONFIG_ERROR", message="symbol use must be a string or list")
-
-
-def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
-    markets = config_doc.get("markets")
-    if not isinstance(markets, dict):
-        return []
-    out = []
-    for market in ("us", "hk"):
-        if isinstance(markets.get(market), dict):
-            out.append(market)
-    return out
 
 
 def _input_error(message: str) -> AgentToolError:

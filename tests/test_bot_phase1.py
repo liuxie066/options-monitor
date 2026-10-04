@@ -115,6 +115,7 @@ def _channel_request(
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    (tmp_path / "assistant.json").write_text(json.dumps({"assistant": {"bot": {"enabled": True}}}))
     base: dict[str, object] = {
         "user_message": "改成 1.2.400",
         "config_key": "us",
@@ -208,7 +209,7 @@ def test_scene_selects_only_the_required_read_tools() -> None:
     assert manifest.allowed_tools == expected
     assert set(expected) == {
         "project_context", "project_files", "candidate_filter_explain",
-        "runtime_runs", "runtime_logs", "runtime_status", "receipt_read", "trade_attribution_read",
+        "runtime_runs", "runtime_logs", "runtime_status", "receipt_read", "option_positions_read", "trade_attribution_read",
     }
     assert len(manifest.tool_descriptions) == len(expected)
 

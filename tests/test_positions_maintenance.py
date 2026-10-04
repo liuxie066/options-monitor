@@ -197,6 +197,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
                 strike=420,
                 contracts=2,
                 contracts_open=2,
+                multiplier=1000,
                 expiration=exp_ms,
                 position_key="0700_HK_20260618_420P_short",
             )
@@ -264,6 +265,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
                 strike=85,
                 contracts=2,
                 contracts_open=2,
+                multiplier=100,
                 expiration=exp_ms,
                 position_key="PDD_20260618_85P_short",
             )
@@ -352,50 +354,6 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
     assert "skipped_grace_pending: 1" in result["summary_text"]
     assert "eligible_after=2026-06-06T00:00:00+00:00" in result["summary_text"]
     assert (report_dir / "auto_close_summary.txt").exists()
-
-
-def test_position_maintenance_external_account_requires_manual_expiry_review(monkeypatch, tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import parse_exp_to_ms
-    from src.application.positions import maintenance as mod
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
-    report_dir = tmp_path / "reports"
-    fake_repo = object()
-    expiration = parse_exp_to_ms("2026-05-22")
-    assert expiration is not None
-
-    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
-    monkeypatch.setattr(
-        mod,
-        "_load_expiry_close_position_lots",
-        lambda _repo: [
-            _lot("lot_tigr", contracts=10, contracts_open=10, position_key="pos_tigr", expiration=expiration)
-        ],
-    )
-
-    result = mod.run_expired_position_maintenance_for_account(
-        base=tmp_path,
-        cfg={
-            "accounts": {"sy": {"type": "external_holdings"}},
-            "portfolio": {"data_config": str(data_config), "broker": "富途"},
-            "option_positions": {"auto_close": {"grace_days": 1}},
-        },
-        account="sy",
-        broker="富途",
-        report_dir=report_dir,
-        as_of_ms=parse_exp_to_ms("2026-05-25"),
-        dry_run=True,
-    )
-
-    assert result["mode"] == "dry_run"
-    assert result["candidates_should_close"] == 0
-    assert result["skipped_review_required"] == 1
-    assert result["decisions"] == 1
-    assert result["decision_items"][0]["skip_reason"] == "manual_expiry_review_required"
-    assert "manual assignment/expiry review" in result["decision_items"][0]["reason"]
-    assert "Review required:" in result["summary_text"]
 
 
 def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp_path: Path) -> None:

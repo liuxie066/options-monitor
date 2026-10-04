@@ -7,6 +7,7 @@ from typing import Any
 from src.application.ledger.api import read_wheel_activation_windows_read_only
 from src.application.wheel.config import (
     evaluate_wheel_activation_readiness,
+    normalize_wheel_accounts,
     resolve_wheel_activation_descriptor,
 )
 from src.application.wheel.remediation import (
@@ -86,24 +87,25 @@ def build_wheel_activation_readiness(
             if str(item).strip()
         )
     )
-    raw_wheel = config.get("wheel")
-    raw_wheel_accounts = (
-        raw_wheel.get("accounts") if isinstance(raw_wheel, Mapping) else []
-    )
-    if isinstance(raw_wheel_accounts, list):
-        wheel_accounts = {
-            str(item).strip().lower()
-            for item in raw_wheel_accounts
-            if str(item).strip()
-        }
-        normalized_accounts = tuple(
+    invalid_account_scope = False
+    try:
+        raw_wheel = config.get("wheel")
+        if raw_wheel is None:
+            raw_wheel = {}
+        if not isinstance(raw_wheel, Mapping):
+            raise ValueError("wheel must be an object")
+        wheel_accounts = set(normalize_wheel_accounts(raw_wheel.get("accounts", [])))
+    except (TypeError, ValueError):
+        wheel_accounts = set()
+        invalid_account_scope = True
+    normalized_accounts = (
+        requested_accounts if invalid_account_scope else tuple(
             account for account in requested_accounts if account in wheel_accounts
         )
-    else:
-        normalized_accounts = requested_accounts
+    )
     windows, storage_status = (
         ({}, "not_required")
-        if not normalized_accounts
+        if invalid_account_scope or not normalized_accounts
         else _read_latest_wheel_activation_windows(
             sqlite_path,
             market=normalized_market,
@@ -117,7 +119,7 @@ def build_wheel_activation_readiness(
         descriptor: dict[str, Any] | None = None
         durable_window = windows.get(account)
         descriptor_error = False
-        if normalized_market:
+        if normalized_market and not invalid_account_scope:
             try:
                 descriptor = resolve_wheel_activation_descriptor(
                     config,
@@ -128,7 +130,15 @@ def build_wheel_activation_readiness(
                 descriptor_error = True
         # Every synthesized refusal states `policy_drift: False` explicitly, so a consumer can
         # read `False` as "not something a policy rebind clears" instead of "unset".
-        if not normalized_market:
+        if invalid_account_scope:
+            readiness = {
+                "ready": False,
+                "enabled_for_new_lifecycle": False,
+                "monitoring_gate": "config_mismatch",
+                "reason_code": "invalid_account_scope",
+                "policy_drift": False,
+            }
+        elif not normalized_market:
             readiness = {
                 "ready": False,
                 "enabled_for_new_lifecycle": False,
@@ -156,6 +166,7 @@ def build_wheel_activation_readiness(
             readiness = evaluate_wheel_activation_readiness(
                 descriptor,
                 durable_window,
+                account_configured=account in wheel_accounts,
             )
         descriptor_identity = _wheel_window_identity(descriptor)
         durable_identity = _wheel_window_identity(durable_window)
@@ -184,7 +195,7 @@ def build_wheel_activation_readiness(
         account_results[account] = account_result
 
     gates = {str(item["monitoring_gate"]) for item in account_results.values()}
-    if "config_mismatch" in gates:
+    if invalid_account_scope or "config_mismatch" in gates:
         monitoring_gate = "config_mismatch"
     elif account_results and gates == {"enabled"}:
         monitoring_gate = "enabled"
@@ -198,7 +209,7 @@ def build_wheel_activation_readiness(
         }
     )
     if not account_results:
-        reason_codes = ["not_configured"]
+        reason_codes = ["invalid_account_scope" if invalid_account_scope else "not_configured"]
     enabled_account_count = sum(bool(item["ready"]) for item in account_results.values())
     # One market-scoped command clears every account whose drift is acceptable and reports
     # the rest in `plan.skipped`, so the operator does not have to triage accounts first.

@@ -388,7 +388,8 @@ def _select_candidates(
                     issues.append({"event_kind": "stock_settlement", "event_id": event.event_id, "reason": problem})
             else:
                 grouped.setdefault(identity, []).append(("stock_settlement", settlement))
-        if zero_option_fee_lifecycle_reason(event) or settlement is not None:
+        broker_close_anchor = bool((event.raw_payload or {}).get("pending_close_event_id"))
+        if (zero_option_fee_lifecycle_reason(event) or settlement is not None) and not broker_close_anchor:
             continue
         if normalize_broker(event.contract_key.broker) != "富途":
             if target_identity is None and _in_range(

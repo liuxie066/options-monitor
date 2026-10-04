@@ -7,6 +7,10 @@ below stay thin wrappers around them.
 
 from __future__ import annotations
 
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -205,7 +209,7 @@ def wheel_started_event_from_assignment(
         stock.get("event_time_ms") or event.get("event_time_ms"),
         "assignment occurred_at_ms",
     )
-    lot_id = f"assigned-stock-{event_id}"
+    lot_id = assigned_stock_lot_id_for_event(event_id)
     return build_wheel_event(
         event_id=f"wheel-started:{event_id}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
@@ -880,7 +884,7 @@ def _plan_intent_consume(
         "market": _wheel_market(source),
         "contracts": contracts,
         "multiplier": multiplier,
-        f"{direction}_lot_id": str(event.get("lot_id") or f"lot_{fill_event_id}"),
+        f"{direction}_lot_id": lot_id_for_open_event(event),
     }
     if direction == "put":
         consumed_payload["capacity_identity_hash"] = intent_payload.get("capacity_identity_hash")

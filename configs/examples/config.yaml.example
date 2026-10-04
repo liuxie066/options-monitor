@@ -4,14 +4,15 @@ accounts:
     futu:
       trd_env: REAL
     futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
-  sy:
-    type: external_holdings
-    holdings_account: sy
 
 trade_intake:
   combo_reconciliation:
     default_mode: off
     accounts: {}
+
+portfolio:
+  holdings:
+    enabled: false
 
 templates:
   put_base:
@@ -21,7 +22,7 @@ templates:
 
 markets:
   us:
-    accounts: [lx, sy]
+    accounts: [lx]
     features:
       wheel:
         enabled: false

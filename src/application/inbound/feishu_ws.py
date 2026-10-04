@@ -407,6 +407,7 @@ def serve_feishu_ws(
                     prepare_feishu_analysis_control(payload,
                         allowed_senders=settings.allowed_senders, config_key=settings.config_key,
                         config_path=settings.config_path, audit_db=settings.audit_db,
+                        assistant_config_path=settings.assistant_config_path,
                         received_monotonic=received_monotonic)
                 except Exception as exc:
                     analysis_control_failed = True

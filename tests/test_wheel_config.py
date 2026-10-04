@@ -62,6 +62,7 @@ def test_nested_policy_overrides_defaults_and_builds_account_bound_descriptor() 
     assert resolved["put"]["min_dte"] == 14
     assert resolved["put"]["min_abs_delta"] == 0.25
     assert resolved["enabled_for_new_lifecycle"] is True
+    assert resolved["account_configured"] is True
     assert descriptor == resolved["activation_descriptor"]
     assert descriptor == {
         "market": "us",
@@ -71,6 +72,14 @@ def test_nested_policy_overrides_defaults_and_builds_account_bound_descriptor() 
         "deactivated_at_ms": None,
         "policy_hash": build_wheel_policy_hash(config, market="us", account="lx"),
     }
+
+    config["wheel"]["accounts"] = []
+    removed = resolve_wheel_config(config, "lx")
+    assert removed["account_configured"] is False
+    assert removed["enabled_for_new_lifecycle"] is False
+    assert evaluate_wheel_activation_readiness(
+        descriptor, descriptor, account_configured=removed["account_configured"],
+    )["reason_code"] == "account_not_configured"
 
 
 def test_policy_hash_excludes_activation_descriptor_and_deprecated_min_delta() -> None:
@@ -96,13 +105,13 @@ def test_activation_readiness_requires_exact_open_descriptor_match() -> None:
     descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
     assert descriptor is not None
 
-    no_descriptor = evaluate_wheel_activation_readiness(None, None)
+    no_descriptor = evaluate_wheel_activation_readiness(None, None, account_configured=True)
     assert no_descriptor["reason_code"] == "missing_descriptor"
-    no_window = evaluate_wheel_activation_readiness(descriptor, None)
+    no_window = evaluate_wheel_activation_readiness(descriptor, None, account_configured=True)
     assert no_window["reason_code"] == "missing_window"
 
     mismatch = {**descriptor, "policy_hash": "f" * 64}
-    mismatch_result = evaluate_wheel_activation_readiness(descriptor, mismatch)
+    mismatch_result = evaluate_wheel_activation_readiness(descriptor, mismatch, account_configured=True)
     assert mismatch_result["monitoring_gate"] == "config_mismatch"
     assert mismatch_result["reason_code"] == "descriptor_mismatch"
 
@@ -111,12 +120,13 @@ def test_activation_readiness_requires_exact_open_descriptor_match() -> None:
     assert no_window["policy_drift"] is False
     assert mismatch_result["policy_drift"] is True
     boundary_result = evaluate_wheel_activation_readiness(
-        descriptor, {**mismatch, "generation": descriptor["generation"] + 1}
+        descriptor, {**mismatch, "generation": descriptor["generation"] + 1},
+        account_configured=True,
     )
     assert boundary_result["reason_code"] == "descriptor_mismatch"
     assert boundary_result["policy_drift"] is False
 
-    ready = evaluate_wheel_activation_readiness(descriptor, descriptor)
+    ready = evaluate_wheel_activation_readiness(descriptor, descriptor, account_configured=True)
     assert ready == {
         "ready": True,
         "enabled_for_new_lifecycle": True,
@@ -125,7 +135,7 @@ def test_activation_readiness_requires_exact_open_descriptor_match() -> None:
     }
 
     closed = {**descriptor, "deactivated_at_ms": descriptor["activated_at_ms"] + 1}
-    closed_result = evaluate_wheel_activation_readiness(closed, closed)
+    closed_result = evaluate_wheel_activation_readiness(closed, closed, account_configured=True)
     assert closed_result["monitoring_gate"] == "disabled"
     assert closed_result["reason_code"] == "closed_window"
 
@@ -150,21 +160,25 @@ def test_readiness_uses_only_durable_effective_policy_and_preserves_boundaries()
     descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
     window = {**descriptor, "policy_hash": "a" * 64,
               "effective_policy_hash": descriptor["policy_hash"], "policy_binding_revision": 1}
-    assert evaluate_wheel_activation_readiness(descriptor, window)["ready"] is True
+    assert evaluate_wheel_activation_readiness(descriptor, window, account_configured=True)["ready"] is True
     assert window["policy_hash"] == "a" * 64
     for field, value in (("market", "hk"), ("account", "sy"), ("generation", 3),
                          ("activated_at_ms", descriptor["activated_at_ms"] + 1)):
-        result = evaluate_wheel_activation_readiness(descriptor, {**window, field: value})
+        result = evaluate_wheel_activation_readiness(
+            descriptor, {**window, field: value}, account_configured=True,
+        )
         assert result["ready"] is False
         assert result["reason_code"] == "descriptor_mismatch"
     closed_at = descriptor["activated_at_ms"] + 1
     result = evaluate_wheel_activation_readiness({**descriptor, "deactivated_at_ms": closed_at},
-                                                 {**window, "deactivated_at_ms": closed_at})
+                                                 {**window, "deactivated_at_ms": closed_at},
+                                                 account_configured=True)
     assert result["reason_code"] == "closed_window"
     assert result["policy_drift"] is False
     # Config metadata cannot substitute for the config's actual policy hash.
     assert evaluate_wheel_activation_readiness(
-        {**descriptor, "policy_hash": "b" * 64, "effective_policy_hash": descriptor["policy_hash"]}, window
+        {**descriptor, "policy_hash": "b" * 64, "effective_policy_hash": descriptor["policy_hash"]}, window,
+        account_configured=True,
     )["ready"] is False
 
 
@@ -181,7 +195,9 @@ def test_readiness_uses_only_durable_effective_policy_and_preserves_boundaries()
 ])
 def test_malformed_effective_binding_fails_closed(binding: dict) -> None:
     descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
-    result = evaluate_wheel_activation_readiness(descriptor, {**descriptor, **binding})
+    result = evaluate_wheel_activation_readiness(
+        descriptor, {**descriptor, **binding}, account_configured=True,
+    )
     assert result["ready"] is False
     assert result["reason_code"] == "descriptor_mismatch"
 
@@ -190,7 +206,9 @@ def test_revision_zero_matches_legacy_readiness() -> None:
     descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
     assert evaluate_wheel_activation_readiness(descriptor, {
         **descriptor, "effective_policy_hash": descriptor["policy_hash"], "policy_binding_revision": 0,
-    }) == evaluate_wheel_activation_readiness(descriptor, descriptor)
+    }, account_configured=True) == evaluate_wheel_activation_readiness(
+        descriptor, descriptor, account_configured=True,
+    )
 
 
 def test_detect_wheel_policy_drift_separates_policy_from_boundary_edits() -> None:

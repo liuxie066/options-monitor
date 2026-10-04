@@ -33,11 +33,12 @@ def test_attribution_preserves_manual_decision_and_reports_late_conflict():
     assert result.status == "linked"
 
 
-def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path):
+def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path, monkeypatch):
     import pytest
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.api import (assert_trade_attribution_unclaimed,
-        read_trade_attribution_facts, record_trade_ordinary_attribution)
+        read_trade_attribution_facts, read_trade_attribution_snapshot)
+    from src.application.trades import attribution
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.ledger.writer import persist_trade_event_object
 
@@ -55,16 +56,21 @@ def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path)
     original = repo.list_trade_events()[0]
     fact, = read_trade_attribution_facts(repo, account="lx")
     assert fact["ordinary_previewable"]
-    args = dict(account="lx", execution_key=fact["execution_key"], expected_input_hash=fact["input_hash"],
-                request_id="op:1", actor="wechat:user", now_ms=2000)
-    record_trade_ordinary_attribution(repo, **args)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    context = dict(config={"accounts": ["lx"], "market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}, market="us", combo_evidence={"complete": True},
+                   capacity_observation={}, combo_mode="confirm")
+    view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", now_ms=2000, **context)
+    args = dict(account="lx", execution_key=fact["execution_key"], expected_input_hash=view["rows"][0]["input_hash"],
+                request_id="op:1", actor="wechat:user", candidate_id="ordinary", manual=True, **context)
+    attribution.apply_trade_attribution(repo, **args, apply_changes=False)
     assert len(repo.list_trade_events()) == 1
-    result = record_trade_ordinary_attribution(repo, **args, apply_changes=True)
+    result = attribution.apply_trade_attribution(repo, **args)
     assert result["status"] == "ordinary" and result["origin"] == "manual"
-    repeated = record_trade_ordinary_attribution(repo, **args, apply_changes=True)
+    repeated = attribution.apply_trade_attribution(repo, **args)
     assert repeated["write_applied"] is False
-    equivalent = record_trade_ordinary_attribution(repo, **{**args, "request_id": "op:2"}, apply_changes=True)
-    assert equivalent["ledger_event_ids"] == result["ledger_event_ids"]
+    with pytest.raises(ValueError, match="evidence changed"):
+        attribution.apply_trade_attribution(repo, **{**args, "request_id": "op:2"})
     assert repo.list_trade_events()[0] == original
     assert len(repo.list_trade_events()) == 2
     with pytest.raises(ValueError, match="manually excluded"):
@@ -72,47 +78,57 @@ def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path)
     assert read_trade_attribution_facts(repo, account="sy") == []
 
 
-def test_attribution_enable_is_explicit_append_only_and_not_retroactive(tmp_path):
+def test_v2_cutover_preserves_v1_and_is_append_only(tmp_path):
     import sqlite3
     import time
     import pytest
-    from src.application.ledger.api import enable_trade_attribution_policy, read_trade_attribution_policy
+    from src.application.ledger.api import read_trade_attribution_policy
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.trade_attribution_migration import (
+        preview_trade_attribution_migration, apply_trade_attribution_migration,
+    )
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     scope = dict(broker="futu", physical_account_id="1001", environment="REAL", account="lx", market="hk")
-    instant = int(time.time() * 1000)
-    args = dict(scope=scope, effective_from_ms=instant + 10000, now_ms=instant, actor="operator", request_id="enable:1")
-    assert read_trade_attribution_policy(repo, scope=scope) is None
-    preview = enable_trade_attribution_policy(repo, **args)
-    assert preview["write_applied"] is False
-    assert read_trade_attribution_policy(repo, scope=scope) is None
-    applied = enable_trade_attribution_policy(repo, **args, apply_changes=True)
-    assert applied["write_applied"] is True
-    repeated = enable_trade_attribution_policy(repo, **{**args, "now_ms": instant + 20000}, apply_changes=True)
-    assert repeated["write_applied"] is False
-    assert repeated["effective_from_ms"] == instant + 10000
-    with pytest.raises(ValueError, match="another request"):
-        enable_trade_attribution_policy(repo, **{**args, "request_id": "enable:2"}, apply_changes=True)
-    other_scope = {**scope, "physical_account_id": "2002"}
-    assert read_trade_attribution_policy(repo, scope=other_scope) is None
-    with pytest.raises(ValueError, match="retroactively"):
-        enable_trade_attribution_policy(repo, **{**args, "scope": other_scope, "now_ms": instant + 20000}, apply_changes=True)
+    t0 = int(time.time() * 1000)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute("""INSERT INTO trade_attribution_policy_enablings
+            (broker, physical_account_id, environment, account, market, policy_version,
+             effective_from_ms, created_at_ms, actor, request_id, request_hash)
+            VALUES ('futu', '1001', 'REAL', 'lx', 'hk', 'trade_attribution.v1', ?, ?, 'legacy', 'old', ?)""",
+            (t0, t0, "a" * 64))
+    t2 = t0 + 30_000
+    with pytest.raises(ValueError, match="cannot precede v1"):
+        preview_trade_attribution_migration(repo.db_path, scope=scope, effective_from_ms=t0 - 1)
+    preview = preview_trade_attribution_migration(repo.db_path, scope=scope, effective_from_ms=t2)
+    assert preview["t0_effective_from_ms"] == t0
+    assert preview["v2_existing_effective_from_ms"] is None
+    applied = apply_trade_attribution_migration(repo.db_path, manifest=preview,
+        backup_path=tmp_path / "backup.sqlite3", writers_stopped=True)
+    assert applied["rules_enabled"] is True
+    assert read_trade_attribution_policy(repo, scope=scope)["effective_from_ms"] == t2
+    repeat_preview = preview_trade_attribution_migration(repo.db_path, scope=scope, effective_from_ms=t2)
+    duplicate_backup = tmp_path / "duplicate-backup.sqlite3"
+    with pytest.raises(ValueError, match="already exists"):
+        apply_trade_attribution_migration(repo.db_path, manifest=repeat_preview,
+            backup_path=duplicate_backup, writers_stopped=True)
+    assert not duplicate_backup.exists()
     with sqlite3.connect(repo.db_path) as conn:
         from src.application.ledger.repository_schema import initialize_ledger_connection
         initialize_ledger_connection(conn)
+        assert conn.execute("SELECT COUNT(*) FROM trade_attribution_policy_enablings").fetchone()[0] == 2
         for statement in ("UPDATE trade_attribution_policy_enablings SET effective_from_ms = 4000",
                           "DELETE FROM trade_attribution_policy_enablings"):
             with pytest.raises(sqlite3.IntegrityError, match="append-only"):
                 conn.execute(statement)
 
 
+
 def test_old_store_is_not_implicitly_migrated_or_enabled(tmp_path):
     import sqlite3
-    import time
-    import pytest
-    from src.application.ledger.api import enable_trade_attribution_policy, read_trade_attribution_policy
+    from src.application.ledger.api import read_trade_attribution_policy
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.trade_attribution_migration import preview_trade_attribution_migration
 
     path = tmp_path / "ledger.sqlite3"
     SQLiteOptionPositionsRepository(path)
@@ -121,6 +137,6 @@ def test_old_store_is_not_implicitly_migrated_or_enabled(tmp_path):
     repo = SQLiteOptionPositionsRepository(path)
     scope = dict(broker="futu", physical_account_id="1001", environment="REAL", account="lx", market="hk")
     assert read_trade_attribution_policy(repo, scope=scope) is None
-    with pytest.raises(ValueError, match="controlled.*migration"):
-        enable_trade_attribution_policy(repo, scope=scope, effective_from_ms=int(time.time() * 1000) + 10000, now_ms=1000,
-                                        actor="operator", request_id="enable:1", apply_changes=True)
+    preview = preview_trade_attribution_migration(path, scope=scope, effective_from_ms=2_000)
+    assert preview["policy_schema_present"] is False
+    assert preview["v2_existing_effective_from_ms"] is None

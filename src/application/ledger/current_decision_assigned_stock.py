@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
 from .current_decision_common import (
     Any,
     CURRENT_ASSIGNED_STOCK_SCHEMA,
@@ -709,7 +711,7 @@ def update_assigned_stock_fact(
             settlement=settled,
         )
         stock = settled["stock_settlement"]
-        lot_id = f"assigned-stock-{settled['terminal_event_id']}"
+        lot_id = assigned_stock_lot_id_for_event(settled["terminal_event_id"])
         price = Decimal(str(stock["price"]))
         shares = int(stock["shares"])
         fees = Decimal(str(stock["fees"]))
@@ -1304,6 +1306,9 @@ def _sync_covered_call_allocations(
     prior_linkages: dict[str, list[dict[str, Any]]] = {}
     for row in item["covered_call_allocations"]:
         prior_linkages.setdefault(str(row["open_event_id"]), []).append(row)
+    unallocated_reviews = {str(row.get("event_id") or "") for row in item["review_facts"]
+                           if row["status"] == "covered_call_unallocated"}
+    still_unallocated: set[str] = set()
 
     allocations: list[dict[str, Any]] = []
     for open_event_id, _lot_id, fields in active_calls:
@@ -1368,9 +1373,11 @@ def _sync_covered_call_allocations(
             )
         elif not group_id:
             if base_candidates:
-                raise CurrentDecisionProjectionError(
-                    "covered-call linkage identity is missing"
-                )
+                if open_event_id not in unallocated_reviews:
+                    raise CurrentDecisionProjectionError(
+                        "covered-call linkage identity is missing"
+                    )
+                still_unallocated.add(open_event_id)
             continue
         else:
             candidates = [
@@ -1421,6 +1428,7 @@ def _sync_covered_call_allocations(
             row
             for row in updated["review_facts"]
             if row["status"] != "covered_call_unallocated"
+            or row.get("event_id") in still_unallocated
         ],
     )
 

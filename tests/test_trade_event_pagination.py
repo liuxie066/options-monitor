@@ -39,6 +39,15 @@ def test_public_api_exposes_trade_event_page_limit() -> None:
     assert MAX_TRADE_EVENT_PAGE_ROWS == 20
 
 
+def test_hk_symbol_alias_matches_canonical_stored_event(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_event(_event("hk-open", event_time_ms=1, symbol="0700.HK"))
+    page = _page(repo, {"symbol": "700.HK", "limit": 10}, market="HK")
+    assert [row["event_id"] for row in page["rows"]] == ["hk-open"]
+    with pytest.raises(TradeEventPaginationError, match="outside the selected market"):
+        _page(repo, {"symbol": "NVDA", "limit": 10}, market="HK")
+
+
 def test_fresh_exhausted_page_covers_full_query_but_continuation_does_not(
     tmp_path: Path,
 ) -> None:
@@ -91,6 +100,7 @@ def _event(
         "adjust",
     }
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type=event_type,
         event_time_ms=event_time_ms,
@@ -286,6 +296,9 @@ def test_market_effect_and_authority_are_applied_before_paging(tmp_path: Path) -
         "sy-close",
     }
     assert all(row["position_effect"] == "close" for row in page["rows"])
+    from src.application.agent_tools.operations_impl import _event_row
+    assignment = next(row for row in page["rows"] if row["event_id"] == "lx-assignment")
+    assert _event_row(assignment, normalize_broker=str, normalize_account=str)["event_type"] == "assignment"
 
 
 def test_cursor_rejects_tampering_expiry_and_scope_changes(tmp_path: Path) -> None:
@@ -358,6 +371,7 @@ def test_backfill_preserves_voided_legacy_event_with_non_positive_time(
     path = tmp_path / "legacy-voided-invalid-time.sqlite3"
     target = _event("legacy-close", event_time_ms=10, event_type="close")
     void = TradeEvent(
+        multiplier=target.multiplier,
         event_id="void-legacy-close",
         event_type="void",
         event_time_ms=20,

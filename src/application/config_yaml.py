@@ -255,12 +255,9 @@ def _normalize_account_setting(raw: Any, *, account: str, path: str) -> dict[str
         futu["account_id"] = shorthand_account_id
         item["futu"] = futu
 
-    account_type = str(item.get("type") or "").strip().lower()
-    if not account_type:
-        account_type = "external_holdings" if str(item.get("holdings_account") or "").strip() else "futu"
-    item["type"] = account_type
-    if account_type == "external_holdings" and not str(item.get("holdings_account") or "").strip():
-        item["holdings_account"] = account
+    if "holdings_account" in item:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.holdings_account is retired")
+    item["type"] = str(item.get("type") or "futu").strip().lower()
     return item
 
 
@@ -741,6 +738,12 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     if not isinstance(market_cfg, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{normalized_market} must be an object")
     _reject_unknown_keys(market_cfg, allowed=MARKET_KEYS, path=f"markets.{normalized_market}")
+    market_portfolio = market_cfg.get("portfolio")
+    if isinstance(market_portfolio, dict) and "holdings" in market_portfolio:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"markets.{normalized_market}.portfolio.holdings must be configured globally",
+        )
 
     accounts = _normalize_market_accounts(market_cfg.get("accounts"), path=f"markets.{normalized_market}.accounts")
     account_settings: dict[str, dict[str, Any]] = {}

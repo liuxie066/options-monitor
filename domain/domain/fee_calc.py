@@ -46,7 +46,7 @@ def calc_futu_us_option_fee(
     order_price: float,
     *,
     contracts: int = 1,
-    multiplier: int = 100,
+    multiplier: int,
     is_sell: bool = True,
 ) -> float:
     """Estimate Futu HK US-option fees using the dated fixed package."""
@@ -54,10 +54,6 @@ def calc_futu_us_option_fee(
     qty = int(contracts)
     if qty <= 0:
         raise ValueError("contracts must be > 0")
-    unit_multiplier = int(multiplier)
-    if unit_multiplier <= 0:
-        raise ValueError("multiplier must be > 0")
-
     transaction_amount = price * contract_share_quantity(contracts, multiplier)
     commission_per_contract = 0.65 if price > 0.1 else 0.15
     commission = max(commission_per_contract * qty, 1.99)
@@ -76,7 +72,7 @@ def calc_futu_hk_option_fee(
     order_price: float,
     *,
     contracts: int = 1,
-    multiplier: int = 100,
+    multiplier: int,
     is_sell: bool = True,
 ) -> float:
     """Estimate Futu HK option fees with a conservative Tier-1 tariff."""
@@ -85,10 +81,6 @@ def calc_futu_hk_option_fee(
     qty = int(contracts)
     if qty <= 0:
         raise ValueError("contracts must be > 0")
-    unit_multiplier = int(multiplier)
-    if unit_multiplier <= 0:
-        raise ValueError("multiplier must be > 0")
-
     transaction_amount = price * contract_share_quantity(contracts, multiplier)
     commission = max(transaction_amount * 0.002, 3.0)
     platform_fee = 15.0
@@ -102,7 +94,7 @@ def calc_futu_option_fee(
     order_price: float,
     *,
     contracts: int = 1,
-    multiplier: int = 100,
+    multiplier: int,
     is_sell: bool = True,
 ) -> float:
     ccy = normalize_currency(currency)

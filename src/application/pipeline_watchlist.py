@@ -1525,11 +1525,26 @@ def run_watchlist_pipeline_default(
     )
     if not isinstance(fx_payload, dict):
         fx_payload = {}
+    portfolio_fx_hash = portfolio_snapshot.get("fx_snapshot_sha256")
+    option_authority = option_snapshot.get("prepared_authority")
+    option_fx_hash = (
+        option_authority.get("run_fx_snapshot_sha256")
+        if isinstance(option_authority, Mapping) else None
+    )
+    if portfolio_fx_hash or option_fx_hash:
+        from src.application.current_fx_run import load_run_fx_snapshot
+
+        _, run_fx_hash = load_run_fx_snapshot(base=base, run_id=account_run_id)
+        if portfolio_fx_hash != run_fx_hash or option_fx_hash != run_fx_hash:
+            raise ValueError("prepared context FX snapshot mismatch")
+        fx_dependency_hash = run_fx_hash
+    else:
+        fx_dependency_hash = canonical_sha256(fx_payload)
     dependencies.extend(
         (
             dependency_from_hash(
                 kind="fx",
-                sha256=canonical_sha256(fx_payload),
+                sha256=fx_dependency_hash,
             ),
             dependency_from_hash(
                 kind="earnings_rv",

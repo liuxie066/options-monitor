@@ -116,9 +116,6 @@ def _record_source_observation(record: dict) -> tuple[datetime | None, str | Non
     ):
         if key in fields:
             return _source_timestamp(fields.get(key)), f"holdings_field:{key}"
-    for key in ("last_modified_time", "updated_at_utc"):
-        if key in record:
-            return _source_timestamp(record.get(key)), f"feishu_record:{key}"
     return None, None
 
 
@@ -426,35 +423,6 @@ def load_holdings_records(data_config_path: Path) -> list[dict]:
             return bitable_list_records(token, app_token, table_id)
 
     return with_tenant_token_retry(feishu.app_id, feishu.app_secret, _list_records)
-
-
-def load_holdings_portfolio_context(
-    *,
-    data_config_path: Path,
-    broker: str | None = None,
-    account: str | None = None,
-) -> dict:
-    records = load_holdings_records(data_config_path)
-    return build_context(
-        records,
-        broker=broker,
-        account=account,
-        portfolio_source_name="external_holdings",
-        source_account_identifiers=([account] if account else []),
-    )
-
-
-def load_holdings_portfolio_shared_context(
-    *,
-    data_config_path: Path,
-    broker: str | None = None,
-) -> dict:
-    records = load_holdings_records(data_config_path)
-    return build_shared_context(
-        records,
-        broker=broker,
-        portfolio_source_name="external_holdings",
-    )
 
 
 def main():

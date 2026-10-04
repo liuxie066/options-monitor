@@ -24,10 +24,14 @@ from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
 )
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
-from domain.domain.cash_secured_utils import read_cash_secured_total_cny
+from domain.domain.cash_secured_utils import (
+    cash_secured_unavailable_for_cash_snapshot,
+)
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
+from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
 from src.application.strategy_scan_failures import (
     ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
     FAILURE_REASON as STRATEGY_FAILURE_REASON,
@@ -74,6 +78,9 @@ from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
 from src.application.payload_helpers import positive_int_or as _positive_int
+from src.application.ledger.api import (
+    open_trade_reconciliation_evidence_repo, resolve_position_ledger_sqlite_path,
+)
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -84,6 +91,35 @@ _COMBO_OCCURRENCE_FIELDS = (
     "candidate_occurrence_data_as_of_utc",
     "candidate_row_content_hash",
 )
+
+
+def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
+                                   account: str, market: str, now_ms: int) -> tuple[list[dict[str, Any]], str | None]:
+    """Re-evaluate ledger fills using the same read-only arbiter as Control."""
+    try:
+        from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
+        from src.application.trades.attribution import build_trade_attribution_view, read_attribution_combo_evidence
+        from src.application.ledger.api import read_trade_attribution_snapshot
+
+        ledger_path = resolve_position_ledger_sqlite_path(base=base, cfg=dict(config))
+        if not ledger_path.exists():
+            return [], "ledger_missing"
+        repo = open_trade_reconciliation_evidence_repo(ledger_path)
+        snapshot = read_trade_attribution_snapshot(repo, account=account, market=market.lower())
+        evidence = read_attribution_combo_evidence(snapshot, account=account,
+                                                   runtime_root=ledger_path.parents[2], now_ms=now_ms)
+        view = build_trade_attribution_view(snapshot, config=config, account=account, market=market.lower(),
+            now_ms=now_ms, combo_evidence=evidence,
+            combo_mode=combo_reconciliation_mode_for_account(config, account=account))
+        pending = [row for row in view["rows"] if row["status"] in {"pending", "conflict"}
+                   and row["contracts_open"] > 0]
+        pending.sort(key=lambda row: (row["event_time_ms"], row["open_event_id"]))
+        return [{"execution_key": row["execution_key"], "symbol": row["contract_key"]["underlying_symbol"],
+                 "option_type": row["contract_key"]["option_type"], "strike": row["contract_key"]["strike"],
+                 "expiration": row["contract_key"]["expiration_ymd"], "status": row["status"]}
+                for row in pending], None
+    except Exception as exc:
+        return [], type(exc).__name__
 
 
 def assemble_daily_decision_brief(
@@ -708,7 +744,13 @@ def assemble_daily_decision_brief(
         data_gaps=deduped_data_gaps,
     )
 
+    attribution_pending, attribution_read_error = _pending_attribution_for_brief(
+        base=base_path, config=config_map, account=account_norm, market=market_norm,
+        now_ms=int(effective_now.timestamp() * 1000),
+    )
     brief_payload = {
+            "attribution_pending": attribution_pending,
+            "attribution_read_error": attribution_read_error,
             "market": market_norm,
             "market_trading_date": market_date,
             "account": account_norm,
@@ -1137,16 +1179,22 @@ def _load_wheel_snapshot_family(
         branch_id = _text(batch.get("wheel_branch_id")) or lot_id
         direction = _text(batch.get("direction") or "call").lower()
         view = {
+            "account": _text(batch.get("account")).lower(),
             "position_lot_id": lot_id,
             "wheel_branch_id": branch_id,
             "direction": direction,
             "symbol": symbol,
-            "shares_remaining": int(batch.get("shares_remaining") or 0),
+            "shares_remaining": batch.get("shares_remaining"),
+            "broker": _text(batch.get("broker")),
+            "assignment_price": batch.get("assignment_price"),
+            "assigned_at_ms": batch.get("assigned_at_ms"),
+            "has_final_candidate": final is not None,
             "remaining_contracts": int(batch.get("remaining_contracts") or 0),
             "principal_anchor": batch.get("principal_anchor"),
             "currency": _text((final or {}).get("currency") or batch.get("currency")).upper(),
             "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
+            "phase": _text(batch.get("phase")),
             "reason_code": _text(batch.get("reason_code")) or None,
             "reason_codes": list(batch.get("reason_codes") or []),
             "recommended_contracts": int(batch.get("granted_contracts") or 0) if price_available else 0,
@@ -1441,6 +1489,13 @@ def _load_portfolio_context(
             expected_manifest_sha256=sha256_bytes(manifest_bytes),
             expected_runtime_config=account_config,
         )
+        if context is None and isinstance(manifest.get("cash_snapshot"), dict):
+            snapshot = manifest["cash_snapshot"]
+            if snapshot.get("status") in {"unknown", "stale"}:
+                context = {"cash_snapshot": snapshot}
+                data_gaps.append({"scope": "source", "kind": "portfolio_context",
+                    "path": _source_path(run_account_dir, manifest_path),
+                    "reason": "prepared_portfolio_context_unavailable"})
         if not isinstance(context, dict):
             raise PreparedPortfolioContextError(
                 "prepared portfolio context is unavailable"
@@ -1533,8 +1588,8 @@ def _build_funds(
     data_gaps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
     cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
-    portfolio_as_of = _parse_datetime(portfolio_context.get("as_of_utc"))
-    cash_total_reliable = cash_total is not None and portfolio_as_of is not None
+    portfolio_as_of = _parse_datetime(portfolio_context.get("cash_source_observed_at"))
+    cash_total_reliable = cash_snapshot_is_usable(portfolio_context)
     if not cash_total_reliable:
         data_gaps.append(
             {
@@ -1546,7 +1601,9 @@ def _build_funds(
 
     secured = _currency_amounts(option_positions_context.get("cash_secured_total_by_ccy"))
     option_as_of = _parse_datetime(option_positions_context.get("as_of_utc"))
-    unavailable = option_positions_context.get("cash_secured_unavailable_by_symbol")
+    unavailable = cash_secured_unavailable_for_cash_snapshot(
+        dict(option_positions_context), dict(portfolio_context)
+    )
     ledger = option_positions_context.get("ledger")
     unavailable_reliable = unavailable is None or (isinstance(unavailable, Mapping) and not unavailable)
     ledger_reliable = ledger is None or (
@@ -1562,8 +1619,8 @@ def _build_funds(
     opening: dict[str, float] = {}
     if cash_total_reliable and secured_reliable:
         opening = {
-            currency: float(amount) - float((secured or {}).get(currency, 0.0))
-            for currency, amount in (cash_total or {}).items()
+            currency: float((cash_total or {}).get(currency, 0.0)) - float((secured or {}).get(currency, 0.0))
+            for currency in sorted(set(cash_total or {}) | set(secured or {}))
         }
     if not secured_reliable:
         if reason == "ok":
@@ -1578,40 +1635,86 @@ def _build_funds(
     if not cash_total_reliable:
         reason = "portfolio_cash_unavailable"
 
-    rate_payload = option_positions_context.get("exchange_rates")
-    rates = rate_payload.get("rates") if isinstance(rate_payload, Mapping) else None
+    option_fx = option_positions_context.get("exchange_rates")
+    portfolio_fx = portfolio_context.get("exchange_rates")
+    option_hash = (option_positions_context.get("prepared_authority") or {}).get("run_fx_snapshot_sha256") if isinstance(option_positions_context.get("prepared_authority"), Mapping) else None
+    portfolio_hash = portfolio_context.get("fx_snapshot_sha256")
+    fx_mismatch = bool(option_hash or portfolio_hash) and option_hash != portfolio_hash
+    if isinstance(option_fx, Mapping) and isinstance(portfolio_fx, Mapping):
+        option_pairs = option_fx.get("pairs")
+        portfolio_pairs = portfolio_fx.get("pairs")
+        if isinstance(option_pairs, Mapping) and isinstance(portfolio_pairs, Mapping):
+            for pair in ("USDCNY", "HKDCNY"):
+                for field in ("rate", "source", "quote_at_utc", "observed_at_utc"):
+                    left = option_pairs.get(pair) if isinstance(option_pairs.get(pair), Mapping) else {}
+                    right = portfolio_pairs.get(pair) if isinstance(portfolio_pairs.get(pair), Mapping) else {}
+                    if left.get(field) != right.get(field):
+                        fx_mismatch = True
+    raw_fx = option_fx if isinstance(option_fx, Mapping) and isinstance(option_fx.get("pairs"), Mapping) else portfolio_fx
+    display_fx = project_exchange_rate_snapshot(raw_fx, purpose="display") if isinstance(raw_fx, Mapping) and not fx_mismatch else {}
+    rates = display_fx.get("rates")
     rates = rates if isinstance(rates, Mapping) else {}
     usdcny_rate = _number(rates.get("USDCNY"))
     cny_per_hkd_rate = _number(rates.get("HKDCNY"))
     cash_total_cny: float | None = None
-    if cash_total:
+    if cash_total_reliable:
         cash_total_cny = sum_by_currency_to_cny(
-            cash_total,
+            cash_total or {},
             usdcny_exchange_rate=usdcny_rate,
             cny_per_hkd_exchange_rate=cny_per_hkd_rate,
         )
-        if cash_total_cny is None:
-            data_gaps.append(
-                {
-                    "scope": "funds",
-                    "kind": "cash_total_cny",
-                    "reason": "cash_total_cny_unavailable",
-                }
-            )
-    secured_total_cny = read_cash_secured_total_cny(dict(option_positions_context)) if secured_reliable else None
+    if cash_total_cny is None:
+        data_gaps.append({"scope": "funds", "kind": "cash_total_cny", "reason": "cash_total_cny_unavailable"})
+    secured_total_cny = (
+        sum_by_currency_to_cny(
+            secured or {},
+            usdcny_exchange_rate=usdcny_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_rate,
+        ) if secured_reliable else None
+    )
     opening_cny: float | None = None
     if cash_total_cny is not None and secured_total_cny is not None:
         opening_cny = cash_total_cny - secured_total_cny
+    needed_pairs = {
+        f"{currency}CNY" for amounts in (cash_total or {}, secured or {})
+        for currency, amount in amounts.items() if currency in {"USD", "HKD"} and amount
+    }
+    pairs = display_fx.get("pairs") if isinstance(display_fx.get("pairs"), Mapping) else {}
+    missing_pairs = [pair for pair in sorted(needed_pairs) if pair not in rates]
+    fx_reason_labels = {
+        "missing_verified_quote": "缺少已核实报价",
+        "calendar_or_timestamp_unknown": "报价时间或休市日历不明",
+        "trading_session_gap": "交易时段断档",
+        "calendar_unknown": "休市日历不明",
+        "stale_quote": "报价过期",
+    }
+    fx_reason = (
+        "批次汇率快照不一致" if fx_mismatch else
+        "汇率证据不足：" + "、".join(
+            f"{pair[:3]}/CNY {fx_reason_labels.get(str((pairs.get(pair) or {}).get('reason')), '不可用')}"
+            for pair in missing_pairs
+        ) if missing_pairs else "暂不支持所需币种折算"
+    )
 
     as_of_values = [item for item in (portfolio_as_of, option_as_of) if item is not None]
     return (
         {
             "as_of_utc": max(as_of_values).astimezone(timezone.utc).isoformat() if as_of_values else "",
-            "cash_total_by_currency": cash_total or {},
+            "cash_total_by_currency": (cash_total or {}) if cash_total_reliable else {},
+            "cash_snapshot": portfolio_context.get("cash_snapshot"),
             "option_opening_available_by_currency": opening,
             "cash_total_cny": cash_total_cny,
             "cash_secured_total_cny": secured_total_cny,
             "option_opening_available_cny": opening_cny,
+            "cash_total_reliable": cash_total_reliable,
+            "option_opening_reliable": cash_total_reliable and secured_reliable,
+            "cash_total_cny_unavailable_reason": "现金来源不可靠" if not cash_total_reliable else fx_reason,
+            "option_opening_cny_unavailable_reason": reason if not (cash_total_reliable and secured_reliable) else fx_reason,
+            "fx_snapshot_sha256": "" if fx_mismatch else option_hash or portfolio_hash or "",
+            "fx_pairs": {
+                pair: {key: row.get(key) for key in ("source", "quote_at_utc", "quality", "reason")}
+                for pair, row in pairs.items() if isinstance(row, Mapping)
+            },
             "available": bool(
                 cash_total_reliable and secured_reliable and (opening or opening_cny is not None)
             ),

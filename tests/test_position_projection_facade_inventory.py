@@ -110,7 +110,7 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
 
     assert runtime_calls == Counter(
         {
-            ("src/application/ledger/trade_attribution.py", "record_trade_ordinary_attribution>run", "'forced_full'"): 1,
+            ("src/application/ledger/trade_attribution.py", "write_trade_attribution_decision", "'forced_full'"): 1,
             ("src/application/ledger/trade_attribution_migration.py", "apply_trade_attribution_migration", "'forced_full'"): 1,
             (
                 "src/application/ledger/bootstrap.py",
@@ -120,11 +120,6 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
             (
                 "src/application/ledger/bootstrap.py",
                 "load_option_positions_repo>_recover",
-                "'forced_full'",
-            ): 1,
-            (
-                "src/application/ledger/combo_reconciliation.py",
-                "adopt_post_trade_combo_pair>_run",
                 "'forced_full'",
             ): 1,
             (
@@ -227,11 +222,6 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
             (
                 "src/application/ledger/combo_reconciliation.py",
                 "supersede_post_trade_combo_pair>_run",
-                "project_stored_trade_events_to_position_lots",
-            ): 1,
-            (
-                "src/application/ledger/combo_reconciliation.py",
-                "_validate_inference_against_current_ledger",
                 "project_stored_trade_events_to_position_lots",
             ): 1,
                 (

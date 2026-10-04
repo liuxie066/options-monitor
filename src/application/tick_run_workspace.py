@@ -346,6 +346,35 @@ def ensure_run_state_directory_safely(*, base: Path, run_id: str) -> Path:
     return Path(base).resolve() / "output_runs" / run_id_norm / "state"
 
 
+def write_run_state_bytes_once_safely(
+    *, base: Path, run_id: str, name: str, payload: bytes,
+) -> Path:
+    run_id_norm = _identity_component(run_id, "run_id")
+    name_norm = _identity_component(name, "state file name")
+    if not isinstance(payload, bytes):
+        raise AccountRunConfigError(
+            "ACCOUNT_RUN_STATE_PAYLOAD_INVALID", "run state payload must be bytes",
+        )
+    _write_once_or_adopt_at(
+        base=base,
+        components=("output_runs", run_id_norm, "state"),
+        name=name_norm,
+        payload=payload,
+        conflict_code="ACCOUNT_RUN_STATE_CONFLICT",
+        write_code="ACCOUNT_RUN_STATE_WRITE_FAILED",
+    )
+    return Path(base).resolve() / "output_runs" / run_id_norm / "state" / name_norm
+
+
+def read_run_state_bytes_safely(*, base: Path, run_id: str, name: str) -> bytes:
+    return _read_regular_file_at_chain(
+        base=base,
+        components=("output_runs", _identity_component(run_id, "run_id"), "state"),
+        name=_identity_component(name, "state file name"),
+        code="ACCOUNT_RUN_STATE_UNAVAILABLE",
+    )
+
+
 def load_published_account_run_config(
     *,
     base: Path,

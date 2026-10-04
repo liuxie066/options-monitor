@@ -37,39 +37,11 @@ def test_auto_combo_uses_only_its_own_market_date_completeness(tmp_path, monkeyp
     monkeypatch.setattr(module, "read_combo_candidate_exposures", read)
     result = module.reconcile_account_post_trade_combos(repo=repo, runtime_root=tmp_path, account="lx",
         runtime_environment="opend:127.0.0.1:11111", mode="auto", effective_now_ms=BASE_TIME_MS + 3000)
-    assert result["auto_adoption_count"] == int(current_complete)
-    assert len(repo.list_strategy_group_identities(account="lx")) == int(current_complete)
+    assert any(row["complete"] is current_complete for row in result["evidence_reads"]
+               if row["market_date"] == current_date)
+    assert len(repo.list_strategy_group_identities(account="lx")) == 0
 
 
-@pytest.mark.parametrize("competing_leg", [False, True])
-def test_auto_combo_rechecks_unique_match_at_the_durable_writer(tmp_path, monkeypatch, competing_leg):
-    import src.application.trades.combo_reconciliation as module
-
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    for event in _open_events():
-        persist_trade_event_object(repo, event)
-    original = repo.list_trade_events()
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", lambda **_kwargs: {"available": True, "complete": True, "delivery_available": True, "exposures": [_exposure()]})
-    actual_adopt = module.adopt_post_trade_combo_pair
-
-    def adopt_after_new_fill(**kwargs):
-        if competing_leg:
-            persist_trade_event_object(repo, _event("call-open-2", "call-lot-2", option_type="call", side="long", strike=110, event_time_ms=BASE_TIME_MS + 2_500))
-        return actual_adopt(**kwargs)
-
-    monkeypatch.setattr(module, "adopt_post_trade_combo_pair", adopt_after_new_fill)
-    result = module.reconcile_account_post_trade_combos(
-        repo=repo, runtime_root=tmp_path, account="lx", runtime_environment="opend:127.0.0.1:11111",
-        mode="auto", effective_now_ms=BASE_TIME_MS + 3_000,
-    )
-    assert result["auto_adoption_count"] == (0 if competing_leg else 1)
-    assert result["auto_adoption_error_count"] == (1 if competing_leg else 0)
-    events = repo.list_trade_events()
-    assert [event for event in events if event["event_id"] in {"call-open", "put-open"}] == original
-    assert len(repo.list_strategy_group_identities(account="lx")) == (0 if competing_leg else 1)
-    if competing_leg:
-        assert len(events) == 3
-        assert "no longer a unique delivered match" in result["auto_adoption_errors"][0]["error"]
 
 
 def _exposure() -> dict:
@@ -100,6 +72,7 @@ def _event(
     event_time_ms: int,
 ) -> TradeEvent:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,
@@ -171,16 +144,6 @@ def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
         for item in repo.list_position_lots()
     )
 
-    adoptions: list[dict] = []
-
-    def _adopt(**kwargs):
-        adoptions.append(kwargs)
-        return {
-            "status": "adopted",
-            "inference": result["inferences"][0],
-        }
-
-    monkeypatch.setattr(module, "adopt_post_trade_combo_pair", _adopt)
     auto_result = reconcile_account_post_trade_combos(
         repo=repo,
         runtime_root=tmp_path,
@@ -190,10 +153,9 @@ def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
         effective_now_ms=BASE_TIME_MS + 4_000,
     )
 
-    assert auto_result["auto_adoption_count"] == 1
-    assert adoptions[0]["inference_id"] == result["inferences"][0]["inference_id"]
-    assert adoptions[0]["actor"] == "trade_intake:auto_combo_reconciliation"
-    assert adoptions[0]["apply_changes"] is True
+    assert auto_result["proposal_ready_count"] == 1
+    assert len(repo.list_strategy_group_identities(account="lx")) == 0
+    assert not hasattr(module, "adopt_post_trade_combo_pair")
 
 
 def test_off_mode_does_not_touch_the_repository(tmp_path) -> None:
@@ -256,6 +218,6 @@ def test_incomplete_exposure_never_auto_adopts(tmp_path, monkeypatch, evidence):
         repo=repo, runtime_root=tmp_path, account="lx", runtime_environment="opend:127.0.0.1:11111",
         mode="auto", effective_now_ms=BASE_TIME_MS + 3_000,
     )
-    assert result["auto_adoption_count"] == 0
+    assert len(repo.list_strategy_group_identities(account="lx")) == 0
     assert len(repo.list_trade_events()) == 2
     assert repo.list_strategy_group_identities(account="lx") == []

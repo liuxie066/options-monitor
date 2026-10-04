@@ -3,9 +3,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from domain.domain.trade_account_identity import extract_primary_account_id
 from src.application.ledger.api import assigned_stock_event_log
@@ -25,6 +26,7 @@ from src.application.trades.inbox import (
     enqueue_trade_payload,
     mark_trade_payload_handled,
     read_trade_payload,
+    read_trade_payloads_for_reconciliation,
 )
 from src.application.trades.state import (
     append_trade_intake_audit,
@@ -50,6 +52,73 @@ def payload_deal_id(payload: dict[str, Any] | None) -> str:
         if value:
             return value
     return ""
+
+
+def _known_old_deal_targets(
+    *, state_path: Path, inbox_path: Path, futu_account_ids: list[str],
+    now: datetime, lookback_hours: float,
+) -> list[dict[str, str]]:
+    """Recheck a bounded set of unresolved source trades by their original date."""
+    state = load_trade_intake_state(state_path)
+    keys = [
+        key for bucket in ("unresolved_deal_ids", "failed_deal_ids")
+        for key in (state.get(bucket) or {})
+    ]
+    if not keys:
+        return []
+    allowed = set(futu_account_ids)
+    cutoff = now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+    targets: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    # SQLite binds each key twice; chunk the scan so earlier recent/missing rows
+    # cannot permanently hide an older unresolved trade.
+    for offset in range(0, len(keys), 400):
+        for row in read_trade_payloads_for_reconciliation(
+            inbox_path, deal_ids=keys[offset:offset + 400],
+        ):
+            target = _old_deal_target(
+                row, allowed=allowed, cutoff=cutoff,
+            )
+            if target is None:
+                continue
+            identity = (target["futu_account_id"], target["deal_id"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            targets.append(target)
+            if len(targets) >= 5:
+                return targets
+    return targets
+
+
+def _old_deal_target(
+    row: dict[str, Any], *, allowed: set[str], cutoff: datetime,
+) -> dict[str, str] | None:
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    execution = payload.get("execution_input")
+    execution = execution if isinstance(execution, dict) else payload
+    ref = execution.get("broker_account_ref")
+    ref = ref if isinstance(ref, dict) else {}
+    physical = str(ref.get("external_account_id") or extract_primary_account_id(payload) or "").strip()
+    environment = str(ref.get("environment") or payload.get("trd_env") or "REAL").rsplit(".", 1)[-1].upper()
+    deal_id = payload_deal_id(payload)
+    raw_time = execution.get("occurred_at_utc") or payload.get("create_time")
+    if physical not in allowed or environment != "REAL" or not deal_id or not isinstance(raw_time, str):
+        return None
+    try:
+        occurred = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+    if occurred.astimezone(timezone.utc) >= cutoff:
+        return None
+    return {
+        "futu_account_id": physical, "deal_id": deal_id,
+        "date": occurred.astimezone(ZoneInfo("Asia/Hong_Kong")).date().isoformat(),
+    }
 
 
 def run_history_backfill(
@@ -126,18 +195,29 @@ def run_history_backfill(
         },
     )
     try:
+        targeted_deals = _known_old_deal_targets(
+            state_path=state_path,
+            inbox_path=inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
+            futu_account_ids=futu_account_ids,
+            now=now,
+            lookback_hours=lookback_hours,
+        )
         payloads, diagnostics = history_deals_fn(
             host=host,
             port=port,
             futu_account_ids=futu_account_ids,
             lookback_hours=lookback_hours,
             now=now,
+            targeted_deals=targeted_deals,
         )
         diagnostics = dict(diagnostics or {})
+        if targeted_deals and diagnostics.get("targeted_complete") is not True:
+            diagnostics["targeted_complete"] = False
         diagnostics.update(
             {
                 "configured_lookback_hours": configured_lookback_hours,
                 "effective_lookback_hours": lookback_hours,
+                "targeted_deal_count": len(targeted_deals),
                 **checkpoint_diagnostics,
             }
         )
@@ -483,6 +563,7 @@ def run_history_backfill(
         diagnostics,
         expected_account_ids=futu_account_ids,
     )
+    targeted_query_complete = diagnostics.get("targeted_complete", True) is True
     scope_updates = {}
     for account_id, scope in scopes.items():
         if (apply_changes and durable_accounts[account_id]
@@ -504,6 +585,7 @@ def run_history_backfill(
         if _checkpoint_scope_key(scope) in advanced_scopes
     ]
     diagnostics["history_query_complete"] = history_query_complete
+    diagnostics["targeted_query_complete"] = targeted_query_complete
     diagnostics["durable_queue_complete"] = durable_queue_complete
     diagnostics["checkpoint_advanced"] = checkpoint_advanced
     diagnostics["fee_target_count"] = len(fee_targets)
@@ -532,6 +614,7 @@ def run_history_backfill(
     out = {
         "ok": bool(
             history_query_complete
+            and targeted_query_complete
             and durable_queue_complete
             and lifecycle_discovery_complete
         ),
@@ -547,6 +630,8 @@ def run_history_backfill(
     }
     if not history_query_complete:
         out["error"] = "history_query_incomplete"
+    elif not targeted_query_complete:
+        out["error"] = "targeted_history_query_incomplete"
     elif not durable_queue_complete:
         out["error"] = "durable_inbox_incomplete"
     elif not lifecycle_discovery_complete:

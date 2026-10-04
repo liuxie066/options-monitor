@@ -69,7 +69,7 @@ from src.application.runtime_portfolio_snapshot import (
     build_source_status_section,
     canonical_json_bytes,
     compare_runtime_portfolio_snapshot,
-    project_broker_cash_facts,
+    BROKER_CASH_V1_FACT_KEYS,
     project_broker_positions_facts,
     project_cash_occupation_facts,
     project_ledger_projection_facts,
@@ -152,7 +152,8 @@ _LIFECYCLE_VIEW_KEYS = frozenset(
     "schema_version lifecycle_case_id lifecycle_state lifecycle_evidence_status "
     "lifecycle_reason_codes observation_start_ms pending_until_ms timing_policy_hash "
     "target_contracts_by_lot resolved_contracts_by_lot remaining_contracts_by_lot "
-    "resolved_contracts_by_terminal_type reserved_contracts_by_lot closure_fact "
+    "resolved_contracts_by_terminal_type reserved_contracts_by_lot "
+    "pending_close_contracts_by_lot closure_fact "
     "reason_state close_reason lifecycle_generation_token actionable".split()
 )
 _QUALITY_DETAIL_KEYS = frozenset(
@@ -928,13 +929,15 @@ def generate_fixture(profile: str, *, verify_payload_hash: bool = True) -> dict[
             ),
             **complete,
         ),
-        "broker_cash": build_runtime_portfolio_section(
-            "broker_cash",
-            source_observed_at_utc=TIMESTAMPS["broker_source_observed_at_utc"],
-            application_received_at_utc=TIMESTAMPS["broker_promoted_at_utc"],
-            facts=project_broker_cash_facts(broker_source),
-            **complete,
-        ),
+        "broker_cash": {
+            "account": ACCOUNT, "schema_version": "runtime_portfolio_snapshot.broker_cash.v1",
+            "source_observed_at_utc": TIMESTAMPS["broker_source_observed_at_utc"],
+            "application_received_at_utc": TIMESTAMPS["broker_promoted_at_utc"],
+            "facts": {key: broker_source[key] for key in BROKER_CASH_V1_FACT_KEYS},
+            "content_sha256": sha256_bytes(canonical_json_bytes({key: broker_source[key] for key in BROKER_CASH_V1_FACT_KEYS})),
+            "completeness": {"status": "complete", "reason_codes": []},
+            "freshness": {"authority": "not_applicable", "status": "not_applicable", "reason_codes": []},
+        },
         "broker_positions": build_runtime_portfolio_section(
             "broker_positions",
             source_observed_at_utc=TIMESTAMPS["broker_source_observed_at_utc"],

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 import hashlib
 import json
 import math
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway, build_ready_futu_quote_gateway
+from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.futu_option_terms import _enrich_option_contract_terms
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.position_snapshot import normalize_position_snapshot_input, position_snapshot_scope_errors
@@ -26,7 +31,7 @@ from src.application.opend_normalize import normalize_opend_option_type
 from src.application.account_config import resolve_futu_account_ids
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
-    fetch_market_exchange_rates,
+    get_exchange_rates_or_fetch_latest,
 )
 
 
@@ -53,6 +58,7 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
+_FX_NOT_PROVIDED = object()
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -189,7 +195,7 @@ def build_futu_position_snapshot(
         "scope": {"markets": markets, "asset_types": asset_types, "filtered": filtered},
         "observed_at_utc": observed_at_utc, "source_as_of_utc": source_as_of_utc,
         "completeness": completeness,
-        "quality": {"status": "ready" if completeness == "complete" and not errors else "unknown"},
+        "quality": {"status": "unavailable" if errors else "ready" if completeness == "complete" else "unknown"},
         "rows": mapped, "errors": errors, "evidence_refs": [],
     }
     content["snapshot_id"] = "opend-" + canonical_sha256({
@@ -233,22 +239,31 @@ def build_futu_position_snapshot(
     return normalized
 
 
-def _dedup_balance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str]] = set()
+def _dedup_balance_rows(
+    rows: list[dict[str, Any]], *, base_currency: str, account_id: str | None = None, trd_env: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    seen: dict[tuple[str, str, str], Any] = {}
     out: list[dict[str, Any]] = []
-    for row in rows:
-        acc = str(_pick(row, "acc_id", "account_id", "trd_acc_id", "trade_acc_id", "accID") or "").strip()
-        if not acc:
-            out.append(row)
+    errors: dict[str, str] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            errors[f"balance_row_{index + 1}"] = "row_invalid"
             continue
-        env = (_row_trd_env(row) or "").strip()
-        ccy = str(_pick(row, "currency", "cash_currency", "currency_code", "ccy") or "").strip().upper()
+        acc = str(_pick(row, "acc_id", "account_id", "trd_acc_id", "trade_acc_id", "accID") or account_id or "").strip()
+        env = _row_trd_env(row) or trd_env or ""
+        ccy = _normalize_currency(_pick(row, "currency", "cash_currency", "currency_code", "ccy"), fallback=base_currency)
+        components, kind, invalid = _extract_cash_components(row, base_currency=base_currency)
+        # Absent components stay absent; an explicit zero is a distinct fact.
+        facts = (components, kind, invalid)
         key = (acc, env, ccy)
-        if key in seen:
+        if acc and key in seen:
+            if seen[key] != facts:
+                errors[f"balance_row_{index + 1}"] = "duplicate_balance_conflict"
             continue
-        seen.add(key)
-        out.append(row)
-    return out
+        if acc:
+            seen[key] = facts
+        out.append(dict(row))
+    return out, errors
 
 
 def _rows(data: Any, *, strict: bool = False) -> list[dict[str, Any]]:
@@ -257,23 +272,23 @@ def _rows(data: Any, *, strict: bool = False) -> list[dict[str, Any]]:
             recs = data.to_dict("records")
             if isinstance(recs, list):
                 if strict and any(not isinstance(row, dict) for row in recs):
-                    raise ValueError("position response contains malformed rows")
+                    raise ValueError("provider response contains malformed rows")
                 return [dict(r) for r in recs]
         except Exception:
             if strict:
-                raise ValueError("position response completeness is unknown") from None
+                raise ValueError("provider response completeness is unknown") from None
     if isinstance(data, list):
         out: list[dict[str, Any]] = []
         for row in data:
             if isinstance(row, dict):
                 out.append(dict(row))
             elif strict:
-                raise ValueError("position response contains malformed rows")
+                raise ValueError("provider response contains malformed rows")
         return out
     if isinstance(data, dict):
         return [dict(data)]
     if strict:
-        raise ValueError("position response completeness is unknown")
+        raise ValueError("provider response completeness is unknown")
     return []
 
 
@@ -336,8 +351,13 @@ def _to_futu_acc_id(value: Any) -> int:
     return int(raw)
 
 
-def _fetch_market_exchange_rate_observation() -> dict[str, Any] | None:
-    return fetch_market_exchange_rates()
+def _fetch_market_exchange_rate_observation(
+    *, cache_path: Path | None = None, write_cache: bool = True,
+) -> dict[str, Any] | None:
+    return get_exchange_rates_or_fetch_latest(
+        cache_path=cache_path or Path(__file__).resolve().parents[2] / "output_shared" / "state" / "rate_cache.json",
+        write_cache=write_cache,
+    )
 
 
 def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:
@@ -372,8 +392,7 @@ def _add_cash_component(
     if not ccy:
         return False
     amount = float(value)
-    if amount:
-        cash_by_currency[ccy] = cash_by_currency.get(ccy, 0.0) + amount
+    cash_by_currency[ccy] = cash_by_currency.get(ccy, 0.0) + amount
     components = components_by_currency.setdefault(ccy, {})
     components[source] = components.get(source, 0.0) + amount
     return True
@@ -401,21 +420,23 @@ def _extract_cash_components(
         currency: str,
         source_fields: tuple[str, ...],
     ) -> None:
+        selected: tuple[str, float] | None = None
         for field in source_fields:
-            if field not in row:
-                continue
             raw_value = row.get(field)
             if raw_value is None or (
-                isinstance(raw_value, str)
-                and raw_value.strip().upper() in {"", "-", "N/A"}
+                isinstance(raw_value, str) and raw_value.strip().upper() in {"", "-", "N/A"}
             ):
                 continue
             value = _to_float(raw_value)
             if value is None:
                 unavailable[field] = "value_invalid"
-            else:
-                components.append((currency, field, value))
-            return
+            elif selected is None:
+                selected = (field, value)
+            elif value != selected[1]:
+                unavailable[field] = "alias_balance_conflict"
+        if selected is not None:
+            # Canonical alias makes equivalent SDK representations one component.
+            components.append((currency, source_fields[0], selected[1]))
 
     append_first_present(row_currency, _FUTU_FUND_ASSET_FIELDS)
 
@@ -424,6 +445,7 @@ def _extract_cash_components(
 
     if components:
         return components, "futu_cash_like_assets", unavailable
+    unavailable["cash_components"] = "supported_cash_field_missing"
     return [], "empty", unavailable
 
 
@@ -539,7 +561,9 @@ def _query_rows_for_account_id(
         kwargs["acc_id"] = _to_futu_acc_id(account_id)
         if trd_env:
             kwargs["trd_env"] = trd_env
-        return _rows(method(**kwargs), strict=method_name == "get_positions")
+        return _rows(method(**kwargs), strict=True)
+    except (TimeoutError, CancelledError):
+        raise
     except Exception as exc:
         raise ValueError(
             f"{method_name} failed for mapped account_id={account_id} via acc_id selector"
@@ -573,6 +597,7 @@ def _query_opend_exchange_rate_observation(
     *,
     account_ids: set[str],
     trd_env: str,
+    read_exchange_rate: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     return (
         _filter_rows_for_account_ids(
@@ -587,7 +612,7 @@ def _query_opend_exchange_rate_observation(
             account_ids,
             trd_env=trd_env,
         ),
-        _fetch_market_exchange_rate_observation(),
+        _fetch_market_exchange_rate_observation() if read_exchange_rate else None,
     )
 
 
@@ -599,6 +624,7 @@ def build_futu_portfolio_context(
     market: str = "富途",
     base_currency: str = "CNY",
     source_observed_at: str | None = None,
+    cash_source_observed_at: str | None = None,
     broker_account_identifiers: set[str] | list[str] | tuple[str, ...] = (),
     futu_account_id: str | None = None,
     trd_env: str | None = None,
@@ -629,7 +655,11 @@ def build_futu_portfolio_context(
         ]
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
-    deduped_balance_rows = _dedup_balance_rows(balance_rows)
+    deduped_balance_rows, row_errors = _dedup_balance_rows(
+        balance_rows, base_currency=base_ccy, trd_env=trd_env,
+        account_id=futu_account_id or (next(iter(broker_account_identifiers)) if len(broker_account_identifiers) == 1 else None),
+    )
+    cash_balance_unavailable_by_row.update(row_errors)
     for row_index, row in enumerate(deduped_balance_rows, start=1):
         components, source_kind, unavailable = _extract_cash_components(
             row, base_currency=base_ccy
@@ -776,6 +806,11 @@ def build_futu_portfolio_context(
         "source_observed_at": observed_at,
         "source": "opend",
     }
+    for index, row in enumerate(deduped_balance_rows, start=1):
+        row_id = _pick(row, "acc_id", "account_id", "trade_acc_id", "trd_acc_id", "accID")
+        if ((row_id is not None and physical_id and str(row_id) != physical_id)
+                or _row_trd_env(row) not in (None, capacity_authority["trd_env"])):
+            cash_balance_unavailable_by_row[f"balance_row_{index}.identity"] = "identity_mismatch"
     capacity_identity_hash = canonical_sha256(capacity_authority)
     snapshot_errors = position_snapshot_scope_errors(
         standard_snapshot, account_label=account_norm, external_account_id=physical_id,
@@ -814,7 +849,7 @@ def build_futu_portfolio_context(
             "futu_account_id": physical_id or None,
             "trd_env": capacity_authority["trd_env"],
             "market": capacity_authority["market"],
-            "source_observed_at": observed_at,
+            "source_observed_at": cash_source_observed_at,
             "capacity_identity_hash": capacity_identity_hash,
             "capacity_authority_status": authority_status,
             "pool_additive_across_candidates": False,
@@ -824,6 +859,12 @@ def build_futu_portfolio_context(
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "source_observed_at": observed_at,
+        "cash_source_observed_at": cash_source_observed_at,
+        # Diagnostic text preserves invalid SDK values without putting NaN/Inf in sealed JSON.
+        "cash_source_rows": [
+            {str(key): repr(value) for key, value in row.items()} if isinstance(row, Mapping) else repr(row)
+            for row in balance_rows
+        ],
         "source_account_identifiers": identifiers,
         "capacity_authority": capacity_authority,
         "capacity_identity_hash": capacity_identity_hash,
@@ -854,6 +895,9 @@ def fetch_futu_portfolio_context(
     market: str = "富途",
     base_currency: str = "CNY",
     include_options: bool = False,
+    exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
+    exchange_rate_cache_path: Path | None = None,
+    write_cache: bool = True,
 ) -> dict[str, Any]:
     if not account:
         raise ValueError("futu portfolio context requires account")
@@ -881,22 +925,56 @@ def fetch_futu_portfolio_context(
         trd_env=trd_env,
         is_option_chain_cache_enabled=False,
     )
+    position_errors: list[str] = []
     try:
-        balance_rows, exchange_rate_observation = (
-            _query_opend_exchange_rate_observation(
-                gateway,
-                account_ids=account_ids,
-                trd_env=trd_env,
+        balance_rows = _query_rows_for_account_ids(
+            gateway, "get_account_balance", account_ids, trd_env=trd_env,
+            currency="CNH", refresh_cache=True,
+        )
+        cash_observed_at = datetime.now(timezone.utc).isoformat()
+        if exchange_rate_observation is _FX_NOT_PROVIDED:
+            try:
+                exchange_rate_observation = _fetch_market_exchange_rate_observation(
+                    cache_path=exchange_rate_cache_path, write_cache=write_cache,
+                )
+            except (TimeoutError, CancelledError):
+                raise
+            except Exception:
+                exchange_rate_observation = None
+        try:
+            position_rows = _query_rows_for_account_ids(
+                gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True,
             )
-        )
-        position_rows = _query_rows_for_account_ids(
-            gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True
-        )
+        except (TimeoutError, CancelledError):
+            raise
+        except Exception:
+            position_rows = []
+            position_errors.append("position_query_failed")
+        source_observed_at = datetime.now(timezone.utc).isoformat()
     finally:
         gateway.close()
 
     balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
-    source_observed_at = datetime.now(timezone.utc).isoformat()
+    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
+    if include_options and not position_errors:
+        option_indexes = [index for index, row in enumerate(position_rows) if _row_looks_like_option_position(row)]
+        if option_indexes:
+            try:
+                route = resolve_futu_quote_route(cfg, market=_runtime_market(cfg, fallback=base_currency))
+                if not route.ok:
+                    raise ValueError("Futu option terms quote route unavailable")
+                quotes = build_ready_futu_quote_gateway(
+                    host=str(route.host), port=int(route.port), is_option_chain_cache_enabled=False)
+                try:
+                    enriched = _enrich_option_contract_terms(quotes, [position_rows[index] for index in option_indexes])
+                finally:
+                    quotes.close()
+                for index, row in zip(option_indexes, enriched, strict=True):
+                    position_rows[index] = row
+            except (TimeoutError, CancelledError):
+                raise
+            except Exception:
+                position_errors.append("position_option_terms_failed")
     capacity_market = _runtime_market(cfg, fallback=base_currency)
     snapshot_input = build_futu_position_snapshot(
         rows=position_rows,
@@ -906,10 +984,9 @@ def fetch_futu_portfolio_context(
             "account_label": account,
         },
         markets=sorted({"US", "HK", capacity_market.upper()} | {str(symbol_market(_pick(row, "code", "symbol", "stock_code")) or "").upper() for row in position_rows} - {""}),
-        asset_types=["stock", "option"] if include_options else ["stock"], observed_at_utc=source_observed_at, completeness="complete",
+        asset_types=["stock", "option"] if include_options else ["stock"], observed_at_utc=source_observed_at,
+        completeness="partial" if position_errors else "complete", source_errors=position_errors,
     )
-    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
-
     return build_futu_portfolio_context(
         balance_rows=balance_rows,
         position_rows=position_rows,
@@ -917,6 +994,7 @@ def fetch_futu_portfolio_context(
         market=market,
         base_currency=base_currency,
         source_observed_at=source_observed_at,
+        cash_source_observed_at=cash_observed_at,
         broker_account_identifiers=account_ids,
         futu_account_id=physical_account_id,
         trd_env=trd_env,

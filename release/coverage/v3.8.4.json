@@ -1,0 +1,40 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.4",
+  "base": {
+    "tag": "v3.8.3",
+    "commit": "a22aac8d3c2ba043ce4e74d14689f01859c67933"
+  },
+  "reviewed_head": "562e03a5c96830a8ae8d144554d1d97ec0caffcf",
+  "commits": [
+    {
+      "sha": "f874bc0ddef368084302c9f0d077feea0e750623",
+      "subject": "fix(wheel): allow disjoint short put expiry in recovery"
+    },
+    {
+      "sha": "562e03a5c96830a8ae8d144554d1d97ec0caffcf",
+      "subject": "Merge pull request #408 from liuxie066/codex/wheel-disjoint-expiry"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复历史 Wheel 恢复把其他独立短 Put 的到期平仓误判为同标的后续冲突、阻止已验证指派恢复的问题。",
+      "commits": [
+        "f874bc0ddef368084302c9f0d077feea0e750623",
+        "562e03a5c96830a8ae8d144554d1d97ec0caffcf"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "f874bc0ddef368084302c9f0d077feea0e750623",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/408"]
+    },
+    {
+      "commit": "562e03a5c96830a8ae8d144554d1d97ec0caffcf",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/408"]
+    }
+  ]
+}

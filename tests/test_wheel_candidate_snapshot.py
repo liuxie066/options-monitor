@@ -321,3 +321,36 @@ def test_wheel_candidate_snapshot_v2_preserves_ordinary_cc_allocation(
     )
 
     assert payload["capacity_allocations"] == [ordinary]
+
+
+def test_confirmation_reads_original_hash_bound_cash_and_ledger_fx(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from cash_evidence_helpers import cash_config, cash_portfolio
+    from src.application.tick_run_workspace import publish_account_run_config
+    from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
+    import src.application.futu_portfolio_context as futu
+
+    monkeypatch.setattr(futu, "fetch_futu_portfolio_context", lambda **kw: pytest.fail("confirmation must not fetch"))
+    config = cash_config()
+    config["portfolio"]["account"] = "lx"
+    authority = publish_account_run_config(base=tmp_path, run_id="run-1", account="lx", config=config)
+    state = tmp_path / "output_runs/run-1/accounts/lx/state"
+    portfolio = cash_portfolio({"cash_by_currency": {"USD": 123},
+        "source_observed_at": "2026-01-01T00:00:00+00:00", "exchange_rates": {"USD": 999}})
+    deps = _dependencies()
+    for kind, name, payload in (("portfolio", "portfolio_context.json", portfolio),
+                               ("ledger", "option_positions_context.json", {"exchange_rates": {"USD": 7}})):
+        path = state / name
+        path.write_text(json.dumps(payload))
+        deps = [{"kind": kind, "relpath": str(path.relative_to(tmp_path)),
+                 "sha256": sha256(path.read_bytes()).hexdigest()} if row["kind"] == kind else row for row in deps]
+    snapshot = {"run_id": "run-1", "account": "lx", "account_config_sha256": authority.account_config_sha256,
+                "dependencies": deps}
+    fact = load_wheel_candidate_cash_fact(base=tmp_path, snapshot=snapshot)
+    assert fact["cash_by_currency"] == {"USD": 123}
+    assert fact["cash_snapshot"] == portfolio["cash_snapshot"]
+    assert fact["fx_snapshot"] == {"USD": 7}
+    assert fact["cash_evidence"]["cash_source_observed_at"] == "2026-01-01T00:00:00+00:00"
+    assert "cash_evidence_error" in load_wheel_candidate_cash_fact(base=tmp_path / "other-runtime", snapshot=snapshot)
+    (state / "portfolio_context.json").write_text("{}")
+    assert "hash" in load_wheel_candidate_cash_fact(base=tmp_path, snapshot=snapshot)["cash_evidence_error"]

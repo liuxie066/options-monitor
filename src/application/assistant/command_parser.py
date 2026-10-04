@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from datetime import date
@@ -10,6 +11,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.capability_catalog import commands_by_intent, operation_target_intents
 from src.application.assistant.contracts import ControlCommand
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
+from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 
 
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
@@ -19,6 +21,7 @@ _MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$")
 _DEFAULT_COMMAND_ACCOUNTS = ("lx", "sy")
+_ATTRIBUTION_BATCH_MAX_BYTES = 16_384
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
@@ -97,8 +100,17 @@ def parse_assistant_command(
     if command in _COMMANDS["model_list"] or command in _COMMANDS["model_use"]:
         return _parse_model_command(command, args)
     if command in _COMMANDS["attribution_preview"]:
+        if len(args) == 3 and args[0] in account_set and args[1] == "batch":
+            try:
+                if len(args[2].encode("utf-8")) > _ATTRIBUTION_BATCH_MAX_BYTES:
+                    raise ValueError("批量 JSON 超过 16 KiB，请缩小请求；不会截断或分次提交")
+                batch = json.loads(args[2], object_pairs_hook=_unique_json_object)
+                validate_attribution_batch(batch)
+            except (ValueError, TypeError, RecursionError) as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=f"批量归属输入无效：{exc}") from exc
+            return _intent("attribution_preview", {"account": args[0], **batch})
         if len(args) not in {3, 4} or args[0] not in account_set or args[2] not in {"ordinary", "wheel", "combo"}:
-            raise AgentToolError(code="INPUT_ERROR", message="格式：/attribute <账户> <execution_key> <ordinary|wheel|combo> [target_id]")
+            raise AgentToolError(code="INPUT_ERROR", message="格式：/attribute <账户> <execution_key> <ordinary|wheel|combo> [target_id]；多分支 Wheel 用逗号列出每张合约的分支 ID。")
         return _intent("attribution_preview", {"account": args[0], "execution_key": args[1], "action": args[2],
                                                **({"target_id": args[3]} if len(args) == 4 else {})})
     if command in _COMMANDS["manual_trade_open"]:
@@ -145,6 +157,47 @@ def parse_assistant_command(
 
 
 parse_agent_command = parse_assistant_command
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("JSON 字段重复")
+    return result
+
+
+def validate_attribution_batch(batch: object) -> None:
+    """Validate the same untrusted shape from command text and Bot Control requests."""
+    def identity(value: object) -> bool:
+        return isinstance(value, str) and bool(value) and value.strip() == value
+
+    if not isinstance(batch, dict) or set(batch) != {"conflict_event_ids", "members"}:
+        raise ValueError("只允许 conflict_event_ids 和 members")
+    if len(json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > _ATTRIBUTION_BATCH_MAX_BYTES:
+        raise ValueError("批量 JSON 超过 16 KiB，请缩小请求；不会截断或分次提交")
+    conflicts, members = batch["conflict_event_ids"], batch["members"]
+    if (not isinstance(conflicts, list) or not conflicts or not all(map(identity, conflicts))
+            or len(set(conflicts)) != len(conflicts) or not isinstance(members, list) or not members):
+        raise ValueError("冲突与成员必须非空，冲突 ID 不得重复")
+    executions = set()
+    for member in members:
+        if (not isinstance(member, dict) or set(member) - {"execution_key", "action", "target_id", "wheel_call_allocations"}
+                or not identity(member.get("execution_key")) or member["execution_key"] in executions):
+            raise ValueError("成员身份无效或重复")
+        executions.add(member["execution_key"])
+        action = member.get("action")
+        targets = set(member) & {"target_id", "wheel_call_allocations"}
+        if action == "ordinary" and not targets:
+            continue
+        if action not in {"wheel", "combo"} or len(targets) != 1:
+            raise ValueError("ordinary 不带目标；wheel/combo 必须提供唯一目标")
+        if "target_id" in targets:
+            if not identity(member["target_id"]) or "," in member["target_id"]:
+                raise ValueError("target_id 必须是单个非空身份")
+        elif action == "wheel":
+            parse_wheel_call_allocations(member["wheel_call_allocations"])
+        else:
+            raise ValueError("combo 必须指定 group ID")
 
 
 def _intent(name: str, arguments: dict[str, object] | None = None) -> ControlCommand:

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import (
@@ -23,11 +24,13 @@ from domain.domain.option_lifecycle import (
     PENDING_STATUSES,
 )
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     canonical_contract_symbol,
     derive_position_side,
     normalize_contract_expiration,
 )
 from src.application.ledger.api import (
+    record_zero_price_option_close,
     accept_option_close_evidence,
     BrokerTradeOperation,
     futu_compatibility_source_key,
@@ -70,6 +73,7 @@ def resolve_lifecycle_trade_deal(
     repo: Any,
     apply_changes: bool,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution | None:
     if _is_stock_settlement_leg(deal):
         evidence = _evidence_from_deal(deal, evidence_type="stock_settlement_leg", case_id=None)
@@ -96,6 +100,7 @@ def resolve_lifecycle_trade_deal(
             repo=repo,
             apply_changes=apply_changes,
             wheel_start_enabled=wheel_start_enabled,
+            notification_status=notification_status,
         )
     if _is_zero_price_option_close(deal):
         return _resolve_zero_price_option_close(
@@ -103,6 +108,7 @@ def resolve_lifecycle_trade_deal(
             repo=repo,
             apply_changes=apply_changes,
             wheel_start_enabled=wheel_start_enabled,
+            notification_status=notification_status,
         )
     return None
 
@@ -117,7 +123,7 @@ def lifecycle_deal_economic_hash(
             evidence_type="stock_settlement_leg",
             case_id=None,
         )
-    elif _is_zero_price_option_close(deal):
+    elif deal.option_type and deal.position_effect == "close":
         role = "option_anchor"
         payload = {
             **deal.to_dict(),
@@ -146,10 +152,23 @@ def _resolve_zero_price_option_close(
     repo: Any,
     apply_changes: bool,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution:
-    if not apply_changes:
-        return _preview_zero_price_option_close(deal, repo=repo)
-
+    resolution = dict(deal.normalization_diagnostics.get("multiplier_resolution") or {})
+    if deal.multiplier is None and not resolution.get("errors"):
+        return LifecycleTradeResolution(
+            handled=True, status="unresolved", action="lifecycle",
+            reason="missing_required_fields:multiplier",
+            diagnostics={"retryable": True, "missing_fields": ["multiplier"],
+                         "multiplier_resolution": resolution},
+        )
+    try:
+        require_option_multiplier(deal.multiplier)
+    except ValueError as exc:
+        return LifecycleTradeResolution(
+            handled=True, status="unresolved", action="lifecycle",
+            reason="invalid_required_fields:multiplier", diagnostics={"retryable": False, "error": str(exc)},
+        )
     source_event_id = _futu_source_key(deal)
     evidence = _evidence_from_deal(
         deal,
@@ -188,14 +207,19 @@ def _resolve_zero_price_option_close(
         ),
         "market": symbol_market(deal.symbol),
         "currency": deal.currency,
-        "multiplier": deal.multiplier or 100,
+        "multiplier": require_option_multiplier(deal.multiplier),
     }
     try:
-        accepted = accept_option_close_evidence(
+        if not apply_changes:
+            accept_option_close_evidence(
+                repo, contract_identity=contract_identity, evidence=evidence, apply_changes=False,
+            )
+            return _preview_zero_price_option_close(deal, repo=repo)
+        accepted = record_zero_price_option_close(
             repo,
+            deal=deal,
             contract_identity=contract_identity,
             evidence=evidence,
-            apply_changes=apply_changes,
         )
     except ValueError as exc:
         reason = str(exc) or "option_close_evidence_not_accepted"
@@ -216,86 +240,96 @@ def _resolve_zero_price_option_close(
             },
         )
     accepted_evidence = dict(accepted.get("lifecycle_evidence") or {})
-    lifecycle_case = dict(accepted.get("lifecycle_case") or {})
-    matching_stock_evidences = _find_matching_stock_evidences(
-        repo,
-        option_case=lifecycle_case,
-        option_evidence=accepted_evidence,
-    )
-    if matching_stock_evidences:
-        results = [
-            _write_lifecycle_close_from_case(
-                repo,
-                case=_case_with_option_evidence_context(
-                    lifecycle_case,
-                    accepted_evidence,
-                ),
-                decision_type=str(
-                    _lifecycle_decision(
-                        _case_with_option_evidence_context(
-                            lifecycle_case,
-                            accepted_evidence,
-                        ),
-                        stock_evidence=stock_evidence,
-                    )["decision_type"]
-                ),
-                option_evidence=accepted_evidence,
-                stock_evidence=stock_evidence,
-                apply_changes=True,
-                wheel_start_enabled=wheel_start_enabled,
-            )
-            for stock_evidence in matching_stock_evidences
-        ]
-        final = results[-1]
-        return LifecycleTradeResolution(
-            handled=True,
-            status=final.status,
-            action=final.action,
-            reason=final.reason,
-            operations=[
-                operation
-                for result in results
-                for operation in result.operations
-            ],
-            diagnostics={
-                **dict(final.diagnostics),
-                "broker_evidence_accepted": True,
-                "lifecycle_adoption": accepted,
-                "settlement_results": [
-                    {
-                        "status": result.status,
-                        "reason": result.reason,
-                        "operation_count": len(result.operations),
-                    }
-                    for result in results
-                ],
-            },
+    reason_correction_error = None
+    try:
+        lifecycle_case = dict(accepted.get("lifecycle_case") or {})
+        stock_rows = _find_matching_stock_evidences(
+            repo, option_case=lifecycle_case, option_evidence=accepted_evidence,
         )
-    target_manifest = dict(
-        accepted_evidence.get("target_contracts_by_lot") or {}
-    )
+        consumed = {
+            str(row.get("source_key") or "")
+            for row in repo.list_trade_lifecycle_source_consumptions(
+                case_id=lifecycle_case.get("case_id"),
+            )
+            if row.get("source_role") == "stock_settlement"
+        }
+        available = [row for row in stock_rows
+                     if str(row.get("source_event_id") or "") not in consumed]
+        if len(available) == 1:
+            case_context = _case_with_option_evidence_context(
+                lifecycle_case, accepted_evidence,
+            )
+            decision = _lifecycle_decision(case_context, stock_evidence=available[0])
+            if decision["decision_type"] in {"assignment", "exercise"}:
+                settled = _write_lifecycle_close_from_case(
+                    repo, case=case_context,
+                    decision_type=str(decision["decision_type"]),
+                    option_evidence=accepted_evidence,
+                    stock_evidence=available[0], apply_changes=True,
+                    wheel_start_enabled=wheel_start_enabled,
+                    notification_status=notification_status,
+                )
+                if settled.status in {"applied", "skipped"}:
+                    return settled
+    except Exception as exc:
+        # The economic close already committed; keep its receipt accurate.
+        reason_correction_error = f"{type(exc).__name__}: {exc}"
+    target_manifest = dict(accepted_evidence.get("target_contracts_by_lot") or {})
     operations = [
         BrokerTradeOperation(
-            action="reserve_option_close",
+            action="close",
             lot_id=lot_id,
             contracts_to_close=int(contracts),
             details={
                 "lifecycle_case_id": accepted.get("case_id"),
                 "lifecycle_evidence_id": accepted.get("evidence_id"),
                 "lifecycle_schema_version": "lifecycle_case.v2",
-                "projection_changed": False,
+                "projection_changed": accepted.get("status") == "accepted",
             },
         )
         for lot_id, contracts in sorted(target_manifest.items())
     ]
+    corrected_type = None
+    reason_correction_readback_error = None
+    if accepted.get("status") == "existing" or reason_correction_error:
+        original_ids = set(
+            (accepted.get("economic_close") or {}).get("terminal_event_ids") or []
+        )
+        if original_ids:
+            try:
+                events = repo.list_trade_events()
+            except Exception as exc:
+                events = []
+                reason_correction_readback_error = f"{type(exc).__name__}: {exc}"
+            voided_ids = {
+                str(item.get("target_event_id") or "")
+                for item in events if item.get("event_type") == "void"
+            }
+            replacements = [
+                item for item in events
+                if str((item.get("raw_payload") or {}).get("pending_close_event_id") or "")
+                in original_ids
+                and str(item.get("event_id") or "") not in voided_ids
+            ]
+            if (
+                {str((item.get("raw_payload") or {}).get("pending_close_event_id") or "")
+                 for item in replacements} == original_ids
+                and len(replacements) == len(original_ids)
+                and len({str(item.get("event_type") or "") for item in replacements}) == 1
+            ):
+                corrected_type = str(replacements[0]["event_type"])
     return LifecycleTradeResolution(
         handled=True,
-        status="unresolved",
-        action="lifecycle",
-        reason="waiting_settlement_evidence",
+        status="skipped" if accepted.get("status") == "existing" else "applied",
+        action=corrected_type or "lifecycle",
+        reason="lifecycle_already_written_v2" if corrected_type else "close_reason_pending",
         operations=operations,
         diagnostics={
             "retryable": False,
+            **({"reason_correction_error": reason_correction_error}
+               if reason_correction_error else {}),
+            **({"reason_correction_readback_error": reason_correction_readback_error}
+               if reason_correction_readback_error else {}),
             "broker_evidence_accepted": bool(
                 accepted.get("broker_evidence_accepted")
             ),
@@ -316,17 +350,21 @@ def _preview_zero_price_option_close(
         evidence_type="option_zero_price_close",
         case_id=case["case_id"],
     )
-    stock_evidence = _find_matching_stock_evidence(
+    stock_evidences = _find_matching_stock_evidences(
         repo,
         option_case=case,
         option_evidence=evidence,
     )
+    stock_evidence = stock_evidences[0] if len(stock_evidences) == 1 else None
     decision = _lifecycle_decision(case, stock_evidence=stock_evidence)
     diagnostics = {
         "lifecycle_case": case,
         "lifecycle_evidence": evidence,
         "decision": decision,
         "matching_stock_evidence": stock_evidence,
+        "matching_stock_evidence_ids": [
+            str(item.get("evidence_id") or "") for item in stock_evidences
+        ],
         "broker_evidence_accepted": False,
         "lifecycle_schema_version": "lifecycle_case.v2",
     }
@@ -364,6 +402,7 @@ def _resolve_stock_settlement_leg(
     repo: Any,
     apply_changes: bool,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution:
     evidence = _evidence_from_deal(deal, evidence_type="stock_settlement_leg", case_id=None)
     return _resolve_stock_settlement_evidence(
@@ -371,6 +410,7 @@ def _resolve_stock_settlement_leg(
         repo=repo,
         apply_changes=apply_changes,
         wheel_start_enabled=wheel_start_enabled,
+        notification_status=notification_status,
     )
 
 
@@ -417,6 +457,7 @@ def _resolve_stock_settlement_evidence(
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     consume_unresolved_attempt: bool = True,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution:
     matching_cases = _find_matching_option_cases(
         repo,
@@ -618,6 +659,7 @@ def _resolve_stock_settlement_evidence(
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,
+        notification_status=notification_status,
     )
 
 
@@ -633,6 +675,7 @@ def _write_lifecycle_close_from_case(
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution:
     if not apply_changes:
         raise ValueError("lifecycle close write requires apply_changes")
@@ -644,20 +687,32 @@ def _write_lifecycle_close_from_case(
         int(case.get("event_time_ms") or 0),
         int(stock.get("trade_time_ms") or 0),
     ) or None
-    v2_result = _write_v2_lifecycle_close_from_case(
-        repo,
-        case=case,
-        decision_type=normalized_decision,
-        option_evidence=option_evidence,
-        stock_evidence=stock,
-        event_time_ms=event_time_ms,
-        expected_lifecycle_generation_token=(
-            expected_lifecycle_generation_token
-        ),
-        attempt_evidence=attempt_evidence,
-        attempt_audit=attempt_audit,
-        wheel_start_enabled=wheel_start_enabled,
-    )
+    try:
+        v2_result = _write_v2_lifecycle_close_from_case(
+            repo,
+            case=case,
+            decision_type=normalized_decision,
+            option_evidence=option_evidence,
+            stock_evidence=stock,
+            event_time_ms=event_time_ms,
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
+            wheel_start_enabled=wheel_start_enabled,
+            notification_status=notification_status,
+        )
+    except ValueError as exc:
+        if str(exc) not in {
+            "ambiguous_stock_settlement_evidence",
+            "ambiguous_stock_trade_ownership",
+        }:
+            raise
+        return LifecycleTradeResolution(
+            handled=True, status="unresolved", action="lifecycle",
+            reason=str(exc), diagnostics={"retryable": False},
+        )
     if v2_result is not None:
         return v2_result
     if attempt_audit is not None:
@@ -789,6 +844,7 @@ def _write_v2_lifecycle_close_from_case(
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
+    notification_status: str = "pending",
 ) -> LifecycleTradeResolution | None:
     option_source_id = str(
         (option_evidence or {}).get("source_event_id") or ""
@@ -862,6 +918,8 @@ def _write_v2_lifecycle_close_from_case(
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,
+        notification_status=notification_status,
+        broker_ownership_validator=validate_broker_stock_ownership_for_write,
     )
     if (
         result.status == "needs_review"
@@ -1002,7 +1060,7 @@ def _case_from_option_deal(deal: NormalizedTradeDeal) -> dict[str, Any]:
     expiration = normalize_contract_expiration(deal.expiration_ymd)
     strike = float(deal.strike) if deal.strike is not None else None
     contracts = int(deal.contracts or 0)
-    multiplier = int(deal.multiplier or 100)
+    multiplier = require_option_multiplier(deal.multiplier)
     case_key = _case_key(
         broker=broker,
         account=account,
@@ -1118,20 +1176,6 @@ def _lifecycle_decision(case: dict[str, Any], *, stock_evidence: dict[str, Any] 
     return {"decision_type": "needs_review", "reason": "waiting_settlement_evidence"}
 
 
-def _find_matching_stock_evidence(
-    repo: Any,
-    *,
-    option_case: dict[str, Any],
-    option_evidence: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    rows = _find_matching_stock_evidences(
-        repo,
-        option_case=option_case,
-        option_evidence=option_evidence,
-    )
-    return rows[-1] if rows else None
-
-
 def _find_matching_stock_evidences(
     repo: Any,
     *,
@@ -1169,6 +1213,99 @@ def _find_matching_stock_evidences(
             str(item.get("evidence_id") or ""),
         ),
     )
+
+
+def validate_broker_stock_ownership_for_write(
+    repo: Any, *, conn: Any, case: dict[str, Any], evidence: dict[str, Any],
+) -> None:
+    """Recheck competing broker sources against the writer's SQLite snapshot."""
+    if str(evidence.get("source_type") or "") != "broker_settlement_pair":
+        return
+    stock = dict(evidence.get("stock_settlement") or {})
+    source_key = str(stock.get("source_event_id") or "").strip()
+    if not source_key:
+        return
+    snapshot = SimpleNamespace(
+        list_trade_lifecycle_evidence=lambda **kwargs: repo.list_trade_lifecycle_evidence(conn=conn, **kwargs),
+        list_trade_lifecycle_cases=lambda **kwargs: repo.list_trade_lifecycle_cases(conn=conn, **kwargs),
+        list_trade_lifecycle_source_consumptions=lambda **kwargs: repo.list_trade_lifecycle_source_consumptions(conn=conn, **kwargs),
+        get_trade_lifecycle_timing_policy=lambda case_id: repo.get_trade_lifecycle_timing_policy(case_id, conn=conn),
+    )
+    option_evidence = _first_option_evidence(snapshot, str(case.get("case_id") or ""))
+    consumed_sources = {
+        str(item.get("source_key") or "").strip()
+        for item in snapshot.list_trade_lifecycle_source_consumptions(
+            case_id=case.get("case_id"),
+        )
+        if str(item.get("source_role") or "") == "stock_settlement"
+    }
+    stock_sources = {
+        str(row.get("source_event_id") or "").strip()
+        for row in _find_matching_stock_evidences(
+            snapshot, option_case=case, option_evidence=option_evidence,
+        )
+        if str(row.get("source_event_id") or "").strip() not in consumed_sources
+        or str(row.get("source_event_id") or "").strip() == source_key
+    }
+    stock_sources.add(source_key)
+    if len(stock_sources) > 1:
+        raise ValueError("ambiguous_stock_settlement_evidence")
+    if str(stock.get("side") or "").lower() != "sell":
+        return
+    source = next(
+        (
+            row for row in repo.list_trade_lifecycle_evidence(
+                account=case.get("account"), symbol=case.get("symbol"), conn=conn,
+            )
+            if str(row.get("source_event_id") or "").strip() == source_key
+            and str(row.get("evidence_type") or "") == "stock_settlement_leg"
+        ), None,
+    )
+    raw = (source or {}).get("raw")
+    raw = dict(raw) if isinstance(raw, dict) else {}
+    from src.application.positions.workflows import (
+        BrokerAssignedStockSaleMatchError, _broker_assigned_stock_sale_match,
+    )
+    from src.application.performance.adapters import (
+        ledger_performance_inputs_from_rows, load_assigned_stock_projection,
+    )
+
+    deal = (
+        NormalizedTradeDeal(**raw)
+        if "internal_account" in raw and "contracts" in raw
+        else NormalizedTradeDeal(
+            broker=str(case.get("broker") or "富途"),
+            futu_account_id=stock.get("futu_account_id"),
+            internal_account=case.get("account"),
+            deal_id=str(raw.get("deal_id") or raw.get("dealID") or raw.get("id") or "").strip() or None,
+            order_id=stock.get("order_id"), symbol=stock.get("symbol") or case.get("symbol"),
+            option_type=None, side=stock.get("side"), position_effect=None,
+            contracts=int(stock.get("shares") or 0), price=float(stock.get("price") or 0),
+            strike=None, multiplier=None, multiplier_source=None,
+            expiration_ymd=None, currency=case.get("currency") or raw.get("currency"),
+            trade_time_ms=int(stock.get("event_time_ms") or 0), raw_payload=raw,
+        )
+    )
+    trade_events = repo.list_trade_events(conn=conn)
+    assigned_events = repo.list_assigned_stock_events(conn=conn)
+    inputs = ledger_performance_inputs_from_rows({
+        "trade_events": trade_events,
+        "account_assigned_stock_events": assigned_events,
+    })
+    report = load_assigned_stock_projection(
+        inputs, as_of_ms=int(deal.trade_time_ms or 0),
+        account=deal.internal_account, broker=deal.broker,
+    )
+    try:
+        _broker_assigned_stock_sale_match(
+            repo, deal, assigned_stock_events=assigned_events,
+            assigned_stock_report=report, assignment_trade_events=trade_events,
+        )
+    except BrokerAssignedStockSaleMatchError as exc:
+        if exc.code not in {"no_match", "unsupported_deal"}:
+            raise ValueError("ambiguous_stock_trade_ownership") from exc
+    else:
+        raise ValueError("ambiguous_stock_trade_ownership")
 
 
 def _find_matching_option_cases(
@@ -1353,6 +1490,7 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
     # Built at most once per call, and only when a lot actually needs its
     # closing event's payload read.
     events_by_id: dict[str, dict[str, Any]] | None = None
+    candidates_by_contract: dict[tuple[Any, ...], dict[str, Any]] = {}
     for item in list(lots or []):
         if not isinstance(item, dict):
             continue
@@ -1407,8 +1545,18 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
             "strike": strike,
             "expiration_ymd": expiration_ymd,
             "contracts": contracts,
-            "multiplier": int(effective_multiplier(fields) or 100),
+            "multiplier": effective_multiplier(fields),
         }
+        key = (
+            case["account"], case["symbol"], case["option_type"],
+            case["position_side"], str(case["strike"]),
+            case["expiration_ymd"], case["multiplier"],
+        )
+        if key in candidates_by_contract:
+            candidates_by_contract[key]["contracts"] += contracts
+        else:
+            candidates_by_contract[key] = case
+    for case in candidates_by_contract.values():
         if _stock_matches_lifecycle_open_lot_context(case, stock_evidence):
             return True
     return False
@@ -1577,8 +1725,6 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
     stock_trade_time_ms = _stock_trade_time_ms(stock_evidence)
     if stock_trade_time_ms <= 0:
         return False
-    if _stock_trade_near_option_event(case, stock_trade_time_ms):
-        return True
     try:
         observation_start_ms = int(
             case.get("observation_start_ms") or 0
@@ -1588,6 +1734,10 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
         )
     except (TypeError, ValueError, OverflowError):
         return False
+    if settlement_deadline_ms > 0 and stock_trade_time_ms > settlement_deadline_ms:
+        return False
+    if _stock_trade_near_option_event(case, stock_trade_time_ms):
+        return True
     if (
         observation_start_ms > 0
         and settlement_deadline_ms > 0
@@ -1596,12 +1746,7 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
         <= settlement_deadline_ms
     ):
         return True
-    return (
-        settlement_deadline_ms > 0
-        and stock_trade_time_ms > settlement_deadline_ms
-        and str(case.get("status") or "").strip().lower()
-        in FINAL_STATUSES
-    )
+    return False
 
 
 def _stock_matches_lifecycle_open_lot_context(case: dict[str, Any], stock_evidence: dict[str, Any] | None) -> bool:
@@ -1649,7 +1794,7 @@ def _stock_matches_lifecycle_contract_terms(
     ):
         return False
     try:
-        multiplier = int(case.get("multiplier") or 100)
+        multiplier = require_option_multiplier(case.get("multiplier"))
         expected_qty = _lifecycle_case_contracts(case) * multiplier
         actual_qty = abs(int(stock_evidence.get("stock_qty") or 0))
     except Exception:
@@ -1676,7 +1821,7 @@ def _stock_settlement_contracts(
     case: dict[str, Any],
     stock_evidence: dict[str, Any],
 ) -> int:
-    multiplier = int(case.get("multiplier") or 100)
+    multiplier = require_option_multiplier(case.get("multiplier"))
     shares = abs(int(stock_evidence.get("stock_qty") or 0))
     if multiplier <= 0 or shares <= 0 or shares % multiplier != 0:
         raise ValueError("stock settlement shares must be a positive contract multiple")

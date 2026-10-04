@@ -136,8 +136,8 @@ def _write_manage_symbols_generation(tmp_path: Path, *, market: str = "us") -> t
         """\
 accounts:
   user1:
-    type: external_holdings
-    holdings_account: user1
+    type: futu
+    futu_account_id: "999000000000000001"
 templates:
   put_base:
     sell_put: {}
@@ -183,7 +183,6 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
         }
     }
     cfg["portfolio"]["account"] = "user1"
-    cfg["portfolio"]["source_by_account"] = {"user1": "futu"}
     cfg["portfolio"]["data_config"] = data_config_ref
     cfg["trade_intake"] = {
         "enabled": True,
@@ -205,9 +204,7 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
 
 def _public_cfg_with_futu_auto_source(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
     cfg = _public_cfg_with_futu(data_config_ref, market=market)
-    cfg["account_settings"]["user1"]["holdings_account"] = "lx"
     cfg["portfolio"]["source"] = "auto"
-    cfg["portfolio"]["source_by_account"]["user1"] = "auto"
     return cfg
 
 
@@ -218,7 +215,7 @@ def _public_cfg_with_external_holdings(data_config_ref: str, *, market: str = "u
         "type": "external_holdings",
         "holdings_account": "Feishu EXT",
     }
-    cfg["portfolio"]["source_by_account"]["ext1"] = "holdings"
+    cfg["portfolio"]["source_by_account"] = {"ext1": "holdings"}
     return cfg
 
 
@@ -795,7 +792,7 @@ def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapp
     assert mapping["value"]["user1"]["trade_source"] == "api"
 
 
-def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_rejects_external_holdings_account(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
@@ -818,16 +815,8 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
-    assert out["ok"] is True
-    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "holdings"
-    assert out["data"]["account_paths"]["ext1"]["primary"]["ok"] is True
-    assert "fallback" not in out["data"]["account_paths"]["ext1"]
-    primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    assert primary["status"] == "ok"
-    assert primary["value"]["ext1"]["type"] == "external_holdings"
-    assert primary["value"]["ext1"]["holdings_account"] == "Feishu EXT"
-    assert primary["value"]["ext1"]["ready"] is True
-    assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
 
 
 def test_healthcheck_missing_ledger_is_read_only_and_never_bootstraps(monkeypatch, tmp_path: Path) -> None:
@@ -1000,111 +989,49 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
     assert out["data"]["portfolio_source_name"] == "futu"
 
 
-def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_account(monkeypatch, tmp_path: Path) -> None:
+def test_get_portfolio_context_materializes_futu_account(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.pipeline_context as pipeline_context
-    import src.application.portfolio_context_service as pcs
 
-    monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
-    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
-    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
-    cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
-    cfg["accounts"] = ["lx", "sy"]
-    cfg["account_settings"]["lx"] = {"type": "futu"}
-    cfg["account_settings"]["sy"] = {"type": "external_holdings", "holdings_account": "sy"}
-    cfg["portfolio"]["account"] = "sy"
-    cfg["portfolio"]["source"] = "auto"
-    cfg["portfolio"]["source_by_account"] = {"lx": "futu", "sy": "holdings"}
-    cfg_path = _write_healthcheck_config(
-        tmp_path,
-        cfg=cfg,
-        data_config={
-            "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
-            "feishu": {
-                "app_id_env": "OM_FEISHU_APP_ID",
-                "app_secret_env": "OM_FEISHU_APP_SECRET",
-                "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=_public_cfg_with_futu("portfolio.runtime.json", market="hk"), file_name="config.hk.json")
+    monkeypatch.setattr(pipeline_context, "_persist_source_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline_context,
+        "fetch_futu_portfolio_context",
+        lambda **_kwargs: {
+            "filters": {"broker": "富途", "account": "user1"},
+            "cash_by_currency": {"HKD": 10000.0},
+            "stocks_by_symbol": {
+                "0700.HK": {"symbol": "0700.HK", "shares": 100, "currency": "HKD", "account": "user1"},
             },
         },
-        file_name="config.hk.json",
     )
 
-    shared_ctx = {
-        "as_of_utc": "2026-04-14T00:00:00+00:00",
-        "filters": {"broker": "富途", "account": None},
-        "all_accounts": {
-            "filters": {"broker": "富途", "account": None},
-            "cash_by_currency": {},
-            "stocks_by_symbol": {},
-            "raw_selected_count": 0,
-        },
-        "by_account": {
-            "sy": {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"broker": "富途", "account": "sy"},
-                "cash_by_currency": {"HKD": 10000.0},
-                "stocks_by_symbol": {
-                    "0700.HK": {
-                        "symbol": "0700.HK",
-                        "shares": 1100,
-                        "avg_cost": 420.0,
-                        "currency": "HKD",
-                        "account": "sy",
-                    }
-                },
-                "raw_selected_count": 1,
-            }
-        },
-    }
-
-    def _is_fresh(path: Path, ttl_sec: int) -> bool:
-        return path.name in {"portfolio_context.json", "portfolio_context.shared.json"}
-
-    def _load_cached(path: Path):  # type: ignore[no-untyped-def]
-        if path.name == "portfolio_context.json":
-            return {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"broker": "富途", "account": "lx"},
-                "cash_by_currency": {"HKD": 8000.0},
-                "stocks_by_symbol": {
-                    "0700.HK": {
-                        "symbol": "0700.HK",
-                        "shares": 100,
-                        "avg_cost": 410.0,
-                        "currency": "HKD",
-                        "account": "lx",
-                    }
-                },
-                "raw_selected_count": 1,
-                "portfolio_source_name": "external_holdings",
-            }
-        if path.name == "portfolio_context.shared.json":
-            return shared_ctx
-        return None
-
-    monkeypatch.setattr(pipeline_context, "is_fresh", _is_fresh)
-    monkeypatch.setattr(pipeline_context, "load_cached_json", _load_cached)
-    monkeypatch.setattr(pcs, "load_holdings_portfolio_shared_context", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse shared cache")))  # type: ignore[assignment]
-
-    out_root = tmp_path / "output_shared" / "agent_tools"
+    out_root = tmp_path / "agent_tools"
     out = run_tool(
         "get_portfolio_context",
-        {
-            "config_path": str(cfg_path),
-            "account": "sy",
-            "output_dir": str(out_root),
-            "ttl_sec": 3600,
-        },
+        {"config_path": str(cfg_path), "account": "user1", "output_dir": str(out_root)},
     )
 
     assert out["ok"] is True
-    assert out["data"]["filters"]["account"] == "sy"
-    assert out["data"]["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
-    assert out["data"]["stocks_by_symbol"]["0700.HK"]["shares"] == 1100
-    state_path = out_root / "portfolio_context_state" / "portfolio_context.json"
-    payload = json.loads(state_path.read_text(encoding="utf-8"))
-    assert payload["filters"]["account"] == "sy"
-    assert payload["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
+    assert out["data"]["filters"]["account"] == "user1"
+    cached = json.loads((out_root / "portfolio_context_state" / "portfolio_context.json").read_text(encoding="utf-8"))
+    assert cached["filters"]["account"] == "user1"
+    assert cached["stocks_by_symbol"]["0700.HK"]["account"] == "user1"
+
+
+def test_get_portfolio_context_rejects_external_holdings_runtime_config(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
+    cfg["account_settings"]["user1"] = {"type": "external_holdings", "holdings_account": "sy"}
+    cfg["portfolio"]["source_by_account"] = {"user1": "holdings"}
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg, file_name="config.hk.json")
+
+    out = run_tool("get_portfolio_context", {"config_path": str(cfg_path), "account": "user1"})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
 
 
 def test_spec_exposes_broker_as_public_field() -> None:
@@ -3895,6 +3822,63 @@ def test_close_advice_read_skips_newer_run_with_invalid_manifest(
     assert out["ok"] is True
     assert out["data"]["source"]["run_id"] == "run-valid"
 
+
+
+def test_close_advice_read_stops_at_first_valid_request_report(monkeypatch, tmp_path: Path) -> None:
+    from src.application.agent_tools import close_advice_read_impl as reader
+
+    output_root = tmp_path / "agent_tools"
+    reports = {}
+    for name, symbol, timestamp in (
+        ("older", "PDD", 1_000_000),
+        ("valid", "NVDA", 2_000_000),
+        ("invalid", "AAPL", 3_000_000),
+    ):
+        report_dir = output_root / "requests" / name / "reports"
+        _write_close_advice_report(
+            report_dir,
+            [{
+                "account": "lx", "symbol": symbol, "option_type": "put",
+                "position_side": "short", "evaluation_status": "priced",
+                "recommendation_state": "hold", "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold", "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.5,
+            }],
+            run_id=name,
+            market="US",
+        )
+        reports[name] = report_dir / "close_advice.csv"
+        if name == "invalid":
+            (report_dir / "close_advice.txt").write_text("tampered", encoding="utf-8")
+        os.utime(reports[name], (timestamp, timestamp))
+
+    validated = []
+    original_validate = reader._validate_source_manifest
+    expected_bytes = reports["valid"].read_bytes()
+
+    def tracked_validate(source, **kwargs):
+        validated.append(source.path)
+        result = original_validate(source, **kwargs)
+        if source.path == reports["valid"]:
+            assert result["ok"] is True
+            assert source.csv_bytes == expected_bytes
+        return result
+
+    monkeypatch.setattr(reader, "_validate_source_manifest", tracked_validate)
+    data, warnings, _meta = reader.close_advice_read_tool(
+        {"config_key": "us", "output_dir": str(output_root), "account": "lx"},
+        load_runtime_config=lambda **_kwargs: (tmp_path / "config.us.json", _minimal_cfg(market="us")),
+        resolve_output_root=lambda value: Path(value),
+        repo_base=lambda: tmp_path,
+        mask_path=str,
+    )
+
+    assert validated == [reports["invalid"], reports["valid"]]
+    assert warnings == []
+    assert data["source"]["type"] == "agent_tool"
+    assert data["row_count"] == 1
+    assert data["rows"][0]["symbol"] == "NVDA"
+    assert data["rows"][0]["net_capture_ratio"] == 0.5
 
 def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool

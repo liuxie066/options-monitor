@@ -72,6 +72,151 @@
       "reason": "The bare settlement claim does not reserve an invocation and is not a supported production entry point; the function remains available for direct legacy imports and tests."
     },
     {
+      "module": "src/application/account_config.py",
+      "name": "ACCOUNT_TYPE_EXTERNAL_HOLDINGS",
+      "reason": "Account-level Holdings type was retired; configured accounts now use Futu and Holdings remains a separate global risk source."
+    },
+    {
+      "module": "src/application/account_config.py",
+      "name": "resolve_configured_holdings_account",
+      "reason": "Account-level Holdings bindings were retired; global risk reads all accounts through the shared Holdings context."
+    },
+    {
+      "module": "src/application/account_config.py",
+      "name": "resolve_holdings_account",
+      "reason": "Account-level Holdings bindings were retired; global risk reads all accounts through the shared Holdings context."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "load_holdings_portfolio_context",
+      "reason": "Account-scoped Holdings context loading was retired; only the global Holdings risk reader remains."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "is_trusted_global_holdings_context",
+      "reason": "The trusted-only Holdings risk gate was replaced by is_valid_global_holdings_context, which accepts an explicitly unknown observation time while validating source, scope, and holdings structure."
+    },
+    {
+      "module": "src/application/portfolio_context_service.py",
+      "name": "expected_portfolio_context_account",
+      "reason": "Portfolio context account binding now directly uses the Futu account label; Holdings account mapping no longer exists."
+    },
+    {
+      "module": "src/application/portfolio_context_service.py",
+      "name": "load_holdings_portfolio_context",
+      "reason": "Account-scoped Holdings context loading was retired; only the global Holdings risk reader remains."
+    },
+    {
+      "module": "src/application/portfolio_context_service.py",
+      "name": "slice_shared_context_for_account",
+      "reason": "The account portfolio service no longer accepts slices of shared Holdings context as account cash or stocks."
+    },
+    {
+      "module": "src/application/strategy_policy.py",
+      "name": "wants_global_path_risk_context",
+      "reason": "Every supported opening strategy disables scan path risk, so the global context gate has no reachable caller."
+    },
+    {
+      "module": "src/application/pipeline_context.py",
+      "name": "load_global_holdings_risk_context",
+      "reason": "The unreachable scan-global Feishu Holdings risk reader and its cache branch were retired; account Futu context remains."
+    },
+    {
+      "module": "src/application/pipeline_context.py",
+      "name": "load_global_option_positions_risk_context",
+      "reason": "The unreachable scan-global option context and cache branch were retired; account ledger option context remains."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "is_valid_global_holdings_context",
+      "reason": "The validator only guarded the retired scan-global Holdings risk path; the independent Feishu context export still uses its own builder."
+    },
+    {
+      "module": "src/application/portfolio_context_builder.py",
+      "name": "load_holdings_portfolio_shared_context",
+      "reason": "The scan-global Holdings wrapper was retired; the independent Feishu context export retains load_holdings_records and build_shared_context."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "enable_trade_attribution_policy",
+      "reason": "The old per-source v1 enable writer was retired; controlled v2 attribution migration is the sole policy cutover writer."
+    },
+    {
+      "module": "src/application/ledger/trade_attribution.py",
+      "name": "enable_trade_attribution_policy",
+      "reason": "The old per-source v1 enable writer was retired; controlled v2 attribution migration is the sole policy cutover writer."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "record_trade_event_with_wheel_intent",
+      "reason": "The independent Wheel intent trade writer was retired; canonical trade intake now records the fill once and applies the shared attribution decision."
+    },
+    {
+      "module": "src/application/ledger/wheel_trade_companions.py",
+      "name": "prepare_wheel_intent_open_event",
+      "reason": "The legacy Wheel intent companion writer was retired in favor of the shared post-fill attribution decision."
+    },
+    {
+      "module": "src/application/ledger/writer_trade_events.py",
+      "name": "persist_trade_event_with_wheel_intent",
+      "reason": "The legacy Wheel intent persistence path was retired; canonical trade intake and shared attribution own new fills."
+    },
+    {
+      "module": "src/application/trades/attribution.py",
+      "name": "trade_attribution_enabled_for_execution",
+      "reason": "The old v1 execution enable switch was retired; v2 event-time cutover and the shared attribution decision replace it."
+    },
+    {
+      "module": "src/infrastructure/exchange_rates.py",
+      "name": "save_exchange_rate_observation",
+      "reason": "The standalone observation cache writer was retired; current_exchange_rate_snapshot now validates and caches each pair as part of one sealed FX fact."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "adopt_post_trade_combo_pair",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/api.py",
+      "name": "record_trade_ordinary_attribution",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/combo_reconciliation.py",
+      "name": "adopt_post_trade_combo_pair",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/ledger/trade_attribution.py",
+      "name": "record_trade_ordinary_attribution",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/__init__.py",
+      "name": "confirm_wheel_call_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/__init__.py",
+      "name": "confirm_wheel_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/workflows.py",
+      "name": "confirm_wheel_call_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/wheel/workflows.py",
+      "name": "confirm_wheel_linkage",
+      "reason": "Lot identity and attribution convergence: all confirmations use src/application/trades/attribution.py apply_trade_attribution and its reference adapters. CLI and Tool command names remain; confirmations require the full trade_attribution_read input_hash. The independent ordinary, Combo and Wheel attribution writers were removed."
+    },
+    {
+      "module": "src/application/portfolio_context_service.py",
+      "name": "FreshnessChecker",
+      "reason": "Cash cache selection now evaluates independent source time and effective runtime.portfolio_context_ttl_sec through the shared cash snapshot owner; per-call file freshness callbacks and their type alias are retired."
+    },
+    {
       "module": "src/interfaces/cli/symbols.py",
       "name": "cmd_add",
       "reason": "The runtime JSON symbol writer was retired; human symbol changes now use the config.yaml authoring transaction."

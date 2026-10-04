@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cash_evidence_helpers import cash_portfolio
+
 BASE = Path(__file__).resolve().parents[1]
 VPY = Path(sys.executable)
 TEST_ROOT = BASE / 'output' / 'state' / 'test_cli_domain_split_step4'
@@ -88,13 +90,15 @@ def test_query_sell_put_cash_domain_minimal() -> None:
     import src.application.cash_headroom_query as m
 
     def fake_load_account_portfolio_context(**_kwargs):
-        return {'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}, 'stocks_by_symbol': {}, 'portfolio_source_name': 'holdings'}
+        return cash_portfolio({'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}, 'stocks_by_symbol': {}})
 
     old_load_portfolio = m.load_account_portfolio_context
     old_load_option_position_records = m._load_option_position_records
+    old_decision_state_snapshot = m.decision_state_snapshot
     old_build_context = m.build_option_positions_context
     m.load_account_portfolio_context = fake_load_account_portfolio_context
-    m._load_option_position_records = lambda *_a, **_k: []
+    m._load_option_position_records = lambda *_a, **_k: (object(), [])
+    m.decision_state_snapshot = lambda *_a, **_k: {}
     m.build_option_positions_context = lambda *_a, **_k: {
         'cash_secured_by_symbol_by_ccy': {'AAPL': {'USD': 200.0}},
         'cash_secured_total_by_ccy': {'USD': 200.0},
@@ -113,6 +117,7 @@ def test_query_sell_put_cash_domain_minimal() -> None:
     finally:
         m.load_account_portfolio_context = old_load_portfolio
         m._load_option_position_records = old_load_option_position_records
+        m.decision_state_snapshot = old_decision_state_snapshot
         m.build_option_positions_context = old_build_context
 
 

@@ -233,6 +233,32 @@ def test_service_keeps_native_cash_when_cny_conversion_is_missing() -> None:
     assert "cash_conversion_missing" in report["quality"]["missing"]
 
 
+def test_service_reports_hkd_return_while_close_reason_is_pending() -> None:
+    key = ContractKey.from_values(
+        broker="富途", account="lx", underlying_symbol="0700.HK",
+        option_type="put", strike=430, expiration_ymd="2026-09-30",
+    )
+    opened = replace(
+        _event("open", "open", "2026-09-01T10:00:00", fx_rate=None),
+        contract_key=key, contracts=4, price=1, currency="HKD",
+    )
+    closed = replace(
+        _event("close", "close", "2026-09-02T10:00:00",
+               target_lot_id="lot-1", fx_rate=None),
+        contract_key=key, contracts=4, price=0, currency="HKD",
+        raw_payload={
+            "side": "buy", "close_type": "cause_pending",
+            "fee_provenance": {"basis": "actual", "amount": 0, "source": "broker"},
+        },
+    )
+    report = _build_report(_Repo([opened.to_dict(), closed.to_dict()]), include_rows=True)
+
+    assert report["rows"][0]["state"] == "terminated"
+    assert report["option_return"]["by_currency"]["HKD"]["rate"] is not None
+    assert report["sell_option_win_rate"]["rate"] is None
+    assert "close_reason_pending" in report["quality"]["missing"]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "issue"),
     [
@@ -312,3 +338,16 @@ def test_service_classifies_tuple_and_control_graph_failures() -> None:
     with pytest.raises(OptionPerformanceReadError) as graph_error:
         _build_report(_Repo([missing_target]))
     assert graph_error.value.reason_codes == ("ledger_control_graph_invalid",)
+
+
+@pytest.mark.parametrize("mismatch", ["contract", "time"])
+def test_service_rejects_control_target_identity_and_time_errors(mismatch):
+    original = _event("open", "open", "2026-09-01T10:00:00")
+    void = _event("void", "void", "2026-09-02T11:00:00", target_event_id="open")
+    if mismatch == "contract":
+        void = replace(void, contract_key=replace(void.contract_key, underlying_symbol="AAPL"))
+    else:
+        void = replace(void, event_time_ms=original.event_time_ms - 1)
+    with pytest.raises(OptionPerformanceReadError) as caught:
+        _build_report(_Repo([original.to_dict(), void.to_dict()]))
+    assert caught.value.reason_codes == ("ledger_control_graph_invalid",)

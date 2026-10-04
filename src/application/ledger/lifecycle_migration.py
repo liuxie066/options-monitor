@@ -6,7 +6,7 @@ from typing import Any
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_lifecycle import build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
-from domain.domain.trade_contract_identity import derive_position_side
+from domain.domain.trade_contract_identity import derive_position_side, require_option_multiplier
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
@@ -18,6 +18,7 @@ from src.application.ledger.notification_outbox import (
     canonical_state_fingerprint,
 )
 from src.application.ledger.repository import (
+    SQLiteOptionPositionsRepository,
     require_option_positions_event_write_repo,
     with_sqlite_repo_transaction,
 )
@@ -37,25 +38,34 @@ def build_lifecycle_migration_inventory(
     explicit_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
+    return _build_lifecycle_migration_inventory(sqlite_repo, explicit_mapping=explicit_mapping)
+
+
+def _build_lifecycle_migration_inventory(
+    sqlite_repo: Any,
+    *,
+    explicit_mapping: dict[str, Any] | None = None,
+    conn: Any = None,
+) -> dict[str, Any]:
     explicit_by_case = _explicit_mappings_by_case(explicit_mapping)
     cases = [
         dict(item)
-        for item in sqlite_repo.list_trade_lifecycle_cases()
+        for item in sqlite_repo.list_trade_lifecycle_cases(conn=conn)
         if isinstance(item, dict)
     ]
     evidence = [
         dict(item)
-        for item in sqlite_repo.list_trade_lifecycle_evidence()
+        for item in sqlite_repo.list_trade_lifecycle_evidence(conn=conn)
         if isinstance(item, dict)
     ]
     allocations = [
         dict(item)
-        for item in sqlite_repo.list_trade_lifecycle_allocations()
+        for item in sqlite_repo.list_trade_lifecycle_allocations(conn=conn)
         if isinstance(item, dict)
     ]
     events = [
         dict(item)
-        for item in sqlite_repo.list_trade_events()
+        for item in sqlite_repo.list_trade_events(conn=conn)
         if isinstance(item, dict)
     ]
     events_by_id = {
@@ -67,7 +77,7 @@ def build_lifecycle_migration_inventory(
         str(item.get("record_id") or "").strip(): dict(
             item.get("fields") or {}
         )
-        for item in sqlite_repo.list_position_lots()
+        for item in sqlite_repo.list_position_lots(conn=conn)
         if isinstance(item, dict)
         and str(item.get("record_id") or "").strip()
         and isinstance(item.get("fields"), dict)
@@ -75,20 +85,20 @@ def build_lifecycle_migration_inventory(
     claims = [
         dict(item)
         for item in (
-            sqlite_repo.list_trade_lifecycle_source_consumptions()
+            sqlite_repo.list_trade_lifecycle_source_consumptions(conn=conn)
         )
         if isinstance(item, dict)
     ]
     notifications = [
         dict(item)
         for item in (
-            sqlite_repo.list_trade_lifecycle_notifications()
+            sqlite_repo.list_trade_lifecycle_notifications(conn=conn)
         )
         if isinstance(item, dict)
     ]
     timing_policies = {
         str(item.get("case_id") or "").strip(): dict(item)
-        for item in sqlite_repo.list_trade_lifecycle_timing_policies()
+        for item in sqlite_repo.list_trade_lifecycle_timing_policies(conn=conn)
         if isinstance(item, dict)
         and str(item.get("case_id") or "").strip()
     }
@@ -164,6 +174,17 @@ def build_lifecycle_migration_inventory(
             lifecycle_case.get("target_contracts_by_lot") or {}
         )
         review_reasons: set[str] = set()
+        try:
+            multiplier = require_option_multiplier(lifecycle_case.get("multiplier"))
+            for lot_id in target:
+                if require_option_multiplier(lot_fields_by_id.get(lot_id, {}).get("multiplier")) != multiplier:
+                    raise ValueError("target multiplier conflicts with case")
+            for allocation in case_allocations:
+                event = events_by_id.get(str(allocation.get("canonical_terminal_event_id") or ""), {})
+                if require_option_multiplier(event.get("multiplier")) != multiplier:
+                    raise ValueError("terminal multiplier conflicts with case")
+        except ValueError as exc:
+            review_reasons.add("option_multiplier_invalid:" + str(exc))
         resolution_payload: dict[str, Any] = {}
         legacy_upgrade: dict[str, Any] | None = None
         if not target:
@@ -731,7 +752,7 @@ def _explicit_contract(
     currency = str(contract.get("currency") or "").strip().upper()
     try:
         strike = _canonical_decimal(contract.get("strike"))
-        multiplier = _canonical_decimal(contract.get("multiplier"))
+        multiplier = str(require_option_multiplier(contract.get("multiplier")))
     except ValueError:
         review_reasons.add("explicit_contract_mapping_invalid")
         return contract
@@ -828,12 +849,8 @@ def _validate_explicit_case_contract(
             )
         ):
             review_reasons.add("explicit_case_contract_mismatch")
-        observed_multiplier = _canonical_decimal(
-            lifecycle_case.get("multiplier")
-        )
-        canonical_multiplier = _canonical_decimal(
-            contract.get("multiplier")
-        )
+        observed_multiplier = str(require_option_multiplier(lifecycle_case.get("multiplier")))
+        canonical_multiplier = str(require_option_multiplier(contract.get("multiplier")))
         if (
             observed_multiplier != canonical_multiplier
             and not _explicit_case_exception_matches(
@@ -1696,6 +1713,10 @@ def _event_matches_explicit_contract(
     *,
     contract: dict[str, Any],
 ) -> bool:
+    try:
+        multiplier_matches = require_option_multiplier(event.get("multiplier")) == require_option_multiplier(contract.get("multiplier"))
+    except ValueError:
+        return False
     event_contract = (
         dict(event.get("contract_key") or {})
         if isinstance(event.get("contract_key"), dict)
@@ -1735,10 +1756,7 @@ def _event_matches_explicit_contract(
         )
         and str(event.get("currency") or "").strip().upper()
         == contract.get("currency")
-        and _decimal_equal(
-            event.get("multiplier"),
-            contract.get("multiplier"),
-        )
+        and multiplier_matches
     )
 
 
@@ -1747,6 +1765,10 @@ def _lot_matches_explicit_contract(
     *,
     contract: dict[str, Any],
 ) -> bool:
+    try:
+        multiplier_matches = require_option_multiplier(fields.get("multiplier")) == require_option_multiplier(contract.get("multiplier"))
+    except ValueError:
+        return False
     # The converged payload carries the contract under ``contract_key`` and the
     # side / currency / multiplier as top-level siblings
     # (``write-side-definition.md`` §2); the retired flat spellings stay
@@ -1805,10 +1827,7 @@ def _lot_matches_explicit_contract(
         )
         and str(fields.get("currency") or "").strip().upper()
         == contract.get("currency")
-        and _decimal_equal(
-            fields.get("multiplier"),
-            contract.get("multiplier"),
-        )
+        and multiplier_matches
     )
 
 
@@ -1996,9 +2015,7 @@ def _plan_legacy_case_upgrade(
             ).strip().lower(),
             "strike": float(required["strike"]),
             "currency": lifecycle_case.get("currency"),
-            "multiplier": float(
-                lifecycle_case.get("multiplier") or 100
-            ),
+            "multiplier": require_option_multiplier(lifecycle_case.get("multiplier")),
         }
     except (TypeError, ValueError, OverflowError) as exc:
         review_reasons.add(
@@ -2066,11 +2083,10 @@ def apply_lifecycle_migration_manifest(
     payload = dict(manifest or {})
     if str(payload.get("schema_version") or "") != MIGRATION_SCHEMA:
         raise ValueError("lifecycle migration manifest schema is invalid")
-    rows = [
-        dict(item)
-        for item in payload.get("rows") or []
-        if isinstance(item, dict)
-    ]
+    raw_rows = payload.get("rows")
+    if not isinstance(raw_rows, list) or any(not isinstance(item, dict) for item in raw_rows):
+        raise ValueError("lifecycle migration manifest rows must be objects")
+    rows = [dict(item) for item in raw_rows]
     body = {
         "schema_version": MIGRATION_SCHEMA,
         "rows": rows,
@@ -2079,45 +2095,120 @@ def apply_lifecycle_migration_manifest(
     if str(payload.get("manifest_hash") or "") != manifest_hash:
         raise ValueError("lifecycle migration manifest hash mismatch")
     selected = [item for item in rows if bool(item.get("selected"))]
-    for item in selected:
-        if str(item.get("mapping_status") or "") != "exact":
-            raise ValueError(
-                "migration_needs_review rows cannot be applied: "
-                f"{item.get('target_key')}"
-            )
-    if not apply_changes:
-        return {
+    target_keys = [str(item.get("target_key") or "").strip() for item in selected]
+    if any(not key for key in target_keys) or len(set(target_keys)) != len(target_keys):
+        raise ValueError("lifecycle migration targets are empty or duplicated")
+    selected.sort(key=lambda item: str(item["target_key"]))
+
+    def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
+        prepared = (
+            _prepare_manifest_rows(sqlite_repo, conn=conn, rows=selected)
+            if selected else []
+        )
+        existing_count = sum(existing for _, _, existing in prepared)
+        result = {
             "schema_version": "lifecycle_migration_apply_result.v1",
-            "status": "dry_run",
+            "status": "applied" if apply_changes else "dry_run",
             "manifest_hash": manifest_hash,
             "selected_count": len(selected),
-            "would_apply_target_keys": [
-                item.get("target_key") for item in selected
-            ],
             "applied_count": 0,
-            "existing_count": 0,
+            "existing_count": existing_count,
         }
-    results = [
-        _apply_manifest_row(
-            repo,
-            row=item,
-            manifest_hash=manifest_hash,
-        )
-        for item in selected
-    ]
-    return {
-        "schema_version": "lifecycle_migration_apply_result.v1",
-        "status": "applied",
-        "manifest_hash": manifest_hash,
-        "selected_count": len(selected),
-        "applied_count": sum(
-            1 for item in results if item["receipt_created"]
-        ),
-        "existing_count": sum(
-            1 for item in results if not item["receipt_created"]
-        ),
-        "results": results,
+        if not apply_changes:
+            result["would_apply_target_keys"] = [
+                row["target_key"] for row, _, existing in prepared if not existing
+            ]
+            return result
+        results = [
+            {
+                "target_key": row["target_key"],
+                "receipt_created": False,
+                "source_claims_created": [],
+                "evidence_bindings_created": [],
+                "timing_policy_created": False,
+                "outbox_rows_created": [],
+            }
+            if existing else _apply_manifest_row(
+                sqlite_repo, conn=conn, row=row, row_hash=row_hash,
+                manifest_hash=manifest_hash,
+            )
+            for row, row_hash, existing in prepared
+        ]
+        result["applied_count"] = sum(bool(item["receipt_created"]) for item in results)
+        result["results"] = results
+        return result
+
+    if not selected:
+        return _run(None, None)
+    sqlite_repo = require_option_positions_event_write_repo(repo)
+    if not isinstance(sqlite_repo, SQLiteOptionPositionsRepository):
+        raise TypeError("lifecycle migration requires SQLite transaction authority")
+    if apply_changes:
+        return with_sqlite_repo_transaction(sqlite_repo, _run)
+    with sqlite_repo._optional_conn(None) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        try:
+            return _run(sqlite_repo, conn)
+        finally:
+            conn.rollback()
+
+
+def _prepare_manifest_rows(
+    sqlite_repo: Any, *, conn: Any, rows: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], str, bool]]:
+    receipts = {
+        str(item.get("target_key") or ""): item
+        for item in sqlite_repo.list_trade_lifecycle_migration_receipts(conn=conn)
     }
+    prepared = []
+    pending = []
+    for row in rows:
+        target_key = str(row["target_key"])
+        row_hash = canonical_payload_hash({key: value for key, value in row.items() if key != "selected"})
+        receipt = receipts.get(target_key)
+        if receipt is not None and receipt.get("row_hash") != row_hash:
+            raise ValueError("lifecycle migration receipt row conflict")
+        prepared.append((row, row_hash, receipt is not None))
+        if receipt is None:
+            upgrade = row.get("legacy_upgrade")
+            if isinstance(upgrade, dict) and isinstance(upgrade.get("canonical_case"), dict):
+                require_option_multiplier(upgrade["canonical_case"].get("multiplier"))
+            pending.append(row)
+    if not pending:
+        return prepared
+    explicit_rows = [row["explicit_mapping"] for row in pending if isinstance(row.get("explicit_mapping"), dict)]
+    inventory = _build_lifecycle_migration_inventory(
+        sqlite_repo, conn=conn,
+        explicit_mapping={"schema_version": EXPLICIT_MAPPING_SCHEMA, "rows": explicit_rows} if explicit_rows else None,
+    )
+    current_rows = {row["target_key"]: row for row in inventory["rows"]}
+    choices = {"selected", "suppress_option_leg_closed", "seed_final_intent", "resolution_revision"}
+    intents_by_key = {
+        (item["transition_key"], item.get("delivery_revision", 0)): item
+        for item in sqlite_repo.list_trade_lifecycle_notifications(conn=conn)
+    }
+    for row in pending:
+        target_key = str(row["target_key"])
+        current = current_rows.get(target_key)
+        if current is None or row.get("inventory_state_hash") != current.get("inventory_state_hash"):
+            raise ValueError(f"lifecycle migration source drift: {target_key}")
+        if current.get("mapping_status") != "exact":
+            raise ValueError(f"migration_needs_review rows cannot be applied: {target_key}: {current.get('review_reason_codes')}")
+        if canonical_payload_hash({key: value for key, value in row.items() if key not in choices}) != canonical_payload_hash({key: value for key, value in current.items() if key not in choices}):
+            raise ValueError(f"lifecycle migration row plan conflict: {target_key}")
+        intents = []
+        if bool(row.get("suppress_option_leg_closed", True)):
+            intents.append(_suppression_intent(row))
+        if bool(row.get("seed_final_intent")):
+            intents.append(_final_intent(row))
+        for intent in intents:
+            key = (intent["transition_key"], intent["delivery_revision"])
+            existing_intent = intents_by_key.get(key)
+            if existing_intent is not None and existing_intent["outbox_id"] != intent["outbox_id"]:
+                raise ValueError("notification outbox immutable intent conflict")
+            intents_by_key[key] = intent
+    return prepared
 
 
 def select_lifecycle_migration_targets(
@@ -2175,273 +2266,220 @@ def select_lifecycle_migration_targets(
 
 
 def _apply_manifest_row(
-    repo: Any,
+    sqlite_repo: Any,
     *,
+    conn: Any,
     row: dict[str, Any],
+    row_hash: str,
     manifest_hash: str,
 ) -> dict[str, Any]:
     target_key = str(row.get("target_key") or "").strip()
-    row_hash = canonical_payload_hash(
-        {
-            key: value
-            for key, value in row.items()
-            if key != "selected"
-        }
+    legacy_upgrade = (
+        dict(row.get("legacy_upgrade") or {})
+        if isinstance(row.get("legacy_upgrade"), dict)
+        else {}
     )
-
-    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
-        if conn is None:
-            raise TypeError(
-                "lifecycle migration requires SQLite transaction authority"
-            )
-        existing_receipt = next(
-            (
-                item
-                for item in (
-                    sqlite_repo.list_trade_lifecycle_migration_receipts(
-                        conn=conn
-                    )
-                )
-                if str(item.get("target_key") or "").strip()
-                == target_key
-            ),
-            None,
+    canonical_case = (
+        dict(legacy_upgrade.get("canonical_case") or {})
+        if isinstance(
+            legacy_upgrade.get("canonical_case"),
+            dict,
         )
-        if isinstance(existing_receipt, dict):
-            if str(
-                existing_receipt.get("row_hash") or ""
-            ) != row_hash:
-                raise ValueError(
-                    "lifecycle migration receipt row conflict"
-                )
-            return {
-                "target_key": target_key,
-                "receipt_created": False,
-                "source_claims_created": [],
-                "evidence_bindings_created": [],
-                "timing_policy_created": False,
-                "outbox_rows_created": [],
-            }
-        current_state_hash = _current_inventory_state_hash(
-            sqlite_repo,
-            row=row,
-            conn=conn,
-        )
-        if (
-            str(row.get("inventory_state_hash") or "")
-            != current_state_hash
-        ):
+        else {}
+    )
+    canonical_case_id = str(
+        canonical_case.get("case_id") or ""
+    ).strip()
+    case_created = False
+    bridge_created: list[bool] = []
+    legacy_superseded = False
+    if legacy_upgrade:
+        if not canonical_case_id:
             raise ValueError(
-                f"lifecycle migration source drift: {target_key}"
+                "legacy migration canonical case is missing"
             )
-        legacy_upgrade = (
-            dict(row.get("legacy_upgrade") or {})
-            if isinstance(row.get("legacy_upgrade"), dict)
-            else {}
-        )
-        canonical_case = (
-            dict(legacy_upgrade.get("canonical_case") or {})
-            if isinstance(
-                legacy_upgrade.get("canonical_case"),
+        if bool(
+            legacy_upgrade.get(
+                "reuse_existing_canonical_case"
+            )
+        ):
+            if not isinstance(
+                sqlite_repo.get_trade_lifecycle_case(
+                    canonical_case_id,
+                    conn=conn,
+                ),
                 dict,
-            )
-            else {}
-        )
-        canonical_case_id = str(
-            canonical_case.get("case_id") or ""
-        ).strip()
-        case_created = False
-        bridge_created: list[bool] = []
-        legacy_superseded = False
-        if legacy_upgrade:
-            if not canonical_case_id:
+            ):
                 raise ValueError(
                     "legacy migration canonical case is missing"
                 )
-            if bool(
-                legacy_upgrade.get(
-                    "reuse_existing_canonical_case"
-                )
-            ):
-                if not isinstance(
-                    sqlite_repo.get_trade_lifecycle_case(
-                        canonical_case_id,
-                        conn=conn,
-                    ),
-                    dict,
-                ):
-                    raise ValueError(
-                        "legacy migration canonical case is missing"
-                    )
-            else:
-                case_created = (
-                    sqlite_repo.insert_trade_lifecycle_case_once(
-                        canonical_case,
-                        conn=conn,
-                    )
-                )
-            sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
-                case_id=canonical_case_id,
-                futu_account_id=str(
-                    canonical_case.get("futu_account_id")
-                    or ""
-                ),
-                conn=conn,
-            )
-            bridge_created = [
-                sqlite_repo.insert_trade_lifecycle_evidence_once(
-                    dict(item),
-                    conn=conn,
-                )
-                for item in legacy_upgrade.get(
-                    "bridge_evidence"
-                )
-                or []
-                if isinstance(item, dict)
-            ]
-            legacy_superseded = (
-                sqlite_repo.supersede_trade_lifecycle_case_once(
-                    case_id=str(row.get("case_id") or ""),
-                    superseded_by_case_id=canonical_case_id,
+        else:
+            case_created = (
+                sqlite_repo.insert_trade_lifecycle_case_once(
+                    canonical_case,
                     conn=conn,
                 )
             )
-        planned_binding = str(
-            row.get("planned_futu_account_binding") or ""
-        ).strip()
-        if planned_binding:
-            sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
-                case_id=str(row.get("case_id") or ""),
-                futu_account_id=planned_binding,
-                conn=conn,
-            )
-        evidence_bindings_created = [
-            sqlite_repo.bind_trade_lifecycle_evidence_case_once(
-                evidence_id=str(item.get("evidence_id") or ""),
-                case_id=str(item.get("case_id") or ""),
-                conn=conn,
-            )
-            for item in row.get("planned_evidence_bindings") or []
-            if isinstance(item, dict)
-        ]
-        claims_created = [
-            sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+        sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
+            case_id=canonical_case_id,
+            futu_account_id=str(
+                canonical_case.get("futu_account_id")
+                or ""
+            ),
+            conn=conn,
+        )
+        bridge_created = [
+            sqlite_repo.insert_trade_lifecycle_evidence_once(
                 dict(item),
                 conn=conn,
             )
-            for item in row.get("planned_source_claims") or []
+            for item in legacy_upgrade.get(
+                "bridge_evidence"
+            )
+            or []
             if isinstance(item, dict)
         ]
-        timing_created = False
-        effective_timing_policy = (
-            dict(legacy_upgrade.get("timing_policy") or {})
-            if legacy_upgrade
-            and isinstance(
-                legacy_upgrade.get("timing_policy"),
-                dict,
-            )
-            else (
-                dict(row.get("timing_policy") or {})
-                if isinstance(row.get("timing_policy"), dict)
-                else {}
-            )
-        )
-        effective_timing_case_id = (
-            canonical_case_id
-            if legacy_upgrade
-            else str(row.get("case_id") or "")
-        )
-        if (
-            row.get("kind") == "lifecycle_case"
-            and effective_timing_policy
-            and (
-                legacy_upgrade
-                or not bool(row.get("timing_policy_bound"))
-            )
-        ):
-            timing_created = (
-                sqlite_repo.insert_trade_lifecycle_timing_policy_once(
-                    effective_timing_policy,
-                    conn=conn,
-                )
-            )
-        if (
-            row.get("kind") == "lifecycle_case"
-            and not bool(row.get("legacy_terminal_frozen"))
-            and not isinstance(
-                sqlite_repo.get_trade_lifecycle_timing_policy(
-                    effective_timing_case_id,
-                    conn=conn,
-                ),
-                dict,
-            )
-        ):
-            raise ValueError(
-                "lifecycle migration timing binding missing"
-            )
-        outbox_created: list[bool] = []
-        if bool(row.get("suppress_option_leg_closed", True)):
-            outbox_created.append(
-                sqlite_repo.insert_trade_lifecycle_notification_once(
-                    _suppression_intent(row),
-                    conn=conn,
-                )
-            )
-        if bool(row.get("seed_final_intent")):
-            outbox_created.append(
-                sqlite_repo.insert_trade_lifecycle_notification_once(
-                    _final_intent(row),
-                    conn=conn,
-                )
-            )
-        receipt = {
-            "schema_version": MIGRATION_RECEIPT_SCHEMA,
-            "migration_schema": MIGRATION_SCHEMA,
-            "target_key": target_key,
-            "manifest_hash": manifest_hash,
-            "row_hash": row_hash,
-            "source_claim_count": len(
-                row.get("planned_source_claims") or []
-            ),
-            "suppression_requested": bool(
-                row.get("suppress_option_leg_closed", True)
-            ),
-            "final_intent_requested": bool(
-                row.get("seed_final_intent")
-            ),
-            "canonical_case_id": canonical_case_id or None,
-            "legacy_superseded": bool(legacy_upgrade),
-            "explicit_mapping_disposition": (
-                dict(row.get("explicit_mapping") or {}).get(
-                    "disposition"
-                )
-                if isinstance(
-                    row.get("explicit_mapping"),
-                    dict,
-                )
-                else None
-            ),
-        }
-        receipt_created = (
-            sqlite_repo.insert_trade_lifecycle_migration_receipt_once(
-                receipt,
+        legacy_superseded = (
+            sqlite_repo.supersede_trade_lifecycle_case_once(
+                case_id=str(row.get("case_id") or ""),
+                superseded_by_case_id=canonical_case_id,
                 conn=conn,
             )
         )
-        sqlite_repo.assert_foreign_keys_clean(conn=conn)
-        return {
-            "target_key": target_key,
-            "receipt_created": receipt_created,
-            "source_claims_created": claims_created,
-            "evidence_bindings_created": evidence_bindings_created,
-            "canonical_case_created": case_created,
-            "bridge_evidence_created": bridge_created,
-            "legacy_superseded": legacy_superseded,
-            "timing_policy_created": timing_created,
-            "outbox_rows_created": outbox_created,
-        }
-
-    return with_sqlite_repo_transaction(repo, _run)
+    planned_binding = str(
+        row.get("planned_futu_account_binding") or ""
+    ).strip()
+    if planned_binding:
+        sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
+            case_id=str(row.get("case_id") or ""),
+            futu_account_id=planned_binding,
+            conn=conn,
+        )
+    evidence_bindings_created = [
+        sqlite_repo.bind_trade_lifecycle_evidence_case_once(
+            evidence_id=str(item.get("evidence_id") or ""),
+            case_id=str(item.get("case_id") or ""),
+            conn=conn,
+        )
+        for item in row.get("planned_evidence_bindings") or []
+        if isinstance(item, dict)
+    ]
+    claims_created = [
+        sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+            dict(item),
+            conn=conn,
+        )
+        for item in row.get("planned_source_claims") or []
+        if isinstance(item, dict)
+    ]
+    timing_created = False
+    effective_timing_policy = (
+        dict(legacy_upgrade.get("timing_policy") or {})
+        if legacy_upgrade
+        and isinstance(
+            legacy_upgrade.get("timing_policy"),
+            dict,
+        )
+        else (
+            dict(row.get("timing_policy") or {})
+            if isinstance(row.get("timing_policy"), dict)
+            else {}
+        )
+    )
+    effective_timing_case_id = (
+        canonical_case_id
+        if legacy_upgrade
+        else str(row.get("case_id") or "")
+    )
+    if (
+        row.get("kind") == "lifecycle_case"
+        and effective_timing_policy
+        and (
+            legacy_upgrade
+            or not bool(row.get("timing_policy_bound"))
+        )
+    ):
+        timing_created = (
+            sqlite_repo.insert_trade_lifecycle_timing_policy_once(
+                effective_timing_policy,
+                conn=conn,
+            )
+        )
+    if (
+        row.get("kind") == "lifecycle_case"
+        and not bool(row.get("legacy_terminal_frozen"))
+        and not isinstance(
+            sqlite_repo.get_trade_lifecycle_timing_policy(
+                effective_timing_case_id,
+                conn=conn,
+            ),
+            dict,
+        )
+    ):
+        raise ValueError(
+            "lifecycle migration timing binding missing"
+        )
+    outbox_created: list[bool] = []
+    if bool(row.get("suppress_option_leg_closed", True)):
+        outbox_created.append(
+            sqlite_repo.insert_trade_lifecycle_notification_once(
+                _suppression_intent(row),
+                conn=conn,
+            )
+        )
+    if bool(row.get("seed_final_intent")):
+        outbox_created.append(
+            sqlite_repo.insert_trade_lifecycle_notification_once(
+                _final_intent(row),
+                conn=conn,
+            )
+        )
+    receipt = {
+        "schema_version": MIGRATION_RECEIPT_SCHEMA,
+        "migration_schema": MIGRATION_SCHEMA,
+        "target_key": target_key,
+        "manifest_hash": manifest_hash,
+        "row_hash": row_hash,
+        "source_claim_count": len(
+            row.get("planned_source_claims") or []
+        ),
+        "suppression_requested": bool(
+            row.get("suppress_option_leg_closed", True)
+        ),
+        "final_intent_requested": bool(
+            row.get("seed_final_intent")
+        ),
+        "canonical_case_id": canonical_case_id or None,
+        "legacy_superseded": bool(legacy_upgrade),
+        "explicit_mapping_disposition": (
+            dict(row.get("explicit_mapping") or {}).get(
+                "disposition"
+            )
+            if isinstance(
+                row.get("explicit_mapping"),
+                dict,
+            )
+            else None
+        ),
+    }
+    receipt_created = (
+        sqlite_repo.insert_trade_lifecycle_migration_receipt_once(
+            receipt,
+            conn=conn,
+        )
+    )
+    sqlite_repo.assert_foreign_keys_clean(conn=conn)
+    return {
+        "target_key": target_key,
+        "receipt_created": receipt_created,
+        "source_claims_created": claims_created,
+        "evidence_bindings_created": evidence_bindings_created,
+        "canonical_case_created": case_created,
+        "bridge_evidence_created": bridge_created,
+        "legacy_superseded": legacy_superseded,
+        "timing_policy_created": timing_created,
+        "outbox_rows_created": outbox_created,
+    }
 
 
 def _suppression_intent(row: dict[str, Any]) -> dict[str, Any]:
@@ -2583,6 +2621,14 @@ def _normal_close_inventory_rows(
         grouped.setdefault(key, []).append(event)
     rows: list[dict[str, Any]] = []
     for broker_key, group in sorted(grouped.items()):
+        review_reasons = []
+        for event in group:
+            if event.get("asset_type") == "stock":
+                continue
+            try:
+                require_option_multiplier(event.get("multiplier"))
+            except ValueError as exc:
+                review_reasons.append("option_multiplier_invalid:" + str(exc))
         account = broker_key.split(":", 3)[1]
         target_key = f"close:{broker_key}"
         transition_key = f"{target_key}:resolution_confirmed"
@@ -2608,8 +2654,8 @@ def _normal_close_inventory_rows(
                 "target_key": target_key,
                 "kind": "normal_close",
                 "selected": False,
-                "mapping_status": "exact",
-                "review_reason_codes": [],
+                "mapping_status": "needs_review" if review_reasons else "exact",
+                "review_reason_codes": sorted(set(review_reasons)),
                 "notification_case_id": target_key,
                 "account": account,
                 "broker_deal_key": broker_key,
@@ -2926,241 +2972,6 @@ def _evidence_contract_matches_case(
         evidence_strike.is_finite()
         and case_strike.is_finite()
         and evidence_strike == case_strike
-    )
-
-
-def _current_inventory_state_hash(
-    sqlite_repo: Any,
-    *,
-    row: dict[str, Any],
-    conn: Any,
-) -> str:
-    if row.get("kind") == "normal_close":
-        event_ids = {
-            str(item)
-            for item in row.get("event_ids") or []
-        }
-        events = [
-            item
-            for item in sqlite_repo.list_trade_events(conn=conn)
-            if str(item.get("event_id") or "") in event_ids
-        ]
-        notifications = [
-            item
-            for item in (
-                sqlite_repo.list_trade_lifecycle_notifications(
-                    conn=conn
-                )
-            )
-            if (
-                str(item.get("transition_key") or "")
-                == str(row.get("transition_key") or "")
-                or str(item.get("case_id") or "")
-                == str(row.get("notification_case_id") or "")
-            )
-        ]
-        if row.get("mapping_status") != "exact":
-            return canonical_payload_hash(
-                {"event": events[0] if len(events) == 1 else None}
-            )
-        return canonical_payload_hash(
-            {
-                "broker_deal_key": row.get("broker_deal_key"),
-                "events": sorted(
-                    events,
-                    key=lambda item: str(
-                        item.get("event_id") or ""
-                    ),
-                ),
-                "notifications": notifications,
-            }
-        )
-    if isinstance(row.get("explicit_mapping"), dict):
-        all_cases = [
-            dict(item)
-            for item in sqlite_repo.list_trade_lifecycle_cases(
-                conn=conn
-            )
-            if isinstance(item, dict)
-        ]
-        all_evidence = [
-            dict(item)
-            for item in sqlite_repo.list_trade_lifecycle_evidence(
-                conn=conn
-            )
-            if isinstance(item, dict)
-        ]
-        all_allocations = [
-            dict(item)
-            for item in sqlite_repo.list_trade_lifecycle_allocations(
-                conn=conn
-            )
-            if isinstance(item, dict)
-        ]
-        all_events = [
-            dict(item)
-            for item in sqlite_repo.list_trade_events(conn=conn)
-            if isinstance(item, dict)
-        ]
-        lots = {
-            str(item.get("record_id") or ""): dict(
-                item.get("fields") or {}
-            )
-            for item in sqlite_repo.list_position_lots(conn=conn)
-            if isinstance(item, dict)
-            and str(item.get("record_id") or "")
-            and isinstance(item.get("fields"), dict)
-        }
-        all_claims = [
-            dict(item)
-            for item in (
-                sqlite_repo.list_trade_lifecycle_source_consumptions(
-                    conn=conn
-                )
-            )
-            if isinstance(item, dict)
-        ]
-        all_notifications = [
-            dict(item)
-            for item in (
-                sqlite_repo.list_trade_lifecycle_notifications(
-                    conn=conn
-                )
-            )
-            if isinstance(item, dict)
-        ]
-        timing_policies = {
-            str(item.get("case_id") or ""): dict(item)
-            for item in (
-                sqlite_repo.list_trade_lifecycle_timing_policies(
-                    conn=conn
-                )
-            )
-            if isinstance(item, dict)
-            and str(item.get("case_id") or "")
-        }
-        void_ids = sorted(
-            {
-                target
-                for item in all_events
-                for target in [valid_void_target_event_id(item)]
-                if target
-            }
-        )
-        return canonical_payload_hash(
-            _explicit_inventory_state(
-                mapping=dict(row["explicit_mapping"]),
-                case_ids=[
-                    str(item)
-                    for item in row.get(
-                        "explicit_state_case_ids"
-                    )
-                    or []
-                ],
-                evidence_ids=[
-                    str(item)
-                    for item in row.get(
-                        "explicit_state_evidence_ids"
-                    )
-                    or []
-                ],
-                terminal_event_ids=[
-                    str(item)
-                    for item in row.get(
-                        "explicit_state_terminal_event_ids"
-                    )
-                    or []
-                ],
-                target_lot_ids=[
-                    str(item)
-                    for item in row.get(
-                        "explicit_state_target_lot_ids"
-                    )
-                    or []
-                ],
-                source_keys=[
-                    str(item)
-                    for item in row.get(
-                        "explicit_state_source_keys"
-                    )
-                    or []
-                ],
-                all_cases=all_cases,
-                all_evidence=all_evidence,
-                all_allocations=all_allocations,
-                all_events=all_events,
-                lot_fields_by_id=lots,
-                all_claims=all_claims,
-                all_notifications=all_notifications,
-                timing_policies=timing_policies,
-                void_ids=void_ids,
-            )
-        )
-    case_id = str(row.get("case_id") or "")
-    lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
-        case_id,
-        conn=conn,
-    )
-    evidence = sqlite_repo.list_trade_lifecycle_evidence(
-        case_id=case_id,
-        conn=conn,
-    )
-    allocations = sqlite_repo.list_trade_lifecycle_allocations(
-        case_id=case_id,
-        conn=conn,
-    )
-    events = sqlite_repo.list_trade_events(conn=conn)
-    void_ids = sorted(
-        {
-            target
-            for item in events
-            for target in [valid_void_target_event_id(item)]
-            if target
-        }
-    )
-    claims = sqlite_repo.list_trade_lifecycle_source_consumptions(
-        case_id=case_id,
-        conn=conn,
-    )
-    notifications = sqlite_repo.list_trade_lifecycle_notifications(
-        case_id=case_id,
-        conn=conn,
-    )
-    return canonical_payload_hash(
-        {
-            "case": lifecycle_case,
-            "evidence": sorted(
-                evidence,
-                key=lambda item: str(
-                    item.get("evidence_id") or ""
-                ),
-            ),
-            "allocations": sorted(
-                allocations,
-                key=lambda item: str(
-                    item.get("allocation_id") or ""
-                ),
-            ),
-            "effective_void_event_ids": void_ids,
-            "claims": sorted(
-                claims,
-                key=lambda item: str(
-                    item.get("source_key") or ""
-                ),
-            ),
-            "notifications": sorted(
-                notifications,
-                key=lambda item: str(
-                    item.get("outbox_id") or ""
-                ),
-            ),
-            "timing_policy": (
-                sqlite_repo.get_trade_lifecycle_timing_policy(
-                    case_id,
-                    conn=conn,
-                )
-            ),
-        }
     )
 
 

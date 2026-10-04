@@ -157,7 +157,7 @@ def test_standard_execution_keeps_futu_event_lot_and_frozen_economics(tmp_path) 
     ({"multiplier": "10"}, "ledger_contract_multiplier"),
 ])
 def test_real_intake_admission_preserves_projection_scope(tmp_path, change, error):
-    payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
+    payload = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL", "status": "OK",
                "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
                "deal_id": "first", "order_id": "first-order", "code": "US.NVDA260918P00100000",
                "qty": "1", "price": "2.50", "multiplier": "100", "trd_side": "SELL_SHORT",
@@ -182,6 +182,7 @@ def test_real_intake_admission_preserves_projection_scope(tmp_path, change, erro
 def _execution_input(deal_id="fill-1", *, namespace="futu.deal", effect="open", option_type="put"):
     return {
         "schema_version": "trade_execution.v1",
+        "status": "OK",
         "broker_account_ref": {"broker_id": "futu", "external_account_id": "123", "environment": "REAL",
                                "broker_account_id": "futu:REAL:123", "account_label": "lx"},
         "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",
@@ -265,6 +266,8 @@ def test_source_effect_enrichment_checks_applied_allocation_at_ledger_facades(tm
             record_normalized_trade_event(repo, enriched)
     else:
         assert replay.reason == "ledger_recorded"
+        assert replay.operations[0].lot_id == before_lots[0]["record_id"]
+        assert before_events[0]["lot_id"] is None
         assert record_normalized_trade_event(repo, enriched).to_dict()["created"] is False
     assert repo.list_trade_events() == before_events
     assert repo.list_position_lots() == before_lots
@@ -346,7 +349,7 @@ def test_close_outbox_keeps_namespace_and_original_account_scope_on_replay(tmp_p
             "broker_account_ref": {**close.execution_input["broker_account_ref"], "account_label": "renamed"},
         })
         replay = _process_payload(
-            renamed.execution_input, repo=repo, state_path=tmp_path / "recovery/state.json",
+            {**renamed.execution_input, "status": "OK"}, repo=repo, state_path=tmp_path / "recovery/state.json",
             audit_path=tmp_path / "recovery/audit.jsonl", account_mapping={"123": "renamed"},
             futu_account_ids=["123"], host="localhost", port=11111,
             source="file", apply_changes=True, allow_external_lookup=False,
@@ -584,7 +587,7 @@ def _proven_legacy_execution_fixture(tmp_path, *, split=False, order_known=True,
         "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
         "deal_id": "legacy-fill", "order_id": "legacy-order", "code": "US.NVDA260918P00100000",
         "qty": "1", "price": "2.50", "multiplier": "100", "trd_side": "SELL_SHORT",
-        "create_time": "2026-09-07 10:30:00",
+        "create_time": "2026-09-07 10:30:00", "status": "OK",
     }
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
 
@@ -750,6 +753,7 @@ def test_complete_split_requires_every_unique_active_allocation(legacy, quantiti
             broker="futu", account="lx", underlying_symbol="NVDA", option_type="put", strike=100, expiration_ymd="2026-09-18",
                 ),
         contracts=0, price=0, currency="USD", source="manual",
+        multiplier=rows[1]["multiplier"],
         target_event_id=rows[1]["event_id"],
     ).to_dict()
     assert completed_ledger_deal_keys([*rows, void]) == set()

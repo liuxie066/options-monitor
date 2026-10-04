@@ -241,6 +241,41 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     assert no_descriptor["reason_code"] == "missing_descriptor"
 
 
+def test_removed_wheel_account_never_reads_as_ready_with_open_window(tmp_path: Path) -> None:
+    config = _wheel_config()
+    sqlite_path = tmp_path / "wheel.sqlite3"
+    _write_activation_table(
+        sqlite_path,
+        policy_hash=build_wheel_policy_hash(config, market="us", account="lx"),
+    )
+    config["wheel"]["accounts"] = []
+
+    result = _readiness_us(config, sqlite_path)
+
+    assert result["ready"] is False
+    assert result["monitoring_gate"] == "disabled"
+    assert result["reason_code"] == "not_configured"
+
+
+@pytest.mark.parametrize("accounts", ["lx", ["lx", "lx"], ["lx", ""]])
+def test_invalid_wheel_accounts_fail_closed_with_open_window(
+    tmp_path: Path, accounts: object,
+) -> None:
+    config = _wheel_config()
+    sqlite_path = tmp_path / "wheel.sqlite3"
+    _write_activation_table(
+        sqlite_path,
+        policy_hash=build_wheel_policy_hash(config, market="us", account="lx"),
+    )
+    config["wheel"]["accounts"] = accounts
+
+    result = _readiness_us(config, sqlite_path)
+
+    assert result["ready"] is False
+    assert result["monitoring_gate"] == "config_mismatch"
+    assert result["reason_code"] == "invalid_account_scope"
+
+
 @pytest.fixture
 def activation_runtime(tmp_path: Path, monkeypatch, request):
     state = getattr(request, "param", "enabled")

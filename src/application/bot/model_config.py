@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_validator import validate_assistant_config
 from src.application.config_yaml import default_yaml_assistant_config_path
 from src.application.llm_provider_registry import (
@@ -151,6 +153,37 @@ def load_assistant_bot_toolsets(
         require_config=require_config,
     )
     return toolsets, error
+
+
+def load_bot_read_scope(*, config_path: str | Path, primary_market: str) -> tuple[frozenset[str], str]:
+    """Validated channel grant and config generation; never sourced from a model turn."""
+    if primary_market not in {"us", "hk"}:
+        raise ValueError("invalid primary market")
+    path = _assistant_config_path(config_path=config_path, repo_root=None)
+    payload, error = _load_assistant_config(config_path=config_path, repo_root=None, require_config=True)
+    if error or payload is None:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"assistant config validation failed: {path}",
+            details={"error": error or "invalid_assistant_config"},
+        )
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size) or json.loads(raw) != payload:
+        raise ValueError("assistant config changed while reading")
+    assistant = payload.get("assistant") or {}
+    bot = assistant.get("bot") or {}
+    configured = bot.get("read_markets")
+    markets = frozenset(configured if configured is not None else (primary_market,))
+    if primary_market not in markets:
+        raise ValueError("assistant.bot.read_markets must include the channel market")
+    generated = payload.get("_generated") or {}
+    generation = hashlib.sha256(json.dumps([
+        str(path.resolve()), hashlib.sha256(raw).hexdigest(),
+        generated.get("generated_at"), after.st_mtime_ns,
+    ], sort_keys=True).encode()).hexdigest()
+    return markets, generation
 
 
 def load_assistant_bot_settings(

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.wheel import project_wheel_coverage
 from domain.domain.cash_secured_utils import normalize_cash_secured_total_by_ccy
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -13,23 +18,43 @@ from domain.domain.risk_capacity import (
     withdraw_opening_share_capacity_grants,
 )
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.config_defaults import DEFAULT_CONFIG
+from src.application.portfolio_context_service import (
+    load_account_portfolio_context, evaluate_account_cash_snapshot, cash_snapshot_is_usable, cash_snapshot_evidence,
+)
+from src.application.ledger.api import decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock
 from src.application.positions.context_builder import build_context
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
+from src.infrastructure.exchange_rates import rates_for_purpose, current_exchange_rate_snapshot, project_exchange_rate_snapshot
 
 
 WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA = "wheel_put_cash_capacity_fact.v1"
 
 
-def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str) -> None:
+def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str, runtime_root: Path) -> None:
     try:
-        connection.send({"portfolio": fetch_futu_portfolio_context(cfg=config, account=account, include_options=True)})
+        cache_path = runtime_root / "output_shared" / "state" / "rate_cache.json"
+        try:
+            fx = project_exchange_rate_snapshot(current_exchange_rate_snapshot(cache_path=cache_path, write_cache=False), purpose="capacity")
+        except (TimeoutError, CancelledError):
+            raise
+        except Exception:
+            fx = None
+        portfolio = load_account_portfolio_context(
+            runtime_config=config, account=account, market="富途", portfolio_source="futu",
+            state_dir=runtime_root / "output_accounts" / account / "state", log=lambda _: None,
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            include_options=True, write_cache=False, exchange_rate_observation=fx,
+            exchange_rate_cache_path=cache_path,
+        )
+        connection.send({"portfolio": portfolio})
     except Exception as exc:
         connection.send({"error": type(exc).__name__})
     finally:
         connection.close()
 
 
-def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, stop_event: Any = None) -> dict[str, Any]:
+def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, runtime_root: Path, stop_event: Any = None) -> dict[str, Any]:
     """One physical-account observation, with a cancellable ten-second I/O budget."""
     import multiprocessing
     import time
@@ -38,7 +63,7 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
         return {"error": "cancelled"}
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(target=_attribution_capacity_worker, args=(sender, config, account), daemon=True)
+    process = context.Process(target=_attribution_capacity_worker, args=(sender, config, account, Path(runtime_root).resolve()), daemon=True)
     deadline = time.monotonic() + 10
     try:
         process.start()
@@ -72,6 +97,7 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
 def trade_attribution_capacity_check(
     *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
     wheel_read_model: Mapping[str, Any], observation: Mapping[str, Any], now_ms: int,
+    config: Mapping[str, Any],
     consumed_reservation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check post-fill occupancy; the already booked target is never added again."""
@@ -93,6 +119,7 @@ def trade_attribution_capacity_check(
             or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
         reasons.add("capacity_authority_unavailable")
     pooled_cash = fact["contract_key"]["option_type"] == "put"
+    call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
     markets = {"us", "hk"} if pooled_cash else {market}
     for required_market in markets:
         for asset in ("stock", "option"):
@@ -111,7 +138,8 @@ def trade_attribution_capacity_check(
         shares, call_claims, put_claims = defaultdict(int), defaultdict(int), defaultdict(Decimal)
         for row in snapshot.get("rows") or []:
             instrument = row["instrument_ref"]
-            if not pooled_cash and str(instrument.get("market") or "").lower() != market:
+            if not pooled_cash and (str(instrument.get("market") or "").lower() != market
+                    or instrument.get("symbol") != call_symbol):
                 continue
             quantity = Decimal(str(row["quantity"]))
             if not quantity.is_finite() or quantity != quantity.to_integral_value() or quantity < 0:
@@ -123,7 +151,7 @@ def trade_attribution_capacity_check(
                 # can_sell_qty is not reduced by those obligations a second time.
                 shares[instrument["symbol"]] += int(quantity)
         for item in facts:
-            if item["contracts_open"] <= 0 or (not pooled_cash and str(symbol_market(item["contract_key"]["underlying_symbol"]) or "").lower() != market):
+            if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
                 continue
             if item.get("broker_account_ref") != ref:
                 reasons.add("ledger_capacity_account_unproven")
@@ -172,15 +200,24 @@ def trade_attribution_capacity_check(
             if call_claims[symbol] > shares[symbol]:
                 reasons.add("account_stock_capacity_exceeded")
         else:
-            if portfolio.get("cash_balance_reliable") is not True:
+            cash_snapshot = evaluate_account_cash_snapshot(
+                portfolio, config=config, account=fact["account"],
+                evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
+            )
+            if not cash_snapshot_is_usable({"cash_snapshot": cash_snapshot}):
                 reasons.add("cash_capacity_unavailable")
             native = fact["currency"]
             required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
             secured = {currency: float(amount) for currency, amount in put_claims.items()}
             secured[native] = float(put_claims[native] - required)
+            fx_payload = portfolio.get("exchange_rates")
+            if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("pairs"), Mapping):
+                fx_for_capacity = {"rates": rates_for_purpose(fx_payload, purpose="capacity")}
+            else:
+                fx_for_capacity = fx_payload if portfolio.get("exchange_rate_status") == "ready" else {}
             available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
                 cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
-                convert_currency=_frozen_fx_converter(portfolio.get("exchange_rates") or {} if portfolio.get("exchange_rate_status") == "ready" else {}),
+                convert_currency=_frozen_fx_converter(fx_for_capacity or {}),
                 fx_status=portfolio.get("exchange_rate_status"))
             if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
                 reasons.add("account_cash_capacity_exceeded")
@@ -204,6 +241,19 @@ def _normalized_fx_snapshot(fx_snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(fx_snapshot), "fx_rate_facts": facts}
 
 
+def broker_capacity_observation_is_fresh(observed_at: Any) -> bool:
+    """A preview broker resource is valid only within the configured default TTL."""
+    try:
+        observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return False
+        age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+        ttl = int(DEFAULT_CONFIG["defaults"]["runtime"]["portfolio_context_ttl_sec"])
+        return 0 <= age <= ttl
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def build_shared_cash_capacity_fact(
     *,
     account: str,
@@ -225,6 +275,8 @@ def build_shared_cash_capacity_fact(
         cash_secured = normalize_cash_secured_total_by_ccy(dict(option_context))
     except (TypeError, ValueError):
         cash_secured = None
+    unavailable = option_context.get("cash_secured_unavailable_by_symbol")
+    unavailable_valid = unavailable is None or isinstance(unavailable, Mapping)
     reservations: list[dict[str, Any]] = []
     reservations_invalid = False
     for branch in wheel_read_model.get("wheel_branches") or []:
@@ -251,7 +303,11 @@ def build_shared_cash_capacity_fact(
         (not account_value or authority_account != account_value, "cash_authority_account_mismatch"),
         (str(authority.get("status") or "").strip().lower() != "available", "cash_authority_unavailable"),
         (not cash_by_currency, "cash_by_currency_missing"),
+        (not cash_snapshot_is_usable(portfolio_context), "cash_snapshot_unavailable"),
         (cash_secured is None, "cash_secured_positions_unavailable"),
+        (option_context.get("context_status") not in (None, "available") or
+         option_context.get("decision_snapshot_status") != "trusted", "option_decision_snapshot_unavailable"),
+        (not unavailable_valid or bool(unavailable), "option_cash_secured_unavailable"),
         (reservations_invalid, "wheel_put_intent_reservations_unavailable"),
         (not isinstance(fx_snapshot, Mapping), "fx_snapshot_unavailable"),
     ):
@@ -269,6 +325,9 @@ def build_shared_cash_capacity_fact(
         "cash_authority_hash": cash_authority_hash,
         "cash_by_currency": cash_by_currency,
         "cash_secured_by_currency": cash_secured,
+        "source_observed_at": portfolio_context.get("cash_source_observed_at"),
+        "cash_evidence": cash_snapshot_evidence(portfolio_context),
+        "decision_state_fingerprint": option_context.get("decision_state_fingerprint"),
         "wheel_intent_reservations": reservations,
         "fx_snapshot": normalized_fx,
         "status": status,
@@ -276,15 +335,50 @@ def build_shared_cash_capacity_fact(
     }
     return {
         **identity_payload,
-        "capacity_identity_hash": canonical_sha256(identity_payload),
+        "capacity_identity_hash": canonical_sha256({key: value for key, value in identity_payload.items() if key not in {"status", "reason"}}),
+        "cash_snapshot": portfolio_context.get("cash_snapshot"),
         "fx_snapshot_hash": canonical_sha256(identity_payload["fx_snapshot"]),
     }
+
+
+def _load_frozen_wheel_capacity_context(
+    repo: Any, *, config: dict[str, Any], account: str, broker: str, as_of_ms: int,
+    runtime_root: Path, fx_snapshot: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    candidate = getattr(repo, "primary_repo", repo)
+    with with_sqlite_repo_writer_lock(candidate):
+        rows = candidate.read_lifecycle_account_rows(account=account)
+        decision_snapshot = decision_state_snapshot_from_locked_rows(
+            candidate, rows,
+            account=account,
+            portfolio_scope_id=portfolio_scope_id(account),
+            source_observed_at=datetime.now(timezone.utc).isoformat(),
+            current_decision_now_ms=as_of_ms,
+        )
+    wheel_model = build_wheel_read_model_from_rows(
+        rows, account=account, as_of_ms=max(int(as_of_ms), 1),
+    )
+    portfolio = load_account_portfolio_context(
+        runtime_config=config, account=account, market=broker, portfolio_source="futu",
+        state_dir=runtime_root / "output_accounts" / account / "state", log=lambda _: None,
+        fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context, write_cache=False,
+        exchange_rate_cache_path=runtime_root / "output_shared" / "state" / "rate_cache.json",
+        **({"exchange_rate_observation": fx_snapshot} if fx_snapshot is not None else {}),
+        required_position_asset_types=("stock",),
+    )
+    option_context = build_context(
+        rows["stored_position_lots"],
+        broker=str(broker or "futu"), account=account,
+        decision_snapshot=decision_snapshot, lifecycle_now_ms=as_of_ms,
+    )
+    return wheel_model, portfolio, option_context
 
 
 def load_shared_cash_capacity_fact(
     repo: Any,
     *,
     config: dict[str, Any],
+    runtime_root: Path,
     account: str,
     broker: str,
     as_of_ms: int,
@@ -292,17 +386,9 @@ def load_shared_cash_capacity_fact(
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     try:
-        rows = repo.read_lifecycle_account_rows(account=account_value)
-        wheel_model = build_wheel_read_model_from_rows(
-            rows,
-            account=account_value,
-            as_of_ms=max(int(as_of_ms), 1),
-        )
-        portfolio = fetch_futu_portfolio_context(cfg=config, account=account_value)
-        option_context = build_context(
-            repo.list_position_lots(),
-            broker=str(broker or "futu"),
-            account=account_value,
+        wheel_model, portfolio, option_context = _load_frozen_wheel_capacity_context(
+            repo, config=config, account=account_value, broker=broker, as_of_ms=as_of_ms,
+            runtime_root=runtime_root, fx_snapshot=fx_snapshot,
         )
         return build_shared_cash_capacity_fact(
             account=account_value,
@@ -521,6 +607,7 @@ def revalidate_selected_wheel_put_candidate_from_rows(
     as_of_ms: int,
     fx_snapshot: Mapping[str, Any],
     final_candidate: Mapping[str, Any],
+    decision_snapshot: Mapping[str, Any] | None = None,
     opening_put_candidates: Sequence[Mapping[str, Any]] = (),
     exchange_rate_converter: Any = None,
 ) -> dict[str, Any]:
@@ -536,6 +623,8 @@ def revalidate_selected_wheel_put_candidate_from_rows(
         list(position_lots),
         broker=str(broker or "futu"),
         account=account_value,
+        decision_snapshot=dict(decision_snapshot or {}),
+        lifecycle_now_ms=as_of_ms,
     )
     fact = build_shared_cash_capacity_fact(
         account=account_value,
@@ -556,6 +645,7 @@ def load_shared_coverage_fact(
     repo: Any,
     *,
     config: dict[str, Any],
+    runtime_root: Path,
     account: str,
     symbol: str,
     broker: str,
@@ -565,17 +655,9 @@ def load_shared_coverage_fact(
     account_value = str(account or "").strip().lower()
     symbol_value = str(symbol or "").strip().upper()
     try:
-        rows = repo.read_lifecycle_account_rows(account=account_value)
-        wheel_model = build_wheel_read_model_from_rows(
-            rows,
-            account=account_value,
-            as_of_ms=max(int(as_of_ms), 1),
-        )
-        portfolio = fetch_futu_portfolio_context(cfg=config, account=account_value)
-        option_context = build_context(
-            repo.list_position_lots(),
-            broker=str(broker or "futu"),
-            account=account_value,
+        wheel_model, portfolio, option_context = _load_frozen_wheel_capacity_context(
+            repo, config=config, account=account_value, broker=broker, as_of_ms=as_of_ms,
+            runtime_root=runtime_root,
         )
         matches = [
             row
@@ -621,6 +703,7 @@ def build_shared_coverage_facts(
     locked_by_symbol = option_context.get("locked_shares_by_symbol")
     locked_by_symbol = locked_by_symbol if isinstance(locked_by_symbol, Mapping) else {}
     locked_unavailable = option_context.get("locked_shares_unavailable_by_symbol")
+    locked_unavailable_valid = locked_unavailable is None or isinstance(locked_unavailable, Mapping)
     locked_unavailable = locked_unavailable if isinstance(locked_unavailable, Mapping) else {}
     reserved: dict[str, int | None] = {}
     for batch in wheel_read_model.get("batches") or []:
@@ -637,13 +720,15 @@ def build_shared_coverage_facts(
         except ValueError:
             reserved[symbol] = None
     facts: list[dict[str, Any]] = []
-    for symbol in sorted(set(stocks) | set(locked_by_symbol) | set(reserved)):
+    for symbol in sorted(set(stocks) | set(locked_by_symbol) | set(locked_unavailable) | set(reserved)):
         stock = stocks.get(symbol)
         status = "available"
         reason = None
         try:
             if not isinstance(stock, Mapping):
                 raise ValueError("holding_missing")
+            if stock.get("capacity_authority_status") not in (None, "available"):
+                raise ValueError("stock_capacity_authority_unavailable")
             shares_total = int(stock.get("shares"))
             shares_can_sell = int(stock.get("can_sell_qty"))
             shares_locked = int(locked_by_symbol.get(symbol, 0))
@@ -652,7 +737,11 @@ def build_shared_coverage_facts(
             shares_reserved = int(reserved.get(symbol, 0))
             if min(shares_total, shares_can_sell, shares_locked, shares_reserved) < 0:
                 raise ValueError("holding_invalid")
-            if str(option_context.get("locked_shares_status") or "") != "available":
+            if shares_can_sell < shares_total and shares_locked:
+                raise ValueError("broker_ledger_stock_lock_overlap_unproven")
+            if (str(option_context.get("locked_shares_status") or "") != "available"
+                    or option_context.get("decision_snapshot_status") != "trusted"
+                    or not locked_unavailable_valid):
                 raise ValueError("short_call_coverage_unavailable")
             if symbol in locked_unavailable:
                 raise ValueError(str(locked_unavailable[symbol]))
@@ -669,6 +758,9 @@ def build_shared_coverage_facts(
                 "shares_can_sell": shares_can_sell,
                 "shares_locked": shares_locked,
                 "shares_reserved": shares_reserved,
+                "status": status,
+                "reason": reason,
+                "decision_state_fingerprint": option_context.get("decision_state_fingerprint"),
                 "source_observed_at": portfolio_context.get("source_observed_at"),
                 "ledger_generation_sha256": (
                     (option_context.get("prepared_authority") or {}).get(
@@ -694,6 +786,8 @@ def build_shared_coverage_facts(
                     0, eligible - shares_locked - shares_reserved
                 ),
                 "capacity_identity_hash": identity,
+                "source_observed_at": stock.get("source_observed_at") or portfolio_context.get("source_observed_at"),
+                "decision_state_fingerprint": option_context.get("decision_state_fingerprint"),
             }
         )
     return facts
@@ -795,6 +889,12 @@ def finalize_wheel_capacity(
         if isinstance(row, Mapping)
         and str(row.get("direction") or "call").strip().lower() == "call"
     }
+    assigned_stock = wheel_read_model.get("assigned_stock_projection")
+    assigned_stock = assigned_stock if isinstance(assigned_stock, Mapping) else {}
+    stock_by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for stock in assigned_stock.get("_all_assigned_stock_lots") or []:
+        if isinstance(stock, Mapping):
+            stock_by_id.setdefault(str(stock.get("stock_lot_id") or ""), []).append(stock)
     raw_by_batch = wheel_scan.get("raw_candidates")
     raw_by_batch = raw_by_batch if isinstance(raw_by_batch, Mapping) else {}
     rejected_claim_ids: set[str] = set()
@@ -864,6 +964,28 @@ def finalize_wheel_capacity(
             allocation=allocation,
             coverage_facts=coverage_facts,
         )
+        source_stocks = stock_by_id.get(lot_id) or []
+        stock = source_stocks[0] if len(source_stocks) == 1 else None
+        assignment_facts: dict[str, Any] = {}
+        if stock is not None:
+            try:
+                price = Decimal(str(stock.get("assignment_price")))
+            except (TypeError, ValueError, ArithmeticError):
+                price = Decimal(0)
+            if (
+                str(stock.get("account") or "").strip().lower() == account
+                and str(stock.get("symbol") or "").strip().upper()
+                == str(batch.get("symbol") or "").strip().upper()
+                and str(stock.get("broker") or "").strip()
+                and str(stock.get("currency") or "").strip()
+                and price.is_finite() and price > 0
+                and type(stock.get("assigned_at_ms")) is int
+                and stock["assigned_at_ms"] > 0
+            ):
+                assignment_facts = {
+                    key: stock[key]
+                    for key in ("broker", "currency", "assignment_price", "assigned_at_ms")
+                }
         snapshot_batches.append(
             {
                 "account": account,
@@ -877,6 +999,7 @@ def finalize_wheel_capacity(
                 or batch.get("batch_generation_hash"),
                 "projection_hash": batch.get("projection_hash"),
                 "shares_remaining": batch.get("shares_remaining"),
+                **assignment_facts,
                 "coverage": dict(batch.get("coverage") or project_wheel_coverage(batch)),
                 "phase": batch.get("phase"),
                 "reason_codes": list(batch.get("reason_codes") or []),

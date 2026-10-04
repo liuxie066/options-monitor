@@ -36,7 +36,13 @@ def attribution_context(tmp_path, monkeypatch):
     authority = {"config_path": str(tmp_path / "config.us.json"), "runtime_root": str(tmp_path),
                  "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
     mapping = {"physical_account_ids": ["1001"], "environment": "REAL"}
-    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, {}, authority.copy(), mapping.copy()))
+    config = {"market": "us", "accounts": ["lx"],
+              "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority.copy(), mapping.copy()))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence", lambda *a, **k: {"complete": True, "exposures": []})
+    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
     store = InboundOperationStore(tmp_path / "audit.sqlite3")
     request = AssistantRequest(text="归属", sender_id="user", channel="wechat", conversation_id="room",
                                config_key="us")
@@ -80,6 +86,19 @@ def test_recovery_fails_uncommitted_claim_and_blocks_delayed_worker(attribution_
     assert len(repo.list_trade_events()) == 1
 
 
+def test_preview_exceeding_channel_limit_is_cancelled(attribution_context):
+    repo, store, request, preview, _ = attribution_context
+    request = replace(request, reply_context={"max_reply_chars": 40})
+    with pytest.raises(AgentToolError, match="完整归属预览"):
+        operations.handle_attribution_operation(preview, request, command_id="too-long", store=store)
+    assert store.get("too-long")["status"] == "cancelled"
+    result = operations.handle_attribution_operation(
+        ControlCommand("attribution_confirm", {"operation_id": "too-long"}),
+        request, command_id="confirm-too-long", store=store)
+    assert result["data"]["status"] == "cancelled"
+    assert len(repo.list_trade_events()) == 1
+
+
 def test_recovery_repairs_committed_effect_after_expired_claim(attribution_context, monkeypatch):
     repo, store, request, preview, _ = attribution_context
     operations.handle_attribution_operation(preview, request, command_id="in_preview", store=store)
@@ -96,6 +115,30 @@ def test_recovery_repairs_committed_effect_after_expired_claim(attribution_conte
     result = operations.recover_attribution_operations(config_key="us", config_path=None, store=store)
     assert result["applied"] == 1
     assert store.get("in_preview")["status"] == "applied"
+    assert len(repo.list_trade_events()) == 2
+
+
+def test_cancel_readback_error_keeps_committed_decision_recoverable(attribution_context, monkeypatch):
+    import sqlite3
+
+    repo, store, request, preview, _ = attribution_context
+    operations.handle_attribution_operation(preview, request, command_id="in_preview", store=store)
+    original_mark = store.mark_applied
+    monkeypatch.setattr(store, "mark_applied", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("audit unavailable")))
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_preview"),
+                                                request, command_id="in_confirm", store=store)
+    monkeypatch.setattr(store, "mark_applied", original_mark)
+    assert store.get("in_preview")["status"] == "confirmed" and len(repo.list_trade_events()) == 2
+    original_read = operations._read_decision
+    monkeypatch.setattr(operations, "_read_decision", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("readback unavailable")))
+    with pytest.raises(sqlite3.OperationalError, match="readback unavailable"):
+        operations.handle_attribution_operation(parse_assistant_command("/cancel attribution in_preview"),
+                                                request, command_id="in_cancel", store=store)
+    assert store.get("in_preview")["status"] == "confirmed"
+    monkeypatch.setattr(operations, "_read_decision", original_read)
+    recovered = operations.recover_attribution_operations(config_key="us", config_path=None, store=store)
+    assert recovered["applied"] == 1 and store.get("in_preview")["status"] == "applied"
     assert len(repo.list_trade_events()) == 2
 
 
@@ -151,6 +194,50 @@ def test_bot_wheel_manual_membership_and_commit_recovery(tmp_path, monkeypatch):
     result = operations.handle_attribution_operation(ControlCommand("attribution_confirm", {"operation_id": "wheel-preview"}),
         request, command_id="retry", store=store)
     assert result["data"]["status"] == "applied" and len(repo.list_trade_events()) == count
+
+
+def test_bot_confirms_three_contracts_to_three_wheel_branches(tmp_path, monkeypatch):
+    from test_trade_attribution_meituan import _meituan_repo
+    from src.application.ledger.api import read_trade_attribution_facts
+    from src.application.wheel.read_model import build_wheel_read_model
+    repo, config, _ = _meituan_repo(tmp_path, call_contracts=3)
+    for key, value in {"OM_INBOUND_OPERATIONS_ENABLED": "1", "OM_INBOUND_TRADE_WRITE_ENABLED": "1",
+                       "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated-key"}.items():
+        monkeypatch.setenv(key, value)
+    authority = {"config_path": str(tmp_path / "config.hk.json"), "runtime_root": str(tmp_path),
+                 "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority,
+        {"physical_account_ids": ["1001"], "environment": "REAL"}))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence",
+                        lambda *a, **k: {"complete": True, "exposures": []})
+    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    fact = next(row for row in read_trade_attribution_facts(repo, account="lx")
+                if row["contract_key"]["option_type"] == "call")
+    branches = build_wheel_read_model(repo, "lx", 10**16, market="hk")["wheel_branches"]
+    chosen = sorted(row["wheel_branch_id"] for row in branches)[:3]
+    command = parse_assistant_command(
+        f"/attribute lx {fact['execution_key']} wheel {','.join(chosen)}")
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    request = AssistantRequest(text="归属", sender_id="user", channel="wechat",
+                               conversation_id="room", config_key="hk")
+    preview = operations.handle_attribution_operation(command, request, command_id="multi-preview", store=store)
+    assert all(branch in preview["data"]["response_text"] for branch in chosen)
+    assert preview["data"]["response_text"].count("：1 张") == 3
+    assert len(store.get("multi-preview")["payload"]["wheel_call_allocations"]) == 3
+    confirmed = operations.handle_attribution_operation(
+        ControlCommand("attribution_confirm", {"operation_id": "multi-preview"}),
+        request, command_id="multi-confirm", store=store)
+    assert confirmed["data"]["status"] == "applied"
+    linked = next(row for row in read_trade_attribution_facts(repo, account="lx")
+                  if row["execution_key"] == fact["execution_key"])
+    assert linked["status"] == "linked" and len(linked["wheel_call_allocations"]) == 3
+    count = len(repo.list_trade_events())
+    assert operations.handle_attribution_operation(
+        ControlCommand("attribution_confirm", {"operation_id": "multi-preview"}),
+        request, command_id="multi-retry", store=store)["data"]["status"] == "applied"
+    assert len(repo.list_trade_events()) == count
 
 
 def test_bot_combo_freezes_both_members_and_confirms_atomic_pair(tmp_path, monkeypatch):
@@ -369,3 +456,257 @@ def test_generated_attribution_commands_roundtrip_public_facade(attribution_cont
     assert result["ok"], result
     assert store.get(created["data"]["operation_id"])["status"] == ("applied" if action == "confirm" else "cancelled")
     assert len(repo.list_trade_events()) == (2 if action == "confirm" else 1)
+
+
+@pytest.mark.parametrize("payload", [
+    '{"conflict_event_ids":["c"],"members":[],"members":[]}',
+    '{"conflict_event_ids":["c","c"],"members":[{"execution_key":"e","action":"ordinary"}]}',
+    '{"conflict_event_ids":["c"],"members":[{"execution_key":"e","action":"ordinary","target_id":"w"}]}',
+    '{"conflict_event_ids":["c"],"members":[{"execution_key":"e","action":"wheel","wheel_call_allocations":[{"stock_lot_id":"s","wheel_branch_id":"b","contracts":true}]}]}',
+    '{"conflict_event_ids":["c"],"members":[{"execution_key":"e","action":"ordinary","actor":"forged"}]}',
+    '{"conflict_event_ids":["c"],"members":[{"execution_key":"e","action":"ordinary"},{"execution_key":"e","action":"ordinary"}]}',
+])
+def test_batch_command_rejects_ambiguous_or_forged_input(payload):
+    with pytest.raises(AgentToolError, match="批量归属输入无效"):
+        parse_assistant_command("/attribute lx batch '" + payload + "'")
+
+
+@pytest.mark.parametrize("explicit_lot", [False, True])
+@pytest.mark.parametrize("explicit_allocation", [False, True])
+def test_batch_control_complete_proof_recovery_and_late_cancel(tmp_path, monkeypatch, explicit_lot, explicit_allocation):
+    import json
+    from copy import deepcopy
+    from test_attribution_conflict_decision import _scope, _view, _conflict, _statuses
+    from src.application.ledger.api import read_trade_attribution_facts
+    repo, config = _scope(tmp_path, monkeypatch)
+    source = next(row for row in repo.list_trade_events() if row["event_type"] == "open" and row["option_type"] == "call")
+    raw = {"side": "sell", "execution_input": deepcopy(source["raw_payload"]["execution_input"])}
+    raw["execution_input"]["external_execution_id"] = "batch-second"
+    raw["execution_id"] = execution_identity_from_input(raw["execution_input"])
+    persist_trade_event_object(repo, replace(TradeEvent.from_dict(source), event_id="batch-second",
+        lot_id="lot_batch-second" if explicit_lot else None, raw_payload=raw))
+    calls = [row for row in _view(repo, config)["rows"] if row["contract_key"]["option_type"] == "call"]
+    conflict = _conflict(repo, _view(repo, config), keys=tuple(row["execution_key"] for row in calls))
+    for key, value in {"OM_INBOUND_OPERATIONS_ENABLED": "1", "OM_INBOUND_TRADE_WRITE_ENABLED": "1",
+        "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated-key"}.items():
+        monkeypatch.setenv(key, value)
+    authority = {"config_path": str(tmp_path / "config.hk.json"), "runtime_root": str(tmp_path),
+        "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority,
+        {"physical_account_ids": ["1001"], "environment": "REAL"}))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence", lambda *a, **k: {"complete": True, "exposures": []})
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    request = AssistantRequest(text="归属", sender_id="user", channel="wechat", conversation_id="room", config_key="hk")
+    payload = {"conflict_event_ids": [conflict], "members": [
+        {"execution_key": calls[0]["execution_key"], "action": "ordinary"},
+        {"execution_key": calls[1]["execution_key"], "action": "wheel", "target_id": calls[1]["candidate_ids"][0]}]}
+    if explicit_allocation:
+        member = payload["members"][1]
+        branch_id = member.pop("target_id").removeprefix("wheel:")
+        branch = next(row for row in _view(repo, config)["wheel_model"]["wheel_branches"] if row["wheel_branch_id"] == branch_id)
+        member["wheel_call_allocations"] = [{"stock_lot_id": branch["stock_lot_id"],
+            "wheel_branch_id": branch_id, "contracts": calls[1]["contracts"]}]
+    before = repo.list_trade_events()
+    command = parse_assistant_command("/attribute lx batch '" + json.dumps(payload) + "'")
+    preview = execute_explicit_control(command, request=request, command_id="in_batch", operation_store=store)
+    assert preview.ok and preview.requires_confirmation, preview
+    assert "第 2 腿" in preview.response_text and conflict in preview.response_text
+    assert "→ 普通单腿" in preview.response_text and "→ Wheel" in preview.response_text
+    assert repo.list_trade_events() == before
+    mark = store.mark_applied
+    monkeypatch.setattr(store, "mark_applied", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("audit unavailable")))
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_batch"), request,
+            command_id="in_confirm", store=store)
+    assert len(repo.list_trade_events()) == len(before) + 2 and _statuses(repo)[conflict]["resolved"]
+    monkeypatch.setattr(store, "mark_applied", mark)
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: (_ for _ in ()).throw(AssertionError("recovery must not query broker")))
+    assert operations.recover_attribution_operations(config_key="hk", config_path=None, store=store)["applied"] == 1
+    for verb in ("cancel", "confirm"):
+        result = operations.handle_attribution_operation(parse_assistant_command(f"/{verb} attribution in_batch"),
+            request, command_id="in_retry", store=store)
+        assert result["data"]["status"] == "applied" and len(result["data"]["result"]["proof_event_ids"]) == 2
+    assert len(repo.list_trade_events()) == len(before) + 2
+    assert len([row for row in read_trade_attribution_facts(repo, account="lx") if row["origin"] == "manual"]) == 2
+
+
+@pytest.mark.parametrize("change", ["expire", "permission", "config", "cancel"])
+def test_control_rechecks_authority_after_writer_and_rolls_back(attribution_context, monkeypatch, change):
+    from src.application.trades import attribution
+    repo, store, request, preview, authority = attribution_context
+    operations.handle_attribution_operation(preview, request, command_id="in_preview", store=store)
+    writer = attribution.write_trade_attribution_decision
+    before = repo.list_trade_events()
+    def changed(*args, **kwargs):
+        result = writer(*args, **kwargs)
+        if change == "expire":
+            monkeypatch.setattr(operations, "operation_is_expired", lambda _: True)
+        elif change == "permission":
+            monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "0")
+        elif change == "config":
+            authority["account_mapping_hash"] = "changed"
+        else:
+            operation = store.get("in_preview")
+            store.mark_cancelled("in_preview", result={"status": "cancelled"}, expected_payload_hash=operation["payload_hash"],
+                expected_statuses=("previewed", "confirmed", "running"))
+        return result
+    monkeypatch.setattr(attribution, "write_trade_attribution_decision", changed)
+    result = operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_preview"),
+        request, command_id="in_confirm", store=store)
+    assert result["data"]["status"] == ("cancelled" if change == "cancel" else "failed") and repo.list_trade_events() == before
+
+
+def test_recovery_does_not_adopt_another_requests_same_result(attribution_context):
+    repo, store, request, preview, _ = attribution_context
+    for name in ("in_first", "in_other"):
+        operations.handle_attribution_operation(preview, request, command_id=name, store=store)
+    operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_other"), request,
+        command_id="in_confirm", store=store)
+    first = store.get("in_first")
+    store.mark_confirmed("in_first", expected_payload_hash=first["payload_hash"])
+    recovered = operations.recover_attribution_operations(config_key="us", config_path=None, store=store)
+    assert recovered["failed"] == 1 and store.get("in_first")["status"] == "failed"
+    assert store.get("in_other")["status"] == "applied" and len(repo.list_trade_events()) == 2
+
+
+def test_batch_size_is_rejected_not_truncated():
+    import json
+    payload = {"conflict_event_ids": ["c" * 17000], "members": [{"execution_key": "e", "action": "ordinary"}]}
+    with pytest.raises(AgentToolError, match="16 KiB"):
+        parse_assistant_command("/attribute lx batch '" + json.dumps(payload) + "'")
+
+
+def test_allocation_quantity_is_checked_before_expansion(attribution_context):
+    import json
+    repo, store, request, preview, _ = attribution_context
+    payload = {"conflict_event_ids": ["c"], "members": [{"execution_key": preview.arguments["execution_key"],
+        "action": "wheel", "wheel_call_allocations": [{"stock_lot_id": "s", "wheel_branch_id": "b", "contracts": 10**12}]}]}
+    command = parse_assistant_command("/attribute lx batch '" + json.dumps(payload) + "'")
+    with pytest.raises(AgentToolError, match="分配张数与原成交不一致"):
+        operations.handle_attribution_operation(command, request, command_id="oversized-allocation", store=store)
+    assert store.get("oversized-allocation") is None and len(repo.list_trade_events()) == 1
+
+
+@pytest.mark.parametrize("decision", ["keep", "move", "ordinary"])
+def test_conflict_preview_identifies_released_and_target_branch(tmp_path, monkeypatch, decision):
+    from test_attribution_conflict_decision import _scope, _view, _call, _args, _conflict
+    from src.application.trades import attribution
+    repo, config = _scope(tmp_path, monkeypatch)
+    fact = _call(_view(repo, config))
+    old_target = fact["candidate_ids"][0]
+    attribution.apply_trade_attribution(repo, **_args(config, fact, old_target, "initial"))
+    _conflict(repo, _view(repo, config))
+    fact = _call(_view(repo, config))
+    for key, value in {"OM_INBOUND_OPERATIONS_ENABLED": "1", "OM_INBOUND_TRADE_WRITE_ENABLED": "1",
+                       "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated"}.items():
+        monkeypatch.setenv(key, value)
+    authority = {"config_path": str(tmp_path / "config.hk.json"), "runtime_root": str(tmp_path),
+                 "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority,
+        {"physical_account_ids": ["1001"], "environment": "REAL"}))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence", lambda *a, **k: {"complete": True, "exposures": []})
+    target = old_target if decision == "keep" else next(value for value in fact["candidate_ids"] if value != old_target)
+    action = "ordinary" if decision == "ordinary" else "wheel " + target
+    request = AssistantRequest(text="归属", sender_id="user", channel="wechat", conversation_id="room", config_key="hk")
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    before = repo.list_trade_events()
+    result = operations.handle_attribution_operation(
+        parse_assistant_command(f"/attribute lx {fact['execution_key']} {action}"), request, command_id="preview", store=store)
+    relation = next(line for line in result["data"]["response_text"].splitlines() if line.startswith("归属｜"))
+    assert f"Wheel 批次 {old_target.removeprefix('wheel:')}：1 张 → " in relation
+    assert relation.endswith("普通单腿" if decision == "ordinary" else "Wheel 批次 " + target.removeprefix("wheel:"))
+    assert repo.list_trade_events() == before
+
+
+@pytest.mark.parametrize("change", ["wheel_off", "activation", "policy", "combo_mode", "capacity", "quote", "cash_ttl", "unrelated", "after_commit"])
+def test_control_rechecks_business_admission_with_same_authority(tmp_path, monkeypatch, change):
+    from copy import deepcopy
+    from test_attribution_conflict_decision import _scope, _view, _call, _args, _conflict, _statuses
+    from src.application.trades import attribution
+    repo, config = _scope(tmp_path, monkeypatch)
+    config["portfolio"] = {"futu": {"host": "initial-capacity-host", "port": 11111}}
+    fact = _call(_view(repo, config))
+    old_target = fact["candidate_ids"][0]
+    attribution.apply_trade_attribution(repo, **_args(config, fact, old_target, "initial"))
+    conflict = _conflict(repo, _view(repo, config))
+    fact = _call(_view(repo, config))
+    target = next(value for value in fact["candidate_ids"] if value != old_target)
+    for key, value in {"OM_INBOUND_OPERATIONS_ENABLED": "1", "OM_INBOUND_TRADE_WRITE_ENABLED": "1",
+                       "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated"}.items():
+        monkeypatch.setenv(key, value)
+    authority = {"config_path": str(tmp_path / "config.hk.json"), "runtime_root": str(tmp_path),
+                 "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
+    active_config = [config]
+    monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, active_config[0], authority.copy(),
+        {"physical_account_ids": ["1001"], "environment": "REAL"}))
+    monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence", lambda *a, **k: {"complete": True, "exposures": []})
+    request = AssistantRequest(text="归属", sender_id="user", channel="wechat", conversation_id="room", config_key="hk")
+    store = InboundOperationStore(tmp_path / "audit.sqlite3")
+    operations.handle_attribution_operation(parse_assistant_command(f"/attribute lx {fact['execution_key']} wheel {target}"),
+        request, command_id="in_preview", store=store)
+    before = (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots())
+    def change_config():
+        updated = deepcopy(config)
+        if change in {"wheel_off", "after_commit"}:
+            updated["wheel"]["accounts"] = []
+        elif change == "activation":
+            updated["wheel"]["activation_by_account"]["lx"]["generation"] += 1
+        elif change == "policy":
+            updated["wheel"]["call"] = {"max_dte": 999}
+        elif change == "combo_mode":
+            updated["trade_intake"] = {"combo_reconciliation": {"accounts": {"lx": "observe"}}}
+        elif change == "capacity":
+            updated["account_settings"]["lx"]["futu"]["host"] = "changed-capacity-host"
+        elif change == "cash_ttl":
+            updated["runtime"] = {"portfolio_context_ttl_sec": 1}
+        elif change == "quote":
+            updated["symbols"] = [{"symbol": "3690.HK", "fetch": {"source": "opend", "host": "changed-quote-host"}}]
+        else:
+            updated["notifications"] = {"display_note": "irrelevant"}
+            updated["wheel"]["accounts"].append("sy")
+        active_config[0] = updated
+    writer = attribution.write_trade_attribution_decision
+    def changed(*args, **kwargs):
+        result = writer(*args, **kwargs)
+        if change != "after_commit":
+            change_config()
+        return result
+    monkeypatch.setattr(attribution, "write_trade_attribution_decision", changed)
+    result = operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_preview"),
+        request, command_id="confirm", store=store)
+    if change in {"unrelated", "after_commit"}:
+        assert result["data"]["status"] == "applied", result
+        assert _statuses(repo)[conflict]["resolved"]
+        change_config()
+        monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: pytest.fail("retry must only read back"))
+        retry = operations.handle_attribution_operation(parse_assistant_command("/confirm attribution in_preview"),
+            request, command_id="retry", store=store)
+        assert retry["data"]["status"] == "applied", retry
+    else:
+        assert result["data"]["status"] == "failed", result
+        assert "归属准入配置或策略已改变" in result["data"]["result"]["reason"]
+        assert (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots()) == before
+        assert not _statuses(repo)[conflict]["resolved"]
+
+
+@pytest.mark.parametrize("relationship", ["multiple_allocations", "combo"])
+def test_preview_renders_complete_old_relationship(attribution_context, relationship):
+    from src.application.assistant.renderer import render_attribution_preview
+    repo, store, request, preview, _ = attribution_context
+    operations.handle_attribution_operation(preview, request, command_id="preview", store=store)
+    operation = store.get("preview")
+    fact = operation["preview"]["members"][0]
+    fact["status"] = "linked"
+    if relationship == "multiple_allocations":
+        fact["wheel_call_allocations"] = [
+            {"stock_lot_id": "old-stock-a", "wheel_branch_id": "old-branch-a", "contracts": 1},
+            {"stock_lot_id": "old-stock-b", "wheel_branch_id": "old-branch-b", "contracts": 2}]
+        expected = "Wheel 分支 old-branch-a：1 张（股票批次 old-stock-a）；Wheel 分支 old-branch-b：2 张（股票批次 old-stock-b）"
+    else:
+        fact["strategy_group_id"] = "old-combo-group"
+        expected = "Combo Yield old-combo-group"
+    assert f"归属｜{expected} → 普通单腿" in render_attribution_preview(operation)
+    assert len(repo.list_trade_events()) == 1

@@ -505,7 +505,6 @@ def test_worker_consumes_published_config_bytes_and_hash(
         "load_account_portfolio_context",
         _load_account_portfolio_context,
     )
-    monkeypatch.setattr(mod, "wants_global_path_risk_context", lambda _cfg: False)
 
     assert mod.run_worker(request_path) == 0
 
@@ -513,6 +512,45 @@ def test_worker_consumes_published_config_bytes_and_hash(
     assert result["status"] == "ready"
     assert result["account_config_sha256"] == authority.account_config_sha256
     assert observed["runtime"]["marker"] == "exact-published-bytes"
+
+
+def test_worker_retains_account_risk_context(monkeypatch, tmp_path: Path) -> None:
+    from src.application import prepared_portfolio_context as mod
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-global-unavailable",
+        account="lx",
+        config={"portfolio": {"account": "lx"}, "symbols": []},
+    )
+    request_path = tmp_path / "worker-request.json"
+    result_path = tmp_path / "worker-result.json"
+    _write_worker_request(
+        tmp_path,
+        authority=authority,
+        run_id="run-global-unavailable",
+        token="token-global",
+        request_path=request_path,
+        result_path=result_path,
+    )
+    from cash_evidence_helpers import cash_portfolio
+    monkeypatch.setattr(mod, "load_account_portfolio_context", lambda **_kwargs: cash_portfolio({
+        "filters": {"account": "lx"}, "cash_by_currency": {"CNY": 100_000.0}, "stocks_by_symbol": {},
+    }))
+
+    assert mod.run_worker(request_path) == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["status"] == "ready"
+    context = result["portfolio_context"]
+    assert context["cash_by_currency"] == {"CNY": 100_000.0}
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert risk.nav_cny == 100_000.0
+    assert risk.unavailable_reasons == ("option_decision_snapshot_unavailable",)
 
 
 def test_worker_fails_closed_when_config_changes_after_spawn(
@@ -762,3 +800,105 @@ def test_partial_spawn_failure_reaps_already_running_worker(
     assert running.terminated is True
     assert running.waited >= 1
     assert running.poll() is not None
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_prepared_cash_replay_preserves_original_verdict(tmp_path, monkeypatch, legacy):
+    from cash_evidence_helpers import cash_portfolio
+    from src.application.daily_decision_brief_service import _build_funds
+    from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
+    import src.application.futu_portfolio_context as futu
+
+    class CashWorker(_CompletedWorker):
+        def __init__(self, command, **kwargs):
+            super().__init__(command, **kwargs)
+            request = json.loads(Path(command[-1]).read_text())
+            path = Path(request["result_path"])
+            result = json.loads(path.read_text())
+            context = cash_portfolio({"cash_by_currency": {"CNY": 100},
+                "source_observed_at": "2020-01-01T00:00:00+00:00"}, account=request["account"])
+            if legacy:
+                del context["cash_snapshot"]
+            result["portfolio_context"] = context
+            result["payload_sha256"] = hashlib.sha256(json.dumps(context, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            path.write_text(json.dumps(result))
+
+    run_id = "cash-replay"
+    shared, states = _state_dirs(tmp_path, run_id)
+    authorities = _config_authorities(tmp_path, run_id)
+    manifests = _prepare(tmp_path, shared, states, run_id, authorities=authorities, popen_factory=CashWorker)
+    manifest = manifests["lx"]
+    identity = _generation_kwargs(tmp_path, Path(manifest["manifest_path"]), run_id=run_id,
+        authority=authorities["lx"], manifest_sha256=manifest["manifest_sha256"])
+    monkeypatch.setattr(futu, "fetch_futu_portfolio_context", lambda **kw: pytest.fail("historical replay must not fetch"))
+    first = load_prepared_portfolio_context(**identity)
+    second = load_prepared_portfolio_context(**identity)
+    assert second == first
+    options = {"as_of_utc": "2020-01-01T00:00:00+00:00", "cash_secured_total_by_ccy": {},
+               "decision_snapshot_status": "trusted", "exchange_rates": {"rates": {}}}
+    gaps = []
+    funds, trusted = _build_funds(portfolio_context=second, option_positions_context=options, data_gaps=gaps)
+    assert trusted is (not legacy)
+    assert funds["cash_total_cny"] == (None if legacy else 100)
+    assert bool(gaps) is legacy
+    if not legacy:
+        assert funds["cash_snapshot"]["evaluated_at"] == "2020-01-01T00:00:00+00:00"
+    ledger = states["lx"] / "option_positions_context.json"
+    ledger.write_text(json.dumps(options))
+    dependencies = [
+        {"kind": kind, "relpath": None, "sha256": "a" * 64}
+        for kind in ("required_data", "fx", "earnings_rv")]
+    dependencies.extend([
+        {"kind": "portfolio", "relpath": str(Path(manifest["manifest_path"]).relative_to(tmp_path)),
+         "sha256": manifest["manifest_sha256"]},
+        {"kind": "ledger", "relpath": str(ledger.relative_to(tmp_path)), "sha256": hashlib.sha256(ledger.read_bytes()).hexdigest()},
+    ])
+    fact = load_wheel_candidate_cash_fact(base=tmp_path, snapshot={"run_id": run_id, "account": "lx",
+        "account_config_sha256": authorities["lx"].account_config_sha256, "dependencies": dependencies})
+    assert fact["cash_snapshot"] == second.get("cash_snapshot")
+    assert fact["cash_by_currency"] == {"CNY": 100}
+
+
+@pytest.mark.parametrize("invalid_ttl", [False, True])
+def test_failed_cash_evidence_survives_real_worker_manifest_and_brief(tmp_path, monkeypatch, invalid_ttl):
+    from cash_evidence_helpers import cash_config
+    from src.application import prepared_portfolio_context as prepared
+    from src.application.daily_decision_brief_service import _load_portfolio_context, _build_funds
+    run_id = "failed-cash"
+    config = cash_config()
+    if invalid_ttl:
+        config["runtime"] = {"portfolio_context_ttl_sec": 0}
+    authorities = {account: publish_account_run_config(base=tmp_path, run_id=run_id, account=account,
+        config={**config, "portfolio": {**config["portfolio"], "account": account}}) for account in ("lx", "sy")}
+    calls = []
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("offline fixture")
+    monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", fail)
+    class RealWorker(_CompletedWorker):
+        def __init__(self, command, **kwargs):
+            assert prepared.run_worker(Path(command[-1])) == 0
+    shared, states = _state_dirs(tmp_path, run_id)
+    manifests = _prepare(tmp_path, shared, states, run_id, authorities=authorities, popen_factory=RealWorker)
+    manifest = manifests["lx"]
+    reason = "CASH_TTL_INVALID" if invalid_ttl else "CASH_PROVIDER_UNAVAILABLE"
+    assert manifest["status"] == "unavailable"
+    assert reason in manifest["cash_snapshot"]["reason_codes"]
+    assert "portfolio_source_account" not in manifest
+    assert manifest["cash_snapshot"]["source_observed_at"] is None
+    assert len(calls) == (0 if invalid_ttl else 2)
+    identity = _generation_kwargs(tmp_path, Path(manifest["manifest_path"]), run_id=run_id,
+        authority=authorities["lx"], manifest_sha256=manifest["manifest_sha256"])
+    receipt = load_prepared_portfolio_context_receipt(**identity)
+    assert receipt["payload"] is None
+    assert receipt["manifest"]["cash_snapshot"] == manifest["cash_snapshot"]
+    gaps = []
+    for _ in range(2):
+        context = _load_portfolio_context(base=tmp_path, run_id=run_id, account="lx", state_dir=states["lx"],
+            run_account_dir=states["lx"].parent, source_artifacts=[], data_gaps=gaps)
+        funds, trusted = _build_funds(portfolio_context=context, option_positions_context={}, data_gaps=gaps)
+        assert trusted is False
+        assert funds["cash_total_cny"] is None
+        assert funds["cash_snapshot"] == manifest["cash_snapshot"]
+    assert len(calls) == (0 if invalid_ttl else 2)

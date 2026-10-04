@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 from src.application.ledger.commands import (
     accept_option_close_evidence,
+    record_zero_price_option_close,
     adopt_existing_combo_identity,
     advance_lifecycle_case_state,
     BrokerTradeOpenPreviewResult,
@@ -61,6 +64,7 @@ from src.application.ledger.event_codec import (
 )
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
+    project_position_lots_and_assigned_stock_from_rows,
 )
 from src.application.ledger.external_event_key import (
     applied_execution_association_conflicts,
@@ -212,7 +216,6 @@ from src.application.ledger.trade_event_pagination import (
 )
 from src.application.ledger.writer import (
     _finish_trade_event_decision_projection as finalize_trade_event_decision_projection,
-    persist_trade_event_with_wheel_intent as record_trade_event_with_wheel_intent,
 )
 from src.application.ledger.writer_trade_events import reconcile_normalized_execution_order_identity
 from src.application.ledger.current_decision_projection import (
@@ -234,6 +237,7 @@ from src.application.ledger.decision_snapshot import (
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
     decision_state_snapshot_from_rows,
+    decision_state_snapshot_from_locked_rows,
     decision_state_snapshot_fingerprint,
     read_decision_state_rows_many,
     validate_position_fact_snapshot_contract,
@@ -243,7 +247,6 @@ from src.application.ledger.combo_membership import (
 )
 from src.application.ledger.combo_reconciliation import (
     combo_attribution_candidates_from_rows,
-    adopt_post_trade_combo_pair,
     list_combo_pair_inferences,
     reject_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
@@ -303,27 +306,30 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 from .trade_attribution import (
-    enable_trade_attribution_policy,
+    write_trade_attribution_decision,
+    read_trade_attribution_decision,
     read_trade_attribution_policy,
     ATTRIBUTION_POLICY_VERSION,
     assert_trade_attribution_unclaimed,
     ledger_resource_identity,
     read_trade_attribution_facts,
     read_trade_attribution_snapshot,
-    record_trade_ordinary_attribution,
     record_trade_attribution_conflict,
     trade_attribution_facts_from_events,
 )
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
 __all__ = [
+    "write_trade_attribution_decision",
+    "read_trade_attribution_decision",
+    "lot_id_for_open_event",
     "combo_attribution_candidates_from_rows",
     "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
     "ledger_resource_identity", "read_trade_attribution_facts",
     "read_trade_attribution_snapshot",
-    "enable_trade_attribution_policy", "read_trade_attribution_policy",
+    "read_trade_attribution_policy",
     "preview_trade_attribution_migration", "apply_trade_attribution_migration",
-    "record_trade_ordinary_attribution", "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
+    "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
     "contract_key_from_lot_fields",
     "lot_contract_value",
     "recover_wheel_assignment",
@@ -338,7 +344,6 @@ __all__ = [
     "assigned_stock_event_log",
     "accept_option_close_evidence",
     "adopt_existing_combo_identity",
-    "adopt_post_trade_combo_pair",
     "advance_lifecycle_case_state",
     "build_source_consumption_claim",
     "apply_lifecycle_migration_manifest",
@@ -381,6 +386,7 @@ __all__ = [
     "build_lot_identity_migration_inventory",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
+    "decision_state_snapshot_from_locked_rows",
     "deactivate_position_projection_checkpoints",
     "discover_expired_lifecycle_cases",
     "ExpiredCloseDecision",
@@ -478,6 +484,7 @@ __all__ = [
     "project_trade_event_log",
     "project_position_lots_from_trade_facts",
     "project_assigned_stock_lifecycle_from_rows",
+    "project_position_lots_and_assigned_stock_from_rows",
     "resolve_position_data_config_path",
     "resolve_position_ledger_sqlite_path",
     "record_broker_trade_close",
@@ -500,7 +507,6 @@ __all__ = [
     "record_manual_position_close",
     "record_manual_position_open",
     "record_normalized_trade_event",
-    "record_trade_event_with_wheel_intent",
     "append_and_verify_wheel_intent_consumption",
     "record_trade_event_repair",
     "record_trade_event_void",

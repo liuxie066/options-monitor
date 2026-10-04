@@ -40,7 +40,6 @@ class StrategySemantics:
     scan_requires_rv: bool
     scan_uses_underwriting_gate: bool
     scan_uses_short_vol_gate: bool
-    scan_uses_path_risk: bool
     close_advice_profile: str
     close_requires_rv: bool
     close_uses_short_vol_thesis: bool
@@ -177,7 +176,6 @@ def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySema
         scan_requires_rv=uses_underwriting,
         scan_uses_underwriting_gate=uses_underwriting,
         scan_uses_short_vol_gate=False,
-        scan_uses_path_risk=False,
         close_advice_profile=close_profile,
         close_requires_rv=uses_short_vol_thesis,
         close_uses_short_vol_thesis=uses_short_vol_thesis,
@@ -201,39 +199,6 @@ def strategy_semantics_for_side_config(
         family=family,
         profile=INSURANCE_UNDERWRITING_PROFILE,
     )
-
-
-def wants_global_path_risk_context(cfg: dict[str, Any] | None) -> bool:
-    if not isinstance(cfg, dict):
-        return False
-
-    def _uses_path_risk(node: object, *, family: str) -> bool:
-        return (
-            isinstance(node, dict)
-            and strategy_semantics_for_side_config(
-                family=family,
-                side_cfg=node,
-            ).scan_uses_path_risk
-        )
-
-    templates = cfg.get("templates")
-    if isinstance(templates, dict):
-        for profile in templates.values():
-            if isinstance(profile, dict) and (
-                _uses_path_risk(profile.get("sell_put"), family=SELL_PUT_FAMILY)
-                or _uses_path_risk(
-                    profile.get("sell_call"),
-                    family=SELL_CALL_FAMILY,
-                )
-            ):
-                return True
-    for item in cfg.get("symbols") or []:
-        if isinstance(item, dict) and (
-            _uses_path_risk(item.get("sell_put"), family=SELL_PUT_FAMILY)
-            or _uses_path_risk(item.get("sell_call"), family=SELL_CALL_FAMILY)
-        ):
-            return True
-    return False
 
 
 def resolve_combo_yield_position_role(position: dict[str, Any]) -> ComboYieldPositionRole:

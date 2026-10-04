@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -252,11 +254,34 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
         and target is not None
         and target.event_time_ms < assignment.event_time_ms
     }
+    other_lots = {
+        row["record_id"]: row["fields"] for row in rows["account_position_lots"]
+        if row["record_id"] != assignment.target_lot_id
+    }
+    target_stock_lot_id = assigned_stock_lot_id_for_event(assignment.event_id)
+
+    def disjoint_settlement(event: Any) -> bool:
+        fields = other_lots.get(event.target_lot_id)
+        if not fields or target_stock_lot_id in {
+            fields.get("source_stock_lot_id"), fields.get("source_wheel_branch_id"),
+        }:
+            return False
+        return (
+            (event.event_type == "assignment"
+             and event.contract_key.option_type == "put"
+             and fields.get("position_side") == "short")
+            or (event.event_type == "expire_close"
+                and (fields.get("position_side") == "long"
+                     or (event.contract_key.option_type == "put"
+                         and fields.get("position_side") == "short")))
+        )
+
     later = [e.event_id for e in events if e.contract_key.account == account
              and e.contract_key.underlying_symbol == key.underlying_symbol
              and e.event_id != assignment_event_id and e.event_id not in allowed_later
              and e.event_id not in historical_voids
-             and e.event_time_ms >= assignment.event_time_ms]
+             and e.event_time_ms >= assignment.event_time_ms
+             and not disjoint_settlement(e)]
     later.extend(str(s.get("stock_event_id") or s.get("event_id")) for s in rows["account_assigned_stock_events"]
                  if str(s.get("symbol") or (s.get("raw_payload") or {}).get("symbol") or "") == key.underlying_symbol
                  and int(s.get("trade_time_ms") or s.get("event_time_ms") or 0) >= assignment.event_time_ms)

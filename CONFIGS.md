@@ -41,8 +41,11 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
-- `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，同时控制只读工具、
-  指派证据和成交后的持仓刷新提示；不要放在 `markets.*` 下；
+- `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，控制 PM 只读工具、
+  Holdings 开启时的补充来源和成交后的持仓刷新提示；不要放在 `markets.*` 下；
+- `portfolio.holdings.enabled` 控制指派后分布是否补充 PM Holdings 中明确为非富途来源的资产，
+  默认关闭；富途股票、现金、MMF 和股票现价取自 OpenD，PM 的富途副本不重复计入。
+  开启预览展示 PM 原始 broker 清单，并把按账户批准的非富途原文集合绑定配置摘要；
 - 旧 `trade_intake.holdings_sync.enabled` 只保留一个版本的迁移读取，旧队列、重试、
   超时和状态目录参数不再生效；
 - account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
@@ -61,6 +64,16 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 
 Close Advice 详细固定规则见
 [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md)。
+
+### Portfolio Exposure 的 Holdings 来源配置
+
+`portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以富途 OpenD 股票、现金（含 MMF）和 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途股票、现金和 MMF 副本不会参与报价、估值或分布。PM 非富途现金计入资产分布，但不增加富途期权资金覆盖。
+
+开启前运行 `om config holdings set --enabled true` 预览。预检向 PM 读取完整原始 Holdings 切片的 broker 清单，展示每个账户的 broker 原文、`futu/non_futu/unknown` 分类、行数、纳入/排除数量与读取时间。成功读取且零合格行、无 unknown 和 unsupported 时为 `ready_empty`。预览把各账户确认的非富途 broker 原文集合写入待发布 `portfolio.holdings.approved_non_futu_brokers`，并绑定 `preview_sha256`；apply 再读 PM，集合变化会在写配置前返回 `STALE_PREVIEW`。实值 broker 归属仍须在实际启用预览中核对。
+
+apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事务生成 YAML、所有已配置市场快照和 Assistant 快照、备份并读回。PM 失败、旧版响应、未知 broker 或估值质量不完整时禁止开启；关闭不依赖 PM。旧版 `enabled=true` 而没有批准集合的配置允许加载，但只读查询暂停 PM 补充并标 partial，提示重新预览确认。启用后出现未批准的新非富途 broker 时，整份 PM 补充暂停并标 partial；已批准 broker 的行数变化无需重新批准。配置只允许全局设置，不允许市场覆盖。
+
+`portfolio_management.enabled` 仍控制更广的 PM 集成，不能代替此开关。配置切换不执行交易、指派、账本、PM Holdings 或 Feishu 写入；生产配置发布与部署另行授权。
 
 ## Symbol 并发配置
 
@@ -344,7 +357,7 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-`portfolio.runtime.json` 只在 external holdings 需要替代 env 名等兼容场景使用。它不能重新引入 Feishu `option_positions` bootstrap 或镜像。
+`portfolio.runtime.json` 只在独立 Feishu Holdings 上下文导出命令需要替代 env 名等兼容场景使用；开仓扫描不读取该表计算全局风险。它不能重新引入 Feishu `option_positions` bootstrap 或镜像。
 
 ## 禁止项
 

@@ -310,7 +310,7 @@ def test_projection_migration_activate_requires_both_evidence_files(
     assert json.loads(capsys.readouterr().out)["operation"] == "activate"
 
 
-def test_combo_confirmation_mode_is_account_scoped_and_fail_closed(
+def test_combo_confirmation_resolves_only_config_path(
     tmp_path: Path,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
@@ -332,43 +332,25 @@ def test_combo_confirmation_mode_is_account_scoped_and_fail_closed(
         encoding="utf-8",
     )
     args = type("Args", (), {"config": str(off_path)})()
-    with pytest.raises(SystemExit, match="effective mode=off"):
-        cli_mod._require_combo_confirmation_mode(
-            base=tmp_path,
-            args=args,
-            inference=inference,
-        )
-
-    confirm_path = tmp_path / "confirm.json"
-    confirm_path.write_text(
-        json.dumps(
-            {
-                "accounts": ["lx"],
-                "trade_intake": {
-                    "combo_reconciliation": {
-                        "default_mode": "off",
-                        "accounts": {"lx": "confirm"},
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    args.config = str(confirm_path)
-    assert cli_mod._require_combo_confirmation_mode(
+    assert cli_mod._combo_confirmation_config_path(
         base=tmp_path,
         args=args,
         inference=inference,
-    )["mode"] == "confirm"
+    ) == off_path
 
-    config = json.loads(confirm_path.read_text(encoding="utf-8"))
-    config["trade_intake"]["combo_reconciliation"]["accounts"]["lx"] = "auto"
-    confirm_path.write_text(json.dumps(config), encoding="utf-8")
-    assert cli_mod._require_combo_confirmation_mode(
+    args.config = None
+    inferred_path = tmp_path / "config.us.json"
+    inferred_path.write_text("{}", encoding="utf-8")
+    assert cli_mod._combo_confirmation_config_path(
         base=tmp_path,
         args=args,
         inference=inference,
-    )["mode"] == "auto"
+    ) == inferred_path
+    with pytest.raises(SystemExit, match="cannot infer config"):
+        cli_mod._combo_confirmation_config_path(base=tmp_path, args=args, inference={"market": "unknown"})
+    args.config = "missing.json"
+    with pytest.raises(SystemExit, match="requires a runtime config"):
+        cli_mod._combo_confirmation_config_path(base=tmp_path, args=args, inference=inference)
 
 
 def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
@@ -1977,6 +1959,7 @@ def test_option_positions_cli_adopt_combo_identity_dry_run(
             price=2.0,
             currency="HKD",
             source="test",
+            multiplier=100,
             lot_id=f"lot-{event_id}",
             raw_payload={
                 "fields": {
@@ -2443,3 +2426,14 @@ def test_lifecycle_receipt_cli_applied_idle_reports_no_write(
     assert payload["write_applied"] is False
     assert calls == []
     assert repo.list_trade_lifecycle_notification_batches() == []
+
+
+@pytest.mark.parametrize("value", ["100.00000000000000001", "100.5", "nan", "inf", "0", "-1"])
+def test_adjust_cli_validates_multiplier_before_float_conversion(monkeypatch, value):
+    import src.interfaces.cli.option_positions as cli_mod
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo",
+                        lambda **_: pytest.fail("invalid raw CLI multiplier must fail before opening the ledger"))
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["adjust", "--record-id", "lot-1", "--multiplier", value, "--dry-run"])
+    assert exc.value.code == 2

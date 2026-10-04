@@ -1,0 +1,101 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.4",
+  "base": {
+    "tag": "v4.1.3",
+    "commit": "0fecf98dcfe32a7675457ce390b2ea3a184c9fda"
+  },
+  "reviewed_head": "f1738c6836e061ae3f9acb28c127d6f4ecfda117",
+  "commits": [
+    {
+      "sha": "eae251f6ec7048410e1d24d8162f12afa7cd0d8c",
+      "subject": "chore(gateflow): accept performance optimization plan"
+    },
+    {
+      "sha": "3a1de1e517f40197ab0afa88d3376f3415734e0f",
+      "subject": "chore(gateflow): accept equivalent matching guard amendment"
+    },
+    {
+      "sha": "db4524ff680118c08c69e3661461a90b2f9a4178",
+      "subject": "perf(runtime): avoid repeated matching and immutable report work"
+    },
+    {
+      "sha": "06a5fb970b9bc8718a46934e517bec473e481719",
+      "subject": "perf(ledger): share coherent projection and history work"
+    },
+    {
+      "sha": "6c964746143ffe2ba4953140f897f2fe9364942a",
+      "subject": "chore(gateflow): accept performance optimization deepreview"
+    },
+    {
+      "sha": "f1738c6836e061ae3f9acb28c127d6f4ecfda117",
+      "subject": "Merge pull request #435 from liuxie066/codex/performance-optimization-20261004"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "减少 Combo 匹配、财报证据标注、Wheel 投影、账户决策最终化和 Close-advice 报告回退中的重复计算与读取，保持现有结果和失败语义。",
+      "commits": [
+        "db4524ff680118c08c69e3661461a90b2f9a4178",
+        "06a5fb970b9bc8718a46934e517bec473e481719"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "eae251f6ec7048410e1d24d8162f12afa7cd0d8c",
+      "reason": "Empty Gateflow review checkpoint; no additional source or user-visible behavior."
+    },
+    {
+      "commit": "3a1de1e517f40197ab0afa88d3376f3415734e0f",
+      "reason": "Empty Gateflow review checkpoint; no additional source or user-visible behavior."
+    },
+    {
+      "commit": "6c964746143ffe2ba4953140f897f2fe9364942a",
+      "reason": "Empty Gateflow review checkpoint; no additional source or user-visible behavior."
+    },
+    {
+      "commit": "f1738c6836e061ae3f9acb28c127d6f4ecfda117",
+      "reason": "Merge commit only combines the two source commits mapped to the release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "eae251f6ec7048410e1d24d8162f12afa7cd0d8c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    },
+    {
+      "commit": "3a1de1e517f40197ab0afa88d3376f3415734e0f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    },
+    {
+      "commit": "db4524ff680118c08c69e3661461a90b2f9a4178",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    },
+    {
+      "commit": "06a5fb970b9bc8718a46934e517bec473e481719",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    },
+    {
+      "commit": "6c964746143ffe2ba4953140f897f2fe9364942a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    },
+    {
+      "commit": "f1738c6836e061ae3f9acb28c127d6f4ecfda117",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/435"
+      ]
+    }
+  ]
+}

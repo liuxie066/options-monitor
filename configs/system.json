@@ -30,6 +30,9 @@
       "futu": {
         "host": "127.0.0.1",
         "port": 11111
+      },
+      "holdings": {
+        "enabled": false
       }
     },
     "portfolio_management": {

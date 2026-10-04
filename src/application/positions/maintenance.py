@@ -171,38 +171,6 @@ def _symbol_aliases(cfg: dict[str, Any]) -> dict[str, Any] | None:
     return aliases if isinstance(aliases, dict) else None
 
 
-def _account_type(cfg: dict[str, Any], account: str | None) -> str:
-    if not account:
-        return ""
-    accounts = cfg.get("accounts") if isinstance(cfg, dict) else {}
-    if not isinstance(accounts, dict):
-        return ""
-    raw = accounts.get(str(account).strip().lower())
-    if not isinstance(raw, dict):
-        return ""
-    return str(raw.get("type") or "").strip().lower()
-
-
-def _mark_manual_expiry_review_required(
-    positions: list[dict[str, Any]],
-    *,
-    cfg: dict[str, Any],
-    account: str | None,
-) -> list[dict[str, Any]]:
-    account_type = _account_type(cfg, account)
-    if account_type != "external_holdings":
-        return positions
-    out: list[dict[str, Any]] = []
-    for item in positions:
-        row = dict(item)
-        row["_auto_close_skip_reason"] = "manual_expiry_review_required"
-        row["_auto_close_skip_message"] = (
-            "account uses external/manual holdings; expiry close requires manual assignment/expiry review"
-        )
-        out.append(row)
-    return out
-
-
 def _requires_expiry_assignment_quote(
     fields: dict[str, Any],
     *,
@@ -633,7 +601,6 @@ def run_expired_position_maintenance_for_account(
         symbol_aliases=_symbol_aliases(cfg),
     )
     _emit_auto_close_stage(account, "positions_load_finished")
-    positions = _mark_manual_expiry_review_required(positions, cfg=cfg, account=account)
     initial_decisions = [
         _payload(item)
         for item in plan_expired_position_closes(

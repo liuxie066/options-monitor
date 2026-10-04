@@ -115,7 +115,6 @@ def add_setup_commands(subparsers: Any) -> None:
     setup_init.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_init.add_argument("--account-label", default=None)
     setup_init.add_argument("--futu-acc-id", default=None)
-    setup_init.add_argument("--external-holdings-account", default=None)
     setup_init.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
                             help="monitored US symbol; repeat for multiple symbols")
     setup_init.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None,
@@ -189,7 +188,6 @@ def run_setup_init(
         "markets": markets,
         "futu_acc_id": futu_acc_id,
         "account_label": account_label,
-        "external_holdings_account": args.external_holdings_account,
         "us_symbols": symbols["us"],
         "hk_symbols": symbols["hk"],
         "symbol_policies": symbol_policies,

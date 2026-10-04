@@ -593,7 +593,7 @@ def test_validate_config_accepts_supported_opend_rate_limit_endpoints() -> None:
     validate_config(cfg)
 
 
-def test_validate_config_accepts_external_holdings_account_settings() -> None:
+def test_validate_config_rejects_external_holdings_account_settings() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -617,7 +617,8 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
         'symbols': [_put_base_symbol()],
     }
 
-    validate_config(cfg)
+    with pytest.raises(SystemExit, match="source_by_account is retired"):
+        validate_config(cfg)
 
 
 def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_call_fields() -> None:

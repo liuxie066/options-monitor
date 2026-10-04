@@ -129,6 +129,35 @@ def _snapshot():
     }
 
 
+def test_holiday_fx_values_distribution_without_authorizing_cash_coverage():
+    evidence = _evidence(
+        holdings=[_holding("HKD-CASH", "港币现金", "cash", quantity=100, market_value_cny=92, currency="HKD")],
+        quotes=[_quote("0700.HK")],
+    )
+    evidence["fx_rates_to_cny"] = {"HKDCNY": 0.92}
+    evidence["capacity_fx_rates_to_cny"] = {}
+    evidence["fx_observation"] = {
+        "pairs": {"HKDCNY": {
+            "source": "tencent_quote",
+            "quote_at_utc": "2026-09-30T07:00:00+00:00",
+            "quality": "holiday_carried",
+        }},
+    }
+
+    result = project_assignment_scenario(
+        accounts=["lx"], portfolio_evidence=evidence,
+        option_positions=[_option("put-1", option_type="put")], snapshot=_snapshot(),
+    )
+
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert result["cash_coverage"]["gross_put_requirement_cny"] is None
+    assert result["cash_coverage"]["terminal_funding_gap_cny"] is None
+    assert result["account_breakdown"][0]["funding_gap_cny"] is None
+    assert result["expiration_ladder"][0]["funding_gap_cny"] is None
+    assert result["assignments"][0]["principal_cny"] == "32200.00"
+    assert result["fx_facts"][0]["quality"] == "holiday_carried"
+
+
 def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
     result = project_assignment_scenario(
         accounts=["lx"],
@@ -429,3 +458,90 @@ def test_untrusted_evidence_is_unavailable():
     assert result["status"] == "unavailable"
     assert result["portfolio_evidence"]["trust_status"] == "untrusted"
     assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+
+
+def test_non_futu_put_keeps_native_change_without_using_futu_cash_or_same_symbol_quote():
+    non_futu = _us_put()
+    non_futu["broker"] = "IBKR"
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(
+            holdings=[_holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=100)],
+            quotes=[_quote("NVDA", currency="USD", price=120, cny_price=864, fx=7.2)],
+        ),
+        option_positions=[non_futu],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "partial"
+    assert result["summary"]["assignment_count"] == 1
+    assert result["assignments"][0]["cash_delta_native"] == "-10000.000000"
+    assert result["assignments"][0]["stock_value_delta_cny"] is None
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "100.00"
+    assert result["cash_coverage"]["gross_put_requirement_cny"] == "0.00"
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] == "100.00"
+    assert result["expiration_ladder"] == []
+    assert result["account_breakdown"][0]["put_assignment_outflow_cny"] == "0.00"
+    assert result["distribution"]["net_assets_cny"] is None
+    assert any(row["broker"] == "IBKR" and row["value_cny"] is None for row in result["distribution"]["rows"])
+
+
+def test_same_account_signed_cash_currencies_keep_gross_assets_and_liabilities():
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(
+            holdings=[
+                _holding("USD-CASH", "美元现金", "cash", quantity=-100, market_value_cny=-100, currency="USD"),
+                _holding("HKD-CASH", "港币现金", "cash", quantity=200, market_value_cny=200, currency="HKD"),
+            ]
+        ),
+        option_positions=[],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "complete"
+    assert result["distribution"]["gross_assets_cny"] == "200.00"
+    assert result["distribution"]["liabilities_cny"] == "100.00"
+    assert result["distribution"]["net_assets_cny"] == "100.00"
+    assert {row["currency"] for row in result["distribution"]["rows"]} == {"USD", "HKD"}
+    assert result["distribution"]["liabilities"][0]["currency"] == "USD"
+
+
+def test_cross_account_economic_net_keeps_local_funding_gap():
+    lx_cash = _holding("CNY-CASH", "现金", "cash", quantity=-100, market_value_cny=-100)
+    sy_cash = _holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=100)
+    sy_cash["account"] = "sy"
+    evidence = _evidence(holdings=[lx_cash, sy_cash])
+    evidence["scope"]["accounts"] = ["lx", "sy"]
+    evidence["account_status"].append({"account": "sy", "status": "complete"})
+    result = project_assignment_scenario(
+        accounts=["lx", "sy"],
+        portfolio_evidence=evidence,
+        option_positions=[],
+        snapshot=_snapshot(),
+    )
+
+    assert result["cash_coverage"]["terminal_funding_gap_cny"] == "0.00"
+    assert result["distribution"]["gross_assets_cny"] == "100.00"
+    assert result["distribution"]["liabilities_cny"] == "100.00"
+    assert result["distribution"]["net_assets_cny"] == "0.00"
+    assert {row["account"] for row in result["distribution"]["liabilities"]} == {"lx"}
+    assert {row["account"]: row["funding_gap_cny"] for row in result["account_breakdown"]} == {
+        "lx": "100.00", "sy": "0.00",
+    }
+
+
+def test_explicit_missing_scenario_fx_does_not_use_quote_embedded_rate():
+    evidence = _evidence(quotes=[_quote("NVDA", currency="USD", price=120, cny_price=864, fx=7.2)])
+    evidence["fx_rates_to_cny"] = {}
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=evidence,
+        option_positions=[_us_put()],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "partial"
+    assert result["assignments"][0]["principal_cny"] is None
+    assert result["cash_coverage"]["gross_put_requirement_cny"] is None
+    assert any("fx_evidence_missing" in warning for warning in result["warnings"])

@@ -66,10 +66,9 @@ def add_run_commands(subparsers: Any) -> None:
     heartbeat_check.add_argument("--config", required=True)
     heartbeat_check.add_argument("--runtime-root", required=True)
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
-    trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-enable", "attribution-migrate"])
+    trade_intake.add_argument("action", nargs="?", default="listen", choices=["listen", "attribution-migrate"])
     trade_intake.add_argument("--effective-from-ms", type=int)
     trade_intake.add_argument("--actor")
-    trade_intake.add_argument("--request-id")
     trade_intake.add_argument("--manifest")
     trade_intake.add_argument("--backup-path")
     trade_intake.add_argument("--writers-stopped", action="store_true")
@@ -88,6 +87,8 @@ def add_run_commands(subparsers: Any) -> None:
     trade_intake.add_argument("--deal-json", default=None)
     trade_intake.add_argument("--execution-file", default=None)
     trade_intake.add_argument("--inbox-id", default=None)
+    trade_intake.add_argument("--recover-skipped", action="store_true")
+    trade_intake.add_argument("--expected-recovery-hash", default=None)
     trade_intake.add_argument("--retry-failed", action="store_true")
     trade_intake.add_argument("--reconcile-state", action="store_true")
     trade_intake.add_argument("--compensate-receipts", action="store_true")
@@ -133,7 +134,7 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
     intake_argv: list[str] = ["--config", str(args.config)]
     if getattr(args, "action", "listen") != "listen":
         intake_argv.append(args.action)
-    for name in ("effective_from_ms", "actor", "request_id", "manifest", "backup_path"):
+    for name in ("effective_from_ms", "actor", "manifest", "backup_path"):
         value = getattr(args, name, None)
         if value is not None:
             intake_argv.extend(["--" + name.replace("_", "-"), str(value)])
@@ -167,6 +168,10 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
         intake_argv.extend(["--execution-file", str(args.execution_file)])
     if args.inbox_id:
         intake_argv.extend(["--inbox-id", str(args.inbox_id)])
+    if args.recover_skipped:
+        intake_argv.append("--recover-skipped")
+    if args.expected_recovery_hash:
+        intake_argv.extend(["--expected-recovery-hash", str(args.expected_recovery_hash)])
     if args.retry_failed:
         intake_argv.append("--retry-failed")
     if args.reconcile_state:

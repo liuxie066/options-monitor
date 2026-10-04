@@ -152,6 +152,7 @@ def derive_effective_lifecycle_timing(
         ).strip().lower(),
         "timing_policy_hash": canonical_hash(timing),
         "first_option_close_received_at_ms": received_at_ms,
+        "last_option_close_received_at_ms": max(accepted),
     }
 
 

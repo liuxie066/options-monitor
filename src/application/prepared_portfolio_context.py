@@ -22,16 +22,11 @@ from src.application.account_config import (
 from src.application.config_loader import resolve_data_config_path
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.portfolio_context_service import (
-    expected_portfolio_context_account,
     load_account_portfolio_context,
-    load_holdings_portfolio_shared_context,
     portfolio_context_account_mismatch_reason,
-    with_context_source,
 )
-from src.application.strategy_policy import wants_global_path_risk_context
 from src.infrastructure.io_utils import (
     atomic_write_json,
-    is_fresh,
     load_cached_json,
 )
 from src.application.source_receipts import sha256_bytes
@@ -46,6 +41,10 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import required_text
 from functools import partial
 from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
+from src.application.current_fx_run import load_run_fx_snapshot
+from src.infrastructure.exchange_rates import (
+    project_exchange_rate_snapshot,
+)
 
 
 _required_text = partial(required_text, error=lambda m: PreparedPortfolioContextError(m))
@@ -69,6 +68,7 @@ def prepare_portfolio_contexts(
     account_state_dirs: Mapping[str, Path],
     shared_state_dir: Path,
     timeout_sec: float,
+    fx_snapshot_sha256: str | None = None,
     python_executable: Path | None = None,
     kill_grace_sec: float = DEFAULT_KILL_GRACE_SEC,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
@@ -191,7 +191,7 @@ def prepare_portfolio_contexts(
                         "reason": "prepared_portfolio_context_existing_invalid",
                     }
                 try:
-                    load_prepared_portfolio_context(
+                    existing_context = load_prepared_portfolio_context(
                         manifest_path=existing_path,
                         expected_base=base_path,
                         expected_run_id=run_id_norm,
@@ -202,6 +202,11 @@ def prepare_portfolio_contexts(
                         expected_manifest_sha256=existing_digest,
                         expected_runtime_config=account_config,
                     )
+                    if fx_snapshot_sha256 is not None and (
+                        not isinstance(existing_context, dict)
+                        or existing_context.get("fx_snapshot_sha256") != fx_snapshot_sha256
+                    ):
+                        raise PreparedPortfolioContextError("prepared portfolio FX snapshot mismatch")
                 except PreparedPortfolioContextError as exc:
                     existing_manifest = {
                         **existing_manifest,
@@ -263,6 +268,7 @@ def prepare_portfolio_contexts(
                 "base": str(Path(base).resolve()),
                 "state_dir": str(states_by_account[account].resolve()),
                 "shared_state_dir": str(run_state_dir),
+                "fx_snapshot_sha256": fx_snapshot_sha256,
                 "account_config_path": str(authority.state_path),
                 "account_config_compatibility_path": str(
                     authority.compatibility_path
@@ -429,6 +435,8 @@ def prepare_portfolio_contexts(
                 manifest["reason"] = str(
                     result.get("reason") or "portfolio_context_worker_failed"
                 ).strip()
+                if isinstance(result.get("cash_snapshot"), dict):
+                    manifest["cash_snapshot"] = result["cash_snapshot"]
                 if result.get("error_type"):
                     manifest["error_type"] = str(result["error_type"])
                 if result.get("error_code"):
@@ -671,6 +679,7 @@ def run_worker(request_path: Path) -> int:
         _required_text(request.get("shared_state_dir"), "shared_state_dir")
     ).resolve()
     logs: list[str] = []
+    context: dict[str, Any] | None = None
     try:
         account_config_sha256 = _required_text(
             request.get("account_config_sha256"),
@@ -707,7 +716,6 @@ def run_worker(request_path: Path) -> int:
             account=account,
         )
         portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-        runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
         data_config = resolve_data_config_path(
             base=base,
             data_config=portfolio_cfg.get("data_config"),
@@ -718,34 +726,28 @@ def run_worker(request_path: Path) -> int:
             account=account,
         )
         source = source_plan.requested_source
+        fx_hash = request.get("fx_snapshot_sha256")
+        if fx_hash is not None:
+            fx_snapshot, sealed_hash = load_run_fx_snapshot(base=base, run_id=run_id)
+            if sealed_hash != fx_hash:
+                raise PreparedPortfolioContextError("worker FX snapshot mismatch")
+            fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
         context = load_account_portfolio_context(
-            base=base,
-            data_config=str(data_config),
             market=broker,
             account=account,
-            ttl_sec=int(runtime.get("portfolio_context_ttl_sec", 900) or 0),
             state_dir=state_dir,
-            shared_state_dir=shared_state_dir,
             log=logs.append,
             runtime_config=cfg,
             portfolio_source=str(source),
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
-            is_fresh_fn=is_fresh,
+            exchange_rate_cache_path=base / "output_shared" / "state" / "rate_cache.json",
+            **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
             load_json_fn=load_cached_json,
             write_cache=False,
         )
-        if wants_global_path_risk_context(cfg):
-            shared = load_holdings_portfolio_shared_context(
-                data_config_path=Path(data_config),
-                broker=None,
-            )
-            all_accounts = shared.get("all_accounts") if isinstance(shared, dict) else None
-            if isinstance(all_accounts, dict):
-                context = dict(context)
-                context["_global_portfolio_ctx"] = with_context_source(
-                    dict(all_accounts),
-                    "global_prepared",
-                )
+        if fx_hash is not None:
+            context = dict(context)
+            context["fx_snapshot_sha256"] = fx_hash
         source_name, source_account = _resolve_context_source_binding(
             config=cfg,
             account=account,
@@ -793,6 +795,10 @@ def run_worker(request_path: Path) -> int:
             "error_type": type(exc).__name__,
             "logs": logs[-20:],
         }
+    if result["status"] == "unavailable" and isinstance(context, dict):
+        snapshot = context.get("cash_snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("status") in {"unknown", "stale"}:
+            result["cash_snapshot"] = snapshot
     result_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(result_path, result)
     return 0
@@ -906,15 +912,11 @@ def _resolve_context_source_binding(
     source_name = str(
         context.get("portfolio_source_name") or plan.primary_source
     ).strip().lower()
-    if source_name not in _allowed_context_sources(plan):
+    if source_name != "futu":
         raise PreparedPortfolioContextError(
             "prepared portfolio context source is not allowed by account config"
         )
-    source_account = expected_portfolio_context_account(
-        source_name=source_name,
-        account=account,
-        holdings_account=plan.holdings_account,
-    )
+    source_account = account
     if not source_account:
         raise PreparedPortfolioContextError(
             "prepared portfolio context source account is unavailable"
@@ -928,16 +930,6 @@ def _resolve_context_source_binding(
             f"prepared portfolio context account mismatch: {mismatch}"
         )
     return source_name, source_account
-
-
-def _allowed_context_sources(plan: Any) -> set[str]:
-    if str(plan.account_type).strip().lower() == "external_holdings":
-        return {"external_holdings", "holdings"}
-    if str(plan.requested_source).strip().lower() == "auto":
-        return {"futu", "holdings", "external_holdings"}
-    if str(plan.primary_source).strip().lower() == "futu":
-        return {"futu"}
-    return {"holdings", "external_holdings"}
 
 
 def _validate_prepared_source_binding(

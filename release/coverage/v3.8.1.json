@@ -1,0 +1,480 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.8.1",
+  "base": {
+    "tag": "v3.8.0",
+    "commit": "3085bca9dd5055061c7e62efc7df4bee0884ce04"
+  },
+  "reviewed_head": "684d5ba6d68293ce460e8c240e3d91dccc4a2e6c",
+  "commits": [
+    {
+      "sha": "f442ee750406bfd80e3549ea5b489d1a9d4ecdad",
+      "subject": "fix(service): delegate rollback service reconcile to the target release"
+    },
+    {
+      "sha": "da531dfbef20c4be5eeb7f0926caf4054773136b",
+      "subject": "chore(merge): sync main into rollback renderer fix"
+    },
+    {
+      "sha": "975351a4e50781aa5dd3483d3805e4270705e839",
+      "subject": "Merge pull request #385 from liuxie066/codex/rollback-renderer-fix"
+    },
+    {
+      "sha": "52581d2aff474efe94484be3d218b5593090d06b",
+      "subject": "feat(bot): support trusted cross-market read scope"
+    },
+    {
+      "sha": "fce03a2bcad5e89fb697930659fccb353fe62788",
+      "subject": "docs(bot): describe cross-market read boundary"
+    },
+    {
+      "sha": "ac1271d18e8bc64be72c1b332c0e0039c18e521c",
+      "subject": "refactor(accounts): retire external Holdings source"
+    },
+    {
+      "sha": "b199beab282a0b1460e769213703945dec1c2e6c",
+      "subject": "Merge pull request #386 from liuxie066/codex/bot-cross-market-read"
+    },
+    {
+      "sha": "71e1263abc7f97797078bbd0fe28c539992f4997",
+      "subject": "chore(merge): sync main into account retirement"
+    },
+    {
+      "sha": "313b8609ec819d8f7aa57eb29b73d32ee1b9c086",
+      "subject": "Merge pull request #387 from liuxie066/codex/external-holdings-retirement"
+    },
+    {
+      "sha": "64d8713d0c1d8ef9c55c1014c4fd007de0c14de7",
+      "subject": "fix(positions): release collateral for confirmed closed option legs"
+    },
+    {
+      "sha": "5c86a3dc4a2ea7cc278315cd476b36642a189fa0",
+      "subject": "chore(merge): sync main into closed option collateral fix"
+    },
+    {
+      "sha": "ef75a799af4ea1e921a4a1be88cecb7a4a849b77",
+      "subject": "Merge pull request #388 from liuxie066/codex/brief-closed-put-collateral"
+    },
+    {
+      "sha": "ab6fe5c33657bd12c013cb2c91e0e55b39befa8c",
+      "subject": "fix(bot): bind read cursors and cancel across grant generations"
+    },
+    {
+      "sha": "ebe02c17cf937cea3f699b82cd3b0d6c07a69004",
+      "subject": "Merge pull request #389 from liuxie066/codex/bot-review-fixes"
+    },
+    {
+      "sha": "93b0e4eabcee55468417cbe8fd53c6d6acaa3a16",
+      "subject": "fix(positions): preserve settlement uncertainty for closed option legs"
+    },
+    {
+      "sha": "e95f53cfd4594ad583ff1ce71ddf684e160212ef",
+      "subject": "chore(merge): sync main into collateral review fix"
+    },
+    {
+      "sha": "569c2fe60a92960eb875926ffedf28dd16e6504a",
+      "subject": "Merge pull request #390 from liuxie066/codex/brief-collateral-review-fix"
+    },
+    {
+      "sha": "019827eb353d5bdd42f288f9b5be591e0584304d",
+      "subject": "feat(config): add Portfolio Exposure Holdings toggle"
+    },
+    {
+      "sha": "fd9a944571457f0ee026afa15dcdb597b63967d3",
+      "subject": "chore(merge): sync main into Holdings config branch"
+    },
+    {
+      "sha": "4fb3aafb605d06f172a075157ca3f36dc9b7a883",
+      "subject": "fix(trades): reconcile assigned stock deals across arrival order"
+    },
+    {
+      "sha": "fc96d1e85c3db98c19a5d3a84f348a097bb2ebec",
+      "subject": "feat(wheel): bootstrap verified Combo assignments"
+    },
+    {
+      "sha": "481b843849055a6a55aebd6d22d79a871e11fbb2",
+      "subject": "chore(merge): sync main into assignment stock match"
+    },
+    {
+      "sha": "fde15045fb53757cf4fcd69a04367e81e4f593ed",
+      "subject": "chore(wheel): merge latest main"
+    },
+    {
+      "sha": "3122ff917add79012c9fe33dc70059fa3174e756",
+      "subject": "fix(config): align Holdings preflight with PM contract"
+    },
+    {
+      "sha": "e5304075fdef2b51a9671d8cb81db0ec83a8518b",
+      "subject": "Merge pull request #395 from liuxie066/codex/combo-wheel-assignment"
+    },
+    {
+      "sha": "988ce90e9f2b98c23a712c1e0690aae5d296a4da",
+      "subject": "chore(merge): sync main into Holdings config"
+    },
+    {
+      "sha": "1bb08e4f4ae720e8034c8018ccc281294475d3b4",
+      "subject": "Merge pull request #391 from liuxie066/codex/portfolio-exposure-holdings"
+    },
+    {
+      "sha": "87e67c8a936d91dca4b613e2793ff195647228b2",
+      "subject": "fix(trades): recover historical manual-required stock assignment"
+    },
+    {
+      "sha": "3a5b4a586bbfe4a790f0a7f56eb5992680a8f41f",
+      "subject": "chore(merge): sync main into assignment recovery"
+    },
+    {
+      "sha": "ca2bfec210291a78770ed473c42e49174098219e",
+      "subject": "Merge pull request #397 from liuxie066/codex/assignment-stock-match"
+    },
+    {
+      "sha": "142cc2da3f623682cc0fdadd3303d042733b179f",
+      "subject": "fix(portfolio): preserve global holdings risk without observation time"
+    },
+    {
+      "sha": "684d5ba6d68293ce460e8c240e3d91dccc4a2e6c",
+      "subject": "Merge pull request #396 from liuxie066/codex/pr-387-review-fixes"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "退役账户级 `external_holdings` 类型、`holdings_account` 和指向 Holdings 的账户来源映射；旧配置现在明确报错，全局 Holdings 风险数据仍保留。",
+      "commits": [
+        "ac1271d18e8bc64be72c1b332c0e0039c18e521c"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Bot 支持经显式授权的跨市场只读访问，并按市场、账户和授权代际隔离会话与数据。",
+      "commits": [
+        "52581d2aff474efe94484be3d218b5593090d06b",
+        "fce03a2bcad5e89fb697930659fccb353fe62788"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增默认关闭的全局 `portfolio.holdings.enabled` 开关及预览、确认写入流程；本版不会因该开关改变 Portfolio Exposure 计算结果。",
+      "commits": [
+        "019827eb353d5bdd42f288f9b5be591e0584304d",
+        "3122ff917add79012c9fe33dc70059fa3174e756"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "已验证的外部 Combo Yield 卖腿指派可按历史 Wheel 激活窗口自动创建相反方向的监控分支；历史漏建分支仍需显式恢复。",
+      "commits": [
+        "fc96d1e85c3db98c19a5d3a84f348a097bb2ebec"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "回滚时改由目标 release 执行服务对账，并严格检查子进程结果和激活状态快照。",
+      "commits": [
+        "f442ee750406bfd80e3549ea5b489d1a9d4ecdad"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已确认关闭的期权腿不再占用 Daily Brief 的 Put 现金担保或 Call 锁定股份；结算未确认时仍保守标记开仓资金不可用。",
+      "commits": [
+        "64d8713d0c1d8ef9c55c1014c4fd007de0c14de7",
+        "93b0e4eabcee55468417cbe8fd53c6d6acaa3a16"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 交易归因翻页绑定原查询范围，香港标的先规范化；撤销授权会取消跨读取代际的在途分析。",
+      "commits": [
+        "ab6fe5c33657bd12c013cb2c91e0e55b39befa8c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "富途股票交割成交与期权指派乱序到达时按精确证据配对，并支持对历史人工待处理行做受控恢复；缺乏唯一证据时保留待核实。",
+      "commits": [
+        "4fb3aafb605d06f172a075157ca3f36dc9b7a883",
+        "87e67c8a936d91dca4b613e2793ff195647228b2"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Holdings 记录更新时间不再冒充持仓观察时间；观察时间未知时保留风险计算并提示，旧假可信缓存和不完整 Feishu 分页会被拒绝。",
+      "commits": [
+        "142cc2da3f623682cc0fdadd3303d042733b179f"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "da531dfbef20c4be5eeb7f0926caf4054773136b",
+      "reason": "PR #385 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "975351a4e50781aa5dd3483d3805e4270705e839",
+      "reason": "PR #385 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "b199beab282a0b1460e769213703945dec1c2e6c",
+      "reason": "PR #386 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "71e1263abc7f97797078bbd0fe28c539992f4997",
+      "reason": "PR #387 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "313b8609ec819d8f7aa57eb29b73d32ee1b9c086",
+      "reason": "PR #387 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "5c86a3dc4a2ea7cc278315cd476b36642a189fa0",
+      "reason": "PR #388 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "ef75a799af4ea1e921a4a1be88cecb7a4a849b77",
+      "reason": "PR #388 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "ebe02c17cf937cea3f699b82cd3b0d6c07a69004",
+      "reason": "PR #389 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "e95f53cfd4594ad583ff1ce71ddf684e160212ef",
+      "reason": "PR #390 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "569c2fe60a92960eb875926ffedf28dd16e6504a",
+      "reason": "PR #390 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "fd9a944571457f0ee026afa15dcdb597b63967d3",
+      "reason": "PR #391 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "481b843849055a6a55aebd6d22d79a871e11fbb2",
+      "reason": "PR #397 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "fde15045fb53757cf4fcd69a04367e81e4f593ed",
+      "reason": "PR #395 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "e5304075fdef2b51a9671d8cb81db0ec83a8518b",
+      "reason": "PR #395 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "988ce90e9f2b98c23a712c1e0690aae5d296a4da",
+      "reason": "PR #391 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "1bb08e4f4ae720e8034c8018ccc281294475d3b4",
+      "reason": "PR #391 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "3a5b4a586bbfe4a790f0a7f56eb5992680a8f41f",
+      "reason": "PR #397 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "ca2bfec210291a78770ed473c42e49174098219e",
+      "reason": "PR #397 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    },
+    {
+      "commit": "684d5ba6d68293ce460e8c240e3d91dccc4a2e6c",
+      "reason": "PR #396 的同步或合并提交；实际变化已由同一 PR 的开发提交说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "f442ee750406bfd80e3549ea5b489d1a9d4ecdad",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/385"
+      ]
+    },
+    {
+      "commit": "da531dfbef20c4be5eeb7f0926caf4054773136b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/385"
+      ]
+    },
+    {
+      "commit": "975351a4e50781aa5dd3483d3805e4270705e839",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/385"
+      ]
+    },
+    {
+      "commit": "52581d2aff474efe94484be3d218b5593090d06b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/386"
+      ]
+    },
+    {
+      "commit": "fce03a2bcad5e89fb697930659fccb353fe62788",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/386"
+      ]
+    },
+    {
+      "commit": "ac1271d18e8bc64be72c1b332c0e0039c18e521c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/387"
+      ]
+    },
+    {
+      "commit": "b199beab282a0b1460e769213703945dec1c2e6c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/386"
+      ]
+    },
+    {
+      "commit": "71e1263abc7f97797078bbd0fe28c539992f4997",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/387"
+      ]
+    },
+    {
+      "commit": "313b8609ec819d8f7aa57eb29b73d32ee1b9c086",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/387"
+      ]
+    },
+    {
+      "commit": "64d8713d0c1d8ef9c55c1014c4fd007de0c14de7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/388"
+      ]
+    },
+    {
+      "commit": "5c86a3dc4a2ea7cc278315cd476b36642a189fa0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/388"
+      ]
+    },
+    {
+      "commit": "ef75a799af4ea1e921a4a1be88cecb7a4a849b77",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/388"
+      ]
+    },
+    {
+      "commit": "ab6fe5c33657bd12c013cb2c91e0e55b39befa8c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/389"
+      ]
+    },
+    {
+      "commit": "ebe02c17cf937cea3f699b82cd3b0d6c07a69004",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/389"
+      ]
+    },
+    {
+      "commit": "93b0e4eabcee55468417cbe8fd53c6d6acaa3a16",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/390"
+      ]
+    },
+    {
+      "commit": "e95f53cfd4594ad583ff1ce71ddf684e160212ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/390"
+      ]
+    },
+    {
+      "commit": "569c2fe60a92960eb875926ffedf28dd16e6504a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/390"
+      ]
+    },
+    {
+      "commit": "019827eb353d5bdd42f288f9b5be591e0584304d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/391"
+      ]
+    },
+    {
+      "commit": "fd9a944571457f0ee026afa15dcdb597b63967d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/391"
+      ]
+    },
+    {
+      "commit": "4fb3aafb605d06f172a075157ca3f36dc9b7a883",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/397"
+      ]
+    },
+    {
+      "commit": "fc96d1e85c3db98c19a5d3a84f348a097bb2ebec",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/395"
+      ]
+    },
+    {
+      "commit": "481b843849055a6a55aebd6d22d79a871e11fbb2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/397"
+      ]
+    },
+    {
+      "commit": "fde15045fb53757cf4fcd69a04367e81e4f593ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/395"
+      ]
+    },
+    {
+      "commit": "3122ff917add79012c9fe33dc70059fa3174e756",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/391"
+      ]
+    },
+    {
+      "commit": "e5304075fdef2b51a9671d8cb81db0ec83a8518b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/395"
+      ]
+    },
+    {
+      "commit": "988ce90e9f2b98c23a712c1e0690aae5d296a4da",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/391"
+      ]
+    },
+    {
+      "commit": "1bb08e4f4ae720e8034c8018ccc281294475d3b4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/391"
+      ]
+    },
+    {
+      "commit": "87e67c8a936d91dca4b613e2793ff195647228b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/397"
+      ]
+    },
+    {
+      "commit": "3a5b4a586bbfe4a790f0a7f56eb5992680a8f41f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/397"
+      ]
+    },
+    {
+      "commit": "ca2bfec210291a78770ed473c42e49174098219e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/397"
+      ]
+    },
+    {
+      "commit": "142cc2da3f623682cc0fdadd3303d042733b179f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/396"
+      ]
+    },
+    {
+      "commit": "684d5ba6d68293ce460e8c240e3d91dccc4a2e6c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/396"
+      ]
+    }
+  ]
+}

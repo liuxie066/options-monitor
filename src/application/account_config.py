@@ -14,8 +14,7 @@ from src.application.symbol_mutations import normalize_symbol_read
 
 DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
-ACCOUNT_TYPE_EXTERNAL_HOLDINGS = "external_holdings"
-ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU, ACCOUNT_TYPE_EXTERNAL_HOLDINGS)
+ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU,)
 _ACCOUNT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -25,8 +24,6 @@ class AccountPortfolioSourcePlan:
     account_type: str
     requested_source: str
     primary_source: str
-    holdings_account: str | None
-    configured_holdings_account: str | None
 
 
 @dataclass(frozen=True)
@@ -34,7 +31,6 @@ class AccountConfigView:
     account: str
     account_type: str
     futu_acc_ids: list[str]
-    holdings_account: str | None
     portfolio_source_plan: AccountPortfolioSourcePlan
     runtime_plan: AccountRuntimePlan
 
@@ -46,7 +42,6 @@ class AccountRuntimePlan:
     portfolio_source: str
     trade_source: str
     trade_intake_enabled: bool
-    holdings_account: str | None
     futu_account_id: str | None = None
     futu_host: str | None = None
     futu_port: int | None = None
@@ -195,9 +190,13 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
         if not account or account not in known or not isinstance(raw_value, dict):
             continue
         item = dict(raw_value)
-        acct_type = str(item.get("type") or "").strip().lower()
+        acct_type = str(item.get("type", ACCOUNT_TYPE_FUTU) or "").strip().lower()
         if acct_type not in ACCOUNT_TYPES:
-            acct_type = ACCOUNT_TYPE_FUTU
+            raise ValueError(f"account_settings.{account}.type must be one of: {', '.join(ACCOUNT_TYPES)}")
+        if "holdings_account" in item:
+            raise ValueError(f"account_settings.{account}.holdings_account is retired")
+        if "bitable" in item:
+            raise ValueError(f"account_settings.{account}.bitable is retired")
         normalized: dict[str, Any] = {"type": acct_type}
         market = str(item.get("market") or "").strip().lower()
         if market in {"us", "hk"}:
@@ -206,9 +205,6 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
             normalized["enabled"] = bool(item.get("enabled"))
         if "trade_intake_enabled" in item:
             normalized["trade_intake_enabled"] = bool(item.get("trade_intake_enabled"))
-        holdings_account = str(item.get("holdings_account") or "").strip()
-        if holdings_account:
-            normalized["holdings_account"] = holdings_account
         futu_cfg = item.get("futu")
         if isinstance(futu_cfg, dict):
             futu_out: dict[str, Any] = {}
@@ -233,15 +229,6 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
                 futu_out["trd_env"] = trd_env
             if futu_out:
                 normalized["futu"] = futu_out
-        bitable_cfg = item.get("bitable")
-        if isinstance(bitable_cfg, dict):
-            bitable_out: dict[str, Any] = {}
-            for key in ("app_token", "table_id", "view_name"):
-                value = str(bitable_cfg.get(key) or "").strip()
-                if value:
-                    bitable_out[key] = value
-            if bitable_out:
-                normalized["bitable"] = bitable_out
         out[account] = normalized
     return out
 
@@ -259,36 +246,7 @@ def resolve_account_type(config: dict[str, Any] | None, *, account: str | None) 
         if acct_type in ACCOUNT_TYPES:
             return acct_type
 
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    mapping = portfolio_cfg.get("source_by_account") if isinstance(portfolio_cfg, dict) else None
-    if isinstance(mapping, dict):
-        value = str(mapping.get(account_key) or "").strip().lower()
-        if value == "holdings":
-            return ACCOUNT_TYPE_EXTERNAL_HOLDINGS
     return ACCOUNT_TYPE_FUTU
-
-
-def resolve_holdings_account(config: dict[str, Any] | None, *, account: str | None) -> str | None:
-    account_key = str(account or "").strip().lower()
-    if not account_key:
-        return None
-    explicit = resolve_configured_holdings_account(config, account=account_key)
-    if explicit:
-        return explicit
-    return account_key
-
-
-def resolve_configured_holdings_account(config: dict[str, Any] | None, *, account: str | None) -> str | None:
-    account_key = str(account or "").strip().lower()
-    if not account_key:
-        return None
-    settings = account_settings_from_config(config)
-    item = settings.get(account_key) if isinstance(settings, dict) else None
-    if isinstance(item, dict):
-        value = str(item.get("holdings_account") or "").strip()
-        if value:
-            return value
-    return None
 
 
 def resolve_account_futu_settings(config: Mapping[str, Any] | Any, *, account: str | None) -> dict[str, Any]:
@@ -486,7 +444,7 @@ def build_account_runtime_plan(config: dict[str, Any] | None, *, account: str) -
     futu_cfg = resolve_account_futu_settings(cfg, account=account_key)
     account_type = source_plan.account_type
     trade_source = "api" if account_type == ACCOUNT_TYPE_FUTU else "manual"
-    portfolio_source = "holdings" if source_plan.primary_source == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else source_plan.primary_source
+    portfolio_source = source_plan.primary_source
 
     return AccountRuntimePlan(
         account=account_key,
@@ -494,7 +452,6 @@ def build_account_runtime_plan(config: dict[str, Any] | None, *, account: str) -
         portfolio_source=portfolio_source,
         trade_source=trade_source,
         trade_intake_enabled=resolve_account_trade_intake_enabled(cfg, account=account_key),
-        holdings_account=source_plan.holdings_account,
         futu_account_id=str(futu_cfg.get("account_id") or "").strip() or None,
         futu_host=str(futu_cfg.get("host") or "").strip() or None,
         futu_port=_int_or_none(futu_cfg.get("port")),
@@ -509,15 +466,8 @@ def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | No
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     account_key = str(account or "").strip().lower()
 
-    if account_key:
-        acct_type = resolve_account_type(cfg, account=account_key)
-        if acct_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
-            return "holdings"
-        mapping = portfolio_cfg.get("source_by_account") if isinstance(portfolio_cfg, dict) else None
-        if isinstance(mapping, dict):
-            value = mapping.get(account_key)
-            if value is not None and str(value).strip():
-                return str(value).strip()
+    if "source_by_account" in portfolio_cfg:
+        raise ValueError("portfolio.source_by_account is retired")
 
     value = portfolio_cfg.get("source") if isinstance(portfolio_cfg, dict) else None
     if value is not None and str(value).strip():
@@ -531,7 +481,7 @@ def normalize_portfolio_source(value: str | None) -> str:
         return "auto"
     if raw in ("futu", "opend"):
         return "futu"
-    return "holdings"
+    raise ValueError(f"unsupported account portfolio source: {value}")
 
 
 def build_account_portfolio_source_plan(
@@ -546,21 +496,11 @@ def build_account_portfolio_source_plan(
     requested_source = normalize_portfolio_source(
         portfolio_source if portfolio_source is not None else resolve_portfolio_source(cfg, account=account_key)
     )
-    configured_holdings_account = resolve_configured_holdings_account(cfg, account=account_key)
-    holdings_account = resolve_holdings_account(cfg, account=account_key)
-
-    if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
-        primary_source = ACCOUNT_TYPE_EXTERNAL_HOLDINGS
-    else:
-        primary_source = "holdings" if requested_source == "holdings" else "futu"
-
     return AccountPortfolioSourcePlan(
         account=account_key,
         account_type=account_type,
         requested_source=requested_source,
-        primary_source=primary_source,
-        holdings_account=holdings_account,
-        configured_holdings_account=configured_holdings_account,
+        primary_source="futu",
     )
 
 
@@ -618,7 +558,6 @@ def build_account_config_view(config: dict[str, Any] | None, *, account: str) ->
         account=account_key,
         account_type=source_plan.account_type,
         futu_acc_ids=futu_acc_ids,
-        holdings_account=source_plan.holdings_account,
         portfolio_source_plan=source_plan,
         runtime_plan=runtime_plan,
     )

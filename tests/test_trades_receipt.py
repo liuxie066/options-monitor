@@ -775,7 +775,7 @@ def test_build_trade_intake_receipt_message_marks_same_expiry_combo_relation_pen
     assert "pair_intent_id" not in msg
 
 
-def test_build_trade_intake_receipt_message_reports_auto_combo_adoption() -> None:
+def test_build_trade_intake_receipt_message_does_not_claim_old_combo_adoption() -> None:
     msg = build_trade_intake_receipt_message(
         deal=None,
         result={
@@ -805,7 +805,7 @@ def test_build_trade_intake_receipt_message_reports_auto_combo_adoption() -> Non
         payload={"symbol": "0700.HK"},
     )
 
-    assert "组合｜✅ 已自动归入 Combo Yield" in msg
+    assert "策略｜归属尚未核实" in msg
     assert "关系待确认" not in msg
 
 

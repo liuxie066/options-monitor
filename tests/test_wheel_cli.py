@@ -25,8 +25,8 @@ def _activation_environment(
     source = tmp_path / "config.yaml"
     doc = {
         "accounts": {
-            "lx": {"type": "futu", "futu_account_id": "12345678"},
-            "sy": {"type": "external_holdings", "holdings_account": "sy"},
+            "lx": {"type": "futu", "futu_account_id": "12345678", "futu": {"host": "127.0.0.1", "port": 11111}},
+            "sy": {"type": "futu", "futu_account_id": "REAL_87654321", "futu": {"host": "127.0.0.1", "port": 11112}},
         },
         "markets": {
             "us": {
@@ -477,6 +477,7 @@ def test_wheel_cli_branch_resolves_legacy_call_alias_and_previews(
         lambda *_args, **_kwargs: {
             "market": "us",
             "activation_descriptor": {"generation": 1},
+            "account_configured": True,
             "policy_sha256": "a" * 64,
         },
     )
@@ -501,6 +502,7 @@ def test_wheel_cli_branch_resolves_legacy_call_alias_and_previews(
             "as_of_ms": calls[0]["as_of_ms"],
             "market": "us",
             "activation_descriptor": {"generation": 1},
+            "account_configured": True,
             "policy_sha256": "a" * 64,
         }
     ]
@@ -930,6 +932,29 @@ def test_public_wheel_cli_activation_status_distinguishes_storage_and_window_sta
         assert not sqlite_path.exists()
         assert not sqlite_path.with_name(sqlite_path.name + "-wal").exists()
         assert not sqlite_path.with_name(sqlite_path.name + "-shm").exists()
+
+
+def test_public_wheel_cli_status_keeps_invalid_scope_when_database_is_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _source, runtime, data_config, sqlite_path = _activation_environment(
+        tmp_path, initialize_db=False,
+    )
+    config = json.loads(runtime.read_text(encoding="utf-8"))
+    config["wheel"]["accounts"] = "lx"
+    runtime.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code, status = _run_activation_cli(
+        "status", runtime=runtime, data_config=data_config,
+        runtime_root=tmp_path, capsys=capsys,
+    )
+
+    assert exit_code == 0
+    assert status["storage_status"] == "missing_database"
+    assert status["monitoring_gate"] == "config_mismatch"
+    assert status["reason_code"] == "invalid_account_scope"
+    assert not sqlite_path.exists()
 
 
 def test_public_wheel_cli_status_preserves_known_window_for_malformed_descriptor(

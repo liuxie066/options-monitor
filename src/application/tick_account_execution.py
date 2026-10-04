@@ -55,8 +55,10 @@ from src.application.close_advice_required_data import (
     publish_close_advice_required_data_plan,
     resolve_bound_close_advice_required_data_plan,
 )
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.ledger.api import (
-    list_position_lot_snapshots,
+    attach_event_strategy_metadata,
+    decision_state_snapshot,
     open_position_ledger_from_data_config,
     resolve_position_data_config_path,
 )
@@ -77,6 +79,7 @@ from src.application.runtime_portfolio_snapshot import (
     publish_runtime_portfolio_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.current_fx_run import seal_run_fx_snapshot
 from src.application.experience_mode import (
     resolve_experience_account_display_name,
 )
@@ -243,7 +246,7 @@ def _build_close_advice_barrier_plan(
         for account, reason in (unavailable_by_account or {}).items()
     }
     if position_records_by_account is None:
-        records_by_path: dict[Path, list[dict[str, Any]]] = {}
+        repos_by_path: dict[Path, Any] = {}
         for account in sorted(scanning_configs):
             config = scanning_configs[account]
             close_cfg = (
@@ -259,18 +262,23 @@ def _build_close_advice_barrier_plan(
                     cfg=config,
                     config_path=request.cfg_path,
                 ).resolve()
-                if data_config_path not in records_by_path:
+                if data_config_path not in repos_by_path:
                     _resolved_path, repo = open_position_ledger_from_data_config(
                         base=request.base,
                         data_config=data_config_path,
                     )
-                    records_by_path[data_config_path] = list(
-                        list_position_lot_snapshots(
-                            repo,
-                            base=request.base,
-                        )
-                    )
-                records_by_account[account] = records_by_path[data_config_path]
+                    repos_by_path[data_config_path] = repo
+                snapshot = decision_state_snapshot(
+                    repos_by_path[data_config_path],
+                    account=account,
+                    portfolio_scope_id=portfolio_scope_id(account),
+                )
+                if snapshot.get("snapshot_status") != "trusted":
+                    unavailable[account] = "option_decision_snapshot_unavailable"
+                    continue
+                records_by_account[account] = attach_event_strategy_metadata(
+                    snapshot["account_position_lots"], snapshot.get("trade_events"),
+                )
             except Exception as exc:
                 unavailable[account] = (
                     f"position_ledger_unavailable:{type(exc).__name__}"
@@ -535,6 +543,10 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     if scanning_accounts and not request.prefetch_done:
         run_started_at_utc = datetime.now(timezone.utc)
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
+        fx_snapshot_sha256 = (
+            seal_run_fx_snapshot(base=request.base, run_id=request.run_id)[1]
+            if not request.experience else None
+        )
         scanning_configs = {
             str(account).strip().lower(): account_configs[
                 str(account).strip().lower()
@@ -572,6 +584,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 account_state_dirs=account_state_dirs,
                 shared_state_dir=run_state_dir,
                 timeout_sec=portfolio_timeout_sec,
+                fx_snapshot_sha256=fx_snapshot_sha256,
                 python_executable=request.vpy,
             )
         except Exception as exc:
@@ -660,6 +673,13 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 )
                 invalid_prepared_accounts.add(account)
                 continue
+            if fx_snapshot_sha256 is not None and prepared_context.get("fx_snapshot_sha256") != fx_snapshot_sha256:
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    "prepared portfolio FX snapshot mismatch",
+                )
+                invalid_prepared_accounts.add(account)
+                continue
             prepared_contexts[account] = prepared_context
             prepared_manifest_paths[account] = manifest_path
             prepared_manifest_sha256_by_account[account] = str(
@@ -706,6 +726,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     message=str(message),
                 ),
                 persist_fx_evidence=not request.smoke,
+                fx_snapshot_sha256=fx_snapshot_sha256,
                 )
             )
         except Exception as exc:
@@ -764,6 +785,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             if (
                 not manifest_path.is_file()
                 or len(manifest_sha256) != 64
+                or (fx_snapshot_sha256 is not None and manifest.get("run_fx_snapshot_sha256") != fx_snapshot_sha256)
                 or any(
                     character not in "0123456789abcdef"
                     for character in manifest_sha256

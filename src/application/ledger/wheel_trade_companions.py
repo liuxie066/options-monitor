@@ -1,31 +1,38 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
+
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import (
+    contract_share_quantity,
+    stock_settlement_unit_issues,
+)
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.cash_facts import (
     assignment_principal_anchor,
     broker_settlement_multiplier_evidence,
 )
-from domain.domain.strategy_membership import resolve_option_strategy_membership
+from domain.domain.strategy_membership import (
+    resolve_option_strategy_membership,
+    resolve_strategy_metadata,
+)
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
     build_wheel_branch_created_event,
     lot_strategy_metadata_for_lot,
     merge_lot_strategy_metadata,
-    plan_wheel_call_intent_consume,
     project_wheel_branches,
     project_wheel_call_intents,
     wheel_called_away_event_from_call_assignment,
 )
-from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
+from src.application.ledger.combo_membership import resolve_combo_assignment_proof
+from src.application.ledger.event_codec import valid_void_target_event_id
 
 
 def _wheel_batches_from_rows(
@@ -319,7 +326,13 @@ def capture_wheel_trade_companion_context(
         target_lot_id = str(getattr(event, "target_lot_id", "") or "").strip()
         if not event_id or not target_lot_id:
             continue
-        fields = repo.get_position_lot_fields(target_lot_id, conn=conn)
+        try:
+            fields = repo.get_position_lot_fields(target_lot_id, conn=conn)
+        except ValueError as exc:
+            if not str(exc).startswith("position lot not found:"):
+                raise
+            # A batch can open both Combo legs before assigning its short leg.
+            fields = None
         source_fields[event_id] = fields
         accounts.add(_event_account(event))
     before_rows = {
@@ -351,24 +364,65 @@ def plan_wheel_assignment_companion(
     if source_open is None:
         reason = str(source_open_reason)
         return None, reason
+    if int(source_open.get("event_time_ms") or 0) >= _event_time_ms(event):
+        return None, "assignment_source_open_after_assignment"
+    as_of_events = [
+        item for item in rows.get("trade_events") or []
+        if int(item.get("event_time_ms") or 0) < _event_time_ms(event)
+    ]
+    as_of_metadata = lot_strategy_metadata_for_lot(fields.get("lot_id"), as_of_events)
+    strategy_fields = merge_lot_strategy_metadata(
+        fields,
+        as_of_metadata,
+    )
+    strategy_fields.update(as_of_metadata)
+    resolved_metadata = resolve_strategy_metadata(
+        strategy_fields, source_id=str(source_open.get("event_id") or ""),
+    )
+    metadata = resolved_metadata.metadata
+    group_id = str(metadata.strategy_group_id or "").strip()
+    has_wheel_source = bool(
+        metadata.strategy == "wheel"
+        or metadata.source_wheel_branch_id
+        or metadata.leg_role in {"wheel_call", "wheel_put"}
+    )
+    has_combo_source = bool(metadata.strategy == "combo_yield" or group_id)
+    if has_wheel_source and has_combo_source:
+        return None, "strategy_attribution_conflict"
+    valid_combo_group_ids: set[str] = set()
+    if has_combo_source and group_id:
+        variant, proof_reason = resolve_combo_assignment_proof(
+            assignment=event,
+            group_id=group_id,
+            trade_events=rows.get("trade_events") or [],
+            identities=(rows.get("account_combo_identities")
+                        or rows.get("account_strategy_group_identities") or []),
+        )
+        if proof_reason:
+            return None, proof_reason
+        if variant:
+            valid_combo_group_ids.add(group_id)
     membership = resolve_option_strategy_membership(
         getattr(event, "contract_key"),
         getattr(event, "position_side"),
         # The strategy-metadata family left ``fields_json`` in the convergence
         # batch (design §7.5); resolve it from this lot's events instead.
-        merge_lot_strategy_metadata(
-            fields,
-            lot_strategy_metadata_for_lot(
-                fields.get("lot_id"),
-                rows.get("trade_events") or [],
-            ),
-        ),
+        strategy_fields,
+        valid_combo_group_ids=valid_combo_group_ids,
         source_id=str(source_open.get("event_id") or ""),
     )
     if membership.issues:
         reason = "strategy_membership_unresolved"
         return None, reason
-    if membership.strategy not in {"csp", "cc", "wheel"}:
+    combo_short_leg = (
+        membership.strategy == "csp_lc"
+        and membership.leg_role == "funding_put"
+        and membership.parent_universe == "csp"
+        or membership.strategy == "cc_lp"
+        and membership.leg_role == "short_call"
+        and membership.parent_universe == "cc"
+    )
+    if membership.strategy not in {"csp", "cc", "wheel"} and not combo_short_leg:
         return None, "strategy_not_eligible"
     option_type = str(
         getattr(getattr(event, "contract_key", None), "option_type", "") or ""
@@ -402,7 +456,14 @@ def plan_wheel_assignment_companion(
             reason = "wheel_parent_branch_not_unique"
             return None, reason
     else:
-        if membership.strategy == "cc" and membership.source_lot_id:
+        if membership.strategy in {"cc", "cc_lp"}:
+            source_stock_lot_id = str(
+                membership.source_lot_id or fields.get("source_stock_lot_id") or ""
+            ).strip()
+            voided_source_ids = {
+                target for item in rows.get("trade_events") or []
+                if (target := valid_void_target_event_id(item))
+            }
             overlaps = [
                 branch
                 for branch in _wheel_branches_from_rows(
@@ -411,13 +472,30 @@ def plan_wheel_assignment_companion(
                     as_of_ms=_event_time_ms(event),
                 )
                 if branch.get("lifecycle_status") == "active"
-                and branch.get("stock_lot_id") == membership.source_lot_id
+                and branch.get("symbol") == event.contract_key.underlying_symbol
+                and branch.get("source_assignment_event_id") not in voided_source_ids
             ]
-            if overlaps:
-                reason = (
-                    "ordinary_cc_overlaps_active_wheel_stock"
+            if membership.strategy == "cc":
+                if source_stock_lot_id and any(
+                    branch.get("stock_lot_id") == source_stock_lot_id
+                    for branch in overlaps
+                ):
+                    return None, "ordinary_cc_overlaps_active_wheel_stock"
+            elif overlaps:
+                stock_report = project_assigned_stock_lifecycle_from_rows(
+                    rows, account=account, as_of_ms=_event_time_ms(event),
                 )
-                return None, reason
+                source_stock = _stock_lot(stock_report, source_stock_lot_id) if source_stock_lot_id else None
+                if (
+                    source_stock is None
+                    or str(source_stock.get("symbol") or "").strip().upper()
+                    != event.contract_key.underlying_symbol
+                    or str(source_stock.get("account") or "").strip().lower() != account
+                    or str(source_stock.get("broker") or "").strip()
+                    != event.contract_key.broker
+                    or any(branch.get("stock_lot_id") == source_stock_lot_id for branch in overlaps)
+                ):
+                    return None, "combo_cc_overlaps_active_wheel_stock"
         symbol = str(
             getattr(getattr(event, "contract_key", None), "underlying_symbol", "")
             or ""
@@ -438,6 +516,22 @@ def plan_wheel_assignment_companion(
     if multiplier != getattr(event, "multiplier", None) or multiplier != source_open.get("multiplier"):
         return None, "assignment_quantity_inconsistent"
     reason = "multiplier_unproven" if multiplier_source == "unproven" else None
+    stock = getattr(event, "raw_payload", None) or {}
+    stock = stock.get("stock_settlement") if isinstance(stock, Mapping) else None
+    if not isinstance(stock, Mapping):
+        return None, "assignment_stock_settlement_unavailable"
+    contracts = int(getattr(event, "contracts", 0) or 0)
+    unit_issues = stock_settlement_unit_issues(
+        terminal_type="assignment",
+        option_type=option_type,
+        position_side="short",
+        stock_side=str(stock.get("side") or "").strip().lower(),
+        contracts=contracts,
+        multiplier=multiplier,
+        shares=stock.get("shares"),
+    )
+    if unit_issues:
+        return None, unit_issues[0]
     (
         principal_anchor,
         currency,
@@ -448,10 +542,6 @@ def plan_wheel_assignment_companion(
         if internal or principal_anchor_reason != "assignment_cash_facts_unavailable":
             return None, principal_anchor_reason
         reason = reason or principal_anchor_reason
-    stock = getattr(event, "raw_payload", None) or {}
-    stock = stock.get("stock_settlement") if isinstance(stock, Mapping) else None
-    if not isinstance(stock, Mapping):
-        return None, "assignment_stock_settlement_unavailable"
     stock_currency = str(stock.get("currency") or "").strip().upper()
     anchor_currency = str(currency or "").strip().upper()
     if not anchor_currency or (internal and not stock_currency):
@@ -463,13 +553,8 @@ def plan_wheel_assignment_companion(
     ):
         reason = "assignment_currency_conflict"
         return None, reason
-    contracts = int(getattr(event, "contracts", 0) or 0)
-    settlement_shares = stock.get("shares")
-    if isinstance(settlement_shares, bool) or contracts <= 0 or settlement_shares != contract_share_quantity(contracts, multiplier):
-        reason = "assignment_quantity_inconsistent"
-        return None, reason
     lot_id = (
-        f"assigned-stock-{event_id}" if direction == "call" else None
+        assigned_stock_lot_id_for_event(event_id) if direction == "call" else None
     )
     companion = build_wheel_branch_created_event(
         account=account,
@@ -523,6 +608,7 @@ def append_wheel_trade_companions(
     }
     rolling_stock_lots: dict[tuple[str, str], dict[str, Any]] = {}
     rolling_stock_as_of: dict[tuple[str, str], int] = {}
+    rolling_wheel_events: dict[str, list[dict[str, Any]]] = {}
     companion_by_trade: dict[str, str] = {}
     review_reason_by_trade: dict[str, str] = {}
     for event in sorted(
@@ -532,6 +618,36 @@ def append_wheel_trade_companions(
         event_id = str(getattr(event, "event_id", "") or "").strip()
         account = _event_account(event)
         fields = source_fields.get(event_id)
+        planner_rows = dict(before_rows[account])
+        planner_rows["trade_events"] = [
+            *(before_rows[account].get("trade_events") or []),
+            *(
+                item.to_dict()
+                for item, created in zip(events, created_flags, strict=True)
+                if created
+                and _event_account(item) == account
+                and (
+                    _event_time_ms(item) < _event_time_ms(event)
+                    or valid_void_target_event_id(item)
+                )
+            ),
+        ]
+        planner_rows["account_wheel_events"] = [
+            *(before_rows[account].get("account_wheel_events") or []),
+            *(
+                item for item in rolling_wheel_events.get(account, [])
+                if int(item.get("occurred_at_ms") or 0) < _event_time_ms(event)
+            ),
+        ]
+        if fields is None:
+            matches = [
+                item.get("fields")
+                for item in after_rows[account].get("account_position_lots") or []
+                if str(item.get("record_id") or "").strip()
+                == str(getattr(event, "target_lot_id", "") or "").strip()
+            ]
+            if len(matches) == 1 and isinstance(matches[0], Mapping):
+                fields = dict(matches[0])
         if isinstance(fields, Mapping) and account in before_rows:
             # The strategy-metadata family is read from the event layer now
             # (design §7.5), so fold this lot's replayed metadata into the
@@ -540,7 +656,7 @@ def append_wheel_trade_companions(
                 fields,
                 lot_strategy_metadata_for_lot(
                     fields.get("lot_id"),
-                    before_rows[account].get("trade_events") or [],
+                    planner_rows["trade_events"],
                 ),
             )
         symbol = str(event.contract_key.underlying_symbol)
@@ -549,7 +665,7 @@ def append_wheel_trade_companions(
             market=market, account=account, occurred_at_ms=_event_time_ms(event), conn=conn,
         ) if market else None
         companion, review_reason = plan_wheel_assignment_companion(
-            event, fields, before_rows[account], activation_window,
+            event, fields, planner_rows, activation_window,
             recorded_at_ms=recorded_at_ms,
         )
         if review_reason and review_reason not in {
@@ -589,9 +705,11 @@ def append_wheel_trade_companions(
             rolling_stock_lots[key] = stock_lot_after
             rolling_stock_as_of[key] = instant
         repo.append_wheel_event_once(companion, conn=conn)
+        rolling_wheel_events.setdefault(account, []).append(companion)
         companion_by_trade[event_id] = companion["event_id"]
         if legacy_terminal is not None:
             repo.append_wheel_event_once(legacy_terminal, conn=conn)
+            rolling_wheel_events[account].append(legacy_terminal)
 
     for (account, lot_id), expected in rolling_stock_lots.items():
         actual_projection = project_assigned_stock_lifecycle_from_rows(
@@ -625,101 +743,6 @@ def append_wheel_trade_companions(
             if len(matches) != 1:
                 raise ValueError("Wheel companion event projection verification failed")
     return companion_by_trade, review_reason_by_trade
-
-
-def prepare_wheel_intent_open_event(
-    rows: Mapping[str, Any],
-    event: Any,
-    coverage_fact: Mapping[str, Any],
-    *,
-    recorded_at_ms: int,
-) -> tuple[Any, dict[str, Any] | None, str]:
-    if (
-        str(getattr(event, "event_type", "") or "").strip().lower() != "open"
-        or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
-        != "call"
-        or str(getattr(event, "position_side", "") or "")
-        != "short"
-    ):
-        return event, None, "not_short_call_open"
-    account = _event_account(event)
-    instant = _event_time_ms(event)
-    batches = _wheel_batches_from_rows(
-        rows,
-        account=account,
-        as_of_ms=instant,
-    )
-    contract_key = getattr(event, "contract_key", None)
-    current_coverage = revalidate_opening_share_coverage(
-        coverage_fact,
-        list(rows.get("account_position_lots") or []),
-        batches,
-        account=account,
-        symbol=str(getattr(contract_key, "underlying_symbol", "") or ""),
-    )
-    known_trade_ids = {
-        str(item.get("event_id") or "").strip()
-        for item in rows.get("trade_events") or []
-        if str(item.get("event_id") or "").strip()
-    }
-    plans: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for batch in batches:
-        if batch["lifecycle_status"] != "active" or batch["integrity_status"] != "trusted":
-            continue
-        summaries = project_wheel_call_intents(
-            rows.get("account_wheel_events") or [],
-            account=account,
-            lot_id=batch["stock_lot_id"],
-            as_of_ms=instant,
-            known_trade_event_ids=known_trade_ids,
-        )
-        for intent in summaries:
-            if intent.get("status") != "active":
-                continue
-            intent_payload = intent.get("payload")
-            intent_payload = (
-                intent_payload if isinstance(intent_payload, Mapping) else intent
-            )
-            try:
-                intent_coverage = {
-                    **current_coverage,
-                    "shares_available_for_cover": int(
-                        current_coverage.get("shares_available_for_cover") or 0
-                    )
-                    + contract_share_quantity(intent.get("remaining_contracts"), intent_payload.get("multiplier")),
-                }
-                plan = plan_wheel_call_intent_consume(
-                    batch,
-                    intent,
-                    event,
-                    intent_coverage,
-                    recorded_at_ms=recorded_at_ms,
-                )
-            except ValueError:
-                continue
-            plans.append((batch, plan))
-    if not plans:
-        return event, None, "no_matching_intent"
-    if len(plans) != 1:
-        return event, None, "ambiguous_matching_intent"
-    batch, plan = plans[0]
-    raw_payload = {
-        **dict(getattr(event, "raw_payload", None) or {}),
-        "strategy": "wheel",
-        "leg_role": "wheel_call",
-        "source_stock_lot_id": batch["stock_lot_id"],
-        "source_wheel_branch_id": batch["wheel_branch_id"],
-        "wheel_call_intent_id": plan["intent_id"],
-    }
-    return (
-        replace(
-            event,
-            lot_id=str(getattr(event, "lot_id", "") or f"lot_{event.event_id}"),
-            raw_payload=raw_payload,
-        ),
-        plan,
-        "matched_intent",
-    )
 
 
 def append_and_verify_wheel_intent_consumption(
@@ -784,5 +807,4 @@ __all__ = [
     "append_and_verify_wheel_intent_consumption",
     "append_wheel_trade_companions",
     "capture_wheel_trade_companion_context",
-    "prepare_wheel_intent_open_event",
 ]

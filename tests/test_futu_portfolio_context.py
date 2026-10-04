@@ -11,7 +11,7 @@ FAKE_FUTU_ACC_ID_SY = "123456789012345680"
 
 @pytest.fixture(autouse=True)
 def _offline_market_fx(monkeypatch):
-    monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda: None)
+    monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda **_: None)
 
 
 def _futu_context(*, balance_rows=None, position_rows=None, account: str = "lx", **overrides):
@@ -27,6 +27,28 @@ def _futu_context(*, balance_rows=None, position_rows=None, account: str = "lx",
 
 def _futu_portfolio_cfg(**extra) -> dict:
     return {"portfolio": {"futu": {"host": "127.0.0.1", "port": 11111, "trd_env": "REAL"}}, **extra}
+
+
+def test_scenario_supplied_fx_skips_context_fx_fetch(monkeypatch) -> None:
+    import src.application.futu_portfolio_context as fc
+
+    monkeypatch.setattr(
+        fc,
+        "_query_rows_for_account_ids",
+        lambda *_args, **_kwargs: [{"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "REAL", "cn_cash": 1}],
+    )
+    monkeypatch.setattr(
+        fc,
+        "_fetch_market_exchange_rate_observation",
+        lambda: pytest.fail("context fetched FX despite supplied scenario observation"),
+    )
+
+    rows, observation = fc._query_opend_exchange_rate_observation(
+        object(), account_ids={FAKE_FUTU_ACC_ID_LX_PRIMARY}, trd_env="REAL", read_exchange_rate=False,
+    )
+
+    assert rows[0]["cn_cash"] == 1
+    assert observation is None
 
 
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
@@ -440,6 +462,44 @@ def test_fetch_futu_portfolio_context_rejects_multiple_physical_accounts() -> No
         )
 
 
+def test_option_capacity_snapshot_fetches_current_futu_contract_terms(monkeypatch) -> None:
+    from types import SimpleNamespace
+    import src.application.futu_portfolio_context as fc
+
+    code = "HK.MET261127C80000"
+    class Broker:
+        def get_account_balance(self, **_kwargs):
+            return [{"currency": "HKD", "hk_cash": 1000}]
+        def get_positions(self, **_kwargs):
+            return [{"code": code, "qty": -3, "currency": "HKD"},
+                    {"code": "HK.03690", "qty": 1500, "currency": "HKD"}]
+        def close(self):
+            pass
+    class Quotes:
+        def get_snapshot(self, codes):
+            assert codes == [code]
+            return [{"code": code, "stock_owner": "HK.03690", "option_valid": True,
+                     "option_type": "CALL", "option_strike_price": 80,
+                     "strike_time": "2026-11-27", "option_contract_size": 500,
+                     "option_contract_multiplier": 500}]
+        def close(self):
+            pass
+    monkeypatch.setattr(fc, "build_ready_futu_broker_gateway", lambda **_: Broker())
+    monkeypatch.setattr(fc, "build_ready_futu_quote_gateway", lambda **_: Quotes())
+    monkeypatch.setattr(fc, "resolve_futu_quote_route", lambda *_args, **_kwargs:
+                        SimpleNamespace(ok=True, host="127.0.0.1", port=11111))
+    cfg = _futu_portfolio_cfg(trade_intake={"account_mapping": {"futu": {
+        FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx"}}})
+    out = fc.fetch_futu_portfolio_context(cfg=cfg, account="lx", include_options=True,
+                                          exchange_rate_observation=None)
+    snapshot = out["position_snapshot_input"]
+    assert snapshot["errors"] == []
+    option = next(row for row in snapshot["rows"] if row["instrument_ref"]["asset_type"] == "option")
+    assert option["instrument_ref"]["symbol"] == "3690.HK"
+    assert option["instrument_ref"]["multiplier"] == "500"
+    assert option["instrument_ref"]["expiration_ymd"] == "2026-11-27"
+
+
 def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_trade_mapping() -> None:
     import src.application.futu_portfolio_context as fc
 
@@ -643,7 +703,8 @@ def test_build_futu_portfolio_context_ignores_legacy_balance_aliases_and_cash() 
     assert out["cash_source"] == "empty"
     assert out["cash_balance_reliable"] is False
     assert out["cash_balance_unavailable_by_row"] == {
-        "balance_snapshot": "supported_cash_field_missing"
+        "balance_row_1.cash_components": "supported_cash_field_missing",
+        "balance_row_2.cash_components": "supported_cash_field_missing",
     }
 
 
@@ -712,7 +773,7 @@ def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> N
     assert out["cash_by_currency"] == {}
     assert out["cash_balance_reliable"] is False
     assert out["cash_balance_unavailable_by_row"] == {
-        "balance_snapshot": "supported_cash_field_missing"
+        "balance_row_1.cash_components": "supported_cash_field_missing",
     }
 
 

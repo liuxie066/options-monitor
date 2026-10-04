@@ -142,6 +142,19 @@ PM 的持仓同步与通知边界仍由
 不能补零。适配器负责来源精度、时间和合约解析，保留原始证据，不通过四舍五入修补
 来源冲突，不默认乘数为 100。既有浮点事件和投影的存储编码不在本切片批量重写。
 
+期权乘数在原始输入上校验为有限正整数；缺失、null、空串、bool、零、负数、小数及
+非有限值均不能参与经济计算或写入。100、500、1000 使用同一规则，股票的乘数 0 仍表示
+不适用。payload 真正省略乘数时可以沿原有 cache/OpenD 链解析，显式非法值不进入后备来源。
+人工开仓和 replacement 要求明确有效输入；adjust 仅在省略乘数字段时继承合法目标值，
+显式 null 不表示“不修改”。目标乘数非法时，平仓、到期、adjust、void 和 repair 均阻断；
+生产坏记录的补证修复需要另行授权，普通操作不自动改写历史。已有合法 void/replacement
+继续按事件图读取，原始错误证据保留可查。
+
+依赖期权经济数据的容量及平仓建议使用既有可信快照门禁；旧持仓行仍可供诊断检视，
+不能在快照不可用时替代当前经济事实。lifecycle manifest 的一次选择集先在同一 SQLite
+快照中完成校验，再在一个 writer 事务内写入；失败整批回滚，已有同 hash 回执支持重试。
+预览采用同一校验且只读，提交仍在事务内重查。
+
 费用沿用 `FeeFact` 的实际、估计与缺失语义及 `enrich_order_fees()` 的受控补证合同。
 订单引用与费用分组按 `broker_account_id + external_order_namespace + external_order_id`
 隔离；订单 ID 命名空间须经验证，不能默认与成交 ID 命名空间相同。
@@ -818,6 +831,65 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 `--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
 会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
 
+### Lot 身份与归属裁决
+
+期权开仓 lot ID 统一由 `domain/domain/ledger/events.py` 的 `lot_id_for_open_event`
+解释：保留显式 ID，缺失时使用 `lot_<event_id>`。原始事件不补写默认值；旧别名与规范
+身份相悖、重复 lot 或跨账户证明均拒绝。指派股票是另一种对象，继续使用
+`domain/domain/assigned_stock.py` 的 `assigned_stock_lot_id_for_event`。
+
+`src/application/trades/attribution.py` 的 `apply_trade_attribution` 接受单个决定或完整
+`member_decisions`，以及显式 `conflict_event_ids`。选中冲突涉及的成交、原 Combo 完整成员和
+目标 Combo 完整成员必须全部明确决定。先绑定真实输入 hash 和分支 generation，再在内存中
+排除选中的冲突做候选校验；最终容量按全部决定写入后的状态检查。
+
+`src/application/ledger/trade_attribution.py` 的 `write_trade_attribution_decision` 在调用方
+事务中追加整组非经济 adjust、对应解除事件并发布一次持仓投影。预览执行同一路径后回滚
+savepoint；提交前取消、证据漂移或容量失败回滚整个请求。每份证明携带相同的
+`attribution_decision.v1`，记录 request、actor、账户、完整成员、原/目标关系、proof IDs、
+冲突 IDs、输入 hash、策略版本和写前 generations。恢复读取 `read_trade_attribution_decision`，
+核对完整持久证明和当前关系；同请求不同内容拒绝。
+
+清单的纯验证 owner 是 `domain/domain/strategy_membership.py` 的 `validate_attribution_decision`。
+Wheel、Combo 和归属读回共用该验证，分别保留自己的关系规则。Wheel 逐 conflict ID 判断解除，
+可选 `resolution_evidence_event_ids` 必须精确覆盖该冲突的全部成交；缺省按单个 evidence ID
+读取，但仍须通过完整清单验证。缺少完整证明的旧解除记录保持未解除；同一冲突后续有有效
+决定时，旧无效记录只保留审计。未来事件不影响过去；相关证明被 void 或当前关系改变后，
+解除重新失效。
+
+Combo 成员 owner 仍是 `src/application/ledger/combo_membership.py`。完整裁决可保留原合法
+配对，或释放为 `released`（当前成员零、历史成员二）；不可改写已有 group identity，也不可
+留下单腿。当前决策读取完整账户证明历史，已释放组不再因历史 inference 占用当前成员。
+指派前的策略证明只读取指派发生前的事实；指派股票经济更正仍沿用原有投影合同。
+
+Control 使用同一条 `/attribute` → `/confirm attribution` / `/cancel attribution` 链路。
+单笔语法仍为 `/attribute <account> <execution_key> ordinary|wheel|combo [target_id]`。
+完整冲突可用 `/attribute <account> batch '<JSON>'`：JSON 顶层为非空的 `conflict_event_ids`
+和 `members`；成员包含 `execution_key`、`action`，以及相应的 `target_id` 或
+`wheel_call_allocations`。ordinary 不带目标，combo 指定 group ID，wheel 指定一个 branch ID
+或显式分配列表。重复字段/身份、未知字段、空值、非整数分配或不完整成员闭包均拒绝。
+当前入口没有可复用的统一文本长度上限，批量 JSON 在解析边界和结构化 Control 边界均限制为
+16 KiB；超限拒绝，不截断、不拆成多个事务。预览逐成员展示原/目标关系及将解除、仍保留的冲突。
+显式分配先核对原成交张数再展开；完整预览超过渠道的 `max_reply_chars` 时取消该预览并拒绝确认。
+
+`confirm-combo`、Wheel linkage confirm CLI/Tool 通过 `trades/attribution.py` 的引用适配入口
+调用同一个裁决。确认的 `expected_input_hash` 使用 `trade_attribution_read` 显式设置
+`prepare_confirmation=true` 返回的完整
+`input_hash`（Combo 使用 funding Put 对应行），旧 inference/linkage 局部 hash 不能确认；
+默认查询只读本地事实，不观察外部容量，不能提供确认凭据。准备确认复用现有容量取证，
+确认时重新取证并严格校验完整 hash；容量不可用、过期或证据变化仍拒绝。
+分页 cursor 绑定准备确认模式，翻页须保持相同模式。所有确认入口透传已解析账本的 runtime root。
+Combo 人工新决定由共享裁决 owner 检查账户模式为 `confirm` 或 `auto`；CLI 只解析配置路径。
+同请求完整证明的幂等读回先于新写入准入检查，模式后来关闭不会阻断已提交结果的恢复。
+reject/supersede 继续使用各自对象的原 hash。这些入口需要当前运行配置与容量证据，缺少来源
+execution 身份的旧记录明确不可写。已退役 ledger 的 `adopt_post_trade_combo_pair` 和
+`record_trade_ordinary_attribution` 导出，以及 Wheel workflow 中的独立归属 writer；
+旧持久记录仍由既有历史读取合同解释。
+
+确认在持锁重读后验证完整输入，写后提交前再次核对权限、配置、预览 TTL 和取消状态。
+回执恢复只接受同 request 的完整有效证明集合及其当前关系，不凭当前标签相同认领其他请求。
+已提交后的取消返回实际成功；证明失效返回冲突，不沿用旧成功回执。
+
 ### 手工 `buy-close` 重放回执修复（M1/M2，2026-09-27）
 
 **目标与验收**：对现行嵌套 lot，重复 `--apply --confirm` 的
@@ -1233,7 +1305,7 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 - 价内、平值或缺少 spot 时进入 review；
 - option leg 与 stock settlement leg 可以异步到达；
 - assignment / exercise 必须有匹配的交割事实；
-- `external_holdings` 账户缺少 broker lifecycle evidence 时默认要求人工复核。
+- 缺少 broker lifecycle evidence 时，当前配置账户的到期流程要求人工复核。已移出配置的历史外部账户不会被自动到期流程枚举；其未结 lot 须在账户迁移前单独清点并确定归属和处理方案。
 
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
 

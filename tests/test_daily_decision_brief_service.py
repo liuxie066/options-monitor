@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cash_evidence_helpers import cash_portfolio
+
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -30,10 +32,10 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
     state_dir.mkdir(exist_ok=True)
     (state_dir / "portfolio_context.json").write_text(
         json.dumps(
-            {
+            cash_portfolio({
                 "as_of_utc": "2026-07-17T13:59:00+00:00",
                 "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
-            }
+            })
         ),
         encoding="utf-8",
     )
@@ -41,6 +43,7 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
         json.dumps(
             {
                 "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"HKD": 255_000, "USD": 3_000},
                 "cash_secured_unavailable_by_symbol": {},
                 "cash_secured_total_cny": 250_500.0,
@@ -1218,27 +1221,28 @@ def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path
 
     brief = _assemble(tmp_path)
 
-    assert brief["funds"] == {
-        "as_of_utc": "2026-07-17T13:59:30+00:00",
-        "cash_total_by_currency": {"HKD": 480_000.0, "USD": 18_000.0},
-        "option_opening_available_by_currency": {"HKD": 225_000.0, "USD": 15_000.0},
-        "cash_total_cny": 558_000.0,
-        "cash_secured_total_cny": 250_500.0,
-        "option_opening_available_cny": 307_500.0,
-        "available": True,
-        "reason": "ok",
-    }
+    funds = brief["funds"]
+    assert funds["cash_total_by_currency"] == {"HKD": 480_000.0, "USD": 18_000.0}
+    assert funds["option_opening_available_by_currency"] == {"HKD": 225_000.0, "USD": 15_000.0}
+    assert funds["cash_total_cny"] is None
+    assert funds["option_opening_available_cny"] is None
+    assert funds["available"] is True
 
 
-def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) -> None:
+def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path, monkeypatch) -> None:
+    from src.infrastructure import exchange_rates as fx
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
     account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     state_dir = account_dir / "state"
     (state_dir / "portfolio_context.json").write_text(
         json.dumps(
-            {
+            cash_portfolio({
                 "as_of_utc": "2026-07-17T13:59:00+00:00",
                 "cash_by_currency": {"HKD": 1_104_060.32},
-            }
+                "fx_snapshot_sha256": "a" * 64,
+            })
         ),
         encoding="utf-8",
     )
@@ -1246,12 +1250,20 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) ->
         json.dumps(
             {
                 "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "decision_snapshot_status": "trusted",
                 "cash_secured_total_by_ccy": {"HKD": 171_000, "USD": 8_500},
                 "cash_secured_unavailable_by_symbol": {},
                 "cash_secured_total_cny": 213_400.0,
+                "prepared_authority": {"run_fx_snapshot_sha256": "a" * 64},
                 "exchange_rates": {
-                    "rates": {"USDCNY": 7.0, "HKDCNY": 0.9},
-                    "timestamp": "2026-07-17T13:59:30+00:00",
+                    "pairs": {
+                        pair: {
+                            "rate": rate, "source": "tencent_quote",
+                            "quote_at_utc": "2026-09-30T07:00:00+00:00",
+                            "observed_at_utc": "2026-09-30T07:01:00+00:00",
+                        }
+                        for pair, rate in (("USDCNY", 7.0), ("HKDCNY", 0.9))
+                    },
                 },
             }
         ),
@@ -1263,12 +1275,19 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) ->
     funds = brief["funds"]
     assert funds["cash_total_by_currency"] == {"HKD": 1_104_060.32}
     assert funds["option_opening_available_by_currency"]["HKD"] == pytest.approx(933_060.32)
+    assert funds["option_opening_available_by_currency"]["USD"] == -8_500.0
     assert funds["cash_total_cny"] == pytest.approx(1_104_060.32 * 0.9)
     assert funds["cash_secured_total_cny"] == 213_400.0
     assert funds["option_opening_available_cny"] == pytest.approx(1_104_060.32 * 0.9 - 213_400.0)
     assert funds["available"] is True
     assert funds["reason"] == "ok"
     assert not any(item.get("scope") == "funds" for item in brief["data_gaps"])
+    assert funds["fx_pairs"]["USDCNY"]["quality"] == "holiday_carried"
+    assert funds["fx_snapshot_sha256"] == "a" * 64
+    rendered = render_fixed_report(brief)
+    assert rendered.index("现金总额（折CNY）") < rendered.index("现金总额｜HK$")
+    assert "汇率｜假期沿用" in rendered
+    assert "可用于期权开仓｜-$8,500.00" in rendered
 
 
 def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
@@ -1294,6 +1313,31 @@ def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
     assert brief["funds"]["option_opening_available_by_currency"] == {}
     assert brief["funds"]["available"] is False
     assert brief["funds"]["reason"] == "option_cash_secured_unavailable"
+
+
+def test_closed_put_with_newer_futu_cash_keeps_settlement_block(tmp_path: Path) -> None:
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    state_dir = account_dir / "state"
+    portfolio_path = state_dir / "portfolio_context.json"
+    portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+    portfolio.update(context_source="futu_direct", source_observed_at="2026-07-17T13:59:00+00:00")
+    portfolio_path.write_text(json.dumps(portfolio), encoding="utf-8")
+    option_path = state_dir / "option_positions_context.json"
+    option_ctx = json.loads(option_path.read_text(encoding="utf-8"))
+    option_ctx["cash_secured_unavailable_by_symbol"] = {"0700.HK": "option_close_settlement_pending"}
+    option_ctx["open_positions_min"] = [{
+        "lot_id": "closed-put", "symbol": "0700.HK", "side": "short", "option_type": "put",
+        "closure_fact": "option_leg_closed", "reserved_contracts_by_lot": {"closed-put": 1},
+        "first_option_close_received_at_ms": int(datetime(2026, 7, 17, 12, tzinfo=timezone.utc).timestamp() * 1000),
+        "last_option_close_received_at_ms": int(datetime(2026, 7, 17, 12, tzinfo=timezone.utc).timestamp() * 1000),
+    }]
+    option_path.write_text(json.dumps(option_ctx), encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["funds"]["available"] is False
+    assert brief["funds"].get("option_opening_available_cny") is None
+    assert any(item.get("kind") == "option_opening_available" for item in brief["data_gaps"])
 
 
 def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path: Path) -> None:
@@ -1345,13 +1389,13 @@ def test_prepared_portfolio_context_is_used_when_legacy_file_is_absent(
         account="lx",
         config=config,
     )
-    context = {
+    context = cash_portfolio({
         "as_of_utc": "2026-07-17T13:59:00+00:00",
         "source_observed_at": "2026-07-17T13:59:00+00:00",
         "filters": {"account": "lx"},
         "portfolio_source_name": "futu",
         "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
-    }
+    })
     payload_bytes = (
         json.dumps(
             context,
@@ -2571,7 +2615,7 @@ def test_sell_put_controlled_newline_is_authoritative_empty(tmp_path: Path) -> N
     assert brief["actionability"] == "live_actionable"
     assert brief["candidates"]["sell_put"] == []
     assert not any(
-        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        item.get("strategy_family") == "sell_put" and item["reason"] == "csv_unavailable"
         for item in brief["data_gaps"]
     )
 
@@ -2585,7 +2629,7 @@ def test_sell_put_controlled_crlf_is_authoritative_empty(tmp_path: Path) -> None
     assert brief["actionability"] == "live_actionable"
     assert brief["candidates"]["sell_put"] == []
     assert not any(
-        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        item.get("strategy_family") == "sell_put" and item["reason"] == "csv_unavailable"
         for item in brief["data_gaps"]
     )
 
@@ -2825,3 +2869,93 @@ def test_wheel_suggestion_requires_original_price_and_quote_time(monkeypatch, qu
     else:
         assert not candidates and views[0]["recommended_contracts"] == 0
         assert gaps[0]["reason"] == "wheel_suggested_price_unavailable"
+
+
+def test_daily_brief_funds_do_not_offer_explicitly_stale_broker_cash() -> None:
+    from src.application.daily_decision_brief_service import _build_funds
+    gaps: list[dict[str, Any]] = []
+    funds, cash_reliable = _build_funds(
+        portfolio_context=cash_portfolio({
+            "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_by_currency": {"HKD": 100_000},
+            "cash_balance_reliable": True, "cash_source_observation_status": "stale",
+        }),
+        option_positions_context={
+            "as_of_utc": "2026-09-30T03:00:00+00:00", "cash_secured_total_by_ccy": {},
+            "cash_secured_total_cny": 0, "cash_secured_unavailable_by_symbol": {},
+        },
+        data_gaps=gaps,
+    )
+    assert cash_reliable is False
+    assert funds["available"] is False
+    assert funds["option_opening_available_by_currency"] == {}
+    assert funds["cash_total_cny"] is None
+    assert funds["cash_total_by_currency"] == {}
+
+
+def test_funds_require_every_needed_pair_but_cny_zero_needs_no_fx(monkeypatch) -> None:
+    from src.application.daily_decision_brief_service import _build_funds
+    from src.infrastructure import exchange_rates as fx
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
+    pair = {
+        "rate": 0.92, "source": "tencent_quote",
+        "quote_at_utc": "2026-09-30T07:00:00+00:00",
+        "observed_at_utc": "2026-09-30T07:01:00+00:00",
+    }
+    options = {
+        "as_of_utc": "2026-10-02T01:43:00+00:00",
+        "decision_snapshot_status": "trusted",
+        "cash_secured_total_by_ccy": {},
+        "cash_secured_unavailable_by_symbol": {},
+        "exchange_rates": {"pairs": {"HKDCNY": pair}},
+    }
+    portfolio = cash_portfolio({"as_of_utc": options["as_of_utc"], "cash_by_currency": {"HKD": 100, "USD": -1}})
+    funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=options, data_gaps=[])
+    assert funds["cash_total_cny"] is None
+    assert funds["option_opening_available_cny"] is None
+    assert funds["option_opening_available_by_currency"] == {"HKD": 100.0, "USD": -1.0}
+    assert "USD/CNY" in funds["cash_total_cny_unavailable_reason"]
+    assert funds["fx_pairs"]["HKDCNY"]["quality"] == "holiday_carried"
+
+    portfolio["cash_by_currency"] = {"CNY": 0}
+    funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=options, data_gaps=[])
+    assert funds["cash_total_cny"] == 0.0
+    assert funds["option_opening_available_cny"] == 0.0
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc))
+    portfolio["cash_by_currency"] = {"HKD": 100}
+    funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=options, data_gaps=[])
+    assert funds["cash_total_cny"] is None
+    assert funds["fx_pairs"]["HKDCNY"]["reason"] == "trading_session_gap"
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 9, 30, 7, 5, tzinfo=timezone.utc))
+    funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=options, data_gaps=[])
+    assert funds["cash_total_cny"] == pytest.approx(92.0)
+    assert funds["fx_pairs"]["HKDCNY"]["quality"] == "fresh"
+
+
+def test_funds_reject_conflicting_run_fx_hashes(monkeypatch) -> None:
+    from src.application.daily_decision_brief_service import _build_funds
+    from src.infrastructure import exchange_rates as fx
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
+    observation = {"pairs": {"HKDCNY": {
+        "rate": 0.92, "source": "tencent_quote",
+        "quote_at_utc": "2026-09-30T07:00:00+00:00",
+        "observed_at_utc": "2026-09-30T07:01:00+00:00",
+    }}}
+    funds, _ = _build_funds(
+        portfolio_context=cash_portfolio({
+            "as_of_utc": "2026-10-02T01:43:00+00:00", "cash_by_currency": {"HKD": 100},
+            "exchange_rates": observation, "fx_snapshot_sha256": "a" * 64,
+        }),
+        option_positions_context={
+            "as_of_utc": "2026-10-02T01:43:00+00:00", "cash_secured_total_by_ccy": {},
+            "cash_secured_unavailable_by_symbol": {}, "exchange_rates": observation,
+            "prepared_authority": {"run_fx_snapshot_sha256": "b" * 64},
+        },
+        data_gaps=[],
+    )
+    assert funds["cash_total_cny"] is None
+    assert funds["cash_total_cny_unavailable_reason"] == "批次汇率快照不一致"
+    assert funds["fx_pairs"] == {}

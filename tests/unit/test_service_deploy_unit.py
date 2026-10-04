@@ -2211,7 +2211,10 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout='{"summary": {"status": "ok"}}', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+            "tool_name": "service.drift", "ok": True,
+            "data": {"summary": {"status": "ok"}},
+        }), stderr="")
 
     _reconcile_services_from_current_release(
         repo_link=tmp_path / "current",
@@ -2224,7 +2227,30 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
     assert "--preserve-activation-state" not in calls[0]
 
 
-def test_upgrade_reconcile_fails_closed_when_the_child_prints_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected_reason"),
+    [
+        (1, "", "drift: no such unit", "drift: no such unit"),
+        (2, json.dumps({
+            "tool_name": "om", "ok": False,
+            "error": {
+                "code": "DEPENDENCY_MISSING",
+                "message": "could not capture timer activation state",
+                "details": {"remediation": ["systemctl is-enabled options-monitor-tick-us.timer"]},
+            },
+        }), "target release rejected --preserve-activation-state", "systemctl is-enabled"),
+        (0, json.dumps({
+            "tool_name": "om", "ok": True, "data": {"summary": {"status": "ok"}},
+        }), "", "unreadable child response"),
+        (2, json.dumps({
+            "tool_name": "service.drift", "ok": True,
+            "data": {"summary": {"status": "ok"}},
+        }), "child exited with status 2", "child exited with status 2"),
+    ],
+)
+def test_upgrade_reconcile_fails_closed_on_bad_child_result(
+    tmp_path: Path, returncode: int, stdout: str, stderr: str, expected_reason: str,
+) -> None:
     """A reconcile that cannot be read is a failed upgrade, not a silent one.
 
     `_service_reconcile_failed` treats an empty result as success, so the helper
@@ -2237,7 +2263,7 @@ def test_upgrade_reconcile_fails_closed_when_the_child_prints_nothing(tmp_path: 
     )
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="drift: no such unit\n")
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
 
     with pytest.raises(ServiceTransitionError) as excinfo:
         _reconcile_services_from_current_release(
@@ -2249,4 +2275,8 @@ def test_upgrade_reconcile_fails_closed_when_the_child_prints_nothing(tmp_path: 
         )
 
     assert excinfo.value.status == "upgraded_service_reconcile_failed"
-    assert any("drift: no such unit" in item for item in excinfo.value.remediation)
+    assert expected_reason in str(excinfo.value) or any(
+        expected_reason in item for item in excinfo.value.remediation
+    )
+    if returncode:
+        assert any(f"returncode: {returncode}" in item for item in excinfo.value.remediation)

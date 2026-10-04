@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from candidate_evidence_helpers import earnings_evidence
+from cash_evidence_helpers import cash_portfolio
 
 
 def _risk_context(*, nav: float = 1_000_000.0, nvda_stock: float = 50_000.0, nvda_short_put: float = 50_000.0):
@@ -52,19 +54,19 @@ def _candidate(**overrides):
     return row
 
 
-def _global_nvda_context() -> dict:
-    return {
-        "_global_portfolio_ctx": {
-            "cash_by_currency": {"CNY": 800_000.0},
-            "stocks_by_symbol": {
-                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
-            },
+def _account_nvda_context() -> dict:
+    return cash_portfolio({
+        "filters": {"account": "lx", "broker": "富途"},
+        "cash_by_currency": {"CNY": 800_000.0},
+        "stocks_by_symbol": {
+            "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
         },
-        "_global_option_ctx": {
+        "option_ctx": {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
             "cash_secured_total_cny": 50_000.0,
         },
-    }
+    })
 
 
 def _filter_underwriting(df, *, symbol="NVDA", cfg=None, ctx=None, converter=None):  # type: ignore[no-untyped-def]
@@ -126,16 +128,12 @@ def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
     assert decision["rule"] == "return_annualized"
 
 
-def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() -> None:
+def test_build_portfolio_risk_context_uses_account_holdings_and_option_context() -> None:
     from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     risk = build_portfolio_risk_context(
-        portfolio_ctx={
-            "cash_by_currency": {"CNY": 1.0},
-            "stocks_by_symbol": {},
-            **_global_nvda_context(),
-        },
+        portfolio_ctx=_account_nvda_context(),
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
     )
 
@@ -151,8 +149,9 @@ def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() 
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     risk = build_portfolio_risk_context(
-        portfolio_ctx={
-            "cash_by_currency": {},
+        portfolio_ctx=cash_portfolio({
+            "cash_by_currency": {"CNY": 0},
+            "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {}},
             "stocks_by_symbol": {
                 "0883.HK": {
                     "symbol": "0883.HK",
@@ -161,7 +160,7 @@ def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() 
                     "currency": "HKD",
                 }
             },
-        },
+        }),
         exchange_rate_converter=CurrencyConverter(
             ExchangeRates(cny_per_hkd=0.92)
         ),
@@ -310,7 +309,7 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
 
 
 def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentration(tmp_path: Path) -> None:
-    portfolio_ctx = _global_nvda_context()
+    portfolio_ctx = _account_nvda_context()
 
     filtered = _filter_underwriting(pd.DataFrame([_candidate()]), ctx=portfolio_ctx)
 
@@ -327,19 +326,19 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
 def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(tmp_path: Path) -> None:
     from domain.domain.engine import rank_candidate_rows
 
-    portfolio_ctx = {
-        "_global_portfolio_ctx": {
-            "cash_by_currency": {"CNY": 500_000.0},
-            "stocks_by_symbol": {
-                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},
-                "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
-            },
+    portfolio_ctx = cash_portfolio({
+        "filters": {"account": "lx", "broker": "富途"},
+        "cash_by_currency": {"CNY": 500_000.0},
+        "stocks_by_symbol": {
+            "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},
+            "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
         },
-        "_global_option_ctx": {
+        "option_ctx": {
+            "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 14_000.0}},
             "cash_secured_total_cny": 100_000.0,
         },
-    }
+    })
     rows: list[dict] = []
     for symbol in ("NVDA", "AAPL"):
         quote = _candidate(symbol=symbol, contract_symbol=f"{symbol}_PUT")

@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import (
+    _UNSET,
     EXPIRE_AUTO_CLOSE,
     PositionLotPatch,
     build_close_patch_contract,
@@ -20,7 +21,7 @@ from domain.domain.lifecycle_allocation import (
     allocate_stock_settlement,
     validate_stock_settlement_allocation_group,
 )
-from domain.domain.trade_contract_identity import normalize_trade_side, contract_share_quantity, stock_settlement_side
+from domain.domain.trade_contract_identity import normalize_trade_side, contract_share_quantity, stock_settlement_side, require_option_multiplier
 from domain.domain.money import to_decimal
 from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
@@ -34,6 +35,7 @@ from src.application.ledger.interventions import (
     persist_manual_void_event,
     preview_manual_opend_trade_time_correction,
     preview_manual_order_identity_binding,
+    readback_manual_repair_event,
 )
 from src.application.ledger.lot_resolver import (
     CloseTargetResolution,
@@ -107,7 +109,9 @@ from src.application.ledger.results import (
     TradeEventInterventionLedgerResult,
 )
 from src.application.ledger.writer import (
+    _trade_event_from_normalized_deal,
     accept_option_close_evidence_atomically,
+    record_zero_price_option_close_atomically,
     adopt_existing_combo_identity_atomically,
     advance_lifecycle_case_state_atomically,
     apply_lifecycle_allocation_atomically,
@@ -308,6 +312,7 @@ def persist_manual_repair_event_with_ledger(
     target_event_id: str,
     overrides: dict[str, Any],
     repair_reason: str,
+    expected_input_hash: str | None,
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionLedgerResult:
     payload = _preflight_manual_repair_payload(
@@ -322,6 +327,7 @@ def persist_manual_repair_event_with_ledger(
         target_event_id=target_event_id,
         overrides=overrides,
         repair_reason=repair_reason,
+        expected_input_hash=expected_input_hash,
         as_of_ms=as_of_ms,
     )
     return TradeEventInterventionLedgerResult(
@@ -340,7 +346,7 @@ def persist_manual_adjust_event_with_ledger(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -417,7 +423,7 @@ def record_manual_position_adjustments(
         item.setdefault("strike", None)
         item.setdefault("expiration_ymd", None)
         item.setdefault("premium_per_share", None)
-        item.setdefault("multiplier", None)
+        item.setdefault("multiplier", _UNSET)
         item.setdefault("opened_at_ms", None)
         item.setdefault("as_of_ms", None)
         normalized.append({"record_id": lot_id, **item})
@@ -1709,6 +1715,7 @@ def preview_lifecycle_expire_close(
     operations: list[dict[str, Any]] = []
     for match in close_target_resolution.matches:
         fields = _current_record_fields(repo, lot_id=match.lot_id)
+        require_option_multiplier(fields.get("multiplier"))
         ledger_preflight = preflight_broker_trade_close(
             repo,
             lot_id=match.lot_id,
@@ -1943,7 +1950,7 @@ def preview_manual_position_adjust(
     strike: float | None,
     expiration_ymd: str | None,
     premium_per_share: float | None,
-    multiplier: float | None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -1996,7 +2003,7 @@ def record_manual_position_adjust(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -2057,7 +2064,7 @@ def preview_broker_trade_open(deal: Any) -> BrokerTradeOpenPreviewResult:
         "contracts": int(getattr(deal, "contracts", 0) or 0),
         "currency": str(getattr(deal, "currency", "") or ""),
         "strike": (float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
-        "multiplier": float(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None,
+        "multiplier": getattr(deal, "multiplier", None),
         "expiration_ymd": (str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
         "premium_per_share": float(raw_price) if raw_price not in (None, "") else None,
         "note": (
@@ -2322,6 +2329,8 @@ def record_lifecycle_allocation(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: list[Any] | None = None,
     notification_transition_type: str | None = None,
+    notification_status: str = "pending",
+    broker_ownership_validator: Any = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     wheel_start_enabled: bool = False,
@@ -2342,6 +2351,8 @@ def record_lifecycle_allocation(
             correction_void_events or []
         ),
         notification_transition_type=notification_transition_type,
+        notification_status=notification_status,
+        broker_ownership_validator=broker_ownership_validator,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,
@@ -2383,6 +2394,21 @@ def accept_option_close_evidence(
         contract_identity=contract_identity,
         evidence=evidence,
         apply_changes=apply_changes,
+    )
+
+
+def record_zero_price_option_close(
+    repo: Any,
+    *,
+    deal: Any,
+    contract_identity: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    return record_zero_price_option_close_atomically(
+        repo,
+        contract_identity=contract_identity,
+        evidence=evidence,
+        base_event=_trade_event_from_normalized_deal(deal),
     )
 
 
@@ -2542,6 +2568,7 @@ def record_trade_event_repair(
     event_id: str,
     overrides: dict[str, Any],
     reason: str,
+    expected_input_hash: str | None = None,
 ) -> dict[str, Any]:
     if is_order_identity_repair_request(overrides):
         return persist_manual_order_identity_binding(
@@ -2557,14 +2584,22 @@ def record_trade_event_repair(
             overrides=overrides,
             repair_reason=reason,
         )
+    readback = readback_manual_repair_event(
+        repo, target_event_id=event_id, overrides=overrides,
+        repair_reason=reason, expected_input_hash=expected_input_hash,
+    )
+    if readback is not None:
+        return readback | {"mode": "no_op"}
     ledger_result = persist_manual_repair_event_with_ledger(
         repo,
         target_event_id=event_id,
         overrides=overrides,
         repair_reason=reason,
+        expected_input_hash=expected_input_hash,
     )
-    return ledger_result.result.to_dict() | {
-        "mode": "applied",
+    result = ledger_result.result.to_dict()
+    return result | {
+        "mode": "applied" if result.get("repair_created") else "no_op",
         "ledger_preflight": ledger_result.ledger_preflight.to_dict(),
     }
 

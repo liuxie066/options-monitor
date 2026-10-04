@@ -136,6 +136,7 @@ def test_wheel_branch_agent_tool_resolves_alias_and_binds_preview(
         lambda *_args, **_kwargs: {
             "market": "us",
             "activation_descriptor": {"generation": 1},
+            "account_configured": True,
             "policy_sha256": "a" * 64,
         },
     )
@@ -178,6 +179,7 @@ def test_wheel_branch_agent_tool_resolves_alias_and_binds_preview(
         "as_of_ms": 123,
         "market": "us",
         "activation_descriptor": {"generation": 1},
+        "account_configured": True,
         "policy_sha256": "a" * 64,
     }
 
@@ -703,7 +705,7 @@ def test_wheel_activation_agent_config_failure_keeps_committed_window(
     assert details["window_receipt"]["expected_config_descriptor"]["generation"] == 1
     assert details["config_audit"] == {"write_applied": False, "targets": []}
     assert details["write_applied"] is True
-    assert details["readiness"]["reason_code"] == "missing_descriptor"
+    assert details["readiness"]["reason_code"] == "account_not_configured"
 
 
 def test_wheel_activation_agent_rejects_market_config_mismatch() -> None:
@@ -738,16 +740,6 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
         "phase": "pending_decision",
         "projection_hash": "branch-hash",
     }
-    monkeypatch.setattr(
-        wheel_read_model,
-        "build_assigned_stock_projection_from_rows",
-        lambda *_args, **_kwargs: {},
-    )
-    monkeypatch.setattr(
-        wheel_read_model,
-        "project_wheel_lifecycles",
-        lambda *_args, **_kwargs: [legacy_batch],
-    )
     monkeypatch.setattr(
         wheel_read_model,
         "project_wheel_branches",

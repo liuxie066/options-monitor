@@ -479,9 +479,14 @@ def test_unreadable_base_module_content_is_reported(monkeypatch, tmp_path: Path)
     repo = _bare_repo(tmp_path)
     _write(repo, "src/pkg/mod.py", "def alpha():\n    pass\n")
     base = _commit(repo, "base")
-    _drop_object(repo, base, "src/pkg/mod.py")
     (repo / "src/pkg/mod.py").unlink()
     monkeypatch.setattr(guardrails_check, "ROOT", repo)
+    original_blob_text = guardrails_check._git_blob_text
+    monkeypatch.setattr(
+        guardrails_check,
+        "_git_blob_text",
+        lambda spec: None if spec == f"{base}:src/pkg/mod.py" else original_blob_text(spec),
+    )
 
     issues = guardrails_check.check_public_surface(base)
 

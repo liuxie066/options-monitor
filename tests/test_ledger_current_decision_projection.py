@@ -67,6 +67,7 @@ from src.application.ledger.decision_snapshot import (
     decision_state_snapshot,
     decision_state_snapshot_fingerprint,
     decision_state_snapshot_from_rows,
+    read_decision_state_rows_many,
 )
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_forced_full,
@@ -966,7 +967,7 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
 ) -> None:
     repo = _repo(tmp_path)
     _bootstrap(repo, "lx")
-    rows = repo.read_decision_state_rows(account="lx")
+    rows = read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
     current = _trusted(repo, 20_000)
     snapshot = decision_state_snapshot_from_rows(
         rows,
@@ -1070,7 +1071,7 @@ def test_legacy_snapshot_shadow_compares_lifecycle_quality_at_same_clock(
     lifecycle_case = _discover_projected_case(repo)
     _bind_test_timing(repo, lifecycle_case)
     now_ms = 1_800_000_000_000
-    rows = repo.read_decision_state_rows(account="lx")
+    rows = read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
     current = _trusted(repo, now_ms)
 
     snapshot = decision_state_snapshot_from_rows(
@@ -2395,12 +2396,17 @@ def test_fence_finalizer_skips_unchanged_and_rebuilds_global_fanout_once(
 
     with repo._connect() as conn:  # noqa: SLF001 - transaction owner contract
         conn.execute("BEGIN IMMEDIATE")
+        unchanged_statements: list[str] = []
+        conn.set_trace_callback(unchanged_statements.append)
         unchanged = finalize_current_decision_projection(
             repo,
             fence=fence,
             updated_at_ms=11_000,
             conn=conn,
         )
+        conn.set_trace_callback(None)
+        assert not any("SELECT EVENT_JSON FROM TRADE_EVENTS" in " ".join(stmt.upper().split())
+                       for stmt in unchanged_statements)
         assert unchanged["projection_dml_count"] == 0
         assert set(unchanged["statuses"].values()) == {"not_required"}
         conn.rollback()
@@ -2440,6 +2446,10 @@ def test_fence_finalizer_skips_unchanged_and_rebuilds_global_fanout_once(
         if statement.lstrip().upper().startswith("INSERT INTO CURRENT_DECISION_PROJECTIONS")
     ]
     assert len(projection_dml) == len(accounts)
+    history_reads = [statement for statement in statements
+                     if " ".join(statement.upper().split()).startswith(
+                         "SELECT EVENT_JSON FROM TRADE_EVENTS ORDER BY")]
+    assert len(history_reads) == 1
     assert all(
         read_current_decision_projection(repo, account=account, now_ms=13_000)[
             "status"
@@ -2703,11 +2713,6 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
         manual_trades.persist_manual_adjust_events: (
             "current_by_lot_id",
             "run_position_projection_in_transaction",
-            "_finish_trade_event_decision_projection",
-        ),
-        combo_reconciliation.adopt_post_trade_combo_pair: (
-            "_validate_inference_against_current_ledger",
-            "identity",
             "_finish_trade_event_decision_projection",
         ),
         combo_reconciliation.supersede_post_trade_combo_pair: (
@@ -3093,3 +3098,46 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
         assigned_stock_after=full_after,
     )
     assert _trusted(repo, 5_000)["payload"]["assigned_stock"]["lots"] == []
+
+
+def test_finalizer_shared_history_preserves_account_time_and_prepublication_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.ledger.current_decision_runtime as runtime
+
+    accounts = ("lx", "sy")
+    repo = _repo(tmp_path, accounts=accounts)
+    for account in accounts:
+        _bootstrap(repo, account)
+    fence = capture_current_decision_projection_fence(repo, accounts=accounts)
+    observed = []
+    real_metadata = runtime.lot_strategy_metadata_from_trade_events
+    real_build = runtime.build_current_decision_projection
+
+    def metadata(events):
+        observed.append([(event["contract_key"]["account"], event["event_id"]) for event in events])
+        return real_metadata(events)
+
+    def fail_second(*args, **kwargs):
+        if kwargs["account"] == "sy":
+            raise ValueError("second account failed")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "lot_strategy_metadata_from_trade_events", metadata)
+    monkeypatch.setattr(runtime, "build_current_decision_projection", fail_second)
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run_position_projection_in_transaction(
+            repo, [_event("future", account="lx", lot_id="future", event_time_ms=50000)],
+            conn=conn, mode="forced_full",
+        )
+        statements = []
+        conn.set_trace_callback(statements.append)
+        with pytest.raises(ValueError, match="second account failed"):
+            finalize_current_decision_projection(repo, fence=fence, updated_at_ms=12000, conn=conn)
+        conn.set_trace_callback(None)
+        assert observed == [[("lx", "open-lx")], [("sy", "open-sy")]]
+        assert not any("INSERT INTO CURRENT_DECISION_PROJECTIONS" in sql.upper() for sql in statements)
+        assert sum(" ".join(sql.upper().split()).startswith(
+            "SELECT EVENT_JSON FROM TRADE_EVENTS ORDER BY") for sql in statements) == 1
+        conn.rollback()

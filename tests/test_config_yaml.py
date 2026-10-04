@@ -59,9 +59,17 @@ accounts:
   lx:
     type: futu
     futu_account_id: "REAL_12345678"
+    futu:
+      host: 127.0.0.1
+      port: 11111
+      trd_env: REAL
   sy:
-    type: external_holdings
-    holdings_account: sy
+    type: futu
+    futu_account_id: "REAL_87654321"
+    futu:
+      host: 127.0.0.1
+      port: 22222
+      trd_env: REAL
 
 features:
   close_advice: false
@@ -123,8 +131,8 @@ markets:
 _US_HOLDINGS_YAML_HEAD = """\
 accounts:
   lx:
-    type: external_holdings
-    holdings_account: lx
+    type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -343,6 +351,70 @@ def test_runtime_config_rejects_retired_symbol_worker_keys(key: str) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        ({"type": "external_holdings"}, "type"),
+        ({"type": "futu", "futu_account_id": "REAL_12345678", "holdings_account": ""}, "holdings_account is retired"),
+    ],
+)
+def test_yaml_config_rejects_retired_account_binding(tmp_path: Path, setting: dict, message: str) -> None:
+    doc = yaml.safe_load(_US_FUTU_YAML_HEAD)
+    doc["accounts"]["lx"] = setting
+    path = _write_yaml(tmp_path / "config.yaml", yaml.safe_dump(doc))
+
+    with pytest.raises(AgentToolError, match=message):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=path)
+
+
+@pytest.mark.parametrize(
+    ("portfolio", "message"),
+    [
+        ({"source_by_account": {"lx": "futu"}}, "source_by_account is retired"),
+        ({"source_by_account": {"lx": "auto"}}, "source_by_account is retired"),
+        ({"source": "holdings"}, "source=holdings is retired"),
+    ],
+)
+def test_runtime_config_rejects_retired_portfolio_binding(portfolio: dict, message: str) -> None:
+    cfg = {"accounts": ["lx"], "symbols": [{"symbol": "NVDA"}], "portfolio": portfolio}
+
+    with pytest.raises(SystemExit, match=message):
+        validate_config(cfg)
+
+
+def test_old_account_config_candidate_build_preserves_backup_and_ledger(tmp_path: Path) -> None:
+    old_doc = yaml.safe_load(_US_FUTU_YAML_HEAD)
+    old_doc["accounts"]["ext1"] = {"type": "external_holdings", "holdings_account": "Feishu EXT"}
+    old_doc["markets"]["us"]["accounts"].append("ext1")
+    old_doc["portfolio"] = {"source_by_account": {"ext1": "holdings"}}
+    source = _write_yaml(tmp_path / "config.yaml", yaml.safe_dump(old_doc))
+    old_bytes = source.read_bytes()
+    backup = tmp_path / "config.yaml.backup"
+    backup.write_bytes(old_bytes)
+    ledger = tmp_path / "option_positions.sqlite3"
+    ledger.write_bytes(b"isolated-ledger-sentinel")
+
+    with pytest.raises(AgentToolError):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=source)
+
+    candidate = deepcopy(old_doc)
+    del candidate["accounts"]["ext1"]
+    candidate["markets"]["us"]["accounts"].remove("ext1")
+    del candidate["portfolio"]["source_by_account"]
+    assert backup.read_bytes() == old_bytes
+    source.write_text(yaml.safe_dump(candidate), encoding="utf-8")
+    output = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT, market="us", config_path=source, output_config_path=output
+    )
+    rebuilt = json.loads(output.read_text(encoding="utf-8"))
+
+    assert rebuilt["accounts"] == ["lx"]
+    assert "ext1" not in rebuilt["account_settings"]
+    assert "source_by_account" not in rebuilt["portfolio"]
+    assert ledger.read_bytes() == b"isolated-ledger-sentinel"
+
+
 def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
 
@@ -351,8 +423,8 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert meta["source_format"] == "yaml"
     assert cfg["accounts"] == ["lx", "sy"]
     assert cfg["account_settings"]["lx"]["futu"]["account_id"] == "REAL_12345678"
-    assert cfg["account_settings"]["sy"] == {"type": "external_holdings", "holdings_account": "sy"}
-    assert cfg["portfolio"]["source_by_account"] == {"lx": "futu", "sy": "holdings"}
+    assert cfg["account_settings"]["sy"]["futu"]["account_id"] == "REAL_87654321"
+    assert "source_by_account" not in cfg["portfolio"]
     assert cfg["close_advice"]["enabled"] is False
     assert "assistant" not in cfg
     assert "inbound" not in cfg
@@ -986,14 +1058,17 @@ def test_yaml_account_add_is_preview_only_by_default(tmp_path: Path) -> None:
         action="add",
         market="us",
         account_label="new",
-        account_type="external_holdings",
+        account_type="futu",
+        futu_acc_id="999000000000000003",
+        futu_host="127.0.0.1",
+        futu_port=33333,
         config_path=config_path,
     )
 
     assert out["dry_run"] is True
     assert out["write_applied"] is False
     assert out["summary"]["accounts"] == ["lx", "sy", "new"]
-    assert out["summary"]["holdings_account"] == "new"
+    assert out["summary"]["futu_acc_id_masked"] == "...0003"
     assert config_path.read_bytes() == before
     assert not (tmp_path / "config.us.json").exists()
 
@@ -1007,7 +1082,10 @@ def test_yaml_account_add_apply_publishes_one_generation(tmp_path: Path) -> None
         action="add",
         market="us",
         account_label="new",
-        account_type="external_holdings",
+        account_type="futu",
+        futu_acc_id="999000000000000003",
+        futu_host="127.0.0.1",
+        futu_port=33333,
         config_path=config_path,
         rebuild_runtime_root=runtime_root,
         apply=True,
@@ -1015,7 +1093,7 @@ def test_yaml_account_add_apply_publishes_one_generation(tmp_path: Path) -> None
 
     assert out["write_applied"] is True
     source_doc = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert source_doc["accounts"]["new"]["type"] == "external_holdings"
+    assert source_doc["accounts"]["new"]["type"] == "futu"
     assert source_doc["markets"]["us"]["accounts"] == ["lx", "sy", "new"]
     assert source_doc["markets"]["hk"]["accounts"] == ["lx"]
     us_runtime = json.loads((runtime_root / "config.us.json").read_text(encoding="utf-8"))
@@ -1371,7 +1449,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert set(payload["assistant"]["models"]) == {"deepseek-default"}
     assert "max_output_tokens" not in payload["assistant"]["models"]["deepseek-default"]
-    assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
+    assert payload["markets"]["us"]["accounts"] == ["lx"]
     assert payload["markets"]["us"]["symbols"] == ["AAPL"]
     assert payload["markets"]["hk"]["symbols"] == ["0005.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
@@ -1422,7 +1500,6 @@ def test_config_init_hk_only_has_no_us_market_or_sample_symbols(tmp_path: Path) 
     [
         {"account_label": "../escaped"},
         {"account_label": "lx.sy"},
-        {"external_holdings_account": "sy account"},
     ],
 )
 def test_config_init_invalid_account_scope_has_dry_run_apply_parity_and_preserves_existing(
@@ -2067,6 +2144,29 @@ def test_yaml_market_fingerprint_rejects_nonfinite_values_on_build_and_check(tmp
     with pytest.raises(ValueError):
         resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
     assert not check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
+
+
+def test_account_setting_builder_never_returns_null_for_unsupported_type() -> None:
+    from src.application.config_yaml_accounts import _build_account_setting
+
+    with pytest.raises(AgentToolError, match="unsupported account type"):
+        _build_account_setting(
+            current=None, account="lx", account_type="other", futu_acc_id=None,
+            market_label=None, enabled=None, trade_intake_enabled=None,
+            futu_host=None, futu_port=None,
+        )
+
+
+def test_account_setting_builder_rejects_retired_bitable_instead_of_dropping_it() -> None:
+    from src.application.config_yaml_accounts import _build_account_setting
+
+    with pytest.raises(AgentToolError, match=r"accounts\.lx\.bitable is retired"):
+        _build_account_setting(
+            current={"type": "futu", "futu": {"account_id": "1"}, "bitable": {"app_token": "old"}},
+            account="lx", account_type="futu", futu_acc_id=None,
+            market_label=None, enabled=None, trade_intake_enabled=None,
+            futu_host=None, futu_port=None,
+        )
 
 
 def test_yaml_mapping_order_does_not_change_combo_policy_or_fingerprint() -> None:

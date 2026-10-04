@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 from collections import Counter
+from dataclasses import replace
+
+from domain.domain.lifecycle_allocation import allocation_id_for, terminal_event_id_for
 
 from domain.domain.assigned_stock import assigned_stock_sale_allocations
 from domain.domain.ledger.identity import position_key_for
@@ -16,7 +21,10 @@ from src.application.ledger.assigned_stock_projection import (
 from src.application.ledger.current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
-from src.application.ledger.external_event_key import execution_identity_from_input
+from src.application.ledger.external_event_key import (
+    execution_identity_from_input,
+    futu_compatibility_source_key,
+)
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
     lot_contract_value,
@@ -44,7 +52,6 @@ from .writer_common import (
     datetime,
     effective_contracts_open,
     effective_expiration_ymd,
-    effective_multiplier,
     effective_strike,
     expiration_observation_start_ms,
     finalize_current_decision_projection,
@@ -275,7 +282,11 @@ def record_assigned_stock_event_atomically(
         assert before_rows is not None and before_report is not None
 
         prepared = (
-            prepare_sale(before_report, list(before_rows["account_assigned_stock_events"]))
+            prepare_sale(
+                before_report,
+                list(before_rows["account_assigned_stock_events"]),
+                list(before_rows["trade_events"]),
+            )
             if prepare_sale is not None
             else {"sale_event": event_seed}
         )
@@ -376,6 +387,27 @@ def record_assigned_stock_event_atomically(
         )
         identity_enriched = False
         created = existing is None
+        if created and str(event.get("source") or "").strip().lower() == "broker":
+            source_key = futu_compatibility_source_key(
+                account=selected_account,
+                futu_account_id=event.get("futu_account_id"),
+                source_deal_id=event.get("source_deal_id"),
+                execution_input=event.get("execution_input"),
+            )
+            if (not event.get("futu_account_id") or not event.get("source_deal_id")):
+                raise ValueError("broker_stock_source_identity_missing")
+            if (
+                sqlite_repo.get_trade_lifecycle_source_consumption(source_key, conn=conn)
+                or any(
+                    str(row.get("source_event_id") or "").strip() == source_key
+                    and str(row.get("evidence_type") or "").strip().lower()
+                    == "stock_settlement_leg"
+                    for row in sqlite_repo.list_trade_lifecycle_evidence(
+                        account=selected_account, conn=conn,
+                    )
+                )
+            ):
+                raise ValueError("broker_stock_source_already_consumed")
         if created and event.get("price") is not None and event.get("currency"):
             storage_event = attach_assigned_stock_sale_cash_conversions(
                 storage_event,
@@ -538,10 +570,13 @@ def accept_option_close_evidence_atomically(
     contract_identity: dict[str, Any],
     evidence: dict[str, Any],
     apply_changes: bool = True,
+    _after_accept: Any = None,
+    _on_existing: Any = None,
 ) -> dict[str, Any]:
     """Create/reuse one lifecycle_case.v2 and accept zero-price close evidence."""
 
     identity = dict(contract_identity or {})
+    multiplier = require_option_multiplier(identity.get("multiplier"))
     evidence_payload = dict(evidence or {})
 
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
@@ -618,6 +653,8 @@ def accept_option_close_evidence_atomically(
             )
             if lifecycle_case is None:
                 raise ValueError("lifecycle evidence case is missing")
+            if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             bound_futu_account_id = str(
                 lifecycle_case.get("futu_account_id") or ""
             ).strip()
@@ -642,7 +679,7 @@ def accept_option_close_evidence_atomically(
                 source_role="option_anchor",
                 economic_payload={
                     **identity,
-                    **existing_evidence,
+                    **evidence_payload,
                     "account": account,
                     "futu_account_id": futu_account_id,
                 },
@@ -655,7 +692,7 @@ def accept_option_close_evidence_atomically(
                 expected_claim,
                 conn=conn,
             )
-            return {
+            result = {
                 "status": "existing",
                 "case_id": existing_case_id,
                 "case_created": False,
@@ -667,7 +704,21 @@ def accept_option_close_evidence_atomically(
                 "source_claim": expected_claim,
                 "source_claim_created": False,
             }
+            if _on_existing is not None:
+                result.update(_on_existing(sqlite_repo, conn, result))
+            return result
 
+        position_lots = list(sqlite_repo.list_position_lots(conn=conn))
+        matching_lots = _matching_lifecycle_lots(
+            position_lots,
+            contract_key=contract_key,
+            position_side=position_side,
+        )
+        active_lot_ids = {lot_id for lot_id, _remaining, _opened_at in matching_lots}
+        for row in position_lots:
+            if str(row.get("record_id") or "") in active_lot_ids:
+                if require_option_multiplier((row.get("fields") or {}).get("multiplier")) != multiplier:
+                    raise ValueError("unsupported_contract_multiplier")
         cases = [
             item
             for item in sqlite_repo.list_trade_lifecycle_cases(
@@ -679,16 +730,29 @@ def accept_option_close_evidence_atomically(
             and str(item.get("contract_key") or "").strip()
             == position_key_for(contract_key, position_side)
         ]
-        if len(cases) > 1:
-            raise ValueError("multiple_lifecycle_cases_for_contract")
-        lifecycle_case = dict(cases[0]) if cases else None
+        matching_cases = []
+        for item in cases:
+            prior_allocations = list(sqlite_repo.list_trade_lifecycle_allocations(
+                case_id=str(item.get("case_id") or ""), conn=conn,
+            ))
+            prior_resolution = resolve_allocations(
+                item.get("target_contracts_by_lot"), prior_allocations,
+                void_event_ids=_effective_void_target_ids(sqlite_repo, conn=conn),
+            )
+            if prior_resolution.status != "ok":
+                raise ValueError("existing_lifecycle_allocations_conflict")
+            live_ids = {
+                lot_id for lot_id, quantity in prior_resolution.remaining_contracts_by_lot.items()
+                if int(quantity) > 0
+            }
+            if live_ids & active_lot_ids:
+                if live_ids != active_lot_ids:
+                    raise ValueError("lifecycle_case_active_lot_set_conflict")
+                matching_cases.append(item)
+        if len(matching_cases) > 1:
+            raise ValueError("multiple_lifecycle_cases_for_active_lots")
+        lifecycle_case = dict(matching_cases[0]) if matching_cases else None
         case_preexisting = lifecycle_case is not None
-        position_lots = list(sqlite_repo.list_position_lots(conn=conn))
-        matching_lots = _matching_lifecycle_lots(
-            position_lots,
-            contract_key=contract_key,
-            position_side=position_side,
-        )
         if lifecycle_case is None:
             if not matching_lots:
                 raise ValueError("lifecycle_close_target_not_found")
@@ -712,9 +776,11 @@ def accept_option_close_evidence_atomically(
                 "option_type": contract_key.option_type,
                 "strike": float(contract_key.strike),
                 "currency": normalize_currency(identity.get("currency")),
-                "multiplier": float(identity.get("multiplier") or 100),
+                "multiplier": multiplier,
             }
         else:
+            if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             bound_futu_account_id = str(
                 lifecycle_case.get("futu_account_id") or ""
             ).strip()
@@ -822,12 +888,14 @@ def accept_option_close_evidence_atomically(
                     conn=conn,
                     lifecycle_case=lifecycle_case,
                     allow_missing_fact=not case_preexisting,
+                    global_event_owner=_after_accept is not None,
                 )
             )
-            begin = decision_fence.accounts[0]
+            if _after_accept is None:
+                begin = decision_fence.accounts[0]
             decision_resolution: dict[str, Any] | None = None
             decision_deferred = False
-            if begin.projection_present and begin.clean_at_start:
+            if _after_accept is None and begin.projection_present and begin.clean_at_start:
                 prior_resolution = (
                     dict(prior_decision_fact["resolution"])
                     if prior_decision_fact is not None
@@ -890,20 +958,27 @@ def accept_option_close_evidence_atomically(
                     conn=conn,
                 )
             )
-            decision_projection = (
-                _defer_lifecycle_decision_projection(decision_fence)
-                if decision_deferred
-                else _finish_lifecycle_decision_projection(
-                    sqlite_repo,
-                    conn=conn,
-                    fence=decision_fence,
-                    prior_fact=prior_decision_fact,
-                    case_id=str(lifecycle_case.get("case_id") or ""),
-                    resolution=decision_resolution,
+            if _after_accept is None:
+                decision_projection = (
+                    _defer_lifecycle_decision_projection(decision_fence)
+                    if decision_deferred
+                    else _finish_lifecycle_decision_projection(
+                        sqlite_repo,
+                        conn=conn,
+                        fence=decision_fence,
+                        prior_fact=prior_decision_fact,
+                        case_id=str(lifecycle_case.get("case_id") or ""),
+                        resolution=decision_resolution,
+                    )
                 )
-            )
+            else:
+                applied = _after_accept(
+                    sqlite_repo, conn, lifecycle_case, accepted_evidence,
+                    case_created, decision_fence, prior_decision_fact,
+                )
+                decision_projection = applied.get("decision_projection")
             sqlite_repo.assert_foreign_keys_clean(conn=conn)
-        return {
+        result = {
             "status": "accepted" if apply_changes else "dry_run",
             "case_id": str(lifecycle_case.get("case_id") or ""),
             "case_created": case_created,
@@ -916,8 +991,150 @@ def accept_option_close_evidence_atomically(
             "source_claim_created": source_claim_created,
             "decision_projection": decision_projection,
         }
+        if apply_changes and _after_accept is not None:
+            result.update(applied)
+        return result
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo, _run, require_projection_publication=_after_accept is not None,
+    )
+
+
+def record_zero_price_option_close_atomically(
+    repo: Any,
+    *,
+    contract_identity: dict[str, Any],
+    evidence: dict[str, Any],
+    base_event: Any,
+) -> dict[str, Any]:
+    """Adopt a broker close anchor and its economic close in one transaction."""
+    from .writer_lifecycle_allocation import apply_lifecycle_allocation_atomically
+
+    if require_option_multiplier(base_event.multiplier) != require_option_multiplier(contract_identity.get("multiplier")):
+        raise ValueError("unsupported_contract_multiplier")
+
+    def _plan(case: dict[str, Any], anchor: dict[str, Any]) -> tuple[list[dict[str, Any]], list[Any]]:
+        case_id = str(case["case_id"])
+        evidence_id = str(anchor["evidence_id"])
+        rows: list[dict[str, Any]] = []
+        events: list[Any] = []
+        for lot_id, quantity in sorted(dict(anchor["target_contracts_by_lot"]).items()):
+            allocation_id = allocation_id_for(
+                case_id=case_id, evidence_id=evidence_id, target_lot_id=lot_id,
+            )
+            event_id = terminal_event_id_for(
+                case_id=case_id, evidence_id=evidence_id, target_lot_id=lot_id,
+                terminal_type="close", contracts_allocated=int(quantity),
+            )
+            rows.append({
+                "allocation_id": allocation_id,
+                "case_id": case_id,
+                "evidence_id": evidence_id,
+                "target_lot_id": lot_id,
+                "terminal_type": "close",
+                "contracts_allocated": int(quantity),
+                "canonical_terminal_event_id": event_id,
+            })
+            events.append(replace(
+                base_event,
+                event_id=event_id,
+                event_type="close",
+                contracts=int(quantity),
+                target_lot_id=lot_id,
+                raw_payload={
+                    **dict(base_event.raw_payload or {}),
+                    "schema_version": "lifecycle_terminal_event.v2",
+                    "record_id": lot_id,
+                    "target_lot_id": lot_id,
+                    "close_type": "cause_pending",
+                    "close_reason": "cause_pending",
+                    "case_id": case_id,
+                    "evidence_id": evidence_id,
+                    "allocation_id": allocation_id,
+                    "contracts": int(quantity),
+                    "source_event_id": anchor["source_event_id"],
+                },
+            ))
+        return rows, events
+
+    def _after_accept(sqlite_repo: Any, conn: Any, case: dict[str, Any],
+                      anchor: dict[str, Any], case_created: bool,
+                      decision_fence: Any,
+                      prior_decision_fact: dict[str, Any] | None) -> dict[str, Any]:
+        allocations, events = _plan(case, anchor)
+        prior = list(sqlite_repo.list_trade_lifecycle_allocations(
+            case_id=case["case_id"], conn=conn,
+        ))
+        resolution = resolve_allocations(
+            case["target_contracts_by_lot"], [*prior, *allocations],
+            void_event_ids=_effective_void_target_ids(sqlite_repo, conn=conn),
+        )
+        if resolution.status != "ok":
+            raise ValueError("lifecycle_close_allocation_conflict")
+        result = apply_lifecycle_allocation_atomically(
+            sqlite_repo,
+            case_id=case["case_id"],
+            evidence={**anchor, "terminal_type": "close"},
+            terminal_events=events,
+            allocations=allocations,
+            derived_status=("ledger_written" if resolution.remaining_contracts == 0
+                            else "partially_resolved"),
+            derived_summary={},
+            notification_status="suppressed",
+            _conn=conn,
+            _fresh_anchor_evidence=True,
+            _new_case=case_created,
+            _decision_fence=decision_fence,
+            _prior_decision_fact=prior_decision_fact,
+        )
+        return {"economic_close": result}
+
+    def _on_existing(sqlite_repo: Any, conn: Any,
+                     accepted: dict[str, Any]) -> dict[str, Any]:
+        case = dict(accepted["lifecycle_case"])
+        anchor = dict(accepted["lifecycle_evidence"])
+        allocations, events = _plan(case, anchor)
+        stored = list(sqlite_repo.list_trade_lifecycle_allocations(
+            case_id=case["case_id"], conn=conn,
+        ))
+        by_id = {str(row.get("allocation_id") or ""): row for row in stored}
+        event_by_id = {
+            str(row.get("event_id") or ""): row
+            for row in sqlite_repo.get_trade_events_by_ids(
+                [event.event_id for event in events], conn=conn,
+            )
+        }
+        if any(
+            row["allocation_id"] not in by_id
+            or row["canonical_terminal_event_id"] not in event_by_id
+            or int(by_id[row["allocation_id"]].get("contracts_allocated") or 0)
+               != row["contracts_allocated"]
+            or str(by_id[row["allocation_id"]].get("canonical_terminal_event_id") or "")
+               != row["canonical_terminal_event_id"]
+            for row in allocations
+        ):
+            raise ValueError("legacy_pending_requires_review")
+        resolution = resolve_allocations(
+            case["target_contracts_by_lot"], stored,
+            void_event_ids=_effective_void_target_ids(sqlite_repo, conn=conn),
+        )
+        if resolution.status != "ok" or any(
+            int(sqlite_repo.get_position_lot_fields(lot_id, conn=conn).get("contracts_open") or 0)
+            != expected
+            for lot_id, expected in resolution.remaining_contracts_by_lot.items()
+        ):
+            raise ValueError("lifecycle_close_replay_projection_conflict")
+        return {"economic_close": {"terminal_event_ids": [
+            event.event_id for event in events
+        ]}}
+
+    return accept_option_close_evidence_atomically(
+        repo,
+        contract_identity=contract_identity,
+        evidence=evidence,
+        _after_accept=_after_accept,
+        _on_existing=_on_existing,
+    )
 
 def discover_expired_lifecycle_cases_atomically(
     repo: Any,
@@ -985,8 +1202,6 @@ def discover_expired_lifecycle_cases_atomically(
             strike = lot_contract_value(fields, lot_contract_key, "strike")
             if strike in (None, ""):
                 strike = effective_strike(fields)
-            # ``multiplier`` keeps its top-level key in the converged payload.
-            multiplier = effective_multiplier(fields)
             try:
                 contract_key = ContractKey.from_values(
                     broker=lot_contract_value(fields, lot_contract_key, "broker", "broker"),
@@ -1026,6 +1241,7 @@ def discover_expired_lifecycle_cases_atomically(
             if lot_id in target_owner:
                 skipped_targeted_lot_ids.append(lot_id)
                 continue
+            multiplier = require_option_multiplier(fields.get("multiplier"))
             group = eligible_groups.setdefault(
                 position_key_for(contract_key, position_side),
                 {
@@ -1033,10 +1249,12 @@ def discover_expired_lifecycle_cases_atomically(
                     "position_side": position_side,
                     "market": market,
                     "currency": normalize_currency(fields.get("currency")),
-                    "multiplier": float(multiplier or 100.0),
+                    "multiplier": multiplier,
                     "target_contracts_by_lot": {},
                 },
             )
+            if group["multiplier"] != multiplier:
+                raise ValueError("unsupported_contract_multiplier")
             group["target_contracts_by_lot"][lot_id] = contracts_open
 
         decision_accounts = sorted(

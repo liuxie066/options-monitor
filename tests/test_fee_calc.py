@@ -370,3 +370,28 @@ def test_hk_terminal_rejects_unknown_kind() -> None:
     except ValueError:
         return
     raise AssertionError("expected ValueError for unsupported terminal kind")
+
+
+@pytest.mark.parametrize("currency", ["USD", "HKD"])
+@pytest.mark.parametrize("raw", [None, True, 100.5, "100.00000000000000001", float("inf")])
+def test_option_fee_validates_original_multiplier(currency, raw):
+    from domain.domain.fee_calc import calc_futu_option_fee
+
+    with pytest.raises(ValueError, match="multiplier"):
+        calc_futu_option_fee(currency, 1, multiplier=raw)
+
+
+def test_all_option_fee_entry_points_require_explicit_multiplier():
+    from domain.domain.fee_calc import calc_futu_option_fee, calc_futu_us_option_fee, calc_futu_hk_option_fee
+
+    for fn, args in [(calc_futu_option_fee, ("USD", 1)), (calc_futu_us_option_fee, (1,)), (calc_futu_hk_option_fee, (1,))]:
+        with pytest.raises(TypeError, match="multiplier"):
+            fn(*args)
+
+
+@pytest.mark.parametrize(("multiplier", "expected_hkd", "expected_usd"), [(100, 21.0, 2.5339), (500, 28.0, 2.6163), (1000, 38.0, 2.7193)])
+def test_option_fees_use_explicit_actual_multiplier(multiplier, expected_hkd, expected_usd):
+    from domain.domain.fee_calc import calc_futu_option_fee
+
+    assert calc_futu_option_fee("HKD", 10, multiplier=multiplier) == expected_hkd
+    assert calc_futu_option_fee("USD", 10, multiplier=multiplier) == expected_usd

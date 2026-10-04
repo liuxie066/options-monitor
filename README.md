@@ -4,7 +4,7 @@
 
 - `Cash-Secured Put (CSP)` 与 `Covered Call (CC)` 候选筛选；
 - `Combo Yield` 组合候选评估；
-- `CSP` 被指派后，继续管理买入的股票并寻找增收与退出机会；
+- Wheel 已启用时，符合身份与交割证据的外部 CSP / CC 指派进入对应轮转分支；
 - 已开期权 lot 的 `Close Advice`；
 - 期权利润、现金活动、持仓与到期生命周期查询；
 - Daily Decision Brief、候选变化提醒和离线策略复盘。
@@ -33,6 +33,7 @@ trade_events -> projection -> position_lots
 
 - `config.yaml` 是人工编辑源；生成的 JSON 是运行快照，不是日常手工编辑入口。
 - 本地 SQLite 是期权交易与持仓事实源；Feishu 不承载 `option_positions` 镜像。
+- Futu 账户现金由共享入口读取并判定可信度；扫描、查询、报告、Wheel 和指派情景采用同一套现金标准，有效期统一由 `runtime.portfolio_context_ttl_sec` 控制，缺少证据时明确标为不可用。
 - 普通手工 `tick` 不自动发送 scheduled ordinary notification；生产调度使用受保护的 `tick-cron`。
 - `./om-agent spec` 是 Tool Gateway 工具名、输入 schema、风险级别和副作用的权威清单。
 - 缺少行情、费用、历史汇率、事件或身份事实时，系统显式返回 missing、partial 或 not-evaluable，不补造数据。
@@ -52,7 +53,7 @@ trade_events -> projection -> position_lots
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
-| 本地 Bot | `om bot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
+| 本地 Bot（受控 US/HK 只读） | `om bot` | [Inbound Control](docs/INBOUND_CONTROL.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
@@ -61,9 +62,9 @@ trade_events -> projection -> position_lots
 
 ### 轮转策略
 
-轮转策略用于管理因卖出的 Put 被行权而买入的股票。持有期间，系统筛选“收取期权收入，并在目标价格卖出股票”的候选方案。如果股票没有卖出，下一轮继续筛选；股票全部卖出后，这一轮生命周期结束，不会自动重新开始。
+轮转策略管理卖出 Put 后买入股票、卖出 Call 后交付股票形成的分支。Wheel 已启用且身份与交割证据完整时，外部 CSP / CC 及对应 Combo 卖腿的指派会自动进入相应分支。成交可对应多个分支或证据不足时，Daily Brief 会持续提示待人工确认，用户可在 Control 预览并确认归属；同一笔多张 Call 成交可按张数分配给多个 Wheel 股票分支，系统不自行选择分支。当前门槛关闭后不再产生新的 Wheel 开仓候选；已有分支与真实成交仍按账本事实保留。
 
-已收到的期权收入会计入总收益，但不用于降低股票的卖出底线。系统还会合并检查所有可能占用持股的期权合约，避免新建议超过实际可用持股。该策略只提供监控和候选建议，不自动下单，也不保证收益。
+在持股分支，已收到的期权收入会计入总收益，但不用于降低股票的卖出底线；系统合并检查所有可能占用持股的期权合约。在现金分支，新 Put 候选仍须通过资金门槛。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
 CSP / CC 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
@@ -262,13 +263,16 @@ om-agent run --tool portfolio_assignment_scenario \
 该功能是纯读压力测试，不写 assignment event、不修改 `position_lots`、不修改 portfolio-management 持仓，也不发送通知。固定口径：
 
 - 只处理 open short put/call；Long Option 完全不读取、不估值、不保留；
-- portfolio-management 提供全部非期权资产、当前报价、显式 FX 和补充标的报价，OM SQLite 提供 short option lot；
+- 富途账户股票、现金与 MMF 从 OpenD 读取，富途股票现价也以 OpenD 为准；OM SQLite 提供 short option lot；
+- `portfolio.holdings.enabled` 默认关闭；开启后仅补充 PM Holdings 中经预检确认的非富途资产，不重复计入 PM 的富途股票、现金和 MMF 副本；
+- 非富途资产估值使用 PM 报价和显式 FX；PM 证据不可用时保留富途基线并标记 `partial`；
 - MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
 - 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
 - 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
 Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Bot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
+渠道 Bot 默认只读本渠道市场；只有显式配置 `assistant.bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
 
 ### Close Advice
 
@@ -308,6 +312,8 @@ om-agent run --tool option_performance_report \
 
 报告只提供期权净现金流、卖出/买入期权胜率和期权收益率，支持 MTD/YTD，金额保持
 原币。正股交易、指派/行权交割现金、PnL、CNY 换算和行情刷新均不在该报告内。
+券商确认的零价期权平仓按成交时间更新未平仓数量；原因待证时胜率暂不可算，
+现金和费用证据完整时仍可计算收益率。历史未入账成交不会自动补账。
 
 ### Research
 
@@ -361,11 +367,11 @@ om-agent run --tool healthcheck \
 | 共享状态与报告 | `<runtime_root>/output_shared/` |
 | 账户级输出 | `<runtime_root>/output_accounts/<account>/` |
 
-账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu` 或 `external_holdings`；数据源和 trade-intake 能力从账户设置派生，不能把一个账户的现金、持仓或状态 fallback 到另一个账户。
+账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu`；账户现金与股票持仓来自对应富途账户，trade-intake 能力从账户设置派生。富途失败时不使用 Holdings 回填账户数据。
 
-Feishu 有三种彼此独立的角色：
+Feishu 在本项目中的角色：
 
-- 可选的 `external_holdings` 数据源；
+- 独立的 Holdings 持仓上下文导出命令（开仓扫描不读取它计算风险）；
 - `feishu_app` 出站通知；
 - Feishu long-connection 入站消息。
 

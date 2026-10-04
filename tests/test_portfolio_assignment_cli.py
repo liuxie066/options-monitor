@@ -89,5 +89,8 @@ def test_assignment_scenario_cli_json_and_text_share_application_result(
     assert portfolio_ops.handle_portfolio_command(text_args) == 0
     rendered = capsys.readouterr().out
     assert "指派后资产分布（不含 Long Option）" in rendered
+    assert "全部券商指派" in rendered
+    assert "仅富途期权资金覆盖" in rendered
+    assert "富途 CSP 指派需求" in rendered
     assert "现金 + MMF：1000.00" in rendered
     assert calls == [["lx", "sy"], ["lx", "sy"]]

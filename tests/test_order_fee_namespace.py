@@ -25,6 +25,7 @@ _NOW_MS = 1_788_752_000_000
 def _payload(identity: str, namespace: str = "futu.order") -> dict:
     return {
         "schema_version": "trade_execution.v1",
+        "status": "OK",
         "broker_account_ref": {"broker_id": "futu", "external_account_id": "123",
                                "environment": "REAL", "broker_account_id": "futu:REAL:123",
                                "account_label": "lx"},

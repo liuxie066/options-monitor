@@ -196,8 +196,14 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   --input-json '{"accounts":["lx","sy"]}'
 ```
 
-该工具只有 `accounts` 一个业务入参。它把 portfolio-management 的非期权估值证据与 OM SQLite 的 open short put/call lot 合并，输出
-`portfolio.assignment_scenario.v1`。MMF 计入现金、主资金口径为 CNY、Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
+该工具只有 `accounts` 一个业务入参。富途 OpenD 的股票和现金（含 MMF）是底仓；
+`portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
+PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
+富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
+启用须先通过 `om config holdings set` 预览确认 broker 原文；查询时 PM scoped 清单
+缺失或出现未批准的新值会暂停整份 PM 补充，保留富途基线并标 `partial`。
+输出 `portfolio.assignment_scenario.v1`，主资金口径为 CNY，
+Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 
 ### 查询运行历史
 
@@ -252,7 +258,13 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   --input-json '{"config_key":"us","action":"events","account":"lx","position_effect":"close","limit":5}'
 ```
 
-`query_cash_headroom` 是 pure-read，并以 `write_cache=false` 查询，不持久化本次 cash query。`option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
+`query_cash_headroom` 是 pure-read，并以 `write_cache=false` 查询，不持久化本次 cash query。
+
+现金读取与扫描、Wheel、指派情景共用 `portfolio_context_service`：只按独立现金源时间和有效配置 `runtime.portfolio_context_ttl_sec`（缺省 900 秒，必须为正整数）决定缓存复用；`get_portfolio_context` 不再接受单独的 `ttl_sec`。
+
+返回的 `cash_snapshot` 包含 `status`（fresh/stale/unknown）、`reason_codes`、`source_observed_at`、`evaluated_at` 和 `max_age_sec`；仅 fresh 可用于现金容量。FX 缺失影响换算值，不改变原币现金可信度。历史报告保留封存时判定，缺少原现金证据时保持不可用。
+
+`option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
 
 `option_positions_read action=events` 读取 canonical SQLite `trade_events`，不会读取报价：
 
@@ -261,6 +273,8 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   `next_cursor` 用于下一次调用；后续页可改变 `limit`，不需要重复筛选条件。
 - cursor 固定首次查询的 market、账户权限、筛选条件和事件成员边界。首次查询后写入的事件，
   即使业务时间更早，也不会进入该 cursor 流。
+- `symbol` 先按标的身份规范化；例如 HK 查询中的 `700.HK` 会匹配账本里的 `0700.HK`。
+  无法识别或不属于所选市场的代码会报输入错误，不会返回看似完整的空页。
 - `include_total=true` 才计算冻结成员集合的 `total_count`。cursor 有效期为 30 分钟；过期、
   签名错误、权限或筛选条件变化都会明确失败，不会自动从头查询。
 - cursor 签名子密钥由运行服务从既有 `inbound.operation_hmac_key` 做固定域派生，不需要
@@ -395,11 +409,15 @@ Bot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细�
 ### `trade_attribution_read`
 
 只读当前配置账户的成交策略归属、候选身份、原因和数量覆盖。输入 `account`（必填），可选
-`execution_key`、`status`、`cursor`、`limit`（1–100）及配置选择。响应返回 `rows`、`next_cursor` 和证据完整性。
+`execution_key`、`symbol`、`status`、`cursor`、`limit`（1–100）及配置选择。响应返回 `market`、`rows`、
+`next_cursor` 和证据完整性。`symbol` 使用规范化标的身份；无法识别或与所选市场不符会报输入错误。
+`next_cursor` 是不透明的续页值，绑定首次查询的账户、市场和筛选条件；续页可省略筛选条件，
+但显式改动会报错。游标有效期为 30 分钟；旧版仅含事件 ID 的游标须重新查询。
 账户、物理 broker 身份与配置不一致时不能确认；查询不更新 Inbox 或 Control operation。
 人工操作见 [Inbound Control](INBOUND_CONTROL.md#已入账成交的策略归属)。
 
-规则管理由人类 CLI `om trade-intake attribution-enable` / `attribution-migrate` 提供，默认预览。
-使用 `--help` 检查必需参数；`--apply --confirm` 才写入。迁移须先停流并排空旧 writer，
-提供 `--writers-stopped`、预览 manifest 和新的备份目标；启用须给明确账户、actor、request ID 与未来生效时间。
-迁移不会自动启用规则，部署与生产启用均需单独授权。
+归属规则只有一套当前写入路径。人类 CLI `om trade-intake attribution-migrate` 负责按物理来源和账户切换到 v2；
+`--effective-from-ms` 指定未来的成交时间切换点，默认只预览。预览列出旧 v1 启用时间 T0、v2 切换时间 T2、来源和成交数量。
+写入前须停流并排空 writer，提供 `--writers-stopped`、同一来源的完整预览 manifest、新备份目标与 `--apply --confirm`。
+迁移只追加 v2 生效记录，不改旧行。T0 至 T2 之间及未切换来源的未归属成交仍可人工确认；仅成交时间不早于 T2 的成交可自动归属。
+部署与生产迁移各需单独授权；简报和成交回执持续显示待人工确认，不把缺失证据或账户总额变化当作归属证明。

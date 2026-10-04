@@ -1,82 +1,60 @@
-goal: "修复 OM 首次配置的离线就绪判断、跨终端目录定位、预览与失败恢复"
-non_goals:
-  - "不迁移或修改已有生产配置、服务或凭证"
-  - "不运行扫描、不连接 OpenD、不发送通知"
-  - "不提交、推送、建 PR、合并、发布或部署"
-scope: "om setup init/check、公共 runtime root 解析、相关 CLI/Tool Gateway 只读消费及文档"
-success_signals:
-  - "S1: 占位账户 ID 或所选市场快照缺失阻断离线配置就绪；Bot 单独报告"
-  - "S2: 无高优先级覆盖时新终端定位新建目录，显式环境与服务路径优先"
-  - "S3: dry-run/确认前展示完整目标与关键设置，不写持久目标、不覆盖并发目标"
-  - "S4: 预备内容绑定最终 YAML；写入失败只恢复本次未变化的文件；成功回读可用"
-authorized_slices:
-  - {slice: "offline-readiness", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S1", depends_on: []}
-  - {slice: "durable-runtime-root", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S2", depends_on: []}
-  - {slice: "preview-and-recovery", design_doc_ref: "CONFIGS.md#首次初始化与运行目录", success_signal: "S3,S4", depends_on: ["durable-runtime-root"]}
-slice_checkpoints:
-  - {slice: "offline-readiness", diff_fingerprint: "sha256:e6a124b902ef3f25d376e456011b45056b01fb6d1ad014cc39c74ad4471855da", validation: "tests/test_setup_check.py: 12 passed", done: true}
-  - {slice: "durable-runtime-root", diff_fingerprint: "sha256:9c85a198f3678637de6ad7e0e3bfc8cc3c3e72896d417aa547497b0ddf818dd2", validation: "new-process resolver/tool scope and tick-cron: passed", done: true}
-  - {slice: "preview-and-recovery", diff_fingerprint: "sha256:8ce75051b073c9d3d0ef2c4b293da6b25fa3befc900a960dc3e17f44b1f037ef", validation: "setup-init faults, new-process setup check, config suite: passed", done: true}
-user_confirmation:
-  - "先修2、3项"
-  - "再处理预览与恢复"
-  - "full"
-prd_doc: "not-applicable"
-prd_doc_ref: "not-applicable"
-design_doc: "CONFIGS.md"
-design_ref: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
-authorization_diffs: []
-workflow_version: 2
-mode: workflow
-workflow_path: full
-node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
+# 当前汇率事实 Devflow scope
+# 前一已完成任务的记录可从基线提交 3e757295 回读。
+goal: "统一 OM 当前汇率事实；CNY 为决策简报主要展示；外汇市场假期沿用各币种对最后有效报价"
+acceptance:
+  - "A1 同一正式批次共用一份封存快照，当前汇率只保留一套取数、校验、缓存和选择代码"
+  - "A2 腾讯和新浪真实字段可解析，逐币种对验证来源、价格和报价时间"
+  - "A3 CNY 优先并保留原币种及负余额；有外汇休市证据才按最后有效价沿用"
+  - "A4 假期沿用不放宽开仓容量，历史账本汇率事实不变"
+confirmed_by_user:
+  - "想要 cny 是主要展示口径"
+  - "假期汇率失效时按最后有效汇率计算"
+  - "确认，另外要求只保留一套代码"
+  - "进入 save design"
+  - "确认（批准 Save Design 版本 6f1c8163，进入 Improve Design）"
+  - "修订后运行planreview（确认四份意见的合批修订与 Planreview）"
+  - "impl（确认 Improve Design 版本 48baca1f，进入 Impl）"
+  - "确认（批准切片 1，进入切片 2）"
+  - "确认（批准切片 2，进入切片 3）"
+  - "确认（批准切片 3 的 Impl 结果，进入 Review）"
+  - "修复问题，再跑一遍deepreview（授权按 Review 发现修复、验证并重审）"
+  - "确认（批准修复后的 Review 结果，Devflow 完成）"
+non_goals: "不修成交归属，不修改生产账本、配置或服务；不提交、发布或升级"
+design_doc: docs/EXCHANGE_RATE_FACT_DESIGN.md
+design_sha256: 48baca1fd3368b79b45bd2b80f577653eeca1ffdcbe21c145fb9f068ca8b3d0a
+workspace: "Codex managed worktree fx-unified-design/options-monitor"
+initial_base: 3e757295e35b433ed2693ac4c301dc73fb2d0144
 current_node: Review
-internal_step: deepreview
 status: completed
-next_action: "研发已完成；如需源码交付，另行授权提交或推送"
-approved_scope_ref: "本对话用户消息: 先修2、3项; 再处理预览与恢复"
-path_approval_ref: "本对话用户消息: full"
-implementation_baseline:
-  design_doc: "CONFIGS.md sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-  implementation_workspace: ". (managed worktree: first-run-readiness/options-monitor)"
-  review_base: "origin/main@18f7ff06364c663cacf9ac84eef591171131b687"
-  head: "18f7ff06364c663cacf9ac84eef591171131b687"
-  git_status: " M CONFIGS.md"
-  staged: []
-  unstaged:
-    - {path: "CONFIGS.md", hash: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786}
-  untracked: []
-inventory:
-  - {path: ".devflow/scope.md", status: " M", hash: "sha256:self-reference", size: 3143, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGS.md", status: " M", hash: "sha256:1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0", size: 27786, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "CONFIGURATION_GUIDE.md", status: " M", hash: "sha256:e5ab0fdb2d6ee9e11719ba76327f3b5d433c78c344d54319a007f11f8d300aa6", size: 11145, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "README.md", status: " M", hash: "sha256:652f4fc8493bbe2656a81f175c9adc9cd248425045465e07d88473d2ce002295", size: 19898, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/DEPENDENCY_GRAPH.md", status: " M", hash: "sha256:11c3a6282ce7ecf32f4b43c8708afcdf2952042146a514675100b7727e061fe7", size: 8918, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/GETTING_STARTED.md", status: " M", hash: "sha256:62fa3a59fa549e1e6fdffbbcb33a3dea730e5bf13fb4a4f1ecfe845c644761a3", size: 7147, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "docs/dependency_graph.mmd", status: " M", hash: "sha256:2de75e2f11184c6dc90f64b05363437e95582c3a2dbc8ce14cc830eb8974d68c", size: 6805, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tool_config.py", status: " M", hash: "sha256:e0a12fc02c4ed2556709f756162ff7fb0ff15119aab6c8ab03e686e769bb63de", size: 4441, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project.py", status: " M", hash: "sha256:15bc0a76e41b9066108c7a304631c869c9aab5dab19342c38923df4d77aefcb7", size: 11808, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/project_runs.py", status: " M", hash: "sha256:619ca98ee71e4b371fad031aa1fa92711ee36c10ceb90bd3457b4a65cb4fa39a", size: 32406, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/agent_tools/runtime.py", status: " M", hash: "sha256:8e89a265f2aa48e90612899bf6c7fea43685b14334f1f90c417b0f7f8acbcde5", size: 26533, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/config_yaml_init.py", status: " M", hash: "sha256:382ebbcf74db4c684469f98a61e252a6643fe23712e405f380d609cd4e0bb6ca", size: 16955, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/runtime_paths.py", status: " M", hash: "sha256:bb7257c0a1530ca8c2db06affe36c441370d0636ac5751ac84231fdb61087b13", size: 3415, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/setup/check.py", status: " M", hash: "sha256:49838c11a2f35f496ec21b7eb6468e6f100afec0fe3ca078bacfe8596d6c30cb", size: 16690, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/application/tick_cron.py", status: " M", hash: "sha256:5f018be587e1cf712753d0f3c6bb5a52a70f804c4e6768fbfafbba7225491c34", size: 17959, type: file, mode: "0644", classification: "required-correctness/safety", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/home.py", status: " M", hash: "sha256:8ae7ae6ba76620aa5667e4ea6d7c56904a967ee61b9984437a4c460ddb08d851", size: 4682, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "src/interfaces/cli/setup_ops.py", status: " M", hash: "sha256:e6a0d4bcedda97f865f5975d9d5f00036bb8326a6d011b6614678a7b6df23dcb", size: 10298, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_runtime_paths.py", status: " M", hash: "sha256:cbde4a7942a76c38a658ab0c17b2e4e1c36502415d29af0157917a567d573042", size: 4254, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_check.py", status: " M", hash: "sha256:f24292359c44442055a798fa7464265afdf07c7b4b3f0283cb0b034eed8ab487", size: 14057, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-  - {path: "tests/test_setup_init_cli.py", status: " M", hash: "sha256:2407e2918029c1542ff058c0c4c534909d23227f4513b09c1337914c8760741c", size: 8651, type: file, mode: "0644", classification: "planned", evidence_ref: "origin/main diff and focused checks"}
-content_revision: "1f6942c383a72235c5b7f409164e8e15229243bd254bed3a1573d3842b4b8ff0"
-planreview_round: 2
-deepreview_round: 1
+next_action: "研发流程已完成；提交、PR、发布与运行环境升级分别等待独立授权"
+panel:
+  design_sha256: 6f1c8163f5bb014a10d77dd41ca458b2dc6b738af4cfcbc510d3e03cc8c0dc44
+  result_count: 4
+  agents: [fx_design_review_1, fx_design_review_2, fx_design_review_3_local, fx_design_review_4]
+  independence: "四个独立原生子代理审阅同一快照；继承模型的精确型号未暴露；跨模型入口不支持当前账户"
+  cross_family_attempt: "deepseek-v4-pro 返回 model unsupported，未计入四份结果"
+  proposed_changes: "核实市场休市日和互斥汇率状态；run 重试与时效绑定；逐币种历史证据与唯一当前换算；简报可靠性/负币种/证据穿透；指派情景估值和资金能力隔离"
+planreview_attempts: 3
+planreview_result: pass-with-risks
+planreview_artifact: docs/reviews/plan-review-20261002-124243.md
+slice_1:
+  result: "逐对真实报文解析、来源择新、2026 FX 休市状态、容量/展示用途和并发缓存合并；旧接口返回容量安全视图"
+  checks: "129 个相关 pytest 通过；ruff、doc guardrails、git diff --check 通过"
+  pending: "正式 tick 共用快照和资金/简报展示属于切片 2/3，尚未实现"
+slice_2:
+  result: "正式 tick 在 worker 前封存一次带 hash 的当前 FX 快照；账户/期权 prepared context 与扫描按同一 hash 读取，晚到消费重判容量资格；直接扫描与独立资金查询复用请求内报价；逐对原报价进入历史候选，Wheel 跨币种容量保持新鲜门槛"
+  checks: "209 个相关 pytest 通过；ruff、doc guardrails、git diff --check 通过；另 8 个无关读模型用例因 worktree tests 目录权限在建临时目录时失败，未运行到业务断言"
+  pending: "决策简报 CNY 优先、假期沿用证据和情景估值/资金能力隔离在切片 3；09:40 生产输入在隔离 worktree 中不可得，尚未只读重放"
+slice_3:
+  result: "简报 CNY 优先且保留原币种负余额；逐对假期沿用证据穿透 normalize/render；缺汇率或来源不可靠时完整 CNY 值不可用；指派情景估值可沿用假期价而资金覆盖继续按容量资格 fail closed；通知 PRD 同步"
+  checks: "329 个核心相关 pytest 与 158 个扩展回归 pytest 通过；全改动 Python Ruff、doc guardrails、git diff --check 通过"
+  pending: "09:40 原始生产输入不在隔离 worktree，未做只读实盘回放；切片 2 的 8 个读模型用例因临时目录权限未到业务断言，未据此宣称通过"
 in_flight: []
-evidence_paths:
-  - "docs/reviews/plan-review-20260929-005839.md"
-  - "docs/reviews/plan-review-20260929-010001.md"
-  - "docs/reviews/code-review-20260929-012144.md"
-blocking_findings: []
-residual_risks:
-  - {item: "强杀后可能留下新建文件", classification: "needs-new-issue-or-user-decision", owner: "首次配置操作者", destination: "当前手动核对见 Getting Started；若需自动恢复再定需求"}
+
+review_attempts: 3
+review_result: pass
+review_artifact: docs/reviews/code-review-20261002-163654.md
+review_history: "首次 Devflow Review 与用户显式独立 DeepReview 均确认只读归属情景写缓存；本次修复后重审无未关闭实质问题"
+repair_1: "portfolio_assignment_scenario 显式 write_cache=False；新增有/无缓存两种入口级无写入回归"
+repair_checks: "33 个相关 pytest 通过；两份改动 Python Ruff、git diff --check 通过"
+review_residual: "09:40 原始批次未回放；切片 2 的 8 个读模型用例仍未到业务断言"

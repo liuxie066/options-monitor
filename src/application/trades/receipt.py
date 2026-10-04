@@ -867,9 +867,20 @@ def build_trade_intake_receipt_message(
         origin = {"rule": "按规则", "intent": "按已登记意图", "manual": "经人工确认", "inherited": "沿用已记录关系"}.get(attribution.get("origin"), "已记录")
         text = {"linked": f"{origin}关联 {str(attribution.get('strategy') or '策略').title()}",
                 "ordinary": "普通单腿" + ("（经人工确认）" if attribution.get("origin") == "manual" else "；当前没有策略匹配"),
-                "pending": "关联待核实；可通过 OM Bot 查询并请求确认预览",
-                "conflict": "归属冲突，暂停相关 Wheel 新增建议；请通过 OM Bot 查询", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
+                "pending": "成交已入账，归属待人工确认；请在 OM Bot 查看待确认归属并预览目标",
+                "conflict": "成交已入账，归属冲突；暂停相关 Wheel 新增建议，请在 OM Bot 查看待确认归属", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
         fields.append(("策略", text))
+        if status in {"pending", "conflict"}:
+            candidates = list(attribution.get("candidate_ids") or [])
+            if candidates:
+                fields.append(("候选", "、".join(f"`{item}`" for item in candidates[:8])
+                               + (f" 等 {len(candidates)} 个" if len(candidates) > 8 else "")))
+            if not attribution.get("rules_enabled"):
+                fields.append(("自动归属", "该成交发生时尚未完成当前规则切换；需人工核对。"))
+            if attribution.get("reason_codes"):
+                fields.append(("待核对", "、".join(str(item) for item in attribution["reason_codes"][:5])))
+            if attribution.get("execution_key"):
+                fields.append(("确认入口", f"OM Bot：查看待确认归属，成交 `{attribution['execution_key']}`"))
         coverage = attribution.get("coverage") or {}
         if coverage:
             put = attribution.get("direction") == "put"
@@ -882,8 +893,6 @@ def build_trade_intake_receipt_message(
                 fields.append(("分支剩余", f"{coverage['available_shares']} 股；可开数量以账户容量检查为准"))
     elif (result.get("combo_reconciliation") or {}).get("ok") is False:
         fields.append(("组合", "组合核对未完成；请检查组合核对服务。"))
-    elif _matching_auto_combo_adoption(result):
-        fields.append(("组合", "✅ 已自动归入 Combo Yield（Funding Put + Participation Call）"))
     elif applied and result.get("action") == "open":
         fields.append(("策略", "归属尚未核实；已记录成交不代表已关联 Wheel/Combo。"))
     if kind:
@@ -933,30 +942,6 @@ def build_trade_intake_receipt_message(
         fields=fields,
         sections=sections,
     )
-
-
-def _matching_auto_combo_adoption(result: dict[str, Any]) -> bool:
-    event_ids = {
-        str(item.get("event_id") or "").strip()
-        for item in result.get("operations") or []
-        if isinstance(item, dict)
-    }
-    reconciliation = result.get("combo_reconciliation")
-    if not event_ids or not isinstance(reconciliation, dict):
-        return False
-    for adoption in reconciliation.get("auto_adoptions") or []:
-        if not isinstance(adoption, dict) or adoption.get("status") not in {
-            "adopted",
-            "already_confirmed",
-        }:
-            continue
-        inference = adoption.get("inference")
-        if isinstance(inference, dict) and event_ids & {
-            str(inference.get("put_open_event_id") or "").strip(),
-            str(inference.get("call_open_event_id") or "").strip(),
-        }:
-            return True
-    return False
 
 
 def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> bool:

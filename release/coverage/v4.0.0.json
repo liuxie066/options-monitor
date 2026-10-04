@@ -1,0 +1,339 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.0.0",
+  "base": {
+    "tag": "v3.8.5",
+    "commit": "7291a5535d4bc91f54845147427b9d80bedea3c0"
+  },
+  "reviewed_head": "bf7f51c255b8bfb749b4f1d9d759f5a4acd48453",
+  "commits": [
+    {
+      "sha": "4485d4523909831a32dcf0949068c65b8f34565c",
+      "subject": "refactor(portfolio): retire unreachable global Holdings scan risk"
+    },
+    {
+      "sha": "382d716d584471079548c21d2b3d8965f6d23e1f",
+      "subject": "Merge pull request #412 from liuxie066/codex/global-holdings-risk-retirement"
+    },
+    {
+      "sha": "24023dbe6d8dcca9083626ff522f82ae853407c9",
+      "subject": "fix(wheel): group same-series assignments in decision brief"
+    },
+    {
+      "sha": "9e69d719c958d1a4e32b2a669bee97e727618b2a",
+      "subject": "Merge pull request #413 from liuxie066/codex/wheel-brief-grouping"
+    },
+    {
+      "sha": "d65a678b4c8c0077b7d735fe8d660f3a1fd84e83",
+      "subject": "fix(cash): use closed put evidence with fresh broker cash for headroom"
+    },
+    {
+      "sha": "73a8da096f5e06b1a87ecb1592e5ca9830579071",
+      "subject": "Merge pull request #414 from liuxie066/codex/cash-close-headroom"
+    },
+    {
+      "sha": "64acfa58ccd686b88bb82cc665fa87ebf6c9e6e2",
+      "subject": "fix(trades): book zero-price option closes before reason resolution"
+    },
+    {
+      "sha": "4c04758a597ff0c3c7b00c1fde335d5163b610b6",
+      "subject": "Merge pull request #416 from liuxie066/codex/option-close-realtime"
+    },
+    {
+      "sha": "23eed43ba1681971dfa1ce6b3cd194989940f055",
+      "subject": "feat(portfolio): use Futu baseline and scoped PM Holdings for assignment scenario"
+    },
+    {
+      "sha": "b7ed70d565f3b07da8b4044a644e5b41a709a04b",
+      "subject": "chore(portfolio): merge main and refresh dependency graph"
+    },
+    {
+      "sha": "e9b6127a2b4bb357da2db10d09ae048043a0c2c0",
+      "subject": "fix(ledger): refresh projector fingerprint for broker alias"
+    },
+    {
+      "sha": "23de937f03518e11cb51ea349b217d7581b486e5",
+      "subject": "Merge pull request #417 from liuxie066/codex/portfolio-holdings-switch-om"
+    },
+    {
+      "sha": "7195f61911a4e9330931e772f10bd6570cf20ce4",
+      "subject": "fix(wheel): unify activation readiness across consumers"
+    },
+    {
+      "sha": "f9cc0773f88e4c85e229a3ba31dea906c01a8252",
+      "subject": "Merge pull request #418 from liuxie066/codex/wheel-activation-gate"
+    },
+    {
+      "sha": "a5cdb98c0a3eb866e79d9177c992efdf681743a5",
+      "subject": "chore(gateflow): accept settlement capacity plan"
+    },
+    {
+      "sha": "077eeaf4cbccd008267944011d3ff5fa39f21fd4",
+      "subject": "chore(gateflow): clarify settlement source slice boundary"
+    },
+    {
+      "sha": "5bd1277430c2b92335529b4ec2e64cfbb238b00f",
+      "subject": "fix(trades): bind broker deal status to ledger decisions"
+    },
+    {
+      "sha": "765765ebb80da15d6a3640a73c9c8aab45989b8e",
+      "subject": "fix(capacity): keep settlement constraints through confirmation"
+    },
+    {
+      "sha": "47290555c907037c05a26a1236ddd238f9ac51db",
+      "subject": "fix(attribution): unify trade ownership and surface pending review"
+    },
+    {
+      "sha": "66bea6a62e5a9392f397d1f0fb1907b0cdfb4c0d",
+      "subject": "fix(trades): use order hints for bounded deal refresh"
+    },
+    {
+      "sha": "460fb1918da30c9ed9d697089601750055f096ed",
+      "subject": "refactor(trades): break ledger source evidence import cycle"
+    },
+    {
+      "sha": "0347515ecd472175c56cbcb4264dbec3a5c36d4f",
+      "subject": "docs(wheel): explain pending attribution workflow"
+    },
+    {
+      "sha": "a216a35417c781aa703ebbfb7225e5b9d9cbe4db",
+      "subject": "docs(trades): record retired attribution entry points"
+    },
+    {
+      "sha": "286ea3923188fb1a641b3b0e186830f977173041",
+      "subject": "test(trades): align regression fixtures with broker gates"
+    },
+    {
+      "sha": "bf7f51c255b8bfb749b4f1d9d759f5a4acd48453",
+      "subject": "Merge pull request #419 from liuxie066/codex/settlement-capacity-gateflow"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "退役旧的逐来源成交归属开关、独立 Wheel 成交写入接口，以及已无扫描调用方的全局 Holdings 风险接口；新成交统一由交易接收与归属流程处理。",
+      "commits": [
+        "4485d4523909831a32dcf0949068c65b8f34565c",
+        "382d716d584471079548c21d2b3d8965f6d23e1f",
+        "460fb1918da30c9ed9d697089601750055f096ed",
+        "a216a35417c781aa703ebbfb7225e5b9d9cbe4db"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Portfolio Exposure 以富途股票、现金、货币基金及价格作为账户基线，并只将获准的非富途 PM Holdings 纳入补充持仓；数据不完整时明确标记。",
+      "commits": [
+        "23eed43ba1681971dfa1ce6b3cd194989940f055",
+        "b7ed70d565f3b07da8b4044a644e5b41a709a04b",
+        "23de937f03518e11cb51ea349b217d7581b486e5"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "成交归属无法唯一确定时，展示待人工确认的候选分支；归属策略切换走受控迁移，保留历史记录可读。",
+      "commits": [
+        "47290555c907037c05a26a1236ddd238f9ac51db",
+        "0347515ecd472175c56cbcb4264dbec3a5c36d4f"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Daily Brief 将美团同系列 Put 指派形成的 Wheel 分支合并展示，同时保留各分支身份与状态。",
+      "commits": [
+        "24023dbe6d8dcca9083626ff522f82ae853407c9",
+        "9e69d719c958d1a4e32b2a669bee97e727618b2a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已确认的期权平仓及时更新剩余张数；零价平仓也入账，平仓原因留待结算证据确认。",
+      "commits": [
+        "64acfa58ccd686b88bb82cc665fa87ebf6c9e6e2",
+        "4c04758a597ff0c3c7b00c1fde335d5163b610b6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Put 开仓现金、Call 股票覆盖与 Daily Brief 共用结算占用口径；只有对应的可信成交及更新的富途资金证据才解除相关阻断。",
+      "commits": [
+        "d65a678b4c8c0077b7d735fe8d660f3a1fd84e83",
+        "73a8da096f5e06b1a87ecb1592e5ca9830579071",
+        "a5cdb98c0a3eb866e79d9177c992efdf681743a5",
+        "077eeaf4cbccd008267944011d3ff5fa39f21fd4",
+        "765765ebb80da15d6a3640a73c9c8aab45989b8e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交接收绑定富途成交状态与来源证据，并用订单线索约束归属；模糊归属留待人工处理，历史回查避免漏推后遗漏。",
+      "commits": [
+        "5bd1277430c2b92335529b4ec2e64cfbb238b00f",
+        "66bea6a62e5a9392f397d1f0fb1907b0cdfb4c0d",
+        "286ea3923188fb1a641b3b0e186830f977173041",
+        "bf7f51c255b8bfb749b4f1d9d759f5a4acd48453"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel 自动启动在各入口使用同一账户启用条件，投影指纹随成交归属变化更新，避免状态或容量读数偏离账本。",
+      "commits": [
+        "e9b6127a2b4bb357da2db10d09ae048043a0c2c0",
+        "7195f61911a4e9330931e772f10bd6570cf20ce4",
+        "f9cc0773f88e4c85e229a3ba31dea906c01a8252"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "4485d4523909831a32dcf0949068c65b8f34565c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/412"
+      ]
+    },
+    {
+      "commit": "382d716d584471079548c21d2b3d8965f6d23e1f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/412"
+      ]
+    },
+    {
+      "commit": "24023dbe6d8dcca9083626ff522f82ae853407c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/413"
+      ]
+    },
+    {
+      "commit": "9e69d719c958d1a4e32b2a669bee97e727618b2a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/413"
+      ]
+    },
+    {
+      "commit": "d65a678b4c8c0077b7d735fe8d660f3a1fd84e83",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/414"
+      ]
+    },
+    {
+      "commit": "73a8da096f5e06b1a87ecb1592e5ca9830579071",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/414"
+      ]
+    },
+    {
+      "commit": "64acfa58ccd686b88bb82cc665fa87ebf6c9e6e2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/416"
+      ]
+    },
+    {
+      "commit": "4c04758a597ff0c3c7b00c1fde335d5163b610b6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/416"
+      ]
+    },
+    {
+      "commit": "23eed43ba1681971dfa1ce6b3cd194989940f055",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/417"
+      ]
+    },
+    {
+      "commit": "b7ed70d565f3b07da8b4044a644e5b41a709a04b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/417"
+      ]
+    },
+    {
+      "commit": "e9b6127a2b4bb357da2db10d09ae048043a0c2c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/417"
+      ]
+    },
+    {
+      "commit": "23de937f03518e11cb51ea349b217d7581b486e5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/417"
+      ]
+    },
+    {
+      "commit": "7195f61911a4e9330931e772f10bd6570cf20ce4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/418"
+      ]
+    },
+    {
+      "commit": "f9cc0773f88e4c85e229a3ba31dea906c01a8252",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/418"
+      ]
+    },
+    {
+      "commit": "a5cdb98c0a3eb866e79d9177c992efdf681743a5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "077eeaf4cbccd008267944011d3ff5fa39f21fd4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "5bd1277430c2b92335529b4ec2e64cfbb238b00f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "765765ebb80da15d6a3640a73c9c8aab45989b8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "47290555c907037c05a26a1236ddd238f9ac51db",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "66bea6a62e5a9392f397d1f0fb1907b0cdfb4c0d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "460fb1918da30c9ed9d697089601750055f096ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "0347515ecd472175c56cbcb4264dbec3a5c36d4f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "a216a35417c781aa703ebbfb7225e5b9d9cbe4db",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "286ea3923188fb1a641b3b0e186830f977173041",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    },
+    {
+      "commit": "bf7f51c255b8bfb749b4f1d9d759f5a4acd48453",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/419"
+      ]
+    }
+  ]
+}

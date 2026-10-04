@@ -447,6 +447,28 @@ def _append_target_event_graph_diagnostics(
             )
             continue
         target = targets[0]
+        if event.contract_key != target.contract_key:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_contract_mismatch",
+                    message="void/repair must have the target event's contract identity",
+                    details={"target_event_id": target_id},
+                )
+            )
+        # A replacement may retain the original trade time; its separate void
+        # still records a control action at or after the event it invalidates.
+        if event.event_time_ms < target.event_time_ms:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_time_invalid",
+                    message="void/repair cannot precede its target event",
+                    details={"target_event_id": target_id},
+                )
+            )
         if target.event_type in forbidden_target_types:
             diagnostics.append(
                 LedgerDiagnostic(
@@ -1141,7 +1163,9 @@ def _scope_diagnostics(
     opens_by_lot: dict[str, TradeEvent] = {}
     for event, _event_diagnostics in validated_events:
         events_by_id.setdefault(event.event_id, []).append(event)
-        if event.event_type == "open":
+        if event.event_type == "open" and not any(
+            item.severity == "error" for item in _event_diagnostics
+        ):
             opens_by_lot[lot_id_for_open_event(event)] = event
     lots_by_id = {lot.lot_id: lot for lot in lots}
 

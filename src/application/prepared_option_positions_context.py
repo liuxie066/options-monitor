@@ -18,7 +18,9 @@ from domain.services import adapt_option_positions_context
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
     get_exchange_rates_or_fetch_latest,
+    project_exchange_rate_snapshot,
 )
+from src.application.current_fx_run import load_run_fx_snapshot
 from src.application.ledger.api import (
     CURRENT_DECISION_READ_SCHEMA,
     attach_event_strategy_metadata,
@@ -49,7 +51,7 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import required_text
 from src.application.wheel.config import (
     evaluate_wheel_activation_readiness,
-    resolve_wheel_activation_descriptor,
+    resolve_wheel_config,
 )
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
@@ -142,7 +144,7 @@ def _persist_fx_evidence(
     migrated_at_ms: int,
     log: Callable[[str], None] | None,
 ) -> dict[str, Any]:
-    if observation_status not in {"ready", "unavailable_stale"} or observation is None:
+    if observation is None:
         return {"status": "source_unavailable"}
     if not repos_by_ledger_path:
         return {"status": "no_ledger"}
@@ -243,6 +245,7 @@ def _reuse_prepared_option_positions_contexts(
     run_id: str,
     configs: Mapping[str, Mapping[str, Any]],
     authorities: Mapping[str, AccountRunConfigAuthority],
+    expected_fx_snapshot_sha256: str | None = None,
 ) -> dict[str, Any]:
     manifests: dict[str, dict[str, Any]] = {}
     records_by_account: dict[str, list[dict[str, Any]]] = {}
@@ -379,6 +382,10 @@ def _reuse_prepared_option_positions_contexts(
                         "fx_observation_sha256",
                     ),
                 }
+                if prepared.get("run_fx_snapshot_sha256"):
+                    recovered["run_fx_snapshot_sha256"] = _required_sha256(
+                        prepared.get("run_fx_snapshot_sha256"), "run_fx_snapshot_sha256",
+                    )
                 if prepared.get("fx_error_type"):
                     recovered["fx_error_type"] = _required_text(
                         prepared["fx_error_type"], "fx_error_type"
@@ -415,6 +422,12 @@ def _reuse_prepared_option_positions_contexts(
             "manifest_sha256": sha256_bytes(manifest_bytes),
         }
         payload = receipt["payload"]
+        if expected_fx_snapshot_sha256 is not None:
+            prepared_fx = payload.get("prepared_authority")
+            if not isinstance(prepared_fx, Mapping) or prepared_fx.get("run_fx_snapshot_sha256") != expected_fx_snapshot_sha256:
+                manifests[account] = {"status": "unavailable", "reason": "prepared_option_fx_snapshot_mismatch"}
+                unavailable[account] = "prepared_option_fx_snapshot_mismatch"
+                continue
         current_read = payload.get("current_decision_read")
         position_lots = (
             current_read.get("position_lots")
@@ -449,6 +462,7 @@ def prepare_option_positions_contexts(
     run_state_dir: Path,
     log: Callable[[str], None] | None = None,
     persist_fx_evidence: bool = False,
+    fx_snapshot_sha256: str | None = None,
 ) -> PreparedOptionPositionsBatch:
     """Publish exact account option contexts from coherent ledger/FX facts."""
 
@@ -485,6 +499,7 @@ def prepare_option_positions_contexts(
         run_id=run_id_norm,
         configs=configs,
         authorities=authorities,
+        expected_fx_snapshot_sha256=fx_snapshot_sha256,
     )
     manifests = dict(reused["manifests"])
     records_by_account = dict(reused["records_by_account"])
@@ -555,22 +570,23 @@ def prepare_option_positions_contexts(
     fx_status = "unavailable"
     fx_error_type: str | None = None
     try:
-        rate_cache_path = (
-            base_path / "output_shared" / "state" / "rate_cache.json"
-        ).resolve()
-        candidate = get_exchange_rates_or_fetch_latest(
-            cache_path=rate_cache_path,
-            max_age_hours=24,
-            log=log,
-        )
-        fx_observation = (
-            dict(candidate) if isinstance(candidate, Mapping) else None
-        )
+        if fx_snapshot_sha256 is not None:
+            snapshot, sealed_hash = load_run_fx_snapshot(base=base_path, run_id=run_id_norm)
+            if sealed_hash != fx_snapshot_sha256:
+                raise PreparedOptionPositionsContextError("prepared option FX snapshot mismatch")
+            fx_observation = project_exchange_rate_snapshot(snapshot, purpose="capacity")
+        else:
+            candidate = get_exchange_rates_or_fetch_latest(
+                cache_path=base_path / "output_shared" / "state" / "rate_cache.json",
+                max_age_hours=24,
+                log=log,
+            )
+            fx_observation = dict(candidate) if isinstance(candidate, Mapping) else None
         fx_status = exchange_rate_observation_status(
             fx_observation,
             max_age_hours=24,
         )
-        rates = fx_observation if fx_status == "ready" else None
+        rates = fx_observation
     except Exception as exc:
         rates = None
         fx_status = "unavailable"
@@ -713,6 +729,7 @@ def prepare_option_positions_contexts(
                     "account_config_sha256": authority.account_config_sha256,
                     "ledger_generation_sha256": ledger_generation_sha256,
                     "fx_observation_sha256": fx_observation_sha256,
+                    "run_fx_snapshot_sha256": fx_snapshot_sha256,
                     "fx_status": fx_status,
                     "source_observed_at": observed_at_utc,
                 }
@@ -724,8 +741,8 @@ def prepare_option_positions_contexts(
                         config_path=config_path,
                         config=configs[account],
                     )
-                    descriptor = resolve_wheel_activation_descriptor(
-                        configs[account], market=market, account=account
+                    wheel_config = resolve_wheel_config(
+                        configs[account], account, market=market,
                     )
                     durable_window = repos_by_ledger_path[
                         ledger_path
@@ -734,8 +751,9 @@ def prepare_option_positions_contexts(
                         account=account,
                     )
                     monitoring_readiness = evaluate_wheel_activation_readiness(
-                        descriptor,
+                        wheel_config["activation_descriptor"],
                         durable_window,
+                        account_configured=wheel_config["account_configured"],
                     )
                     wheel_model = build_wheel_read_model_from_rows(
                         rows_by_account[account],
@@ -790,6 +808,7 @@ def prepare_option_positions_contexts(
                         application_received_at_utc=(application_received_at_utc),
                         fx_status=fx_status,
                         fx_observation_sha256=fx_observation_sha256,
+                        run_fx_snapshot_sha256=fx_snapshot_sha256,
                         fx_error_type=fx_error_type,
                     )
                 except Exception as exc:
@@ -814,6 +833,7 @@ def prepare_option_positions_contexts(
                 source_observed_at=observed_at_utc,
                 fx_status=fx_status,
                 fx_observation_sha256=fx_observation_sha256,
+                run_fx_snapshot_sha256=fx_snapshot_sha256,
                 fx_error_type=fx_error_type,
             )
         except Exception:
@@ -1025,6 +1045,8 @@ def _load_prepared_option_positions_context_artifacts(
             raise PreparedOptionPositionsContextError(
                 f"prepared option payload authority mismatch: {key}"
             )
+    if prepared.get("run_fx_snapshot_sha256") != manifest.get("run_fx_snapshot_sha256"):
+        raise PreparedOptionPositionsContextError("prepared option FX run authority mismatch")
     if str(prepared.get("account_config_sha256") or "") != expected_config_hash:
         raise PreparedOptionPositionsContextError(
             "prepared option payload account config hash mismatch"
@@ -1161,13 +1183,15 @@ def cny_per_currency_rates_from_option_context(
     prepared = context.get("prepared_authority")
     authority = prepared if isinstance(prepared, Mapping) else {}
     out = {"CNY": 1.0}
-    if str(authority.get("fx_status") or "").strip().lower() != "ready":
-        return out
-
     raw_rates = context.get("exchange_rates")
     rates = raw_rates if isinstance(raw_rates, Mapping) else {}
-    nested = rates.get("rates")
-    rates_map = nested if isinstance(nested, Mapping) else rates
+    if isinstance(rates.get("pairs"), Mapping):
+        rates_map = project_exchange_rate_snapshot(rates, purpose="capacity")["rates"]
+    elif str(authority.get("fx_status") or "").strip().lower() == "ready":
+        nested = rates.get("rates")
+        rates_map = nested if isinstance(nested, Mapping) else rates
+    else:
+        return out
     usdcny = _positive_float(rates_map.get("USDCNY"))
     hkd_cny = _positive_float(rates_map.get("HKDCNY"))
     if usdcny is not None:
@@ -1190,6 +1214,7 @@ def _publish_ready_context(
     application_received_at_utc: str,
     fx_status: str,
     fx_observation_sha256: str,
+    run_fx_snapshot_sha256: str | None,
     fx_error_type: str | None,
 ) -> dict[str, Any]:
     payload_bytes = _json_bytes(context)
@@ -1215,6 +1240,8 @@ def _publish_ready_context(
         "fx_status": fx_status,
         "fx_observation_sha256": fx_observation_sha256,
     }
+    if run_fx_snapshot_sha256 is not None:
+        manifest["run_fx_snapshot_sha256"] = run_fx_snapshot_sha256
     if fx_error_type:
         manifest["fx_error_type"] = fx_error_type
     return _publish_manifest(
@@ -1235,6 +1262,7 @@ def _publish_unavailable_manifest(
     source_observed_at: str,
     fx_status: str,
     fx_observation_sha256: str,
+    run_fx_snapshot_sha256: str | None,
     fx_error_type: str | None,
 ) -> dict[str, Any]:
     application_received_at_utc = datetime.now(timezone.utc).isoformat()
@@ -1250,6 +1278,8 @@ def _publish_unavailable_manifest(
         "fx_status": fx_status,
         "fx_observation_sha256": fx_observation_sha256,
     }
+    if run_fx_snapshot_sha256 is not None:
+        manifest["run_fx_snapshot_sha256"] = run_fx_snapshot_sha256
     if fx_error_type:
         manifest["fx_error_type"] = fx_error_type
     return _publish_manifest(

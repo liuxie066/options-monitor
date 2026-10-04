@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from src.application.account_config import (
-    ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     ACCOUNT_TYPE_FUTU,
     ACCOUNT_TYPES,
     normalize_account_label,
@@ -13,7 +12,7 @@ from src.application.account_config import (
 )
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
-from src.application.config_primitives import normalize_config_market
+from src.application.config_primitives import configured_markets, normalize_config_market
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
 from src.application.write_contract import attach_write_contract
 
@@ -27,16 +26,11 @@ def mutate_yaml_account_config(
     account_type: str | None = None,
     config_path: str | Path | None = None,
     futu_acc_id: str | None = None,
-    holdings_account: str | None = None,
-    clear_holdings_account: bool = False,
     market_label: str | None = None,
     enabled: bool | None = None,
     trade_intake_enabled: bool | None = None,
     futu_host: str | None = None,
     futu_port: int | None = None,
-    bitable_app_token: str | None = None,
-    bitable_table_id: str | None = None,
-    bitable_view_name: str | None = None,
     rebuild_runtime_root: str | Path | None = None,
     apply: bool = False,
     backup: bool = True,
@@ -58,15 +52,11 @@ def mutate_yaml_account_config(
             account=account,
             account_type=account_type,
             futu_acc_id=futu_acc_id,
-            holdings_account=holdings_account,
             market_label=market_label,
             enabled=enabled,
             trade_intake_enabled=trade_intake_enabled,
             futu_host=futu_host,
             futu_port=futu_port,
-            bitable_app_token=bitable_app_token,
-            bitable_table_id=bitable_table_id,
-            bitable_view_name=bitable_view_name,
         )
     elif action_key == "edit":
         summary = _edit_account(
@@ -75,16 +65,11 @@ def mutate_yaml_account_config(
             account=account,
             account_type=account_type,
             futu_acc_id=futu_acc_id,
-            holdings_account=holdings_account,
-            clear_holdings_account=clear_holdings_account,
             market_label=market_label,
             enabled=enabled,
             trade_intake_enabled=trade_intake_enabled,
             futu_host=futu_host,
             futu_port=futu_port,
-            bitable_app_token=bitable_app_token,
-            bitable_table_id=bitable_table_id,
-            bitable_view_name=bitable_view_name,
         )
     else:
         summary = _remove_account(after_doc, market=market_key, account=account)
@@ -99,7 +84,7 @@ def mutate_yaml_account_config(
         config_yaml_path=config_yaml_path,
         config_doc=after_doc,
         runtime_root=runtime_root,
-        markets=_markets_in_doc(after_doc),
+        markets=configured_markets(after_doc),
         include_assistant=True,
         apply=bool(apply),
         backup=bool(backup),
@@ -119,7 +104,6 @@ def mutate_yaml_account_config(
             key: summary[key]
             for key in (
                 "futu_acc_id_masked",
-                "holdings_account",
                 "removed_account",
                 "removed_global_account",
             )
@@ -147,15 +131,11 @@ def _add_account(
     account: str,
     account_type: str | None,
     futu_acc_id: str | None,
-    holdings_account: str | None,
     market_label: str | None,
     enabled: bool | None,
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
-    bitable_app_token: str | None,
-    bitable_table_id: str | None,
-    bitable_view_name: str | None,
 ) -> dict[str, Any]:
     accounts = _account_defs(config_doc)
     if account in accounts:
@@ -166,16 +146,11 @@ def _add_account(
         account=account,
         account_type=normalized_type,
         futu_acc_id=futu_acc_id,
-        holdings_account=holdings_account,
-        clear_holdings_account=False,
         market_label=market_label or market,
         enabled=enabled,
         trade_intake_enabled=trade_intake_enabled,
         futu_host=futu_host,
         futu_port=futu_port,
-        bitable_app_token=bitable_app_token,
-        bitable_table_id=bitable_table_id,
-        bitable_view_name=bitable_view_name,
     )
     _ensure_unique_futu_account_id(accounts, account=account, setting=setting)
     accounts[account] = setting
@@ -197,16 +172,11 @@ def _edit_account(
     account: str,
     account_type: str | None,
     futu_acc_id: str | None,
-    holdings_account: str | None,
-    clear_holdings_account: bool,
     market_label: str | None,
     enabled: bool | None,
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
-    bitable_app_token: str | None,
-    bitable_table_id: str | None,
-    bitable_view_name: str | None,
 ) -> dict[str, Any]:
     accounts = _account_defs(config_doc)
     current = accounts.get(account)
@@ -225,16 +195,11 @@ def _edit_account(
         account=account,
         account_type=normalized_type,
         futu_acc_id=futu_acc_id,
-        holdings_account=holdings_account,
-        clear_holdings_account=clear_holdings_account,
         market_label=market_label,
         enabled=enabled,
         trade_intake_enabled=trade_intake_enabled,
         futu_host=futu_host,
         futu_port=futu_port,
-        bitable_app_token=bitable_app_token,
-        bitable_table_id=bitable_table_id,
-        bitable_view_name=bitable_view_name,
     )
     _ensure_unique_futu_account_id(accounts, account=account, setting=setting)
     accounts[account] = setting
@@ -263,7 +228,7 @@ def _remove_account(config_doc: dict[str, Any], *, market: str, account: str) ->
         )
     market_accounts[:] = remaining
     _remove_account_from_market_overrides(config_doc, market=market, account=account)
-    still_referenced = any(account in _market_accounts(config_doc, market=item) for item in _markets_in_doc(config_doc))
+    still_referenced = any(account in _market_accounts(config_doc, market=item) for item in configured_markets(config_doc))
     removed_global = not still_referenced
     if removed_global:
         accounts.pop(account, None)
@@ -287,18 +252,15 @@ def _build_account_setting(
     account: str,
     account_type: str,
     futu_acc_id: str | None,
-    holdings_account: str | None,
-    clear_holdings_account: bool,
     market_label: str | None,
     enabled: bool | None,
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
-    bitable_app_token: str | None,
-    bitable_table_id: str | None,
-    bitable_view_name: str | None,
 ) -> dict[str, Any]:
     existing = deepcopy(current) if isinstance(current, dict) else {}
+    if "bitable" in existing:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"accounts.{account}.bitable is retired")
     setting: dict[str, Any] = {"type": account_type}
     for key in ("enabled", "trade_intake_enabled", "market"):
         if key in existing:
@@ -334,40 +296,9 @@ def _build_account_setting(
         if futu_port is not None:
             futu["port"] = int(futu_port)
         setting["futu"] = futu
-        if clear_holdings_account:
-            holdings_value = ""
-        elif holdings_account is not None:
-            holdings_value = str(holdings_account).strip()
-        else:
-            holdings_value = str(existing.get("holdings_account") or "").strip()
-        if holdings_value:
-            setting["holdings_account"] = holdings_value
         return setting
 
-    if clear_holdings_account:
-        holdings_value = ""
-    elif holdings_account is not None:
-        holdings_value = str(holdings_account).strip()
-    else:
-        holdings_value = str(existing.get("holdings_account") or "").strip()
-    setting["holdings_account"] = holdings_value or account
-    raw_bitable = existing.get("bitable")
-    bitable = deepcopy(raw_bitable) if isinstance(raw_bitable, dict) else {}
-    for key, value in {
-        "app_token": bitable_app_token,
-        "table_id": bitable_table_id,
-        "view_name": bitable_view_name,
-    }.items():
-        if value is None:
-            continue
-        normalized = str(value).strip()
-        if normalized:
-            bitable[key] = normalized
-        else:
-            bitable.pop(key, None)
-    if bitable:
-        setting["bitable"] = bitable
-    return setting
+    raise AgentToolError(code="CONFIG_ERROR", message=f"unsupported account type: {account_type}")
 
 
 def _account_defs(config_doc: dict[str, Any]) -> dict[str, Any]:
@@ -446,10 +377,8 @@ def _ensure_unique_futu_account_id(accounts: dict[str, Any], *, account: str, se
 
 def _masked_account_details(setting: dict[str, Any]) -> dict[str, Any]:
     account_id = _futu_account_id(setting)
-    holdings = str(setting.get("holdings_account") or "").strip()
     return {
         **({"futu_acc_id_masked": f"...{account_id[-4:]}"} if account_id else {}),
-        **({"holdings_account": holdings} if holdings else {}),
     }
 
 
@@ -472,9 +401,6 @@ def _remove_account_from_market_overrides(config_doc: dict[str, Any], *, market:
 def _remove_explicit_account_references(config_doc: dict[str, Any], *, account: str) -> None:
     portfolio = config_doc.get("portfolio")
     if isinstance(portfolio, dict):
-        source_by_account = portfolio.get("source_by_account")
-        if isinstance(source_by_account, dict):
-            source_by_account.pop(account, None)
         if str(portfolio.get("account") or "").strip().lower() == account:
             portfolio.pop("account", None)
     notifications = config_doc.get("notifications")
@@ -484,13 +410,6 @@ def _remove_explicit_account_references(config_doc: dict[str, Any], *, account: 
             for item in normalize_accounts(notifications.get("cash_footer_accounts"), fallback=())
             if item != account
         ]
-
-
-def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
-    markets = config_doc.get("markets")
-    if not isinstance(markets, dict):
-        return []
-    return [market for market in ("us", "hk") if isinstance(markets.get(market), dict)]
 
 
 __all__ = ["mutate_yaml_account_config"]

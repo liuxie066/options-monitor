@@ -1,38 +1,35 @@
 from __future__ import annotations
 
-from domain.domain.wheel.intents import resolve_wheel_fill_intent
+from pathlib import Path
+
 
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 
 import yaml
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger import ContractKey
 from domain.domain.ledger.position_fields import (
-    build_open_adjustment_patch_contract,
     effective_expiration_ymd,
-    effective_multiplier,
     effective_strike,
 )
 from domain.domain.risk_capacity import revalidate_opening_share_coverage
+from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
     WHEEL_EVENT_SCHEMA_V1,
     WHEEL_EVENT_SCHEMA_V2,
     build_wheel_event,
     plan_wheel_call_intent_cancel,
-    plan_wheel_call_intent_consume,
     plan_wheel_call_intent_create,
     plan_wheel_branch_decision,
     plan_wheel_manual_end,
     plan_wheel_put_intent_cancel,
-    plan_wheel_put_intent_consume,
     plan_wheel_put_intent_create,
     project_wheel_call_intents,
     project_wheel_intents,
@@ -86,22 +83,19 @@ def _lot_contract_scalars(fields: Mapping[str, Any]) -> tuple[Any, Any]:
     return strike, expiration_ymd
 
 
+from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_contract import sha256_text
 from src.application.runtime_config_paths import authoritative_config_yaml_path
 from src.application.settings import build_effective_env
 from src.application.ledger.api import (
-    assert_trade_attribution_unclaimed,
     read_wheel_activation_windows_read_only,
     ledger_store_write_guard,
     open_wheel_activation_repository,
     resolve_position_data_config_path,
     resolve_position_ledger_sqlite_path,
-    append_and_verify_wheel_intent_consumption,
-    capture_trade_event_decision_projection_fence,
-    finalize_trade_event_decision_projection,
-    run_position_projection_in_transaction,
     with_sqlite_repo_transaction,
+    decision_state_snapshot_from_locked_rows,
 )
 from src.application.wheel.read_model import (
     build_wheel_read_model,
@@ -109,10 +103,12 @@ from src.application.wheel.read_model import (
 )
 from src.application.wheel.config import (
     WHEEL_ACTIVATION_DESCRIPTOR_FIELDS, build_wheel_policy_hash, evaluate_wheel_activation_readiness,
-    resolve_wheel_activation_descriptor, resolve_wheel_config, materialize_wheel_config, normalize_wheel_accounts,
+    resolve_wheel_activation_descriptor, materialize_wheel_config, normalize_wheel_accounts,
 )
+from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.wheel.capacity import (
     revalidate_selected_wheel_put_candidate_from_rows,
+    broker_capacity_observation_is_fresh,
 )
 from src.application.wheel.remediation import policy_remediation
 from src.application.write_contract import attach_write_contract
@@ -191,8 +187,11 @@ def _require_current_wheel_activation(
     market: str,
     branch: Mapping[str, Any],
     activation_descriptor: Mapping[str, Any] | None,
+    account_configured: bool,
     policy_sha256: str,
 ) -> None:
+    if not account_configured:
+        raise ValueError("wheel_disabled: account_not_configured")
     market_value = str(market or "").strip().lower()
     policy_hash = str(policy_sha256 or "").strip().lower()
     descriptor_policy = str(
@@ -214,6 +213,7 @@ def _require_current_wheel_activation(
             account=account,
             conn=conn,
         ),
+        account_configured=account_configured,
     )
     if not readiness["ready"]:
         raise ValueError(
@@ -232,6 +232,7 @@ def decide_wheel_branch(
     actor: str,
     market: str,
     activation_descriptor: Mapping[str, Any] | None = None,
+    account_configured: bool | None = None,
     policy_sha256: str | None = None,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
@@ -311,6 +312,7 @@ def decide_wheel_branch(
                 market=market_value,
                 branch=branch,
                 activation_descriptor=activation_descriptor,
+                account_configured=account_configured is True,
                 policy_sha256=str(policy_sha256 or ""),
             )
         event = plan_wheel_branch_decision(
@@ -404,6 +406,7 @@ def _activation_status(
     latest = windows[-1] if windows else None
     current = latest if latest and latest["deactivated_at_ms"] is None else None
     membership = False
+    invalid_account_scope = False
     try:
         raw_wheel = cfg.get("wheel")
         if raw_wheel is None:
@@ -411,19 +414,25 @@ def _activation_status(
         if not isinstance(raw_wheel, Mapping):
             raise ValueError("wheel must be an object")
         membership = account in normalize_wheel_accounts(raw_wheel.get("accounts", []))
-        readiness = evaluate_wheel_activation_readiness(
-            resolve_wheel_activation_descriptor(cfg, market=market, account=account), latest,
-        )
     except (ValueError, TypeError):
+        invalid_account_scope = True
+    if invalid_account_scope:
         readiness = {"ready": False, "enabled_for_new_lifecycle": False,
-                     "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch",
+                     "monitoring_gate": "config_mismatch", "reason_code": "invalid_account_scope",
                      "policy_drift": False}
-    if observed["source_status"] != "available":
+    else:
+        try:
+            readiness = evaluate_wheel_activation_readiness(
+                resolve_wheel_activation_descriptor(cfg, market=market, account=account), latest,
+                account_configured=membership,
+            )
+        except (ValueError, TypeError):
+            readiness = {"ready": False, "enabled_for_new_lifecycle": False,
+                         "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch",
+                         "policy_drift": False}
+    if observed["source_status"] != "available" and readiness["monitoring_gate"] != "config_mismatch":
         readiness.update(ready=False, enabled_for_new_lifecycle=False,
                          monitoring_gate="disabled", reason_code=observed["source_status"])
-    elif readiness["ready"] and not membership:
-        readiness.update(ready=False, enabled_for_new_lifecycle=False,
-                         monitoring_gate="disabled", reason_code="account_not_configured")
     # After the overrides: a gate that was closed for another reason must never advertise
     # a policy command, and the overrides above rewrite `reason_code` to say so.
     readiness.update(
@@ -1029,6 +1038,7 @@ def create_wheel_call_intent(
     actor: str,
     coverage_fact: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
@@ -1112,6 +1122,7 @@ def create_wheel_call_intent(
             market=market_value,
             branch=batch,
             activation_descriptor=activation_descriptor,
+            account_configured=account_configured,
             policy_sha256=policy_sha256,
         )
         if batch["batch_generation_hash"] != expected_generation:
@@ -1140,6 +1151,32 @@ def create_wheel_call_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
+        if not broker_capacity_observation_is_fresh(coverage_fact.get("source_observed_at")):
+            raise ValueError("Wheel Call broker capacity observation is stale or unavailable")
+        decision_snapshot = decision_state_snapshot_from_locked_rows(
+            sqlite_repo, rows,
+            account=account_value,
+            portfolio_scope_id=portfolio_scope_id(account_value),
+            source_observed_at=datetime.now(timezone.utc).isoformat(),
+            current_decision_now_ms=instant,
+        )
+        option_context = build_option_positions_context(
+            list(rows["stored_position_lots"]),
+            broker=str(candidate.get("broker") or "futu"),
+            account=account_value,
+            decision_snapshot=decision_snapshot,
+            lifecycle_now_ms=instant,
+        )
+        symbol = str(batch.get("symbol") or "")
+        if (option_context.get("context_status") != "available"
+                or option_context.get("decision_snapshot_status") != "trusted"
+                or symbol in (option_context.get("locked_shares_unavailable_by_symbol") or {})
+                or not str(coverage_fact.get("decision_state_fingerprint") or "").strip()
+                or coverage_fact.get("decision_state_fingerprint")
+                   != option_context.get("decision_state_fingerprint")
+                or str(candidate.get("capacity_identity_hash") or "").strip()
+                   != str(coverage_fact.get("capacity_identity_hash") or "").strip()):
+            raise ValueError("Wheel Call coverage settlement decision is unavailable")
         current_coverage = revalidate_opening_share_coverage(
             coverage_fact,
             list(rows.get("account_position_lots") or []),
@@ -1372,263 +1409,6 @@ def _validate_linkage_coverage(
     ):
         raise ValueError("Wheel Call linkage coverage identity is unavailable")
 
-
-def confirm_wheel_call_linkage(
-    repo: Any,
-    *,
-    account: str,
-    call_lot_id: str,
-    lot_id: str,
-    linkage_candidate_id: str,
-    expected_input_hash: str,
-    expected_batch_generation_hash: str,
-    request_id: str,
-    actor: str,
-    coverage_fact: Mapping[str, Any],
-    market: str,
-    apply_changes: bool = False,
-    as_of_ms: int | None = None,
-    conn: Any = None,
-    attribution_metadata: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    account_value = str(account or "").strip().lower()
-    call_lot_value = str(call_lot_id or "").strip()
-    stock_lot_value = str(lot_id or "").strip()
-    candidate_id = str(linkage_candidate_id or "").strip()
-    input_hash = str(expected_input_hash or "").strip()
-    expected_generation = str(expected_batch_generation_hash or "").strip()
-    request_value = str(request_id or "").strip()
-    actor_value = str(actor or "").strip()
-    market_value = _require_market(market)
-    instant = int(as_of_ms or _now_ms())
-    if not all(
-        (
-            account_value,
-            call_lot_value,
-            stock_lot_value,
-            candidate_id,
-            input_hash,
-            expected_generation,
-            request_value,
-            actor_value,
-        )
-    ):
-        raise ValueError("Wheel Call linkage confirmation requires complete fields")
-
-    def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
-        rows = sqlite_repo.read_lifecycle_account_rows(account=account_value, conn=conn)
-        existing = [
-            item
-            for item in rows.get("trade_events") or []
-            if str((item.get("raw_payload") or {}).get("wheel_linkage_request_id") or "")
-            == request_value
-        ]
-        if len(existing) > 1:
-            raise ValueError("Wheel Call linkage request identity is not unique")
-        if existing:
-            payload = existing[0].get("raw_payload") or {}
-            if (
-                str(payload.get("target_lot_id") or "") != call_lot_value
-                or str(payload.get("source_stock_lot_id") or "") != stock_lot_value
-                or (
-                    payload.get("source_wheel_branch_id")
-                    and str(payload.get("source_wheel_branch_id"))
-                    != str(existing[0].get("wheel_branch_id") or stock_lot_value)
-                )
-                or str(payload.get("actor") or "") != actor_value
-                or str(payload.get("linkage_candidate_id") or "") != candidate_id
-                or str(payload.get("input_snapshot_hash") or "") != input_hash
-                or str(payload.get("batch_generation_hash") or "")
-                != expected_generation
-                or str(payload.get("market") or "").strip().lower()
-                != market_value
-            ):
-                raise ValueError("Wheel Call linkage request identity conflicts")
-            return _linkage_result(
-                status="idempotent",
-                event_id=str(existing[0]["event_id"]),
-                call_lot_id=call_lot_value,
-                lot_id=stock_lot_value,
-                request_id=request_value,
-                market=market_value,
-                dry_run=not apply_changes,
-                write_applied=False,
-            )
-
-        assert_trade_attribution_unclaimed(rows.get("trade_events") or [], [call_lot_value])
-        model = build_wheel_read_model_from_rows(
-            rows,
-            account=account_value,
-            as_of_ms=instant,
-            market=market_value,
-        )
-        candidate = _linkage_candidate(
-            model,
-            call_lot_id=call_lot_value,
-            lot_id=stock_lot_value,
-            linkage_candidate_id=candidate_id,
-            expected_input_hash=input_hash,
-            expected_batch_generation_hash=expected_generation,
-        )
-        batch = next(
-            item for item in model["batches"] if item["stock_lot_id"] == stock_lot_value
-        )
-        _validate_linkage_coverage(
-            coverage_fact,
-            account=account_value,
-            symbol=str(candidate["symbol"]),
-        )
-        fields = sqlite_repo.get_position_lot_fields(call_lot_value, conn=conn)
-        patch = build_open_adjustment_patch_contract(
-            fields,
-            strategy="wheel",
-            leg_role="wheel_call",
-            source_lot_id=stock_lot_value,
-            source_wheel_branch_id=str(batch["wheel_branch_id"]),
-            as_of_ms=instant,
-        )
-        digest = canonical_sha256(
-            {
-                "account": account_value,
-                "call_record_id": call_lot_value,
-                "stock_lot_id": stock_lot_value,
-                "request_id": request_value,
-            }
-        )[:24]
-        event = TradeEvent(
-            event_id=f"wheel-call-linkage-confirmed:{digest}",
-            event_type="adjust",
-            event_time_ms=instant,
-            contract_key=_lot_contract_key(fields, account=account_value),
-            contracts=0,
-            price=0,
-            currency=str(fields.get("currency") or ""),
-            source="wheel_linkage",
-            multiplier=float(effective_multiplier(fields) or 0),
-            target_lot_id=call_lot_value,
-            raw_payload={
-                "schema_version": "wheel_call_linkage_confirmed.v1",
-                "market": market_value,
-                "source": "wheel_linkage",
-                "target_lot_id": call_lot_value,
-                "adjust_target_source_event_id": candidate["call_open_event_id"],
-                "wheel_linkage_request_id": request_value,
-                "linkage_candidate_id": candidate_id,
-                "input_snapshot_hash": input_hash,
-                "batch_generation_hash": expected_generation,
-                "actor": actor_value,
-                "source_stock_lot_id": stock_lot_value,
-                "source_wheel_branch_id": str(batch["wheel_branch_id"]),
-                "patch": patch.to_dict(),
-                **dict(attribution_metadata or {}),
-            },
-        )
-        open_rows = [
-            item
-            for item in rows.get("trade_events") or []
-            if str(item.get("event_id") or "") == candidate["call_open_event_id"]
-        ]
-        if len(open_rows) != 1:
-            raise ValueError("Wheel Call open event is not unique")
-        fill = open_rows[0]
-        intent_check = resolve_wheel_fill_intent(batch, fill, rows.get("account_wheel_events") or [], now_ms=instant,
-            known_trade_event_ids={str(item.get("event_id") or "") for item in rows["trade_events"]})
-        if intent_check["reason_codes"]:
-            raise ValueError("Wheel Call intent does not admit this fill")
-        intent_event = (plan_wheel_call_intent_consume(batch, intent_check["intent"], fill,
-            {**dict(coverage_fact), "status": "available", "shares_available_for_cover": candidate["required_shares"]},
-            recorded_at_ms=instant) if intent_check["intent"] else None)
-        if not apply_changes:
-            return _linkage_result(
-                status="planned",
-                event_id=event.event_id,
-                call_lot_id=call_lot_value,
-                lot_id=stock_lot_value,
-                request_id=request_value,
-                market=market_value,
-                dry_run=True,
-                write_applied=False,
-            )
-
-        fence = capture_trade_event_decision_projection_fence(sqlite_repo, conn=conn)
-        runtime = run_position_projection_in_transaction(
-            sqlite_repo,
-            [event],
-            conn=conn,
-            mode="fast_if_safe",
-        )
-        if runtime.created_flags != (True,):
-            raise ValueError("Wheel Call linkage adjust unexpectedly replayed")
-        if intent_event is not None:
-            append_and_verify_wheel_intent_consumption(
-                sqlite_repo,
-                conn=conn,
-                linked_event=event,
-                intent_event=intent_event,
-            )
-        else:
-            # The linkage facts this guard compares are the strategy family, which
-            # left the lot payload (``write-side-definition.md`` §2 RECONSTRUCTIBLE;
-            # §7 moves it to the strategy/event side) -- a converged lot answers all
-            # four with ``None``. The adjust event this branch just wrote is their
-            # carrier now, so the guard reads it back from the store and checks the
-            # patch it applied. The retired flat lot keys stay as the fallback for a
-            # row written before the shape switch.
-            linked = sqlite_repo.get_position_lot_fields(call_lot_value, conn=conn)
-            written_rows = sqlite_repo.read_lifecycle_account_rows(
-                account=account_value, conn=conn
-            )
-            written = next(
-                (
-                    item
-                    for item in written_rows.get("trade_events") or []
-                    if str(item.get("event_id") or "") == event.event_id
-                ),
-                None,
-            )
-            applied = dict(
-                ((written or {}).get("raw_payload") or {}).get("patch") or {}
-            )
-
-            def _linkage_value(key: str) -> Any:
-                value = applied.get(key)
-                if value in (None, ""):
-                    value = linked.get(key)
-                return value
-
-            if (
-                _linkage_value("strategy") != "wheel"
-                or _linkage_value("leg_role") != "wheel_call"
-                or _linkage_value("source_stock_lot_id") != stock_lot_value
-                or _linkage_value("source_wheel_branch_id") != batch["wheel_branch_id"]
-            ):
-                raise ValueError("Wheel Call linkage verification failed")
-        finalize_trade_event_decision_projection(
-            sqlite_repo,
-            conn=conn,
-            fence=fence,
-            events=[event],
-            created_flags=runtime.created_flags,
-        )
-        return _linkage_result(
-            status="confirmed",
-            event_id=event.event_id,
-            call_lot_id=call_lot_value,
-            lot_id=stock_lot_value,
-            request_id=request_value,
-            market=market_value,
-            dry_run=False,
-            write_applied=True,
-            intent_event_id=(intent_event or {}).get("event_id"),
-        )
-
-    if conn is not None:
-        return _run(repo, conn)
-    return with_sqlite_repo_transaction(
-        repo,
-        _run,
-        require_projection_publication=True,
-    )
 
 
 def reject_wheel_call_linkage(
@@ -1919,11 +1699,8 @@ def _wheel_linkage_result(
 
 
 def _put_portfolio_context(capacity_fact: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "capacity_authority": capacity_fact.get("cash_authority") or {},
-        "capacity_identity_hash": capacity_fact.get("cash_authority_hash"),
-        "cash_by_currency": capacity_fact.get("cash_by_currency"),
-    }
+    return {**dict(capacity_fact.get("cash_evidence") or {}),
+            "cash_snapshot": capacity_fact.get("cash_snapshot")}
 
 
 def _bound_put_capacity_fact(
@@ -1954,7 +1731,9 @@ def _create_wheel_put_intent(
     request_id: str,
     actor: str,
     capacity_fact: Mapping[str, Any],
+    runtime_config: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
@@ -2017,6 +1796,7 @@ def _create_wheel_put_intent(
             market=market,
             branch=branch,
             activation_descriptor=activation_descriptor,
+            account_configured=account_configured,
             policy_sha256=policy_sha256,
         )
         if branch.get("direction") != "put":
@@ -2053,9 +1833,26 @@ def _create_wheel_put_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
+        portfolio = _put_portfolio_context(capacity_fact)
+        confirmed_cash = evaluate_account_cash_snapshot(
+            portfolio, config=runtime_config, account=account,
+            evaluated_at=datetime.now(timezone.utc),
+        )
+        if confirmed_cash["max_age_sec"] != portfolio.get("max_age_sec"):
+            raise ValueError("Wheel Put cash policy changed; repreview required")
+        portfolio["cash_snapshot"] = confirmed_cash
+        if not cash_snapshot_is_usable(portfolio):
+            raise ValueError("Wheel Put cash evidence stale or unavailable; repreview required")
+        decision_snapshot = decision_state_snapshot_from_locked_rows(
+            sqlite_repo, rows,
+            account=account,
+            portfolio_scope_id=portfolio_scope_id(account),
+            source_observed_at=datetime.now(timezone.utc).isoformat(),
+            current_decision_now_ms=as_of_ms,
+        )
         current_capacity = revalidate_selected_wheel_put_candidate_from_rows(
             account=account,
-            portfolio_context=_put_portfolio_context(capacity_fact),
+            portfolio_context=portfolio,
             position_lots=sqlite_repo.list_position_lots(conn=conn),
             lifecycle_rows=rows,
             broker=str(
@@ -2065,6 +1862,7 @@ def _create_wheel_put_intent(
                 or "futu"
             ),
             as_of_ms=as_of_ms,
+            decision_snapshot=decision_snapshot,
             fx_snapshot=(
                 capacity_fact.get("fx_snapshot")
                 if isinstance(capacity_fact.get("fx_snapshot"), Mapping)
@@ -2145,9 +1943,11 @@ def create_wheel_intent(
     actor: str,
     capacity_fact: Mapping[str, Any],
     new_intent_enabled: bool,
+    account_configured: bool,
     market: str,
     activation_descriptor: Mapping[str, Any] | None,
     policy_sha256: str,
+    runtime_config: Mapping[str, Any] | None = None,
     broker_order_id: str | None = None,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
@@ -2173,7 +1973,9 @@ def create_wheel_intent(
             request_id=str(request_id or "").strip(),
             actor=str(actor or "").strip(),
             capacity_fact=capacity_fact,
+            runtime_config=runtime_config or {},
             new_intent_enabled=new_intent_enabled,
+            account_configured=account_configured,
             market=market_value,
             activation_descriptor=activation_descriptor,
             policy_sha256=policy_sha256,
@@ -2207,6 +2009,7 @@ def create_wheel_intent(
         actor=actor,
         coverage_fact=capacity_fact,
         new_intent_enabled=new_intent_enabled,
+        account_configured=account_configured,
         market=market_value,
         activation_descriptor=activation_descriptor,
         policy_sha256=policy_sha256,
@@ -2423,310 +2226,6 @@ def cancel_wheel_intent(
         direction=direction_value,
     )
 
-
-def confirm_wheel_linkage(
-    repo: Any,
-    *,
-    account: str,
-    option_lot_id: str,
-    wheel_branch_id: str,
-    direction: str,
-    linkage_candidate_id: str,
-    expected_input_hash: str,
-    expected_batch_generation_hash: str,
-    request_id: str,
-    actor: str,
-    capacity_fact: Mapping[str, Any],
-    market: str,
-    apply_changes: bool = False,
-    as_of_ms: int | None = None,
-    conn: Any = None,
-    attribution_metadata: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    account_value = str(account or "").strip().lower()
-    branch_id = str(wheel_branch_id or "").strip()
-    direction_value = str(direction or "").strip().lower()
-    market_value = _require_market(market)
-    instant = int(as_of_ms or _now_ms())
-    if direction_value == "put":
-        values = {
-            "account": account_value,
-            "option_record_id": str(option_lot_id or "").strip(),
-            "wheel_branch_id": branch_id,
-            "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
-            "expected_input_hash": str(expected_input_hash or "").strip(),
-            "expected_batch_generation_hash": str(
-                expected_batch_generation_hash or ""
-            ).strip(),
-            "request_id": str(request_id or "").strip(),
-            "actor": str(actor or "").strip(),
-            "market": market_value,
-        }
-        if not all(values.values()):
-            raise ValueError("Wheel Put linkage confirmation requires complete fields")
-
-        def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
-            rows = sqlite_repo.read_lifecycle_account_rows(
-                account=account_value,
-                conn=conn,
-            )
-            existing = [
-                item
-                for item in rows.get("trade_events") or []
-                if str(
-                    (item.get("raw_payload") or {}).get("wheel_linkage_request_id")
-                    or ""
-                )
-                == values["request_id"]
-            ]
-            if len(existing) > 1:
-                raise ValueError("Wheel Put linkage request identity is not unique")
-            if existing:
-                payload = existing[0].get("raw_payload") or {}
-                if (
-                    str(payload.get("target_lot_id") or "")
-                    != values["option_record_id"]
-                    or str(payload.get("source_wheel_branch_id") or "")
-                    != values["wheel_branch_id"]
-                    or str(payload.get("direction") or "") != "put"
-                    or str(payload.get("actor") or "") != values["actor"]
-                    or str(payload.get("linkage_candidate_id") or "")
-                    != values["linkage_candidate_id"]
-                    or str(payload.get("input_snapshot_hash") or "")
-                    != values["expected_input_hash"]
-                    or str(payload.get("batch_generation_hash") or "")
-                    != values["expected_batch_generation_hash"]
-                    or str(payload.get("market") or "").strip().lower()
-                    != market_value
-                ):
-                    raise ValueError("Wheel Put linkage request identity conflicts")
-                return _wheel_linkage_result(
-                    status="idempotent",
-                    event_id=str(existing[0]["event_id"]),
-                    option_lot_id=values["option_record_id"],
-                    wheel_branch_id=values["wheel_branch_id"],
-                    direction="put",
-                    request_id=values["request_id"],
-                    market=market_value,
-                    dry_run=not apply_changes,
-                    write_applied=False,
-                )
-
-            assert_trade_attribution_unclaimed(rows.get("trade_events") or [], [values["option_record_id"]])
-            model = build_wheel_read_model_from_rows(
-                rows,
-                account=account_value,
-                as_of_ms=instant,
-                market=market_value,
-            )
-            candidate = _wheel_linkage_candidate(
-                rows,
-                model,
-                option_lot_id=values["option_record_id"],
-                wheel_branch_id=values["wheel_branch_id"],
-                direction="put",
-                linkage_candidate_id=values["linkage_candidate_id"],
-                expected_input_hash=values["expected_input_hash"],
-                expected_batch_generation_hash=values[
-                    "expected_batch_generation_hash"
-                ],
-            )
-            branch = next(
-                item
-                for item in model["wheel_branches"]
-                if item["wheel_branch_id"] == branch_id
-            )
-            fields = sqlite_repo.get_position_lot_fields(
-                values["option_record_id"],
-                conn=conn,
-            )
-            patch = build_open_adjustment_patch_contract(
-                fields,
-                strategy="wheel",
-                leg_role="wheel_put",
-                source_wheel_branch_id=branch_id,
-                as_of_ms=instant,
-            )
-            digest = canonical_sha256(
-                {
-                    "account": account_value,
-                    "option_record_id": values["option_record_id"],
-                    "wheel_branch_id": branch_id,
-                    "request_id": values["request_id"],
-                }
-            )[:24]
-            event = TradeEvent(
-                event_id=f"wheel-put-linkage-confirmed:{digest}",
-                event_type="adjust",
-                event_time_ms=instant,
-                contract_key=_lot_contract_key(fields, account=account_value),
-                contracts=0,
-                price=0,
-                currency=str(fields.get("currency") or ""),
-                source="wheel_linkage",
-                multiplier=float(effective_multiplier(fields) or 0),
-                target_lot_id=values["option_record_id"],
-                raw_payload={
-                    "schema_version": "wheel_put_linkage_confirmed.v1",
-                    "market": market_value,
-                    "source": "wheel_linkage",
-                    "direction": "put",
-                    "target_lot_id": values["option_record_id"],
-                    "adjust_target_source_event_id": candidate[
-                        "option_open_event_id"
-                    ],
-                    "wheel_linkage_request_id": values["request_id"],
-                    "linkage_candidate_id": values["linkage_candidate_id"],
-                    "input_snapshot_hash": values["expected_input_hash"],
-                    "batch_generation_hash": values[
-                        "expected_batch_generation_hash"
-                    ],
-                    "actor": values["actor"],
-                    "source_wheel_branch_id": branch_id,
-                    "patch": patch.to_dict(),
-                    **dict(attribution_metadata or {}),
-                },
-            )
-            open_rows = [
-                item
-                for item in rows.get("trade_events") or []
-                if str(item.get("event_id") or "")
-                == candidate["option_open_event_id"]
-            ]
-            if len(open_rows) != 1:
-                raise ValueError("Wheel Put open event is not unique")
-            fill = open_rows[0]
-            intent_check = resolve_wheel_fill_intent(branch, fill, rows.get("account_wheel_events") or [], now_ms=instant,
-                known_trade_event_ids={str(item.get("event_id") or "") for item in rows["trade_events"]})
-            if intent_check["reason_codes"]:
-                raise ValueError("Wheel Put intent does not admit this fill")
-            intent_event = (plan_wheel_put_intent_consume(branch, intent_check["intent"], fill,
-                _bound_put_capacity_fact(intent_check["intent"], capacity_fact), recorded_at_ms=instant)
-                if intent_check["intent"] else None)
-            if not apply_changes:
-                return _wheel_linkage_result(
-                    status="planned",
-                    event_id=event.event_id,
-                    option_lot_id=values["option_record_id"],
-                    wheel_branch_id=branch_id,
-                    direction="put",
-                    request_id=values["request_id"],
-                    market=market_value,
-                    dry_run=True,
-                    write_applied=False,
-                    intent_event_id=(intent_event or {}).get("event_id"),
-                )
-
-            fence = capture_trade_event_decision_projection_fence(sqlite_repo, conn=conn)
-            runtime = run_position_projection_in_transaction(
-                sqlite_repo,
-                [event],
-                conn=conn,
-                mode="fast_if_safe",
-            )
-            if runtime.created_flags != (True,):
-                raise ValueError("Wheel Put linkage adjust unexpectedly replayed")
-            if intent_event is not None and not sqlite_repo.append_wheel_event_once(
-                intent_event,
-                conn=conn,
-            ):
-                raise ValueError("Wheel Put intent consumption unexpectedly replayed")
-            linked = sqlite_repo.get_position_lot_fields(
-                values["option_record_id"],
-                conn=conn,
-            )
-            if (
-                linked.get("strategy") != "wheel"
-                or linked.get("leg_role") != "wheel_put"
-                or linked.get("source_wheel_branch_id") != branch_id
-            ):
-                raise ValueError("Wheel Put linkage verification failed")
-            if intent_event is not None:
-                after_rows = sqlite_repo.read_lifecycle_account_rows(
-                    account=account_value,
-                    conn=conn,
-                )
-                after_intents = project_wheel_intents(
-                    after_rows.get("account_wheel_events") or [],
-                    account=account_value,
-                    wheel_branch_id=branch_id,
-                    direction="put",
-                    as_of_ms=instant,
-                    known_trade_event_ids={
-                        str(item.get("event_id") or "").strip()
-                        for item in after_rows.get("trade_events") or []
-                        if str(item.get("event_id") or "").strip()
-                    },
-                )
-                if any(
-                    item.get("intent_id") == intent_event.get("intent_id")
-                    and int(item.get("remaining_contracts") or 0) != int(intent_check["intent"]["remaining_contracts"]) - int(fill["contracts"])
-                    for item in after_intents
-                ):
-                    raise ValueError("Wheel Put intent consumption verification failed")
-            finalize_trade_event_decision_projection(
-                sqlite_repo,
-                conn=conn,
-                fence=fence,
-                events=[event],
-                created_flags=runtime.created_flags,
-            )
-            return _wheel_linkage_result(
-                status="confirmed",
-                event_id=event.event_id,
-                option_lot_id=values["option_record_id"],
-                wheel_branch_id=branch_id,
-                direction="put",
-                request_id=values["request_id"],
-                market=market_value,
-                dry_run=False,
-                write_applied=True,
-                intent_event_id=(intent_event or {}).get("event_id"),
-            )
-
-        if conn is not None:
-            return _run(repo, conn)
-        return with_sqlite_repo_transaction(
-            repo,
-            _run,
-            require_projection_publication=True,
-        )
-    branch = _canonical_wheel_branch(
-        repo,
-        account=account_value,
-        wheel_branch_id=branch_id,
-        direction=direction_value,
-        expected_batch_generation_hash=str(expected_batch_generation_hash or "").strip(),
-        as_of_ms=instant,
-        market=market_value,
-    )
-    lot_id = str(branch.get("stock_lot_id") or "").strip()
-    if not lot_id:
-        raise ValueError("Wheel Call branch has no stock lot")
-    result = confirm_wheel_call_linkage(
-        repo,
-        conn=conn,
-        attribution_metadata=attribution_metadata,
-        account=account_value,
-        call_lot_id=option_lot_id,
-        lot_id=lot_id,
-        linkage_candidate_id=linkage_candidate_id,
-        expected_input_hash=expected_input_hash,
-        expected_batch_generation_hash=expected_batch_generation_hash,
-        request_id=request_id,
-        actor=actor,
-        coverage_fact=capacity_fact,
-        market=market_value,
-        apply_changes=apply_changes,
-        as_of_ms=instant,
-    )
-    return _canonical_wheel_result(
-        result,
-        schema_version="wheel_linkage_result.v1",
-        wheel_branch_id=branch_id,
-        direction=direction_value,
-        option_lot_id=option_lot_id,
-    )
 
 
 def reject_wheel_linkage(
@@ -3123,8 +2622,6 @@ __all__ = [
     "cancel_wheel_intent",
     "cancel_wheel_call_intent",
     "change_wheel_activation",
-    "confirm_wheel_linkage",
-    "confirm_wheel_call_linkage",
     "create_wheel_intent",
     "create_wheel_call_intent",
     "decide_wheel_branch",

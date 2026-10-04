@@ -611,14 +611,80 @@ trade-intake audit 只记录 `portfolio_refresh_hint_accepted` 或
 
 1. 第一阶段确认平仓事实。Futu 零价期权成交进入 durable Inbox，以
    `futu:<account>:<futu_account_id>:<deal_id>` 占用唯一 broker source，
-   冻结受影响 lot 和合约数量，并生成一次 `option_leg_closed` Outbox 意图。
+   冻结受影响 lot 和合约数量，在同一账本事务内按成交时间写入原因待定的
+   canonical close event、allocation 和 lot 投影，并生成一次 `option_leg_closed`
+   Outbox 意图。确认成交后不等待平仓原因才减少未平仓数量。
 2. 第二阶段确认平仓原因。原因未确认时为 `cause_pending`；证据完整后写入
-   canonical terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
+   原子更正后的 terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
    数量冲突或投影漂移进入 `needs_review` 或 `conflict`，不得猜测原因。
 
 平仓事实不会因为原因尚未确认而消失；原因确认也不能再次消费同一 broker
 成交。`resolution_revision` 只随业务结论变化，通知重发只增加
 `delivery_revision`。
+
+### 已确认期权平仓的风险占用设计（历史方案）
+
+以下记录此前按预留量修正风险占用的设计。当期零价成交已写 canonical close
+event 后，风险数量取投影中的未平仓张数，不再扣减同一笔预留量；待交收资金和
+股份的不可用标记仍须依据独立结算证据解除。下文“不改 canonical”仅描述旧方案。
+
+目标：账户级期权上下文在已接受的平仓事实出现后，按仍实际未平仓的合约数计算
+CSP 现金担保及 CC 锁定股数，避免已交收股票和更新后的现金再次被旧期权占用。
+本次不推断平仓原因、不改 canonical `position_lots.contracts_open`、不修生产账本，
+也不更改券商现金或通知金额公式。
+
+成功信号：完整平仓且原因待确认的合约不再占用风险容量；部分平仓只保留未平仓
+部分的占用；没有可信平仓事实、快照不可信或生命周期冲突时不凭猜测释放占用；
+账户级日报只在担保和券商资金证据均可靠时展示可开仓金额；原因待交收时显示
+“暂不可用”，原始持仓行仍可追溯。
+
+事实与约束：`domain/domain/option_lifecycle.py::derive_lifecycle_read_model` 已从
+可信账户快照派生 `closure_fact` 和按 lot 的 `reserved_contracts_by_lot`；
+`src/application/positions/context_builder.py::build_context` 从事件补齐持仓行的
+策略家族，而可信快照保留原始存储行；这族可重建字段不能参与两侧持仓代次比较。
+`daily_decision_brief_service._build_funds` 读取担保汇总，现金本身来自独立的
+券商持仓快照，观察时间不能单独证明交收完成。日报管线将可信账户快照传给
+`build_context`，而 `cash_headroom_query.py`、`wheel/capacity.py` 的直接调用
+目前没有传该快照，不在本次账户级日报验收内。原因未定时保留账本
+数量是两阶段状态的既有合同，不能为了资金展示提前写 terminal event。
+
+复用清单：复用 `derive_lifecycle_read_model` 的平仓事实与预留数量，复用
+`build_context` 作为账户风险汇总 owner，复用 `risk_capacity.py` 的 Put/Call 按数量
+缩放计算及日报现有汇总读取；不新增字段、状态、计算 owner 或数据来源。
+检索范围为上述 owner、`daily_decision_brief_service.py`、`sell_put_cash.py`、
+`cash_headroom_query.py`、`wheel/capacity.py` 及其相关测试；未发现另一个负责
+把已接受期权平仓预留量扣出账户风险汇总的 owner。
+
+方案：`build_context` 仅在可信快照中的同账户、同 lot，且经
+`position_lot_risk_view` 标准化后的原始持仓字段与本次汇总行一致（仅从汇总行
+排除事件层补齐的 `STRATEGY_METADATA_KEYS`），
+`lifecycle_state`、`reason_state` 均非 `conflict`、
+`closure_fact` 为 `option_leg_closed` 或 `partial_close_observed`、该 lot 预留量
+为 0 到 `contracts_open` 的整数时，令有效数量为
+`contracts_open - reserved_contracts_by_lot[lot_id]`；Put 现金担保与 Call 锁定股数
+均使用有效数量。快照不可信、跨代持仓行、冲突或数量越界时沿用账本数量，
+不把冲突当零占用。预留平仓量仍待交收时，保留现有
+`cash_secured_unavailable_by_symbol` / `locked_shares_unavailable_by_symbol` 标记。
+Put 期权腿全部平仓且富途直连现金快照晚于最后一笔已接受平仓证据时，现金已反映可能的指派消耗，
+日报与 CSP 容量检查可忽略该 Put 的待交收标记；旧快照、部分平仓和其他依据缺口
+仍使资金不可用。Call 锁定股数标记继续等待交收依据。
+`open_positions_min` 保留账本数量与生命周期字段，
+使后续平仓原因核对和自动操作仍有原始事实。拒绝在日报中单独减一笔现金、
+直接改账本，或用股票增量推断每张期权的指派原因；这些做法会重复计算或越过
+交收证据边界。账户切片之外的全账户汇总没有可信的账户生命周期快照，不能
+用本方案声称它已修正；缺快照的 Wheel 容量入口仍按账本占用，
+需另行接入可信账户快照才能与日报同口径。直接 CSP 现金查询读取同账户决策快照。
+
+实现切片：一片，在 `build_context` 统一应用有效数量并覆盖完整、部分、无证据、
+冲突和跨代快照行为。验证先用最小测试复现旧金额，再验证 Put/Call 汇总及
+可信账户快照到日报资金的读取链；检查相关消费者测试、格式和文档引用。失败语义沿用
+既有不可用/冲突状态，不写持久账本、不连券商、不发送通知。
+
+风险与待核事项：历史已生成简报不会自动重算；在缺少可验证的券商交收事实时，
+本设计只能确认期权腿已平仓，不能确认资金或正股可立即用于新交易，因此
+原因待交收的可开仓金额保持不可用。后续可靠金额仍是 OM 模型头寸，
+不是券商可下单额度。全账户汇总及缺快照的直接容量入口由各入口 owner 后续
+接入可信账户快照，当前账户级简报不读取这些结果。
 
 Lifecycle discovery 只冻结到期 lot 并创建 immutable case，不刷新已有 case 的
 `status` 或 `derived_summary`。既有 case 的派生状态由 canonical lifecycle read model
@@ -650,6 +716,147 @@ History backfill 只从本次查询的 Futu account IDs 与 canonical account ma
 date cash flow、交易日历和合约元数据的查询输入、返回码、覆盖范围、行及
 payload hash。任一来源不完整、日历 hash 变化、零价锚点无法在历史成交中
 唯一复核、source claim 不匹配或数量超出冻结余量，统一进入人工复核。
+
+### 股票成交先到与提前指派配对（2026-09-29 设计）
+
+目标：修复同合约多 lot 的股票交收成交被逐 lot 数量门槛漏接、旧 lifecycle case
+跨期争抢股票成交，以及普通股票卖出与期权交收分支的归属冲突。成功信号：
+
+- 2026-09-29 美团 3690.HK 的 77.5P 三张（各一张、乘数 500）可由一笔
+  1500 股、77.5 港元的富途买入成交匹配；80P 一张的当日案例不被
+  2026-03-30 同价旧终态案例阻塞；75P 已完成的处理保持幂等。
+- 到期及未到期的股票先到、期权先到都只在完整且唯一的 broker 证据配对后
+  产生一次 assignment/exercise 与对应 Outbox 意图。提前指派不以价内为硬门槛；
+  到期日价内只提高观察优先级，不能证明实际指派。
+- 普通股票成交不因恰好等于行权价和数量而被预先写为交收；若一笔卖出同时
+  可归属已有 assigned-stock lot 与期权交收，保持 unresolved，待人工核实。
+- 旧 `handled/skipped/not_option_deal` 股票成交可按精确 broker source、原始
+  payload hash 和操作人受控预览及恢复；重复恢复不产生第二次经济效果。
+
+非目标：解析富途人工通知文本、以行情预测实际指派、新增候选池表或生命周期
+状态、自动改写生产账本、真实发送通知、发布或升级。此处的远端成交与案例是
+2026-09-29 诊断快照；执行恢复前须重新核对远端 broker、Inbox、ledger 和
+通知 Outbox，且生产写入另需明确授权。`7973` 通知账户尾号尚未独立映射到
+物理 Futu account ID，不据此代替 source 身份。
+
+当前事实与约束：富途结构化期权和股票成交已经进入 Inbox。77.5P 的股票
+成交 `8819493529739285424` 因 1500 股大于每个 500 股 lot，在 lifecycle
+admission 被当成 `not_option_deal`，随后以 `skipped` 写入 state 并标记 Inbox
+`handled`；普通 `--inbox-id` 无法重领。80P 的股票成交
+`3940217024375863831` 同时匹配当日待处理案例和三月旧终态案例，返回
+`ambiguous_lifecycle_case_match`。intake 的旧终态“截止后任意股票成交”兜底
+与 writer 拒绝 `stock_settlement_after_deadline` 冲突。已有单 lot 提前指派
+双顺序测试通过，故不重建提前指派状态机。远端只读核对表明 77.5P
+零价期权证据是一条 3 张成交，80P Inbox 行的 `receipt_kind` 为
+`manual_required`，可使用现有 `--inbox-id` 手工重领入口；两者都须在
+实际恢复前重新读回确认。
+
+复用与归属（检索范围：`src/application/trades/{normalizer,resolver,lifecycle,
+intake,inbox,auto_intake}.py`、`src/application/positions/workflows.py`、
+`src/application/ledger/writer_lifecycle_support.py` 和本节相邻合同；检索词
+`stock_settlement`、`assigned_stock_sale`、`option_zero_price_close`、
+`settlement_deadline`、`not_option_deal`；未发现可直接重领已处理 skipped 的
+公开恢复入口）：
+
+| 本次概念或改动 | owner 裁定 |
+| --- | --- |
+| 原始成交、broker deal key、Inbox payload 与 claim | 复用 `trades/inbox.py`、`trades/intake.py`；不新建队列或 source ID |
+| 未归属股票证据、期权零价锚点、case 唯一配对 | 复用 `trades/lifecycle.py` 的 `stock_settlement_leg`、`option_zero_price_close` 和 v2 case |
+| 同合约多 lot 总量与 allocation | 复用 `accept_option_close_evidence` 的 `target_contracts_by_lot`、source claim 及 ledger writer；admission 按同合约合计判断，写入前校验一条零价锚点和目标 manifest 数量守恒 |
+| 已指派股票卖出 | 复用 `positions/workflows.py` 和 `resolver.py` 的 `_resolve_broker_assigned_stock_sale` |
+| 交收截止与可写案例 | 复用冻结的 `lifecycle_timing_policy.v1` 及 writer 校验；intake 不另定义宽松截止 |
+| 历史 skipped 精确恢复 | 在现有 `run trade-intake --inbox-id` 增加显式恢复选择；原因是通用 resume 只接受 pending/manual_required |
+| 历史通知抑制 | 复用 lifecycle Outbox 的 `suppressed` 状态和 Inbox 的历史回执抑制；不增加另一套投递状态 |
+
+处理顺序：
+
+1. 归一化并核对 account/Futu account/source key、broker 成交时间及幂等状态。
+   对正股成交，从现有受支持的实物交割股票期权 lot（包括可提前行权的
+   short assignment 与 long exercise）或 lifecycle case 按需查候选；
+   不预先扫描行情建表。无 case 时按同账户、同完整合约的 lot 合计可用股数，
+   物理账户无法由 lot 证明或多个合约组均可能命中时只留未归属线索。
+   股票先到只持久化未归属
+   `stock_settlement_leg`，不产生 terminal event、assigned-stock lot 或
+   `resolution_confirmed`。没有可信 option anchor 时，数量及执行价相符仍
+   只是线索。到期日前的价外合约不能仅因行情被排除。
+2. 期权零价平仓建立或读取同一完整合约的 v2 case 和 option anchor，目标
+   manifest 可含多个 lot；到达次序不改变
+   source claim 或 lot allocation。只在 account、物理 Futu account、标的、
+   期权方向/仓位方向、到期日、行权价、成交方向、乘数与 broker 成交时间
+   窗口一致，且 case、单条 option anchor、股票 source 三者的配对唯一时写入。
+   本次按远端真实形状处理一条 3 张 option anchor 对三个 lot 和一笔 1500 股
+   股票成交；多个 option anchor 或股票 source 暂不自动拼单，待人工核实。
+   逐笔循环不能先写一个再以最后一个结果代表整组。`received_at` 晚于截止
+   可以；股票成交本身晚于冻结截止不能靠旧
+   final case 兜底。截止后的观察规则不放宽 writer 的成交时间校验。
+3. 股票卖出先做无写入的 assigned-stock-sale 与 lifecycle 双候选检查。
+   assigned-stock-sale 候选必须核对物理 Futu account：从
+   `source_assignment_event_id` 回查原指派事件；有 broker 物理账户记录时
+   必须与股票成交一致。既有手工指派事件没有该字段，保留原有股票卖出
+   路径，并把这类旧 lot 的跨物理账户归属列为待补来源证据的风险。
+   两者均可解释、任一身份/数量不完整或多案例
+   竞争时，返回可见的 unresolved，不让分支顺序决定归属；没有冲突才走
+   现有 writer。正股买入同样需唯一的期权证据。正价正常期权平仓仍走原路径。
+4. assigned-stock-sale 和 lifecycle 两种 writer 在最终同一 ledger 锁/事务
+   中各自重查另一类候选及 canonical broker source 的消费归属；预览检查
+   不能代替提交时排他门。writer 同时核验完整合约、冻结时间、目标 manifest、
+   source claim 和 allocation，再生成终态及 Outbox。重复、崩溃读回和晚到证据沿已有幂等
+   机制收敛；证据冲突失败关闭，不猜测普通交易还是指派。
+
+历史恢复只针对已保存且 `handled/skipped/not_option_deal`，或带
+`manual_required` 的 `handled/unresolved/ambiguous_lifecycle_case_match` 的精确股票 Inbox 行：
+`--recover-skipped --inbox-id` 默认 `--mode dry-run` 展示原始 broker source、
+Inbox 经济 hash、原 state 条目、账户 ledger 证据行数和外部副作用抑制策略；
+预览 hash 绑定原 Inbox 行、state 文件及账户内 lot、交易、case、evidence、
+source claim、allocation、通知 Outbox 的读回快照。富途 source 可是
+`futu:<account>:<physical>:<deal>` 或 `execution:v1:<hash>`；后一种仍须由
+保存的可信 source 与当前账户映射共同证明 account 和物理账户。已有回执
+或尚未尝试的 PM 刷新意图时拒绝自动恢复；已尝试的历史 PM 意图保留，
+本次不重新请求。
+`--mode apply` 必须显式确认、操作人和预览 hash，且只在交易 intake writer
+停止、同一 writer lock 下按原 source 重领。重领前在锁内重算预览并 CAS
+核对原 Inbox 为 skipped、经济 hash、state 原版本、候选及 Outbox 摘要均未
+改变，且该 source 未有 terminal allocation；仅此精确恢复请求可让 resolver
+越过原 `processed_deal_ids/skipped` gate，保留旧记录及审计，不普遍放宽
+duplicate。重处理由原 resolver/writer 执行，成功后更新原 state/Inbox 并
+读回。跨 Inbox/state 提交崩溃或不确定写入先
+按 source claim 和 terminal event 读回，禁止盲目重放或直接删除 skipped
+标记。历史恢复在终态写入事务内把新 lifecycle Outbox 意图持久化为
+`suppressed`，重启前读回确保无 pending 意图；普通即时回执和新增 PM 刷新
+提示也默认抑制。重领到 pending 的 Inbox 行保存 `skipped_stock` 恢复标记，
+普通自动重试和回执恢复扫描跳过它；共享 Inbox claim 与普通 resume 也拒绝
+领取该标记，仅显式 `--recover-skipped` 可继续，中断后仍须通过同一预览/操作入口继续。
+恢复交易与真实通知/PM 外部请求分别授权。
+80P 现存 `handled/unresolved/ambiguous_lifecycle_case_match` 行也经由上述
+受控预览、哈希和 writer lock 恢复。原 state 与 Inbox 必须一致，且旧行无
+已发回执；新终态通知、即时回执与 PM 刷新同样抑制。
+
+拒绝方案：价内作为指派证明（可能漏掉主动提前行权）、股票先到立即记指派
+（普通股票成交误归属）、为候选池新建表和状态机（已有 Inbox/证据 owner）、
+只从 state 删除 skipped 后重播（缺少幂等与审计）。
+
+实现切片与验收：
+
+1. `matching`：统一 intake/writer 时间与完整合约身份，按目标 manifest 总量
+   接纳无 case 的股票先到；用三 lot 1500 股、单条 3 张 option
+   anchor、多条 anchor 保持 unresolved、双股票 source 冲突、当日 80P 与三月旧案例、截止前成交晚收／
+   截止后成交、提前指派不看价内、long exercise 双顺序及重复消息验证。
+2. `stock-ownership`：无写入双候选加两条 writer 内的排他重查；用正常卖出、
+   双候选、物理 Futu account 冲突、无候选、已有指派股票多 lot 全量卖出
+   和两个连接并发竞争测试验证，依赖 `matching`。
+3. `skipped-recovery`：精确 Inbox/source/hash 的预览、受控重领、幂等读回；
+   用隔离 SQLite fixture 验证旧 skipped、80P 既有 `manual_required` 重领、
+   预览后候选/hash 漂移、writer 并发、
+   重复 apply、中断后读回，以及 lifecycle Outbox、普通回执、PM 提示均不
+   对外发送，依赖前两片。生产恢复另需授权。
+
+风险与未决事实：结构化成交没有经验证的“本笔由指派产生”标记；经济条件
+配对仍可能与普通交易相撞，因此双归属与不完整来源都需人工复核。用户认可
+“股票先留线索、期权平仓后完成唯一配对”的自动化策略；这证明证据相关，
+不等于证明券商逐笔因果，普通股票买入恰好撞上全部经济条件是残余误配风险，
+由交易录入操作者在异常对账时复核。富途人工
+通知不能作为逐笔 deal ID 的自动映射。恢复时的停写与服务路径须在目标环境
+独立核证；本设计不授权该动作。
 
 ## 通知 Outbox 与批量回执
 
@@ -1482,3 +1689,122 @@ F12/F13 已用临时 SQLite 复现存储行为，未调用真实渠道或修改�
 | 旧产品 PRD 仍要求逐笔 intent | Wheel 产品 owner | B 同步修订 §4.4；本设计未实现前保持现状 |
 | 真实渠道的 sender/conversation 形状、scope 映射与管理员配置未验证 | assistant/渠道 adapter owner | B 用脱敏入口 fixture 验证规范身份；生产写入前按现有受控流程核对，缺身份拒绝预览 |
 | 部署、真实发送和 broker 联调未执行 | 运维与通知 owner | 单独授权后的部署验收，不计入本次设计完成 |
+
+
+## 期权成交、结算与开仓容量统一：Gateflow 实施合同（2026-10-01）
+
+本节是当前任务从已确认设计进入实施的可携带合同，基线为 origin/main f9cc0773。
+目标是成交事实只入账一次、平仓原因和资源释放各有对应证据、所有开仓入口共享结算约束，
+歧义主动提供人工待办；保留 Wheel 自动启用和 Combo 指派转 Wheel，删除旧归属及重复容量路径。
+生产账本写入、真实通知、发布和部署不在本次研发范围内。旧成交不因升级自动重放或自动归属。
+不新增订单账本、待办表、监听进程、容量计算器或策略开关。
+
+四路设计审查增加五个约束：Inbox 撤销/更改须进入冻结决策；人工修复绑定看到的证据版本且可安全重试；
+新切换时点与旧启用时点分开；状态补齐、冲突和迟到消息有确定规则；已知旧成交按原日期有限量补查。
+富途历史成交日期过滤尚未证明，完全无提示的旧更改不得声称已被默认回查覆盖。
+
+#### A1–A8 验收合同
+
+|---|---|
+| A1 成交正确 | 正常/零价平仓及时更新剩余张数；推送、回查、重复、乱序、重连恢复仍恰好入账一次。撤销/更改/未知状态不会被正常成交去重吞掉或默认为正常。 |
+| A2 结算独立 | 全平仓但待结算/冲突仍受约束；日期、总现金/总持股变化和本地订单推断不能放行；唯一完整交收证据或合规人工修复才改变对应事实，重复证据不重复消费。 |
+| A3 容量一致 | 同一事实输入下，Daily Brief、query_cash_headroom、CSP、Wheel Put、CC、预览及确认得出一致约束；覆盖六项已确认缺口和资金/股票守恒案例。 |
+| A4 推送可靠 | 订单回调保留账户/环境身份；只唤醒现有查询，错误账户拒绝、重复合并、乱序不改账、断线靠回查恢复；查询限频、失败退避、取消和重启可验证。 |
+| A5 人工可达 | 多候选/冲突主动显示具体待办与有效入口；无扫描候选仍可见；重复不骚扰、失败不假称送达；预览后事实变动阻止旧确认。 |
+| A6 只有一套 | 删除清单逐项给出代码与消费者证据，全部真实入口使用共同规则；无新旧策略开关、独立旧写入或重复计算，历史记录仍能读取。 |
+| A7 证据可信 | 保持账户/市场/币种隔离；快照同源且包含消费者需要的事件；查询失败、陈旧/缺失/部分数据明确不可用，不当作空数据放行；金额不变的证据变化也使旧预览失效。 |
+| A8 全流程可证 | 隔离集成测试从监听/回查入口经持久化、投影、核对到容量和待办验证；补齐一个脱敏真实指派案例，分别展示收到的推送、可主动查询的数据、关联依据和时序。未取得真实样本时明确此项未通过。 |
+
+官方接口依据：[成交推送](https://openapi.futunn.com/futu-api-doc/en/trade/update-order-fill.html)、
+[成交状态定义](https://openapi.futunn.com/futu-api-doc/en/trade/trade.html)、
+[订单推送](https://openapi.futunn.com/futu-api-doc/en/trade/update-order.html)和
+[历史成交查询](https://openapi.futunn.com/futu-api-doc/en/trade/get-history-order-fill-list.html)。
+文档确认状态字段和更新时间戳，但未说明旧成交更改的历史查询日期归属。
+
+### 目标对齐与切片
+
+| 切片 | 对应验收 | 独立可观察结果 |
+|---|---|---|
+| S1 成交状态与冻结证据 | A1、A7 | 成交源状态入 Inbox；ledger 决策看见撤销/更改并使旧预览失效，即使经济账本尚未改变 |
+| S2 结算约束与共同容量 | A2、A3，重验 A7 | 全平仓、到期或总额变化均不会提前释放；所有资金/股票开仓入口同样阻断 |
+| S3 单一归属与人工处理 | A5、A6及美团案例 | 唯一入口决定归属，歧义主动可见且可确认，旧自动写入路径消失 |
+| S4 订单提示、回查与全链验收 | A4、A8，重验 A1–A7 | 同连接订单提示加速查询，漏推恢复；真实指派样本与隔离全链分别有证据 |
+
+四片比默认三片多一片，因为来源跨库正确性、容量消费者、归属交互、Broker 调度各有独立副作用和回归。强行合并会使单次实施和评审范围过大。顺序 S1 → S2 → S3 → S4；S3 人工修复 facade 的底层证据契约在 S1 建立，UI 在 S3 交付。每片完成真实入口观察、评审和 commit 后才进入下一片。
+
+### 直接依据与最小设计
+
+1. 富途官方文档的成交状态有 OK、CANCELLED、CHANGED，推送协议有 updateTimestamp；订单推送含账户/环境头、状态和累计成交量。订单只做刷新提示，不用累计量差制造成交。历史成交 API 有 start/end，但未承诺旧成交更改按哪个日期返回。
+2. 标准化在 domain/domain/trade_execution.py；来源 Inbox 在 src/application/trades/inbox.py；账本冻结快照在 src/application/ledger/decision_snapshot.py。两份 SQLite 需要共享写锁、完整来源摘要及确认前重验。审计所有真实 Inbox 写入是否传权威 repo；打不开 Inbox 标不可用。
+3. 可信 OK 才建立正常经济成交；入账前 CANCELLED/CHANGED 不入账；入账后状态变化阻断受影响资源，并要求人工修复，不自动倒写下游股票、费用或收益。缺状态先查历史，同身份同修订同内容去重；可信较新修订胜过旧修订；同修订冲突或跨来源无法比较则待核实。经济身份与状态摘要分离，旧格式通过同一读取入口转换。
+4. 复用已有 ledger 事务、人工修复 facade、Wheel/Combo 指派共同规划、持仓上下文及归属预览。不新增数据库表或第二套策略。已有 policy 表追加本次迁移版本和切换时点，保留旧启用记录；按成交发生时间判断，切换前未归属成交只可人工处理，不因升级自动归属。
+5. 同账户/市场/币种/账本版本的事实和有来源时间的券商资源一起决定容量。待结算、冲突、撤销独立于剩余期权张数。逐笔释放必须有对应义务证据；总现金/总持股只约束总量。券商冻结与本地占用无法去重时阻断相关资源池。
+6. 人工待办复用成交回执、Daily Brief、Control 和现有通知去重。相同证据版本不重复骚扰，未解决仍持续可见。确认绑定完整成交身份、来源摘要及依赖摘要，事务内再比对；重试读回已持久结果，新证据重开阻断，不清空原冲突。
+7. 美团 HK 五个 500 股候选须由真实成交入口进入隔离账本。无唯一证据就待人工；精确意图仍需排除竞争；确认只关联目标分支的 500 股。保留 #418 Wheel 启用和 Combo 指派转 Wheel 的同一规划函数。
+
+### S1：成交状态与冻结证据
+
+Allowed modules: domain/domain/trade_execution.py；src/application/trades/{inbox,inbox_authority,auto_intake,backfill,review}.py；src/application/ledger/{api,decision_snapshot,repository_decision_reads,interventions,commands,results}.py；src/infrastructure/futu_trade_push.py 的成交修订字段；src/interfaces/cli/trade_events.py 的人工修复参数；成交写入 facade、相关 tests。S1 不修改容量计算、Wheel 归属选择或订单状态回调。
+
+入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：
+- 缺失/未知状态：保存来源，主动查询；新经济成交不入账。历史已入账事件保持可读，但相关证据不完整时待核实。
+- OK：身份完整且无冲突才入账一次；缺状态来源后来由可验证 OK 补齐，可以解除该项缺失阻断。
+- CANCELLED/CHANGED：入账前不记经济事件；入账后保留已有事件、添加来源冲突，使相关决策 unavailable，待修复预览。
+- 相同身份、同一 provider updateTimestamp、同状态和内容：重复 no-op；同修订不同状态/经济字段：冲突；可比较的更旧修订不能覆盖新状态。不同来源缺少可比较修订：待核实，不以收到时间推断先后。CANCELLED 后出现更晚 OK 也须核对及人工裁决，不自动恢复经济可用性。
+- 已裁决 evidence set：原证据不删除；相同 evidence IDs 与摘要再次到达不重开，新 evidence ID/digest 重新阻断。不能只靠 Inbox status 或 payload_version，因为已 conflict 时新证据可能不增加版本。
+
+冻结边界：所有权威 canonical Inbox 写入必须传 repo；无 repo 的 source-only/测试记录不可进入生产经济决策。由 inbox_authority.resolve_execution_inbox_path(repo, requested_path) 绑定 Inbox 到 ledger 路径。只读预览先用现有 with_sqlite_repo_writer_lock 获取一次共享跨进程 writer lock，再读 ledger 决策行和 Inbox 完整来源摘要；所有权威 Inbox 写入必须使用同一锁。确认沿现有 with_sqlite_repo_transaction 进入一次 writer lock 和 ledger 事务，在其回调中读取 Inbox、ledger generation 与依赖并比对预览，不在事务外再套一次锁，避免 _writer_connection 嵌套锁。读序由单一锁串行化两个 SQLite 的权威写入；任一非锁内写入视为契约违例。Inbox 缺失仅在明确空新库且 ledger 无来源事件时可判空，其余缺失/不可读为 unavailable；不能让 read_trade_source_evidence 的 [] 被解释为无冲突。decision_snapshot 返回 trade_events、来源约束及其 fingerprint；金额/张数不变的来源变化仍改变指纹。
+
+人工修复底层：现有 review.py/commands.py/interventions.py 的 preview 加 expected_input_hash（目标事件、来源 evidence IDs/digest、股票及后续事件依赖）；apply 必须带该值，事务内复查，旧值拒绝。成功的手工事件 raw_payload 保存已裁决证据集合与摘要；现有确定性 repair event ID 与同一请求一起做丢响应读回，读回的目标/摘要/结果一致才返回成功，真正不同请求或依赖冲突拒绝。历史修复工具其他模式保持现有明确入口，不暗改其授权边界。
+
+验证与完成：先红后绿覆盖 OK/零价平仓去重、缺状态→可信 OK、OK→CANCELLED→迟到旧 OK、同修订冲突、不同源不可比、已 conflict 后新增证据、Inbox 已写但处理前崩溃、锁内并发/确认前变更、缺 Inbox、无 repo 权威写入拒绝、修复失败与重复读回。使用隔离双 SQLite 与真实 facade；A1/A7 的状态和旧预览失效成立才结束。发现依赖修复不安全时返回具体阻断，不保证一键解决。
+
+### S2：结算约束与共同容量
+
+Allowed modules: domain/domain/cash_secured_utils.py 与现有容量 domain；src/application/positions/context_builder.py；src/application/ledger/decision_snapshot.py；src/application/wheel/capacity.py；sell_put_cash.py、cash_headroom_query.py、daily_decision_brief_service.py、short_vol_risk_context.py、Control 预览/确认直接消费者及 tests。S2 不写归属迁移或通知渠道。
+
+数据流：S1 冻结快照（同账户/市场/币种/账本及来源摘要）+ 带来源和时间的券商资金/持仓 → context_builder 的结算和冲突约束 → CSP/Wheel Put/Call/查询/简报/预览/事务确认。归属容量只核对既有成交的覆盖义务；新增开仓才申请新增额度。任何消费者不得跳过来源冲突、待结算或券商陈旧状态。
+
+改动：从 decision_snapshot 返回消费者实际使用的 trade_events；context_builder 对 contracts_open=0 的 lot 仍携带待结算/冲突约束；删除 cash_secured_unavailable_for_cash_snapshot 的总现金放行和 Put 到期加一天释放；Wheel Put/Call 的 load、finalize 和事务 revalidate 消费同一决策约束；所有直接消费者只消费共享事实。冻结与本地占用可证明同一义务时只扣一次，无法证明时对应池 unavailable。普通买回平仓只释放已证明的普通期权义务；指派/到期原因 pending 不因总额变化解除待结算。
+
+验证与完成：先用六项现有缺口的失败回归定位，然后隔离 ledger+fake broker 数值场景覆盖部分成交、普通平仓、到期未结算、指派交收、现金/股票冻结重叠、跨币种、陈旧或失败快照及扫描与确认竞争。逐个真实入口断言相同阻断和预览失效；A2/A3 通过后完成。
+
+### S3：单一归属与人工闭环
+
+Allowed modules: src/application/trades/{auto_intake,attribution,combo_reconciliation,receipt}.py；src/application/ledger/{api,trade_attribution,trade_attribution_migration,repository_schema,writer_trade_events,wheel_trade_companions}.py；src/application/wheel/capacity.py；assistant/attribution_operations.py、daily_decision_brief_service.py/renderer.py、现有 Control/通知路由、相关 tests/docs。S3 不接订单状态回调。
+
+切换：已有 append-only trade_attribution_policy_enablings 保留 v1；新实现固定当前 policy_version=v2。受控迁移按 broker、物理账户、环境、账户、市场在既有表追加 v2 effective_from_ms，不改旧行；受控 preview 展示来源、T0 旧启用边界、T2 本次切换点和影响数，apply 需要停 writer、manifest、备份与读回。T0≤成交时间<T2 的未归属交易保持人工可处理；成交时间≥T2 才自动归属；晚到旧成交不能因处理时间晚而自动归属。未迁移来源可只读评估/人工待办，自动写入 fail closed。Wheel 自身启用门槛继续决定新开仓，历史启用窗口继续判断旧指派，不引入第三个业务开关。
+
+唯一入口：auto_intake 删除按 trade_attribution_enabled_for_execution 选择旧 Wheel intent writer 的分支；所有成交同一经济写入后统一评估归属。combo_reconciliation 删除独立自动采用，但统一归属可调用既有原子 adopt 函数；Combo 指派转 Wheel 保留共同规划函数与历史恢复。精准 intent 是候选证据，不自动排除其他可行分支。S2 容量规则核对股票/现金，已成交归属不再申请新增开仓额度。
+
+人工闭环：多候选/来源冲突/配置或证据不足进入现有回执、Daily Brief、Control 待办，说明已确认成交、影响、最近核对和下一步。相同事项和证据摘要去重通知，未解决持续展示；外部送达无回执显示未知。Control 预览及确认绑定 S1/S2 来源/依赖/容量摘要，重读后再写；重复确认读回，不重放成交。
+
+验证与完成：美团五个 500 股 HK 分支经真实成交入口进入隔离库，分别测无意图、单意图仍有竞争、精确排除竞争、缺配置、手工选目标、预览失效、重复确认；目标覆盖 1 张/500 股且其他四分支不变。Combo Put/Call 卖腿部分/全部指派、另一腿仍开仓、缺乘数/费用可见阻断、重复不建第二分支。静态导出/动态注册/真实入口验证旧 writer、独立 Combo 自动采用、通用归属 enable 业务命令与重复容量规则均退役；A5/A6 通过才完成。
+
+### S4：订单提示、回查与全链验收
+
+Allowed modules: 现有 OpenD trade listener、futu_gateway.py、futu_history_deals.py、trades/backfill.py、auto_intake 主循环；关联 fake-provider tests、集成 tests 与 docs。S4 不改变 S1–S3 的业务决策。
+
+同一 OpenD 连接注册订单状态回调，协议头绑定物理账户/环境/市场；回调只提交刷新提示到主循环，同账户合并并沿现有限频、超时、退避和取消；随后查询真实订单及成交并走 S1 唯一入口。订单累计量只核对，不差额制造成交。错误账户拒绝；查询失败不推进可信游标；断线保留周期回查。默认近 6 小时与停机窗口扩展保留；已知未决旧成交按原发生日期限量定向补查。无提示且超出窗口的旧更改，在富途日期过滤语义得到真实证据前保持明确残余风险，不能承诺自动发现。
+
+实现口径：订单回调只保留经协议头和账户快照核对的订单 ID；同账户重复 ID 合并，不同 ID 按每账户最短 30 秒间隔依次核对。主循环强制刷新当前订单，查看状态及累计成交量，再运行原有历史成交回查；只有历史成交结果进入 Inbox 与账本。订单查询失败保留提示供退避重试；停止信号阻止后续回查。旧的未决或失败成交仅在 Inbox 保存原始账户、成交 ID 和发生时间时按该日追加查询，单轮最多五笔；定向查询的完整性单独报告，不否定独立完成的近期窗口游标。富途未证明旧成交更改按原日期返回，且单纯账户总额变化仍不能证明交收。
+
+验证与完成：假 provider 记录同连接、调用顺序、限频/合并、失败退避、取消/重连、漏推与旧日期定向查询；全链从推送/回查经持久化、投影、结算、容量、待办到预览确认。收集一个脱敏真实指派样本，列推送、主动查询、交收匹配和时序；缺失则 A8 未通过，不能宣称完成。A4/A8 及 A1–A7 共享回归、项目门禁通过后进入 aggregate deepreview。
+
+2026-10-01 只读生产核验（`liuxie-incus`，`lx`，运行版 3.8.5；未写账本或改服务）：
+`TCOM` 2026-07-17 到期的 Put 45，case 前缀 `ce682e02`。账本记录 2026-07-18
+05:50:10–11 UTC 的期权零价平仓与 100 股按 45 USD 买入交收，两条来源均为
+`futu_trade_push`，约 05:51:29–30 UTC 入账；账户、标的、行权价、方向、数量和成交时间
+共同匹配一张指派义务。2026-10-01 14:46 UTC 用该账户和 2026-07-18 日期窗口主动查询
+OpenD 历史成交，查询覆盖完整、返回 4 条，其中精确成交 ID 尾号 `37052890`
+（期权）和 `40211255`（股票）均为 `OK`，标的是相应的 `US.TCOM` 合约/股票。
+指派配对证据直到 2026-09-14 09:51 UTC 才写入，说明这笔历史样本证明推送与主动查询
+都能取得对应成交，也暴露旧版原因确认的延迟；它不证明本次改造已在线上运行。
+
+### 验证、文档与风险
+
+每项行为先证明旧实现会失败，再跑定向 pytest；跨模块契约用隔离 DB、假券商与假渠道；最终按 om-pre-push-checks 执行必需门禁。本节作为分支内的实施合同；公共命令和 payload 变动时更新相应说明，主工作区其它未提交内容保持原状。Gateflow 每片 code review/fix/re-review/commit 后做 aggregate deepreview、draft PR review。
+
+待补证据：真实成交状态修订语义、历史查询日期过滤、券商资金/可卖量与本地占用重叠、真实指派完整样本。证据不足时保守阻断并报告，不能把 mock、静态审查或总额变化当生产验收。当前还有其它任务未提交归属改动，只读复核可复用差异，不直接合并或覆盖。
+
+本方案复用现有数据库和入口，没有新订单账本、待办表、监听服务、业务开关或通用框架；四片均直接映射目标和 A1–A8，没有扩大目标。完成报告列出改动/删除路径、A1–A8 证据、测试与 CI、commit、draft PR、剩余风险和 owner。

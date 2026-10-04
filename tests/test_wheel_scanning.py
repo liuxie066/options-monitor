@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cash_evidence_helpers import cash_portfolio
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,14 +11,17 @@ import pytest
 
 from conftest import phase2_opening_row
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.daily_decision_brief_service import _load_wheel_snapshot_family
 from src.application.wheel import (
     build_shared_coverage_facts,
     finalize_wheel_capacity,
     run_wheel_call_scan,
 )
 from src.application.wheel.capacity import (
+    build_shared_cash_capacity_fact,
     finalize_wheel_put_capacity,
     revalidate_selected_wheel_put_candidate,
+    revalidate_selected_wheel_put_candidate_from_rows,
 )
 from src.application.wheel.scanning import run_wheel_put_scan
 from src.application.wheel.candidate_snapshot import (
@@ -57,6 +62,7 @@ def _read_model() -> dict:
                     "symbol": "NVDA",
                     "currency": "USD",
                     "assigned_at_ms": 1_000,
+                    "assignment_price": 100,
                     "remaining_stock_cost_basis": 10_010,
                     "option_premium_attribution": 250,
                     "covered_call_realized_pnl": 100,
@@ -141,6 +147,15 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["capacity_claims"][0]["requested_shares"] == 100
 
+    removed_model = _read_model()
+    removed_model["batches"][0]["monitoring_gate"] = "disabled"
+    closed = run_wheel_call_scan(
+        removed_model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}}, {},
+        {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    assert not closed["raw_candidates"].get("stock-1")
+
     captured = finalize_wheel_capacity(
         account="lx",
         wheel_read_model=_read_model(),
@@ -165,6 +180,20 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     source = result["raw_candidates"]["stock-1"][0]
     expected_key = json.loads(json.dumps(source["rank_key"], allow_nan=False))
     batch = payload["batches"][0]
+    assert {key: batch[key] for key in (
+        "broker", "currency", "assignment_price", "assigned_at_ms"
+    )} == {
+        "broker": "富途", "currency": "USD",
+        "assignment_price": 100, "assigned_at_ms": 1_000,
+    }
+    views, _, available = _load_wheel_snapshot_family(
+        run_id="finite-rank", account="lx", market="US",
+        source_artifacts=[], data_gaps=[], snapshot=payload,
+    )
+    assert available
+    assert views[0]["assignment_price"] == 100
+    assert views[0]["assigned_at_ms"] == 1_000
+    assert views[0]["has_final_candidate"] is True
     assert batch["granted_contracts"] == 1
     for candidate in (batch["raw_candidates"][0], batch["final_candidate"]):
         assert "_grant_evaluations" not in candidate
@@ -176,6 +205,28 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
     captured["batches"][0]["raw_candidates"][0]["rank_key"]["sort_tuple"] = (float("inf"),)
     with pytest.raises(WheelCandidateSnapshotError, match="non-finite"):
         seal_wheel_candidate_snapshot(**{**seal_args, "run_id": "invalid-rank"})
+
+
+def test_wheel_snapshot_omits_ambiguous_assignment_facts() -> None:
+    scan = {
+        "scope_results": [{"stock_lot_id": "stock-1", "symbol": "NVDA", "status": "completed"}],
+        "capacity_claims": [], "raw_candidates": {},
+    }
+    for change in ("duplicate", "wrong_account", "missing_price"):
+        model = _read_model()
+        rows = model["assigned_stock_projection"]["_all_assigned_stock_lots"]
+        if change == "duplicate":
+            rows.append(dict(rows[0]))
+        elif change == "wrong_account":
+            rows[0]["account"] = "sy"
+        else:
+            rows[0].pop("assignment_price")
+        batch = finalize_wheel_capacity(
+            account="lx", wheel_read_model=model, wheel_scan=scan,
+            opening_call_candidates=[], coverage_facts=[],
+        )["batches"][0]
+        assert "assignment_price" not in batch
+        assert "assigned_at_ms" not in batch
 
 
 def test_wheel_scan_uses_decision_time_and_ignores_ineligible_sibling() -> None:
@@ -233,6 +284,7 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
             },
         },
         option_context={
+            "decision_snapshot_status": "trusted",
             "locked_shares_status": "available",
             "locked_shares_by_symbol": {"NVDA": 100},
             "locked_shares_unavailable_by_symbol": {},
@@ -594,7 +646,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
         wheel_read_model=model,
         wheel_scan=scan,
         opening_put_candidates=[],
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -603,7 +655,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
             "cash_secured_by_currency": {},
             "wheel_intent_reservations": [],
             "fx_snapshot": {"rates": {}},
-        },
+        }),
         exchange_rate_converter=converter,
     )
 
@@ -664,7 +716,7 @@ def test_wheel_pending_put_branch_remains_visible_without_required_data() -> Non
 
 def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
     allocation = revalidate_selected_wheel_put_candidate(
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -685,7 +737,7 @@ def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
                     }
                 ]
             },
-        },
+        }),
         final_candidate={
             "claim_id": "wheel:put:branch-a",
             "wheel_branch_id": "branch-a",
@@ -748,7 +800,7 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
             "capacity_claims": [],
         },
         opening_put_candidates=[],
-        cash_capacity_fact={
+        cash_capacity_fact=cash_portfolio({
             "account": "lx",
             "status": "available",
             "cash_authority": {"status": "available", "logical_account": "lx"},
@@ -757,7 +809,7 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
             "cash_secured_by_currency": {},
             "wheel_intent_reservations": [],
             "fx_snapshot": {"rates": {}},
-        },
+        }),
         exchange_rate_converter=_converter(),
     )
 
@@ -859,7 +911,7 @@ def test_unknown_wheel_reservation_blocks_scan_and_transaction_coverage():
         fact = build_shared_coverage_facts(
             account="lx",
             portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 200, "can_sell_qty": 200}}},
-            option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
+            option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {}},
             wheel_read_model={"batches": [batch]},
         )[0]
         rechecked = revalidate_opening_share_coverage(
@@ -897,3 +949,120 @@ def test_partial_coverage_scans_only_uncommitted_unreserved_shares(direction):
     branch["active_intent_reserved_shares"] = 0
     branch["coverage"] = project_wheel_coverage(branch)
     assert not scan()["capacity_claims"]
+
+
+def test_shared_wheel_capacity_blocks_pending_settlement_even_after_cash_or_stock_refresh() -> None:
+    put_fact = build_shared_cash_capacity_fact(
+        account="lx",
+        portfolio_context=cash_portfolio({
+            "capacity_authority": {"status": "available", "logical_account": "lx"},
+            "cash_by_currency": {"HKD": 100_000},
+            "source_observed_at": "2026-09-30T03:00:48+00:00",
+        }),
+        option_context={
+            "decision_snapshot_status": "trusted",
+            "cash_secured_total_by_ccy": {},
+            "cash_secured_unavailable_by_symbol": {"3690.HK": "option_close_settlement_pending"},
+        },
+        wheel_read_model={"wheel_branches": []},
+        fx_snapshot={},
+    )
+    assert put_fact["status"] == "unavailable"
+    assert put_fact["reason"] == "option_cash_secured_unavailable"
+
+    call_fact = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 500, "can_sell_qty": 500}}},
+        option_context={
+            "decision_snapshot_status": "trusted",
+            "locked_shares_status": "available",
+            "locked_shares_by_symbol": {},
+            "locked_shares_unavailable_by_symbol": {"3690.HK": "option_close_settlement_pending"},
+        },
+        wheel_read_model={"batches": []},
+    )[0]
+    assert call_fact["status"] == "unavailable"
+    assert call_fact["reason"] == "option_close_settlement_pending"
+
+
+def test_wheel_put_preview_invalidates_when_source_evidence_changes_without_cash_change() -> None:
+    def fact(fingerprint: str) -> dict:
+        return build_shared_cash_capacity_fact(
+            account="lx",
+            portfolio_context=cash_portfolio({
+                "capacity_authority": {"status": "available", "logical_account": "lx"},
+                "cash_by_currency": {"USD": 20_000},
+            }),
+            option_context={
+                "decision_snapshot_status": "trusted",
+                "decision_state_fingerprint": fingerprint,
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_unavailable_by_symbol": {},
+            },
+            wheel_read_model={"wheel_branches": []},
+            fx_snapshot={},
+        )
+
+    candidate = {
+        "claim_id": "wheel:put:branch-a", "wheel_branch_id": "branch-a", "symbol": "NVDA",
+        "currency": "USD", "strike": 100, "multiplier": 100, "granted_contracts": 1,
+    }
+    original = revalidate_selected_wheel_put_candidate(cash_capacity_fact=fact("source-a"), final_candidate=candidate)
+    with pytest.raises(ValueError, match="cash capacity facts changed"):
+        revalidate_selected_wheel_put_candidate(
+            cash_capacity_fact=fact("source-b"),
+            final_candidate={**candidate, "capacity_identity_hash": original["capacity_identity_hash"]},
+        )
+
+
+def test_wheel_call_blocks_unknown_overlap_between_broker_sellable_and_ledger_lock() -> None:
+    fact = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 1000, "can_sell_qty": 500}}},
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {"3690.HK": 500}},
+        wheel_read_model={"batches": []},
+    )[0]
+    assert fact["status"] == "unavailable"
+    assert fact["reason"] == "broker_ledger_stock_lock_overlap_unproven"
+
+
+def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.wheel.capacity.build_wheel_read_model_from_rows",
+        lambda *_args, **_kwargs: {"wheel_branches": []},
+    )
+    with pytest.raises(ValueError, match="no longer has cash capacity"):
+        revalidate_selected_wheel_put_candidate_from_rows(
+            account="lx",
+            portfolio_context=cash_portfolio({
+                "capacity_authority": {"status": "available", "logical_account": "lx"},
+                "cash_by_currency": {"USD": 20_000},
+            }),
+            position_lots=[], lifecycle_rows={}, broker="futu", as_of_ms=1_000,
+            fx_snapshot={}, decision_snapshot={"snapshot_status": "source_untrusted"},
+            final_candidate={
+                "claim_id": "wheel:put:branch-a", "wheel_branch_id": "branch-a", "symbol": "NVDA",
+                "currency": "USD", "strike": 100, "multiplier": 100, "granted_contracts": 1,
+            },
+        )
+
+
+def test_wheel_capacity_facts_require_trusted_decision_snapshot() -> None:
+    put = build_shared_cash_capacity_fact(
+        account="lx", portfolio_context=cash_portfolio({
+            "capacity_authority": {"status": "available", "logical_account": "lx"},
+            "cash_by_currency": {"USD": 20_000},
+        }),
+        option_context={"cash_secured_total_by_ccy": {}},
+        wheel_read_model={"wheel_branches": []}, fx_snapshot={},
+    )
+    call = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 100, "can_sell_qty": 100}}},
+        option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
+        wheel_read_model={"batches": []},
+    )[0]
+    assert put["status"] == "unavailable"
+    assert put["reason"] == "option_decision_snapshot_unavailable"
+    assert call["status"] == "unavailable"
+    assert call["reason"] == "short_call_coverage_unavailable"

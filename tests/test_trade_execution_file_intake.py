@@ -24,7 +24,7 @@ BINDING = {"broker_id": "futu", "external_account_id": "123", "environment": "RE
 def _execution(deal_id="fill-1", *, effect="open"):
     instrument = {"asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",
                   "option_type": "put", "strike": "100", "expiration_ymd": "2026-09-18", "multiplier": "100"}
-    return {"schema_version": "trade_execution.v1", "broker_account_ref": dict(BINDING), "instrument_ref": instrument,
+    return {"schema_version": "trade_execution.v1", "status": "OK", "broker_account_ref": dict(BINDING), "instrument_ref": instrument,
             "external_id_namespace": "futu.deal", "external_execution_id": deal_id,
             "external_order_namespace": "futu.order", "external_order_id": f"order-{deal_id}",
             "side": "sell" if effect == "open" else "buy", "position_effect": effect,
@@ -78,7 +78,7 @@ def test_file_rejects_structural_errors_before_any_partial_processing(tmp_path, 
 def test_api_history_and_file_share_identity_and_preserve_every_source_evidence(tmp_path):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     core = _core(tmp_path, repo)
-    api = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL",
+    api = {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL", "status": "OK",
            "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
            "deal_id": "fill-1", "order_id": "order-fill-1", "code": "US.NVDA260918P00100000",
            "qty": "1", "price": "2.50", "multiplier": "100", "trd_side": "SELL_SHORT",

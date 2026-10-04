@@ -13,6 +13,19 @@ def normalize_symbol(symbol: Any) -> str:
     return canonical_symbol(raw) or raw.upper()
 
 
+def cash_secured_unavailable_for_cash_snapshot(
+    option_ctx: dict | None,
+    portfolio_ctx: dict | None,
+) -> Any:
+    """Return unresolved collateral facts; total account cash cannot clear a case."""
+    if not isinstance(option_ctx, dict):
+        return None
+    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
+    if option_ctx.get("decision_snapshot_status") != "trusted":
+        return "option_decision_snapshot_unavailable"
+    return unavailable
+
+
 def _normalize_currency(value: Any) -> str:
     return normalize_currency(value)
 

@@ -1129,7 +1129,7 @@ def _read_required_data_csv(parsed: Path) -> pd.DataFrame:
         path = Path(parsed)
         if not path.exists() or path.stat().st_size <= 0:
             return pd.DataFrame()
-        return pd.read_csv(path)
+        return pd.read_csv(path, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
     except Exception:
         return pd.DataFrame()
 

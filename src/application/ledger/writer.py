@@ -19,7 +19,6 @@ from .writer_trade_events import (
     persist_trade_event_object,
     persist_trade_event_objects_atomically,
     persist_trade_event_with_combo_identity,
-    persist_trade_event_with_wheel_intent,
     rebuild_position_lots_from_trade_events,
 )
 
@@ -29,6 +28,7 @@ from .writer_lifecycle_allocation import (
 
 from .writer_lifecycle_evidence import (
     accept_option_close_evidence_atomically,
+    record_zero_price_option_close_atomically,
     bind_lifecycle_timing_policy_atomically,
     discover_expired_lifecycle_cases_atomically,
     record_assigned_stock_event_atomically,

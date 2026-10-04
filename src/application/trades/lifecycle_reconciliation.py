@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
@@ -19,9 +19,9 @@ from domain.domain.lifecycle_allocation import (
     plan_evidence_allocation,
     resolve_allocations,
 )
-from domain.domain.option_lifecycle import derive_lifecycle_read_model
+from domain.domain.option_lifecycle import derive_lifecycle_read_model, pending_close_quantities
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
-from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues
+from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues, require_option_multiplier
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
     LifecycleAttemptAuditEnvelope,
@@ -110,6 +110,7 @@ def lifecycle_case_read_model(
         case_resolution=dict(facts["case_resolution"]),
         generation_token=dict(facts["generation_token"]),
         allocations=list(facts["case_allocations"]),
+        trade_events=list(facts["trade_events"]),
         timing_policy=(
             dict(facts["timing_policy"])
             if isinstance(facts.get("timing_policy"), dict)
@@ -232,6 +233,7 @@ def lifecycle_case_read_models_for_account(
                 case_resolution=case_resolution,
                 generation_token=generation_token,
                 allocations=allocations_by_case.get(case_id, []),
+                trade_events=list(facts.get("trade_events") or []),
                 timing_policy=timing_by_case.get(case_id),
                 position_lot_fields_by_id=lots_by_id,
                 void_event_ids=tuple(
@@ -312,6 +314,7 @@ def build_lifecycle_read_models_from_resolved_account(
     *,
     cases: list[dict[str, Any]],
     allocations: list[dict[str, Any]],
+    trade_events: list[dict[str, Any]],
     timing_policies: list[dict[str, Any]],
     position_lots: list[dict[str, Any]],
     account_resolution: Mapping[str, Any],
@@ -375,6 +378,7 @@ def build_lifecycle_read_models_from_resolved_account(
                 case_resolution=case_resolution,
                 generation_token=generation_token,
                 allocations=allocations_by_case.get(case_id, []),
+                trade_events=trade_events,
                 timing_policy=timing_by_case.get(case_id),
                 position_lot_fields_by_id=lots_by_id,
                 void_event_ids=tuple(void_event_ids),
@@ -423,6 +427,7 @@ def build_lifecycle_case_read_model_from_resolved_facts(
     case_resolution: dict[str, Any],
     generation_token: dict[str, Any],
     allocations: list[dict[str, Any]],
+    trade_events: list[dict[str, Any]],
     timing_policy: dict[str, Any] | None,
     position_lot_fields_by_id: dict[str, dict[str, Any]],
     void_event_ids: tuple[str, ...] | list[str],
@@ -504,6 +509,9 @@ def build_lifecycle_case_read_model_from_resolved_facts(
         conflict_reasons.add("lifecycle_effective_timing_invalid")
 
     try:
+        pending_close = pending_close_quantities(
+            allocations, trade_events, void_event_ids=void_event_ids,
+        )
         read_model = derive_lifecycle_read_model(
             expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
             market=str(
@@ -513,6 +521,7 @@ def build_lifecycle_case_read_model_from_resolved_facts(
             ),
             target_contracts_by_lot=target_manifest,
             allocations=allocations,
+            pending_close_contracts_by_lot=pending_close,
             void_event_ids=void_event_ids,
             accepted_option_close_contracts_by_lot=dict(
                 case_resolution.get("effective_reservations_by_lot") or {}
@@ -556,6 +565,8 @@ def build_lifecycle_case_read_model_from_resolved_facts(
     elif anchor_status in {"direct", "bridged"} and any(
         read_model.reserved_contracts_by_lot.values()
     ):
+        evidence_status = "closure_observed_cause_pending"
+    elif pending_close:
         evidence_status = "closure_observed_cause_pending"
     elif anchor_status == "missing" and not effective_allocations:
         evidence_status = "missing"
@@ -606,6 +617,11 @@ def build_lifecycle_case_read_model_from_resolved_facts(
             if effective_timing is not None
             else None
         ),
+        "last_option_close_received_at_ms": (
+            int(effective_timing["last_option_close_received_at_ms"])
+            if effective_timing is not None
+            else None
+        ),
         "timing_policy_hash": (
             str(effective_timing["timing_policy_hash"])
             if effective_timing is not None
@@ -628,6 +644,7 @@ def build_lifecycle_case_read_model_from_resolved_facts(
             read_model.resolved_contracts_by_terminal_type
         ),
         "reserved_contracts_by_lot": read_model.reserved_contracts_by_lot,
+        "pending_close_contracts_by_lot": pending_close,
         "closure_fact": read_model.closure_fact,
         "reason_state": effective_reason_state,
         "close_reason": effective_close_reason,
@@ -705,6 +722,86 @@ def _isolated_case_error_model(
     }
 
 
+def _pending_close_correction(
+    *, lifecycle_case: dict[str, Any], evidence: dict[str, Any],
+    evidence_rows: list[dict[str, Any]], allocations: list[dict[str, Any]],
+    trade_events: list[dict[str, Any]], void_event_ids: tuple[str, ...],
+) -> tuple[tuple[tuple[TradeEvent, ...], dict[str, TradeEvent]] | None, str | None]:
+    """Select one complete broker anchor; leave partial evidence for review."""
+    voided = set(void_event_ids)
+    events = {str(row.get("event_id") or ""): row for row in trade_events}
+    pending: dict[str, list[tuple[dict[str, Any], TradeEvent]]] = {}
+    for allocation in allocations:
+        event_id = str(allocation.get("canonical_terminal_event_id") or "")
+        if not event_id or event_id in voided:
+            continue
+        row = events.get(event_id)
+        if row is None:
+            continue
+        raw = row.get("raw_payload") or {}
+        if (str(row.get("event_type") or "") == "close"
+                and isinstance(raw, dict)
+                and raw.get("close_type") == "cause_pending"):
+            pending.setdefault(str(allocation.get("evidence_id") or ""), []).append(
+                (allocation, TradeEvent.from_dict(row))
+            )
+    if not pending:
+        return None, None
+    source_ids = {
+        str(item).strip() for item in evidence.get("source_evidence_ids") or []
+        if str(item).strip()
+    }
+    source_ids.add(str(evidence.get("pending_close_anchor_evidence_id") or "").strip())
+    matching = sorted(source_ids.intersection(pending))
+    if len(matching) != 1:
+        return None, "pending_close_anchor_unproven"
+    anchor_id = matching[0]
+    anchor = next(
+        (row for row in evidence_rows if str(row.get("evidence_id") or "") == anchor_id),
+        None,
+    )
+    if not isinstance(anchor, dict) or str(anchor.get("evidence_type") or "") != "option_zero_price_close":
+        return None, "pending_close_anchor_unproven"
+    rows = pending[anchor_id]
+    manifest = {str(row["target_lot_id"]): int(row["contracts_allocated"]) for row, _ in rows}
+    if (
+        len(manifest) != len(rows)
+        or manifest != {str(k): int(v) for k, v in dict(anchor.get("target_contracts_by_lot") or {}).items()}
+        or sum(manifest.values()) != int(evidence["contracts"])
+        or any(event.contracts != int(allocation["contracts_allocated"]) for allocation, event in rows)
+    ):
+        return None, "pending_close_settlement_not_exact"
+    pending_event_ids = {event.event_id for _, event in rows}
+    if any(
+        str(row.get("evidence_id") or "") == anchor_id
+        and str(row.get("canonical_terminal_event_id") or "") not in voided
+        and str(row.get("canonical_terminal_event_id") or "") not in pending_event_ids
+        for row in allocations
+    ):
+        return None, "pending_close_anchor_mixed"
+    voids = tuple(
+        TradeEvent(
+            event_id="lifecycle_correction_void_" + canonical_hash({
+                "case_id": lifecycle_case["case_id"],
+                "evidence_id": evidence["evidence_id"],
+                "target_event_id": event.event_id,
+            }),
+            event_type="void", event_time_ms=int(evidence["event_time_ms"]),
+            contract_key=event.contract_key, contracts=0, price=0,
+            currency=event.currency, source="broker_lifecycle_correction",
+            multiplier=event.multiplier, target_event_id=event.event_id,
+            raw_payload={
+                "schema_version": "lifecycle_correction_void.v1",
+                "case_id": lifecycle_case["case_id"],
+                "evidence_id": evidence["evidence_id"],
+                "void_target_event_id": event.event_id,
+            },
+        )
+        for _, event in rows
+    )
+    return (voids, {str(row["target_lot_id"]): event for row, event in rows}), None
+
+
 def reconcile_lifecycle_evidence(
     repo: Any,
     *,
@@ -717,6 +814,8 @@ def reconcile_lifecycle_evidence(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: tuple[Any, ...] = (),
     notification_transition_type: str | None = None,
+    notification_status: str = "pending",
+    broker_ownership_validator: Any = None,
     refresh_read_model: bool = True,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
@@ -867,6 +966,37 @@ def reconcile_lifecycle_evidence(
             attempt_audit=attempt_audit,
         )
 
+    pending_events_by_lot: dict[str, TradeEvent] = {}
+    terminal_type = str(normalized["terminal_type"])
+    if not correction_void_events:
+        if terminal_type in {"assignment", "exercise", "expire_close"}:
+            correction, correction_error = _pending_close_correction(
+                lifecycle_case=lifecycle_case,
+                evidence=normalized,
+                evidence_rows=list(facts["evidence"]),
+                allocations=allocations,
+                trade_events=list(facts["trade_events"]),
+                void_event_ids=void_event_ids,
+            )
+            if correction_error:
+                return _record_issue_result(
+                    repo, lifecycle_case=lifecycle_case, evidence=normalized,
+                    status="needs_review", reason_codes=(correction_error,),
+                    apply_changes=apply_changes, now_ms=now_ms,
+                    expected_lifecycle_generation_token=expected_lifecycle_generation_token,
+                    refresh_read_model=refresh_read_model,
+                    attempt_evidence=attempt_evidence, attempt_audit=attempt_audit,
+                )
+            if correction is not None:
+                correction_void_events, pending_events_by_lot = correction
+                normalized["pending_close_anchor_evidence_id"] = str(
+                    next(iter(pending_events_by_lot.values())).raw_payload["evidence_id"]
+                )
+                void_event_ids = tuple(sorted({
+                    *void_event_ids,
+                    *(event.target_event_id for event in correction_void_events),
+                }))
+
     resolution = resolve_allocations(
         dict(lifecycle_case.get("target_contracts_by_lot") or {}),
         allocations,
@@ -965,6 +1095,8 @@ def reconcile_lifecycle_evidence(
                 notification_transition_type=(
                     notification_transition_type
                 ),
+                notification_status=notification_status,
+                broker_ownership_validator=broker_ownership_validator,
                 attempt_evidence=attempt_evidence,
                 attempt_audit=attempt_audit,
                 wheel_start_enabled=wheel_start_enabled,
@@ -1012,7 +1144,10 @@ def reconcile_lifecycle_evidence(
         evidence_id=evidence_id,
         terminal_type=terminal_type,
         contracts=normalized["contracts"],
-        remaining_contracts_by_lot=resolution.remaining_contracts_by_lot,
+        remaining_contracts_by_lot=(
+            {lot_id: event.contracts for lot_id, event in pending_events_by_lot.items()}
+            if pending_events_by_lot else resolution.remaining_contracts_by_lot
+        ),
         target_lot_id=target_lot_id or normalized.get("target_lot_id"),
     )
     if plan.status != "planned":
@@ -1032,6 +1167,11 @@ def reconcile_lifecycle_evidence(
             attempt_evidence=attempt_evidence,
             attempt_audit=attempt_audit,
         )
+    if pending_events_by_lot and {
+        str(item.get("target_lot_id") or ""): int(item.get("contracts_allocated") or 0)
+        for item in plan.allocations
+    } != {lot_id: event.contracts for lot_id, event in pending_events_by_lot.items()}:
+        raise ValueError("pending_close_replacement_allocation_mismatch")
     allocated_settlements = _allocated_stock_settlements(
         lot_fields_by_id,
         lifecycle_case=lifecycle_case,
@@ -1042,9 +1182,17 @@ def reconcile_lifecycle_evidence(
         _terminal_event(
             lot_fields_by_id,
             lifecycle_case=lifecycle_case,
-            evidence=normalized,
+            evidence={
+                **normalized,
+                "event_time_ms": pending_events_by_lot[
+                    str(allocation.get("target_lot_id") or "")
+                ].event_time_ms,
+            } if pending_events_by_lot else normalized,
             allocation=allocation,
             stock_settlement=allocated_settlements.get(
+                str(allocation.get("target_lot_id") or "")
+            ),
+            prior_pending_event=pending_events_by_lot.get(
                 str(allocation.get("target_lot_id") or "")
             ),
         )
@@ -1103,7 +1251,12 @@ def reconcile_lifecycle_evidence(
             expected_lifecycle_generation_token
         ),
         correction_void_events=list(correction_void_events),
-        notification_transition_type=notification_transition_type,
+        notification_transition_type=(
+            notification_transition_type
+            or ("resolution_corrected" if pending_events_by_lot else None)
+        ),
+        notification_status=notification_status,
+        broker_ownership_validator=broker_ownership_validator,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         wheel_start_enabled=wheel_start_enabled,
@@ -1489,6 +1642,7 @@ def _terminal_event(
     evidence: dict[str, Any],
     allocation: dict[str, Any],
     stock_settlement: dict[str, Any] | None = None,
+    prior_pending_event: TradeEvent | None = None,
 ) -> TradeEvent:
     lot_id = str(allocation.get("target_lot_id") or "")
     terminal_type = str(allocation.get("terminal_type") or "").strip().lower()
@@ -1529,6 +1683,9 @@ def _terminal_event(
             fields, lot_contract_key, "position_side", "position_side", "side"
         ),
     )
+    multiplier = require_option_multiplier(fields.get("multiplier"))
+    if require_option_multiplier(lifecycle_case.get("multiplier")) != multiplier:
+        raise ValueError("unsupported_contract_multiplier")
     contracts = int(allocation.get("contracts_allocated") or 0)
     event_price = (
         float(evidence.get("price") or 0)
@@ -1539,7 +1696,7 @@ def _terminal_event(
         raise ValueError(
             "trade_close requires a positive broker execution price"
         )
-    return TradeEvent(
+    event = TradeEvent(
         event_id=str(allocation.get("canonical_terminal_event_id") or ""),
         event_type=terminal_type,
         event_time_ms=int(evidence.get("event_time_ms") or 0),
@@ -1548,11 +1705,7 @@ def _terminal_event(
         price=event_price,
         currency=str(evidence.get("currency") or fields.get("currency") or ""),
         source="lifecycle_reconciliation",
-        multiplier=float(
-            lifecycle_case.get("multiplier")
-            or fields.get("multiplier")
-            or 100
-        ),
+        multiplier=multiplier,
         target_lot_id=lot_id,
         raw_payload={
             "schema_version": "lifecycle_terminal_event.v2",
@@ -1589,6 +1742,22 @@ def _terminal_event(
             **strategy_metadata_fields_from_payload(fields),
         },
     )
+    if prior_pending_event is None:
+        return event
+    prior_raw = dict(prior_pending_event.raw_payload or {})
+    retained = {
+        key: prior_raw[key]
+        for key in (
+            "source_deal_id", "futu_account_id", "order_id", "execution_id",
+            "execution_input", "fee_provenance", "multiplier_source",
+        )
+        if key in prior_raw
+    }
+    return replace(
+        event, fees=prior_pending_event.fees,
+        raw_payload={**event.raw_payload, **retained,
+                     "pending_close_event_id": prior_pending_event.event_id},
+    )
 
 
 def _allocated_stock_settlements(
@@ -1605,17 +1774,17 @@ def _allocated_stock_settlements(
     rows = [dict(item) for item in allocations]
     if terminal_type not in {"assignment", "exercise"} or not isinstance(source, dict):
         return {}
+    multiplier = require_option_multiplier(lifecycle_case.get("multiplier"))
+    for item in rows:
+        if require_option_multiplier(lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get("multiplier")) != multiplier:
+            raise ValueError("unsupported_contract_multiplier")
     return allocate_stock_settlement(
         source,
         (
             {
                 "target_lot_id": str(item.get("target_lot_id") or ""),
                 "contracts_allocated": item.get("contracts_allocated"),
-                "multiplier": lifecycle_case.get("multiplier")
-                or lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get(
-                    "multiplier"
-                )
-                or 100,
+                "multiplier": require_option_multiplier(lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get("multiplier")),
             }
             for item in rows
         ),

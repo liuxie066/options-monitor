@@ -54,3 +54,11 @@ def test_attach_write_contract_adds_standard_fields() -> None:
         "audit_id": "audit_test",
         "rollback_hint": "restore backup",
     }
+
+
+def test_preview_receipt_can_omit_unpublished_audit_id() -> None:
+    out = attach_write_contract(
+        {"ok": True}, dry_run=True, write_applied=False, generate_audit_id=False,
+    )
+    assert out["audit_id"] is None
+    assert out["write_applied"] is False

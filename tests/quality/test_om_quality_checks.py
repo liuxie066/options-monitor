@@ -595,6 +595,7 @@ def test_full_replay_mismatch_blocks_position_consumers() -> None:
 
 def _void_event(*, event_id: str, target_event_id: str) -> dict:
     return TradeEvent(
+        multiplier=100,
         event_id=event_id,
         event_type="void",
         event_time_ms=1_700_000_001_000,
@@ -676,6 +677,7 @@ def test_non_lot_materializing_events_alone_do_not_fail_the_replay_check() -> No
         repo=_LedgerRepo(
             [
                 TradeEvent(
+                    multiplier=100,
                     event_id="event-verify-1",
                     event_type="verification",
                     event_time_ms=1_700_000_000_000,
@@ -1818,7 +1820,7 @@ def _public_assignment_repo(tmp_path):
         trade_time_ms=observed + 1000,
         raw_payload={"deal_id": "quality-option", "code": "US.TIGR260522P6000"},
     ), repo=repo, state={}, apply_changes=True)
-    assert option.status == "unresolved"
+    assert option.status == "applied"
     stock = resolve_trade_deal(_deal(
         deal_id="quality-stock", order_id="stock-order", symbol="TIGR",
         option_type=None, side="buy", position_effect=None, contracts=300,

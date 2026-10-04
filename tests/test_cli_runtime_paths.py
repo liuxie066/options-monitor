@@ -86,3 +86,40 @@ def test_sell_put_cash_cli_defaults_out_dir_to_runtime_root(monkeypatch, tmp_pat
 
     assert rc == 0
     assert captured["out_dir"] == str((runtime_root / "output_shared" / "state").resolve())
+
+
+def test_sell_put_cash_cli_reports_retired_snapshot_as_config_error(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli import main as cli
+
+    config = tmp_path / "config.us.json"
+    config.write_text(
+        json.dumps({"accounts": ["lx"], "portfolio": {"source_by_account": {"lx": "futu"}}}),
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["sell-put-cash", "--config", str(config), "--format", "json", "--out-dir", str(tmp_path / "state")])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+    assert "source_by_account" in payload["error"]["message"]
+
+
+def test_early_cli_dispatch_reports_retired_account_config_error(monkeypatch, capsys) -> None:
+    from src.interfaces.cli import main as cli
+    from src.interfaces.cli import option_positions
+
+    def invalid_config(_argv):
+        raise ValueError("account_settings.lx.type must be one of: futu")
+
+    monkeypatch.setattr(option_positions, "main", invalid_config)
+    rc = cli.main(["option-positions", "list"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+
+    monkeypatch.setattr(cli, "run_scan_pipeline", invalid_config)
+    rc = cli.main(["scan-pipeline", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["error"]["code"] == "CONFIG_ERROR"

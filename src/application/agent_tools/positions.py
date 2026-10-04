@@ -1,10 +1,12 @@
 from __future__ import annotations
+from src.application.trades.attribution import confirm_wheel_call_linkage, confirm_wheel_linkage
 
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 import src.application.wheel as wheel_application
+from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
 from src.application.agent_tools.operations_impl import (
     normalize_option_positions_read_input,
     option_positions_read_tool,
@@ -34,7 +36,6 @@ from src.application.performance.service import build_option_period_performance
 from src.application.wheel import (
     build_wheel_read_model,
     cancel_wheel_call_intent,
-    confirm_wheel_call_linkage,
     create_wheel_call_intent,
     end_wheel_lifecycle,
     load_wheel_candidate_snapshot,
@@ -47,7 +48,6 @@ from src.application.wheel.capacity import (
 )
 from src.application.wheel.workflows import (
     cancel_wheel_intent,
-    confirm_wheel_linkage,
     create_wheel_intent,
     reject_wheel_linkage,
 )
@@ -569,6 +569,7 @@ def _wheel_coverage(
     return load_shared_coverage_fact(
         repo,
         config=cfg,
+        runtime_root=Path(str(payload["runtime_root"])).resolve(),
         account=str(payload.get("account") or ""),
         symbol=str(batch.get("symbol") or ""),
         broker=str(batch.get("broker") or portfolio.get("broker") or "富途"),
@@ -589,6 +590,7 @@ def _wheel_cash_capacity(
     return load_shared_cash_capacity_fact(
         repo,
         config=cfg,
+        runtime_root=Path(str(payload["runtime_root"])).resolve(),
         account=str(payload.get("account") or ""),
         broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=instant,
@@ -639,6 +641,7 @@ def _wheel_end_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str],
 def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         common = _wheel_common(payload, instant=instant)
         if payload["action"] == "cancel":
@@ -686,6 +689,7 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            account_configured=resolved["account_configured"],
             market=str(resolved.get("market") or ""),
             activation_descriptor=resolved.get("activation_descriptor"),
             policy_sha256=str(resolved.get("policy_sha256") or ""),
@@ -697,7 +701,8 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
 
 def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         common = _wheel_common(payload, instant=instant)
         args = {
@@ -723,9 +728,8 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             return result, [], meta
         result = confirm_wheel_call_linkage(
             repo,
-            **args,
-            coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
-            market=str(payload.get("config_key") or ""),
+            **{key: value for key, value in args.items() if key != "as_of_ms"},
+            config=cfg, runtime_root=repo.ledger_store.runtime_root,
         )
         return result, [], meta
 
@@ -776,6 +780,7 @@ def _wheel_intent_tool(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         branch, direction, common = _neutral_wheel_context(
             repo,
@@ -785,7 +790,7 @@ def _wheel_intent_tool(
         capacity_fact = (
             _wheel_coverage(repo, cfg, payload, branch, instant)
             if direction == "call"
-            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
+            else (_wheel_cash_capacity(repo, cfg, payload, branch, instant) if payload["action"] == "cancel" else {})
         )
         if payload["action"] == "cancel":
             result = cancel_wheel_intent(
@@ -807,6 +812,8 @@ def _wheel_intent_tool(
             run_id=str(payload.get("run_id") or ""),
             account=str(payload.get("account") or ""),
         )
+        if direction == "put":
+            capacity_fact = load_wheel_candidate_cash_fact(base=snapshot_base, snapshot=snapshot)
         resolved = resolve_wheel_config(
             cfg,
             str(payload.get("account") or ""),
@@ -826,7 +833,9 @@ def _wheel_intent_tool(
             expires_at_ms=int(payload.get("expires_at_ms") or 0),
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             capacity_fact=capacity_fact,
+            runtime_config=cfg,
             new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            account_configured=resolved["account_configured"],
             activation_descriptor=resolved.get("activation_descriptor"),
             policy_sha256=str(resolved.get("policy_sha256") or ""),
         )
@@ -839,7 +848,8 @@ def _wheel_linkage_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         branch, direction, common = _neutral_wheel_context(
             repo,
@@ -859,15 +869,10 @@ def _wheel_linkage_tool(
                 reason=str(payload.get("reason") or ""),
             )
             return result, [], meta
-        capacity_fact = (
-            _wheel_coverage(repo, cfg, payload, branch, instant)
-            if direction == "call"
-            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
-        )
         result = confirm_wheel_linkage(
             repo,
-            **args,
-            capacity_fact=capacity_fact,
+            **{key: value for key, value in args.items() if key not in {"market", "as_of_ms"}},
+            config=cfg, runtime_root=repo.ledger_store.runtime_root,
         )
         return result, [], meta
 
@@ -878,7 +883,8 @@ def _wheel_branch_decision_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        payload["runtime_root"] = str(payload.get("runtime_root") or config_path.parent)
         instant = _wheel_now_ms(payload)
         account = str(payload.get("account") or "")
         branch = _wheel_branch(
@@ -914,6 +920,7 @@ def _wheel_branch_decision_tool(
             args.update(
                 market=resolved.get("market"),
                 activation_descriptor=resolved.get("activation_descriptor"),
+                account_configured=resolved["account_configured"],
                 policy_sha256=resolved.get("policy_sha256"),
             )
         result = wheel_application.decide_wheel_branch(repo, **args)
@@ -1599,7 +1606,7 @@ WHEEL_CALL_LINKAGE_TOOL = build_agent_tool(
         },
         "call_record_id": {"type": "string", "minLength": 1},
         "linkage_candidate_id": {"type": "string", "minLength": 1},
-        "expected_input_hash": {"type": "string", "minLength": 1},
+        "expected_input_hash": {"type": "string", "minLength": 1, "description": "confirm: trade_attribution_read prepare_confirmation=true input_hash; reject: linkage input_snapshot_hash"},
         "reason": "reject-only reason",
     },
     handler=_wheel_call_linkage_tool,
@@ -1669,7 +1676,7 @@ WHEEL_LINKAGE_TOOL = build_agent_tool(
         },
         "option_record_id": {"type": "string", "minLength": 1},
         "linkage_candidate_id": {"type": "string", "minLength": 1},
-        "expected_input_hash": {"type": "string", "minLength": 1},
+        "expected_input_hash": {"type": "string", "minLength": 1, "description": "confirm: trade_attribution_read prepare_confirmation=true input_hash; reject: linkage input_snapshot_hash"},
         "reason": "reject-only reason",
     },
     handler=_wheel_linkage_tool,
@@ -1797,27 +1804,29 @@ from src.application.trades.attribution import trade_attribution_read
 
 TRADE_ATTRIBUTION_READ_TOOL = build_agent_tool(
     name="trade_attribution_read",
-    description="只读查看当前账户成交的策略归属、待核实原因和确认条件。",
+    description="只读查看当前账户成交归属；prepare_confirmation=true 时观察当前容量，生成确认所需的完整 input_hash。",
     handler=trade_attribution_read,
     requires=(),
     pure_read=True,
     allow_additional_input=False,
-    bot_input_fields=("config_key", "account", "execution_key", "status", "cursor", "limit"),
-    capabilities=("positions", "local_read"),
+    bot_input_fields=("config_key", "account", "symbol", "execution_key", "status", "cursor", "limit"),
+    capabilities=("positions",),
     input_schema={
         "config_key": {"type": "string", "enum": ["us", "hk"]},
         "config_path": "host supplied runtime config path",
+        "prepare_confirmation": {"type": "boolean", "description": "Observe current capacity to prepare a confirmation input_hash; false keeps the default local-only read."},
         "account": {"type": "string", "required": True, "minLength": 1},
         "execution_key": "optional canonical execution identity",
-        "status": "optional attribution status", "cursor": "optional last open_event_id",
+        "symbol": "optional canonical underlying symbol",
+        "status": "optional attribution status", "cursor": "optional opaque filter-bound continuation cursor",
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
     },
     output_contract={"schema_version": "trade_attribution_read.v1", "evidence_type": "collection",
                      "bounded_projection": "contract_fields", "coverage": "source_declared",
                      "freshness": "source_declared", "pagination": {"mode": "keyset"},
                      "primary_rows": "rows", "row_count_field": "returned_count",
-                     "model_preview_fields": ["account", "rows", "next_cursor", "evidence_complete"],
-                     "model_value_fields": ["account", "rows", "next_cursor", "evidence_complete"],
+                     "model_preview_fields": ["account", "market", "rows", "next_cursor", "evidence_complete"],
+                     "model_value_fields": ["account", "market", "rows", "next_cursor", "evidence_complete"],
                      "fact_fields": ["rows"], "missing_data_fields": ["rows[].reason_codes"]},
 )
 

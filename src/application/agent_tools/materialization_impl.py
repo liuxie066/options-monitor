@@ -792,6 +792,8 @@ def get_portfolio_context_tool(
     repo_base,
     mask_path,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    if "ttl_sec" in payload:
+        raise AgentToolError(code="INPUT_ERROR", message="现金有效期统一使用 runtime.portfolio_context_ttl_sec；get_portfolio_context 不再接受 ttl_sec。")
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
@@ -806,7 +808,6 @@ def get_portfolio_context_tool(
         data_config=data_config,
         market=broker,
         account=account,
-        ttl_sec=int(payload.get("ttl_sec") or 0),
         state_dir=state_dir,
         shared_state_dir=shared_dir,
         log=logs.append,
@@ -932,6 +933,7 @@ def prepare_close_advice_inputs_tool(
             state_dir=state_dir,
             shared_state_dir=shared_dir,
             log=logs.append,
+            runtime_config=cfg,
         )
     except SystemExit as exc:
         raise AgentToolError(

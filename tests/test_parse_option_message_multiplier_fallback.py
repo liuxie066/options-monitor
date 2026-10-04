@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.parse_option_message import parse_option_message_text
 
 
@@ -64,3 +66,44 @@ def test_parse_futu_us_fill_uses_symbol_currency_with_hong_kong_timestamp(monkey
     assert out["ok"] is True
     assert out["parsed"]["symbol"] == "PDD"
     assert out["parsed"]["currency"] == "USD"
+
+
+@pytest.mark.parametrize("raw", ["100.00000000000000001", "100.5", "0", "-1", "nan", "inf"])
+def test_manual_message_original_multiplier_is_not_truncated(tmp_path, monkeypatch, raw):
+    from src.application.multiplier_cache import resolve_multiplier_with_source, save_cache
+
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", {"NVDA": {"multiplier": 500, "source": "cache"}})
+    monkeypatch.setattr("src.application.parse_option_message.resolve_multiplier_with_source",
+                        lambda **kw: resolve_multiplier_with_source(repo_base=tmp_path, symbol="NVDA",
+                                                                    multiplier=kw["multiplier"], allow_opend_refresh=False))
+    result = parse_option_message_text(f"NVDA put short strike 100 exp 2026-09-18 premium 1 1张 lx multiplier {raw}")
+    assert result["ok"] is False
+    assert result["parsed"]["multiplier"] is None
+
+
+@pytest.mark.parametrize("suffix, expected", [
+    ("乘数", None), ("乘数，", None), ("乘数：", None),
+    ("multiplier", None), ("multiplier=", None),
+    ("", 500), ("乘数500", 500), ("multiplier=1000", 1000),
+])
+def test_manual_message_empty_multiplier_is_not_cache_fallback(tmp_path, monkeypatch, suffix, expected):
+    from src.application.multiplier_cache import resolve_multiplier_with_source, save_cache
+
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json",
+               {"0700.HK": {"multiplier": 500, "source": "cache"}})
+    monkeypatch.setattr(
+        "src.application.parse_option_message.resolve_multiplier_with_source",
+        lambda **kw: resolve_multiplier_with_source(
+            repo_base=tmp_path, symbol=kw["symbol"], multiplier=kw["multiplier"],
+            allow_opend_refresh=False,
+        ),
+    )
+    result = parse_option_message_text(
+        "期权：腾讯20260330 put，strike500，成本5.425每股，short 10张，sy，HKD，" + suffix,
+        accounts=["lx", "sy"],
+    )
+    assert result["ok"] is (expected is not None)
+    assert result["parsed"]["multiplier"] == expected
+    assert result["parsed"]["multiplier_source"] == (
+        None if expected is None else "cache" if not suffix else "payload"
+    )

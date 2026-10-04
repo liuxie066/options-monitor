@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
@@ -50,6 +51,8 @@ from src.application.trades.lifecycle_reconciliation import (
 from src.application.trades.lifecycle import (
     reconcile_polled_stock_settlement_evidence,
 )
+from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.settlement_attempts import (
     SETTLEMENT_OBSERVATION_CONTEXT_KEY,
     case_scope_fingerprint,
@@ -90,6 +93,11 @@ def _calendar_rows() -> list[dict[str, str]]:
 
 def _repo_with_pending_case(
     tmp_path: Path,
+    *,
+    opening_event: TradeEvent | None = None,
+    option_code: str = OPTION_CODE,
+    seed_anchor: bool = True,
+    second_open_lot: bool = False,
 ) -> tuple[
     SQLiteOptionPositionsRepository,
     dict,
@@ -99,7 +107,7 @@ def _repo_with_pending_case(
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
     )
-    contract = ContractKey.from_values(
+    contract = opening_event.contract_key if opening_event is not None else ContractKey.from_values(
         broker="futu",
         account="lx",
         underlying_symbol="NVDA",
@@ -107,9 +115,10 @@ def _repo_with_pending_case(
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
         )
+    lot_id = opening_event.lot_id if opening_event is not None else "lot-1"
     persist_trade_event_object(
         repo,
-        TradeEvent(
+        opening_event or TradeEvent(
             event_id="open-1",
             event_type="open",
             event_time_ms=1_700_000_000_000,
@@ -138,6 +147,12 @@ def _repo_with_pending_case(
             },
         ),
     )
+    if second_open_lot:
+        first_open = TradeEvent.from_dict(repo.list_trade_events()[0])
+        persist_trade_event_object(
+            repo,
+            replace(first_open, event_id="open-2", lot_id="lot-2"),
+        )
     anchor_time_ms = int(
         datetime(
             2026,
@@ -171,34 +186,36 @@ def _repo_with_pending_case(
         "account": "lx",
         "futu_account_id": "1001",
         "symbol": "NVDA",
-        "option_type": "put",
+        "option_type": contract.option_type,
         "position_side": "short",
-        "strike": 100,
+        "strike": int(contract.strike),
         "expiration_ymd": EXPIRATION_YMD,
         "contracts": 1,
         "price": 0,
         "event_time_ms": anchor_time_ms,
         "received_at_ms": anchor_time_ms + 100,
         "order_id": "option-order-1",
-        "target_contracts_by_lot": {"lot-1": 1},
-        "raw": {"raw_payload": {"code": OPTION_CODE}},
+        "target_contracts_by_lot": {lot_id: 1},
+        "raw": {"raw_payload": {"code": option_code}},
     }
-    assert repo.insert_trade_lifecycle_evidence_once(evidence)
+    if seed_anchor:
+        assert repo.insert_trade_lifecycle_evidence_once(evidence)
     assert repo.bind_trade_lifecycle_case_futu_account_once(
         case_id=case_id,
         futu_account_id="1001",
     )
     lifecycle_case = repo.get_trade_lifecycle_case(case_id)
     assert lifecycle_case is not None
-    assert repo.insert_trade_lifecycle_source_consumption_once(
-        build_source_consumption_claim(
-            source_key=source_key,
-            case_id=case_id,
-            owner_evidence_id="anchor-1",
-            source_role="option_anchor",
-            economic_payload=evidence,
+    if seed_anchor:
+        assert repo.insert_trade_lifecycle_source_consumption_once(
+            build_source_consumption_claim(
+                source_key=source_key,
+                case_id=case_id,
+                owner_evidence_id="anchor-1",
+                source_role="option_anchor",
+                economic_payload=evidence,
+            )
         )
-    )
     policy = build_lifecycle_timing_policy(
         case_id=case_id,
         market="US",
@@ -3206,6 +3223,68 @@ def _admitted_terminal_settlement(
     return repo, case_id, now_ms, observation
 
 
+def test_two_pending_anchors_observation_stays_incomplete_and_is_recorded_for_review(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, anchor_ms = _repo_with_pending_case(
+        tmp_path, seed_anchor=False, second_open_lot=True,
+    )
+    case_id = str(lifecycle_case["case_id"])
+    history_deals = []
+    for number in (1, 2):
+        deal_id = f"option-close-{number}"
+        result = resolve_trade_deal(
+            NormalizedTradeDeal(
+                broker="富途", futu_account_id="1001", internal_account="lx",
+                deal_id=deal_id, order_id="option-order-1", symbol="NVDA",
+                option_type="put", side="buy", position_effect="close",
+                contracts=1, price=0, strike=100, multiplier=100,
+                multiplier_source="cache", expiration_ymd=EXPIRATION_YMD,
+                currency="USD", trade_time_ms=anchor_ms + number,
+                raw_payload={"deal_id": deal_id, "code": OPTION_CODE},
+            ),
+            repo=repo, state={}, apply_changes=True,
+        )
+        assert result.status == "applied"
+        history_deals.append({
+            "deal_id": deal_id, "acc_id": "1001", "code": OPTION_CODE,
+            "price": "0", "qty": 1,
+        })
+    assert [repo.get_position_lot_fields(lot_id)["contracts_open"]
+            for lot_id in ("lot-1", "lot-2")] == [0, 0]
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=repo.get_trade_lifecycle_case(case_id),
+        case_id=case_id, gateway=_Gateway(history_deals=history_deals),
+        now_ms=now_ms,
+    )
+    assert observation["complete"] is False
+    assert "option_anchor_claim_not_unique" in observation["incomplete_reason_codes"]
+    preview = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=now_ms,
+        observation=observation, apply_changes=False,
+    )
+    assert preview["decision"]["status"] == "needs_review"
+    assert "settlement_observation_incomplete" in preview["decision"]["reason_codes"]
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174405",
+        attempted_at_ms=now_ms,
+        outcome_kind="observed_incomplete",
+        observation=observation,
+    )
+    applied = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=now_ms,
+        observation=observation, apply_changes=True, attempt_audit=envelope,
+    )
+    assert applied["decision"] == preview["decision"]
+    assert applied["write_result"]["admission_status"] == "admitted_semantic"
+    assert repo.get_trade_lifecycle_evidence(observation["observation_id"]) is not None
+    assert len(repo.list_trade_lifecycle_attempt_audits(case_id=case_id)) == 1
+    assert not [event for event in repo.list_trade_events()
+                if event["event_type"] == "expire_close"]
+
+
 def _rebase_terminal_duplicate(
     repo: SQLiteOptionPositionsRepository,
     *,
@@ -3917,3 +3996,29 @@ def test_malformed_latest_legacy_observation_fails_closed(
     assert repo.get_trade_lifecycle_settlement_admission_head(
         case_id=case_id
     ) is None
+
+
+@pytest.mark.parametrize("multiplier", [None, True, 100.5, "100.00000000000000001", 0, 500, 1000])
+def test_settlement_matching_requires_actual_integral_multiplier(multiplier):
+    from src.application.trades.settlement_observation import _stock_settlement_candidate
+    from src.application.trades.lifecycle import _stock_matches_lifecycle_contract_terms, _stock_settlement_contracts
+
+    valid = type(multiplier) is int and multiplier > 0
+    shares = multiplier * 2 if valid else 1000
+    case = {"symbol": "NVDA", "option_type": "put", "position_side": "short", "strike": 100,
+            "multiplier": multiplier, "contracts": 2, "futu_account_id": "1001"}
+    evidence = {"side": "buy", "stock_qty": shares, "stock_price": 100, "futu_account_id": "1001"}
+    assert _stock_matches_lifecycle_contract_terms(case, evidence, strict_price=True) is valid
+    if valid:
+        assert _stock_settlement_contracts(case, evidence) == 2
+    else:
+        with pytest.raises(ValueError, match="multiplier"):
+            _stock_settlement_contracts(case, evidence)
+    row = {**_stock_settlement_deal("units", trade_time_ms=1000), "qty": shares}
+    candidate = _stock_settlement_candidate(row, lifecycle_case=case, account="lx", futu_account_id="1001",
+                                            timezone="America/New_York", settlement_deadline_ms=2000)
+    assert (candidate is not None) is valid
+    if valid:
+        row["qty"] += 1
+        assert _stock_settlement_candidate(row, lifecycle_case=case, account="lx", futu_account_id="1001",
+                                           timezone="America/New_York", settlement_deadline_ms=2000) is None

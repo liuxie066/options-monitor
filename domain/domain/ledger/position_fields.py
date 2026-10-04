@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import math
 from typing import Any
+from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -25,6 +26,7 @@ from domain.domain.option_position_identity import (
     resolve_open_currency,
 )
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD, canonical_strategy_id
+from domain.domain.strategy_membership import POSITION_LOT_STRATEGY_PATCH_FIELDS as POSITION_LOT_STRATEGY_PATCH_FIELDS
 
 
 class _Unset:
@@ -32,18 +34,12 @@ class _Unset:
 
 
 _UNSET = _Unset()
-_PatchValue = int | float | str | dict[str, Any] | None | _Unset
+_PatchValue = int | float | str | dict[str, Any] | list[dict[str, Any]] | None | _Unset
+
+
 PRICE_DECIMAL_PLACES = 3
 _PRICE_QUANTUM = Decimal(1).scaleb(-PRICE_DECIMAL_PLACES)
 
-POSITION_LOT_STRATEGY_PATCH_FIELDS = (
-    "strategy",
-    "leg_role",
-    "strategy_group_id",
-    "source_stock_lot_id",
-    "source_wheel_branch_id",
-    "strategy_snapshot",
-)
 LEGACY_POSITION_LOT_PATCH_FIELDS = ("yield_enhancement_mode",)
 
 # §7.1: ``position_id`` is retired, so it is not a patch field and must never be
@@ -296,14 +292,12 @@ def effective_strike(fields: dict[str, Any]) -> float | None:
     return None
 
 
-def effective_multiplier(fields: dict[str, Any]) -> float | None:
-    # ``note.multiplier`` fallback retired (write-side-definition §4/§0.9).
-    # ``multiplier`` keeps its top-level key in the converged payload, so the
-    # primary read itself does not move.
-    multiplier = safe_float(fields.get("multiplier"))
-    if multiplier is not None:
-        return float(multiplier)
-    return None
+def effective_multiplier(fields: dict[str, Any]) -> int | None:
+    # Only the canonical field supplies option units; notes are not evidence.
+    try:
+        return require_option_multiplier(fields.get("multiplier"))
+    except ValueError:
+        return None
 
 
 # §7.1: ``build_position_id`` and its ``_fmt_strike`` helper are retired. The
@@ -339,6 +333,7 @@ class PositionLotPatch:
     strategy_group_id: _PatchValue = _UNSET
     source_lot_id: _PatchValue = _UNSET
     source_wheel_branch_id: _PatchValue = _UNSET
+    wheel_call_allocations: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
     yield_enhancement_mode: _PatchValue = _UNSET
 
@@ -356,7 +351,7 @@ class PositionLotPatch:
             raise KeyError(f"unsupported position lot patch field: {key}")
         return getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key)) is not _UNSET
 
-    def value(self, key: str) -> int | float | str | dict[str, Any] | None:
+    def value(self, key: str) -> int | float | str | dict[str, Any] | list[dict[str, Any]] | None:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
         value = getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key))
@@ -401,6 +396,7 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
         source_lot_id=payload.get("source_stock_lot_id", _UNSET),
         source_wheel_branch_id=payload.get("source_wheel_branch_id", _UNSET),
+        wheel_call_allocations=payload.get("wheel_call_allocations", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
         yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
     )
@@ -445,7 +441,7 @@ def build_position_lot_fields(
 
     if multiplier is None:
         raise ValueError(f"{option_type} option requires multiplier")
-    multiplier = _required_positive_float(multiplier, "multiplier")
+    multiplier = require_option_multiplier(multiplier)
     cash_secured = None
     if side == "short" and option_type == "put":
         cash_secured = calc_cash_secured(strike, multiplier, contracts)
@@ -465,9 +461,7 @@ def build_position_lot_fields(
     note_kv: dict[str, str] = {}
 
     opened_at = int(opened_at_ms or now_ms())
-    normalized_multiplier = None
-    if multiplier is not None:
-        normalized_multiplier = int(float(multiplier)) if float(multiplier).is_integer() else float(multiplier)
+    normalized_multiplier = multiplier
     strategy_snapshot_value = (
         strip_retired_strategy_metadata(strategy_snapshot) or None
         if isinstance(strategy_snapshot, dict)
@@ -520,6 +514,12 @@ def strategy_metadata_fields_from_payload(
         if key == "strategy_snapshot":
             if snapshot_fields:
                 out[key] = dict(snapshot_fields)
+            continue
+        if key == "wheel_call_allocations":
+            if isinstance(value, list):
+                out[key] = value
+            elif isinstance(snapshot_fields.get(key), list):
+                out[key] = snapshot_fields[key]
             continue
         if value in (None, ""):
             value = snapshot_fields.get(key)
@@ -577,6 +577,18 @@ def apply_strategy_metadata_patch(
         if key == "strategy_snapshot" or key not in patch:
             continue
         value = patch.get(key)
+        if key == "wheel_call_allocations":
+            if value is None:
+                out.pop(key, None)
+                snapshot.pop(key, None)
+            elif isinstance(value, list):
+                parse_wheel_call_allocations(value)
+                out[key] = value
+                if snapshot:
+                    snapshot[key] = value
+            else:
+                raise ValueError("wheel_call_allocations must be a list")
+            continue
         if value in (None, ""):
             out.pop(key, None)
             snapshot.pop(key, None)
@@ -604,32 +616,33 @@ def build_open_adjustment_patch_contract(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: _PatchValue = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
+    wheel_call_allocations: list[dict[str, Any]] | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> PositionLotPatch:
     if isinstance(strategy_snapshot, dict):
         strategy_snapshot = strip_retired_strategy_metadata(strategy_snapshot) or None
-    if all(
+    if multiplier is _UNSET and all(
         value is None
         for value in (
             contracts,
             strike,
             expiration_ymd,
             premium_per_share,
-            multiplier,
             opened_at_ms,
             strategy,
             leg_role,
             strategy_group_id,
             source_lot_id,
             source_wheel_branch_id,
+            wheel_call_allocations,
             strategy_snapshot,
         )
     ):
@@ -652,8 +665,8 @@ def build_open_adjustment_patch_contract(
         raise ValueError("cannot change contracts on a closed lot unless it equals contracts_closed")
 
     next_strike = _required_positive_float(strike, "strike") if strike is not None else effective_strike(fields)
-    next_multiplier = (
-        _required_positive_float(multiplier, "multiplier") if multiplier is not None else effective_multiplier(fields)
+    next_multiplier = require_option_multiplier(
+        fields.get("multiplier") if multiplier is _UNSET else multiplier
     )
 
     next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
@@ -685,6 +698,9 @@ def build_open_adjustment_patch_contract(
         source_wheel_branch_id,
         "source_wheel_branch_id",
     )
+    if wheel_call_allocations is not None:
+        parse_wheel_call_allocations(wheel_call_allocations)
+    patch_wheel_call_allocations: _PatchValue = wheel_call_allocations if wheel_call_allocations is not None else _UNSET
     patch_strategy_snapshot = _optional_patch_object(strategy_snapshot, "strategy_snapshot")
 
     if contracts is not None:
@@ -697,12 +713,8 @@ def build_open_adjustment_patch_contract(
         patch_strike = next_strike
     if premium_per_share is not None:
         patch_premium = normalize_trade_price(premium_per_share, "premium_per_share")
-    if multiplier is not None:
-        assert next_multiplier is not None
-        if float(next_multiplier).is_integer():
-            patch_multiplier = int(float(next_multiplier))
-        else:
-            patch_multiplier = float(next_multiplier)
+    if multiplier is not _UNSET:
+        patch_multiplier = next_multiplier
     if expiration_ymd is not None:
         assert parsed_exp_ms is not None
         patch_expiration = int(parsed_exp_ms)
@@ -710,18 +722,18 @@ def build_open_adjustment_patch_contract(
         patch_opened_at = int(opened_at_ms)
 
     if side == "short" and option_type == "put" and (
-        contracts is not None or strike is not None or multiplier is not None
+        contracts is not None or strike is not None or multiplier is not _UNSET
     ):
         if next_strike is None:
             raise ValueError("short put adjustment requires strike")
         if next_multiplier is None:
             raise ValueError("short put adjustment requires multiplier")
-        patch_cash_secured = float(calc_cash_secured(float(next_strike), float(next_multiplier), next_contracts))
+        patch_cash_secured = float(calc_cash_secured(float(next_strike), next_multiplier, next_contracts))
 
-    if side == "short" and option_type == "call" and (contracts is not None or multiplier is not None):
+    if side == "short" and option_type == "call" and (contracts is not None or multiplier is not _UNSET):
         if next_multiplier is None:
             raise ValueError("short call adjustment requires multiplier")
-        patch_underlying_locked = _short_call_locked_shares(float(next_multiplier), next_contracts)
+        patch_underlying_locked = _short_call_locked_shares(next_multiplier, next_contracts)
 
     return PositionLotPatch(
         contracts=patch_contracts,
@@ -740,6 +752,7 @@ def build_open_adjustment_patch_contract(
         strategy_group_id=patch_strategy_group_id,
         source_lot_id=patch_source_lot_id,
         source_wheel_branch_id=patch_source_wheel_branch_id,
+        wheel_call_allocations=patch_wheel_call_allocations,
         strategy_snapshot=patch_strategy_snapshot,
     )
 
@@ -751,13 +764,14 @@ def build_open_adjustment_patch(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: _PatchValue = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
+    wheel_call_allocations: list[dict[str, Any]] | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -774,6 +788,7 @@ def build_open_adjustment_patch(
         strategy_group_id=strategy_group_id,
         source_lot_id=source_lot_id,
         source_wheel_branch_id=source_wheel_branch_id,
+        wheel_call_allocations=wheel_call_allocations,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     ).to_dict()

@@ -298,12 +298,13 @@ trade intake、生命周期核对和 SQLite option-position ledger 形成权威�
 
 ### 4.4 Wheel Call 自动确认批次
 
-候选展示不代表用户已采用，broker 成交不携带策略归属。未启用全局归属规则的账户继续采用
-既有精确 intent 路径；启用后，Call/Put 都由同一交易归属 owner 汇总 Wheel、Combo 的竞争证据。
+候选展示不代表用户已采用，broker 成交不携带策略归属。Call/Put 成交均先由同一交易归属逻辑
+汇总 Wheel、Combo 的竞争证据；旧 v1 启用记录只供历史读取，旧 intent 自动写入路径已退役。
+按物理来源受控切换到 v2 后，只有成交时间不早于切换点的交易可按规则自动关联。
 唯一合法、成交时与当前均有效的 active 分支，且账户、合约、全部竞争成交和容量证据通过时，
-可以在没有 intent 的情况下按规则关联；存在多候选、缺失证据或容量不足时保持待核实。
-现有 intent 继续固定账户、批次、合约、数量、multiplier 和有效期；精确匹配才消费预留，
-不匹配时不能退回宽泛分支匹配。规则启用不启动新分支，也不重写经济成交。
+可以在没有 intent 的情况下关联；存在多候选、缺失证据或容量不足时进入人工待办。
+现有 intent 继续固定账户、批次、合约、数量、multiplier 和有效期，作为候选证据参与竞争；
+精确匹配才消费预留，不能仅凭 intent 排除其他可行分支。切换不启动新分支，也不重写经济成交。
 
 人工确认统一通过 OM Bot 查询、请求预览，再由 Control 确认。归属冲突持久化到 ledger，
 相关分支停止新增扫描；复杂纠错需受控人工修复。完整规则与切换契约见
@@ -629,6 +630,15 @@ Wheel 区块每个批次最小展示：
 
 账户使用报告区块的现有上下文；只在同一账户+标的存在多个 Wheel 批次时展示短化批次 ID。
 
+### 9.1 同次指派的简报汇总展示
+
+- **目标与验收**：固定时段决策简报的正文和卡片中，来源于同一账户、标的、券商、币种、指派价和指派时刻的多个 Wheel Call 批次，若均无本轮独立 Call 建议且状态、原因和覆盖事实一致，展示为一个 Wheel 项；标题标明原 Put 指派价与批次数，正文合计剩余股份、CC 已覆盖股数、意图预留及分支剩余股数，并列出各批次短 ID。当前 3690.HK 77.5P 的三个 500 股批次应显示合计剩余 1,500 股；只读 assigned-stock 事实确认三批均为 77.5、`assigned_at_ms=1790682393529`。75P、80P 与 0700.HK 仍各自显示。输出中的“分支合计剩余”不是账户可开张数，后者仍以容量检查为准；三个批次均为 `linkage_unresolved` 时，合并项仍显示“成交归属待人工确认”。
+- **边界与退回**：这是固定简报的只读展示变换，不合并 `stock_lot_id`、Wheel 分支、成本、收益、CC 归属、候选或快照中的原始批次；其他简报类型和 Tool Gateway 读模型保持逐批次。任一批有 `final_candidate` 或独立 Call 建议，或同源事实缺失、错配、重复，或数量不完整/不一致，或 `phase`、批次 `reason_code` / `reason_codes`、coverage `status` / `reason_codes` 不同，均原样逐批次展示。汇总前逐批确认剩余股份及 coverage 的 target、committed、reserved、available 均为非负整数，`target_shares == shares_remaining` 且 `available_shares == max(0, target_shares - committed_shares - reserved_shares)`；不把待核实写成可开仓。
+- **复用与数据流**：复用 `src/application/wheel/read_model.py` 同次生成的 `assigned_stock_projection._all_assigned_stock_lots`（不能使用按月过滤的公开列表），由 `src/application/wheel/capacity.py::finalize_wheel_capacity` 按唯一 `stock_lot_id` 关联 Call 分支，核对账户和标的，并将非空 `broker`、`currency`、有效 `assignment_price`、正整数 `assigned_at_ms` 附到候选快照批次；无法唯一核实时该批次不得汇总。快照现有哈希封存保证新增字段的内容完整性，字段语义由汇总前检查。`src/application/daily_decision_brief_service.py::_load_wheel_snapshot_family` 转发同源事实和未降格的数量；`src/application/daily_decision_brief_renderer.py::_wheel_batch_views` 仅在 `fixed_report` 中按完整同源键和完整警示集合做确定性展示汇总。复用现有 coverage 数值与原因文案，不新增持久实体、配置键或独立计算 owner。检索范围为以上 owner、`domain/domain/wheel/projection.py`、`src/application/wheel/candidate_snapshot.py` 和当前简报测试；旧快照无分组字段时保留逐批次展示。
+- **取舍**：不按标的直接汇总，以免混合不同指派价；不改 Wheel 分支模型或交易回执，因为生命周期和归属仍按真实股票批次追踪。
+- **复用清单**：分组身份与来源事实复用 `assigned_stock_projection._all_assigned_stock_lots` 的账户、标的、券商、币种、指派价、指派时刻和 `stock_lot_id`；股份及覆盖数复用 `project_wheel_coverage`；快照完整性复用 `seal_wheel_candidate_snapshot`；简报入口和状态文案复用 `_wheel_batch_views`。新增的只有固定简报的临时汇总视图和 `has_final_candidate` 只读标记，分别用于一项展示与防止隐藏已有独立建议，不建立新持久身份或第二套容量计算。相关字段名在上述 owner 均有命中；不存在可直接复用的同源批次展示汇总实现。
+- **实现切片与验证**：单一切片覆盖上述验收：补快照展示事实、固定简报投影与渲染，并以 77.5P×3、75P/80P、0700.HK、缺字段与错配、混合状态/额外警示、有独立建议的测试证明只汇总安全同质项；同时断言固定简报正文与卡片（含 blocked 路径）、非固定提醒仍逐批，以及共同和额外原因并存时警示不消失。运行相关简报/快照测试与项目适用守卫。风险是封存前账本事实缺失，此时明确退回既有逐批次展示，不猜分组。
+
 ## 10. 失败与等待语义
 
 - 当前没有通过硬门槛的 Call 是合法等待，不是系统故障。
@@ -765,7 +775,7 @@ OM 完成，实际下单继续由用户完成。
 - 迁移必须证明新 normalize/hash 分派对每个 v1 事件重算后得到原 hash；仅比较迁移前后存储值不算验证。
   原 event ID、payload、payload hash 和时间保持不变，旧 `called_away` / `manual_ended` 只作历史终态
   解释，不回建 CSP child。
-- 新普通 CSP 或普通 CC assignment 创建 active child；新 Wheel 内部 assignment 创建
+- 新普通 CSP、普通 CC 或身份与成员均已验证的外部 Combo Yield 卖腿 assignment 创建 active child；新 Wheel 内部 assignment 创建
   `pending_decision` child。用户决定只追加一次含 expected generation hash 的 CAS 事件：`start`
   转为 active，`end` 转为不可逆 `manual_ended`。
 - 父分支按实际 assignment 数量减少可继续监控的数量；还有整张容量时继续原阶段，不足一张时
@@ -868,8 +878,9 @@ partial assignment 对实际转换量创建 pending child；父分支若仍有 o
 
 期权 lot 使用 `strategy=wheel`、方向对应的 `leg_role=wheel_call|wheel_put` 和中性
 `source_wheel_branch_id`。Call 同时保留 `source_stock_lot_id` 以证明股票覆盖来源。唯一匹配的有效
-intent 才允许 trade writer 原子写入归属并消费 intent；没有或存在多个匹配时不猜，仓位保持真实、
-占用进入共享容量，并在读模型中暴露 linkage unresolved。
+intent 是统一归属判断的候选证据；唯一合法目标及全部竞争、容量证据通过后，由归属事务写入关系，
+匹配 intent 时同时消费预留。没有合法目标或存在多个匹配时不猜，仓位保持真实，
+占用进入共享容量，并在读模型与人工待办中暴露 linkage unresolved。
 
 已有 open Wheel Call lot 的兼容 adapter 只在 `strategy=wheel`、`leg_role=wheel_call`、没有冲突
 `strategy_group_id` 且 `source_stock_lot_id` 在账户内唯一时映射到同 ID branch；新 lot 必须显式保存
@@ -935,7 +946,7 @@ readback 幂等恢复。re-enable 必须显式创建更大 generation 和更晚
 
 两个真实 writer owner `src/application/ledger/writer_trade_events.py`、
 `src/application/ledger/writer_lifecycle_allocation.py` 及其共享 companion hook 都接收同一份 immutable
-market/account window history，并在各自 SQLite 事务内重读。普通 CSP/CC assignment 只按
+market/account window history，并在各自 SQLite 事务内重读。普通 CSP/CC 与已验证的外部 Combo Yield 卖腿 assignment 只按
 `(market, account, occurred_at_ms)` 在全部 immutable historical windows 中唯一命中 generation：命中一行
 即使该 row 后来已关闭或当前已是更高 generation，也创建 active bootstrap child；零行表示启用前或
 closed-window gap，永久不补建；多行是 schema conflict。来源 timestamp 缺失时 fail closed，禁止用入库、
@@ -948,7 +959,7 @@ window/descriptor action matrix 固定为：
 
 | 动作 | 是否要求 current open window 与 descriptor 精确匹配 |
 |---|---|
-| 普通 CSP/CC assignment bootstrap | 否；只按 historical event-time window |
+| 普通 CSP/CC 与已验证的外部 Combo Yield 卖腿 assignment bootstrap | 否；只按 historical event-time window |
 | 既有 Wheel assignment 的 parent conversion + pending child | 否 |
 | projection/read、物理容量、open lot close/expire/assignment、source void/reconciliation | 否 |
 | linkage confirm/reject、existing intent consume/cancel/expire、branch end | 否 |
@@ -1422,21 +1433,35 @@ Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`c
 
 ## 指派后 Wheel 监控接入与受控恢复
 
-目标：已在 Wheel 激活窗口内完成的普通 CSP/CC 指派，不因收益计算证据不完整而静默消失；已完整结束的 Combo Yield funding Put 可显式转入 Wheel。非目标：自动交易、放宽推荐门槛、补造费用或乘数证据、回填启用前历史、改写原始成交/指派。
+目标：已在 Wheel 激活窗口内完成的普通 CSP/CC 或已验证外部 Combo Yield 卖腿指派，不因收益计算证据不完整而静默消失；已漏建分支且完整结束的 Combo Yield funding Put 可显式恢复。非目标：自动交易、放宽推荐门槛、补造费用或乘数证据、回填启用前历史、改写原始成交/指派。
 
 现状：指派入账 owner 已生成 canonical assignment；Wheel companion 在乘数来源不可证明、交割费用缺失或币种缺失时提前跳过，而现有 Wheel 分支投影原本已支持 multiplier_unproven、principal_anchor 缺失等阻塞原因。腾讯 lx、sy 指派时间晚于各自持久激活窗口；其乘数数值为 100 但来源尚未证明，交割费用此前未被手续费同步器选中。sy 的 funding Put 已指派，配对 Long Call 已到期关闭，原 Combo Yield 已结束。
 
-设计：复用 wheel_branch_created 和现有阻塞投影。身份、账户、策略、激活窗口及正整数数量一致性仍是入场条件；对数值一致但 provenance 未证实的乘数，以及缺少真实费用的本金，不伪造证明或金额，创建可见但禁止推荐的分支。币种沿用 canonical cash-fact owner 的已解析币种，显式交割币种冲突仍拒绝。上游 broker settlement pair 在已有来源具备币种/实际费用时保留这些字段；缺失不得填零。Daily Brief 用中文显示实际阻塞原因。
+设计：复用 wheel_branch_created 和现有阻塞投影。外部 Combo Yield 卖腿保留组合归属，身份、两腿成员及实际交割均验证通过后，funding Put 自动创建 Wheel Call 分支，short Call 自动创建 Wheel Put 分支；配对长腿仍独立管理。身份、账户、策略、激活窗口及正整数数量一致性仍是入场条件；对数值一致但 provenance 未证实的乘数，以及缺少真实费用的本金，不伪造证明或金额，创建可见但禁止推荐的分支。币种沿用 canonical cash-fact owner 的已解析币种，显式交割币种冲突仍拒绝。上游 broker settlement pair 在已有来源具备币种/实际费用时保留这些字段；缺失不得填零。Daily Brief 用中文显示实际阻塞原因。
 
-恢复：在现有 Wheel CLI/ledger owner 增加按 account、market、assignment-event-id 定位的 recover 操作，默认只读 preview；apply 必须绑定 preview hash 并显式确认。在同一 ledger 写锁/事务内重查原指派、无 void、普通 CSP/CC 策略、历史激活窗口及现有分支；复用同一 companion 规则与确定性事件 ID，恢复只添加缺失 Wheel 事件，不重记交易、现金、股票交割或通知。已完整结束的 Combo Yield 仅在显式参数开启时允许转换，并要求有效 group identity、精确两腿成员、funding Put 是目标指派、两腿均无未平仓合约且配对腿存在有效终态事件；原组合交易历史保持不变。已存在相同分支返回无效果；不同账户/市场、启用前、活动或冲突组合、已 void 或身份/数量冲突拒绝。恢复后读取 Wheel 投影证明分支可见且证据不足仍不能推荐。恢复使用原指派时间判定资格，并以当前时间回读；恢复不重建漏失的后续 child。若源指派之后存在无法证明属于已关闭组合的成交、卖股、再次交割或关联变化，则拒绝并列出事件 ID。
+恢复：在现有 Wheel CLI/ledger owner 增加按 account、market、assignment-event-id 定位的 recover 操作，默认只读 preview；apply 必须绑定 preview hash 并显式确认。在同一 ledger 写锁/事务内重查原指派、无 void、普通 CSP/CC 策略、历史激活窗口及现有分支；复用同一 companion 规则与确定性事件 ID，恢复只添加缺失 Wheel 事件，不重记交易、现金、股票交割或通知。恢复已漏建分支的完整结束 Combo Yield 时，仅在显式参数开启后允许转换，并要求有效 group identity、精确两腿成员、funding Put 是目标指派、两腿均无未平仓合约且配对腿存在有效终态事件；原组合交易历史保持不变。已存在相同分支返回无效果；不同账户/市场、启用前、活动或冲突组合、已 void 或身份/数量冲突拒绝。恢复后读取 Wheel 投影证明分支可见且证据不足仍不能推荐。恢复使用原指派时间判定资格，并以当前时间回读；恢复不重建漏失的后续 child。若源指派之后存在无法证明属于已关闭组合的成交、卖股、再次交割或关联变化，则拒绝并列出事件 ID。
 
 实施增量：1. 修复 companion 的证据不全可见性、上游已知字段保留及简报原因；2. 精确恢复 preview/apply/replay 与 CLI；3. 让手续费同步器按股票交割订单补录实际费用，并让未验证乘数缓存继续尝试 OpenD。不增加 schema、并行账本或新状态。
 
-验收：从真实指派写入 facade 覆盖入账成功且仅生成一个受阻 Wheel 分支；有效完整证据仍可正常投影；缺费用不变为零，未证实乘数不变为已验证；账户/策略/激活/void/冲突隔离；完整关闭组合只能显式转换，活动组合和无关后续交易拒绝；恢复默认无写、hash 漂移拒绝、重复执行无重复事件、回滚；简报包含腾讯及中文阻塞原因，候选/intent 路径不能消费受阻分支。运行相关 integration/CLI/renderer 检查与项目必需门禁。
+验收：从真实指派写入 facade 覆盖入账成功且仅生成一个受阻 Wheel 分支；已验证外部 Combo funding Put 和 short Call 指派分别自动创建 Call、Put 分支，配对长腿保持原生命周期；有效完整证据仍可正常投影；缺费用不变为零，未证实乘数不变为已验证；账户/策略/激活/void/冲突隔离；已漏建且完整关闭的 SP+LC 组合只能显式恢复，活动组合和无关后续交易拒绝；恢复默认无写、hash 漂移拒绝、重复执行无重复事件、回滚；简报包含腾讯及中文阻塞原因，候选/intent 路径不能消费受阻分支。运行相关 integration/CLI/renderer 检查与项目必需门禁。
 
 风险：加入监控不等于有可交易候选；乘数 provenance 未完成补证时分支保持不可推荐。生产恢复只在新版本按受控发布与升级流程安装后执行。
 
 本节仅替代 §13.4/§13.8 中普通 CSP/CC 入口的证据完整性限制；内部 Wheel 转换仍沿用原有 pending child 与证据门槛。数值非法、乘数冲突、数量不符、负本金和显式币种冲突仍拒绝。不可用本金保持 null，缺费不得当作零费用。
+
+### 外部 Combo 卖腿自动接入：本次完整链路设计
+
+**批准范围与验收。** Wheel 在指派发生时的账户、市场窗口内已开启，且外部 Combo 卖腿的身份及实际交割均验证通过时，自动进入相反方向的 Wheel 监控：SP+LC 的 funding Put 接货后监控 Call，CC+LP 的 short Call 交股后监控 Put。先确认来源是否属于已有 Wheel 分支；属于 Wheel 的指派仍只转换父分支并创建 `pending_decision` child，不因其卖腿属于 CSP/CC 而再次 bootstrap。配对长腿不变更归属或生命周期。监控分支可见与可推荐分开；缺报价、费用或乘数来源时保留真实阻塞原因。一个源指派最多创建一个确定性分支，重放不重复。非目标是启用 CC+LP 开仓扫描、自动交易、新 Wheel 开关、生产历史回填和本次自动迁移旧组合身份。
+
+**当前事实与复用归属。** `domain/domain/strategy_membership.py::resolve_option_strategy_membership` 已把短 Put/Call 归入 `parent_universe=csp/cc`，但将组合策略分别标为 `csp_lc/cc_lp`，并要求调用方提供可信 `valid_combo_group_ids`；现有 Wheel planner 未提供，因而排除两者。`src/application/ledger/wheel_trade_companions.py::plan_wheel_assignment_companion` 及两条 writer 共用的 companion hook 已持有指派前事实、同事务写入、历史激活窗口和确定性事件 ID；不新增监听器或并行账本。`src/application/ledger/combo_membership.py::resolve_combo_group_membership` 已校验组的事件历史、精确两成员、账户、标的、角色与 retag/void，但其 `exact` 规则目前只认 SP+LC；`domain/domain/ledger/projection.py::_valid_combo_pair` 已支持 SP+LC/CC+LP 的实际期权结构。组合 owner 应复用这一领域配对规则，产出涵盖两腿 open event、当前 lot 和结构的精确证明，Wheel 只消费证明，不复制判定。`domain/domain/combo_identity.py::validate_combo_identity` 与 `strategy_group_identities` 是 SP+LC 的持久意图证明，但形状和 hash 有效不代表两腿事实匹配；必须逐字段回读。检索 `domain/domain/combo_identity.py`、`src/application/ledger/`、`domain/domain/ledger/projection.py` 中 `cc_lp` 与 `strategy_group_identities`，没有 CC+LP 对应的持久身份写入路径。CC+LP 本轮只接受两腿开仓事件当时就带相同完整组身份与角色；无组到有组的普通 adjust 不构成受控 adoption，待未来有相应受控回执再支持。这样复用不可变 open 事件及投影，无需把 CC+LP 塞入 SP+LC 专名物理列或新增 schema。当前 `current_decision_combo` 仍只消费 SP+LC 持久身份；它不作为 CC+LP Wheel 接入的身份 owner。
+
+**判定顺序与失败语义。** (1) 接受 canonical short-option assignment，以共享 `stock_settlement_unit_issues` 和来源 lot/open event 核对账户、broker、symbol、数量、乘数、币种、短 Put 买股/短 Call 卖股及精确份数；已持久化的 assignment `stock_settlement` 是当次交割依据，生命周期 allocation row 可能尚未插入，不充作前置条件。费用缺失可以创建可见但受阻分支，交割方向/份数错误不能创建。(2) 先判可信 Wheel 来源引用与事件时刻 active 父分支；Wheel 和 Combo 元数据并存、来源引用无效或父分支不唯一均按冲突停止，不退化成外部 bootstrap。有效内部指派只转换父分支并创建 `pending_decision` child。(3) 无 Wheel 来源时，普通 CSP/CC 走现有规则；Combo owner 基于指派 `occurred_at_ms` 之前已生效的 open/受控归属事件与指派前 lot，证明同账户同标的、同 broker/币种/乘数/原始合约数、对应角色、行权价/到期结构、两条 open-event/lot/contract_key 精确绑定、无外部成员和 retag/void 冲突。事件时刻晚于指派的补开长腿或归属不得追认历史指派；写入时已知的 void 对原 open/归属的否定不得忽略。SP+LC 还须逐字段匹配已存 v2 identity 的两腿 record/open/contract_key/original_contracts 及 hash；CC+LP 只接受两腿 open 时即有完整相同 group/role，不把事后普通标签当作身份。(4) 在 `(market, account, assignment occurred_at_ms)` 唯一命中历史激活窗口后，短 Put→Call，短 Call→Put。CC+LP 卖股若有明确 stock lot 来源，必须证实它不是已有 Wheel 股份；来源不明且同账户同标的有 active Wheel Call 股份时保守阻断。覆盖检查用指派前 Wheel/assigned-stock 前态及 assignment 的显式 lot 引用；不依赖尚未插入的 allocation row，也不把缺 `source_lot_id` 当作无冲突。用现有确定性 `wheel_branch_created` 按实际交割量创建 active 分支；事件继续引用源 assignment，组合历史证明从源事件及两腿 open 按指派时点回读，不复制当前组成员到 Wheel 事件。当前配置/行情门禁只控制扫描与新意图，不改写事件时刻的 bootstrap 资格。(5) 缺少身份或交割证据时给出可审阅的原因，不静默当作“无策略”；重放、并发与事务失败不产生第二分支或半成品。过去漏建的分支仍只走显式、默认只读的 recovery；既有完成 SP+LC 恢复合同保持，CC+LP 历史恢复另行设计，不能因发布新代码自动补建。
+
+**未采用方案。** 只把 `csp_lc/cc_lp` 加进允许名单会让未经确认的 group 标签启动 Wheel；仅凭 Put/Call 类型会把 Wheel 内部指派当外部新入口。为 CC+LP 写入现有 SP+LC 专名的身份列会造成假语义，另建平行 ledger/schema 及新的启用开关也不能改善本次身份和交割证明。
+
+**同批入账边界。** 共用 companion 当前在 batch 写入前捕获 source lot；不能把事务前缺 lot 误判成策略不适用。每个新 assignment 的证明输入是同事务写入前的有效 ledger 事件，加本批新增且 `event_time_ms` **严格早于**该 assignment 的 open/adjust；按 canonical 事件投影形成指派前 lot。相同时刻、晚于指派、无法排序、重复 ID 冲突或任何已知 void 使证明不唯一时阻断并给可审阅原因；不能用输入列表顺序代替事件时刻。SP+LC 仍须 v2 identity 已在事务开始前持久存在，不能凭批内标签替代；CC+LP 可凭批内两条已生效的完整 open 事件证明。两条 writer 的不同入口必须复用同一规则；不通过发布后自动回填补救漏建。
+
+**实施切片与验证。** Slice 1：在现有组合归属 owner 中补齐 CC+LP 精确成员、指派时点、两条 lot/open/合约结构的可调用证明，并保持 SP+LC v2 hash/事实兼容；用域/应用层测试覆盖有效两腿、交叉账户、混组、事后贴标、缺失/void、错 broker/到期/行权价/乘数/原始合约数、持久 identity 与真实长腿不匹配。Slice 2（依赖 Slice 1）：在共用 assignment companion 里按上述优先级接入两种外部 Combo 卖腿，沿现有两条 writer facade 验证 Call/Put 分支、部分指派、同批/逆序、内部 Wheel `pending_decision`、长腿不变、历史窗口、错误交割方向、股票覆盖冲突、迟到指派、事务回滚和重放；用 read model/scan 证明证据不足时可见但不能推荐，并用源 assignment 和时点事件回读接入依据。文档 wording、敏感 artifact 和相关项目 guardrails 随最终改动检查。两片共同覆盖本节全部验收，无新公开命令、配置键或生产数据写入。
 
 recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 schema 不创建目录、schema 或迁移。hash 绑定解析后的 ledger 路径与文件身份、账户/市场、canonical 指派/来源 lot/open、void 和相关后续事实、历史激活窗口、已有 Wheel 事实及计划事件内容；不包含当前时钟或无关扫描日志。事务内先识别同一确定性事件的相同 payload 并返回 no-effect（自身新增事实不得使成功后的重试失效），不同 payload 冲突；首次追加前重算 hash。恢复不会刷新已有创建事件证据；后续补证需独立受控修复，不能声称本次恢复会自动解除阻塞。
 

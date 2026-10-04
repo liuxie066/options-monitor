@@ -24,7 +24,7 @@ def _settings(tmp_path, config_path, **kwargs):
 def _preflight(payload, settings):
     return prepare_feishu_analysis_control(payload, allowed_senders=settings.allowed_senders,
         config_key=settings.config_key, config_path=settings.config_path, audit_db=settings.audit_db,
-        received_monotonic=time.monotonic())
+        received_monotonic=time.monotonic(), assistant_config_path=settings.assistant_config_path)
 
 
 def _contract(settings, *, sender="ou_1", conversation=None):
@@ -46,6 +46,58 @@ def _open_run(tmp_path, config_path, run_id="active", **settings_kwargs):
     store = BotHostStore(settings.audit_db)
     store.start_run(run_id, contract=contract, session_key=session)
     return settings, contract, session, store
+
+
+@pytest.mark.parametrize("assistant_state", ["same", "changed", "unavailable"])
+def test_cancel_targets_active_read_generation_after_assistant_change(tmp_path, monkeypatch, assistant_state):
+    from tests.test_bot_cross_market_read import _scope
+    from src.application.bot.service import prepare_contract
+
+    configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
+    settings = _settings(tmp_path, configs["us"][0], assistant_config_path=fixed["assistant_config_path"])
+    key, path, authority = channel_facade.resolve_trusted_config_scope(config_key=None, config_path=settings.config_path)
+    request = channel_facade._channel_request(user_message="调查运行状态", config_key=key, config_path=path,
+        request_id="original", context_messages=(), channel="feishu", sender_id="ou_1",
+        authenticated_sender_id="ou_1", conversation_id=None, authority_scope=authority,
+        read_markets=frozenset(fixed["read_markets"]), read_generation=fixed["read_generation"],
+        assistant_config_path=fixed["assistant_config_path"])
+    contract = prepare_contract(request)
+    session = channel_facade._channel_session_key(channel="feishu", sender_id="ou_1", conversation_id=None,
+        authority_scope=channel_facade._session_authority(authority, fixed["read_generation"]))
+    store = BotHostStore(settings.audit_db)
+    store.start_run("active", contract=contract, session_key=session)
+    assistant = tmp_path / "config.assistant.json"
+    if assistant_state == "changed":
+        assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+    elif assistant_state == "unavailable":
+        assistant.unlink()
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-" + assistant_state), settings)
+    assert outcome["status"] == "cancelled" and outcome["target_run_id"] == "active"
+    assert store.is_cancel_requested("active")
+
+
+def test_cancel_targets_all_matching_active_generations(tmp_path, example_config_path):
+    settings, contract, session, store = _open_run(tmp_path, example_config_path, "older")
+    store.start_run("newer", contract=contract, session_key=session + ":new-generation")
+    store.start_run("unrelated-damaged", contract=contract, session_key=session + ":other")
+    with sqlite3.connect(settings.audit_db) as conn:
+        conn.execute("UPDATE bot_runs SET contract_json='not-json' WHERE run_id='unrelated-damaged'")
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-both"), settings)
+    assert outcome["status"] == "cancelled"
+    assert store.is_cancel_requested("older")
+    assert store.is_cancel_requested("newer")
+    assert not store.is_cancel_requested("unrelated-damaged")
+
+
+def test_cancel_fallback_targets_multiple_old_generations(tmp_path, example_config_path):
+    settings = _settings(tmp_path, example_config_path)
+    contract, session = _contract(settings)
+    store = BotHostStore(settings.audit_db)
+    store.start_run("generation-a", contract=contract, session_key=session + ":a")
+    store.start_run("generation-b", contract=contract, session_key=session + ":b")
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-old-generations"), settings)
+    assert outcome["status"] == "cancelled"
+    assert all(store.is_cancel_requested(run_id) for run_id in ("generation-a", "generation-b"))
 
 
 @pytest.mark.parametrize("text", ["再看一下", "为什么说取消分析", "‘取消分析’", '"停止分析"',

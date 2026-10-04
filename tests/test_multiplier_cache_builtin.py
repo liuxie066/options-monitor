@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -300,3 +301,55 @@ def test_opend_label_without_receipt_does_not_suppress_refresh(tmp_path, monkeyp
     _, _, diagnostics = resolve_multiplier_with_source_and_diagnostics(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=True)
     assert calls == ["0700.HK"]
     assert diagnostics["multiplier_evidence"]["source_receipt_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize("raw", [None, "", True, False, 0, -1, 100.5, "100.00000000000000001", float("nan"), float("inf")])
+def test_cache_and_refresh_never_round_invalid_multiplier(tmp_path, monkeypatch, raw):
+    from src.application.multiplier_cache import get_cached_multiplier_source, store_multiplier
+
+    cache = _entry("NVDA", raw, "opend")
+    assert get_cached_multiplier(cache, "NVDA") is None
+    assert get_cached_multiplier_source(cache, "NVDA") is None
+    with pytest.raises(ValueError, match="multiplier"):
+        store_multiplier({}, "NVDA", raw)
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend",
+                        lambda **_: RefreshResult(symbol="NVDA", ok=True, multiplier=raw))
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path, symbol="NVDA", allow_opend_refresh=True,
+    )
+    assert value is None and source is None
+    assert diagnostics["attempted_sources"][-1]["status"] == "invalid"
+    assert not (tmp_path / "output_shared/state/multiplier_cache.json").exists()
+
+
+@pytest.mark.parametrize("raw", ["", True, 0, -1, 100.5, "100.00000000000000001"])
+def test_explicit_invalid_multiplier_never_uses_valid_cache(tmp_path, monkeypatch, raw):
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", _entry("NVDA", 500, "opend"))
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend",
+                        lambda **_: pytest.fail("invalid source must not query OpenD"))
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path, symbol="NVDA", multiplier=raw, allow_opend_refresh=True,
+    )
+    assert value is None and source is None
+    assert diagnostics["attempted_sources"] == [{"source": "payload", "status": "invalid"}]
+
+
+@pytest.mark.parametrize("raw", [True, 100.5, "100.00000000000000001"])
+def test_opend_rows_validate_original_value(tmp_path, monkeypatch, raw):
+    from types import SimpleNamespace
+
+    fake = ModuleType("src.application.opend_symbol_fetching")
+    fake.FetchSymbolRequest = SimpleNamespace
+    fake.fetch_symbol_request = lambda _: {"rows": [{"multiplier": raw}]}
+    monkeypatch.setitem(sys.modules, "src.application.opend_symbol_fetching", fake)
+    assert not refresh_via_opend(repo_base=tmp_path, symbol="NVDA").ok
+
+
+def test_invalid_cache_can_use_existing_opend_refresh(tmp_path, monkeypatch):
+    save_cache(tmp_path / "output_shared/state/multiplier_cache.json", _entry("NVDA", 100.5, "opend"))
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend",
+                        lambda **_: RefreshResult(symbol="NVDA", ok=True, multiplier=500, source_receipt_sha256="a" * 64))
+    value, source, _ = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path, symbol="NVDA", allow_opend_refresh=True,
+    )
+    assert (value, source) == (500, "opend")

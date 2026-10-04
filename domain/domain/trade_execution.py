@@ -10,6 +10,7 @@ import re
 from typing import Any, Iterable
 
 from domain.domain.trade_contract_identity import (
+    require_option_multiplier,
     canonical_contract_symbol, derive_position_side, normalize_contract_expiration,
     normalize_contract_option_type, normalize_position_effect, normalize_trade_side,
 )
@@ -156,6 +157,41 @@ def epoch_milliseconds_instant(value: Any) -> str | None:
     fractional_digits = str(fraction).zfill(decimal_places + 3).rstrip("0")
     return instant.strftime("%Y-%m-%dT%H:%M:%S") + (f".{fractional_digits}" if fractional_digits else "") + "Z"
 
+
+def execution_source_status(payload: Mapping[str, Any]) -> str | None:
+    """Canonical Futu deal status; None means the source did not provide one."""
+    nested = payload.get("execution_input")
+    source = payload
+    if not any(name in source for name in ("deal_status", "status")) and isinstance(nested, Mapping):
+        source = nested
+    raw = source.get("deal_status", source.get("status"))
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return "unknown"
+    if isinstance(raw, int):
+        return {0: "ok", 1: "cancelled", 2: "changed"}.get(raw, "unknown")
+    value = str(raw).strip().upper()
+    return {
+        "OK": "ok", "CANCELLED": "cancelled", "CHANGED": "changed",
+    }.get(value, "unknown")
+
+
+
+def execution_source_revision(payload: Mapping[str, Any]) -> Decimal | None:
+    """Comparable broker revision only when its Unix timestamp is explicit."""
+    nested = payload.get("execution_input")
+    source = payload
+    if not any(name in source for name in ("update_timestamp", "updateTimestamp")) and isinstance(nested, Mapping):
+        source = nested
+    raw = source.get("update_timestamp", source.get("updateTimestamp"))
+    if raw is None or raw == "":
+        return None
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() and value > 0 else None
 
 def normalize_execution_input(
     payload: Mapping[str, Any], *, source_payload: Mapping[str, Any] | None = None,
@@ -453,13 +489,12 @@ def _futu_asset_type(src: dict[str, Any], option_info: dict[str, Any]) -> str | 
 def _source_multiplier_errors(src: dict[str, Any]) -> list[str]:
     supplied = {}
     for key in ("multiplier", "contract_multiplier", "lot_size"):
-        if src.get(key) in (None, ""):
+        if key not in src:
             continue
         try:
-            value = canonical_decimal(str(src[key]) if isinstance(src[key], float) else src[key])
-        except (ValueError, TypeError):
-            value = None
-        supplied[key] = _positive_int(value)
+            supplied[key] = require_option_multiplier(src[key])
+        except ValueError:
+            supplied[key] = None
     errors = [f"invalid:instrument_ref.multiplier:source_field:{key}" for key, value in supplied.items() if value is None or value <= 0]
     if len({value for value in supplied.values() if value is not None and value > 0}) > 1:
         errors.append("invalid:instrument_ref.multiplier:source_alias_conflict")

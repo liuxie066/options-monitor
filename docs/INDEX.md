@@ -64,9 +64,12 @@
 - [Order Domain Model PRD](ORDER_DOMAIN_MODEL_PRD.md)：订单/成交/持仓统一领域模型的需求真源：目标、现状证据、成功信号与验收映射。
 - [Order Domain Model Design](ORDER_DOMAIN_MODEL_DESIGN.md)：上述需求的技术实现参考（字段表、现状映射、迁移路径）；非需求真源，决策与验收以 PRD 为准。
 - [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。
+- [Option Close Realtime Design](OPTION_CLOSE_REALTIME_DESIGN.md)：零价期权即时平仓与原因迟到补齐的设计及实现边界；部署状态以运行环境为准。
+- [External Holdings Account Retirement Design](EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md)：账户退役、全局扫描风险分支退役与旧配置切换边界；前半部分保留历史设计依据。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
+- [Portfolio Assignment Scenario Design](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)：全部指派后分布来源、报价及资金覆盖的实现依据。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
 - [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的研发设计。
 - [Runtime Failure Operations](RUNTIME_FAILURE_OPERATIONS.md)：Tick 故障取证、审计时间窗、drift 导出与只读回收预览。

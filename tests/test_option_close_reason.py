@@ -17,6 +17,20 @@ from domain.domain.option_lifecycle import (
     expiration_observation_start_ms,
     derive_lifecycle_read_model,
 )
+from src.application.trades.close_reason_evidence import derive_effective_lifecycle_timing
+
+
+def test_effective_timing_tracks_last_accepted_option_close() -> None:
+    timing = derive_effective_lifecycle_timing(
+        policy={"policy_schema": "lifecycle_timing_policy.v1"},
+        option_close_evidence=[
+            {"evidence_type": "option_zero_price_close", "received_at_ms": 100},
+            {"evidence_type": "option_zero_price_close", "received_at_ms": 200},
+        ],
+    )
+
+    assert timing["first_option_close_received_at_ms"] == 100
+    assert timing["last_option_close_received_at_ms"] == 200
 
 
 def _target(**overrides) -> CloseReasonTarget:

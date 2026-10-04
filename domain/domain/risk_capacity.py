@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import math
 from typing import Any, Callable, Mapping, Sequence
 
-from domain.domain.trade_contract_identity import contract_share_quantity
+from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
@@ -307,13 +308,9 @@ def compute_sell_call_share_capacity(
     ):
         return _result("share_capacity_facts_inconsistent")
 
-    multiplier_v = _to_float(multiplier)
-    multiplier_int = int(multiplier_v) if multiplier_v is not None else 0
-    if (
-        multiplier_v is None
-        or multiplier_int <= 0
-        or float(multiplier_int) != multiplier_v
-    ):
+    try:
+        multiplier_int = require_option_multiplier(multiplier)
+    except (TypeError, ValueError):
         return _result("invalid_multiplier")
 
     covered_contracts = max(0, available) // multiplier_int
@@ -350,12 +347,9 @@ def compute_short_call_locked_shares(
             locked = float(locked) / float(total_contracts) * float(open_contracts)
         return max(0, int(locked))
 
-    multiplier_v = _to_float(multiplier)
-    if multiplier_v is None or multiplier_v <= 0:
-        return None
     try:
-        return contract_share_quantity(open_contracts, multiplier_v)
-    except ValueError:
+        return contract_share_quantity(open_contracts, multiplier)
+    except (TypeError, ValueError):
         return None
 
 
@@ -492,13 +486,12 @@ def compute_short_put_cash_secured(
 
     if cash_secured is None:
         strike_v = _to_float(strike)
-        multiplier_v = _to_float(multiplier)
-        if strike_v is None or multiplier_v is None or multiplier_v <= 0:
+        if strike_v is None:
             return None
         basis_contracts = total_contracts if total_contracts > 0 else open_contracts
         try:
-            cash_secured = strike_v * contract_share_quantity(basis_contracts, multiplier_v)
-        except ValueError:
+            cash_secured = strike_v * contract_share_quantity(basis_contracts, multiplier)
+        except (TypeError, ValueError):
             return None
 
     if total_contracts > 0 and open_contracts < total_contracts:
@@ -551,7 +544,10 @@ def allocate_opening_share_capacity(
         account = str(row.get("account") or "").strip().lower()
         symbol = str(row.get("symbol") or "").strip().upper()
         claim_id = str(row.get("claim_id") or "").strip()
-        multiplier = _positive_exact_int(row.get("multiplier"))
+        try:
+            multiplier = require_option_multiplier(row.get("multiplier"))
+        except (TypeError, ValueError):
+            multiplier = 0
         requested = _positive_exact_int(row.get("requested_contracts"))
         if not account or not symbol or not claim_id or not multiplier or not requested:
             invalid_indexes.add(index)
@@ -675,7 +671,7 @@ def withdraw_opening_share_capacity_grants(
         before = remaining.setdefault(pool, int(row["capacity_before"]))
         claim_id = str(row.get("claim_id") or "").strip()
         granted = 0 if claim_id in rejected else int(row.get("granted_contracts") or 0)
-        multiplier = int(row.get("multiplier") or 0)
+        multiplier = require_option_multiplier(row.get("multiplier"))
         granted_shares = contract_share_quantity(granted, multiplier)
         after = before - granted_shares
         if min(before, granted, multiplier, granted_shares, after) < 0:
@@ -712,17 +708,17 @@ def _cash_claim_reservation(
     )
     if amount is None:
         strike = _to_float(raw.get("strike"))
-        multiplier = _to_float(raw.get("multiplier"))
+        multiplier = raw.get("multiplier")
         contracts = _to_float(
             raw.get("requested_contracts")
             or raw.get("granted_contracts")
             or raw.get("contracts")
             or 1
         )
-        if None not in {strike, multiplier, contracts}:
+        if strike is not None and contracts is not None:
             try:
                 amount = float(strike) * contract_share_quantity(contracts, multiplier)
-            except ValueError:
+            except (TypeError, ValueError):
                 return None
     if not currency or amount is None or amount <= 0:
         return None
@@ -770,6 +766,7 @@ def allocate_wheel_put_cash_capacity(
             "account": account,
             "cash_authority": authority,
             "cash_authority_hash": fact.get("cash_authority_hash"),
+            "cash_capacity_fact_identity_hash": fact.get("capacity_identity_hash"),
             "cash_by_currency": cash,
             "cash_secured_by_currency": existing_secured,
             "ordinary_put_claims": ordinary_identity_rows,
@@ -955,7 +952,7 @@ def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> lis
         else:
             pool_key = (account, capacity_scope, symbol.lower())
             pool = share_pools.get(pool_key)
-            multiplier = _to_float(row.get("multiplier"))
+            multiplier = row.get("multiplier")
             try:
                 required = contract_share_quantity(contracts, multiplier)
             except (TypeError, ValueError):
@@ -1032,3 +1029,77 @@ def _consistent_pools(
         first = items[0]
         out[key] = first if all(abs(item - first) <= 1e-6 for item in items[1:]) else None
     return out
+
+
+def evaluate_cash_snapshot(
+    context: Mapping[str, Any], *, expected_authority: Mapping[str, Any],
+    evaluated_at: datetime, max_age_sec: Any,
+) -> dict[str, Any]:
+    """Evaluate cash evidence only; clocks, config and I/O belong to the caller."""
+    reasons: set[str] = set()
+    if context.get("portfolio_source_name") != "futu":
+        reasons.add("CASH_SOURCE_INVALID")
+    authority = context.get("capacity_authority")
+    authority = authority if isinstance(authority, Mapping) else {}
+    fields = ("logical_account", "futu_account_id", "trd_env", "market")
+    if (authority.get("source") != "opend" or authority.get("status") != "available"
+            or expected_authority.get("trd_env") not in {"REAL", "SIMULATE"}
+            or expected_authority.get("market") not in {"us", "hk"}
+            or any(not expected_authority.get(key) or authority.get(key) != expected_authority[key]
+                   for key in fields)):
+        reasons.add("CASH_IDENTITY_MISMATCH")
+    filters = context.get("filters")
+    if (not isinstance(filters, Mapping)
+            or filters.get("account") != expected_authority.get("logical_account")
+            or context.get("source_account_identifiers") != [expected_authority.get("futu_account_id")]):
+        reasons.add("CASH_IDENTITY_MISMATCH")
+    amounts = context.get("cash_by_currency")
+    if not isinstance(amounts, Mapping) or not amounts:
+        reasons.add("CASH_AMOUNT_INVALID")
+    else:
+        for currency, raw in amounts.items():
+            value = _to_float(raw)
+            if (not isinstance(currency, str) or len(currency) != 3
+                    or not currency.isascii() or not currency.isalpha() or currency != currency.upper()
+                    or value is None or not math.isfinite(value)):
+                reasons.add("CASH_AMOUNT_INVALID")
+    errors = context.get("cash_balance_unavailable_by_row")
+    if context.get("cash_balance_reliable") is not True or not isinstance(errors, Mapping) or errors:
+        reasons.add("CASH_BALANCE_UNRELIABLE")
+    source_status = context.get("cash_source_observation_status", context.get("source_observation_status"))
+    if source_status == "stale":
+        reasons.add("CASH_OBSERVATION_STALE")
+    elif source_status not in (None, "trusted"):
+        reasons.add("CASH_BALANCE_UNRELIABLE")
+    if context.get("cash_provider_error"):
+        reasons.add("CASH_PROVIDER_UNAVAILABLE")
+    ttl_valid = type(max_age_sec) is int and max_age_sec > 0
+    if not ttl_valid:
+        reasons.add("CASH_TTL_INVALID")
+    now_valid = isinstance(evaluated_at, datetime) and evaluated_at.utcoffset() is not None
+    if not now_valid:
+        reasons.add("CASH_EVALUATION_TIME_INVALID")
+    observed_raw = context.get("cash_source_observed_at")
+    observed = None
+    try:
+        if not isinstance(observed_raw, str):
+            raise ValueError("cash time missing")
+        observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
+        if observed.utcoffset() is None:
+            raise ValueError("cash time requires timezone")
+    except (ValueError, TypeError, OverflowError):
+        reasons.add("CASH_OBSERVATION_MISSING")
+        observed = None
+    if observed is not None and now_valid:
+        age = (evaluated_at - observed).total_seconds()
+        if age < 0:
+            reasons.add("CASH_OBSERVATION_IN_FUTURE")
+        elif ttl_valid and age > max_age_sec:
+            reasons.add("CASH_OBSERVATION_STALE")
+    status = "unknown" if reasons - {"CASH_OBSERVATION_STALE"} else "stale" if reasons else "fresh"
+    return {
+        "status": status, "reason_codes": sorted(reasons),
+        "source_observed_at": observed_raw if isinstance(observed_raw, str) else None,
+        "evaluated_at": evaluated_at.isoformat() if now_valid else None,
+        "max_age_sec": max_age_sec if ttl_valid else None,
+    }

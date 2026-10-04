@@ -4,10 +4,12 @@ from typing import Any
 
 import pandas as pd
 
+from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.numeric_helpers import float_or_none as _float
 
 
@@ -28,18 +30,26 @@ def build_portfolio_risk_context(
             unavailable_reasons=("holdings_context_missing",),
         )
 
-    global_portfolio = portfolio_ctx.get("_global_portfolio_ctx")
-    holdings_ctx = global_portfolio if isinstance(global_portfolio, dict) else portfolio_ctx
-    option_ctx = portfolio_ctx.get("_global_option_ctx")
-    if not isinstance(option_ctx, dict):
-        option_ctx = portfolio_ctx.get("option_ctx") if isinstance(portfolio_ctx.get("option_ctx"), dict) else {}
+    option_ctx = portfolio_ctx.get("option_ctx") if isinstance(portfolio_ctx.get("option_ctx"), dict) else {}
 
     unavailable: list[str] = []
     warnings: list[str] = []
+    position_snapshot = portfolio_ctx.get("position_snapshot_input")
+    stocks = portfolio_ctx.get("stocks_by_symbol")
+    positions_unavailable = not isinstance(stocks, dict) or not isinstance(position_snapshot, dict) or (
+        position_snapshot.get("completeness") != "complete"
+        or position_snapshot.get("quality", {}).get("status") != "ready"
+        or bool(position_snapshot.get("errors"))
+    )
+    if positions_unavailable:
+        unavailable.append("broker_positions_unavailable")
+    cash_usable = cash_snapshot_is_usable(portfolio_ctx)
+    if not cash_usable:
+        unavailable.append("broker_cash_snapshot_unavailable")
     nav_cny = 0.0
 
-    cash_by_currency = holdings_ctx.get("cash_by_currency") if isinstance(holdings_ctx, dict) else {}
-    if isinstance(cash_by_currency, dict):
+    cash_by_currency = portfolio_ctx.get("cash_by_currency")
+    if cash_usable and isinstance(cash_by_currency, dict):
         for ccy, raw_amount in cash_by_currency.items():
             amount_cny = amount_to_cny(raw_amount, ccy, exchange_rate_converter=exchange_rate_converter)
             if amount_cny is None:
@@ -48,7 +58,6 @@ def build_portfolio_risk_context(
             nav_cny += float(amount_cny)
 
     stock_value_by_symbol: dict[str, float] = {}
-    stocks = holdings_ctx.get("stocks_by_symbol") if isinstance(holdings_ctx, dict) else {}
     if isinstance(stocks, dict):
         for raw_symbol, raw_stock in stocks.items():
             if not isinstance(raw_stock, dict):
@@ -73,12 +82,13 @@ def build_portfolio_risk_context(
 
     short_put_by_symbol, short_put_total, short_put_unavailable = _short_put_assignment_from_option_ctx(
         option_ctx,
+        portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
     )
     unavailable.extend(short_put_unavailable)
 
     return PortfolioRiskContext(
-        nav_cny=nav_cny if nav_cny > 0 else None,
+        nav_cny=nav_cny if nav_cny > 0 and cash_usable and not positions_unavailable and not any(reason.startswith("cash_fx_missing:") for reason in unavailable) else None,
         stock_value_cny_by_symbol=stock_value_by_symbol,
         short_put_assignment_cny_by_symbol=short_put_by_symbol,
         short_put_assignment_total_cny=short_put_total,
@@ -161,6 +171,7 @@ def _stock_value_cny(
 def _short_put_assignment_from_option_ctx(
     option_ctx: dict[str, Any],
     *,
+    portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
 ) -> tuple[dict[str, float], float | None, list[str]]:
     unavailable: list[str] = []
@@ -197,9 +208,12 @@ def _short_put_assignment_from_option_ctx(
                 total_cny += float(converted)
     if total_cny is None and by_symbol:
         total_cny = sum(by_symbol.values())
-    if isinstance(option_ctx.get("cash_secured_unavailable_by_symbol"), dict):
-        for raw_symbol, reason in option_ctx.get("cash_secured_unavailable_by_symbol", {}).items():
+    unresolved = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
+    if isinstance(unresolved, dict):
+        for raw_symbol, reason in unresolved.items():
             unavailable.append(f"{canonical_symbol(raw_symbol) or raw_symbol}:{reason}")
+    elif unresolved is not None:
+        unavailable.append(str(unresolved))
     return by_symbol, total_cny, unavailable
 
 
@@ -209,5 +223,3 @@ def _first_float(row: dict[str, Any], *keys: str) -> float | None:
         if value is not None:
             return value
     return None
-
-

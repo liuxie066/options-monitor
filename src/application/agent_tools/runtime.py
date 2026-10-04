@@ -546,7 +546,7 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
     output_contract=_RUNTIME_RUNS_OUTPUT_CONTRACT,
     output_contract_resolver=lambda payload: _SCOPED_RUNS_CONTRACT if payload.get("action") == "scoped" else _RUNTIME_RUNS_OUTPUT_CONTRACT,
     bot_input_normalizer=_scoped_runtime_input,
-    bot_input_fields=("action", "account", "cursor", "limit", "run_id", "scanned_only"),
+    bot_input_fields=("config_key", "action", "account", "cursor", "limit", "run_id", "scanned_only"),
 )
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
@@ -584,7 +584,7 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
     output_contract=_RUNTIME_LOGS_OUTPUT_CONTRACT,
     output_contract_resolver=lambda payload: _SCOPED_LOGS_CONTRACT if payload.get("action") == "scoped" else _RUNTIME_LOGS_OUTPUT_CONTRACT,
     bot_input_normalizer=_scoped_logs_input,
-    bot_input_fields=("action", "account", "run_id", "limit", "cursor"),
+    bot_input_fields=("config_key", "action", "account", "run_id", "limit", "cursor"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

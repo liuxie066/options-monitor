@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import CancelledError
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
-from src.application.account_config import build_account_portfolio_source_plan
-import src.application.portfolio_context_builder as holdings_context
+from domain.domain.risk_capacity import evaluate_cash_snapshot
+from domain.domain.position_snapshot import position_snapshot_scope_errors
+from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
+from src.application.config_defaults import cash_snapshot_ttl_sec
+from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
+from src.infrastructure.exchange_rates import exchange_rate_observation_status
+from src.infrastructure.io_utils import atomic_write_json
 
-load_holdings_portfolio_context = holdings_context.load_holdings_portfolio_context
-load_holdings_portfolio_shared_context = holdings_context.load_holdings_portfolio_shared_context
-slice_shared_context_for_account = holdings_context.slice_shared_context_for_account
+_FX_NOT_PROVIDED = object()
 
 
 JsonLoader = Callable[[Path], Optional[dict]]
-FreshnessChecker = Callable[[Path, int], bool]
 Logger = Callable[[str], None]
 
 
@@ -28,13 +33,6 @@ def _read_json_from_path(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"expected JSON object: {path}")
     return payload
-
-
-def _load_json_payload(load_json_fn: JsonLoader, path: Path) -> dict[str, Any]:
-    payload = load_json_fn(path)
-    if isinstance(payload, dict) and payload:
-        return payload
-    return _read_json_from_path(path)
 
 
 def portfolio_context_account_mismatch_reason(
@@ -81,185 +79,159 @@ def _validate_portfolio_context_account(
     return False
 
 
-def expected_portfolio_context_account(
-    *,
-    source_name: str,
-    account: str | None,
-    holdings_account: str | None,
-) -> str | None:
-    source_norm = str(source_name or "").strip().lower()
-    if source_norm == "futu":
-        return str(account or "").strip().lower() or None
-    return str(holdings_account or account or "").strip().lower() or None
+def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
+    """Consume a well-formed shared verdict; never reconstruct one from legacy flags."""
+    snapshot = context.get("cash_snapshot")
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {
+        "status", "reason_codes", "source_observed_at", "evaluated_at", "max_age_sec",
+    }:
+        return False
+    if (snapshot["status"] != "fresh" or snapshot["reason_codes"] != []
+            or type(snapshot["max_age_sec"]) is not int or snapshot["max_age_sec"] <= 0):
+        return False
+    for key in ("source_observed_at", "evaluated_at"):
+        try:
+            value = snapshot[key]
+            if not isinstance(value, str) or datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() is None:
+                return False
+        except (ValueError, TypeError, OverflowError):
+            return False
+    return True
+
+
+def evaluate_account_cash_snapshot(
+    context: Mapping[str, Any], *, config: Mapping[str, Any], account: str | None,
+    evaluated_at: datetime,
+) -> dict[str, Any]:
+    """Evaluate retained or live cash with the same effective account policy."""
+    try:
+        ttl = cash_snapshot_ttl_sec(config)
+    except ValueError:
+        ttl = None
+    try:
+        ids = resolve_futu_account_ids(config, account=account)
+        settings = infer_futu_portfolio_settings(config, account=account)
+    except ValueError:
+        ids, settings = [], {}
+    portfolio_cfg = config.get("portfolio") or {}
+    base_currency = str(portfolio_cfg.get("base_currency") or "CNY")
+    expected = {
+        "logical_account": str(account or "").strip().lower(),
+        "futu_account_id": str(ids[0]) if len(ids) == 1 else None,
+        "trd_env": settings.get("trd_env"),
+        "market": _runtime_market(config, fallback=base_currency),
+    }
+
+    return evaluate_cash_snapshot(
+        context, expected_authority=expected, evaluated_at=evaluated_at, max_age_sec=ttl,
+    )
+
+
+def cash_snapshot_evidence(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Stable decision inputs; evaluation time and the derived verdict are excluded."""
+    keys = (
+        "portfolio_source_name", "capacity_authority", "capacity_identity_hash",
+        "filters", "source_account_identifiers", "cash_by_currency",
+        "cash_balance_reliable", "cash_balance_unavailable_by_row",
+        "cash_source_observed_at", "cash_source_observation_status",
+        "source_observation_status", "cash_provider_error",
+    )
+    snapshot = context.get("cash_snapshot")
+    return {**{key: deepcopy(context[key]) for key in keys if key in context},
+            "max_age_sec": snapshot.get("max_age_sec") if isinstance(snapshot, Mapping) else None}
 
 
 def load_account_portfolio_context(
     *,
-    base: Path,
-    data_config: str,
     market: str,
     account: str | None,
-    ttl_sec: int,
     state_dir: Path,
-    shared_state_dir: Path | None,
     log: Logger,
     runtime_config: dict[str, Any] | None,
     portfolio_source: str | None,
     fetch_futu_portfolio_context_fn: Callable[..., dict[str, Any]],
-    is_fresh_fn: FreshnessChecker,
-    load_json_fn: JsonLoader,
+    load_json_fn: JsonLoader = _read_json_from_path,
     write_cache: bool = True,
+    exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
+    exchange_rate_cache_path: Path | None = None,
+    include_options: bool = False,
+    required_position_asset_types: tuple[str, ...] = (),
+    now_utc: datetime | None = None,
 ) -> dict[str, Any]:
+    config = runtime_config or {}
     port_path = (state_dir / "portfolio_context.json").resolve()
-    plan = build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
-    holdings_source_name = "external_holdings" if plan.primary_source == "external_holdings" else "holdings"
-    allow_holdings_fallback = (
-        plan.primary_source in {"futu", "external_holdings"} and str(plan.requested_source or "").strip().lower() == "auto"
-    ) or plan.primary_source == "external_holdings"
-
-    cached = None
+    build_account_portfolio_source_plan(config, account=account, portfolio_source=portfolio_source)
+    ttl = None
     try:
-        if ttl_sec > 0 and is_fresh_fn(port_path, ttl_sec):
-            cached = load_json_fn(port_path)
+        ttl = cash_snapshot_ttl_sec(config)
+    except ValueError as exc:
+        log(f"[CTX] cash config unavailable: {exc}")
+
+    def evaluate(context: dict[str, Any], source: str) -> dict[str, Any]:
+        result = deepcopy(context)
+        result["context_source"] = source
+        result["cash_snapshot"] = evaluate_account_cash_snapshot(
+            result, config=config, account=account,
+            evaluated_at=now_utc or datetime.now(timezone.utc),
+        )
+        if exchange_rate_observation is not _FX_NOT_PROVIDED:
+            result["exchange_rates"] = deepcopy(dict(exchange_rate_observation)) if isinstance(exchange_rate_observation, Mapping) else None
+            result["exchange_rate_status"] = exchange_rate_observation_status(
+                result["exchange_rates"], max_age_hours=24,
+            )
+        return result
+
+    if ttl is None:
+        return evaluate({}, "unavailable")
+    try:
+        cached = load_json_fn(port_path)
+    except (TimeoutError, CancelledError):
+        raise
     except Exception:
         cached = None
-
-    cached_source = str((cached or {}).get("portfolio_source_name") or "").strip().lower() if isinstance(cached, dict) else ""
     if isinstance(cached, dict):
-        if cached_source == plan.primary_source:
-            expected_account = expected_portfolio_context_account(
-                source_name=cached_source,
-                account=account,
-                holdings_account=plan.holdings_account,
+        result = evaluate(cached, "account_cache")
+        assets = required_position_asset_types or (("stock", "option") if include_options else ())
+        snapshot = result.get("position_snapshot_input")
+        snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+        authority = result.get("capacity_authority")
+        authority = authority if isinstance(authority, Mapping) else {}
+        position_errors = [
+            error for asset in assets if cash_snapshot_is_usable(result)
+            for error in position_snapshot_scope_errors(
+                snapshot, account_label=str(account or "").lower(),
+                external_account_id=authority.get("futu_account_id"), environment=str(authority.get("trd_env") or ""),
+                market=authority.get("market"), asset_type=asset,
+                now_utc=now_utc or datetime.now(timezone.utc),
+                max_age_seconds=60 if include_options else 300,
             )
-            if _validate_portfolio_context_account(cached, requested_account=expected_account, log=log, source="account_cache"):
-                cached = with_context_source(cached, "account_cache")
-                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                return cached
-        if plan.primary_source == "external_holdings" and cached_source in {"holdings", "external_holdings"}:
-            expected_account = expected_portfolio_context_account(
-                source_name=cached_source,
-                account=account,
-                holdings_account=plan.holdings_account,
-            )
-            if _validate_portfolio_context_account(cached, requested_account=expected_account, log=log, source="account_cache"):
-                cached = with_context_source(cached, "account_cache")
-                log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
-                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                return cached
-
-    portfolio_cfg = (runtime_config.get("portfolio") or {}) if isinstance(runtime_config, dict) else {}
-    if plan.primary_source == "futu":
-        try:
-            ctx = fetch_futu_portfolio_context_fn(
-                cfg=(runtime_config or {}),
-                account=account,
-                market=str(market),
-                base_currency=str(portfolio_cfg.get("base_currency") or "CNY"),
-                )
-            ctx = dict(ctx)
-            ctx["portfolio_source_name"] = "futu"
-            expected_account = expected_portfolio_context_account(
-                source_name="futu",
-                account=account,
-                holdings_account=plan.holdings_account,
-            )
-            if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source="futu_direct"):
-                raise ValueError("futu_direct account mismatch")
-            ctx = with_context_source(ctx, "futu_direct")
-            if write_cache:
-                port_path.parent.mkdir(parents=True, exist_ok=True)
-                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-            log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
-            return ctx
-        except Exception as exc:
-            if not allow_holdings_fallback:
-                raise
-            log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} error={exc}")
-
-    holdings_account = plan.holdings_account
-    shared_root = (shared_state_dir or state_dir).resolve()
-    if write_cache:
-        shared_root.mkdir(parents=True, exist_ok=True)
-    shared_path = (shared_root / "portfolio_context.shared.json").resolve()
-
+        ]
+        account_valid = _validate_portfolio_context_account(result, requested_account=account, log=log, source="account_cache")
+        if cash_snapshot_is_usable(result) and not position_errors and account_valid:
+            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+            return result
+    kwargs: dict[str, Any] = {
+        "cfg": config, "account": account, "market": str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
+        "write_cache": write_cache,
+        "exchange_rate_cache_path": exchange_rate_cache_path or state_dir / "rate_cache.json",
+    }
+    if include_options:
+        kwargs["include_options"] = True
+    if exchange_rate_observation is not _FX_NOT_PROVIDED:
+        kwargs["exchange_rate_observation"] = exchange_rate_observation
     try:
-        if ttl_sec > 0 and is_fresh_fn(shared_path, ttl_sec):
-            shared_cached = load_json_fn(shared_path)
-            if isinstance(shared_cached, dict):
-                sliced = slice_shared_context_for_account(shared_cached, holdings_account)
-                if isinstance(sliced, dict):
-                    expected_account = expected_portfolio_context_account(
-                        source_name=holdings_source_name,
-                        account=account,
-                        holdings_account=holdings_account,
-                    )
-                    if not _validate_portfolio_context_account(sliced, requested_account=expected_account, log=log, source="shared_slice"):
-                        raise ValueError("shared slice account mismatch")
-                    sliced = dict(sliced)
-                    sliced["portfolio_source_name"] = holdings_source_name
-                    sliced = with_context_source(sliced, "shared_slice")
-                    if write_cache:
-                        port_path.parent.mkdir(parents=True, exist_ok=True)
-                        port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding="utf-8")
-                    log(f"[CTX] portfolio_context source=shared_slice account={holdings_account or '-'}")
-                    return sliced
-    except Exception:
-        pass
-
-    refresh_sources = ((shared_path, "shared_refresh"), (None, "direct_fetch")) if write_cache else ((None, "direct_fetch"),)
-    for shared_out, context_source in refresh_sources:
-        try:
-            if shared_out is not None:
-                shared_ctx = load_holdings_portfolio_shared_context(
-                    data_config_path=Path(data_config),
-                    broker=str(market),
-                )
-                if write_cache:
-                    shared_out.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-                ctx = dict(slice_shared_context_for_account(shared_ctx, holdings_account) or {})
-            else:
-                ctx = load_holdings_portfolio_context(
-                    data_config_path=Path(data_config),
-                    broker=str(market),
-                    account=holdings_account,
-                )
-            if not ctx:
-                ctx = dict(_load_json_payload(load_json_fn, port_path))
-            expected_account = expected_portfolio_context_account(
-                source_name=holdings_source_name,
-                account=account,
-                holdings_account=holdings_account,
-            )
-            if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source=context_source):
-                raise ValueError(f"{context_source} account mismatch")
-            ctx["portfolio_source_name"] = holdings_source_name
-            ctx = with_context_source(ctx, context_source)
-            if write_cache:
-                port_path.parent.mkdir(parents=True, exist_ok=True)
-                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-            log(f"[CTX] portfolio_context source={context_source} account={holdings_account or '-'}")
-            return ctx
-        except Exception:
-            if shared_out is None:
-                if allow_holdings_fallback:
-                    cached_fallback = _load_json_payload(load_json_fn, port_path)
-                    expected_account = expected_portfolio_context_account(
-                        source_name=holdings_source_name,
-                        account=account,
-                        holdings_account=holdings_account,
-                    )
-                    if not _validate_portfolio_context_account(
-                        cached_fallback,
-                        requested_account=expected_account,
-                        log=log,
-                        source="account_cache",
-                    ):
-                        raise
-                    cached_fallback["portfolio_source_name"] = holdings_source_name
-                    cached_fallback = with_context_source(cached_fallback, "account_cache")
-                    log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
-                    log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                    return cached_fallback
-                raise
-    raise RuntimeError("unreachable")
+        context = fetch_futu_portfolio_context_fn(**kwargs)
+        if not isinstance(context, dict):
+            raise ValueError("portfolio response is not an object")
+    except (TimeoutError, CancelledError):
+        raise
+    except Exception as exc:
+        log(f"[WARN] portfolio cash provider unavailable: {exc}")
+        return evaluate({"cash_provider_error": type(exc).__name__}, "unavailable")
+    result = evaluate(context, "futu_direct")
+    if not _validate_portfolio_context_account(result, requested_account=account, log=log, source="futu_direct"):
+        raise ValueError("futu_direct account mismatch")
+    if write_cache:
+        atomic_write_json(port_path, result)
+    log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
+    return result

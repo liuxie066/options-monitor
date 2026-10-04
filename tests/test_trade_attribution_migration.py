@@ -46,7 +46,20 @@ def test_migration_requires_drain_fresh_manifest_and_verified_backup(tmp_path, m
         conn.execute("DELETE FROM combo_pair_inferences")
 
 
-def test_attribution_enable_public_cli_preview_apply_and_replay(tmp_path, monkeypatch, capsys):
+
+def test_retired_attribution_enable_command_is_not_registered():
+    from src.application.trades.auto_intake import parse_args
+    from src.application.ledger import api
+    from src.application.ledger import writer_trade_events
+    with pytest.raises(SystemExit):
+        parse_args(["attribution-enable", "--config", "config.us.json"])
+    assert not hasattr(api, "enable_trade_attribution_policy")
+    assert not hasattr(api, "record_trade_event_with_wheel_intent")
+    assert not hasattr(writer_trade_events, "persist_trade_event_with_wheel_intent")
+
+
+def test_attribution_migration_cli_previews_and_applies_exact_source(tmp_path, monkeypatch, capsys):
+    import json
     from types import SimpleNamespace
     from src.application.trades import auto_intake, attribution
     from src.application.ledger.api import read_trade_attribution_policy
@@ -58,19 +71,21 @@ def test_attribution_enable_public_cli_preview_apply_and_replay(tmp_path, monkey
     monkeypatch.setattr(attribution, "resolve_ledger_store", lambda *a, **k: SimpleNamespace(sqlite_path=repo.db_path, runtime_root=tmp_path))
     monkeypatch.setattr(attribution, "ledger_store_write_guard", lambda *a, **k: {"ok": True})
     monkeypatch.setattr("time.time", lambda: 1)
-    args = ["attribution-enable", "--config", str(tmp_path / "config.us.json"), "--account", "lx",
-            "--actor", "operator", "--request-id", "enable-v1", "--effective-from-ms", "2000"]
+    args = ["attribution-migrate", "--config", str(tmp_path / "config.us.json"), "--account", "lx",
+            "--effective-from-ms", "2000"]
     scope = {"broker": "futu", "physical_account_id": "1001", "environment": "REAL", "account": "lx", "market": "us"}
     assert auto_intake.main([*args, "--dry-run"]) == 0
+    preview = preview_trade_attribution_migration(repo.db_path, scope=scope, effective_from_ms=2000)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(preview), encoding="utf-8")
     assert read_trade_attribution_policy(repo, scope=scope) is None
-    assert auto_intake.main([*args, "--apply"]) == 2
-    assert read_trade_attribution_policy(repo, scope=scope) is None
-    assert auto_intake.main([*args, "--apply", "--confirm"]) == 0
-    first = read_trade_attribution_policy(repo, scope=scope)
-    assert first["effective_from_ms"] == 2000
-    assert auto_intake.main([*args, "--apply", "--confirm"]) == 0
-    assert read_trade_attribution_policy(repo, scope=scope) == first
+    assert auto_intake.main([*args, "--apply", "--manifest", str(manifest),
+        "--backup-path", str(tmp_path / "backup.sqlite3"), "--writers-stopped"]) == 2
+    assert auto_intake.main([*args, "--apply", "--confirm", "--manifest", str(manifest),
+        "--backup-path", str(tmp_path / "backup.sqlite3"), "--writers-stopped"]) == 0
+    assert read_trade_attribution_policy(repo, scope=scope)["effective_from_ms"] == 2000
     assert auto_intake.main([*args, "--once"]) == 2
+
 
 
 def _populated_legacy_ledger(tmp_path, monkeypatch):

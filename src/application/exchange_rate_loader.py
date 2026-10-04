@@ -7,12 +7,13 @@ This wraps the legacy rate-cache reading into a single helper.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from src.infrastructure.exchange_rates import (
     CurrencyConverter,
     ExchangeRates,
-    fetch_market_exchange_rates,
+    get_exchange_rates_or_fetch_latest,
 )
 
 
@@ -40,4 +41,6 @@ def fetch_opend_exchange_rate_observation(
     """
 
     del configs
-    return fetch_market_exchange_rates()
+    return get_exchange_rates_or_fetch_latest(
+        cache_path=Path(__file__).resolve().parents[2] / "output_shared" / "state" / "rate_cache.json",
+    )

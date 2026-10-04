@@ -12,10 +12,10 @@ Design constraints:
 - best-effort context (should not fail the whole pipeline in scheduled mode)
 """
 
-import json
 from pathlib import Path
+from typing import Mapping
 
-from src.application.account_config import build_account_portfolio_source_plan
+from src.application.account_config import accounts_from_config, build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
     STRATEGY_FAMILY_SOURCE,
@@ -28,12 +28,12 @@ from src.infrastructure.io_utils import atomic_write_json, is_fresh, load_cached
 from src.application.ledger.api import (
     decision_state_snapshot,
     list_position_lot_snapshots,
+    position_lot_risk_view,
     open_position_ledger,
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
-    load_holdings_portfolio_shared_context,
     with_context_source,
 )
 from src.application.prepared_portfolio_context import (
@@ -45,10 +45,15 @@ from src.application.prepared_option_positions_context import (
     exchange_rate_scalars_from_option_context,
     load_prepared_option_positions_context,
 )
+from src.application.current_fx_run import load_run_fx_snapshot
+from src.infrastructure.exchange_rates import (
+    exchange_rate_observation_status,
+    get_exchange_rates_or_fetch_latest,
+    project_exchange_rate_snapshot,
+)
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
-from src.application.strategy_policy import wants_global_path_risk_context
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
@@ -66,13 +71,15 @@ def _load_option_position_records(data_config: str) -> tuple[object, list[dict]]
 def _decision_snapshots_for_records(
     repo: object,
     records: list[dict],
+    *,
+    accounts: tuple[str, ...] = (),
 ) -> dict[str, dict]:
     accounts = sorted(
-        {
-            str((item.get("fields") or {}).get("account") or "").strip().lower()
+        {str(account).strip().lower() for account in accounts if str(account).strip()} | {
+            account
             for item in records
             if isinstance(item, dict)
-            and str((item.get("fields") or {}).get("account") or "").strip()
+            and (account := position_lot_risk_view(item).account)
         }
     )
     return {
@@ -85,38 +92,39 @@ def _decision_snapshots_for_records(
     }
 
 
+_PORTFOLIO_FX_NOT_PROVIDED = object()
+
+
 def load_portfolio_context(
     *,
     data_config: str,
     market: str,
     account: str | None,
-    ttl_sec: int,
     base: Path,
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
     runtime_config: dict | None = None,
     portfolio_source: str | None = None,
+    exchange_rate_observation: Mapping | None | object = _PORTFOLIO_FX_NOT_PROVIDED,
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
     try:
         ctx = load_account_portfolio_context(
-            base=base,
-            data_config=data_config,
             market=market,
             account=account,
-            ttl_sec=ttl_sec,
             state_dir=state_dir,
-            shared_state_dir=shared_state_dir,
             log=log,
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
-            is_fresh_fn=is_fresh,
+            exchange_rate_cache_path=(shared_state_dir or state_dir) / "rate_cache.json",
+            **({"exchange_rate_observation": exchange_rate_observation} if exchange_rate_observation is not _PORTFOLIO_FX_NOT_PROVIDED else {}),
             load_json_fn=load_cached_json,
         )
-        snap = adapt_holdings_context(ctx)
-        _persist_source_snapshot(base, snap)
+        if isinstance(ctx.get("cash_by_currency"), dict) and isinstance(ctx.get("stocks_by_symbol"), dict):
+            snap = adapt_holdings_context(ctx)
+            _persist_source_snapshot(base, snap)
         return ctx
     except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
@@ -133,13 +141,21 @@ def load_option_positions_context(
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
+    exchange_rate_observation: Mapping | None = None,
+    runtime_config: dict | None = None,
 ) -> tuple[dict | None, bool]:
     """Best-effort load position-lot context.
 
     Returns (context, refreshed).
     """
     try:
+        requested_accounts = (account,) if account else tuple(accounts_from_config(runtime_config, fallback=()))
+        if not requested_accounts:
+            raise ValueError("aggregate option context requires configured account scope")
+        current_decision_snapshot: dict | None = None
+
         def _is_exact_account(context: dict, *, source: str) -> bool:
+            nonlocal current_decision_snapshot
             try:
                 validate_option_positions_context_account(
                     context,
@@ -158,6 +174,23 @@ def load_option_positions_context(
                         f"{context.get('strategy_family_source')!r}, expected "
                         f"{STRATEGY_FAMILY_SOURCE!r})"
                     )
+                if source in {"account_cache", "shared_slice"}:
+                    if not account:
+                        # Aggregate contexts have no single decision snapshot;
+                        # rebuild through the per-account decision owners.
+                        return False
+                    if current_decision_snapshot is None:
+                        normalized_account = str(account).strip().lower()
+                        current_decision_snapshot = decision_state_snapshot(
+                            open_position_ledger(Path(data_config)),
+                            account=normalized_account,
+                            portfolio_scope_id=portfolio_scope_id(normalized_account),
+                        )
+                    if (
+                        current_decision_snapshot.get("snapshot_status") != "trusted"
+                        or context.get("decision_snapshot_status") != "trusted"
+                    ):
+                        raise ValueError("cached option context has no trusted current decision snapshot")
                 return True
             except ValueError as exc:
                 log(
@@ -208,14 +241,12 @@ def load_option_positions_context(
         # Refresh shared cache (single fetch) and produce account context in one command.
         try:
             _repo, records = _load_option_position_records(data_config)
-            rates = _load_option_position_exchange_rates(
-                base=base,
-                state_dir=shared_root,
-                log=log,
-            )
+            rates = (exchange_rate_observation if exchange_rate_observation is not None
+                     else _load_option_position_exchange_rates(base=base, state_dir=shared_root, log=log))
             decision_snapshots = _decision_snapshots_for_records(
                 _repo,
                 records,
+                accounts=requested_accounts,
             )
             shared_ctx = build_shared_option_positions_context(
                 records,
@@ -245,12 +276,11 @@ def load_option_positions_context(
             pass
 
         # Fallback: direct per-account fetch path.
+        if not account:
+            raise ValueError("aggregate option context requires per-account decision snapshots")
         _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(
-            base=base,
-            state_dir=shared_root,
-            log=log,
-        )
+        rates = (exchange_rate_observation if exchange_rate_observation is not None
+                 else _load_option_position_exchange_rates(base=base, state_dir=shared_root, log=log))
         normalized_account = str(account or "").strip().lower()
         decision_snapshot = (
             decision_state_snapshot(
@@ -298,91 +328,6 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         return None
 
 
-def load_global_holdings_risk_context(
-    *,
-    base: Path,
-    data_config: str,
-    ttl_sec: int,
-    shared_state_dir: Path | None,
-    state_dir: Path,
-    log,
-) -> dict | None:
-    """Best-effort all-broker holdings context for portfolio risk limits."""
-
-    try:
-        shared_root = (shared_state_dir or state_dir).resolve()
-        shared_root.mkdir(parents=True, exist_ok=True)
-        path = (shared_root / "portfolio_context.global.json").resolve()
-        if ttl_sec > 0 and is_fresh(path, ttl_sec):
-            cached = load_cached_json(path)
-            if isinstance(cached, dict):
-                cached = with_context_source(cached, "global_cache")
-                log("[CTX] portfolio_context source=global_cache account=all broker=all")
-                return cached
-
-        shared_ctx = load_holdings_portfolio_shared_context(
-            data_config_path=Path(data_config),
-            broker=None,
-        )
-        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
-        if not isinstance(all_accounts, dict):
-            raise ValueError("global holdings context missing all_accounts")
-        out = dict(all_accounts)
-        out["portfolio_source_name"] = "holdings_global"
-        out = with_context_source(out, "global_refresh")
-        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        log("[CTX] portfolio_context source=global_refresh account=all broker=all")
-        snap = adapt_holdings_context(out)
-        _persist_source_snapshot(base, snap)
-        return out
-    except Exception as exc:
-        log(f"[WARN] global holdings risk context not available: {exc}")
-        return None
-
-
-def load_global_option_positions_risk_context(
-    *,
-    base: Path,
-    data_config: str,
-    ttl_sec: int,
-    shared_state_dir: Path | None,
-    state_dir: Path,
-    log,
-) -> dict | None:
-    """Best-effort all-broker option-position context for short-put exposure."""
-
-    try:
-        shared_root = (shared_state_dir or state_dir).resolve()
-        shared_root.mkdir(parents=True, exist_ok=True)
-        path = (shared_root / "option_positions_context.global.json").resolve()
-        if ttl_sec > 0 and is_fresh(path, ttl_sec):
-            cached = load_cached_json(path)
-            if isinstance(cached, dict):
-                cached = with_context_source(cached, "global_cache")
-                log("[CTX] option_positions_context source=global_cache account=all broker=all")
-                return cached
-
-        _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(
-            base=base,
-            state_dir=shared_root,
-            log=log,
-        )
-        shared_ctx = build_shared_option_positions_context(records, broker="", rates=rates)
-        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
-        if not isinstance(all_accounts, dict):
-            raise ValueError("global option positions context missing all_accounts")
-        out = dict(all_accounts)
-        out = with_context_source(out, "global_refresh")
-        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        log("[CTX] option_positions_context source=global_refresh account=all broker=all")
-        snap = adapt_option_positions_context(out)
-        _persist_source_snapshot(base, snap)
-        return out
-    except Exception as exc:
-        log(f"[WARN] global option positions risk context not available: {exc}")
-        return None
-
 def load_exchange_rates(
     *,
     base: Path,
@@ -390,6 +335,7 @@ def load_exchange_rates(
     log,
     shared_state_dir: Path | None = None,
     status_out: dict[str, str] | None = None,
+    exchange_rate_observation: Mapping | None = None,
 ) -> tuple[float | None, float | None]:
     """Best-effort exchange-rate loader.
 
@@ -401,9 +347,7 @@ def load_exchange_rates(
     if status_out is not None:
         status_out["status"] = "unavailable"
     try:
-        from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
-
-        rates_obj = get_exchange_rates_or_fetch_latest(
+        rates_obj = exchange_rate_observation if exchange_rate_observation is not None else get_exchange_rates_or_fetch_latest(
             cache_path=(
                 (shared_state_dir or state_dir) / "rate_cache.json"
             ).resolve(),
@@ -424,11 +368,8 @@ def load_exchange_rates(
                 cny_per_hkd_exchange_rate = None
             if usdcny and usdcny > 0:
                 usd_per_cny_exchange_rate = 1.0 / usdcny
-            if status_out is not None and (
-                usd_per_cny_exchange_rate is not None
-                or cny_per_hkd_exchange_rate is not None
-            ):
-                status_out["status"] = "ready"
+            if status_out is not None:
+                status_out["status"] = exchange_rate_observation_status(rates_obj)
     except Exception as e:
         log(f"[WARN] exchange rates not available: {e}")
     return usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate
@@ -483,7 +424,17 @@ def build_pipeline_context(
 
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
-    ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if is_scheduled else 60) or 0)
+    direct_fx: Mapping | None = None
+    if prepared_portfolio_context_manifest is None and prepared_option_positions_context_manifest is None:
+        try:
+            direct_fx = get_exchange_rates_or_fetch_latest(
+                cache_path=((shared_state_dir or state_dir) / "rate_cache.json").resolve(),
+                max_age_hours=24,
+                log=log,
+            ) or {}
+        except Exception as exc:
+            log(f"[WARN] exchange rates not available: {exc}")
+            direct_fx = {}
 
     if prepared_portfolio_context_manifest is not None:
         try:
@@ -511,19 +462,15 @@ def build_pipeline_context(
             data_config=str(data_config),
             market=str(broker),
             account=(str(account) if account else None),
-            ttl_sec=ttl_port_ctx,
             state_dir=state_dir,
             shared_state_dir=shared_state_dir,
             log=log,
             runtime_config=cfg,
             portfolio_source=str(portfolio_source),
+            exchange_rate_observation=direct_fx,
         )
 
     if prepared_option_positions_context_manifest is not None:
-        if wants_global_path_risk_context(cfg):
-            raise PreparedOptionPositionsContextError(
-                "prepared option context does not support global path risk"
-            )
         try:
             option_ctx = load_prepared_option_positions_context(
                 manifest_path=(
@@ -564,34 +511,70 @@ def build_pipeline_context(
             state_dir=state_dir,
             shared_state_dir=shared_state_dir,
             log=log,
+            exchange_rate_observation=direct_fx,
+            runtime_config=cfg,
         )
 
-    if portfolio_ctx is not None and wants_global_path_risk_context(cfg):
-        portfolio_ctx = dict(portfolio_ctx)
-        if prepared_portfolio_context_manifest is None:
-            global_portfolio_ctx = load_global_holdings_risk_context(
-                base=base,
-                data_config=str(data_config),
-                ttl_sec=ttl_port_ctx,
-                shared_state_dir=shared_state_dir,
-                state_dir=state_dir,
-                log=log,
-            )
-            if global_portfolio_ctx is not None:
-                portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
-        if prepared_option_positions_context_manifest is None:
-            global_option_ctx = load_global_option_positions_risk_context(
-                base=base,
-                data_config=str(data_config),
-                ttl_sec=ttl_opt_ctx,
-                shared_state_dir=shared_state_dir,
-                state_dir=state_dir,
-                log=log,
-            )
-            if global_option_ctx is not None:
-                portfolio_ctx["_global_option_ctx"] = global_option_ctx
+    if direct_fx is not None:
+        if isinstance(portfolio_ctx, dict) and "exchange_rates" in portfolio_ctx:
+            portfolio_ctx = dict(portfolio_ctx)
+            portfolio_ctx["exchange_rates"] = direct_fx
+            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(direct_fx)
+        if isinstance(option_ctx, dict) and "exchange_rates" in option_ctx:
+            prior = option_ctx.get("exchange_rates")
+            prior_rates = prior.get("rates") if isinstance(prior, dict) else None
+            current_rates = direct_fx.get("rates") if isinstance(direct_fx.get("rates"), dict) else {}
+            secured = option_ctx.get("cash_secured_total_by_ccy")
+            required_pairs = {
+                {"USD": "USDCNY", "HKD": "HKDCNY"}[ccy]
+                for ccy, amount in (secured.items() if isinstance(secured, dict) else ())
+                if ccy in {"USD", "HKD"} and amount
+            }
+            option_ctx = dict(option_ctx)
+            option_ctx["exchange_rates"] = direct_fx
+            if not isinstance(prior_rates, dict) or any(
+                prior_rates.get(pair) != current_rates.get(pair) for pair in required_pairs
+            ):
+                option_ctx["cash_secured_total_cny"] = None
 
     if prepared_option_positions_context_manifest is not None:
+        fx_authority = option_ctx.get("prepared_authority") if isinstance(option_ctx, dict) else None
+        if (
+            isinstance(option_ctx, dict)
+            and isinstance(portfolio_ctx, dict)
+            and (
+                portfolio_ctx.get("fx_snapshot_sha256")
+                or (fx_authority.get("run_fx_snapshot_sha256") if isinstance(fx_authority, dict) else None)
+            )
+        ):
+            run_id = str(prepared_option_positions_context_run_id or "")
+            snapshot, fx_hash = load_run_fx_snapshot(base=base, run_id=run_id)
+            authority = option_ctx.get("prepared_authority")
+            if (
+                portfolio_ctx.get("fx_snapshot_sha256") != fx_hash
+                or not isinstance(authority, dict)
+                or authority.get("run_fx_snapshot_sha256") != fx_hash
+            ):
+                raise PreparedOptionPositionsContextError("prepared context FX snapshot mismatch")
+            current_fx = project_exchange_rate_snapshot(snapshot, purpose="capacity")
+            prior_fx = option_ctx.get("exchange_rates")
+            prior_rates = prior_fx.get("rates") if isinstance(prior_fx, dict) else None
+            current_rates = current_fx["rates"]
+            secured = option_ctx.get("cash_secured_total_by_ccy")
+            required_pairs = {
+                {"USD": "USDCNY", "HKD": "HKDCNY"}[ccy]
+                for ccy, amount in (secured.items() if isinstance(secured, dict) else ())
+                if ccy in {"USD", "HKD"} and amount
+            }
+            option_ctx = dict(option_ctx)
+            option_ctx["exchange_rates"] = current_fx
+            if not isinstance(prior_rates, dict) or any(
+                prior_rates.get(pair) != current_rates.get(pair) for pair in required_pairs
+            ):
+                option_ctx["cash_secured_total_cny"] = None
+            portfolio_ctx = dict(portfolio_ctx)
+            portfolio_ctx["exchange_rates"] = current_fx
+            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(current_fx)
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
             exchange_rate_scalars_from_option_context(option_ctx or {})
         )
@@ -601,7 +584,9 @@ def build_pipeline_context(
             and isinstance(option_ctx.get("prepared_authority"), dict)
             else {}
         )
-        fx_status = str(prepared_authority.get("fx_status") or "").strip().lower()
+        fx_status = exchange_rate_observation_status(
+            option_ctx.get("exchange_rates") if isinstance(option_ctx, dict) else None,
+        )
     else:
         rate_status: dict[str, str] = {}
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
@@ -611,6 +596,7 @@ def build_pipeline_context(
                 shared_state_dir=shared_state_dir,
                 log=log,
                 status_out=rate_status,
+                exchange_rate_observation=direct_fx,
             )
         )
         fx_status = str(rate_status.get("status") or "").strip().lower()

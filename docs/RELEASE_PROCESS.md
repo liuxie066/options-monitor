@@ -371,7 +371,7 @@ git branch -d <exact-local-branch>
 
 切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
 
-`--no-restart-services` 只跳过长期 service 的 restart 和后续 health check，不会关闭 timer activation drift 修复。维护窗口如果已经显式暂停某个 timer，应同时传 `--preserve-activation-state`。升级器会在切换 symlink 前快照既有 systemd timer；原本 inactive、disabled 或 masked 的 timer 可以更新 unit/profile 并执行 `daemon-reload`，但不会执行 `enable --now`、`start`、`restart` 或 `unmask`。相同快照也用于升级失败补偿和显式 rollback；新增 timer 没有旧运行态，仍按 release 期望状态安装和激活。
+`--no-restart-services` 只跳过长期 service 的 restart 和后续 health check，不会关闭 timer activation drift 修复。维护窗口如果已经显式暂停某个 timer，应同时传 `--preserve-activation-state`。升级器会在切换 symlink 前快照既有 systemd timer；原本 inactive、disabled 或 masked 的 timer 可以更新 unit/profile 并执行 `daemon-reload`，但不会执行 `enable --now`、`start`、`restart` 或 `unmask`。升级失败补偿复用这同一份快照。显式 rollback 也在切换 symlink 前采集一次快照，作为切换前的 fail-fast 闸门和结果中 `preserved_activation_units` 的来源；切换后由回滚目标 release 自己的 `om service drift --confirm` 重新采集快照并执行对账，两份快照不一致时在结果中记录差异。新增 timer 没有旧运行态，仍按 release 期望状态安装和激活。
 
 ```bash
 ./om update apply \

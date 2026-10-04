@@ -19,7 +19,7 @@
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-只有 `external_holdings` 账户需要 Feishu holdings 数据源；这不会让 Feishu 成为期权账本。
+开仓扫描的账户现金和股票持仓只读取对应富途账户，期权账本以本地 SQLite 为准；扫描不读取 Feishu Holdings 计算全局风险。独立的 Feishu 持仓上下文导出命令仍可使用该表。
 
 ## 初始化
 
@@ -56,13 +56,9 @@ accounts:
   lx:
     type: futu
     futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
-  sy:
-    type: external_holdings
-    holdings_account: sy
-
 markets:
   us:
-    accounts: [lx, sy]
+    accounts: [lx]
     symbols:
       - NVDA
       - GOOGL
@@ -91,6 +87,7 @@ portfolio_management:
 - `symbols` 保持字符串列表；
 - 个性化策略配置放在 `overrides.<symbol>`；
 - `portfolio_management.enabled` 是全局开关，不按市场配置；默认关闭；
+- `portfolio.holdings.enabled` 控制全部指派后分布是否补充 PM Holdings 的非富途资产，默认关闭；
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
@@ -109,6 +106,42 @@ om symbols rm YOUR_SYMBOL
 
 将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`：CSP 必须给 `--csp-max-strike`，CC 必须给 `--cc-min-strike`；可选 `--csp-min-strike`、`--cc-max-strike`。`NVDA` 会识别为 US，`0700.HK` 会识别为 HK；`--market` 可省略，但显式指定时必须与标的一致。只配置一个市场时，`list` 可省略 `--market`；多个市场时需指定。新增标的只覆盖明确选择的策略开关与行权价边界，其余设置继承现有默认配置。`edit --set` 修改 `markets.<market>.overrides.<symbol>` 下的相对路径；列表值使用 JSON 写法，例如 `--set 'accounts=["lx"]'`。高级单项设置也可用 `om config symbol set --help`。删除市场最后一个标的会被配置验证拒绝。Agent 的结构化入口是 `om-agent run --tool manage_symbols`，其写入门禁另见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
+## Portfolio Exposure 的 Holdings 来源配置
+
+Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。情景以富途 OpenD 的
+股票和现金（含 MMF）为底，OM `position_lots` 提供未平仓卖出期权。开启
+`portfolio.holdings.enabled` 后，仅补充 PM Holdings 中券商明确为非富途的资产；PM 中
+富途股票、现金和 MMF 副本全部排除。来源不明的 PM 行不纳入并标记结果为 partial。
+富途股票及期权标的价格取自 OpenD 市场快照；汇率使用同次情景的 OM 市场汇率观测。
+休市价或报价缺失会标记 partial，不以 PM 报价回退。Holdings 关闭时查询不依赖 PM；
+缺少富途底仓时结果为 unavailable。
+开启预检以已配置 OM 账户为范围，要求 PM `non_futu` 估值证据新鲜可信，并展示完整原始
+broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。预览将非富途
+broker 原文集合按账户写入待发布配置；apply 重读 PM，集合变化会在写入前拒绝。
+查询遇旧配置缺集合或新 broker 值会暂停整份 PM 补充并标 partial。不把 Holdings 写入
+Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
+`portfolio_management.enabled` 开启。
+PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
+
+通过 YAML authoring/build 事务预览和写入：
+
+```bash
+./om config holdings set --enabled true
+./om config holdings set --enabled true --apply --confirm \
+  --expected-source-sha256 <预览中的 before_sha256> \
+  --expected-preview-sha256 <预览中的 preview_sha256>
+./om config holdings set --enabled false
+./om config holdings set --enabled false --apply --confirm \
+  --expected-source-sha256 <关闭预览中的 before_sha256> \
+  --expected-preview-sha256 <关闭预览中的 preview_sha256>
+```
+
+预览摘要绑定目标值、配置路径和 runtime root；apply 改动这些目标时需重新预览。
+写入后会核对 `config.yaml`、所有已配置市场 runtime JSON 和 Assistant 快照的摘要；
+如果写入后读回失败，错误会给出已写入状态、审计 ID 与备份路径，须先核对目标再重试。
+如需回滚，恢复 YAML 备份后，还须用 `om config build` 和 `om config build-assistant`
+重建返回结果中列出的市场与 Assistant 目标，并核对读回；只恢复 YAML 不会撤销生成快照。
+
 ## Symbol 扫描并发
 
 Symbol pipeline 不提供 worker 数配置。它按输入顺序串行处理 Symbol，使受支持的
@@ -120,7 +153,7 @@ Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真�
 
 ## 账户
 
-支持两种账户类型：
+账户类型为 `futu`：
 
 ### `futu`
 
@@ -133,16 +166,7 @@ accounts:
 
 `futu` 账户的现金、股票持仓和可用 trade-intake 能力从账户设置派生。多 OpenD endpoint、host、port 和服务配置应通过当前示例、`config explain` 和 service preflight 核对，不要从历史 redesign plan 复制。
 
-### `external_holdings`
-
-```yaml
-accounts:
-  ext1:
-    type: external_holdings
-    holdings_account: "Feishu EXT"
-```
-
-`external_holdings` 从 holdings 数据源读取现金和普通持仓，交易默认人工录入。它不应启动 Futu trade-intake，也不应把 Feishu option position 当 canonical lot。
+旧 `external_holdings` 账户、账户级 `holdings_account`、`portfolio.source_by_account` 和 `portfolio.source: holdings` 需在升级前从人工配置中迁出；这些输入在新版配置校验中报普通配置错误。开仓扫描不再使用全局 Holdings 风险快照。已安装 systemd 单元的 `--accounts` 不会随配置自动更新；配置切换到受控升级重渲染单元之间须保持受影响 timer 暂停，核对新单元账户集合后再恢复。迁移顺序与账本核对见 [退役设计](docs/EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md#旧配置切换)。
 
 账户增删改应直接修改 `config.yaml`，然后 validate 并重建受影响的
 runtime snapshot：
@@ -154,10 +178,9 @@ runtime snapshot：
   --output config.us.json
 ```
 
-`./om-agent add-account` / `edit-account` / `remove-account` 是受控的
-runtime-JSON 兼容 facade，不是 YAML authoring 入口；其结果会被下一次
-`config build` 覆盖。只有明确需要该兼容路径时才先 `--dry-run`，再通过
-`OM_AGENT_ENABLE_WRITE_TOOLS=true` 与 `--confirm` 写入精确目标。
+`./om-agent add-account` / `edit-account` / `remove-account` 是受控账户入口；
+先 `--dry-run` 检查候选改动，再通过 `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+与 `--confirm` 写入精确目标。
 
 ## 市场与 symbol override
 
@@ -324,9 +347,9 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
-## external holdings
+## 独立 Feishu Holdings 上下文导出
 
-需要 Feishu holdings 时，通过 env-file 提供 App credential 与 holdings table 引用。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。
+使用独立的 Feishu Holdings 上下文导出命令时，通过 env-file 提供 App credential 与 holdings table 引用。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。开仓扫描不使用此数据源。
 
 它不能配置：
 

@@ -72,6 +72,55 @@ def _valuation_receipt(accounts=None) -> dict:
     }
 
 
+def _non_futu_receipt() -> dict:
+    receipt = _valuation_receipt()
+    counts = {"source_rows": 2, "included": 1, "zero_quantity": 0,
+              "excluded_futu": 1, "excluded_unknown_broker": 0, "unsupported": 0}
+    read_at = "2026-07-24T01:00:00Z"
+    receipt["scope"].update({
+        "holdings_scope": "non_futu", "holding_counts": {"lx": counts},
+        "broker_inventory": {"lx": {"source": "feishu", "source_rows": 2, "read_at_utc": read_at,
+                                    "brokers": [{"broker": "Futu", "classification": "futu", "row_count": 1},
+                                                {"broker": "银行", "classification": "non_futu", "row_count": 1}]}},
+    })
+    receipt["account_status"][0].update({
+        "holding_counts": counts,
+        "source_rows": [{"record_id": "r1", "broker": "Futu", "classification": "futu", "source_read_at_utc": read_at},
+                        {"record_id": "r2", "broker": "银行", "classification": "non_futu", "source_read_at_utc": read_at}],
+    })
+    receipt["holdings"] = [{"account": "lx", "broker": "银行", "code": "CNY-CASH",
+                            "asset_type": "cash", "quantity": "1", "market_value_cny": "1",
+                            "record_id": "r2", "source_read_at_utc": read_at}]
+    return receipt
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda receipt: receipt["scope"].pop("holdings_scope"),
+    lambda receipt: receipt["scope"]["broker_inventory"]["lx"]["brokers"][0].update(classification="non_futu"),
+    lambda receipt: receipt["scope"]["holding_counts"]["lx"].update(source_rows=1),
+    lambda receipt: receipt["account_status"][0]["source_rows"][1].update(broker="manual"),
+])
+def test_non_futu_client_rejects_old_or_inconsistent_inventory(mutation) -> None:
+    receipt = _non_futu_receipt()
+    mutation(receipt)
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+    with pytest.raises(PortfolioManagementProtocolError):
+        client.read_valuation_evidence(accounts=["lx"], supplemental_codes=[], price_timeout=10,
+                                       holdings_scope="non_futu")
+
+
+def test_non_futu_client_posts_scope_and_accepts_consistent_inventory() -> None:
+    seen = []
+    def open_pm(request, **_kwargs):
+        seen.append(json.loads(request.data))
+        return _Response(_non_futu_receipt())
+    client = PortfolioManagementClient(urlopen_fn=open_pm)
+    result = client.read_valuation_evidence(accounts=["lx"], supplemental_codes=[], price_timeout=10,
+                                            holdings_scope="non_futu")
+    assert seen[0]["holdings_scope"] == "non_futu"
+    assert result["scope"]["holding_counts"]["lx"]["included"] == 1
+
+
 def _accepted_receipt(**overrides) -> dict:
     return {
         "success": True,

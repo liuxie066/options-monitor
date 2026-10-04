@@ -7,7 +7,6 @@ from src.application.daily_decision_brief_repository import (
     read_combo_candidate_exposures,
 )
 from src.application.ledger.api import (
-    adopt_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
 )
 
@@ -34,7 +33,7 @@ def reconcile_account_post_trade_combos(
     mode: str,
     effective_now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Reconcile one account after trade commit and adopt only strict auto matches."""
+    """Refresh Combo proposals; attribution decisions use the shared arbiter."""
 
     account_value = str(account or "").strip().lower()
     mode_value = str(mode or "off").strip().lower()
@@ -108,56 +107,11 @@ def reconcile_account_post_trade_combos(
         persist=True,
         effective_now_ms=effective_now_ms,
     )
-    auto_adoptions = []
-    auto_adoption_errors = []
-    if mode_value == "auto":
-        complete_scopes = {(row["market"], row["market_date"]) for row in evidence_reads if row["complete"]}
-        for inference in reconciled.get("inferences") or []:
-            if (inference.get("market"), inference.get("market_date")) not in complete_scopes:
-                continue
-            from src.application.trades.attribution import trade_attribution_enabled_for_execution
-            if any(trade_attribution_enabled_for_execution(repo,
-                    execution={"broker_account_ref": (inference.get(leg) or {}).get("broker_account_ref") or {}},
-                    account=account_value, market=str(inference.get("market") or "").lower(),
-                    event_time_ms=int((inference.get(leg) or {}).get("trade_time_ms") or 0))
-                   for leg in ("put_lot_snapshot", "call_lot_snapshot")):
-                continue
-            if not (
-                inference.get("status") == "proposal_ready"
-                and inference.get("evidence_grade") == "exact_delivered_candidate"
-                and not inference.get("alternative_inference_ids")
-                and inference.get("selected_in_one_optimum") is True
-            ):
-                continue
-            try:
-                adopted = adopt_post_trade_combo_pair(
-                    repo=repo,
-                    inference_id=str(inference["inference_id"]),
-                    expected_input_hash=str(inference["input_snapshot_hash"]),
-                    actor="trade_intake:auto_combo_reconciliation",
-                    apply_changes=True,
-                    effective_now_ms=effective_now_ms,
-                    require_unique_auto_match=True,
-                    exposures=[exposures_by_id[key] for key in sorted(exposures_by_id)],
-                )
-            except Exception as exc:
-                auto_adoption_errors.append(
-                    {
-                        "inference_id": inference["inference_id"],
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-            else:
-                auto_adoptions.append(adopted)
     return {
         **reconciled,
         "status": "reconciled",
         "mode": mode_value,
         "evidence_reads": evidence_reads,
-        "auto_adoption_count": len(auto_adoptions),
-        "auto_adoptions": auto_adoptions,
-        "auto_adoption_error_count": len(auto_adoption_errors),
-        "auto_adoption_errors": auto_adoption_errors,
     }
 
 

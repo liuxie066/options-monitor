@@ -198,6 +198,7 @@ def test_build_expired_close_decisions_marks_expired_position() -> None:
                 "status": "open",
                 "contracts": 1,
                 "contracts_open": 1,
+                "multiplier": 100,
                 "expiration": parse_exp_to_ms("2026-04-17"),
                 "note": "",
             }
@@ -215,6 +216,7 @@ def test_build_expired_close_decisions_marks_expired_position() -> None:
     assert patch["status"] == "close"
     assert patch["close_type"] == EXPIRE_AUTO_CLOSE
     assert patch["close_reason"] == "expired"
+
 
 
 def test_build_expired_close_decisions_skips_missing_record_id() -> None:
@@ -279,6 +281,7 @@ def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day(
                 "status": "open",
                 "contracts": 1,
                 "contracts_open": 1,
+                "multiplier": 100,
                 "expiration": exp_ms,
                 "note": "",
             }
@@ -289,6 +292,7 @@ def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day(
 
     assert decisions[0].to_payload()["should_close"] is True
     assert decisions[0].to_payload()["expiration_ymd"] == "2026-05-01"
+
 
 
 def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> None:
@@ -305,6 +309,7 @@ def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> No
                 "status": "open",
                 "contracts": 2,
                 "contracts_open": 2,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -328,6 +333,7 @@ def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> No
                 "status": "open",
                 "contracts": 2,
                 "contracts_open": 2,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -336,6 +342,7 @@ def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> No
     )
 
     assert decisions[0].to_payload()["should_close"] is True
+
 
 
 def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> None:
@@ -352,6 +359,7 @@ def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> No
                 "status": "open",
                 "contracts": 1,
                 "contracts_open": 1,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -360,6 +368,7 @@ def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> No
     )
 
     assert decisions[0].to_payload()["should_close"] is True
+
 
 
 def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm() -> None:
@@ -380,6 +389,7 @@ def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm()
                 "status": "open",
                 "contracts": 2,
                 "contracts_open": 2,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -393,6 +403,7 @@ def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm()
     assert decisions[0].to_payload()["assignment_review"]["spot"] == 80
     assert decisions[0].to_payload()["assignment_review"]["strike"] == 85
     assert decisions[0].to_payload()["patch"] is None
+
 
 
 def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified() -> None:
@@ -413,6 +424,7 @@ def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified()
                 "status": "open",
                 "contracts": 2,
                 "contracts_open": 2,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -423,6 +435,7 @@ def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified()
     assert decisions[0].to_payload()["should_close"] is True
     assert decisions[0].to_payload()["assignment_review"]["status"] == "otm_verified"
     assert decisions[0].to_payload()["assignment_review"]["spot"] == 90
+
 
 
 def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm() -> None:
@@ -443,6 +456,7 @@ def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm(
                 "status": "open",
                 "contracts": 1,
                 "contracts_open": 1,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -453,6 +467,7 @@ def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm(
     assert decisions[0].to_payload()["should_close"] is False
     assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
     assert decisions[0].to_payload()["assignment_review"]["status"] == "itm_or_atm"
+
 
 
 def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missing() -> None:
@@ -472,6 +487,7 @@ def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missin
                 "status": "open",
                 "contracts": 1,
                 "contracts_open": 1,
+                "multiplier": 100,
                 "expiration": exp_ms,
             }
         ],
@@ -483,6 +499,7 @@ def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missin
     assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
     assert decisions[0].to_payload()["assignment_review"]["status"] == "missing_spot"
     assert decisions[0].to_payload()["patch"] is None
+
 
 
 def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> None:
@@ -1083,6 +1100,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
 ) -> None:
     from src.application.ledger import maintenance as maintenance_mod
     from src.application.ledger.commands import persist_manual_repair_event_with_ledger
+    from src.application.ledger.interventions import build_manual_repair_preview
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     lot_id = "lot_tigr_put_6_20260522"
@@ -1106,12 +1124,18 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
 
     def repair_after_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
         result = original_preflight(*args, **kwargs)
+        repair = {"account": "sy", "symbol": "MSFT"}
+        reason = "simulate concurrent identity repair"
+        repair_time = int(result.event_time_ms) + 1
+        preview = build_manual_repair_preview(repo, target_event_id=f"seed-{lot_id}",
+            overrides=repair, repair_reason=reason, as_of_ms=repair_time)
         persist_manual_repair_event_with_ledger(
             repo,
             target_event_id=f"seed-{lot_id}",
-            overrides={"account": "sy", "symbol": "MSFT"},
-            repair_reason="simulate concurrent identity repair",
-            as_of_ms=int(result.event_time_ms) + 1,
+            overrides=repair,
+            repair_reason=reason,
+            expected_input_hash=preview.expected_input_hash,
+            as_of_ms=repair_time,
         )
         return result
 

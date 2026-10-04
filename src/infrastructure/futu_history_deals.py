@@ -40,6 +40,7 @@ def fetch_opend_history_deals(
     futu_account_ids: list[str],
     lookback_hours: float,
     now: datetime | None = None,
+    targeted_deals: list[dict[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     client = OpenDHistoryDealClient(host=host, port=port)
     try:
@@ -47,6 +48,7 @@ def fetch_opend_history_deals(
             futu_account_ids=futu_account_ids,
             lookback_hours=lookback_hours,
             now=now,
+            targeted_deals=targeted_deals,
         )
     finally:
         client.close()
@@ -67,6 +69,7 @@ class OpenDHistoryDealClient:
         futu_account_ids: list[str],
         lookback_hours: float,
         now: datetime | None = None,
+        targeted_deals: list[dict[str, str]] | None = None,
         **_kwargs: Any,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         gateway = self._gateway_client()
@@ -77,8 +80,43 @@ class OpenDHistoryDealClient:
                 lookback_hours=lookback_hours,
                 now=now,
             )
+            if targeted_deals:
+                if len(targeted_deals) > 5:
+                    raise ValueError("at most five old deal targets per backfill")
+                targeted_results = []
+                for target in targeted_deals:
+                    physical = str(target.get("futu_account_id") or "").strip()
+                    deal_id = str(target.get("deal_id") or "").strip()
+                    day = str(target.get("date") or "").strip()
+                    if physical not in futu_account_ids or not deal_id:
+                        raise ValueError("old deal target identity is invalid")
+                    trade_midnight = datetime.strptime(day, "%Y-%m-%d").replace(
+                        tzinfo=ZoneInfo("Asia/Hong_Kong")
+                    )
+                    old_rows, old_diagnostics = _query_history_deals(
+                        gateway=gateway, futu_account_ids=[physical], lookback_hours=24,
+                        now=trade_midnight + timedelta(days=1),
+                    )
+                    complete = all(
+                        item.get("coverage_status") == "complete"
+                        for item in old_diagnostics.get("account_results", [])
+                    ) and bool(old_diagnostics.get("account_results"))
+                    matches = [
+                        row for row in old_rows
+                        if str(row.get("deal_id") or row.get("dealID") or "") == deal_id
+                    ]
+                    rows.extend(matches)
+                    targeted_results.append({
+                        "futu_account_id": physical, "deal_id": deal_id,
+                        "date": day, "coverage_complete": complete,
+                        "found": bool(matches),
+                    })
+                diagnostics["targeted_results"] = targeted_results
+                diagnostics["targeted_complete"] = all(
+                    result["coverage_complete"] for result in targeted_results
+                )
             account_results = diagnostics.get("account_results")
-            if isinstance(account_results, list) and any(
+            if diagnostics.get("targeted_complete") is False or isinstance(account_results, list) and any(
                 isinstance(item, dict) and item.get("error")
                 for item in account_results
             ):
@@ -94,6 +132,31 @@ class OpenDHistoryDealClient:
         close = getattr(gateway, "close", None)
         if callable(close):
             close()
+
+    def probe_order_hint(self, *, futu_account_id: str, order_id: str) -> dict[str, Any]:
+        """Corroborate an order hint; execution rows still come from the deal query."""
+        requested = str(order_id).strip()
+        if not requested:
+            raise ValueError("order hint requires an order ID")
+        try:
+            rows = _gateway_rows(self._gateway_client().get_order_list(
+                trd_env="REAL", acc_id=_numeric_account_id(futu_account_id),
+                order_id=requested, refresh_cache=True,
+            ))
+            matches = [row for row in rows if str(row.get("order_id") or "").strip() == requested]
+            if len(matches) > 1:
+                raise ValueError("order hint query returned duplicate order IDs")
+            if not matches:
+                return {"order_id": requested, "found": False}
+            row = matches[0]
+            return {
+                "order_id": requested, "found": True,
+                "status": str(row.get("order_status") or ""),
+                "dealt_qty": _decimal_text(row.get("dealt_qty"), nonnegative=True),
+            }
+        except Exception:
+            self.close()
+            raise
 
     def fetch_terminal_orders(
         self,

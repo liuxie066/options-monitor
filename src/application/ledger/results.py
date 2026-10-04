@@ -470,6 +470,7 @@ class TradeEventInterventionPreview:
     target_event: dict[str, Any]
     void_event: dict[str, Any]
     repair_event: dict[str, Any] | None = None
+    expected_input_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "target_event", dict(self.target_event))
@@ -492,6 +493,7 @@ class TradeEventInterventionPreview:
             target_event=dict(payload.get("target_event") or {}),
             void_event=dict(payload.get("void_event") or {}),
             repair_event=(dict(payload["repair_event"]) if isinstance(payload.get("repair_event"), dict) else None),
+            expected_input_hash=payload.get("expected_input_hash"),
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -499,6 +501,8 @@ class TradeEventInterventionPreview:
             "target_event": dict(self.target_event),
             "void_event": dict(self.void_event),
         }
+        if self.expected_input_hash is not None:
+            payload["expected_input_hash"] = self.expected_input_hash
         if self.repair_event is not None:
             payload["repair_event"] = dict(self.repair_event)
         return payload

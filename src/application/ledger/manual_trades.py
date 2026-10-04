@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from domain.domain.ledger.events import lot_id_for_open_event
+
 import hashlib
 import json
 from typing import Any, Sequence
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
+    _UNSET,
     PositionLotPatch,
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
@@ -23,7 +26,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, require_option_multiplier
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
@@ -43,7 +46,6 @@ from src.application.ledger.lot_resolver import (
     lot_contract_value,
 )
 from src.application.ledger.repository import with_sqlite_repo_transaction
-from src.infrastructure.feishu_bitable import safe_float
 
 
 def _canonical_trade_symbol(value: Any) -> str:
@@ -206,7 +208,7 @@ def _manual_open_request_intent_hash(
         "contracts": int(contracts),
         "currency": resolve_open_currency(symbol, currency),
         "strike": float(strike) if strike is not None else None,
-        "multiplier": float(effective_multiplier(fields) or 100),
+        "multiplier": float(require_option_multiplier(fields.get("multiplier"))),
         "expiration_ymd": str(expiration_ymd or "").strip() or None,
         "premium_per_share": float(fields.get("premium")),
         "underlying_share_locked": underlying_share_locked,
@@ -340,7 +342,7 @@ def _manual_close_event_id(
             "contracts": int(contracts_to_close),
             "price": float(close_price or 0.0),
             "strike": float(strike) if strike is not None else None,
-            "multiplier": int(float(multiplier)) if multiplier is not None else None,
+            "multiplier": require_option_multiplier(multiplier),
             "expiration_ymd": str(expiration_ymd or "").strip() or None,
             "currency": normalize_currency(currency),
             "record_id": str(lot_id or "").strip(),
@@ -371,7 +373,7 @@ def existing_manual_close_event_result(
         operation="manual_close",
     )
     current_identity = _lot_identity(current_fields)
-    multiplier = effective_multiplier(current_fields)
+    multiplier = require_option_multiplier(current_fields.get("multiplier"))
     strike = (
         float(current_identity["strike"])
         if current_identity["strike"] is not None
@@ -391,7 +393,7 @@ def existing_manual_close_event_result(
         contracts_to_close=int(contracts_to_close),
         close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
-        multiplier=(int(float(multiplier)) if multiplier is not None else None),
+        multiplier=require_option_multiplier(multiplier),
         expiration_ymd=(
             current_identity["expiration_ymd"]
             or effective_expiration_ymd(current_fields)
@@ -430,7 +432,7 @@ def _manual_adjust_event_id(
             "side": str(side or "").strip().lower(),
             "position_effect": "adjust",
             "strike": float(strike) if strike is not None else None,
-            "multiplier": int(float(multiplier)) if multiplier is not None else None,
+            "multiplier": require_option_multiplier(multiplier),
             "expiration_ymd": str(expiration_ymd or "").strip() or None,
             "currency": normalize_currency(currency),
             "record_id": str(lot_id or "").strip(),
@@ -521,7 +523,7 @@ def persist_manual_open_event(
     existing_result = _existing_trade_event_result(
         repo,
         event_id=event_id,
-        lot_id=f"lot_{event_id}",
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
     )
     if existing_result is not None:
         if request_id_value:
@@ -567,8 +569,8 @@ def persist_manual_open_event(
         price=float(normalized_premium),
         currency=resolved_currency,
         source="cli_manual_open",
-        multiplier=(float(multiplier) if multiplier is not None else 100.0),
-        lot_id=f"lot_{event_id}",
+        multiplier=require_option_multiplier(multiplier),
+        lot_id=lot_id_for_open_event({"event_id": event_id}),
         raw_payload={
             "source": "om option-positions",
             "source_type": "manual_trade_event",
@@ -607,7 +609,7 @@ def persist_manual_close_event(
     )
     identity = _lot_identity(fields)
     broker = normalize_broker(identity["broker"])
-    multiplier = effective_multiplier(fields)
+    multiplier = require_option_multiplier(fields.get("multiplier"))
     strike = (
         float(identity["strike"])
         if identity["strike"] is not None
@@ -629,7 +631,7 @@ def persist_manual_close_event(
         contracts_to_close=int(contracts_to_close),
         close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
-        multiplier=(int(float(multiplier)) if multiplier is not None else None),
+        multiplier=require_option_multiplier(multiplier),
         expiration_ymd=expiration_ymd,
         currency=currency,
         lot_id=str(lot_id),
@@ -663,7 +665,7 @@ def persist_manual_close_event(
         price=float(normalized_close_price),
         currency=currency,
         source="cli_manual_close",
-        multiplier=(float(multiplier) if multiplier is not None else 100.0),
+        multiplier=require_option_multiplier(multiplier),
         target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
@@ -693,7 +695,7 @@ def _build_manual_adjust_event(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,
@@ -727,8 +729,7 @@ def _build_manual_adjust_event(
         as_of_ms=as_of_ms,
     )
     patch = patch_contract.to_dict()
-    raw_multiplier = safe_float(fields.get("multiplier"))
-    current_multiplier = int(float(raw_multiplier)) if raw_multiplier is not None else None
+    current_multiplier = require_option_multiplier(fields.get("multiplier"))
     event_id = _manual_adjust_event_id(
         broker=normalize_broker(identity["broker"]),
         account=normalize_account(identity["account"]),
@@ -769,7 +770,7 @@ def _build_manual_adjust_event(
         price=0.0,
         currency=normalize_currency(fields.get("currency")),
         source="cli_manual_adjust",
-        multiplier=(float(current_multiplier) if current_multiplier is not None else 100.0),
+        multiplier=current_multiplier,
         target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
@@ -794,7 +795,7 @@ def persist_manual_adjust_event(
     strike: float | None = None,
     expiration_ymd: str | None = None,
     premium_per_share: float | None = None,
-    multiplier: float | None = None,
+    multiplier: Any = _UNSET,
     opened_at_ms: int | None = None,
     strategy: str | None = None,
     leg_role: str | None = None,

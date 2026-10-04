@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_contract_identity import require_option_multiplier
+
 import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, cast
@@ -883,6 +885,10 @@ def _require_runtime_config_scope(request: AssistantRequest) -> None:
 def _manual_open_args(args: dict[str, Any]) -> dict[str, Any]:
     required = ("account", "symbol", "option_type", "side", "contracts", "strike", "multiplier", "expiration_ymd", "premium_per_share")
     _require_fields(args, required, action="记录开仓")
+    try:
+        multiplier = require_option_multiplier(args.get("multiplier"))
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     return {
         "broker": str(args.get("broker") or "富途"),
         "account": _required_text(args.get("account"), "account"),
@@ -892,7 +898,7 @@ def _manual_open_args(args: dict[str, Any]) -> dict[str, Any]:
         "contracts": _positive_int(args.get("contracts"), "contracts"),
         "currency": _optional_text(args.get("currency")),
         "strike": _positive_float(args.get("strike"), "strike"),
-        "multiplier": _positive_float(args.get("multiplier"), "multiplier"),
+        "multiplier": multiplier,
         "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
         "premium_per_share": _positive_float(args.get("premium_per_share"), "premium_per_share"),
         "underlying_share_locked": _optional_positive_int(args.get("underlying_share_locked"), "underlying_share_locked"),

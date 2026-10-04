@@ -168,6 +168,9 @@ def derive_lifecycle_case_current_view(
         market=fact["market"],
         target_contracts_by_lot=fact["target_contracts_by_lot"],
         allocations=_synthetic_allocations(fact),
+        pending_close_contracts_by_lot=fact["resolution"][
+            "pending_close_contracts_by_lot"
+        ],
         accepted_option_close_contracts_by_lot=fact["resolution"][
             "effective_reservations_by_lot"
         ],
@@ -198,6 +201,8 @@ def derive_lifecycle_case_current_view(
         model.reserved_contracts_by_lot.values()
     ):
         evidence_status = "closure_observed_cause_pending"
+    elif fact["resolution"]["pending_close_contracts_by_lot"]:
+        evidence_status = "closure_observed_cause_pending"
     elif not fact["resolution"]["anchor_facts"] and not any(
         model.resolved_contracts_by_lot.values()
     ):
@@ -227,6 +232,9 @@ def derive_lifecycle_case_current_view(
             model.resolved_contracts_by_terminal_type
         ),
         "reserved_contracts_by_lot": model.reserved_contracts_by_lot,
+        "pending_close_contracts_by_lot": fact["resolution"][
+            "pending_close_contracts_by_lot"
+        ],
         "closure_fact": model.closure_fact,
         "reason_state": reason_state,
         "close_reason": close_reason,
