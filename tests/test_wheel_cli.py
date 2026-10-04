@@ -1269,3 +1269,100 @@ def test_wheel_cli_put_rejects_legacy_stock_lot_alias(
     args.stock_lot_id = "legacy-lot"
     with pytest.raises(ValueError, match="Call-only alias"):
         wheel_cli.execute(args)
+
+
+@pytest.mark.parametrize(
+    ("command", "extra", "target"),
+    [
+        (["branch", "end"], [], "branch"),
+        (["end"], [], "end"),
+        (["intent", "cancel"], ["--intent-id", "intent-1", "--reason", "cancel"], "intent"),
+        (
+            ["linkage", "reject"],
+            [
+                "--option-record-id", "option-1",
+                "--linkage-candidate-id", "candidate-1",
+                "--expected-input-hash", "input-1",
+                "--reason", "wrong branch",
+            ],
+            "linkage",
+        ),
+    ],
+)
+def test_wheel_cli_config_path_uses_resolved_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: list[str],
+    extra: list[str],
+    target: str,
+) -> None:
+    cfg = {"_generated": {"market": "hk"}, "portfolio": {}}
+    repo = object()
+    config_path = tmp_path / "runtime.json"
+    monkeypatch.setattr(wheel_cli, "_open_runtime", lambda *_a, **_k: (config_path, cfg, repo))
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        wheel_cli,
+        "build_wheel_read_model",
+        lambda *_a, **kwargs: (
+            calls.append(("read", kwargs.get("market")))
+            or {"wheel_branches": [{
+                "wheel_branch_id": "branch-1",
+                "stock_lot_id": "assigned-stock-1",
+                "direction": "call",
+            }]}
+        ),
+    )
+
+    def capture(name: str):
+        def fake(_repo, **kwargs):
+            calls.append((name, kwargs.get("market")))
+            return {"dry_run": True, "write_applied": False}
+        return fake
+
+    monkeypatch.setattr(wheel_cli.wheel_application, "decide_wheel_branch", capture("branch"))
+    monkeypatch.setattr(wheel_cli, "end_wheel_lifecycle", capture("end"))
+    monkeypatch.setattr(wheel_cli, "cancel_wheel_intent", capture("intent"))
+    monkeypatch.setattr(wheel_cli, "reject_wheel_linkage", capture("linkage"))
+    args = wheel_cli.parse_args([
+        *command,
+        "--account", "lx",
+        "--stock-lot-id", "assigned-stock-1",
+        "--expected-batch-generation-hash", "generation-1",
+        "--request-id", "request-1",
+        "--actor", "tester",
+        *extra,
+        "--config", str(config_path),
+    ])
+    assert args.config_key is None
+    assert wheel_cli.execute(args)["dry_run"] is True
+    assert calls[-1] == (target, "hk")
+    assert all(market == "hk" for _, market in calls)
+
+
+def test_wheel_cli_explicit_generated_config_reads_market_from_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _activation_environment(tmp_path)
+    markets: list[str | None] = []
+
+    def end_preview(_repo, **kwargs):
+        markets.append(kwargs.get("market"))
+        return {"dry_run": True, "write_applied": False}
+
+    monkeypatch.setattr(wheel_cli, "end_wheel_lifecycle", end_preview)
+    args = wheel_cli.parse_args([
+        "end",
+        "--account", "lx",
+        "--stock-lot-id", "assigned-stock-1",
+        "--expected-batch-generation-hash", "generation-1",
+        "--request-id", "request-1",
+        "--actor", "tester",
+        "--config", str(runtime),
+        "--data-config", str(data_config),
+        "--runtime-root", str(tmp_path),
+    ])
+    assert args.config_key is None
+    assert wheel_cli.execute(args)["dry_run"] is True
+    assert markets == ["us"]
