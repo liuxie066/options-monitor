@@ -2135,6 +2135,8 @@ def apply_lifecycle_migration_manifest(
             for row, row_hash, existing in prepared
         ]
         result["applied_count"] = sum(bool(item["receipt_created"]) for item in results)
+        if not result["applied_count"] and existing_count:
+            result["status"] = "noop"
         result["results"] = results
         return result
 

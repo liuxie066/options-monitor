@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 重放已完成的 lifecycle migration manifest 若未产生新写入，返回 `status: "noop"`，并保留 `applied_count=0`、已有回执数及成功退出码。
+
 ### Improvements
 - 首次安装与日常菜单接入可执行的账户、标的、通知、Bot、全局持仓风险和服务流程；新增 `channel/bot/holdings/close-advice configure` 与预览确认式 `service install/start/stop`。可选功能可跳过；普通设置写入实例 env，密钥经终端隐藏输入和既有系统存储。通知显式关闭同时约束定时投递、回执与系统告警，旧配置保持原默认行为。
 - `bot` 统一承载模型、能力和消息入口，`channel feishu event/serve` 提供飞书接入；保留 `assistant/inbound` 兼容。账户和标的变更发布同一代运行快照，同市场账户共享标的。菜单子命令隔离实例环境；手动扫描使用 `--force --no-send`，并如实保留失败与未验证状态。

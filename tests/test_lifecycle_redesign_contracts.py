@@ -659,6 +659,7 @@ def test_migration_manifest_requires_explicit_selection_and_replays_noop(
         manifest=manifest,
         apply_changes=True,
     )
+    assert applied["status"] == "applied"
     assert applied["applied_count"] == 1
     suppressed = [
         item
@@ -674,6 +675,7 @@ def test_migration_manifest_requires_explicit_selection_and_replays_noop(
         manifest=manifest,
         apply_changes=True,
     )
+    assert replay["status"] == "noop"
     assert replay["applied_count"] == 0
     assert replay["existing_count"] == 1
     assert len(
@@ -907,6 +909,7 @@ def test_explicit_terminal_frozen_mapping_only_links_existing_facts(
         manifest=manifest,
         apply_changes=True,
     )
+    assert replay["status"] == "noop"
     assert replay["applied_count"] == 0
     assert replay["existing_count"] == 1
 
