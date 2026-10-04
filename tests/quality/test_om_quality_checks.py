@@ -906,6 +906,75 @@ def test_lifecycle_excludes_superseded_and_other_market_cases() -> None:
     assert [item["scope"]["lifecycle_case_id"] for item in datasets] == ["pending-us"]
 
 
+def test_lifecycle_quality_shadow_matches_without_timing_policy() -> None:
+    deadline_ms = 1_800_000
+    now_ms = deadline_ms + 1
+    now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    case = {
+        "case_id": "unbound-us",
+        "account": "lx",
+        "market": "US",
+        "symbol": "NVDA",
+        "status": "waiting_settlement_evidence",
+    }
+    read_model = {
+        "pending_until_ms": deadline_ms,
+        "reason_state": "cause_pending",
+        "timing_policy_hash": None,
+    }
+    current_quality = {
+        "schema_version": "current_lifecycle_quality.v1",
+        "account": "lx",
+        "aggregate_by_market": [{
+            "market": "US",
+            "total_case_count": 1,
+            "status_counts": {"waiting_settlement_evidence": 1},
+            "trust_class_counts": {"trusted": 1},
+        }],
+        "operational_cases": [{
+            "case_id": "unbound-us",
+            "market": "US",
+            "status": "waiting_settlement_evidence",
+            "trust_class": "trusted",
+            "evidence_count": 0,
+            "settlement_deadline_ms": None,
+            "reason_state": "cause_pending",
+            "timing_policy_hash": None,
+        }],
+    }
+    current_quality["aggregate_fingerprint"] = canonical_sha256(
+        current_quality["aggregate_by_market"]
+    )
+    current_quality["detail_fingerprint"] = canonical_sha256(
+        current_quality["operational_cases"]
+    )
+    legacy = build_lifecycle_datasets(
+        cases=[case],
+        evidence_rows=[],
+        account="lx",
+        market="us",
+        observed_at_utc=now.isoformat(),
+        now=now,
+        trading_days=[],
+        first_deep_by_case={},
+        read_models_by_case={"unbound-us": read_model},
+    )
+    summary, comparison = build_lifecycle_quality_migration_summary(
+        legacy_datasets=legacy,
+        current_quality=derive_lifecycle_quality_view(current_quality, now_ms=now_ms),
+        account="lx",
+        market="us",
+        observed_at_utc=now.isoformat(),
+        now_ms=now_ms,
+        case_status_by_id={"unbound-us": "waiting_settlement_evidence"},
+        read_models_by_case={"unbound-us": read_model},
+    )
+
+    assert comparison["status"] == "matched"
+    assert summary["status"] == "unavailable"
+    assert summary["extensions"]["operational_cases"][0]["settlement_deadline_ms"] is None
+
+
 def test_lifecycle_quality_shadow_matches_both_sides_of_deadline() -> None:
     deadline_ms = 1_800_000
     case = {

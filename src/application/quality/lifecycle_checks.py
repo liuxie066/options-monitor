@@ -579,7 +579,11 @@ def _legacy_operational_detail(
     expected_by = str(
         ((dataset.get("freshness") or {}).get("expected_by_utc") or "")
     ).strip()
-    deadline_ms = model.get("pending_until_ms")
+    deadline_ms = (
+        model.get("pending_until_ms")
+        if model.get("timing_policy_hash")
+        else None
+    )
     if deadline_ms is None and expected_by:
         parsed = _parse_utc(expected_by)
         deadline_ms = int(parsed.timestamp() * 1000) if parsed else None
