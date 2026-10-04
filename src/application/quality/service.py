@@ -220,8 +220,10 @@ def _current_lifecycle_position_inputs(
             }
         )
         timing[case_id] = {
-            "settlement_deadline_ms": fact_timing.get(
-                "settlement_deadline_ms"
+            "settlement_deadline_ms": (
+                fact_timing.get("settlement_deadline_ms")
+                if fact_timing.get("timing_policy_hash")
+                else None
             )
         }
     return {

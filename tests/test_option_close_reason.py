@@ -282,6 +282,27 @@ def _read_model(**overrides) -> LifecycleReadModel:
     return derive_lifecycle_read_model(**{**values, **overrides})
 
 
+
+def test_review_wait_does_not_claim_a_settlement_deadline_without_policy() -> None:
+    observation_start = expiration_observation_start_ms("2026-08-21", "US")
+    assert observation_start is not None
+    review_at = observation_start + 72 * 60 * 60 * 1000
+
+    before = _read_model(now_ms=review_at - 1)
+    after = _read_model(now_ms=review_at)
+    bound = _read_model(
+        now_ms=review_at,
+        pending_until_ms_override=review_at,
+    )
+
+    assert before.lifecycle_state == "settlement_pending"
+    assert before.lifecycle_reason_codes == ("awaiting_settlement_evidence",)
+    assert after.lifecycle_state == "needs_review"
+    assert after.lifecycle_reason_codes == ("lifecycle_timing_policy_unavailable",)
+    assert after.actionable is False
+    assert bound.lifecycle_reason_codes == ("settlement_evidence_deadline_elapsed",)
+
+
 def test_pending_reservation_is_nonactionable_without_changing_remaining() -> None:
     observation_start = expiration_observation_start_ms("2026-08-21", "US")
     assert observation_start is not None

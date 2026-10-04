@@ -761,7 +761,11 @@ def _reconcile_deadline_without_effective_pairing(
             "close_reason": close_reason,
             "lifecycle_reason_codes": reason_codes,
             "pairing_until_ms": read_model.get("pairing_until_ms"),
-            "settlement_deadline_ms": read_model.get("pending_until_ms"),
+            "settlement_deadline_ms": (
+                read_model.get("pending_until_ms")
+                if read_model.get("timing_policy_hash")
+                else None
+            ),
             "timing_policy_hash": read_model.get("timing_policy_hash"),
             "observation_hash": None,
         },

@@ -179,7 +179,9 @@ def derive_lifecycle_case_current_view(
         quantity_drift=quantity_drift,
         observation_start_ms_override=timing["observation_start_ms"],
         pending_until_ms_override=(
-            timing["settlement_deadline_ms"] or timing["pending_until_ms"]
+            timing["settlement_deadline_ms"]
+            if timing["timing_policy_hash"]
+            else None
         ),
     )
     persisted_status = str(fact["status"])
@@ -296,7 +298,11 @@ def _quality_detail(fact: Mapping[str, Any]) -> dict[str, Any]:
         "status": item["status"],
         "trust_class": item["decision"]["quality_trust_class"],
         "evidence_count": item["evidence"]["count"],
-        "settlement_deadline_ms": item["timing"]["settlement_deadline_ms"],
+        "settlement_deadline_ms": (
+            item["timing"]["settlement_deadline_ms"]
+            if item["timing"]["timing_policy_hash"]
+            else None
+        ),
         "reason_state": item["decision"]["reason_state"],
         "timing_policy_hash": item["timing"]["timing_policy_hash"],
     }
@@ -587,7 +593,11 @@ def derive_lifecycle_quality_view(
         status = item["status"]
         market_status = operational_status.setdefault(market, {})
         market_status[status] = market_status.get(status, 0) + 1
-        deadline = item["settlement_deadline_ms"]
+        deadline = (
+            item["settlement_deadline_ms"]
+            if item["timing_policy_hash"]
+            else None
+        )
         if trust == "external_review":
             verdict = "unavailable"
             blocked = ["close_advice", "lifecycle_report", "option_performance"]
@@ -607,7 +617,12 @@ def derive_lifecycle_quality_view(
             verdict = "untrusted"
             blocked = ["close_advice", "lifecycle_report", "option_performance"]
         add_counts(market, verdict, blocked)
-        details.append({**item, "dataset_status": verdict, "blocked_consumers": blocked})
+        details.append({
+            **item,
+            "settlement_deadline_ms": deadline,
+            "dataset_status": verdict,
+            "blocked_consumers": blocked,
+        })
 
     aggregate_markets: set[str] = set()
     terminal_classification = {

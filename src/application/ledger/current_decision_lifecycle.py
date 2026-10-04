@@ -156,7 +156,11 @@ def build_lifecycle_case_decision_fact(
         "timing": {
             "observation_start_ms": model.get("observation_start_ms"),
             "pending_until_ms": model.get("pending_until_ms"),
-            "settlement_deadline_ms": model.get("pending_until_ms"),
+            "settlement_deadline_ms": (
+                model.get("pending_until_ms")
+                if model.get("timing_policy_hash")
+                else None
+            ),
             "timing_policy_hash": model.get("timing_policy_hash"),
         },
         "evidence": {
