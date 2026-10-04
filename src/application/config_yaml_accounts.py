@@ -9,11 +9,13 @@ from src.application.account_config import (
     ACCOUNT_TYPES,
     normalize_account_label,
     normalize_accounts,
+    parse_lossless_integer,
+    resolve_account_futu_settings,
 )
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
 from src.application.config_primitives import configured_markets, normalize_config_market
-from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
+from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path, resolve_yaml_runtime_config
 from src.application.write_contract import attach_write_contract
 
 
@@ -31,6 +33,9 @@ def mutate_yaml_account_config(
     trade_intake_enabled: bool | None = None,
     futu_host: str | None = None,
     futu_port: int | None = None,
+    trd_env: str | None = None,
+    symbols: list[str] | None = None,
+    symbol_policies: dict[str, dict[str, Any]] | None = None,
     rebuild_runtime_root: str | Path | None = None,
     apply: bool = False,
     backup: bool = True,
@@ -43,9 +48,11 @@ def mutate_yaml_account_config(
     account = _normalize_account_label(account_label)
     config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     loaded_source_sha = config_source_sha256(config_yaml_path)
-    after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
+    before_doc = load_yaml_config_file(config_yaml_path)
+    after_doc = deepcopy(before_doc)
 
     if action_key == "add":
+        _prepare_market(after_doc, market=market_key, symbols=symbols, symbol_policies=symbol_policies)
         summary = _add_account(
             after_doc,
             market=market_key,
@@ -57,6 +64,7 @@ def mutate_yaml_account_config(
             trade_intake_enabled=trade_intake_enabled,
             futu_host=futu_host,
             futu_port=futu_port,
+            trd_env=trd_env,
         )
     elif action_key == "edit":
         summary = _edit_account(
@@ -70,10 +78,18 @@ def mutate_yaml_account_config(
             trade_intake_enabled=trade_intake_enabled,
             futu_host=futu_host,
             futu_port=futu_port,
+            trd_env=trd_env,
         )
     else:
         summary = _remove_account(after_doc, market=market_key, account=account)
 
+    summary["affected_markets"] = [
+        selected for selected in configured_markets(after_doc)
+        if account in before_doc.get("markets", {}).get(selected, {}).get("accounts", [])
+        or account in after_doc["markets"][selected].get("accounts", [])
+    ]
+    summary["before_account"] = _masked_account_details(before_doc["accounts"][account]) if account in before_doc["accounts"] else None
+    summary["after_account"] = _masked_account_details(after_doc["accounts"][account]) if account in after_doc["accounts"] else None
     runtime_root = (
         Path(rebuild_runtime_root).expanduser().resolve()
         if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
@@ -136,11 +152,20 @@ def _add_account(
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
+    trd_env: str | None = None,
 ) -> dict[str, Any]:
     accounts = _account_defs(config_doc)
+    normalized_type = _normalize_account_type(account_type or ACCOUNT_TYPE_FUTU)
     if account in accounts:
-        raise AgentToolError(code="INPUT_ERROR", message=f"account already exists: {account}")
-    normalized_type = _normalize_account_type(account_type)
+        members = _market_accounts(config_doc, market=market)
+        if account in members:
+            raise AgentToolError(code="INPUT_ERROR", message=f"account already exists in market {market}: {account}")
+        if any(value is not None for value in (futu_acc_id, futu_host, futu_port, trd_env, market_label, enabled, trade_intake_enabled)):
+            raise AgentToolError(code="INPUT_ERROR", message="linking an existing account to a market must preserve its mapping; use accounts edit separately")
+        members.append(account)
+        return {"action": "add", "account_type": "futu", "accounts": list(members),
+                "linked_existing_account": True, "shared_symbols": list(config_doc["markets"][market]["symbols"]),
+                "changed_paths": [f"markets.{market}.accounts[]"], **_masked_account_details(accounts[account])}
     setting = _build_account_setting(
         current=None,
         account=account,
@@ -151,6 +176,7 @@ def _add_account(
         trade_intake_enabled=trade_intake_enabled,
         futu_host=futu_host,
         futu_port=futu_port,
+        trd_env=trd_env,
     )
     _ensure_unique_futu_account_id(accounts, account=account, setting=setting)
     accounts[account] = setting
@@ -160,6 +186,7 @@ def _add_account(
         "action": "add",
         "account_type": normalized_type,
         "accounts": list(market_accounts),
+        "shared_symbols": list(config_doc["markets"][market]["symbols"]),
         "changed_paths": [f"accounts.{account}", f"markets.{market}.accounts[]"],
         **_masked_account_details(setting),
     }
@@ -177,6 +204,7 @@ def _edit_account(
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
+    trd_env: str | None = None,
 ) -> dict[str, Any]:
     accounts = _account_defs(config_doc)
     current = accounts.get(account)
@@ -200,6 +228,7 @@ def _edit_account(
         trade_intake_enabled=trade_intake_enabled,
         futu_host=futu_host,
         futu_port=futu_port,
+        trd_env=trd_env,
     )
     _ensure_unique_futu_account_id(accounts, account=account, setting=setting)
     accounts[account] = setting
@@ -207,6 +236,7 @@ def _edit_account(
         "action": "edit",
         "account_type": normalized_type,
         "accounts": list(market_accounts),
+        "shared_symbols": list(config_doc["markets"][market]["symbols"]),
         "changed_paths": [f"accounts.{account}"],
         **_masked_account_details(setting),
     }
@@ -257,6 +287,7 @@ def _build_account_setting(
     trade_intake_enabled: bool | None,
     futu_host: str | None,
     futu_port: int | None,
+    trd_env: str | None = None,
 ) -> dict[str, Any]:
     existing = deepcopy(current) if isinstance(current, dict) else {}
     if "bitable" in existing:
@@ -289,12 +320,18 @@ def _build_account_setting(
             raise AgentToolError(code="INPUT_ERROR", message="futu_acc_id is required for a Futu account")
         if futu_host is not None:
             host = str(futu_host).strip()
-            if host:
-                futu["host"] = host
-            else:
-                futu.pop("host", None)
+            if not host or any(char.isspace() for char in host):
+                raise AgentToolError(code="INPUT_ERROR", message="futu_host must be a non-empty host without whitespace")
+            futu["host"] = host
         if futu_port is not None:
-            futu["port"] = int(futu_port)
+            parsed_port = parse_lossless_integer(futu_port)
+            if parsed_port is None or not 1 <= parsed_port <= 65535:
+                raise AgentToolError(code="INPUT_ERROR", message="futu_port must be between 1 and 65535")
+            futu["port"] = parsed_port
+        if trd_env is not None:
+            futu["trd_env"] = normalize_trd_env(trd_env)
+        elif current is None:
+            futu["trd_env"] = "REAL"
         setting["futu"] = futu
         return setting
 
@@ -378,6 +415,7 @@ def _ensure_unique_futu_account_id(accounts: dict[str, Any], *, account: str, se
 def _masked_account_details(setting: dict[str, Any]) -> dict[str, Any]:
     account_id = _futu_account_id(setting)
     return {
+        "futu": {key: value for key, value in (setting.get("futu") or {}).items() if key != "account_id"},
         **({"futu_acc_id_masked": f"...{account_id[-4:]}"} if account_id else {}),
     }
 
@@ -412,4 +450,47 @@ def _remove_explicit_account_references(config_doc: dict[str, Any], *, account: 
         ]
 
 
-__all__ = ["mutate_yaml_account_config"]
+def normalize_trd_env(value: Any) -> str:
+    environment = str(value or "").strip().upper()
+    if environment not in {"REAL", "SIMULATE"}:
+        raise AgentToolError(code="INPUT_ERROR", message="trd_env must be REAL or SIMULATE")
+    return environment
+
+
+def _prepare_market(config_doc: dict[str, Any], *, market: str, symbols: list[str] | None,
+                    symbol_policies: dict[str, dict[str, Any]] | None) -> None:
+    markets = config_doc.get("markets")
+    if not isinstance(markets, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message="config.yaml markets must be an object")
+    current = markets.get(market)
+    if isinstance(current, dict) and current.get("symbols"):
+        if symbols or symbol_policies:
+            raise AgentToolError(code="INPUT_ERROR", message="existing market shares its symbols; use symbols add/edit separately")
+        return
+    from src.application.config_yaml_init import _normalize_symbols, _normalize_symbol_policies
+
+    selected = _normalize_symbols(symbols, market=market)
+    policies = _normalize_symbol_policies(symbol_policies or {}, symbols=selected)
+    market_doc = current if isinstance(current, dict) else {"accounts": []}
+    market_doc.update({"symbols": selected, "overrides": policies})
+    markets[market] = market_doc
+
+
+def list_yaml_accounts(*, repo_root: Path, config_path: str | Path | None = None,
+                       market: str | None = None) -> dict[str, Any]:
+    source = resolve_yaml_config_path(config_path, repo_root=repo_root)
+    document = load_yaml_config_file(source)
+    markets = [normalize_config_market(market)] if market else configured_markets(document)
+    rows: list[dict[str, Any]] = []
+    for selected in markets:
+        runtime, _ = resolve_yaml_runtime_config(repo_root=repo_root, market=selected, config_path=source)
+        for label in runtime["accounts"]:
+            binding = resolve_account_futu_settings(runtime, account=label)
+            rows.append({"market": selected, "account_label": label, "futu_acc_id": binding.get("account_id"),
+                         "futu_host": binding.get("host"), "futu_port": binding.get("port"),
+                         "trd_env": binding.get("trd_env"), "symbols": list(document["markets"][selected]["symbols"])})
+    return {"ok": True, "config_yaml_path": str(source), "accounts": rows,
+            "source_revision": {"before_sha256": config_source_sha256(source)}}
+
+
+__all__ = ["list_yaml_accounts", "mutate_yaml_account_config", "normalize_trd_env"]

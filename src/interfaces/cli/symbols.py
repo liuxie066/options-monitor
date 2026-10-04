@@ -51,6 +51,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--csp-max-strike", type=float, help="required when CSP is enabled")
             command.add_argument("--cc-min-strike", type=float, help="required when CC is enabled")
             command.add_argument("--cc-max-strike", type=float, help="optional CC upper strike bound")
+        command.add_argument("--expected-source-sha256", default=None, help="source revision from the preview")
         command.add_argument("--rebuild-runtime-root", default=None,
                              help="generated snapshot directory; defaults to the YAML directory")
         mode = command.add_mutually_exclusive_group()
@@ -136,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         result = mutate_yaml_symbol_config(
             repo_root=repo_base(), market=market, payload=mutation,
             config_path=source, rebuild_runtime_root=args.rebuild_runtime_root,
-            apply=bool(args.apply),
+            apply=bool(args.apply), expected_source_sha256=args.expected_source_sha256,
         )
         if args.format == "json":
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -144,9 +145,10 @@ def main(argv: list[str] | None = None) -> int:
             summary = result["summary"]
             state = "已写入 YAML 并重建快照" if result["write_applied"] else "预览，未写入"
             print(f"{state}：{summary['action']} {summary['canonical_symbol']} · {source}")
-            if action == "add":
-                entry = summary["entry"]
-                for label, key in (("CSP", "sell_put"), ("CC", "covered_call")):
+            print("共享账户：" + ", ".join(summary["affected_accounts"]))
+            if action != "remove":
+                entry = summary["after_effective"]
+                for label, key in (("CSP", "sell_put"), ("CC", "sell_call")):
                     setting = entry[key]
                     bounds = " ".join(
                         f"{bound}_strike={setting[bound + '_strike']}"
@@ -154,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     print(f"  {label}: {'on' if setting['enabled'] else 'off'}{(' · ' + bounds) if bounds else ''}")
             if not result["write_applied"]:
-                print("确认后追加 --apply。")
+                print("源版本：" + result["source_revision"]["before_sha256"])
+                print("确认后追加 --apply --expected-source-sha256 " + result["source_revision"]["before_sha256"])
             elif result.get("backup_path"):
                 print(f"配置备份：{result['backup_path']}")
         return 0

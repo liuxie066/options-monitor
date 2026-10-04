@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.application.account_config import normalize_account_label
+from src.application.account_config import normalize_account_label, parse_lossless_integer
+from src.application.config_yaml_accounts import normalize_trd_env
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
 from src.application.config_primitives import resolve_config_path as _resolve_path
@@ -119,11 +120,15 @@ def _starter_yaml_payload(
     us_symbols: list[str],
     hk_symbols: list[str],
     symbol_overrides: dict[str, dict[str, Any]] | None,
+    futu_host: str,
+    futu_port: int,
+    trd_env: str,
 ) -> dict[str, Any]:
     accounts: dict[str, Any] = {
         account_label: {
             "type": "futu",
             "futu_account_id": futu_account_id,
+            "futu": {"host": futu_host, "port": futu_port, "trd_env": trd_env},
         }
     }
     markets: dict[str, Any] = {}
@@ -131,10 +136,6 @@ def _starter_yaml_payload(
         us_market: dict[str, Any] = {"accounts": [account_label], "symbols": us_symbols}
         if symbol_overrides is not None:
             us_market["overrides"] = {symbol: symbol_overrides[symbol] for symbol in us_symbols}
-        elif "FUTU" in us_symbols:
-            us_market["overrides"] = {
-                "FUTU": {"sell_put": {"dte": [20, 45], "strike": [55, 85]}}
-            }
         markets["us"] = us_market
     if "hk" in selected_markets:
         hk_market: dict[str, Any] = {"accounts": [account_label], "symbols": hk_symbols}
@@ -145,11 +146,12 @@ def _starter_yaml_payload(
     return {
         "accounts": accounts,
         "markets": markets,
+        "notifications": {"enabled": False},
         "assistant": {
-            "enabled": True,
+            "enabled": False,
             "context_window_messages": 8,
             "bot": {
-                "enabled": True,
+                "enabled": False,
                 "toolsets": {
                     "portfolio": False,
                 },
@@ -217,6 +219,9 @@ def init_yaml_config(
     assistant_output_config_path: str | Path | None = None,
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
+    futu_host: str = "127.0.0.1",
+    futu_port: int = 11111,
+    trd_env: str = "REAL",
     account_label: str | None = None,
     us_symbols: list[str] | tuple[str, ...] | None = None,
     hk_symbols: list[str] | tuple[str, ...] | None = None,
@@ -228,6 +233,13 @@ def init_yaml_config(
     selected_markets = _normalize_markets(list(markets) if markets is not None else None)
     account = _normalize_account_label(account_label)
     futu_id = _normalize_futu_account_id(futu_acc_id)
+    environment = normalize_trd_env(trd_env)
+    host = str(futu_host).strip()
+    if not host or any(char.isspace() for char in host):
+        raise AgentToolError(code="INPUT_ERROR", message="futu_host must be a non-empty host without whitespace")
+    parsed_port = parse_lossless_integer(futu_port)
+    if parsed_port is None or not 1 <= parsed_port <= 65535:
+        raise AgentToolError(code="INPUT_ERROR", message="futu_port must be between 1 and 65535")
     us_symbol_values = _normalize_symbols(us_symbols, market="us") if "us" in selected_markets else []
     hk_symbol_values = _normalize_symbols(hk_symbols, market="hk") if "hk" in selected_markets else []
     symbol_overrides = _normalize_symbol_policies(symbol_policies, symbols=us_symbol_values + hk_symbol_values)
@@ -258,6 +270,9 @@ def init_yaml_config(
         selected_markets=selected_markets,
         account_label=account,
         futu_account_id=futu_id,
+        futu_host=host,
+        futu_port=parsed_port,
+        trd_env=environment,
         us_symbols=us_symbol_values,
         hk_symbols=hk_symbol_values,
         symbol_overrides=symbol_overrides,
@@ -336,6 +351,8 @@ def init_yaml_config(
         "market_symbols": {market: us_symbol_values if market == "us" else hk_symbol_values for market in selected_markets},
         "symbol_policies": symbol_overrides,
         "account_label": account,
+        "futu_host": host, "futu_port": parsed_port, "trd_env": environment,
+        "ready": False,
         "futu_account_id_placeholder": futu_id == DEFAULT_FUTU_ACCOUNT_ID,
         "runtime_output_dir": str(output_dir),
         "runtime_config_paths": {market: str(path) for market, path in runtime_outputs.items()},

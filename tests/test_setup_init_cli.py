@@ -67,7 +67,7 @@ def test_setup_init_maps_two_market_strategies_to_runtime(tmp_path: Path) -> Non
         "--us-symbol", "AAPL", "--hk-symbol", "0005.HK",
         "--symbol-strategy", "AAPL=csp", "--csp-max-strike", "AAPL=100",
         "--symbol-strategy", "0005.HK=cc", "--cc-min-strike", "0005.HK=50",
-        "--apply",
+        "--futu-acc-id", "123456", "--trd-env", "REAL", "--apply",
     ])
     output, applied = run_setup_init(
         args, repo_base_fn=lambda: Path(__file__).resolve().parents[1],
@@ -116,7 +116,7 @@ def test_setup_init_preview_and_cancel_leave_target_untouched(tmp_path: Path) ->
     assert "仅预览，未写入" in preview
     assert not target.exists()
 
-    answers = iter(("", "us", "", "123456", "AAPL", "csp", "100", "", "no"))
+    answers = iter(("us", "", "", "REAL", "", "123456", "AAPL", "csp", "100", "", "no"))
     interactive_args = parse_args(["setup", "init", "--output-dir", str(target)])
     cancelled, applied = run_setup_init(
         interactive_args,
@@ -146,7 +146,7 @@ def test_setup_init_preview_explains_higher_priority_env(monkeypatch, tmp_path: 
 def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, capsys) -> None:
     target = tmp_path / "config"
     args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us"])
-    answers = iter(("", "", "", "123456", "AAPL", "csp", "100", "", "yes"))
+    answers = iter(("", "", "", "REAL", "", "123456", "AAPL", "csp", "100", "", "yes"))
 
     def answer(prompt: str) -> str:
         if prompt.startswith("确认写入"):
@@ -186,22 +186,17 @@ def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, caps
     assert readiness["freshness"]["ok"] is True
 
 
-def test_setup_init_guides_placeholder_account_repair(tmp_path: Path) -> None:
+def test_setup_apply_requires_complete_account_identity(tmp_path: Path) -> None:
     target = tmp_path / "config"
     args = parse_args([
         "setup", "init", "--output-dir", str(target), "--market", "us",
         "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
         "--csp-max-strike", "AAPL=100", "--apply",
     ])
-    output, applied = run_setup_init(
-        args, repo_base_fn=lambda: Path(__file__).resolve().parents[1],
-        input_is_tty=lambda: False, user_home=tmp_path / "home",
-    )
-
-    assert applied is True
-    assert "om accounts edit --market us --account-label lx --futu-acc-id ACCOUNT_ID" in output
-    assert f"--config-yaml {target / 'config.yaml'} --apply --confirm" in output
-    assert "om setup check --format text" in output
+    with pytest.raises(AgentToolError, match="requires --futu-acc-id and --trd-env"):
+        run_setup_init(args, repo_base_fn=lambda: Path(__file__).resolve().parents[1],
+                       input_is_tty=lambda: False, user_home=tmp_path / "home")
+    assert not target.exists()
 
 
 def test_create_starter_success_has_no_unsafe_delete_hint(tmp_path: Path) -> None:

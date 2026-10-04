@@ -115,6 +115,9 @@ def add_setup_commands(subparsers: Any) -> None:
     setup_init.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_init.add_argument("--account-label", default=None)
     setup_init.add_argument("--futu-acc-id", default=None)
+    setup_init.add_argument("--futu-host", default="127.0.0.1")
+    setup_init.add_argument("--futu-port", type=int, default=11111)
+    setup_init.add_argument("--trd-env", choices=("REAL", "SIMULATE"), default=None)
     setup_init.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
                             help="monitored US symbol; repeat for multiple symbols")
     setup_init.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None,
@@ -152,17 +155,31 @@ def run_setup_init(
     markets = args.market
     account_label = args.account_label
     futu_acc_id = args.futu_acc_id
+    futu_host = getattr(args, "futu_host", "127.0.0.1")
+    futu_port = getattr(args, "futu_port", 11111)
+    trd_env = getattr(args, "trd_env", None)
     symbols = {"us": args.us_symbols, "hk": args.hk_symbols}
     if interactive:
         try:
-            raw_dir = input_fn(f"配置目录 [{output_dir}]: ").strip()
-            if raw_dir:
-                output_dir = Path(raw_dir).expanduser()
-            raw_markets = input_fn("市场 [us,hk]（也可填 us 或 hk）: ").strip().lower()
-            if raw_markets:
-                markets = [item.strip() for item in raw_markets.split(",")]
+            selected_default = markets[0] if markets and len(markets) == 1 and markets[0] in {"us", "hk"} else "us"
+            raw_market = input_fn(f"首次配置市场 [us/hk] [{selected_default}]: ").strip().lower() or selected_default
+            if raw_market not in {"us", "hk"}:
+                raise AgentToolError(code="INPUT_ERROR", message="interactive setup selects one market: us or hk")
+            markets = [raw_market]
+            futu_host = input_fn(f"OpenD 地址 [{futu_host}]: ").strip() or futu_host
+            raw_port = input_fn(f"OpenD 端口 [{futu_port}]: ").strip()
+            if raw_port:
+                try:
+                    futu_port = int(raw_port)
+                except ValueError as exc:
+                    raise AgentToolError(code="INPUT_ERROR", message="OpenD port must be an integer") from exc
+            trd_env = input_fn(f"账户环境 REAL（真实）/SIMULATE（测试）[{trd_env or '必填'}]: ").strip().upper() or trd_env
             account_label = input_fn(f"账户标签 [{account_label or 'lx'}]: ").strip() or account_label
-            futu_acc_id = input_fn("富途账户 ID（数字，回车保留占位符）: ").strip() or futu_acc_id
+            futu_acc_id = input_fn("富途账户 ID（数字，必填）: ").strip() or futu_acc_id
+            if not futu_acc_id:
+                raise AgentToolError(code="INPUT_ERROR", message="interactive setup requires a Futu account ID")
+            if not trd_env:
+                raise AgentToolError(code="INPUT_ERROR", message="interactive setup requires REAL or SIMULATE")
             for market in _normalize_markets(markets):
                 current = ", ".join(symbols[market] or []) or "必填"
                 entered = input_fn(f"{market.upper()} 监控标的（逗号或空格分隔）[{current}]: ").strip()
@@ -187,6 +204,7 @@ def run_setup_init(
         "assistant_output_config_path": output_dir / "resolved" / "config.assistant.json",
         "markets": markets,
         "futu_acc_id": futu_acc_id,
+        "futu_host": futu_host, "futu_port": futu_port, "trd_env": trd_env or "REAL",
         "account_label": account_label,
         "us_symbols": symbols["us"],
         "hk_symbols": symbols["hk"],
@@ -222,10 +240,13 @@ def run_setup_init(
                 f"CC={'on' if call['enabled'] else 'off'}"
                 f" min_strike={call.get('min_strike', '-')} max_strike={call.get('max_strike', '-')}"
             )
-    lines.append("Assistant/Bot 默认启用，需另配凭证。")
+    lines.append(f"OpenD：{preview['futu_host']}:{preview['futu_port']} · 环境：{preview['trd_env']}（尚未验证登录与账户）")
+    if not trd_env:
+        lines.append("账户环境尚未确认；当前仅按 REAL 生成预览，写入前必须选择 REAL/SIMULATE。")
+    lines.append("通知和 Bot 默认未启用，可在后续步骤单独配置。")
     lines.append(f"运行目录记录：{record}（{'保留已有' if record_exists else '新建'}）")
     if preview.get("futu_account_id_placeholder"):
-        lines.append("富途账户 ID 尚未填写；创建后可用 om accounts edit 补齐。")
+        lines.append("富途账户 ID 尚未填写，基础配置未就绪；创建后可用 om accounts edit 补齐。")
     else:
         lines.append("富途账户 ID 已填写（值已隐藏）。")
     if not record_exists and (repo_root / "config.yaml").exists() and output_dir != repo_root:
@@ -234,6 +255,9 @@ def run_setup_init(
         source = effective.source_of("OM_RUNTIME_ROOT")
         lines.append(f"注意：当前 OM_RUNTIME_ROOT 来自 {source.public_value() if source else 'environment'}，仍优先于新记录；请核对或清除该覆盖。")
     preview_text = "\n".join(lines) + "\n"
+    if not interactive and args.apply and (not futu_acc_id or not trd_env):
+        raise AgentToolError(code="INPUT_ERROR", message="setup init --apply requires --futu-acc-id and --trd-env REAL|SIMULATE",
+                             hint="Use --dry-run to preview; advanced config init can create an unfinished placeholder.")
     if args.dry_run:
         return preview_text + "仅预览，未写入。\n", False
     if interactive:

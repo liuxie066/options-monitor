@@ -1439,8 +1439,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["assistant"]["enabled"] is True
-    assert payload["assistant"]["bot"]["enabled"] is True
+    assert payload["assistant"]["enabled"] is False
+    assert payload["assistant"]["bot"]["enabled"] is False
     assert payload["assistant"]["bot"]["toolsets"]["portfolio"] is False
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
@@ -1462,8 +1462,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert us_cfg["runtime"] == hk_cfg["runtime"]
-    assert assistant_cfg["assistant"]["enabled"] is True
-    assert assistant_cfg["assistant"]["bot"]["enabled"] is True
+    assert assistant_cfg["assistant"]["enabled"] is False
+    assert assistant_cfg["assistant"]["bot"]["enabled"] is False
     assert assistant_cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]

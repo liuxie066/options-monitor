@@ -111,7 +111,7 @@ def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch
     assert "REPLACE_WITH_FUTU_ACCOUNT_ID" in checks["config.us"]["message"]
     assert "om setup init" not in out["next_steps"]
     assert any("om accounts edit --market us" in step for step in out["next_steps"])
-    assert checks["bot.model_context"]["status"] == "ok"
+    assert checks["bot.model_context"]["status"] == "warn"
     assert checks["bot.session_path"]["status"] == "warn"
 
 

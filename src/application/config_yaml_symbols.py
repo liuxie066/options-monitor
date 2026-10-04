@@ -12,7 +12,11 @@ from src.application.config_primitives import configured_markets, normalize_conf
 from src.application.config_yaml import (
     load_yaml_config_file,
     resolve_yaml_config_path,
+    yaml_to_market_user_config,
 )
+from src.application.config_defaults import default_config
+from src.application.config_profiles import apply_profiles
+from src.application.layered_config import build_layered_runtime_config_from_user_config
 from src.application.symbol_calibration import require_calibrated_symbol
 from src.application.symbol_mutations import default_use_for_enabled_sides, set_path
 from src.application.write_contract import attach_write_contract
@@ -51,16 +55,20 @@ def symbol_strategy_override(
         for label, raw in (("min", low), ("max", high)):
             if raw is None:
                 continue
-            try:
-                value = float(raw)
-            except (TypeError, ValueError) as exc:
-                raise AgentToolError(code="INPUT_ERROR", message=f"{side} {label} strike must be a positive number") from exc
-            if not math.isfinite(value) or value <= 0:
-                raise AgentToolError(code="INPUT_ERROR", message=f"{side} {label} strike must be a positive number")
-            override[key][f"{label}_strike"] = value
+            override[key][f"{label}_strike"] = _positive_strike(raw, label=f"{side} {label} strike")
         if low is not None and high is not None and override[key]["min_strike"] > override[key]["max_strike"]:
             raise AgentToolError(code="INPUT_ERROR", message=f"{side} min strike exceeds max strike")
     return override
+
+
+def _positive_strike(raw: Any, *, label: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{label} must be a positive number (finite)") from exc
+    if isinstance(raw, bool) or not math.isfinite(value) or value <= 0:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{label} must be a positive number (finite)")
+    return value
 
 
 def set_yaml_symbol_config(
@@ -94,7 +102,8 @@ def set_yaml_symbol_config(
     config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     market_key = normalize_config_market(market)
     loaded_source_sha = config_source_sha256(config_yaml_path)
-    after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
+    before_doc = load_yaml_config_file(config_yaml_path)
+    after_doc = deepcopy(before_doc)
     summary = _mutate_symbol_config(
         after_doc,
         market=market_key,
@@ -105,6 +114,8 @@ def set_yaml_symbol_config(
         sell_put_max_strike=sell_put_max_strike,
         combo_yield_enabled=combo_yield_enabled,
     )
+    summary.update(_validate_changed_symbol(repo_root=repo_root, before=before_doc, after=after_doc,
+                                            market=market_key, summary=summary))
     runtime_root = (
         Path(rebuild_runtime_root).expanduser().resolve()
         if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
@@ -161,8 +172,11 @@ def mutate_yaml_symbol_config(
     market_key = normalize_config_market(market)
     config_yaml_path = resolve_yaml_config_path(config_path, repo_root=repo_root)
     loaded_source_sha = config_source_sha256(config_yaml_path)
-    after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
+    before_doc = load_yaml_config_file(config_yaml_path)
+    after_doc = deepcopy(before_doc)
     summary = _mutate_generic_symbol_config(after_doc, market=market_key, action=action, payload=payload)
+    summary.update(_validate_changed_symbol(repo_root=repo_root, before=before_doc, after=after_doc,
+                                            market=market_key, summary=summary))
     runtime_root = (
         Path(rebuild_runtime_root).expanduser().resolve()
         if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
@@ -214,6 +228,8 @@ def _mutate_generic_symbol_config(
         config=config_doc,
         error_factory=_input_error,
     )
+    if str(calibration.market or "").lower() != market:
+        raise AgentToolError(code="INPUT_ERROR", message=f"symbol belongs to {calibration.market}, not {market}")
     symbol = str(calibration.canonical_symbol or "")
     symbols = _symbols_list(market_doc, market=market)
     overrides = market_doc.get("overrides")
@@ -306,6 +322,53 @@ def _mutate_generic_symbol_config(
     }
 
 
+def _effective_symbol(*, repo_root: Path, document: dict[str, Any], market: str, symbol: str) -> dict[str, Any] | None:
+    runtime, _ = build_layered_runtime_config_from_user_config(
+        repo_root=repo_root, market=market, user_config=yaml_to_market_user_config(document, market=market),
+        system_config=default_config(),
+    )
+    raw = next((deepcopy(item) for item in runtime["symbols"] if item["symbol"] == symbol), None)
+    return apply_profiles(raw, runtime.get("templates")) if raw is not None else None
+
+
+def _validate_changed_symbol(*, repo_root: Path, before: dict[str, Any], after: dict[str, Any],
+                             market: str, summary: dict[str, Any]) -> dict[str, Any]:
+    symbol = summary["canonical_symbol"]
+    previous_error = None
+    try:
+        previous = _effective_symbol(repo_root=repo_root, document=before, market=market, symbol=symbol)
+    except AgentToolError as exc:
+        # An invalid old target may be repaired; only the candidate must pass.
+        previous = None
+        previous_error = exc.message
+    current = None if summary["action"] == "remove" else _effective_symbol(
+        repo_root=repo_root, document=after, market=market, symbol=symbol)
+    if current is not None:
+        enabled_count = 0
+        for label, key, required in (("CSP", "sell_put", "max_strike"), ("CC", "sell_call", "min_strike")):
+            settings = current.get(key) or {}
+            if previous is not None and settings == previous.get(key):
+                # Keep legacy policies usable when an unrelated side/feature changes.
+                continue
+            if not settings.get("enabled"):
+                continue
+            enabled_count += 1
+            if settings.get(required) is None:
+                raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} {label} requires {required}")
+            bounds: dict[str, float] = {}
+            for bound in ("min_strike", "max_strike"):
+                raw = settings.get(bound)
+                if raw is None:
+                    continue
+                bounds[bound] = _positive_strike(raw, label=f"{symbol} {label} {bound}")
+            if bounds.get("min_strike", 0) > bounds.get("max_strike", math.inf):
+                raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} {label} min strike exceeds max strike")
+        if symbol not in before["markets"][market]["symbols"] and not enabled_count:
+            raise AgentToolError(code="INPUT_ERROR", message="new symbol requires CSP or CC with its strike bound")
+    return {"before_effective": previous, "before_error": previous_error, "after_effective": current,
+            "affected_accounts": _market_accounts(after, market=market)}
+
+
 def _enables_call_without_put(override: dict[str, Any]) -> bool:
     call = override.get("covered_call")
     if not isinstance(call, dict):
@@ -336,6 +399,9 @@ def _build_generic_add_override(
         return override
     sell_put_enabled = bool(payload.get("sell_put_enabled", False))
     sell_call_enabled = bool(payload.get("sell_call_enabled", False))
+    for side, enabled in (("sell_put", sell_put_enabled), ("sell_call", sell_call_enabled)):
+        if not enabled and any(payload.get(f"{side}_{bound}_strike") is not None for bound in ("min", "max")):
+            raise AgentToolError(code="INPUT_ERROR", message=f"{side} strike requires enabling that side")
     if sell_put_enabled:
         _require_payload_fields(payload, "sell_put_min_dte", "sell_put_max_dte")
     if sell_call_enabled:
@@ -363,7 +429,7 @@ def _build_generic_add_override(
             ("sell_put_max_strike", "max_strike"),
         ):
             if payload.get(source) is not None:
-                override["sell_put"][target] = float(payload[source])
+                override["sell_put"][target] = _positive_strike(payload[source], label=source)
     if sell_call_enabled:
         override["covered_call"].update(
             {
@@ -376,7 +442,7 @@ def _build_generic_add_override(
             ("sell_call_max_strike", "max_strike"),
         ):
             if payload.get(source) is not None:
-                override["covered_call"][target] = float(payload[source])
+                override["covered_call"][target] = _positive_strike(payload[source], label=source)
     use = payload.get("use")
     if use is None:
         use = default_use_for_enabled_sides(
@@ -439,6 +505,8 @@ def _mutate_symbol_config(
 ) -> dict[str, Any]:
     market_doc = _market_doc(config_doc, market=market)
     calibration = require_calibrated_symbol(symbol, config=config_doc, error_factory=_input_error)
+    if str(calibration.market or "").lower() != market:
+        raise AgentToolError(code="INPUT_ERROR", message=f"symbol belongs to {calibration.market}, not {market}")
     canonical_symbol = str(calibration.canonical_symbol)
     symbols = _symbols_list(market_doc, market=market)
     symbol_added = False
@@ -594,6 +662,9 @@ def _sync_use_templates(
     new_symbol: bool,
 ) -> bool:
     if covered_call_enabled is None and sell_put_enabled is None and not new_symbol:
+        return False
+    if not new_symbol and "use" not in override:
+        # Keep inherited template selection when editing one strategy.
         return False
     use = _use_templates(override.get("use"))
     original = list(use)

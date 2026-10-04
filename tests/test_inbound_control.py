@@ -1675,7 +1675,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert f"取消：/cancel trade {trade_id}" in pending["data"]["response_text"]
 
     symbol_preview = _handle(
-        "/symbol add TIGR put",
+        "/symbol add TIGR put sell_put.max_strike=8",
         "msg_pending_symbol_preview",
         conversation_id="feishu:chat_a:ou_1",
         config_path=str(cfg_path),
@@ -2627,7 +2627,7 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert listed["tool_name"] == "inbound.symbols"
     assert "当前监控标的" in listed["data"]["response_text"]
 
-    add_preview = _handle("/symbol add 700 put", "msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db))
+    add_preview = _handle("/symbol add 700 put sell_put.max_strike=450", "msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db))
     assert add_preview["ok"] is True
     assert "校准为：0700.HK" in add_preview["data"]["response_text"]
     add_id = add_preview["data"]["operation_id"]
@@ -4273,3 +4273,42 @@ def test_attribution_operation_requires_conversation_and_owns_stale_recovery(tmp
     store.list_pending_operations(channel="wechat", sender_id="ou_1", conversation_id="chat",
                                   operation_types={"model_use"}, now=datetime(2030, 1, 1, tzinfo=timezone.utc))
     assert store.get("claimed")["status"] == "confirmed"
+
+
+@pytest.mark.parametrize("command", ["/symbol add TIGR put", "/symbol add TIGR call",
+                                     "/symbol add TIGR put sell_put.max_strike=0",
+                                     "/symbol add TIGR call sell_call.min_strike=-1",
+                                     "/symbol add TIGR put sell_put.max_strike=nan",
+                                     "/symbol add TIGR put sell_put.max_strike=true",
+                                     "/symbol add TIGR put sell_put.max_strike=bad",
+                                     "/symbol add TIGR put sell_put.max_strike=8 sell_call.min_strike=10"])
+def test_inbound_symbol_add_requires_explicit_positive_strategy_bound(monkeypatch, tmp_path, command):
+    _enable_inbound_symbol_write(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    source = tmp_path / "config.yaml"
+    before = source.read_bytes(), cfg_path.read_bytes()
+    response = _handle(command, "invalid_add_bound", config_path=str(cfg_path), audit_db=str(tmp_path / "inbound.sqlite3"))
+    assert response["ok"] is False
+    assert not response.get("data", {}).get("operation_id")
+    assert (source.read_bytes(), cfg_path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("command,side,bound,value", [
+    ("/symbol add TIGR put sell_put.max_strike=1", "sell_put", "max_strike", 1),
+    ("/symbol add TIGR call covered_call.min_strike=10 sell_call.max_strike=20", "sell_call", "min_strike", 10),
+])
+def test_inbound_symbol_add_accepts_strategy_bound_and_confirms_one_publication(monkeypatch, tmp_path, command, side, bound, value):
+    _enable_inbound_symbol_write(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    before = (tmp_path / "config.yaml").read_bytes()
+    preview = _handle(command, "add_bounded_symbol", config_path=str(cfg_path), audit_db=str(audit_db))
+    assert preview["ok"] is True
+    assert (tmp_path / "config.yaml").read_bytes() == before
+    operation_id = preview["data"]["operation_id"]
+    confirmed = _handle(f"/confirm symbol {operation_id}", "confirm_bounded_symbol", config_path=str(cfg_path), audit_db=str(audit_db))
+    assert confirmed["ok"] is True
+    rows = json.loads(cfg_path.read_text())["symbols"]
+    added = [row for row in rows if row["symbol"] == "TIGR"]
+    assert len(added) == 1
+    assert added[0][side][bound] == value

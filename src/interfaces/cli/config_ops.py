@@ -28,6 +28,9 @@ def add_config_commands(subparsers: Any) -> None:
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
     init_config.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     init_config.add_argument("--futu-acc-id", default=None, help="Futu account id; omitted keeps a placeholder in config.yaml")
+    init_config.add_argument("--futu-host", default="127.0.0.1")
+    init_config.add_argument("--futu-port", type=int, default=11111)
+    init_config.add_argument("--trd-env", choices=("REAL", "SIMULATE"), default="REAL")
     init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
     init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
                              help="required for US; repeat for each monitored symbol")
@@ -86,6 +89,8 @@ def add_config_commands(subparsers: Any) -> None:
     symbol_set.add_argument("--covered-call-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--covered-call-min-strike", type=float, default=None)
     symbol_set.add_argument("--sell-put-enabled", type=_parse_bool_value, default=None)
+    symbol_set.add_argument("--sell-put-max-strike", type=float, default=None)
+    symbol_set.add_argument("--expected-source-sha256", default=None)
     symbol_set.add_argument("--combo-yield-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--rebuild-runtime-root", default=None)
     symbol_set.add_argument("--apply", action="store_true")
@@ -293,6 +298,7 @@ def handle_config_command(
             runtime_output_dir=args.runtime_output_dir,
             markets=args.market,
             futu_acc_id=args.futu_acc_id,
+            futu_host=args.futu_host, futu_port=args.futu_port, trd_env=args.trd_env,
             account_label=args.account_label,
             us_symbols=args.us_symbols,
             hk_symbols=args.hk_symbols,
@@ -328,6 +334,8 @@ def handle_config_command(
                 covered_call_enabled=args.covered_call_enabled,
                 covered_call_min_strike=args.covered_call_min_strike,
                 sell_put_enabled=args.sell_put_enabled,
+                sell_put_max_strike=getattr(args, "sell_put_max_strike", None),
+                expected_source_sha256=getattr(args, "expected_source_sha256", None),
                 combo_yield_enabled=args.combo_yield_enabled,
                 rebuild_runtime_root=args.rebuild_runtime_root,
                 apply=bool(args.apply),
