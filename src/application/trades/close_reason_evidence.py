@@ -7,6 +7,8 @@ from decimal import Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from domain.domain.option_lifecycle import MARKET_TIMEZONES, SUPPORTED_LAST_TRADE_SOURCES
+
 from src.application.ledger.api import (
     attach_settlement_semantics,
     settlement_evidence_id,
@@ -24,14 +26,6 @@ REQUIRED_SETTLEMENT_SOURCES = (
     "trading_calendar",
     "contract_metadata",
 )
-MARKET_TIMEZONES = {
-    "US": "America/New_York",
-    "HK": "Asia/Hong_Kong",
-}
-SUPPORTED_LAST_TRADE_SOURCES = {
-    "broker_contract_metadata",
-    "instrument_policy_registry",
-}
 
 
 def canonical_hash(value: Any) -> str:

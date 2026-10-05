@@ -29,6 +29,10 @@ MARKET_TIMEZONES = {
     "US": "America/New_York",
     "HK": "Asia/Hong_Kong",
 }
+SUPPORTED_LAST_TRADE_SOURCES = frozenset({
+    "broker_contract_metadata",
+    "instrument_policy_registry",
+})
 
 
 @dataclass(frozen=True)
@@ -495,6 +499,7 @@ __all__ = [
     "LIFECYCLE_CASE_SCHEMA",
     "LifecycleReadModel",
     "MARKET_TIMEZONES",
+    "SUPPORTED_LAST_TRADE_SOURCES",
     "PENDING_ELAPSED_HOURS",
     "PENDING_STATUSES",
     "build_lifecycle_case",
