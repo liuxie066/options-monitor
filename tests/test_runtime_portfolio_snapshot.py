@@ -159,6 +159,21 @@ def _owner_assembly_kwargs() -> dict:
     }
 
 
+def _assembly_with_current_read(current_read: dict) -> dict:
+    assembly = _owner_assembly_kwargs()
+    option_payload = json.loads(assembly["prepared_option_payload_bytes"])
+    option_payload["current_decision_read"] = current_read
+    option_payload["decision_snapshot_status"] = "source_untrusted"
+    option_payload["decision_snapshot_actionable"] = False
+    option_payload["current_decision_shadow"] = {"status": "unavailable"}
+    raw = canonical_json_bytes(option_payload)
+    option_manifest = json.loads(assembly["prepared_option_manifest_bytes"])
+    option_manifest["payload_sha256"] = sha256_bytes(raw)
+    assembly["prepared_option_payload_bytes"] = raw
+    assembly["prepared_option_manifest_bytes"] = canonical_json_bytes(option_manifest)
+    return assembly
+
+
 def test_frozen_fixture_contract_hash_is_independent_and_exact() -> None:
     raw = FIXTURE_DESCRIPTOR_PATH.read_bytes()
     descriptor = json.loads(raw)
@@ -262,6 +277,66 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
         snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
     )
+
+
+@pytest.mark.parametrize("shape", ["fallback", "sparse", "full"])
+def test_assembler_seals_unavailable_current_read_without_inventing_facts(tmp_path, shape: str) -> None:
+    full = json.loads(_owner_assembly_kwargs()["prepared_option_payload_bytes"])["current_decision_read"]
+    reason = "current_projection_unavailable"
+    if shape == "fallback":
+        current_read = {"status": "data_unavailable", "reason": reason}
+    elif shape == "sparse":
+        current_read = {
+            "schema_version": full["schema_version"],
+            "status": "data_unavailable",
+            "account": full["account"],
+            "reason": reason,
+            "payload": None,
+            "position_lots": [],
+        }
+    else:
+        current_read = {**full, "status": "data_unavailable", "reason": reason, "payload": None}
+    assembly = _assembly_with_current_read(current_read)
+
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+
+    assert snapshot["status"] == "data_unavailable"
+    ledger = snapshot["sections"]["ledger_projection"]
+    assert ledger["facts"]["current_decision"]["reason"] == reason
+    assert reason in ledger["completeness"]["reason_codes"]
+    assert ledger["completeness"]["status"] == "unavailable"
+    assert snapshot["sections"]["cash_occupation"]["completeness"]["status"] == "unavailable"
+    if shape == "fallback":
+        assert ledger["facts"]["read_schema_version"] is None
+        assert ledger["facts"]["position_lots"] is None
+        assert ledger["facts"]["current_decision"]["lot_count"] is None
+    elif shape == "sparse":
+        assert ledger["facts"]["position_lots"] == []
+        assert ledger["facts"]["current_decision"]["lot_count"] is None
+    assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
+    path = _published(tmp_path, snapshot, references)
+    assert path.read_bytes() == canonical_json_bytes(snapshot)
+
+
+@pytest.mark.parametrize("mutation", ["trusted_fallback", "foreign_sparse", "payload_sparse", "lots_sparse"])
+def test_assembler_rejects_invalid_sparse_current_read(mutation: str) -> None:
+    full = json.loads(_owner_assembly_kwargs()["prepared_option_payload_bytes"])["current_decision_read"]
+    read = {
+        "schema_version": full["schema_version"], "status": "data_unavailable",
+        "account": full["account"], "reason": "read_unavailable", "payload": None,
+        "position_lots": [],
+    }
+    if mutation == "trusted_fallback":
+        read = {"status": "trusted", "reason": "read_unavailable"}
+    elif mutation == "foreign_sparse":
+        read["account"] = "other_account"
+    elif mutation == "payload_sparse":
+        read["payload"] = {}
+    else:
+        read["position_lots"] = [{"id": "unexpected"}]
+
+    with pytest.raises(RuntimePortfolioSnapshotError):
+        assemble_runtime_portfolio_snapshot(**_assembly_with_current_read(read))
 
 
 def test_runtime_snapshot_preserves_prepared_owner_binding() -> None:

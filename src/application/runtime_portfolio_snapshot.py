@@ -191,12 +191,19 @@ def project_ledger_projection_facts(
     decision_state_fingerprint: str,
 ) -> dict[str, Any]:
     read = _mapping(current_decision_read, "current_decision_read")
-    current_decision = _project_required(read, CURRENT_DECISION_READ_KEYS)
-    if "position_lots" not in read:
-        _fail("REQUIRED_FIELD_MISSING", "required field is missing: position_lots")
+    keys = set(read)
+    full_keys = {*CURRENT_DECISION_READ_KEYS, "schema_version", "position_lots"}
+    if keys == full_keys:
+        current_decision = _project_required(read, CURRENT_DECISION_READ_KEYS)
+    elif keys == {"schema_version", "status", "account", "reason", "payload", "position_lots"}:
+        current_decision = {key: read.get(key) for key in CURRENT_DECISION_READ_KEYS}
+    elif keys == {"status", "reason"}:
+        current_decision = {key: read.get(key) for key in CURRENT_DECISION_READ_KEYS}
+    else:
+        _fail("FIELD_INVALID", "current decision read fields do not match a known shape")
     return {
-        "read_schema_version": _text(read.get("schema_version"), "current_decision_read.schema_version"),
-        "position_lots": read["position_lots"],
+        "read_schema_version": read.get("schema_version"),
+        "position_lots": read.get("position_lots"),
         "current_decision": current_decision,
         "decision_state_fingerprint": _sha256(decision_state_fingerprint, "decision_state_fingerprint"),
     }
@@ -516,6 +523,8 @@ def assemble_runtime_portfolio_snapshot(
             "owner_snapshots",
         )
     }
+    option_reasons = _manifest_reason_codes(option_manifest)
+    read_trusted = current_read.get("status") == "trusted"
     reference_payloads = {
         _ROLE_RELPATHS["account_config"]: account_config_bytes,
         _ROLE_RELPATHS["candidate_snapshot_manifest"]: candidate_manifest_bytes,
@@ -550,7 +559,11 @@ def assemble_runtime_portfolio_snapshot(
                 current_decision_read=current_read,
                 decision_state_fingerprint=decision_fingerprint,
             ),
-            completeness_status="complete",
+            completeness_status=("complete" if option_manifest.get("status") == "ready" and read_trusted else "unavailable"),
+            completeness_reason_codes=(
+                [] if option_manifest.get("status") == "ready" and read_trusted
+                else [*option_reasons, *([] if read_trusted else [str(current_read.get("reason") or f"current_decision:{current_read.get('status')}")])]
+            ),
         ),
         "broker_cash": build_runtime_portfolio_section(
             "broker_cash",
@@ -575,7 +588,10 @@ def assemble_runtime_portfolio_snapshot(
             source_observed_at_utc=option_observed,
             application_received_at_utc=option_received,
             facts=project_cash_occupation_facts(option_context),
-            completeness_status="complete",
+            completeness_status=("complete" if option_manifest.get("status") == "ready" and read_trusted else "unavailable"),
+            completeness_reason_codes=(
+                [] if option_manifest.get("status") == "ready" and read_trusted else option_reasons
+            ),
             freshness_authority=("prepared_option_positions_context.fx_status"),
             freshness_status=str(option_manifest.get("fx_status") or ""),
             freshness_reason_codes=_option_freshness(option_manifest)["reason_codes"],
@@ -617,11 +633,14 @@ def assemble_runtime_portfolio_snapshot(
         ledger_shadow_status=ledger_shadow_status,
     )
     if ledger_shadow_status != "matched":
-        unavailable = {
+        ledger_completeness = sections["ledger_projection"]["completeness"]
+        sections["ledger_projection"]["completeness"] = {
             "status": "unavailable",
-            "reason_codes": [f"legacy_comparison:{comparison['status']}"],
+            "reason_codes": _sorted_codes([
+                *ledger_completeness["reason_codes"],
+                f"legacy_comparison:{comparison['status']}",
+            ]),
         }
-        sections["ledger_projection"]["completeness"] = unavailable
 
     by_role = {row["role"]: row for row in bindings}
     required_ready = [
@@ -915,14 +934,8 @@ def _section(value: Any, name: str, account: str) -> dict[str, Any]:
             "sections.ledger_projection.facts.current_decision",
             set(CURRENT_DECISION_READ_KEYS),
         )
-        if normalize_account_label(current.get("account")) != account:
-            _fail("SECTION_ACCOUNT_MISMATCH", "current decision account mismatch")
-        _text(facts["read_schema_version"], "ledger read_schema_version")
         _sha256(facts["decision_state_fingerprint"], "decision_state_fingerprint")
-        if not isinstance(facts["position_lots"], list):
-            _fail("SECTION_INVALID", "ledger position_lots must be a list")
-        if _nonnegative_int(current.get("lot_count"), "lot_count") != len(facts["position_lots"]):
-            _fail("SECTION_INVALID", "ledger lot_count mismatch")
+        _validate_current_decision_truth({"facts": facts}, expected_account=account)
     observed = _utc_timestamp(row.get("source_observed_at_utc"), f"sections.{name}.source_observed_at_utc")
     received = _utc_timestamp(
         row.get("application_received_at_utc"),
@@ -1845,15 +1858,34 @@ def _require_manifest_identity(
 def _validate_current_decision_truth(section: Mapping[str, Any], *, expected_account: str) -> None:
     facts = section["facts"]
     current = facts["current_decision"]
-    if facts["read_schema_version"] != CURRENT_DECISION_READ_SCHEMA:
-        _fail("SOURCE_STATUS_INVALID", "current decision read schema mismatch")
     status = _one_of(
         current.get("status"),
         {"trusted", "absent", "data_unavailable"},
         "current decision status",
     )
+    reason = current.get("reason")
+    schema = facts["read_schema_version"]
+    positions = facts["position_lots"]
+    missing_views = all(current.get(key) is None for key in (
+        "lot_count", "lifecycle_by_lot", "lifecycle_by_case", "lifecycle_quality"
+    ))
+    if schema is None:
+        if (status != "data_unavailable" or current.get("account") is not None
+                or current.get("payload") is not None or positions is not None
+                or not missing_views or not isinstance(reason, str) or not reason.strip()):
+            _fail("SOURCE_STATUS_INVALID", "fallback current decision read is invalid")
+        return
+    if schema != CURRENT_DECISION_READ_SCHEMA:
+        _fail("SOURCE_STATUS_INVALID", "current decision read schema mismatch")
     if normalize_account_label(current.get("account")) != expected_account:
         _fail("SOURCE_STATUS_INVALID", "current decision account mismatch")
+    if missing_views:
+        if (status == "trusted" or current.get("payload") is not None
+                or positions != [] or not isinstance(reason, str) or not reason.strip()):
+            _fail("SOURCE_STATUS_INVALID", "sparse current decision read is invalid")
+        return
+    if not isinstance(positions, list) or _nonnegative_int(current.get("lot_count"), "lot_count") != len(positions):
+        _fail("SOURCE_STATUS_INVALID", "current decision lot count mismatch")
     if (
         not isinstance(current.get("lifecycle_by_lot"), Mapping)
         or not isinstance(current.get("lifecycle_by_case"), Mapping)
@@ -1874,7 +1906,7 @@ def _validate_current_decision_truth(section: Mapping[str, Any], *, expected_acc
             _fail("SOURCE_STATUS_INVALID", "current decision payload account mismatch")
         if payload["position_binding"]["lot_count"] != current["lot_count"]:
             _fail("SOURCE_STATUS_INVALID", "current decision payload lot count mismatch")
-    elif current.get("payload") is not None or not isinstance(current.get("reason"), str):
+    elif current.get("payload") is not None or not isinstance(reason, str) or not reason.strip():
         _fail("SOURCE_STATUS_INVALID", "unavailable current decision receipt is invalid")
 
 
