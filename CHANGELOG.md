@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 空选择的 lifecycle migration manifest 现在会在 apply 时失败关闭，CLI 返回错误信封与退出码 2；只读 inventory 和 dry-run 仍可用于盘点。
+- 重放已完成的 lifecycle migration manifest 若未产生新写入，返回 `status: "noop"`，并保留 `applied_count=0`、已有回执数及成功退出码。
+- `om wheel` 的 branch end、end、intent 和 linkage 在使用 `--config <path>` 时，现从已加载运行配置解析市场，不再因缺少 `--config-key` 而失败。
+- Wheel Call 关联拒绝遇到同账户同市场的 Put 待关联候选时，跳过不含 Call 身份字段的候选，避免未捕获的 `KeyError`。
+
 ### Improvements
 - 首次安装与日常菜单接入可执行的账户、标的、通知、Bot、全局持仓风险和服务流程；新增 `channel/bot/holdings/close-advice configure` 与预览确认式 `service install/start/stop`。可选功能可跳过；普通设置写入实例 env，密钥经终端隐藏输入和既有系统存储。通知显式关闭同时约束定时投递、回执与系统告警，旧配置保持原默认行为。
 - `bot` 统一承载模型、能力和消息入口，`channel feishu event/serve` 提供飞书接入；保留 `assistant/inbound` 兼容。账户和标的变更发布同一代运行快照，同市场账户共享标的。菜单子命令隔离实例环境；手动扫描使用 `--force --no-send`，并如实保留失败与未验证状态。

@@ -423,6 +423,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
 
     apply_changes = _write_requested(args)
     config_path, cfg, repo = _open_runtime(args, apply_changes=apply_changes)
+    market = args.config_key or resolve_wheel_config(cfg, args.account)["market"]
 
     instant = int(getattr(args, "as_of_ms", None) or _now_ms())
     if args.wheel_command == "branch":
@@ -430,7 +431,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             repo,
             args.account,
             instant,
-            market=args.config_key,
+            market=market,
         )
         branch = _branch(
             model,
@@ -444,7 +445,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "expected_batch_generation_hash": args.expected_batch_generation_hash,
             "request_id": args.request_id,
             "actor": args.actor,
-            "market": args.config_key,
+            "market": market,
             "apply_changes": apply_changes,
             "as_of_ms": instant,
         }
@@ -452,7 +453,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             resolved = resolve_wheel_config(
                 cfg,
                 args.account,
-                market=getattr(args, "config_key", None),
+                market=market,
             )
             branch_args.update(
                 market=resolved.get("market"),
@@ -470,7 +471,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             expected_batch_generation_hash=args.expected_batch_generation_hash,
             request_id=args.request_id,
             actor=args.actor,
-            market=args.config_key,
+            market=market,
             apply_changes=apply_changes,
             as_of_ms=instant,
         )
@@ -480,7 +481,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         repo,
         args.account,
         instant,
-        market=args.config_key,
+        market=market,
     )
     branch = _branch(
         model,
@@ -496,7 +497,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "expected_batch_generation_hash": args.expected_batch_generation_hash,
         "request_id": args.request_id,
         "actor": args.actor,
-        "market": args.config_key,
+        "market": market,
         "apply_changes": apply_changes,
         "as_of_ms": instant,
     }
@@ -544,7 +545,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         resolved = resolve_wheel_config(
             cfg,
             args.account,
-            market=args.config_key,
+            market=market,
         )
         return create_wheel_intent(
             repo,

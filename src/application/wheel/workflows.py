@@ -1381,9 +1381,9 @@ def _linkage_candidate(
     matches = [
         item
         for item in model.get("linkage_candidates") or []
-        if item["call_record_id"] == call_lot_id
-        and item["stock_lot_id"] == lot_id
-        and item["linkage_candidate_id"] == linkage_candidate_id
+        if item.get("call_record_id") == call_lot_id
+        and item.get("stock_lot_id") == lot_id
+        and item.get("linkage_candidate_id") == linkage_candidate_id
     ]
     if len(matches) != 1:
         raise ValueError("Wheel Call linkage candidate is stale or unavailable")
