@@ -7,7 +7,10 @@ from typing import Any, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
     combo_opening_status,
+    current_candidate_owner_schema,
     normalize_combo_scope_results,
     normalize_dependencies,
     normalize_json_value,
@@ -202,6 +205,7 @@ def _seal_owner(
     evidence: Mapping[str, Any],
     fields: Mapping[str, Any],
     sealed_at: str,
+    schema: str,
 ) -> dict[str, Any]:
     _assert_counts(scopes=scopes, selected=selected)
     opening_status = (
@@ -211,7 +215,7 @@ def _seal_owner(
     )
     payload = normalize_json_value(
         {
-            "schema_version": EXPERIENCE_OWNER_SCHEMAS[owner],
+            "schema_version": schema,
             "run_id": run_id,
             "account": account,
             "market": market,
@@ -229,7 +233,11 @@ def _seal_owner(
         field=f"{owner} experience snapshot",
     )
     payload["content_sha256"] = canonical_sha256(payload)
-    _validate_owner(payload, owner=owner)
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=schema,
+    )
     try:
         write_account_run_state_bytes_once_safely(
             base=base,
@@ -245,157 +253,83 @@ def _seal_owner(
     return payload
 
 
-def seal_experience_candidate_bundle(
+def seal_experience_candidate_owner(
     *,
     base: Path,
     run_id: str,
     account: str,
     market: str,
+    owner: str,
     account_config_sha256: str,
     strategy_policy_sha256: str,
     dependencies: Iterable[Mapping[str, Any]],
-    status_index: Mapping[str, Any],
-    statuses_by_owner: Mapping[str, list[dict[str, Any]]],
-    opening_candidates: Mapping[str, list[dict[str, Any]]],
-    opening_decisions: Mapping[str, list[dict[str, Any]]],
-    combo_evidence_by_owner: Mapping[str, list[dict[str, Any]]],
-    account_display_name: str,
+    scan_statuses: Iterable[Mapping[str, Any]],
+    selected_candidates: Iterable[Mapping[str, Any]],
+    evidence: Mapping[str, Iterable[Mapping[str, Any]]],
+    run_mode: Mapping[str, Any],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
-    run_id_norm = required_text(run_id, "run_id")
-    account_norm = required_text(account, "account").lower()
+    """Seal one experience branch through a current owner schema."""
+
+    run_id_norm = _identity(run_id, "run_id")
+    account_norm = _identity(account, "account", lower=True)
     market_norm = required_text(market, "market").upper()
-    config_hash = sha256_text(account_config_sha256, "account_config_sha256")
-    policy_hash = sha256_text(strategy_policy_sha256, "strategy_policy_sha256")
+    if owner not in EXPERIENCE_OWNER_FILES:
+        raise ExperienceCandidateSnapshotError("experience owner is invalid")
+    try:
+        schema = current_candidate_owner_schema(owner)
+    except CandidateSnapshotContractError as exc:
+        raise ExperienceCandidateSnapshotError(str(exc)) from exc
+    fields = validate_experience_fields(run_mode)
     dependency_rows = normalize_dependencies(
         dependencies,
         verify_root=Path(base).resolve(),
         required_kinds=EXPERIENCE_CANDIDATE_DEPENDENCIES,
     )
-    fields = experience_fields(account_display_name)
-    seal_time = utc_timestamp(sealed_at or datetime.now(timezone.utc))
-    owners = sorted(
-        {
-            str(item.get("candidate_owner") or "").strip().lower()
-            for item in status_index.get("items") or []
-        }
-        & set(EXPERIENCE_OWNER_SCHEMAS)
-    )
-    entries: list[dict[str, Any]] = []
-    for owner in owners:
-        scopes = _scope_rows(statuses_by_owner.get(owner) or [], owner=owner)
-        if owner == "opening":
-            selected = [
-                {**row, "strategy_mode": mode, "rank": rank}
-                for mode, rows in opening_candidates.items()
-                for rank, row in enumerate(rows, start=1)
-            ]
-            evidence: dict[str, Any] = {
-                "candidate_decisions": _tag_rows(
-                    (
-                        {**row, "strategy_mode": mode}
-                        for mode, rows in opening_decisions.items()
-                        for row in rows
-                    ),
-                    fields=fields,
-                )
-            }
-        else:
-            owner_evidence = list(combo_evidence_by_owner.get(owner) or [])
-            selected = [
-                row
-                for evidence_row in owner_evidence
-                for row in evidence_row.get("ranked_pairs") or []
-            ]
-            evidence = {}
-            if owner == "sp_lc":
-                for key in (
-                    "funding_put_decisions",
-                    "pair_evaluations",
-                    "rank_records",
-                ):
-                    evidence[key] = _tag_rows(
-                        (
-                            row
-                            for evidence_row in owner_evidence
-                            for row in evidence_row.get(key) or []
-                        ),
-                        fields=fields,
-                    )
-        selected_tagged = _tag_rows(selected, fields=fields)
-        snapshot = _seal_owner(
-            base=Path(base),
-            run_id=run_id_norm,
-            account=account_norm,
-            market=market_norm,
-            owner=owner,
-            account_config_sha256=config_hash,
-            strategy_policy_sha256=policy_hash,
-            dependencies=dependency_rows,
-            scopes=scopes,
-            selected=selected_tagged,
-            evidence=evidence,
-            fields=fields,
-            sealed_at=seal_time,
-        )
-        path = _state_dir(base, run_id_norm, account_norm) / EXPERIENCE_OWNER_FILES[owner]
-        entries.append(
-            {
-                "candidate_owner": owner,
-                "schema_version": snapshot["schema_version"],
-                "relpath": f"state/{path.name}",
-                "sha256": sha256_bytes(path.read_bytes()),
-                "content_sha256": snapshot["content_sha256"],
-                "opening_status": snapshot["opening_status"],
-                **fields,
-            }
-        )
-    state_dir = _state_dir(base, run_id_norm, account_norm)
-    index_path = state_dir.parent / STRATEGY_SCAN_STATUS_INDEX_V3_FILE
-    manifest: dict[str, Any] = {
-        "schema_version": EXPERIENCE_CANDIDATE_MANIFEST_SCHEMA,
-        "run_id": run_id_norm,
-        "account": account_norm,
-        "markets": sorted(
-            {
-                str(item.get("market") or "").strip().upper()
-                for item in status_index.get("items") or []
-                if str(item.get("market") or "").strip()
-            }
-        ),
-        "account_config_sha256": config_hash,
-        "strategy_policy_sha256": policy_hash,
-        "sealed_at_utc": seal_time,
-        "expected_owners": owners,
-        "status_index": {
-            "schema_version": STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA,
-            "relpath": STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
-            "sha256": sha256_bytes(index_path.read_bytes()),
-            "content_sha256": status_index["content_sha256"],
-        },
-        "owner_snapshots": entries,
-        **fields,
+    scopes = _scope_rows(scan_statuses, owner=owner)
+    selected = _tag_rows(selected_candidates, fields=fields)
+    tagged_evidence = {
+        key: _tag_rows(rows, fields=fields)
+        for key, rows in evidence.items()
     }
-    manifest["content_sha256"] = canonical_sha256(manifest)
-    _validate_manifest(manifest)
+    _assert_no_authority_keys(
+        {
+            "dependencies": dependency_rows,
+            "scopes": scopes,
+            "selected": selected,
+            "evidence": tagged_evidence,
+        }
+    )
+    account_dir = _state_dir(base, run_id_norm, account_norm).parent
     try:
-        write_account_run_state_bytes_once_safely(
-            base=Path(base),
-            run_id=run_id_norm,
-            account=account_norm,
-            name=EXPERIENCE_CANDIDATE_MANIFEST_FILE,
-            payload=_json_bytes(manifest),
+        assert_current_candidate_artifact_boundary(
+            account_dir=account_dir,
+            target=account_dir / "state" / EXPERIENCE_OWNER_FILES[owner],
         )
-    except AccountRunConfigError as exc:
-        raise ExperienceCandidateSnapshotError(
-            "experience candidate manifest cannot be published"
-        ) from exc
-    adopted = load_experience_candidate_snapshot_bundle(
-        base=Path(base), run_id=run_id_norm, account=account_norm
-    )["manifest"]
-    if adopted != manifest:
-        raise ExperienceCandidateSnapshotError("experience manifest adoption mismatch")
-    return adopted
+    except CandidateSnapshotContractError as exc:
+        raise ExperienceCandidateSnapshotError(str(exc)) from exc
+    return _seal_owner(
+        base=Path(base),
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        owner=owner,
+        account_config_sha256=sha256_text(
+            account_config_sha256,
+            "account_config_sha256",
+        ),
+        strategy_policy_sha256=sha256_text(
+            strategy_policy_sha256,
+            "strategy_policy_sha256",
+        ),
+        dependencies=dependency_rows,
+        scopes=scopes,
+        selected=selected,
+        evidence=tagged_evidence,
+        fields=fields,
+        sealed_at=utc_timestamp(sealed_at or datetime.now(timezone.utc)),
+        schema=schema,
+    )
 
 
 def _assert_no_authority_keys(value: Any) -> None:
@@ -413,8 +347,36 @@ def _assert_no_authority_keys(value: Any) -> None:
 
 
 def _validate_owner(payload: Mapping[str, Any], *, owner: str) -> None:
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=EXPERIENCE_OWNER_SCHEMAS[owner],
+    )
+
+
+def validate_experience_candidate_owner(
+    payload: Mapping[str, Any],
+    *,
+    owner: str,
+    schema: str,
+) -> None:
+    if owner not in EXPERIENCE_OWNER_SCHEMAS:
+        raise ExperienceCandidateSnapshotError("experience owner is invalid")
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=required_text(schema, "schema"),
+    )
+
+
+def _validate_experience_owner(
+    payload: Mapping[str, Any],
+    *,
+    owner: str,
+    expected_schema: str,
+) -> None:
     item = dict(payload)
-    if item.get("schema_version") != EXPERIENCE_OWNER_SCHEMAS[owner]:
+    if item.get("schema_version") != expected_schema:
         raise ExperienceCandidateSnapshotError("experience owner schema mismatch")
     validate_experience_fields(item)
     _identity(item.get("run_id"), "run_id")
@@ -714,5 +676,6 @@ __all__ = [
     "EXPERIENCE_CANDIDATE_MANIFEST_SCHEMA",
     "ExperienceCandidateSnapshotError",
     "load_experience_candidate_snapshot_bundle",
-    "seal_experience_candidate_bundle",
+    "seal_experience_candidate_owner",
+    "validate_experience_candidate_owner",
 ]

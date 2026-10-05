@@ -1665,18 +1665,9 @@ def test_config_drift_isolated_to_one_account_before_shared_prefetch(
     assert outcome.ran_pipeline_accounts == ["sy"]
 
 
-@pytest.mark.parametrize(
-    ("manifest_schema", "manifest_name"),
-    [
-        ("candidate_snapshot_manifest.v1", "candidate_snapshot_manifest.v1.json"),
-        ("candidate_snapshot_manifest.v3", "candidate_snapshot_manifest.v3.json"),
-    ],
-)
-def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
+def test_runtime_snapshot_shadow_is_account_scoped_and_current_only(
     monkeypatch,
     tmp_path: Path,
-    manifest_schema: str,
-    manifest_name: str,
 ) -> None:
     from src.application import tick_account_execution as mod
 
@@ -1693,6 +1684,8 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
         audit_helper=audit,
         runlog=runlog,
     )
+    manifest_schema = "candidate_snapshot_manifest.v4"
+    manifest_name = "candidate_snapshot_manifest.v4.json"
     legacy = AccountResult("lx", True, True, "ok", "unchanged")
     legacy_before = vars(legacy).copy()
     required_path = tmp_path / "required.json"

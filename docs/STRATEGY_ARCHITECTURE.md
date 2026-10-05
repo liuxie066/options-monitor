@@ -137,7 +137,7 @@ period_net_return = combo_net_credit / cash_required
 
 因此，通知里只出现：Funding Put 已通过 CSP underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试进入 sealed Combo snapshot 的 `pair_evaluations`，不会进入通知。
 
-Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算。Combo Yield 候选、Funding Put 决策、pair diagnostics 和 rank evidence 写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），其完整性由 `candidate_snapshot_manifest.v1.json` 提交；Agent、Daily Brief 与 Research 均只消费该 bundle，不从兼容 CSV 恢复候选事实。
+Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算。Combo Yield 候选、Funding Put 决策、pair diagnostics 和 rank evidence 写入独立的 run/account 级 `combo_yield_candidate_snapshot.v4`（文件名 `combo_yield_candidate_snapshot.json`），其完整性由 `candidate_snapshot_manifest.v4.json` 提交；Agent、Daily Brief 与当前 runtime 均只消费该当前 bundle，不从兼容 CSV 恢复候选事实。Research 对 v1/v3 正式历史 bundle 的读取只经过 `candidate_evidence_history` 的显式 inspection 边界，不会把历史格式重新送入当前执行路径。
 
 ### 候选身份、成交意图与回执
 

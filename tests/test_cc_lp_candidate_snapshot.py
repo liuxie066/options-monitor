@@ -60,6 +60,7 @@ def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> d
         market="us",
         account_config_sha256="a" * 64,
         strategy_policy_sha256="b" * 64,
+        run_mode={"scan_mode": "standard", "executable": True},
         dependencies=_dependencies(),
         scan_statuses=[
             _scope(
@@ -74,7 +75,7 @@ def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> d
 def test_cc_lp_snapshot_seals_and_loads_with_pairs(tmp_path: Path) -> None:
     payload = _seal(tmp_path)
 
-    assert payload["schema_version"] == "cc_lp_candidate_snapshot.v2"
+    assert payload["schema_version"] == "cc_lp_candidate_snapshot.v4"
     assert payload["candidate_owner"] == "cc_lp"
     assert payload["opening_status"] == "candidates_found"
     assert len(payload["ranked_pairs"]) == 1
@@ -104,6 +105,7 @@ def test_cc_lp_snapshot_rejects_missing_pair_id(tmp_path: Path) -> None:
             market="us",
             account_config_sha256="a" * 64,
             strategy_policy_sha256="b" * 64,
+            run_mode={"scan_mode": "standard", "executable": True},
             dependencies=_dependencies(),
             scan_statuses=[_scope()],
             ranked_pairs=[{"symbol": "NVDA"}],
@@ -132,6 +134,7 @@ def test_cc_lp_snapshot_binds_ranked_pair_identity_to_scope(
             market="us",
             account_config_sha256="a" * 64,
             strategy_policy_sha256="b" * 64,
+            run_mode={"scan_mode": "standard", "executable": True},
             dependencies=_dependencies(),
             scan_statuses=[_scope()],
             ranked_pairs=[_pair(**overrides)],

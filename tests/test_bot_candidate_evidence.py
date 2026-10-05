@@ -5,6 +5,9 @@ import pytest
 
 from src.application.agent_tools import candidate
 from src.application.bot.tools import compact_observation
+from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
+)
 from src.application.tool_execution import execute_tool
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
@@ -73,7 +76,11 @@ def test_empty_rank_is_valid_but_unknown_symbol_is_partial(monkeypatch, tmp_path
 def test_missing_manifest_time_cannot_be_used_as_evidence(monkeypatch, tmp_path: Path) -> None:
     import json
     _seed(monkeypatch, tmp_path)
-    path = tmp_path / 'output_runs/candidate-source/accounts/lx/state/candidate_snapshot_manifest.v1.json'
+    path = (
+        tmp_path
+        / 'output_runs/candidate-source/accounts/lx/state'
+        / CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE
+    )
     manifest = json.loads(path.read_text())
     from domain.domain.decision_state_fingerprint import canonical_sha256
     manifest.pop('sealed_at_utc')

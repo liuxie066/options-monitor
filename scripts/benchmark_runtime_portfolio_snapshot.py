@@ -77,10 +77,10 @@ from src.application.runtime_portfolio_snapshot import (
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
-    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
+    STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA,
     STRATEGY_SCAN_STATUS_SCHEMA,
-    validate_strategy_scan_status_index_v2,
+    validate_strategy_scan_status_index,
 )
 from src.application.tick_run_workspace import canonical_account_run_config_bytes
 
@@ -140,8 +140,8 @@ CURRENT_STATE_10X = {
 
 # Re-pinned only after both profiles pass all real owner validators.
 EXPECTED_FIXTURE_PAYLOAD_SHA256 = {
-    "current_scale": "3956e0fd58359c3dc50c4b3b0cf4f03884f8e48ea2ef582920c87ac6271c1ba3",
-    "current_state_10x": "9d32430a3156de807442f9c263ad9eeb34d9ebb7503e32178378db61dc39086e",
+    "current_scale": "236afbeba01480b7c978a35bd94c9aeae0888efcdc52fbf025d8a9b8338c6352",
+    "current_state_10x": "7839c551f5e185e16ab4e0f7b6543022687c8f9f82fc1686ae4d769b4cb021d8",
 }
 
 _H = {
@@ -499,7 +499,9 @@ def _candidate_bundle(
             "candidate_owner": scope["candidate_owner"],
             "account_config_sha256": config_hash,
             "source_status_schema": STRATEGY_SCAN_STATUS_SCHEMA,
-            "source_status_path": (f"{scope['symbol'].lower()}_combo_yield_scan_status.json"),
+            "source_status_path": (f"{scope['symbol'].lower()}_combo_yield_scan_status.v3.json"),
+            "source_status_sha256": _H["implementation"],
+            "source_status_content_sha256": _H["implementation"],
         }
         for scope in scopes
     ]
@@ -508,7 +510,7 @@ def _candidate_bundle(
         for status in ("completed", "unavailable", "failed", "not_applicable")
     }
     index = {
-        "schema_version": STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
+        "schema_version": STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA,
         "run_id": RUN_ID,
         "account": ACCOUNT,
         "account_config_sha256": config_hash,
@@ -516,16 +518,18 @@ def _candidate_bundle(
         "expected_count": len(items),
         "counts": counts,
         "items": items,
+        "scan_mode": "standard",
+        "executable": True,
     }
     index["content_sha256"] = sha256_bytes(canonical_json_bytes(index))
-    validate_strategy_scan_status_index_v2(
+    validate_strategy_scan_status_index(
         index,
         expected_run_id=RUN_ID,
         expected_account=ACCOUNT,
         expected_account_config_sha256=config_hash,
     )
     index_raw = canonical_json_bytes(index)
-    payloads = {STRATEGY_SCAN_STATUS_INDEX_V2_FILE: index_raw}
+    payloads = {STRATEGY_SCAN_STATUS_INDEX_V5_FILE: index_raw}
     dependencies = [
         {"kind": kind, "relpath": None, "sha256": digest}
         for kind, digest in sorted(
@@ -580,6 +584,8 @@ def _candidate_bundle(
             "opening_status": "no_candidate",
             "scope_results": normalized,
             "ranked_pairs": [],
+            "scan_mode": "standard",
+            "executable": True,
         }
         if owner == "sp_lc":
             snapshot.update(
@@ -602,6 +608,8 @@ def _candidate_bundle(
                 "content_sha256": snapshot["content_sha256"],
                 "opening_status": "no_candidate",
                 "covered_scopes": covered,
+                "scan_mode": "standard",
+                "executable": True,
             }
         )
     manifest = {
@@ -616,12 +624,14 @@ def _candidate_bundle(
         "expected_scopes": scopes,
         "expected_owners": ["cc_lp", "sp_lc"],
         "status_index": {
-            "schema_version": STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
-            "relpath": STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+            "schema_version": STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA,
+            "relpath": STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
             "sha256": sha256_bytes(index_raw),
             "content_sha256": index["content_sha256"],
         },
         "owner_snapshots": owner_entries,
+        "scan_mode": "standard",
+        "executable": True,
     }
     manifest["content_sha256"] = canonical_sha256(manifest)
     validate_candidate_snapshot_manifest(manifest, expected_run_id=RUN_ID, expected_account=ACCOUNT)

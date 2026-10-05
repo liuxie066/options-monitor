@@ -17,7 +17,7 @@ from src.application.combo_yield_candidate_snapshot import (
 )
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
@@ -75,7 +75,7 @@ def _seal_combo_diagnostic_fixture(
         snapshot_id="quote-1",
         receipt_relpath="quotes/quote-1/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
+    publish_strategy_scan_status_index(
         report_dir=account_dir,
         run_id=run_id,
         account=account,
@@ -90,6 +90,7 @@ def _seal_combo_diagnostic_fixture(
                 "account_config_sha256": "a" * 64,
             }
         ],
+        run_mode={"scan_mode": "standard", "executable": True},
     )
     accepted = [
         row
@@ -156,6 +157,7 @@ def _seal_combo_diagnostic_fixture(
         pair_evaluations=pair_evaluations,
         rank_records=rank_records,
         ranked_pairs=selected,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-16T08:00:00Z",
     )
     publish_candidate_snapshot_manifest(

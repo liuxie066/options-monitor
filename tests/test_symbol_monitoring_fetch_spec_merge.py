@@ -362,7 +362,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
         },
     ]
     status = json.loads(
-        (report_dir / "nvda_sell_put_scan_status.json").read_text(
+        (report_dir / "nvda_sell_put_scan_status.v3.json").read_text(
             encoding="utf-8"
         )
     )
@@ -370,7 +370,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     assert status["snapshot_id"] == "snapshot-failed"
     assert status["receipt_relpath"] == "quotes/receipt.json"
     call_status = json.loads(
-        (report_dir / "nvda_covered_call_scan_status.json").read_text(
+        (report_dir / "nvda_covered_call_scan_status.v3.json").read_text(
             encoding="utf-8"
         )
     )
@@ -447,7 +447,7 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
     status = json.loads(
         (
             report_dir
-            / "nvda_sell_put_scan_status.json"
+            / "nvda_sell_put_scan_status.v3.json"
         ).read_text(encoding="utf-8")
     )
     assert status["status"] == expected_status

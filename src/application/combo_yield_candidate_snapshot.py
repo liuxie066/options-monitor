@@ -9,6 +9,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import validate_candidate_decision_payload
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
     combo_opening_status,
     dependency_hash,
     normalize_combo_scope_results,
@@ -17,6 +18,7 @@ from src.application.candidate_snapshot_contract import (
     required_text,
     sha256_text,
     utc_timestamp,
+    validate_candidate_run_mode,
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -26,7 +28,7 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import readable_json_bytes as _canonical_json_bytes
 
 
-COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA = "combo_yield_candidate_snapshot.v2"
+COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA = "combo_yield_candidate_snapshot.v4"
 COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE = "combo_yield_candidate_snapshot.json"
 COMBO_YIELD_OPENING_STATUSES = frozenset(
     {
@@ -424,6 +426,22 @@ def validate_combo_yield_candidate_snapshot(
             raise ComboYieldCandidateSnapshotError(
                 "combo yield candidate snapshot owner mismatch"
             )
+        mode_fields = validate_candidate_run_mode(item)
+        if mode_fields["scan_mode"] == "experience":
+            from src.application.experience_candidate_snapshot import (
+                ExperienceCandidateSnapshotError,
+                validate_experience_candidate_owner,
+            )
+
+            try:
+                validate_experience_candidate_owner(
+                    item,
+                    owner="sp_lc",
+                    schema=COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
+                )
+            except ExperienceCandidateSnapshotError as exc:
+                raise ComboYieldCandidateSnapshotError(str(exc)) from exc
+            return
         for field in (
             "account_config_sha256",
             "strategy_policy_sha256",
@@ -498,6 +516,7 @@ def seal_combo_yield_candidate_snapshot(
     rank_records: Iterable[Mapping[str, Any]] = (),
     ranked_pairs: Iterable[Mapping[str, Any]] = (),
     opening_status: str | None = None,
+    run_mode: Mapping[str, Any],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run SP+LC snapshot."""
@@ -508,15 +527,57 @@ def seal_combo_yield_candidate_snapshot(
         market_norm = required_text(market, "market").lower()
         account_config_hash = sha256_text(account_config_sha256, "account_config_sha256")
         policy_hash = sha256_text(strategy_policy_sha256, "strategy_policy_sha256")
-        dependency_rows = normalize_dependencies(dependencies)
-        scopes = normalize_combo_scope_results(scan_statuses, owner="sp_lc")
+        mode_fields = validate_candidate_run_mode(run_mode)
+    except CandidateSnapshotContractError as exc:
+        raise _contract_error(exc) from exc
+    dependency_input = [dict(item) for item in dependencies]
+    status_input = [dict(item) for item in scan_statuses]
+    decision_input = [dict(item) for item in funding_put_decisions]
+    evaluation_input = [dict(item) for item in pair_evaluations]
+    rank_input = [dict(item) for item in rank_records]
+    pair_input = [dict(item) for item in ranked_pairs]
+    if mode_fields["scan_mode"] == "experience":
+        if opening_status is not None:
+            raise ComboYieldCandidateSnapshotError(
+                "experience candidate snapshot cannot accept opening_status"
+            )
+        from src.application.experience_candidate_snapshot import (
+            ExperienceCandidateSnapshotError,
+            seal_experience_candidate_owner,
+        )
+
+        try:
+            return seal_experience_candidate_owner(
+                base=Path(base),
+                run_id=run_id_norm,
+                account=account_norm,
+                market=market_norm,
+                owner="sp_lc",
+                account_config_sha256=account_config_hash,
+                strategy_policy_sha256=policy_hash,
+                dependencies=dependency_input,
+                scan_statuses=status_input,
+                selected_candidates=pair_input,
+                evidence={
+                    "funding_put_decisions": decision_input,
+                    "pair_evaluations": evaluation_input,
+                    "rank_records": rank_input,
+                },
+                run_mode=mode_fields,
+                sealed_at=sealed_at,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise ComboYieldCandidateSnapshotError(str(exc)) from exc
+    try:
+        dependency_rows = normalize_dependencies(dependency_input)
+        scopes = normalize_combo_scope_results(status_input, owner="sp_lc")
     except CandidateSnapshotContractError as exc:
         raise _contract_error(exc) from exc
     try:
-        pairs = _pairs(list(ranked_pairs))
-        decisions = _funding_put_decisions(list(funding_put_decisions))
-        evaluations = _pair_evaluations(list(pair_evaluations))
-        ranks = _rank_records(list(rank_records))
+        pairs = _pairs(pair_input)
+        decisions = _funding_put_decisions(decision_input)
+        evaluations = _pair_evaluations(evaluation_input)
+        ranks = _rank_records(rank_input)
         evaluations = _bind_selection_states(
             evaluations,
             rank_records=ranks,
@@ -561,6 +622,7 @@ def seal_combo_yield_candidate_snapshot(
         "pair_evaluations": evaluations,
         "rank_records": ranks,
         "ranked_pairs": pairs,
+        **mode_fields,
     }
     payload["content_sha256"] = canonical_sha256(payload)
     validate_combo_yield_candidate_snapshot(
@@ -570,6 +632,17 @@ def seal_combo_yield_candidate_snapshot(
     )
     encoded = _canonical_json_bytes(payload)
     try:
+        account_dir = (
+            Path(base).resolve()
+            / "output_runs"
+            / run_id_norm
+            / "accounts"
+            / account_norm
+        )
+        assert_current_candidate_artifact_boundary(
+            account_dir=account_dir,
+            target=account_dir / "state" / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+        )
         write_account_run_state_bytes_once_safely(
             base=Path(base),
             run_id=run_id_norm,
@@ -577,7 +650,7 @@ def seal_combo_yield_candidate_snapshot(
             name=COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
             payload=encoded,
         )
-    except AccountRunConfigError as exc:
+    except (AccountRunConfigError, CandidateSnapshotContractError) as exc:
         raise ComboYieldCandidateSnapshotError(
             "terminal combo yield candidate snapshot conflicts or cannot be published"
         ) from exc

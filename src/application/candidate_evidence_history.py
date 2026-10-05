@@ -12,12 +12,22 @@ from typing import Any, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA,
     CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
     CandidateSnapshotManifestError,
+    _expected_scopes,
+    _load_latest_candidate_snapshot_bundle,
+    _snapshot_strategy_scopes,
     load_candidate_snapshot_bundle,
 )
 from src.application.experience_candidate_snapshot import (
     EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+    EXPERIENCE_OWNER_FILES,
+    _experience_projection,
+    _validate_manifest as _validate_experience_manifest,
+    _validate_owner as _validate_experience_owner,
     ExperienceCandidateSnapshotError,
     load_experience_candidate_snapshot_bundle,
 )
@@ -38,8 +48,17 @@ from src.application.opening_candidate_snapshot import (
 )
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
+    STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA,
     STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
+    StrategyScanStatusError,
+    validate_strategy_scan_status_index_v2,
+    validate_strategy_scan_status_index_v3,
+    validate_strategy_scan_status_index_v4,
 )
+from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
     AccountRunConfigError,
@@ -82,6 +101,53 @@ _OWNER_FILES = {
     "wheel_v1": "wheel_candidate_snapshot.json",
     "wheel_v2": "wheel_candidate_snapshot.v2.json",
 }
+_FORMAL_HISTORY_MANIFESTS = {
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE: CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE: CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
+}
+_KNOWN_MANIFEST_FILES = (
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+)
+_FORMAL_HISTORY_INDEXES = {
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA: {
+        STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA: STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA: STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
+    },
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA: {
+        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA: STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+    },
+}
+_FORMAL_HISTORY_OWNER_FILES = {
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA: {
+        "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
+        "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+        "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+        "wheel": "wheel_candidate_snapshot.json",
+    },
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA: {
+        "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
+        "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+        "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+        "wheel": "wheel_candidate_snapshot.v2.json",
+    },
+}
+_FORMAL_HISTORY_OWNER_SCHEMAS = {
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA: {
+        "opening": "opening_candidate_snapshot.v1",
+        "sp_lc": "combo_yield_candidate_snapshot.v2",
+        "cc_lp": "cc_lp_candidate_snapshot.v2",
+        "wheel": "wheel_candidate_snapshot.v1",
+    },
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA: {
+        "opening": "opening_candidate_snapshot.v1",
+        "sp_lc": "combo_yield_candidate_snapshot.v2",
+        "cc_lp": "cc_lp_candidate_snapshot.v2",
+        "wheel": "wheel_candidate_snapshot.v2",
+    },
+}
 _MODERN_OWNER_SCHEMAS = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -89,8 +155,17 @@ _MODERN_OWNER_SCHEMAS = {
     "wheel_v1": "wheel_candidate_snapshot.v1",
     "wheel_v2": "wheel_candidate_snapshot.v2",
 }
+_SEALED_OWNER_SCHEMAS = set(_MODERN_OWNER_SCHEMAS.values()) | {
+    "combo_yield_candidate_snapshot.v2",
+    "combo_yield_candidate_snapshot.v3",
+    "cc_lp_candidate_snapshot.v2",
+    "cc_lp_candidate_snapshot.v3",
+    "wheel_candidate_snapshot.v1",
+    "wheel_candidate_snapshot.v2",
+    "wheel_candidate_snapshot.v3",
+}
 _LEGACY_OWNER_SCHEMAS = {
-    "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
+    "opening": "opening_candidate_snapshot.v1",
     "sp_lc": _LEGACY_COMBO_SCHEMA,
     "cc_lp": _LEGACY_CC_LP_SCHEMA,
 }
@@ -129,6 +204,727 @@ class AccountCandidateEvidence:
         }
 
 
+def load_candidate_snapshot_bundle_for_inspection(
+    *, base: Path, run_id: str, account: str,
+) -> dict[str, Any]:
+    """Load current or explicitly historical candidate evidence for inspection."""
+
+    run_id_norm = _safe_identity(run_id, "run_id")
+    account_norm = _safe_identity(account, "account").lower()
+    state_dir = (
+        Path(base).resolve()
+        / "output_runs"
+        / run_id_norm
+        / "accounts"
+        / account_norm
+        / "state"
+    )
+    present = [
+        name
+        for name in _KNOWN_MANIFEST_FILES
+        if (state_dir / name).exists() or (state_dir / name).is_symlink()
+    ]
+    if len(present) != 1:
+        if present:
+            raise CandidateSnapshotManifestError("artifact_version_mismatch")
+        raise CandidateSnapshotManifestError(
+            "candidate snapshot manifest is unavailable"
+        )
+    manifest_name = present[0]
+    if manifest_name == CANDIDATE_SNAPSHOT_MANIFEST_FILE:
+        return load_candidate_snapshot_bundle(
+            base=base,
+            run_id=run_id_norm,
+            account=account_norm,
+        )
+    if manifest_name == EXPERIENCE_CANDIDATE_MANIFEST_FILE:
+        try:
+            return load_experience_candidate_snapshot_bundle(
+                base=base,
+                run_id=run_id_norm,
+                account=account_norm,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise CandidateSnapshotManifestError(str(exc)) from exc
+    return load_historical_candidate_snapshot_bundle(
+        base=base,
+        run_id=run_id_norm,
+        account=account_norm,
+    )
+
+
+def load_latest_candidate_snapshot_bundle_for_inspection(
+    *, base: Path, account: str,
+) -> dict[str, Any]:
+    """Resolve the latest account run through the inspection-only loader."""
+
+    return _load_latest_candidate_snapshot_bundle(
+        base=base,
+        account=account,
+        loader=load_candidate_snapshot_bundle_for_inspection,
+    )
+
+
+def load_historical_candidate_snapshot_bundle(
+    *, base: Path, run_id: str, account: str,
+) -> dict[str, Any]:
+    """Load one sealed v1/v3 formal bundle without admitting it to runtime."""
+
+    root = Path(base).resolve()
+    run_id_norm = _safe_identity(run_id, "run_id")
+    account_norm = _safe_identity(account, "account").lower()
+    account_dir = root / "output_runs" / run_id_norm / "accounts" / account_norm
+    state_dir = account_dir / "state"
+    present = [
+        name
+        for name in _KNOWN_MANIFEST_FILES
+        if (state_dir / name).exists() or (state_dir / name).is_symlink()
+    ]
+    if len(present) != 1 or present[0] not in _FORMAL_HISTORY_MANIFESTS:
+        raise CandidateSnapshotManifestError("historical candidate manifest is unavailable")
+    manifest_name = present[0]
+    files: dict[str, bytes] = {}
+    for directory, prefix in ((account_dir, ""), (state_dir, "state/")):
+        if not directory.is_dir() or directory.is_symlink():
+            raise CandidateSnapshotManifestError("candidate account directory is unsafe")
+        for path in directory.iterdir():
+            if path.is_file() and not path.is_symlink():
+                files[prefix + path.name] = path.read_bytes()
+    manifest = _decoded_file(files, "state/" + manifest_name)
+    dependencies: dict[str, bytes] = {}
+    for entry in manifest.get("owner_snapshots") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        owner_path = str(entry.get("relpath") or "")
+        if owner_path not in files:
+            continue
+        snapshot = _decoded_file(files, owner_path)
+        for dependency in snapshot.get("dependencies") or []:
+            if not isinstance(dependency, Mapping):
+                continue
+            relpath = str(dependency.get("relpath") or "").strip()
+            if not relpath:
+                continue
+            target = (root / relpath).resolve()
+            if root not in target.parents or not target.is_file() or target.is_symlink():
+                raise CandidateSnapshotManifestError(
+                    "candidate dependency binding is unavailable"
+                )
+            dependencies[relpath] = target.read_bytes()
+    return validate_historical_candidate_snapshot_bundle_bytes(
+        manifest_name=manifest_name,
+        files=files,
+        account_names=[item.name for item in account_dir.iterdir()],
+        state_names=[item.name for item in state_dir.iterdir()],
+        run_id=run_id_norm,
+        account=account_norm,
+        dependencies=dependencies,
+    )
+
+
+def validate_historical_candidate_snapshot_bundle_bytes(
+    *,
+    manifest_name: str,
+    files: Mapping[str, bytes],
+    account_names: list[str],
+    state_names: list[str],
+    run_id: str,
+    account: str,
+    dependencies: Mapping[str, bytes],
+    check: Any = lambda: None,
+    require_external_bindings: bool = True,
+) -> dict[str, Any]:
+    """Validate sealed formal v1/v3 bytes at the explicit history boundary."""
+
+    if manifest_name == EXPERIENCE_CANDIDATE_MANIFEST_FILE:
+        return _validate_historical_experience_bundle_bytes(
+            manifest_name=manifest_name,
+            files=files,
+            account_names=account_names,
+            state_names=state_names,
+            run_id=run_id,
+            account=account,
+            dependencies=dependencies,
+            check=check,
+            require_external_bindings=require_external_bindings,
+        )
+    expected_schema = _FORMAL_HISTORY_MANIFESTS.get(manifest_name)
+    if expected_schema is None:
+        raise CandidateSnapshotManifestError("historical candidate manifest is unsupported")
+    manifest = _decoded_file(files, "state/" + manifest_name, check=check)
+    _validate_historical_manifest(
+        manifest,
+        manifest_name=manifest_name,
+        expected_schema=expected_schema,
+        run_id=run_id,
+        account=account,
+    )
+    if set(state_names).intersection(_KNOWN_MANIFEST_FILES) != {manifest_name}:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    owner_files = _FORMAL_HISTORY_OWNER_FILES[expected_schema]
+    expected_files = {owner_files[owner] for owner in manifest["expected_owners"]}
+    all_owner_files = {
+        filename
+        for mapping in _FORMAL_HISTORY_OWNER_FILES.values()
+        for filename in mapping.values()
+    } | {"wheel_candidate_snapshot.v3.json"}
+    if set(state_names).intersection(all_owner_files) != expected_files:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    allowed_indexes = set(_FORMAL_HISTORY_INDEXES[expected_schema].values())
+    all_indexes = {
+        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
+        STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+        "strategy_scan_status_index.v5.json",
+    }
+    binding = dict(manifest["status_index"])
+    if set(account_names).intersection(all_indexes) != {binding["relpath"]}:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    if binding["relpath"] not in allowed_indexes:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    index = _decoded_file(files, binding["relpath"], check=check)
+    validators = {
+        STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA: validate_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA: validate_strategy_scan_status_index_v3,
+        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA: validate_strategy_scan_status_index_v4,
+    }
+    try:
+        validators[binding["schema_version"]](
+            index,
+            expected_run_id=run_id,
+            expected_account=account,
+            expected_account_config_sha256=manifest["account_config_sha256"],
+        )
+    except (KeyError, StrategyScanStatusError) as exc:
+        raise CandidateSnapshotManifestError(
+            "historical candidate status index is invalid"
+        ) from exc
+    if (
+        sha256_bytes(files[binding["relpath"]]) != binding["sha256"]
+        or index.get("content_sha256") != binding["content_sha256"]
+    ):
+        raise CandidateSnapshotManifestError("candidate status index binding mismatch")
+    requires_direction = expected_schema == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    if _expected_scopes(
+        index,
+        require_wheel_direction=requires_direction,
+    ) != manifest["expected_scopes"]:
+        raise CandidateSnapshotManifestError("candidate status index scope binding mismatch")
+    if requires_direction:
+        for row in index.get("items") or []:
+            check()
+            source_name = str(row["source_status_path"])
+            if source_name in files:
+                _validate_historical_source_status_bytes(
+                    row,
+                    files[source_name],
+                )
+            elif require_external_bindings:
+                raise CandidateSnapshotManifestError(
+                    "candidate source status is unavailable"
+                )
+    owners: dict[str, dict[str, Any]] = {}
+    for raw_entry in manifest["owner_snapshots"]:
+        check()
+        entry = dict(raw_entry)
+        owner = str(entry["candidate_owner"])
+        snapshot = _decoded_file(files, str(entry["relpath"]), check=check)
+        _validate_historical_owner(
+            snapshot,
+            entry=entry,
+            manifest=manifest,
+            index=index,
+            owner=owner,
+            encoded=files[str(entry["relpath"])],
+            dependencies=dependencies,
+            require_wheel_direction=requires_direction,
+            check=check,
+            require_external_bindings=require_external_bindings,
+        )
+        owners[owner] = snapshot
+    bundle = {"manifest": manifest, "status_index": index, "owners": owners}
+    return bundle if requires_direction else _adapt_legacy_wheel_bundle(bundle)
+
+
+def _validate_historical_experience_bundle_bytes(
+    *,
+    manifest_name: str,
+    files: Mapping[str, bytes],
+    account_names: list[str],
+    state_names: list[str],
+    run_id: str,
+    account: str,
+    dependencies: Mapping[str, bytes],
+    check: Any,
+    require_external_bindings: bool,
+) -> dict[str, Any]:
+    manifest = _decoded_file(files, "state/" + manifest_name, check=check)
+    try:
+        _validate_experience_manifest(
+            manifest,
+            expected_run_id=run_id,
+            expected_account=account,
+        )
+    except ExperienceCandidateSnapshotError as exc:
+        raise CandidateSnapshotManifestError(str(exc)) from exc
+    if set(state_names).intersection(_KNOWN_MANIFEST_FILES) != {manifest_name}:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    expected_files = {
+        EXPERIENCE_OWNER_FILES[owner]
+        for owner in manifest["expected_owners"]
+    }
+    all_owner_files = set(EXPERIENCE_OWNER_FILES.values()) | {
+        "wheel_candidate_snapshot.json",
+        "wheel_candidate_snapshot.v2.json",
+        "wheel_candidate_snapshot.v3.json",
+    }
+    if set(state_names).intersection(all_owner_files) != expected_files:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    if set(account_names).intersection(
+        {
+            STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+            STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
+            STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+            "strategy_scan_status_index.v5.json",
+        }
+    ) != {STRATEGY_SCAN_STATUS_INDEX_V3_FILE}:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    binding = dict(manifest["status_index"])
+    index = _decoded_file(files, binding["relpath"], check=check)
+    try:
+        validate_strategy_scan_status_index_v3(
+            index,
+            expected_run_id=run_id,
+            expected_account=account,
+            expected_account_config_sha256=manifest["account_config_sha256"],
+        )
+    except StrategyScanStatusError as exc:
+        raise CandidateSnapshotManifestError(
+            "experience status index is invalid"
+        ) from exc
+    if (
+        sha256_bytes(files[binding["relpath"]]) != binding["sha256"]
+        or index.get("content_sha256") != binding["content_sha256"]
+        or _experience_projection(index) != _experience_projection(manifest)
+    ):
+        raise CandidateSnapshotManifestError(
+            "experience status index binding mismatch"
+        )
+    index_owners = sorted(
+        {
+            str(row.get("candidate_owner") or "").strip().lower()
+            for row in index.get("items") or []
+        }
+    )
+    index_markets = sorted(
+        {
+            str(row.get("market") or "").strip().upper()
+            for row in index.get("items") or []
+            if str(row.get("market") or "").strip()
+        }
+    )
+    if (
+        index_owners != manifest["expected_owners"]
+        or index_markets != manifest["markets"]
+    ):
+        raise CandidateSnapshotManifestError("experience status scope mismatch")
+    owners: dict[str, dict[str, Any]] = {}
+    for entry in manifest["owner_snapshots"]:
+        check()
+        owner = str(entry["candidate_owner"])
+        relpath = str(entry["relpath"])
+        snapshot = _decoded_file(files, relpath, check=check)
+        try:
+            _validate_experience_owner(snapshot, owner=owner)
+        except ExperienceCandidateSnapshotError as exc:
+            raise CandidateSnapshotManifestError(str(exc)) from exc
+        if (
+            sha256_bytes(files[relpath]) != entry["sha256"]
+            or snapshot.get("run_id") != run_id
+            or snapshot.get("account") != account
+            or snapshot.get("candidate_owner") != owner
+            or snapshot.get("account_config_sha256")
+            != manifest["account_config_sha256"]
+            or snapshot.get("strategy_policy_sha256")
+            != manifest["strategy_policy_sha256"]
+            or snapshot.get("sealed_at_utc") != manifest["sealed_at_utc"]
+            or snapshot.get("content_sha256") != entry["content_sha256"]
+            or snapshot.get("opening_status") != entry["opening_status"]
+            or _experience_projection(snapshot) != _experience_projection(manifest)
+        ):
+            raise CandidateSnapshotManifestError(
+                "experience owner binding mismatch"
+            )
+        owner_markets = {
+            str(row.get("market") or "").strip().upper()
+            for row in index.get("items") or []
+            if str(row.get("candidate_owner") or "").strip().lower() == owner
+        }
+        expected_market = next(iter(owner_markets)) if len(owner_markets) == 1 else "MULTI"
+        if snapshot.get("market") != expected_market:
+            raise CandidateSnapshotManifestError("experience owner market mismatch")
+        expected_scopes = sorted(
+            (
+                str(row.get("symbol") or "").strip().upper(),
+                str(row.get("strategy_mode") or "").strip().lower(),
+                str(row.get("status") or "").strip().lower(),
+                str(row.get("reason") or row.get("reason_code") or "").strip(),
+                row.get("candidate_count"),
+            )
+            for row in index.get("items") or []
+            if str(row.get("candidate_owner") or "").strip().lower() == owner
+        )
+        actual_scopes = sorted(
+            (
+                str(row.get("symbol") or "").strip().upper(),
+                str(row.get("strategy_mode") or "").strip().lower(),
+                str(row.get("status") or "").strip().lower(),
+                str(row.get("reason_code") or "").strip(),
+                row.get("candidate_count"),
+            )
+            for row in snapshot.get("scope_results") or []
+            if isinstance(row, Mapping)
+        )
+        if actual_scopes != expected_scopes:
+            raise CandidateSnapshotManifestError("experience owner scope mismatch")
+        for dependency in snapshot.get("dependencies") or []:
+            check()
+            relpath = str(dependency.get("relpath") or "").strip()
+            if relpath and relpath in dependencies and (
+                sha256_bytes(dependencies[relpath]) != dependency.get("sha256")
+            ):
+                raise CandidateSnapshotManifestError(
+                    "candidate dependency binding mismatch"
+                )
+            if relpath and relpath not in dependencies and require_external_bindings:
+                raise CandidateSnapshotManifestError(
+                    "candidate dependency binding mismatch"
+                )
+        owners[owner] = snapshot
+    return {"manifest": manifest, "status_index": index, "owners": owners}
+
+
+def _validate_historical_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    manifest_name: str,
+    expected_schema: str,
+    run_id: str,
+    account: str,
+) -> None:
+    item = dict(manifest)
+    if (
+        item.get("schema_version") != expected_schema
+        or item.get("run_id") != run_id
+        or str(item.get("account") or "").lower() != account
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest identity mismatch"
+        )
+    _manifest_sha256(item.get("account_config_sha256"), "account_config_sha256")
+    _manifest_sha256(item.get("strategy_policy_sha256"), "strategy_policy_sha256")
+    content_hash = _manifest_sha256(item.get("content_sha256"), "content_sha256")
+    content = {key: value for key, value in item.items() if key != "content_sha256"}
+    if canonical_sha256(content) != content_hash:
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest content hash mismatch"
+        )
+    _timestamp(item.get("sealed_at_utc"), "sealed_at_utc")
+    scopes = item.get("expected_scopes")
+    owners = item.get("expected_owners")
+    entries = item.get("owner_snapshots")
+    if (
+        not isinstance(scopes, list)
+        or any(not isinstance(row, Mapping) for row in scopes)
+        or not isinstance(owners, list)
+        or not isinstance(entries, list)
+        or any(not isinstance(row, Mapping) for row in entries)
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest structure is invalid"
+        )
+    requires_direction = expected_schema == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    projected = [
+        _historical_scope(row, require_wheel_direction=requires_direction)
+        for row in scopes
+    ]
+    if projected != sorted(
+        projected,
+        key=lambda row: (
+            row["market"],
+            row["symbol"],
+            row["strategy_family"],
+            row.get("direction", ""),
+        ),
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest scopes are not canonical"
+        )
+    if len({tuple(sorted(row.items())) for row in projected}) != len(projected):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest scopes are duplicated"
+        )
+    projected_owners = sorted({row["candidate_owner"] for row in projected})
+    if (
+        item.get("markets") != sorted({row["market"] for row in projected})
+        or owners != projected_owners
+        or [row.get("candidate_owner") for row in entries] != projected_owners
+        or item.get("completion_reason")
+        != ("complete" if projected else "no_applicable_scope")
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest scope set mismatch"
+        )
+    index = item.get("status_index")
+    allowed_indexes = _FORMAL_HISTORY_INDEXES[expected_schema]
+    if (
+        not isinstance(index, Mapping)
+        or index.get("schema_version") not in allowed_indexes
+        or index.get("relpath") != allowed_indexes.get(index.get("schema_version"))
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate manifest status index mismatch"
+        )
+    _manifest_sha256(index.get("sha256"), "status index sha256")
+    _manifest_sha256(index.get("content_sha256"), "status index content_sha256")
+    owner_files = _FORMAL_HISTORY_OWNER_FILES[expected_schema]
+    owner_schemas = _FORMAL_HISTORY_OWNER_SCHEMAS[expected_schema]
+    for entry in entries:
+        owner = str(entry.get("candidate_owner") or "")
+        expected = [row for row in projected if row["candidate_owner"] == owner]
+        if (
+            owner not in owner_files
+            or entry.get("schema_version") != owner_schemas[owner]
+            or entry.get("relpath") != f"state/{owner_files[owner]}"
+            or entry.get("covered_scopes") != expected
+        ):
+            raise CandidateSnapshotManifestError(
+                "historical candidate manifest owner binding mismatch"
+            )
+        _manifest_sha256(entry.get("sha256"), f"{owner} snapshot sha256")
+        _manifest_sha256(entry.get("content_sha256"), f"{owner} content sha256")
+        _required(entry.get("opening_status"), f"{owner} opening_status")
+    if manifest_name != {
+        CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA: CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+        CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA: CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    }[expected_schema]:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+
+
+def _validate_historical_owner(
+    snapshot: Mapping[str, Any],
+    *,
+    entry: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    index: Mapping[str, Any],
+    owner: str,
+    encoded: bytes,
+    dependencies: Mapping[str, bytes],
+    require_wheel_direction: bool,
+    check: Any,
+    require_external_bindings: bool,
+) -> None:
+    if (
+        sha256_bytes(encoded) != entry["sha256"]
+        or snapshot.get("schema_version") != entry["schema_version"]
+        or snapshot.get("run_id") != manifest["run_id"]
+        or str(snapshot.get("account") or "").lower() != manifest["account"]
+        or snapshot.get("account_config_sha256")
+        != manifest["account_config_sha256"]
+        or snapshot.get("strategy_policy_sha256")
+        != manifest["strategy_policy_sha256"]
+        or snapshot.get("opening_status") != entry["opening_status"]
+    ):
+        raise CandidateSnapshotManifestError(
+            f"historical candidate owner binding mismatch: {owner}"
+        )
+    content_hash = _manifest_sha256(
+        snapshot.get("content_sha256"),
+        f"{owner} content_sha256",
+    )
+    content = {
+        key: value for key, value in snapshot.items() if key != "content_sha256"
+    }
+    if content_hash != entry["content_sha256"] or canonical_sha256(content) != content_hash:
+        raise CandidateSnapshotManifestError(
+            f"historical candidate owner content mismatch: {owner}"
+        )
+    _timestamp(snapshot.get("sealed_at_utc"), f"{owner} sealed_at_utc")
+    covered = _snapshot_strategy_scopes(
+        snapshot,
+        owner=owner,
+        index_items=list(index.get("items") or []),
+        require_wheel_direction=require_wheel_direction,
+    )
+    if covered != entry["covered_scopes"]:
+        raise CandidateSnapshotManifestError(
+            f"historical candidate owner scope mismatch: {owner}"
+        )
+    for dependency in snapshot.get("dependencies") or []:
+        check()
+        if not isinstance(dependency, Mapping):
+            raise CandidateSnapshotManifestError(
+                "candidate dependency binding is invalid"
+            )
+        relpath = str(dependency.get("relpath") or "").strip()
+        if relpath and relpath in dependencies and (
+            sha256_bytes(dependencies[relpath]) != dependency.get("sha256")
+        ):
+            raise CandidateSnapshotManifestError(
+                "candidate dependency binding mismatch"
+            )
+        if relpath and relpath not in dependencies and require_external_bindings:
+            raise CandidateSnapshotManifestError(
+                "candidate dependency binding mismatch"
+            )
+
+
+def _historical_scope(
+    row: Mapping[str, Any], *, require_wheel_direction: bool,
+) -> dict[str, str]:
+    result = {
+        "market": _required(row.get("market"), "scope market").upper(),
+        "symbol": _required(row.get("symbol"), "scope symbol").upper(),
+        "strategy_family": _required(
+            row.get("strategy_family"), "scope strategy_family"
+        ).lower(),
+        "strategy_mode": _required(
+            row.get("strategy_mode"), "scope strategy_mode"
+        ).lower(),
+        "candidate_owner": _required(
+            row.get("candidate_owner"), "scope candidate_owner"
+        ).lower(),
+    }
+    direction = str(row.get("direction") or "").strip().lower()
+    if result["strategy_family"] == "wheel":
+        if require_wheel_direction and direction not in {"call", "put"}:
+            raise CandidateSnapshotManifestError(
+                "historical Wheel direction is invalid"
+            )
+        if direction:
+            result["direction"] = direction
+    elif direction:
+        raise CandidateSnapshotManifestError(
+            "historical non-Wheel scope has direction"
+        )
+    return result
+
+
+def _adapt_legacy_wheel_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    adapted = json.loads(json.dumps(dict(bundle), ensure_ascii=False, allow_nan=False))
+    if "wheel" not in adapted.get("owners", {}):
+        return adapted
+    for row in adapted["status_index"].get("items") or []:
+        if row.get("strategy_family") == "wheel":
+            row["direction"] = "call"
+    for row in adapted["manifest"].get("expected_scopes") or []:
+        if row.get("strategy_family") == "wheel":
+            row["direction"] = "call"
+    for entry in adapted["manifest"].get("owner_snapshots") or []:
+        if entry.get("candidate_owner") == "wheel":
+            for row in entry.get("covered_scopes") or []:
+                row["direction"] = "call"
+    snapshot = adapted["owners"]["wheel"]
+    for row in snapshot.get("scope_results") or []:
+        if row.get("scope") == "strategy":
+            row["direction"] = "call"
+    for batch in snapshot.get("batches") or []:
+        batch.setdefault("direction", "call")
+        for candidate in batch.get("raw_candidates") or []:
+            candidate.setdefault("direction", "call")
+        if isinstance(batch.get("final_candidate"), dict):
+            batch["final_candidate"].setdefault("direction", "call")
+    return adapted
+
+
+def _decoded_file(
+    files: Mapping[str, bytes], name: str, *, check: Any = lambda: None,
+) -> dict[str, Any]:
+    check()
+    try:
+        payload = json.loads(files[name].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateSnapshotManifestError(
+            "historical candidate bundle data is unavailable"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CandidateSnapshotManifestError(
+            "historical candidate bundle data is invalid"
+        )
+    return payload
+
+
+def _validate_historical_source_status_bytes(
+    row: Mapping[str, Any],
+    encoded: bytes,
+) -> None:
+    """Validate source bytes according to the fixed v4-index history contract."""
+
+    if sha256_bytes(encoded) != row.get("source_status_sha256"):
+        raise CandidateSnapshotManifestError(
+            "historical candidate source status hash mismatch"
+        )
+    if row.get("strategy_family") != "wheel":
+        return
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateSnapshotManifestError(
+            "historical candidate Wheel source status is unreadable"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CandidateSnapshotManifestError(
+            "historical candidate Wheel source status is invalid"
+        )
+    content_hash = payload.get("content_sha256")
+    content = {key: value for key, value in payload.items() if key != "content_sha256"}
+    computed = sha256_bytes(
+        json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    if (
+        content_hash != row.get("source_status_content_sha256")
+        or computed != content_hash
+    ):
+        raise CandidateSnapshotManifestError(
+            "historical candidate Wheel source status content binding mismatch"
+        )
+
+
+def _safe_identity(value: Any, field: str) -> str:
+    text = _required(value, field)
+    if text in {".", ".."} or Path(text).name != text:
+        raise CandidateSnapshotManifestError(
+            "candidate snapshot identity is invalid"
+        )
+    return text
+
+
+def _timestamp(value: Any, field: str) -> str:
+    text = _required(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CandidateSnapshotManifestError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise CandidateSnapshotManifestError(f"{field} has no timezone")
+    return text
+
+
+def _manifest_sha256(value: Any, field: str) -> str:
+    digest = str(value or "").strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise CandidateSnapshotManifestError(f"{field} is invalid")
+    return digest
+
+
 def load_account_candidate_evidence(
     *,
     base: Path,
@@ -159,9 +955,13 @@ def load_account_candidate_evidence(
         "legacy_candidate_files": legacy_csv_names,
     }
 
-    manifest_paths = (
-        state_dir / CANDIDATE_SNAPSHOT_MANIFEST_FILE,
-        state_dir / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    manifest_paths = tuple(
+        state_dir / name
+        for name in (
+            CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+            CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+            CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+        )
     )
     formal_manifests_present = [
         path for path in manifest_paths if path.exists() or path.is_symlink()
@@ -200,7 +1000,7 @@ def load_account_candidate_evidence(
         )
     if formal_manifests_present:
         try:
-            bundle = load_candidate_snapshot_bundle(
+            bundle = load_candidate_snapshot_bundle_for_inspection(
                 base=authority_base,
                 run_id=run_id_norm,
                 account=account_norm,
@@ -213,11 +1013,31 @@ def load_account_candidate_evidence(
                 reason_code="candidate_snapshot_manifest_invalid",
                 detail=str(exc),
             )
+        manifest_schema = str(bundle["manifest"].get("schema_version") or "")
+        is_experience = bundle["manifest"].get("scan_mode") == "experience"
+        is_historical = manifest_schema in set(_FORMAL_HISTORY_MANIFESTS.values())
+        classification_status = (
+            NON_CONTRIBUTING_EXPERIENCE
+            if is_experience
+            else (
+                SUPPORTED_LIMITED_LEGACY_SNAPSHOT
+                if is_historical
+                else SUPPORTED
+            )
+        )
         return _result(
             account_dir=account_dir,
             common=common,
-            status=SUPPORTED,
-            reason_code="candidate_snapshot_manifest_valid",
+            status=classification_status,
+            reason_code=(
+                "experience_candidate_not_executable"
+                if is_experience
+                else (
+                    "historical_candidate_snapshot_valid"
+                    if is_historical
+                    else "candidate_snapshot_manifest_valid"
+                )
+            ),
             owners=dict(bundle["owners"]),
             status_index=dict(bundle["status_index"]),
             manifest=dict(bundle["manifest"]),
@@ -235,10 +1055,12 @@ def load_account_candidate_evidence(
         (account_dir / filename).exists()
         for filename in (
             STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+            STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
             STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+            "strategy_scan_status_index.v5.json",
         )
     ) or any(
-        payload.get("schema_version") in set(_MODERN_OWNER_SCHEMAS.values()) - {OPENING_CANDIDATE_SNAPSHOT_SCHEMA}
+        payload.get("schema_version") in _SEALED_OWNER_SCHEMAS
         for payload in owner_payloads.values()
     ):
         return _result(
@@ -795,6 +1617,10 @@ __all__ = [
     "UNSUPPORTED_SNAPSHOT_MISSING",
     "UNSUPPORTED_SNAPSHOT_SCHEMA",
     "load_account_candidate_evidence",
+    "load_candidate_snapshot_bundle_for_inspection",
+    "load_historical_candidate_snapshot_bundle",
+    "load_latest_candidate_snapshot_bundle_for_inspection",
     "load_run_candidate_evidence",
     "summarize_run_candidate_evidence",
+    "validate_historical_candidate_snapshot_bundle_bytes",
 ]
