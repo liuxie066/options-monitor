@@ -94,7 +94,8 @@ _COMBO_OCCURRENCE_FIELDS = (
 
 
 def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
-                                   account: str, market: str, now_ms: int) -> tuple[list[dict[str, Any]], str | None]:
+                                   account: str, market: str, now_ms: int,
+                                   capacity_observation: Mapping[str, Any] | None = None) -> tuple[list[dict[str, Any]], str | None]:
     """Re-evaluate ledger fills using the same read-only arbiter as Control."""
     try:
         from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
@@ -110,6 +111,7 @@ def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
                                                    runtime_root=ledger_path.parents[2], now_ms=now_ms)
         view = build_trade_attribution_view(snapshot, config=config, account=account, market=market.lower(),
             now_ms=now_ms, combo_evidence=evidence,
+            capacity_observation=capacity_observation,
             combo_mode=combo_reconciliation_mode_for_account(config, account=account))
         pending = [row for row in view["rows"] if row["status"] in {"pending", "conflict"}
                    and row["contracts_open"] > 0]
@@ -747,6 +749,7 @@ def assemble_daily_decision_brief(
     attribution_pending, attribution_read_error = _pending_attribution_for_brief(
         base=base_path, config=config_map, account=account_norm, market=market_norm,
         now_ms=int(effective_now.timestamp() * 1000),
+        capacity_observation={"portfolio": portfolio_context} if portfolio_context else None,
     )
     brief_payload = {
             "attribution_pending": attribution_pending,

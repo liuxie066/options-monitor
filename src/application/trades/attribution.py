@@ -615,7 +615,7 @@ def apply_trade_attribution(
                 if available is None or committed is None or committed + (reserved or 0) > available:
                     raise ValueError("attribution final Wheel capacity exceeded")
         for plan in plans:
-            if plan["fact"]["position_side"] == "short":
+            if plan["action"] != "ordinary" and plan["fact"]["position_side"] == "short":
                 check = trade_attribution_capacity_check(config=config, fact=plan["fact"], facts=after_facts, wheel_read_model=after_model,
                     observation=capacity_observation, now_ms=int(time.time() * 1000))
                 if check["status"] != "available":

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from domain.domain.trade_execution import execution_identity_from_input
+from domain.domain.trade_execution import execution_identity_from_input, legacy_open_execution_input_from_event
 
 from domain.domain.strategy_vocab import (
     STRATEGY_COMBO_YIELD,
@@ -69,6 +69,8 @@ def validate_attribution_decision(
         patch = raw.get("patch") or {}
         after = member.get("after")
         before = member.get("before")
+        opening_execution = ((opening.get("raw_payload") or {}).get("execution_input")
+            or legacy_open_execution_input_from_event(opening))
         if (not isinstance(patch, Mapping) or not isinstance(after, Mapping) or not isinstance(before, Mapping)
                 or set(after) != set(POSITION_LOT_STRATEGY_PATCH_FIELDS)
                 or set(before) != set(POSITION_LOT_STRATEGY_PATCH_FIELDS)
@@ -94,8 +96,7 @@ def validate_attribution_decision(
                 or (raw.get("attribution_origin") != "manual" if decision.get("manual", True)
                     else raw.get("attribution_origin") not in {"rule", "intent"})
                 or proof.get("source") not in {"trade_attribution", "wheel_linkage", "post_trade_combo_reconciliation"}
-                or execution_identity_from_input((opening.get("raw_payload") or {}).get("execution_input") or {})
-                != member["execution_key"]):
+                or execution_identity_from_input(opening_execution) != member["execution_key"]):
             raise ValueError("attribution decision proof or opening is invalid")
         resolved = resolve_strategy_metadata({key: value for key, value in after.items() if value is not None})
         if resolved.issues:
@@ -111,7 +112,7 @@ def validate_attribution_decision(
                 {key: value for key, value in before.items() if value is not None})):
             raise ValueError("automatic attribution cannot transfer an existing relationship")
         proofs.append(proof)
-        ref = ((opening.get("raw_payload") or {}).get("execution_input") or {}).get("broker_account_ref") or {}
+        ref = opening_execution.get("broker_account_ref") or {}
         physical_accounts.append(tuple(ref.get(key) for key in ("broker_id", "external_account_id", "environment")))
     if any(not all(ref) for ref in physical_accounts) or len(set(physical_accounts)) != 1:
         raise ValueError("attribution decision physical accounts differ")

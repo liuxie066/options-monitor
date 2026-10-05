@@ -165,7 +165,7 @@ def test_final_capacity_failure_rolls_back_proof_resolution_and_projection(tmp_p
     repo, config = _scope(tmp_path, monkeypatch)
     conflict = _conflict(repo, _view(repo, config))
     call = _call(_view(repo, config))
-    args = _args(config, call, "ordinary", "rollback", (conflict,))
+    args = _args(config, call, call["candidate_ids"][0], "rollback", (conflict,))
     before = (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots())
     original = attribution.write_trade_attribution_decision
     def fail_after_write(*args, **kwargs):

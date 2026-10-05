@@ -680,6 +680,42 @@ def structured_deal_keys_from_ledger_event(
     return keys
 
 
+def legacy_open_execution_input_from_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Recover only an exact REAL Futu open identity already proven by its ledger alias."""
+    if event.get("event_type") != "open":
+        return {}
+    raw = event.get("raw_payload")
+    contract = event.get("contract_key")
+    if not isinstance(raw, Mapping) or not isinstance(contract, Mapping):
+        return {}
+    if raw.get("execution_input") not in (None, {}) or raw.get("trd_env") != "REAL":
+        return {}
+    if str(contract.get("broker") or "").strip().lower() not in {"futu", "富途"}:
+        return {}
+    account = str(contract.get("account") or "").strip()
+    physical = str(raw.get("futu_account_id") or "").strip()
+    deals = structured_deal_ids_from_ledger_event(dict(event))
+    if (not account or account != account.lower() or not physical.isascii() or not physical.isdigit()
+            or physical.startswith("0") or len(deals) != 1):
+        return {}
+    if any(str(raw.get(field)).strip().lower() != account for field in ("internal_account", "account")
+           if raw.get(field) not in (None, "")):
+        return {}
+    deal_id = next(iter(deals))
+    if event.get("event_id") != f"futu:{account}:{physical}:{deal_id}":
+        return {}
+    execution = {
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": physical, "environment": "REAL"},
+        "external_id_namespace": "futu.deal", "external_execution_id": deal_id,
+    }
+    execution_key = execution_identity_from_input(execution)
+    if (not execution_key or raw.get("execution_id") not in (None, "", execution_key)
+            or execution_key not in structured_deal_keys_from_ledger_event(
+                dict(event), include_legacy_execution_identity=True)):
+        return {}
+    return execution
+
+
 def ledger_execution_event_set_is_complete(rows: list[dict[str, Any]]) -> bool:
     """Prove one active execution's complete allocation, source and target evidence."""
     if not rows:
