@@ -162,3 +162,9 @@ def apply_repair_trade_event(
         repo, event_id=event_id, overrides=overrides, reason=reason,
         expected_input_hash=expected_input_hash,
     )
+
+
+def preview_futu_time_repair(repo: Any, *, request: dict[str, Any]) -> dict[str, Any]:
+    from src.application.ledger.api import prepare_futu_time_repair
+    from src.application.trades.inbox import plan_futu_time_repair
+    return prepare_futu_time_repair(repo, request=request, plan_inbox=plan_futu_time_repair)

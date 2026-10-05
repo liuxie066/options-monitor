@@ -4006,3 +4006,64 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
     if skipped_unlinkable:
         _LOGGER.warning("trade_receipt_account_unlinkable skipped_unlinkable=%d", skipped_unlinkable)
     return result
+
+
+def plan_futu_time_repair(conn: sqlite3.Connection, event_changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Plan current inbox metadata only; historical source receipts are immutable."""
+    from copy import deepcopy
+    from domain.domain.trade_execution import (
+        structured_deal_keys_from_ledger_event, execution_instant_milliseconds,
+        futu_execution_time,
+    )
+    patches = []
+    for stored in conn.execute("SELECT * FROM repair_inbox.trade_inbox ORDER BY inbox_id"):
+        row = dict(stored)
+        source_key = str(row["broker_deal_key"] or "")
+        payload = json.loads(row["payload_json"])
+        content = _inbox_execution_content(source_key, payload)
+        actual_account = str(payload.get("internal_account") or payload.get("account") or "").lower()
+        payload_event = {"raw_payload": payload, "contract_key": {"account": actual_account, "broker": "futu"}}
+        payload_keys = structured_deal_keys_from_ledger_event(payload_event, include_legacy_execution_identity=True)
+        raw_keys = structured_deal_keys_from_ledger_event(
+            {**payload_event, "raw_payload": {k: v for k, v in payload.items() if k not in {"execution_input", "execution_id"}}},
+            include_legacy_execution_identity=True,
+        )
+        related = [change for change in event_changes if ({source_key} | payload_keys | raw_keys) & structured_deal_keys_from_ledger_event(
+            change["before_payload"], include_legacy_execution_identity=True)]
+        if not related:
+            continue
+        if row["status"] != "handled" or row["claim_id"] is not None:
+            raise ValueError(f"inbox is not quiescent and handled: {row['inbox_id']}")
+        accounts = {change["before_payload"]["contract_key"]["account"] for change in related}
+        actual_account = str(payload.get("internal_account") or payload.get("account") or "").lower()
+        if accounts != {actual_account} or any(str(e).startswith("invalid:") for e in content.get("errors", ())):
+            raise ValueError(f"inbox identity conflict: {row['inbox_id']}")
+        nested_account = ((payload.get("execution_input") or {}).get("broker_account_ref") or {}).get("account_label")
+        labels = [payload.get(k) for k in ("internal_account", "account", "account_label")] + [nested_account]
+        if raw_keys != payload_keys or any(str(label).strip().lower() != actual_account for label in labels if label not in (None, "")):
+            raise ValueError(f"inbox raw and normalized identity conflict: {row['inbox_id']}")
+        if source_key not in payload_keys:
+            raise ValueError(f"inbox source key does not match physical execution: {row['inbox_id']}")
+        after_ms = {change["after_trade_time_ms"] for change in related}
+        if len(after_ms) != 1:
+            raise ValueError("split execution proposed times disagree")
+        proposed_ms = next(iter(after_ms))
+        evidence = futu_execution_time(payload)
+        if evidence["errors"] or execution_instant_milliseconds(evidence["occurred_at_utc"]) != proposed_ms:
+            raise ValueError(f"inbox raw time disagrees with ledger evidence: {row['inbox_id']}")
+        updated = deepcopy(payload)
+        if isinstance(updated.get("execution_input"), dict):
+            updated["execution_input"]["occurred_at_utc"] = evidence["occurred_at_utc"]
+            updated["execution_input"]["source_timezone"] = evidence["source_timezone"]
+        revised = _inbox_execution_content(source_key, updated)
+        for receipt in conn.execute("SELECT payload_json FROM repair_inbox.trade_inbox_evidence WHERE inbox_id=?", (row["inbox_id"],)):
+            historical = _inbox_execution_content(source_key, json.loads(receipt[0]))
+            if _economic_values_conflict(historical.get("economic"), revised.get("economic")):
+                raise ValueError(f"historical inbox evidence conflicts with corrected content: {row['inbox_id']}")
+        after = dict(row)
+        after["payload_json"] = json.dumps(updated, ensure_ascii=False, sort_keys=True) if updated != payload else row["payload_json"]
+        after["economic_payload_hash"] = _execution_content_hash(revised)
+        after["payload_version"] += 1
+        after["updated_at_ms"] = related[0]["after_payload"]["raw_payload"]["trade_time_correction_provenance"]["corrected_at_ms"]
+        patches.append({"inbox_id": row["inbox_id"], "before_row": row, "after_row": after})
+    return patches

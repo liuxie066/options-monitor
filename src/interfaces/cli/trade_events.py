@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.application.ledger.api import (
     ledger_store_payload,
+    open_futu_time_repair_store,
     open_position_ledger_from_runtime_config as resolve_option_positions_repo,
     resolve_position_data_config_path,
 )
@@ -18,6 +20,7 @@ from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
     apply_repair_trade_event,
+    preview_futu_time_repair,
     apply_void_trade_event,
     list_trade_event_reviews,
     preview_repair_trade_event,
@@ -116,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--format", choices=["text", "json"], default="text")
     _add_write_flags(p_repair, high_risk=True)
 
+    p_times = sub.add_parser("repair-futu-times", help="preview a source-bound historical Futu time repair batch")
+    p_times.add_argument("--request", required=True)
+    p_times.add_argument("--expected-input-hash")
+    p_times.add_argument("--backup-dir")
+    p_times.add_argument("--runtime-root", default=None)
+    p_times.add_argument("--format", choices=["text", "json"], default="json")
+    _add_write_flags(p_times, high_risk=True)
+
     p_fees = sub.add_parser(
         "fees-sync",
         help="preview or apply OpenD actual order-fee enrichment",
@@ -138,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     write_controls: dict[str, dict[str, bool]] = {}
     if args.cmd == "replay":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="trade-events replay", high_risk=False)
-    elif args.cmd in {"void", "repair", "fees-sync"}:
+    elif args.cmd in {"void", "repair", "fees-sync", "repair-futu-times"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"trade-events {args.cmd}", high_risk=True)
     base = Path(__file__).resolve().parents[3]
     if args.cmd == "fees-sync":
@@ -156,6 +167,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         if guard is None:
             return 2
+    if args.cmd == "repair-futu-times":
+        try:
+            if write_controls[args.cmd]["write_requested"]:
+                raise ValueError("batch apply is not yet supported")
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            repo, ledger_store = open_futu_time_repair_store(data_config=data_config_path, runtime_root=_runtime_root_arg(args))
+            payload = preview_futu_time_repair(repo, request=request)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            _print_json({"mode": "blocked", "write_applied": False, "error": str(exc)})
+            return 2
+        payload["ledger_store"] = ledger_store
+        payload = attach_write_contract(payload, dry_run=True, write_applied=False,
+            rollback_hint="read-only batch preview; no rollback needed")
+        _print_json(payload)
+        return 0
+
     _data_config, repo = resolve_option_positions_repo(base=base, cfg=None, data_config=args.data_config, runtime_root=_runtime_root_arg(args))
     ledger_store = ledger_store_payload(_data_config, repo)
 
@@ -274,13 +301,22 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=not should_apply,
             write_applied=write_applied,
             rollback_hint=(
-                "in-place repair creates no backup or void event; restore a separately verified pre-write SQLite backup"
+                "preview only; raw Futu time apply is not supported"
+                if payload.get("operation") == "futu_raw_trade_time_preview"
+                else "in-place repair creates no backup or void event; restore a separately verified pre-write SQLite backup"
                 if in_place_repair
                 else "void repair events or restore option_positions SQLite from backup"
             ),
         )
         if args.format == "json":
             _print_json(payload)
+            return 0
+        if payload.get("operation") == "futu_raw_trade_time_preview":
+            print(
+                f"[DRY_RUN] 原始 Futu 成交时间预览 event_id={args.event_id} "
+                f"from={payload.get('before_trade_time_ms')} to={payload.get('after_trade_time_ms')}；"
+                "仅核对已存原始时间，关联数据尚待验证，不支持 apply"
+            )
             return 0
         if identity_binding:
             state = str(payload.get("mode") or "").upper()
