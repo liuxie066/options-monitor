@@ -1124,3 +1124,26 @@ def test_immutable_conflict_and_terminal_latest_pointer_fail_closed(
             scan_statuses=[_scan_status("NVDA", "put", "completed")],
             final_candidates={"put": []},
         )
+
+
+def test_missing_cny_premium_survives_seal_and_brief_as_data_gap(tmp_path):
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.daily_decision_brief_service import _load_opening_candidate_families
+    from src.application.daily_decision_brief_renderer import _strategy_data_gap_reminders
+
+    row = _candidate(contract_symbol="NVDA-CNY-MISSING", period_return=0.02)
+    row["net_income_cny"] = None
+    decision = evaluate_opening_candidate_policy(row, mode="put")
+    payload = _seal_snapshot(tmp_path, run_id="run-cny-missing",
+        scan_statuses=[_scan_status("NVDA", "put", "completed", reason="no_candidate")],
+        final_candidates={"put": []}, candidate_evaluations={"put": [
+            {"normalized_input": row, "opening_decision": decision}]})
+    assert payload["opening_status"] == "data_unavailable"
+    validate_opening_candidate_snapshot(payload, expected_run_id="run-cny-missing", expected_account="lx", require_current_contract=True)
+    summary = candidate_universe_summary(payload)
+    assert summary["affected_scopes"][0]["reason_code"] == "net_premium_cny_unavailable"
+    gaps = []
+    _load_opening_candidate_families(base=tmp_path, run_id="run-cny-missing", account="lx", market="US",
+        source_artifacts=[], data_gaps=gaps, snapshot=payload)
+    assert any(row.get("reason_code") == "net_premium_cny_unavailable" for row in gaps)
+    assert any("人民币净权利金无法计算" in line for line in _strategy_data_gap_reminders({"data_gaps": gaps}))

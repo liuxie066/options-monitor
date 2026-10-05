@@ -856,15 +856,21 @@ def evaluate_opening_candidate_policy(
         )
 
     net_premium_cny = _first_float(src, "net_income_cny")
-    if (
-        net_premium_cny is None
-        or net_premium_cny < resolved_min_net_premium_cny
-    ):
+    if net_premium_cny is None:
+        _reject(
+            rejects,
+            stage=STAGE_RETURN_FLOOR,
+            reason=REJECT_INPUT_MISSING,
+            message="one-contract net premium in CNY is unavailable",
+            metric_value={"field": "net_income_cny", "reason_code": "net_premium_cny_unavailable"},
+            threshold=resolved_min_net_premium_cny,
+        )
+    elif net_premium_cny < resolved_min_net_premium_cny:
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
             reason=REJECT_RETURN_NET_PREMIUM_CNY,
-            message="one-contract net premium in CNY below minimum or unavailable",
+            message="one-contract net premium in CNY below minimum",
             metric_value=net_premium_cny,
             threshold=resolved_min_net_premium_cny,
         )

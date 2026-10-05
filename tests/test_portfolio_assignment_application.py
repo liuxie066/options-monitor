@@ -330,7 +330,7 @@ def test_query_keeps_shared_fx_cache_read_only(monkeypatch, tmp_path, existing_c
     assert not cache.with_suffix(".json.lock").exists()
 
 
-def test_query_holiday_fx_keeps_cash_valuation_but_withholds_coverage(monkeypatch):
+def test_query_holiday_fx_supports_cash_valuation_and_coverage(monkeypatch):
     from src.infrastructure import exchange_rates as fx
 
     monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
@@ -360,12 +360,12 @@ def test_query_holiday_fx_keeps_cash_valuation_but_withholds_coverage(monkeypatc
     monkeypatch.setattr(application, "fetch_futu_portfolio_context", read_context)
     result = application.query_portfolio_assignment_scenario(["lx"])
 
-    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "92.00"
     assert result["distribution"]["by_code"][0]["value_cny"] == "92.00"
     assert result["fx_facts"][0]["quality"] == "holiday_carried"
     assert result["snapshot"]["fx_observation"]["pairs"]["HKDCNY"]["quote_at_utc"] == "2026-09-30T07:00:00+00:00"
     assert result["snapshot"]["fx_observation"]["snapshot_sha256"]
-    assert "资金能力汇率：不可用；假期沿用价仅用于估值" in application.render_assignment_scenario_text(result)
+    assert "资金能力汇率：不可用" not in application.render_assignment_scenario_text(result)
 
 
 def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):

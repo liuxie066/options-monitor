@@ -220,7 +220,14 @@ def resolve_trade_attribution(
             target = _text(existing.get("candidate_id"))
             # Missing evidence cannot disprove a durable relationship.
             acknowledged = set(existing.get("acknowledged_candidate_ids") or []) if existing.get("origin") == "manual" else set()
-            conflicts = [key for key in ids if key != target and key not in acknowledged]
+            # A manual Wheel assignment already chooses among stock branches.
+            # New branch possibilities alone do not contradict that choice;
+            # explicit intent/Combo evidence and real capacity conflicts still do.
+            conflicts = [key for key in ids if key != target and key not in acknowledged
+                and not (existing.get("origin") == "manual" and existing.get("strategy") == "wheel"
+                    and by_id[key].get("strategy") == "wheel" and not by_id[key].get("intent_id")
+                    and not {"multiple_or_invalid_wheel_intents", "wheel_intent_fill_mismatch_or_consumed"}
+                        .intersection(by_id[key].get("reason_codes") or []))]
             if conflicts:
                 return TradeAttributionResolution("conflict", ids, reason_codes=("late_competing_evidence",))
             capacity_conflicts = {"competing_fills_exceed_capacity", "competing_fills_exceed_intent_remainder",

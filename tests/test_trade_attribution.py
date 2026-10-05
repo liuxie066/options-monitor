@@ -192,3 +192,20 @@ def test_old_store_is_not_implicitly_migrated_or_enabled(tmp_path):
     preview = preview_trade_attribution_migration(path, scope=scope, effective_from_ms=2_000)
     assert preview["policy_schema_present"] is False
     assert preview["v2_existing_effective_from_ms"] is None
+
+
+def test_manual_wheel_choice_ignores_alternatives_but_preserves_real_conflicts():
+    existing = {"status": "linked", "origin": "manual", "strategy": "wheel", "candidate_id": "wheel:a"}
+    target = {"candidate_id": "wheel:a", "strategy": "wheel", "eligible": True}
+    other = {"candidate_id": "wheel:b", "strategy": "wheel", "eligible": True}
+    def resolve(candidates, **extra):
+        return resolve_trade_attribution(
+            candidates=tuple(candidates), evidence_complete=True, existing={**existing, **extra})
+    assert resolve([target, other]).status == "linked"
+    assert resolve([target, other], origin="inherited").reason_codes == ("late_competing_evidence",)
+    assert resolve([target, {**other, "intent_id": "explicit-intent"}]).status == "conflict"
+    for reason in ("multiple_or_invalid_wheel_intents", "wheel_intent_fill_mismatch_or_consumed"):
+        assert resolve([target, {**other, "reason_codes": [reason]}]).status == "conflict"
+    assert resolve([target, {"candidate_id": "combo:c", "strategy": "combo_yield"}]).status == "conflict"
+    assert resolve([{**target, "reason_codes": ["account_stock_capacity_exceeded"]}, other]).reason_codes == ("late_capacity_conflict",)
+    assert resolve([target, other], status="conflict").reason_codes == ("unresolved_attribution_conflict",)

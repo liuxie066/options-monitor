@@ -340,3 +340,72 @@ def test_multi_branch_terminal_keeps_stock_coverage_blocked_until_settlement_is_
     assert all(row["active_option_committed_shares"] == 500
                and "wheel_call_settlement_allocation_pending" in row["reason_codes"]
                for row in branches if row["wheel_branch_id"] in chosen)
+
+
+def test_legacy_manual_wheel_confirmation_survives_other_branches(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from src.application.ledger.api import trade_attribution_facts_from_events
+    from src.application.daily_decision_brief_service import _pending_attribution_for_brief
+
+    repo, config, _ = _meituan_repo(tmp_path)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": []})
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    evidence = {"complete": True, "exposures": []}
+    now = _ms("2026-10-01T00:00:00Z")
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
+        now_ms=now, combo_evidence=evidence)
+    call = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
+    branch = call["candidate_ids"][0].removeprefix("wheel:")
+    fill = next(row for row in rows["trade_events"] if row["event_id"] == call["open_event_id"])
+    patch = {"strategy": "wheel", "leg_role": "wheel_call", "source_stock_lot_id": branch,
+             "source_wheel_branch_id": branch, "last_action_at": now - 1000}
+    proof = TradeEvent(event_id="legacy-confirmation", event_type="adjust", event_time_ms=now - 1000,
+        contract_key=ContractKey.from_values(**call["contract_key"]), contracts=0, price=0,
+        multiplier=500, currency="HKD", source="wheel_linkage", target_lot_id=call["lot_id"],
+        raw_payload={"schema_version": "wheel_call_linkage_confirmed.v1", "actor": "operator",
+            "wheel_linkage_request_id": "legacy-request", "input_snapshot_hash": "a" * 64,
+            "batch_generation_hash": "b" * 64, "linkage_candidate_id": "legacy-candidate",
+            "adjust_target_source_event_id": fill["event_id"], "target_lot_id": call["lot_id"],
+            "source_stock_lot_id": branch, "source_wheel_branch_id": branch, "patch": patch})
+    persist_trade_event_objects_atomically(repo, [proof])
+    before = repo.list_trade_events()
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    def fact(events):
+        return next(row for row in trade_attribution_facts_from_events(events, account="lx")
+                    if row["open_event_id"] == fill["event_id"])
+    assert fact(rows["trade_events"])["origin"] == "manual"
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
+        now_ms=now, combo_evidence=evidence)
+    linked = next(row for row in view["rows"] if row["open_event_id"] == fill["event_id"])
+    assert len(linked["candidate_ids"]) == 5
+    assert linked["status"] == "linked" and linked["wheel_branch_id"] == branch
+    pending, error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
+        market="HK", now_ms=now)
+    assert error is None and pending == []
+    assert repo.list_trade_events() == before  # Readback never writes a replacement confirmation.
+
+    # A link without the actual legacy proof must not acquire manual authority.
+    for field in ("actor", "wheel_linkage_request_id", "input_snapshot_hash",
+                  "batch_generation_hash", "linkage_candidate_id", "adjust_target_source_event_id",
+                  "source_stock_lot_id", "target_lot_id"):
+        events = deepcopy(rows["trade_events"])
+        legacy = next(row for row in events if row["event_id"] == "legacy-confirmation")
+        legacy["raw_payload"].pop(field)
+        assert fact(events)["origin"] == "inherited", field
+    events = deepcopy(rows["trade_events"])
+    legacy = next(row for row in events if row["event_id"] == "legacy-confirmation")
+    legacy["contract_key"]["account"] = "sy"
+    assert fact(events)["origin"] == "inherited"
+    events = deepcopy(rows["trade_events"])
+    legacy = next(row for row in events if row["event_id"] == "legacy-confirmation")
+    later = deepcopy(legacy)
+    later.update(event_id="later-unconfirmed-patch", event_time_ms=now)
+    later["raw_payload"] = {"patch": patch}
+    events.append(later)
+    assert fact(events)["origin"] == "inherited"
+    from dataclasses import replace
+    void = replace(proof, event_id="void-legacy-proof", event_type="void", event_time_ms=now,
+                   target_lot_id=None, target_event_id=proof.event_id, raw_payload={}).to_dict()
+    voided = fact([*rows["trade_events"], void])
+    assert voided["origin"] is None and voided["status"] == "pending"

@@ -1066,3 +1066,30 @@ def test_wheel_capacity_facts_require_trusted_decision_snapshot() -> None:
     assert put["reason"] == "option_decision_snapshot_unavailable"
     assert call["status"] == "unavailable"
     assert call["reason"] == "short_call_coverage_unavailable"
+
+
+def test_covered_wheel_contracts_reach_sealed_snapshot_and_brief(tmp_path: Path) -> None:
+    model = _read_model()
+    contract = {"lot_id": "open-call", "underlying_symbol": "NVDA", "option_type": "call",
+                "strike": "110", "expiration_ymd": "2026-05-06"}
+    batch = model["batches"][0]
+    batch.update(active_option_contracts=[contract], active_option_committed_shares=100,
+                 phase="option_open", active_call_lot_ids=["open-call"])
+    scan = run_wheel_call_scan(model, _policy(), {}, {}, {}, decision_time_ms=int(AS_OF.timestamp()*1000))
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+                                      opening_call_candidates=[], coverage_facts=[])
+    payload = seal_wheel_candidate_snapshot(
+        base=tmp_path, run_id="covered", account="lx", market="us",
+        account_config_sha256="a"*64, strategy_policy_sha256="b"*64,
+        dependencies=_seal_dependencies(), scope_results=captured["scope_results"],
+        batches=captured["batches"], capacity_allocations=captured["allocations"], sealed_at=AS_OF,
+    )
+    assert load_wheel_candidate_snapshot(base=tmp_path,run_id="covered",account="lx") == payload
+    views, candidates, available = _load_wheel_snapshot_family(
+        run_id="covered", account="lx", market="US", source_artifacts=[],data_gaps=[],snapshot=payload)
+    assert available and not candidates
+    assert views[0]["active_option_contracts"] == [contract]
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+    message = render_fixed_report({"account":"lx", "market":"US", "wheel_batches":views})
+    assert "2026-05-06 110 Call" in message
+    assert "建议：卖出" not in message

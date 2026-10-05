@@ -1499,7 +1499,7 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     assert "多个 CSP 候选共享同一现金额度" not in message
     assert "## 提醒" not in message
     assert "提醒｜" not in message
-    assert "GOOGL CSP：本轮部分行情证据不可用" not in message
+    assert "GOOGL CSP：本轮部分数据不可用" not in message
     assert "事件数据不完整，无法排除近期重要事件；下单前复核。" in message
     assert "当前无法确认没有重要事件" not in message
 
@@ -1855,3 +1855,50 @@ def test_hk_data_time_does_not_repeat_identical_beijing_time():
     message = render_fixed_report(brief, context={})
     assert "数据｜香港 14:02" in message
     assert "/ 北京 14:02" not in message
+
+
+@pytest.mark.parametrize("delivery_kind", ["fixed_report", "full", "query"])
+def test_wheel_keeps_same_symbol_adjacent_with_stable_branch_order(delivery_kind) -> None:
+    brief = _hk_assigned_wheel_brief()
+    rows = brief["wheel_batches"]
+    rows.insert(1, rows.pop())  # Tencent between Meituan branches in source order.
+    view = build_daily_brief_user_view(brief, delivery_kind=delivery_kind)
+    symbols = [item["title"].split(" · ")[0] for item in view["wheel_batches"]]
+    assert symbols == ["3690.HK"] * (len(symbols)-1) + ["0700.HK"]
+    if delivery_kind != "fixed_report":
+        ids = [row["wheel_branch_id"][-8:] for row in rows if row["symbol"] == "3690.HK"]
+        assert all(branch in item["title"] for branch,item in zip(ids,view["wheel_batches"]))
+
+
+def test_grouped_wheel_preserves_distinct_covered_contracts_and_missing_details() -> None:
+    brief = _hk_assigned_wheel_brief()
+    for index,row in enumerate(brief["wheel_batches"]):
+        shares = row["shares_remaining"]
+        row.update(status="option_open", phase="option_open", reason_codes=[],
+                   reason_code="wheel_capacity_fully_committed_or_reserved")
+        row["coverage"].update(status="full",target_shares=shares,committed_shares=shares,
+                               available_shares=0,reserved_shares=0,reason_codes=[])
+        row["active_option_contracts"] = [{"lot_id":str(index),"underlying_symbol":row["symbol"],
+            "expiration_ymd":"2026-11-27", "strike":"80" if index<2 else "85", "option_type":"call"}]
+    for render in (render_fixed_report, render_fixed_report_card_markdown):
+        message=render(brief)
+        assert "2026-11-27 80 Call；2026-11-27 85 Call" in message
+        assert "建议：卖出" not in message
+    brief["wheel_batches"][1].pop("active_option_contracts")
+    grouped=build_daily_brief_user_view(brief,delivery_kind="fixed_report")["wheel_batches"][0]
+    assert "合约信息不完整" in " ".join(grouped["details"])
+
+
+def test_wheel_reservation_and_candidate_are_not_covered_contracts() -> None:
+    brief = _hk_assigned_wheel_brief()
+    row=brief["wheel_batches"][0]
+    brief["wheel_batches"]=[row]
+    row.update(expiration="2026-12-31",strike=90,reason_codes=[],status="ready")
+    row["coverage"].update(status="full",committed_shares=0,reserved_shares=500,available_shares=0,reason_codes=[])
+    message=render_fixed_report(brief)
+    assert "覆盖期权" not in message
+    assert "意图预留" in message
+    row["coverage"].update(committed_shares=500,reserved_shares=0)
+    message=render_fixed_report(brief)
+    assert "覆盖期权｜合约信息待核实" in message
+    assert "2026-12-31" not in message

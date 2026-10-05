@@ -106,6 +106,41 @@ def _manual_ordinary_decision(events: Sequence[Mapping[str, Any]], lot_id: str, 
     return None
 
 
+def _legacy_manual_wheel_call_confirmation(
+    related: Sequence[Mapping[str, Any]], *, opening: Mapping[str, Any],
+    lot_id: str, membership: Mapping[str, Any],
+) -> bool:
+    """Recognize the original durable confirmation, never infer it from a link alone."""
+    latest = next((row for row in reversed(related) if row.get("event_type") == "adjust"
+        and any(key in ((row.get("raw_payload") or {}).get("patch") or {})
+                for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)), None)
+    if latest is None:
+        return False
+    raw = latest.get("raw_payload") or {}
+    patch = raw.get("patch") or {}
+    branch = patch.get("source_wheel_branch_id")
+    if (latest.get("source") != "wheel_linkage"
+            or raw.get("schema_version") != "wheel_call_linkage_confirmed.v1"
+            or "attribution_decision" in raw
+            or not all(raw.get(key) for key in ("actor", "wheel_linkage_request_id",
+                "input_snapshot_hash", "batch_generation_hash", "linkage_candidate_id"))
+            or latest.get("target_lot_id") != lot_id or raw.get("target_lot_id") != lot_id
+            or raw.get("adjust_target_source_event_id") != opening.get("event_id")
+            or not branch or patch.get("source_stock_lot_id") != branch
+            or raw.get("source_wheel_branch_id") != branch or raw.get("source_stock_lot_id") != branch
+            or patch.get("strategy") != "wheel" or patch.get("leg_role") != "wheel_call"
+            or any(membership.get(key) != patch.get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)
+            or latest.get("event_time_ms", 0) < opening.get("event_time_ms", 0)):
+        return False
+    try:
+        proof, fill = TradeEvent.from_dict(latest), TradeEvent.from_dict(opening)
+        return (proof.contract_key == fill.contract_key and proof.currency == fill.currency
+            and proof.multiplier == fill.multiplier and proof.contracts == 0
+            and proof.price == 0 and proof.fees == 0)
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
 def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, account: str) -> list[dict[str, Any]]:
     effective = _effective_events(events)
     accepted: set[str] = set()
@@ -145,7 +180,9 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
             and (row.get("raw_payload") or {}).get("attribution_origin") in {"manual", "rule", "intent"}
             and (row.get("raw_payload") or {}).get("attribution_request_id")
             and ("attribution_decision" not in (row.get("raw_payload") or {}) or row["event_id"] in accepted)]
-        origin = (decisions[-1]["raw_payload"]["attribution_origin"] if decisions else "inherited") if linked else None
+        origin = (decisions[-1]["raw_payload"]["attribution_origin"] if decisions else
+            "manual" if _legacy_manual_wheel_call_confirmation(related, opening=event,
+                lot_id=lot_id, membership=membership) else "inherited") if linked else None
         reasons = []
         if not execution_key or execution.get("errors") or ref.get("account_label") not in (None, "", account):
             reasons.append("execution_identity_unproven")

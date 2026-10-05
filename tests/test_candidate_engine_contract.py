@@ -391,3 +391,39 @@ def test_sell_put_profiles_reject_covered_call_and_unknown_names() -> None:
 def test_rank_api_has_no_score_weight_compatibility_alias() -> None:
     with pytest.raises(TypeError):
         rank_candidate_rows([_policy_row()], mode="put", score_weights={})  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_missing_cny_premium_is_missing_input_not_low_return(mode):
+    decision = _decide(_policy_row(mode=mode, net_income_cny=None), mode=mode)
+    assert decision["accepted"] is False
+    assert "input_missing" in _reasons(decision)
+    assert "return_net_premium_cny" not in _reasons(decision)
+    gap = next(row for row in decision["rejects"] if row["reason"] == "input_missing")
+    assert gap["metric_value"]["reason_code"] == "net_premium_cny_unavailable"
+    low = _decide(_policy_row(mode=mode, net_income_cny=0), mode=mode)
+    assert "return_net_premium_cny" in _reasons(low)
+    assert "input_missing" not in _reasons(low)
+
+
+@pytest.mark.parametrize("holiday", [False, True])
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_fx_purpose_flows_to_cny_premium_gate(holiday, mode, monkeypatch):
+    from test_current_exchange_rate_snapshot import _at, _row
+    from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
+    from src.application.exchange_rate_loader import build_converter
+    from src.application.short_vol_risk_context import enrich_short_vol_contract_cny_fields
+    snapshot = {"pairs": {"HKDCNY": _row(0.8543, _at(9, 30, 9, 40))}}
+    now = _at(10, 5, 15) if holiday else _at(9, 30, 10)
+    monkeypatch.setattr("src.infrastructure.exchange_rates._utc_now", lambda: now)
+    capacity = project_exchange_rate_snapshot(snapshot, purpose="capacity")
+    display = project_exchange_rate_snapshot(snapshot, purpose="display")
+    assert display["rates"]["HKDCNY"] == 0.8543
+    converter = build_converter(usd_per_cny_exchange_rate=None,
+                               cny_per_hkd_exchange_rate=capacity["rates"].get("HKDCNY"))
+    row = _policy_row(mode=mode, net_income=100.0, currency="HKD")
+    row.pop("net_income_cny")
+    row.update(enrich_short_vol_contract_cny_fields(row, exchange_rate_converter=converter))
+    reasons = _reasons(_decide(row, mode=mode))
+    assert row["net_income_cny"] == pytest.approx(85.43)
+    assert "input_missing" not in reasons and "return_net_premium_cny" not in reasons

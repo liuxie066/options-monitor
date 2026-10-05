@@ -109,7 +109,18 @@ def test_real_wheel_projection_equivalence_and_replay_counts(monkeypatch, kind, 
     monkeypatch.setattr(wheel_projection, "project_wheel_lifecycles",
                         lambda *a, **kw: (lifecycle_calls.append(1), real_lifecycle(*a, **kw))[1])
     actual = build_wheel_read_model_from_rows(rows, account="lx", as_of_ms=4000, market=market)
-    assert actual["wheel_branches"] == expected
+    # Presentation enrichment must leave the canonical projection unchanged.
+    enriched = deepcopy(actual["wheel_branches"])
+    for branch in enriched:
+        contracts = branch.pop("active_option_contracts")
+        active_ids = branch.get("active_option_lot_ids") or branch.get("active_call_lot_ids") or []
+        assert [item["lot_id"] for item in contracts] == active_ids
+        for item in contracts:
+            assert item["underlying_symbol"] == "NVDA"
+            assert item["option_type"] == "call"
+            assert item["strike"] == "100"
+            assert item["expiration_ymd"] == "2026-08-21"
+    assert enriched == expected
     assert actual["assigned_stock_projection"] == stock
     assert rows == original
     assert calls == [3]

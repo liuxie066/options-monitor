@@ -77,7 +77,7 @@ def test_provider_rejects_malformed_and_future_pair_without_losing_other_pair(mo
     assert result["pairs"]["HKDCNY"]["source"] == "tencent_quote"
 
 
-def test_holiday_carry_preserves_source_time_and_blocks_capacity(tmp_path: Path, monkeypatch) -> None:
+def test_holiday_carry_preserves_source_time_and_allows_capacity(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "rate_cache.json"
     quoted = _at(9, 30, 14)
     _cache(path, USDCNY=_row(7.2, quoted), HKDCNY=_row(0.92, quoted))
@@ -88,7 +88,11 @@ def test_holiday_carry_preserves_source_time_and_blocks_capacity(tmp_path: Path,
 
     assert {row["quality"] for row in result["pairs"].values()} == {"holiday_carried"}
     assert fx.rates_for_purpose(result, purpose="display", now=now) == {"USDCNY": 7.2, "HKDCNY": 0.92}
-    assert fx.rates_for_purpose(result, purpose="capacity", now=now) == {}
+    assert fx.rates_for_purpose(result, purpose="capacity", now=now) == {"USDCNY": 7.2, "HKDCNY": 0.92}
+    assert all(row["capacity_eligible"] for row in result["pairs"].values())
+    monkeypatch.setattr(fx, "_utc_now", lambda: now)
+    assert fx.exchange_rate_observation_status(result) == "ready"
+    assert fx.project_exchange_rate_snapshot(result, purpose="capacity", now=now)["rates"] == result["rates"]
     assert result["pairs"]["USDCNY"]["quote_at_utc"] == quoted.isoformat()
     assert json.loads(path.read_text(encoding="utf-8"))["pairs"]["USDCNY"]["quote_at_utc"] == quoted.isoformat()
 
@@ -179,7 +183,8 @@ def test_delayed_capacity_rechecks_sealed_quote_time(tmp_path: Path, monkeypatch
     snapshot = fx.current_exchange_rate_snapshot(cache_path=path, now=_at(9, 30, 12), write_cache=False)
 
     assert fx.rates_for_purpose(snapshot, purpose="capacity", now=_at(9, 30, 12)) == {"USDCNY": 7.2}
-    assert fx.rates_for_purpose(snapshot, purpose="capacity", now=_at(10, 2, 12)) == {}
+    assert fx.rates_for_purpose(snapshot, purpose="capacity", now=_at(10, 2, 12)) == {"USDCNY": 7.2}
+    assert fx.rates_for_purpose(snapshot, purpose="capacity", now=_at(10, 8, 9, 30)) == {}
     assert fx.rates_for_purpose(snapshot, purpose="display", now=_at(10, 2, 12)) == {"USDCNY": 7.2}
 
 

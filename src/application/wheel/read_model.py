@@ -181,8 +181,18 @@ def build_wheel_read_model_from_rows(
             and projection.get("lifecycle_status") == "active"
         ):
             projection["phase"] = "linkage_unresolved"
+    lots_by_id = {str(row["record_id"]): row["fields"] for row in position_lots}
     for projection in [*batches, *wheel_branches]:
         projection["coverage"] = project_wheel_coverage(projection)
+        # Use only the lot identities already linked by the Wheel projection.
+        active_ids = projection.get("active_option_lot_ids") or projection.get("active_call_lot_ids") or []
+        projection["active_option_contracts"] = [
+            {"lot_id": lot_id, **{
+                key: (lots_by_id.get(lot_id, {}).get("contract_key") or {}).get(key)
+                for key in ("underlying_symbol", "option_type", "strike", "expiration_ymd")
+            }}
+            for lot_id in active_ids
+        ]
     return {
         "schema_version": WHEEL_READ_MODEL_SCHEMA,
         "account": account_value,
