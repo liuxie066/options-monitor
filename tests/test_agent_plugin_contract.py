@@ -327,7 +327,17 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
         "freshness.dataset_ids",
         "freshness.reason_codes",
     ]
-    assert tools["preview_notification"]["input_schema"]["render_style"]["enum"] == ["compact", "legacy"]
+    assert set(tools["preview_notification"]["input_schema"]) == {
+        "account",
+        "market",
+        "date",
+        "revision",
+    }
+    assert tools["preview_notification"]["input_json_schema"]["additionalProperties"] is False
+    assert tools["preview_notification"]["output_contract"]["schema_version"] == (
+        "preview_notification.output.v2"
+    )
+    assert "render_style" not in tools["preview_notification"]["input_schema"]
     assert "renderer" in tools["preview_notification"]["output_contract"]["fact_fields"]
     assert "authority" in tools["preview_notification"]["output_contract"]["fact_fields"]
     assert "delivery_evidence" in tools["preview_notification"]["output_contract"]["fact_fields"]

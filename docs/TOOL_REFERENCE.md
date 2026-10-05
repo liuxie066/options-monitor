@@ -136,7 +136,7 @@
 
 ### 通知
 
-- `preview_notification`
+- `preview_notification`：用 `account`、`market`、`date`、`revision` 选择已持久化的成功 Daily Brief，并通过 canonical Daily Brief query renderer 生成只读正文；不扫描、不发送、不改变 delivery state，也不接受 legacy alert/change 文本或路径
 - `notification_perception_read`
 - `daily_decision_brief_read`
 

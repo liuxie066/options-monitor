@@ -19,6 +19,28 @@ from src.application.runtime_paths import resolve_runtime_root
 
 _MARKETS = ("US", "HK")
 _MARKET_LABELS = {"US": "美股", "HK": "港股"}
+DAILY_BRIEF_SELECTOR_INPUT_SCHEMA: dict[str, Any] = {
+    "account": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Optional lowercase account label; omitted queries all enabled accounts",
+    },
+    "market": {
+        "type": "string",
+        "enum": ["US", "HK", "us", "hk"],
+        "description": "Optional market; omitted latest queries all enabled markets and day queries default to US",
+    },
+    "date": {
+        "type": "string",
+        "pattern": r"^\d{4}-\d{2}-\d{2}$",
+        "description": "Optional market trading date; requires account; market defaults to US",
+    },
+    "revision": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Optional exact revision; requires date and account; market defaults to US",
+    },
+}
 _OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
@@ -395,7 +417,7 @@ def _page_daily_brief(data: dict[str, Any], payload: dict[str, Any], *, binding:
     return result
 
 
-def _validate_daily_brief_input(payload: dict[str, Any]) -> None:
+def validate_daily_brief_query_input(payload: dict[str, Any]) -> None:
     if payload.get("section") is not None and payload["section"] not in _BRIEF_SECTIONS:
         raise AgentToolError(code="INPUT_ERROR", message="Unknown report section")
     has_date = bool(str(payload.get("date") or "").strip())
@@ -406,9 +428,16 @@ def _validate_daily_brief_input(payload: dict[str, Any]) -> None:
         raise AgentToolError(code="INPUT_ERROR", message="account is required for day or revision queries")
 
 
-def _daily_brief_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+def query_daily_brief_tool_view(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    validate_daily_brief_query_input(payload)
     revision_value = payload.get("revision")
-    revision = None if revision_value is None else int(revision_value)
+    if revision_value is not None and (
+        isinstance(revision_value, bool) or not isinstance(revision_value, int)
+    ):
+        raise AgentToolError(code="INPUT_ERROR", message="revision must be an integer")
+    revision = None if revision_value is None else revision_value
     date = str(payload.get("date") or "").strip() or None
     market = str(payload.get("market") or "").strip() or ("US" if date is not None else None)
     repo_root = repo_base()
@@ -468,31 +497,12 @@ DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
     input_schema={
         "section": {"type": "string", "enum": list(_BRIEF_SECTIONS), "description": "Bounded original report section; brief reads structured details"},
         "cursor": {"type": "string", "minLength": 1, "maxLength": 8192},
-        "account": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Optional lowercase account label; omitted queries all enabled accounts",
-        },
-        "market": {
-            "type": "string",
-            "enum": ["US", "HK", "us", "hk"],
-            "description": "Optional market; omitted latest queries all enabled markets and day queries default to US",
-        },
-        "date": {
-            "type": "string",
-            "pattern": r"^\d{4}-\d{2}-\d{2}$",
-            "description": "Optional market trading date; requires account; market defaults to US",
-        },
-        "revision": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "Optional exact revision; requires date and account; market defaults to US",
-        },
+        **DAILY_BRIEF_SELECTOR_INPUT_SCHEMA,
     },
-    handler=_daily_brief_read_tool,
+    handler=query_daily_brief_tool_view,
     pure_read=True,
     safe_default_input={},
-    input_validator=_validate_daily_brief_input,
+    input_validator=validate_daily_brief_query_input,
     examples=(
         {"input": {}},
         {"input": {"market": "HK"}},
@@ -508,4 +518,11 @@ DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
 TOOLS: tuple[AgentTool, ...] = (DAILY_DECISION_BRIEF_READ_TOOL,)
 
 
-__all__ = ["DAILY_DECISION_BRIEF_READ_TOOL", "TOOLS", "read_daily_brief_view"]
+__all__ = [
+    "DAILY_BRIEF_SELECTOR_INPUT_SCHEMA",
+    "DAILY_DECISION_BRIEF_READ_TOOL",
+    "TOOLS",
+    "query_daily_brief_tool_view",
+    "read_daily_brief_view",
+    "validate_daily_brief_query_input",
+]

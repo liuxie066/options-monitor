@@ -5,21 +5,18 @@ from src.application.tool_execution import execute_tool
 
 def preview_notification(
     *,
-    alerts_path: str | None = None,
-    changes_path: str | None = None,
-    alerts_text: str | None = None,
-    changes_text: str | None = None,
-    account_label: str | None = None,
+    account: str | None = None,
+    market: str | None = None,
+    date: str | None = None,
+    revision: int | None = None,
 ) -> dict:
     payload: dict[str, object] = {}
-    if alerts_path:
-        payload["alerts_path"] = str(alerts_path)
-    if changes_path:
-        payload["changes_path"] = str(changes_path)
-    if alerts_text:
-        payload["alerts_text"] = str(alerts_text)
-    if changes_text:
-        payload["changes_text"] = str(changes_text)
-    if account_label:
-        payload["account_label"] = str(account_label)
+    if account:
+        payload["account"] = str(account)
+    if market:
+        payload["market"] = str(market)
+    if date:
+        payload["date"] = str(date)
+    if revision is not None:
+        payload["revision"] = int(revision)
     return execute_tool("preview_notification", payload)

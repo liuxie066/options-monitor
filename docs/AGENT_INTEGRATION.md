@@ -337,11 +337,13 @@ notifications, or write state. It summarizes:
 - `output_shared/state/last_run.json`
 - `output_accounts/<account>/state/last_run.json`
 - the latest `output_runs/<run_id>` pointer when available
-- compatibility notification artifacts and their explicit `compatibility_only` authority
+- historical or explicit manual-stage compatibility notification artifacts and their `compatibility_only` authority
 - freshness and per-account summary fields
 
-普通调度通知的权威渲染面是 Daily Brief；`symbols_notification.txt` 只作为兼容
-artifact 被 `runtime_status` 诊断，不能作为通知已投递的证据。
+普通 scan / Tick 不再生成 `symbols_alerts.txt`、`symbols_changes.txt` 或
+`symbols_notification.txt`，其通知正文权威是持久化 Daily Brief。`runtime_status`
+仍可诊断历史文件或显式 `--stage-only alert|notify` 生成的兼容 artifact；它们不能证明
+当前运行生成了 Daily Brief，更不能作为通知已投递的证据。
 
 If the production layout uses non-default paths, pass them explicitly:
 
