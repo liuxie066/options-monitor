@@ -940,12 +940,35 @@ def test_explicit_terminal_frozen_mapping_only_links_existing_facts(
     assert applied["applied_count"] == 1
     assert repo.list_trade_events() == before_events
     assert repo.list_position_lots() == before_lots
-    assert repo.list_trade_lifecycle_cases() == before_cases
-    assert len(
-        repo.list_trade_lifecycle_source_consumptions(
-            case_id=case_id
-        )
-    ) == 2
+    assert repo.list_trade_lifecycle_cases() == [
+        {**before_cases[0], "futu_account_id": "1001"}
+    ]
+    claims = repo.list_trade_lifecycle_source_consumptions(case_id=case_id)
+    assert len(claims) == 2
+    stock_claim = next(item for item in claims if item["source_role"] == "stock_settlement")
+    stock_raw = repo.get_trade_lifecycle_evidence("legacy-stock-evidence-1")["raw"]
+    assert stock_claim == build_source_consumption_claim(
+        source_key="futu:lx:1001:legacy-stock-deal-1", case_id=case_id,
+        owner_evidence_id="legacy-stock-evidence-1", source_role="stock_settlement",
+        economic_payload=stock_raw,
+    )
+    assert float(stock_claim["source_payload"]["quantity"]) == 100
+    from src.application.ledger.queries import stock_claim_matches_lifecycle_terminal_events
+    settlement = {
+        "source_event_id": stock_claim["source_key"], "futu_account_id": "1001",
+        "symbol": "NVDA", "side": "buy", "shares": 100,
+        "price": stock_raw["price"], "event_time_ms": stock_raw["trade_time_ms"],
+    }
+    terminal_for_proof = {
+        "event_id": terminal_event_id, "event_type": "assignment", "contracts": 1,
+        "multiplier": 100, "raw_payload": {
+            "case_id": case_id, "evidence_id": "legacy-stock-evidence-1",
+            "target_lot_id": "lot-1", "stock_settlement": settlement,
+        },
+    }
+    assert stock_claim_matches_lifecycle_terminal_events(
+        stock_claim, [terminal_for_proof], case=repo.get_trade_lifecycle_case(case_id),
+    )
     assert (
         repo.get_trade_lifecycle_evidence(
             "legacy-stock-evidence-1"
@@ -1129,9 +1152,11 @@ def test_explicit_mapping_apply_rejects_source_drift(
     assert repo.list_trade_lifecycle_notifications() == []
 
 
+@pytest.mark.parametrize("prebound_policy", [False, True])
 def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    prebound_policy: bool,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
@@ -1263,8 +1288,31 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
             }
         ],
     }
+    if prebound_policy:
+        assert repo.insert_trade_lifecycle_timing_policy_once(policy)
     before_event_count = len(repo.list_trade_events())
     before_case_count = len(repo.list_trade_lifecycle_cases())
+    if not prebound_policy:
+        for field, invalid in (
+            ("timezone", None),
+            ("timezone", "UTC"),
+            ("settlement_style", None),
+            ("underlying_security_type", None),
+            ("last_trade_cutoff_source", None),
+            ("last_trade_cutoff_source", "invented_source"),
+            ("calendar_source", None),
+            ("calendar_observed_at_ms", None),
+            ("calendar_observed_at_ms", True),
+        ):
+            invalid_mapping = {**mapping, "rows": [
+                {**mapping["rows"][0], "timing_policy": {**policy, field: invalid}}
+            ]}
+            invalid_inventory = build_lifecycle_migration_inventory(
+                repo, explicit_mapping=invalid_mapping,
+            )
+            invalid_row = _inventory_row(invalid_inventory, f"lifecycle:{legacy_case_id}")
+            assert invalid_row["mapping_status"] == "needs_review"
+            assert "explicit_bridge_timing_policy_invalid" in invalid_row["review_reason_codes"]
     inventory = build_lifecycle_migration_inventory(
         repo,
         explicit_mapping=mapping,
@@ -1274,6 +1322,30 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
+    with pytest.raises(ValueError, match="notification slot shared by selected migration rows"):
+        select_lifecycle_migration_targets(
+            inventory,
+            target_keys=[target_key, f"lifecycle:{canonical_case_id}"],
+        )
+
+    if prebound_policy:
+        from src.application.ledger.notification_outbox import canonical_payload_hash
+
+        unsafe_rows = [
+            {**item, "selected": item["target_key"] in {target_key, f"lifecycle:{canonical_case_id}"}}
+            for item in inventory["rows"]
+        ]
+        unsafe_body = {"schema_version": inventory["schema_version"], "rows": unsafe_rows}
+        unsafe_manifest = {**unsafe_body, "manifest_hash": canonical_payload_hash(unsafe_body)}
+        with repo._optional_conn(None) as conn:
+            before_tables = tuple(conn.iterdump())
+        for apply_changes in (False, True):
+            with pytest.raises(ValueError, match="notification outbox immutable intent conflict"):
+                apply_lifecycle_migration_manifest(
+                    repo, manifest=unsafe_manifest, apply_changes=apply_changes,
+                )
+            with repo._optional_conn(None) as conn:
+                assert tuple(conn.iterdump()) == before_tables
 
     manifest = select_lifecycle_migration_targets(
         inventory,
@@ -2369,3 +2441,33 @@ def test_reconciliation_terminal_requires_valid_matching_original_units(tmp_path
                         evidence={"event_time_ms": observed_at_ms + 1},
                         allocation={"target_lot_id": "lot-1", "terminal_type": "expire_close",
                                     "contracts_allocated": 1, "canonical_terminal_event_id": "terminal-unit"})
+
+
+
+@pytest.mark.parametrize("invalid_contracts", [True, 2.9, "2.9", 0, -1])
+def test_explicit_mapping_rejects_nonintegral_target_contracts(tmp_path: Path, invalid_contracts) -> None:
+    repo, case_id, mapping, _ = _legacy_terminal_mapping_fixture(tmp_path)
+    mapping["rows"][0]["target_contracts_by_lot"] = {"lot-1": invalid_contracts}
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
+    assert row["mapping_status"] == "needs_review"
+    assert "explicit_target_mapping_invalid" in row["review_reason_codes"]
+
+
+def test_explicit_terminal_resolution_cannot_report_ok_for_empty_target(tmp_path: Path) -> None:
+    repo, case_id, mapping, _ = _legacy_terminal_mapping_fixture(tmp_path)
+    mapping["rows"][0]["target_contracts_by_lot"] = {}
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
+    assert row["mapping_status"] == "needs_review"
+    assert row["resolution"]["status"] == "invalid"
+    assert "explicit_target_mapping_missing" in row["resolution"]["reason_codes"]
+
+
+
+def test_explicit_mapping_rejects_conflicting_existing_physical_account(tmp_path: Path) -> None:
+    repo, case_id, mapping, _ = _legacy_terminal_mapping_fixture(tmp_path)
+    assert repo.bind_trade_lifecycle_case_futu_account_once(
+        case_id=case_id, futu_account_id="2002",
+    )
+    row = _migration_row(repo, case_id=case_id, explicit_mapping=mapping)
+    assert row["mapping_status"] == "needs_review"
+    assert "explicit_case_futu_account_conflict" in row["review_reason_codes"]
