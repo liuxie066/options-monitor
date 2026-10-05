@@ -1884,10 +1884,16 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
     if carried:
         out.append("汇率：假期沿用 " + "、".join(carried))
     reliability = "（来源未核实）" if funds.get("cash_total_reliable") is False else ""
-    out.extend(f"现金总额：{_currency_money(currency, amount)}{reliability}" for currency, amount in cash.items())
+    visible_currencies = {"CNY", "HKD", "USD"}
+    out.extend(
+        f"现金总额：{_currency_money(currency, amount)}{reliability}"
+        for currency, amount in cash.items()
+        if currency in visible_currencies
+    )
     out.extend(
         f"可用于期权开仓：{_currency_money(currency, amount)}"
         for currency, amount in opening.items()
+        if currency in visible_currencies
     )
     return out
 

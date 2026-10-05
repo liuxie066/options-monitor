@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_contracts_open
-from domain.domain.trade_execution import execution_identity_from_input
+from domain.domain.trade_execution import execution_identity_from_input, legacy_open_execution_input_from_event
 from domain.domain.strategy_membership import strategy_metadata_has_owner, POSITION_LOT_STRATEGY_PATCH_FIELDS, validate_attribution_decision
 from domain.domain.ledger.events import lot_id_for_open_event
 from domain.domain.wheel import lot_strategy_metadata_from_trade_events, effective_wheel_events, build_wheel_event
@@ -129,7 +129,7 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         if event.get("lot_id") and event["lot_id"] != lot_id:
             continue
         raw = event.get("raw_payload") or {}
-        execution = raw.get("execution_input") or {}
+        execution = raw.get("execution_input") or legacy_open_execution_input_from_event(event)
         execution_key = execution_identity_from_input(execution)
         ref = execution.get("broker_account_ref") or {}
         fields = lots[lot_id]

@@ -1230,6 +1230,25 @@ def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
     assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
 
 
+def test_funds_display_only_cny_hkd_usd_native_currency_lines() -> None:
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {"CNY": 100.0, "HKD": 20.0, "USD": 3.0, "JPY": 0.0, "SGD": 7.0},
+        "option_opening_available_by_currency": {"CNY": 90.0, "HKD": -10.0, "USD": 2.0, "JPY": 5.0, "SGD": 0.0},
+        "cash_total_cny": 130.0,
+        "option_opening_available_cny": 80.0,
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "现金总额（折CNY）｜¥130.00" in message
+    assert "可用于期权开仓（折CNY，展示值）｜¥80.00" in message
+    for amount in ("¥100.00", "HK$20.00", "$3.00", "¥90.00", "-HK$10.00", "$2.00"):
+        assert amount in message
+    assert "JPY" not in message
+    assert "SGD" not in message
+
+
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
     brief = deepcopy(_brief())
     brief["funds"] = {

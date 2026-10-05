@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Bug Fixes
+- Daily Brief 的成交归属复用本批次已核实的持仓容量证据，避免已绑定 Wheel 的 Call 被空容量快照误报为待确认；旧富途开仓在账户、环境和成交别名可精确验证时也可确认普通单腿，且普通单腿确认不再依赖 Wheel 容量检查。
+- Daily Brief 的原币资金明细只展示 CNY、HKD 和 USD，折 CNY 汇总仍保留完整资金与汇率计算口径。
 - 空选择的 lifecycle migration manifest 现在会在 apply 时失败关闭，CLI 返回错误信封与退出码 2；只读 inventory 和 dry-run 仍可用于盘点。
 - 重放已完成的 lifecycle migration manifest 若未产生新写入，返回 `status: "noop"`，并保留 `applied_count=0`、已有回执数及成功退出码。
 - `om wheel` 的 branch end、end、intent 和 linkage 在使用 `--config <path>` 时，现从已加载运行配置解析市场，不再因缺少 `--config-key` 而失败。

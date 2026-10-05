@@ -56,7 +56,6 @@ def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path,
     original = repo.list_trade_events()[0]
     fact, = read_trade_attribution_facts(repo, account="lx")
     assert fact["ordinary_previewable"]
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
     context = dict(config={"accounts": ["lx"], "market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}, market="us", combo_evidence={"complete": True},
                    capacity_observation={}, combo_mode="confirm")
     view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
@@ -76,6 +75,59 @@ def test_manual_ordinary_is_durable_idempotent_and_preserves_economics(tmp_path,
     with pytest.raises(ValueError, match="manually excluded"):
         assert_trade_attribution_unclaimed(repo.list_trade_events(), ["lot"])
     assert read_trade_attribution_facts(repo, account="sy") == []
+
+
+def test_legacy_futu_open_with_exact_scoped_deal_identity_can_be_marked_ordinary(tmp_path):
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from domain.domain.trade_execution import (execution_identity_from_input,
+        legacy_open_execution_input_from_event)
+    from src.application.ledger.api import read_trade_attribution_facts, read_trade_attribution_snapshot
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.writer import persist_trade_event_object
+    from src.application.trades.attribution import apply_trade_attribution, build_trade_attribution_view
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    event = TradeEvent(event_id="futu:lx:1001:123", event_type="open", event_time_ms=1000,
+        contract_key=ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=100, expiration_ymd="2026-12-18"),
+        contracts=1, price=2, multiplier=100, currency="USD", source="opend_push",
+        raw_payload={"side": "sell", "source_type": "broker_trade_event", "futu_account_id": "1001",
+            "trd_env": "REAL", "source_deal_id": "123", "deal_id": 123})
+    persist_trade_event_object(repo, event)
+    original = repo.list_trade_events()[0]
+    expected = execution_identity_from_input(legacy_open_execution_input_from_event(original))
+    fact, = read_trade_attribution_facts(repo, account="lx")
+    assert expected and fact["execution_key"] == expected and fact["ordinary_previewable"]
+    context = dict(config={"accounts": ["lx"], "market": "us", "account_settings": {
+        "lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}, market="us",
+        combo_evidence={"complete": True}, capacity_observation={}, combo_mode="confirm")
+    view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", now_ms=2000, **context)
+    args = dict(account="lx", execution_key=expected, expected_input_hash=view["rows"][0]["input_hash"],
+        request_id="legacy-ordinary:123", actor="operator:lx", candidate_id="ordinary", manual=True, **context)
+    preview = apply_trade_attribution(repo, **args, apply_changes=False)
+    assert preview["write_applied"] is False and len(repo.list_trade_events()) == 1
+    applied = apply_trade_attribution(repo, **args)
+    assert applied["status"] == "ordinary" and applied["write_applied"] is True
+    assert repo.list_trade_events()[0] == original
+    assert len(repo.list_trade_events()) == 2
+    assert read_trade_attribution_facts(repo, account="lx")[0]["status"] == "ordinary"
+
+
+def test_legacy_execution_identity_requires_exact_source_alias():
+    from copy import deepcopy
+    from domain.domain.trade_execution import legacy_open_execution_input_from_event
+
+    event = {"event_id": "futu:sy:1001:123", "event_type": "open",
+        "contract_key": {"broker": "富途", "account": "sy"},
+        "raw_payload": {"futu_account_id": "1001", "trd_env": "REAL", "source_deal_id": "123"}}
+    assert legacy_open_execution_input_from_event(event)
+    for field, value in (("futu_account_id", "1002"), ("trd_env", "SIMULATE"),
+                         ("source_deal_id", "124"), ("execution_id", "execution:v1:wrong"),
+                         ("internal_account", "lx"), ("external_id_namespace", "other.deal")):
+        changed = deepcopy(event)
+        changed["raw_payload"][field] = value
+        assert legacy_open_execution_input_from_event(changed) == {}
 
 
 def test_v2_cutover_preserves_v1_and_is_append_only(tmp_path):

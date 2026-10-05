@@ -146,6 +146,17 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     pending_after, read_error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
         market="HK", now_ms=int(time.time() * 1000) + 1000)
     assert read_error is None and pending_after == []
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **kwargs: {
+        "status": "available" if kwargs["observation"].get("portfolio") else "unavailable",
+        "reason_codes": [] if kwargs["observation"].get("portfolio") else ["account_stock_capacity_exceeded"],
+    })
+    missing_capacity, read_error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
+        market="HK", now_ms=int(time.time() * 1000) + 1000)
+    assert read_error is None and missing_capacity[0]["status"] == "conflict"
+    with_capacity, read_error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
+        market="HK", now_ms=int(time.time() * 1000) + 1000,
+        capacity_observation={"portfolio": {"capacity_authority": {"status": "available"}}})
+    assert read_error is None and with_capacity == []
 
 
 def test_historical_futu_assignment_inherits_exact_source_account():
