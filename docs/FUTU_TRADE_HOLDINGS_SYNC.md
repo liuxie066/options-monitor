@@ -1069,6 +1069,10 @@ Phase 3B 只增加影子读面，legacy 决策仍是唯一业务权威。先在�
 `existing_count`；源状态漂移或 claim owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
 和重复消息计数；启动服务与真实发送属于另一次明确授权。
 
+历史迁移不补发 `resolution_confirmed` 通知；新盘点清单不提供
+`seed_final_intent`，旧冻结清单中的 `seed_final_intent: false` 仍可按原 hash
+预览、执行和重试，任何其它值都会在写入前被拒绝。
+
 普通平仓的历史通知迁移只接受完整且一致的 canonical broker deal key：
 `futu:<account>:<futu-account-id>:<deal-id>`。旧事件顶层 account 缺失时，
 只有 contract key 和 raw close target 等候选账户唯一且一致才可恢复；账户

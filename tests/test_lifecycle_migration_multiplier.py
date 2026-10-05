@@ -251,10 +251,55 @@ def test_existing_receipt_rejects_changed_row_hash(tmp_path):
     repo, manifest = _batch(tmp_path)
     apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=True)
     before = _dump(repo)
-    manifest["rows"][0]["seed_final_intent"] = True
+    manifest["rows"][0]["suppress_option_leg_closed"] = False
     _rehash(manifest)
     with pytest.raises(ValueError, match="receipt row conflict"):
         apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=True)
+    assert _dump(repo) == before
+
+
+@pytest.mark.parametrize("apply_changes", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_final_notification_request_is_rejected_before_writes(
+    tmp_path, apply_changes, selected
+):
+    repo, manifest = _batch(tmp_path)
+    if not selected:
+        manifest = select_lifecycle_migration_targets(manifest, target_keys=[])
+    manifest["rows"][0]["seed_final_intent"] = True
+    _rehash(manifest)
+    before = _dump(repo)
+    with pytest.raises(ValueError, match="cannot seed final notifications"):
+        apply_lifecycle_migration_manifest(
+            repo, manifest=manifest, apply_changes=apply_changes
+        )
+    assert _dump(repo) == before
+
+
+def test_legacy_false_manifest_replays_without_final_notification(tmp_path):
+    repo, manifest = _batch(tmp_path)
+    assert all("seed_final_intent" not in row for row in manifest["rows"])
+    for row in manifest["rows"]:
+        row["seed_final_intent"] = False
+    _rehash(manifest)
+
+    assert apply_lifecycle_migration_manifest(repo, manifest=manifest)[
+        "status"
+    ] == "dry_run"
+    assert apply_lifecycle_migration_manifest(
+        repo, manifest=manifest, apply_changes=True
+    )["applied_count"] == 2
+    notifications = repo.list_trade_lifecycle_notifications()
+    assert notifications
+    assert all(item["status"] == "suppressed" for item in notifications)
+    assert all(
+        item["transition_type"] != "resolution_confirmed"
+        for item in notifications
+    )
+    before = _dump(repo)
+    assert apply_lifecycle_migration_manifest(
+        repo, manifest=manifest, apply_changes=True
+    )["status"] == "noop"
     assert _dump(repo) == before
 
 
