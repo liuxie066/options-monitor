@@ -782,12 +782,14 @@ def test_rejected_combo_does_not_reappear_as_placeholder_but_new_pair_competes(t
             exposures=[_exposure()], effective_now_ms=BASE_TIME_MS + 3000, include_claimed=True)["inferences"]
 
 
-def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_path, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["writer", "manual_confirm"])
+def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_path, monkeypatch, entrypoint):
     from domain.domain.ledger import ContractKey, TradeEvent
-    from domain.domain.wheel import build_wheel_event
+    from domain.domain.wheel import build_wheel_event, project_wheel_linkage_candidates
     from src.application.futu_portfolio_context import build_futu_position_snapshot
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.ledger.writer import persist_trade_event_objects_atomically
+    from src.application.trades import attribution
     from src.application.trades.attribution import apply_trade_attribution
     from src.application.wheel import build_wheel_read_model
     from src.application.wheel.config import resolve_wheel_activation_descriptor
@@ -856,19 +858,48 @@ def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_pa
     args = dict(account="lx", market="us", config=config, execution_key=fact["execution_key"],
         candidate_id=fact["selected_candidate_id"], expected_input_hash=fact["input_hash"], request_id="put-consume",
         actor="trade_intake:rule", combo_evidence=evidence, capacity_observation=observation, combo_mode="confirm")
+    if entrypoint == "manual_confirm":
+        rows = read_trade_attribution_snapshot(repo, account="lx", market="us")
+        candidates = project_wheel_linkage_candidates(view["wheel_model"]["wheel_branches"],
+            rows["account_position_lots"], rows["account_wheel_events"])
+        candidate = next(row for row in candidates if row["option_record_id"] == fact["lot_id"]
+            and row["wheel_branch_id"] == branch["wheel_branch_id"])
+        context = dict(config=config, market="us", combo_evidence=evidence,
+            capacity_observation=observation, combo_mode="confirm")
+        monkeypatch.setattr(attribution, "read_trade_attribution_context", lambda *a, **kw: context)
+        confirm_args = dict(account="lx", option_lot_id=fact["lot_id"], wheel_branch_id=branch["wheel_branch_id"],
+            direction="put", linkage_candidate_id=candidate["linkage_candidate_id"],
+            expected_input_hash=fact["input_hash"], expected_batch_generation_hash=candidate["batch_generation_hash"],
+            request_id="put-consume", actor="trade_intake:rule", config=config, runtime_root=tmp_path)
+        invoke = lambda apply: attribution.confirm_wheel_linkage(repo, **confirm_args, apply_changes=apply)
+    else:
+        invoke = lambda apply: apply_trade_attribution(repo, **args, apply_changes=apply)
     before = repo.list_trade_events()
     before_wheel = repo.list_wheel_events(account="lx")
-    assert not apply_trade_attribution(repo, **args, apply_changes=False)["write_applied"]
+    preview = invoke(False)
+    assert not preview["write_applied"]
     assert repo.list_trade_events() == before
     assert repo.list_wheel_events(account="lx") == before_wheel
-    result = apply_trade_attribution(repo, **args)
-    assert result["write_applied"] and result["origin"] == "intent"
-    assert not apply_trade_attribution(repo, **args)["write_applied"]
+    result = invoke(True)
+    assert result["write_applied"] and result["origin"] == ("manual" if entrypoint == "manual_confirm" else "intent")
+    assert not invoke(True)["write_applied"]
     consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_put_intent_consumed"]
     assert len(consumed) == 1 and consumed[0]["payload"]["cash_reservation_amount"] == 10000
     after = build_wheel_read_model(repo, "lx", 7000, market="us")["wheel_branches"][0]
     assert after["active_intent_reserved_contracts"] == 0
     assert len(repo.list_trade_events()) == len(before) + 1
+    if entrypoint == "manual_confirm":
+        assert result["status"] == "confirmed" and result["proof_event_ids"] == preview["proof_event_ids"]
+        proof = next(row for row in repo.list_trade_events() if row["event_id"] in result["proof_event_ids"])
+        patch = proof["raw_payload"]["patch"]
+        assert patch["strategy"] == "wheel" and patch["leg_role"] == "wheel_put"
+        assert patch["source_wheel_branch_id"] == branch["wheel_branch_id"]
+        fields = repo.get_position_lot_fields(fact["lot_id"])
+        assert all(key not in fields for key in ("strategy", "leg_role", "source_wheel_branch_id"))
+        from src.application.ledger.api import read_trade_attribution_facts
+        linked = next(row for row in read_trade_attribution_facts(repo, account="lx") if row["lot_id"] == fact["lot_id"])
+        assert linked["status"] == "linked" and linked["wheel_branch_id"] == branch["wheel_branch_id"]
+        assert fact["lot_id"] in after["active_option_lot_ids"]
 
 
 @pytest.mark.parametrize("cached", [True, False])
