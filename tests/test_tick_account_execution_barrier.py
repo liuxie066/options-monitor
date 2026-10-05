@@ -1725,7 +1725,7 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
                 "ACCOUNT_RUN_STATE_CONFLICT",
                 "injected immutable conflict",
             )
-        return tmp_path / "runtime_portfolio_snapshot.v1.json"
+        return tmp_path / "runtime_portfolio_snapshot.v2.json"
 
     def _forbidden(name):
         def _call(*_args, **_kwargs):

@@ -23,14 +23,17 @@ from scripts.benchmark_runtime_portfolio_snapshot import (
     run_profile,
 )
 from src.application.runtime_portfolio_snapshot import (
+    LEDGER_SHADOW_SCHEMA_VERSION,
+    LEGACY_SCHEMA_VERSION,
     MAX_CANONICAL_BYTES,
+    SHADOW_SCHEMA_VERSION,
     RuntimePortfolioSnapshotError,
+    _build_runtime_portfolio_snapshot,
     assemble_runtime_portfolio_snapshot,
     build_runtime_portfolio_section,
     build_runtime_portfolio_snapshot,
     build_source_status_section,
     canonical_json_bytes,
-    compare_runtime_portfolio_snapshot,
     load_runtime_portfolio_snapshot,
     publish_runtime_portfolio_snapshot,
     validate_replay_bundle,
@@ -45,29 +48,17 @@ from src.application.tick_run_workspace import (
 
 _CONTRACT_HASH = "f180e7bbcdd2f9bdaf6edfc540099b5c54156f3c6971ce83ef55c6fea51099c8"
 _INPUT_HASHES = {
-    "current_scale": "9a735acf87602227578eee35c7f3a336db59f107ab11ec4e072cc1773dcb2270",
-    "current_state_10x": "4c81c6e53d4a0bfac8d4074f8691c3d516ac1df37a0646b8f0ab8b0de0e2063d",
+    "current_scale": "3956e0fd58359c3dc50c4b3b0cf4f03884f8e48ea2ef582920c87ac6271c1ba3",
+    "current_state_10x": "9d32430a3156de807442f9c263ad9eeb34d9ebb7503e32178378db61dc39086e",
 }
-_LEGACY_SECTION_NAMES = (
-    "ledger_projection",
-    "broker_cash",
-    "broker_positions",
-    "cash_occupation",
-)
-
-
 def _current_scale_kwargs() -> dict:
     return generate_fixture("current_scale")["builder_kwargs"]
-
-
-def _legacy_section_facts(sections: dict) -> dict:
-    return {name: deepcopy(sections[name]["facts"]) for name in _LEGACY_SECTION_NAMES}
 
 
 def _unavailable_completeness() -> dict:
     return {
         "status": "unavailable",
-        "reason_codes": ["legacy_comparison:unavailable"],
+        "reason_codes": ["ledger_shadow:unavailable"],
     }
 
 
@@ -272,7 +263,10 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
     snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
 
     assert snapshot["status"] == "trusted"
-    assert snapshot["legacy_comparison"]["status"] == "matched"
+    assert snapshot["ledger_shadow"] == {
+        "schema_version": LEDGER_SHADOW_SCHEMA_VERSION,
+        "status": "matched",
+    }
     assert snapshot == _verified(
         snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
@@ -382,14 +376,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
     assert canonical_json_bytes({"值": 1, "a": 1.25}) == canonical_json_bytes({"a": 1.25, "值": 1})
 
     changed_sections = deepcopy(kwargs["sections"])
-    legacy = _legacy_section_facts(changed_sections)
-    comparison = compare_runtime_portfolio_snapshot(
-        sections=changed_sections,
-        chosen_results=kwargs["chosen_results"],
-        legacy_section_facts=legacy,
-        legacy_chosen_results=kwargs["chosen_results"],
-        ledger_shadow_status="unavailable",
-    )
+    shadow = {**kwargs["ledger_shadow"], "status": "unavailable"}
     unavailable = _unavailable_completeness()
     changed_sections["ledger_projection"]["completeness"] = unavailable
     owners = deepcopy(changed_sections["source_status"]["facts"])
@@ -399,7 +386,7 @@ def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
         **{
             **kwargs,
             "sections": changed_sections,
-            "legacy_comparison": comparison,
+            "ledger_shadow": shadow,
         }
     )
     assert conflicting["status"] == "data_unavailable"
@@ -450,51 +437,64 @@ def test_verifier_rejects_tampered_trust_boundaries(case: str) -> None:
         )
 
 
-def test_shadow_mismatch_is_bounded_metadata_and_fails_closed() -> None:
+@pytest.mark.parametrize("shadow_status", ["mismatched", "unavailable"])
+def test_shadow_failure_is_bounded_metadata_and_fails_closed(shadow_status: str) -> None:
     kwargs = _current_scale_kwargs()
-    legacy = _legacy_section_facts(kwargs["sections"])
-    legacy["broker_cash"]["filters"] = {"market": "hk"}
-    comparison = compare_runtime_portfolio_snapshot(
-        sections=kwargs["sections"],
-        chosen_results=kwargs["chosen_results"],
-        legacy_section_facts=legacy,
-        legacy_chosen_results=kwargs["chosen_results"],
-        ledger_shadow_status="unavailable",
-    )
-
-    assert comparison["status"] == "unavailable"
-    assert comparison["mismatch_count"] == 2
-    assert len(comparison["mismatch_samples"]) <= 10
-    assert set(comparison["mismatch_samples"][0]) == {
-        "section",
-        "key",
-        "reason",
-        "legacy_sha256",
-        "compact_sha256",
-    }
+    shadow = {**kwargs["ledger_shadow"], "status": shadow_status}
     sections = deepcopy(kwargs["sections"])
-    unavailable = _unavailable_completeness()
+    unavailable = {"status": "unavailable", "reason_codes": [f"ledger_shadow:{shadow_status}"]}
     sections["ledger_projection"]["completeness"] = unavailable
     owners = deepcopy(sections["source_status"]["facts"])
     owners["ledger_projection"]["completeness"] = unavailable
     sections["source_status"] = build_source_status_section(account="acct_fixture", owner_receipts=owners)
-    snapshot = build_runtime_portfolio_snapshot(**{**kwargs, "sections": sections, "legacy_comparison": comparison})
+    snapshot = build_runtime_portfolio_snapshot(**{**kwargs, "sections": sections, "ledger_shadow": shadow})
+    assert snapshot["ledger_shadow"] == shadow
+    assert "legacy_comparison" not in snapshot
     assert snapshot["status"] == "data_unavailable"
     assert snapshot["reason_codes"] == [
-        "legacy_comparison:unavailable",
+        f"ledger_shadow:{shadow_status}",
         "section_completeness:ledger_projection:unavailable",
         "section_completeness:source_status:unavailable",
     ]
+    tampered = deepcopy(snapshot)
+    tampered["ledger_shadow"]["status"] = "matched"
+    with pytest.raises(RuntimePortfolioSnapshotError):
+        _verified(tampered, expected_run_id=kwargs["run_id"], expected_account=kwargs["account"], reference_payloads=kwargs["reference_payloads"])
 
 
-def test_loader_rejects_invalid_present_artifact_without_fallback(tmp_path) -> None:
-    references = _current_scale_kwargs()["reference_payloads"]
+def test_historical_v1_loads_but_cannot_be_published_and_bad_v2_blocks_fallback(tmp_path) -> None:
+    kwargs = _current_scale_kwargs()
+    rows = []
+    for name in ("broker_cash", "broker_positions", "cash_occupation", "chosen_results", "ledger_projection"):
+        value = kwargs["chosen_results"] if name == "chosen_results" else kwargs["sections"][name]["facts"]
+        digest = sha256_bytes(canonical_json_bytes(value))
+        rows.append({"section": name, "legacy_sha256": digest, "compact_sha256": digest, "mismatch_count": 0})
+    historical = _build_runtime_portfolio_snapshot(
+        run_id=kwargs["run_id"], account=kwargs["account"],
+        sections=kwargs["sections"], replay_bindings=kwargs["replay_bindings"],
+        chosen_results=kwargs["chosen_results"],
+        receipt={"schema_version": SHADOW_SCHEMA_VERSION, "status": "matched", "mismatch_count": 0,
+                 "mismatch_samples": [], "sections": rows},
+        receipt_key="legacy_comparison", schema_version=LEGACY_SCHEMA_VERSION,
+        reference_payloads=kwargs["reference_payloads"],
+    )
     write_account_run_state_bytes_once_safely(
         base=tmp_path,
         run_id="fixture-runtime-0001",
         account="acct_fixture",
         name="runtime_portfolio_snapshot.v1.json",
-        payload=b"{}",
+        payload=canonical_json_bytes(historical),
+    )
+    assert load_runtime_portfolio_snapshot(
+        base=tmp_path, run_id=kwargs["run_id"], account=kwargs["account"],
+        reference_payloads=kwargs["reference_payloads"],
+    ) == historical
+    with pytest.raises(RuntimePortfolioSnapshotError, match="read-only"):
+        _published(tmp_path, historical, kwargs["reference_payloads"])
+
+    write_account_run_state_bytes_once_safely(
+        base=tmp_path, run_id=kwargs["run_id"], account=kwargs["account"],
+        name="runtime_portfolio_snapshot.v2.json", payload=b"{}",
     )
 
     with pytest.raises(RuntimePortfolioSnapshotError):
@@ -502,7 +502,7 @@ def test_loader_rejects_invalid_present_artifact_without_fallback(tmp_path) -> N
             base=tmp_path,
             run_id="fixture-runtime-0001",
             account="acct_fixture",
-            reference_payloads=references,
+            reference_payloads=kwargs["reference_payloads"],
         )
 
 
@@ -582,7 +582,7 @@ def test_benchmark_gate_measures_valid_path_and_faults() -> None:
     assert receipt["forbidden_history_executable_spy_calls"] == 0
     assert receipt["forbidden_history_reader_calls"] == 0
     assert receipt["production_artifact_read_calls"] == 0
-    assert receipt["legacy_comparison_matches"]
+    assert receipt["ledger_shadow_matches"]
 
     def owner_drift(builder_kwargs: dict) -> None:
         chosen = builder_kwargs["chosen_results"]

@@ -54,14 +54,18 @@ from src.application.strategy_scan_status import (
 )
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
+    AccountRunConfigError,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
 
 
-SCHEMA_VERSION = "runtime_portfolio_snapshot.v1"
+SCHEMA_VERSION = "runtime_portfolio_snapshot.v2"
+LEGACY_SCHEMA_VERSION = "runtime_portfolio_snapshot.v1"
 SHADOW_SCHEMA_VERSION = "runtime_portfolio_snapshot_shadow.v1"
+LEDGER_SHADOW_SCHEMA_VERSION = "runtime_portfolio_snapshot.ledger_shadow.v1"
 ARTIFACT_NAME = f"{SCHEMA_VERSION}.json"
+LEGACY_ARTIFACT_NAME = f"{LEGACY_SCHEMA_VERSION}.json"
 CANONICALIZATION = "json.sort_keys.compact.utf8.v1"
 MAX_CANONICAL_BYTES = 1_048_576
 
@@ -140,8 +144,9 @@ def _positions_completeness(context: Mapping[str, Any]) -> dict[str, Any]:
 
 _TOP_LEVEL_KEYS = set(
     "schema_version run_id account status reason_codes sections observed_time_range "
-    "replay_bindings chosen_results legacy_comparison seal".split()
+    "replay_bindings chosen_results ledger_shadow seal".split()
 )
+_LEGACY_TOP_LEVEL_KEYS = (_TOP_LEVEL_KEYS - {"ledger_shadow"}) | {"legacy_comparison"}
 _SECTION_KEYS = set(
     "account schema_version source_observed_at_utc application_received_at_utc "
     "content_sha256 completeness freshness facts".split()
@@ -315,80 +320,6 @@ def build_source_status_section(*, account: str, owner_receipts: Mapping[str, Ma
         "facts": facts,
     }
     return section
-
-
-def compare_runtime_portfolio_snapshot(
-    *,
-    sections: Mapping[str, Mapping[str, Any]],
-    chosen_results: Mapping[str, Any],
-    legacy_section_facts: Mapping[str, Any],
-    legacy_chosen_results: Mapping[str, Any],
-    ledger_shadow_status: str,
-) -> dict[str, Any]:
-    """Compare supplied legacy projections without retaining their payloads."""
-
-    comparable = set(_COMPARISON_NAMES) - {"chosen_results"}
-    section_rows = _mapping(sections, "sections")
-    section_names = set(section_rows)
-    if section_names != comparable and section_names != set(SECTION_NAMES):
-        _fail("FIELD_INVALID", "comparison section fields do not match schema")
-    legacy = _mapping(legacy_section_facts, "legacy section facts", comparable)
-    shadow_status = _one_of(
-        ledger_shadow_status,
-        {"matched", "mismatched", "unavailable"},
-        "ledger_shadow_status",
-    )
-    samples: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
-    total = 0
-    comparison_status = "matched"
-    for name in _COMPARISON_NAMES:
-        compact_value = chosen_results if name == "chosen_results" else section_rows[name]["facts"]
-        legacy_value = legacy_chosen_results if name == "chosen_results" else legacy[name]
-        compact_hash = sha256_bytes(canonical_json_bytes(compact_value))
-        legacy_hash = sha256_bytes(canonical_json_bytes(legacy_value))
-        count = int(compact_hash != legacy_hash)
-        if count and len(samples) < 10:
-            samples.append(
-                {
-                    "section": name,
-                    "key": "$",
-                    "reason": "value_mismatch",
-                    "legacy_sha256": legacy_hash,
-                    "compact_sha256": compact_hash,
-                }
-            )
-        if name == "ledger_projection" and shadow_status != "matched":
-            count += 1
-            if len(samples) < 10:
-                samples.append(
-                    {
-                        "section": name,
-                        "key": "$shadow",
-                        "reason": "ledger_shadow_unavailable" if shadow_status == "unavailable" else "value_mismatch",
-                        "legacy_sha256": sha256_bytes(canonical_json_bytes("matched")),
-                        "compact_sha256": sha256_bytes(canonical_json_bytes(shadow_status)),
-                    }
-                )
-            comparison_status = "unavailable" if shadow_status == "unavailable" else "mismatched"
-        if count and comparison_status == "matched":
-            comparison_status = "mismatched"
-        total += count
-        rows.append(
-            {
-                "section": name,
-                "legacy_sha256": legacy_hash,
-                "compact_sha256": compact_hash,
-                "mismatch_count": count,
-            }
-        )
-    return {
-        "schema_version": SHADOW_SCHEMA_VERSION,
-        "status": comparison_status,
-        "mismatch_count": total,
-        "mismatch_samples": samples,
-        "sections": rows,
-    }
 
 
 def assemble_runtime_portfolio_snapshot(
@@ -597,7 +528,6 @@ def assemble_runtime_portfolio_snapshot(
             freshness_reason_codes=_option_freshness(option_manifest)["reason_codes"],
         ),
     }
-    legacy = {name: section["facts"] for name, section in sections.items()}
     snapshot_status = str(
         decision.get("snapshot_status")
         or option_context.get("decision_snapshot_status")
@@ -625,20 +555,17 @@ def assemble_runtime_portfolio_snapshot(
         if shadow_status == "mismatch"
         else "unavailable"
     )
-    comparison = compare_runtime_portfolio_snapshot(
-        sections=sections,
-        chosen_results=chosen,
-        legacy_section_facts=legacy,
-        legacy_chosen_results=chosen,
-        ledger_shadow_status=ledger_shadow_status,
-    )
+    ledger_shadow = {
+        "schema_version": LEDGER_SHADOW_SCHEMA_VERSION,
+        "status": ledger_shadow_status,
+    }
     if ledger_shadow_status != "matched":
         ledger_completeness = sections["ledger_projection"]["completeness"]
         sections["ledger_projection"]["completeness"] = {
             "status": "unavailable",
             "reason_codes": _sorted_codes([
                 *ledger_completeness["reason_codes"],
-                f"legacy_comparison:{comparison['status']}",
+                f"ledger_shadow:{ledger_shadow_status}",
             ]),
         }
 
@@ -718,7 +645,7 @@ def assemble_runtime_portfolio_snapshot(
         sections=sections,
         replay_bindings=bindings,
         chosen_results=chosen,
-        legacy_comparison=comparison,
+        ledger_shadow=ledger_shadow,
         reference_payloads=reference_payloads,
     )
     return snapshot, reference_payloads
@@ -753,17 +680,43 @@ def build_runtime_portfolio_snapshot(
     sections: Mapping[str, Mapping[str, Any]],
     replay_bindings: Sequence[Mapping[str, Any]],
     chosen_results: Mapping[str, Any],
-    legacy_comparison: Mapping[str, Any],
+    ledger_shadow: Mapping[str, Any],
     reference_payloads: Mapping[str, bytes],
 ) -> dict[str, Any]:
     """Build and seal one run/account snapshot from bounded supplied inputs."""
+
+    return _build_runtime_portfolio_snapshot(
+        run_id=run_id,
+        account=account,
+        sections=sections,
+        replay_bindings=replay_bindings,
+        chosen_results=chosen_results,
+        receipt=_ledger_shadow(ledger_shadow),
+        receipt_key="ledger_shadow",
+        schema_version=SCHEMA_VERSION,
+        reference_payloads=reference_payloads,
+    )
+
+
+def _build_runtime_portfolio_snapshot(
+    *,
+    run_id: str,
+    account: str,
+    sections: Mapping[str, Mapping[str, Any]],
+    replay_bindings: Sequence[Mapping[str, Any]],
+    chosen_results: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    receipt_key: str,
+    schema_version: str,
+    reference_payloads: Mapping[str, bytes],
+) -> dict[str, Any]:
+    """Shared canonical validation for new v2 writes and historical v1 reads."""
 
     run_id_norm = _identity(run_id, "run_id")
     account_norm = normalize_account_label(account)
     normalized_sections = _sections(sections, account_norm)
     bindings = _replay_bindings(replay_bindings)
     chosen = _chosen_results(chosen_results)
-    comparison = _legacy_comparison(legacy_comparison)
     owner_payloads = validate_replay_bundle(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
@@ -777,10 +730,11 @@ def build_runtime_portfolio_snapshot(
         bindings,
         owner_payloads,
         chosen,
-        comparison,
+        receipt,
+        legacy=schema_version == LEGACY_SCHEMA_VERSION,
     )
     body = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_id": run_id_norm,
         "account": account_norm,
         "status": "trusted",
@@ -789,7 +743,7 @@ def build_runtime_portfolio_snapshot(
         "observed_time_range": _observed_time_range(normalized_sections),
         "replay_bindings": bindings,
         "chosen_results": chosen,
-        "legacy_comparison": comparison,
+        receipt_key: dict(receipt),
     }
     body["reason_codes"] = _snapshot_reason_codes(body)
     body["status"] = "trusted" if not body["reason_codes"] else "data_unavailable"
@@ -812,26 +766,36 @@ def verify_runtime_portfolio_snapshot(
     expected_account: str,
     reference_payloads: Mapping[str, bytes],
 ) -> dict[str, Any]:
-    """Verify exact schema, bindings, hashes, range, comparison and seal."""
+    """Verify new v2 snapshots or immutable historical v1 snapshots."""
 
-    payload = _mapping(snapshot, "runtime portfolio snapshot", _TOP_LEVEL_KEYS)
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    payload = _mapping(snapshot, "runtime portfolio snapshot")
+    schema = payload.get("schema_version")
+    if schema not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
         _fail("SCHEMA_INVALID", "runtime portfolio snapshot schema is invalid")
+    _keys(payload, _TOP_LEVEL_KEYS if schema == SCHEMA_VERSION else _LEGACY_TOP_LEVEL_KEYS, "runtime portfolio snapshot")
     run_id = _identity(payload.get("run_id"), "run_id")
     account = normalize_account_label(payload.get("account"))
     if run_id != _identity(expected_run_id, "expected_run_id"):
         _fail("RUN_MISMATCH", "runtime portfolio snapshot run_id mismatch")
     if account != normalize_account_label(expected_account):
         _fail("ACCOUNT_MISMATCH", "runtime portfolio snapshot account mismatch")
-    rebuilt = build_runtime_portfolio_snapshot(
-        run_id=run_id,
-        account=account,
-        sections=payload.get("sections"),
-        replay_bindings=payload.get("replay_bindings"),
-        chosen_results=payload.get("chosen_results"),
-        legacy_comparison=payload.get("legacy_comparison"),
-        reference_payloads=reference_payloads,
-    )
+    common = {
+        "run_id": run_id,
+        "account": account,
+        "sections": payload.get("sections"),
+        "replay_bindings": payload.get("replay_bindings"),
+        "chosen_results": payload.get("chosen_results"),
+        "reference_payloads": reference_payloads,
+    }
+    if schema == SCHEMA_VERSION:
+        rebuilt = build_runtime_portfolio_snapshot(**common, ledger_shadow=payload.get("ledger_shadow"))
+    else:
+        rebuilt = _build_runtime_portfolio_snapshot(
+            **common,
+            receipt=_legacy_comparison(payload.get("legacy_comparison")),
+            receipt_key="legacy_comparison",
+            schema_version=LEGACY_SCHEMA_VERSION,
+        )
     if payload != rebuilt:
         _fail(
             "VERIFICATION_FAILED",
@@ -855,6 +819,8 @@ def publish_runtime_portfolio_snapshot(
         expected_account=payload.get("account"),
         reference_payloads=reference_payloads,
     )
+    if verified["schema_version"] != SCHEMA_VERSION:
+        _fail("SCHEMA_INVALID", "historical v1 snapshots are read-only")
     encoded = canonical_json_bytes(verified)
     path = write_account_run_state_bytes_once_safely(
         base=base,
@@ -879,14 +845,24 @@ def load_runtime_portfolio_snapshot(
     account: str,
     reference_payloads: Mapping[str, bytes],
 ) -> dict[str, Any]:
-    """Load only a canonical, sealed artifact; never fall back to legacy data."""
+    """Load v2 when present, or a canonical historical v1 artifact."""
 
-    raw = read_account_run_state_bytes_safely(
-        base=base,
-        run_id=run_id,
-        account=account,
-        name=ARTIFACT_NAME,
-    )
+    try:
+        raw = read_account_run_state_bytes_safely(
+            base=base,
+            run_id=run_id,
+            account=account,
+            name=ARTIFACT_NAME,
+        )
+    except AccountRunConfigError as exc:
+        if not isinstance(exc.__cause__, FileNotFoundError):
+            raise
+        raw = read_account_run_state_bytes_safely(
+            base=base,
+            run_id=run_id,
+            account=account,
+            name=LEGACY_ARTIFACT_NAME,
+        )
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1194,7 +1170,9 @@ def _validate_source_bindings(
     bindings: Sequence[Mapping[str, Any]],
     owner_payloads: Mapping[str, Mapping[str, Any]],
     chosen: Mapping[str, Any],
-    comparison: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    legacy: bool,
 ) -> None:
     by_role = {row["role"]: row for row in bindings}
     owners = sections["source_status"]["facts"]
@@ -1204,12 +1182,12 @@ def _validate_source_bindings(
     ):
         _fail("SOURCE_STATUS_INVALID", "source status aggregate contradicts its owners")
     for owner, role in _OWNER_BINDING_ROLES.items():
-        receipt = owners[owner]
+        owner_receipt = owners[owner]
         binding = by_role[role]
         if (
-            receipt["owner_schema_version"] != binding["schema_version"]
-            or receipt["manifest_sha256"] != binding["sha256"]
-            or receipt["content_sha256"] != binding["content_sha256"]
+            owner_receipt["owner_schema_version"] != binding["schema_version"]
+            or owner_receipt["manifest_sha256"] != binding["sha256"]
+            or owner_receipt["content_sha256"] != binding["content_sha256"]
         ):
             _fail("SOURCE_BINDING_INVALID", f"{owner} replay binding mismatch")
 
@@ -1224,12 +1202,16 @@ def _validate_source_bindings(
         _fail("SOURCE_BINDING_INVALID", "ledger freshness must be not_applicable")
     _validate_current_decision_truth(ledger, expected_account=ledger["account"])
     option_status = option_manifest["status"]
-    comparison_by_name = {row["section"]: row for row in comparison["sections"]}
+    ledger_shadow_failed = (
+        next(row for row in receipt["sections"] if row["section"] == "ledger_projection")["mismatch_count"] != 0
+        if legacy else receipt["status"] != "matched"
+    )
+    shadow_reason = f"{'legacy_comparison' if legacy else 'ledger_shadow'}:{receipt['status']}"
     ledger_status = (
         "complete"
         if option_status == "ready"
         and ledger["facts"]["current_decision"]["status"] == "trusted"
-        and comparison_by_name["ledger_projection"]["mismatch_count"] == 0
+        and not ledger_shadow_failed
         else "unavailable"
     )
     option_status_expected = (
@@ -1242,8 +1224,8 @@ def _validate_source_bindings(
     current = ledger["facts"]["current_decision"]
     if current["status"] != "trusted":
         ledger_reasons.append(str(current.get("reason") or f"current_decision:{current['status']}"))
-    if comparison_by_name["ledger_projection"]["mismatch_count"]:
-        ledger_reasons.append(f"legacy_comparison:{comparison['status']}")
+    if ledger_shadow_failed:
+        ledger_reasons.append(shadow_reason)
     ledger_completeness = _completeness(
         ledger_status,
         ledger_reasons if ledger_status != "complete" else [],
@@ -2044,6 +2026,16 @@ def _legacy_comparison(value: Any) -> dict[str, Any]:
     }
 
 
+def _ledger_shadow(value: Any) -> dict[str, str]:
+    row = _mapping(value, "ledger_shadow", {"schema_version", "status"})
+    if row.get("schema_version") != LEDGER_SHADOW_SCHEMA_VERSION:
+        _fail("SHADOW_INVALID", "ledger shadow schema is invalid")
+    return {
+        "schema_version": LEDGER_SHADOW_SCHEMA_VERSION,
+        "status": _one_of(row.get("status"), {"matched", "mismatched", "unavailable"}, "ledger shadow status"),
+    }
+
+
 def _mismatch_sample(value: Any, index: int) -> dict[str, Any]:
     keys = {"section", "key", "reason", "legacy_sha256", "compact_sha256"}
     row = _mapping(value, f"mismatch_samples[{index}]", keys)
@@ -2071,9 +2063,10 @@ def _snapshot_reason_codes(body: Mapping[str, Any]) -> list[str]:
         if freshness["status"] not in {"ready", "not_applicable"}:
             reasons.append(f"section_freshness:{name}:{freshness['status']}")
             reasons.extend(freshness["reason_codes"])
-    comparison = body["legacy_comparison"]
-    if comparison["status"] != "matched":
-        reasons.append(f"legacy_comparison:{comparison['status']}")
+    receipt_key = "legacy_comparison" if body["schema_version"] == LEGACY_SCHEMA_VERSION else "ledger_shadow"
+    receipt = body[receipt_key]
+    if receipt["status"] != "matched":
+        reasons.append(f"{receipt_key}:{receipt['status']}")
     for owner, receipt in body["sections"]["source_status"]["facts"].items():
         freshness = receipt["freshness"]
         if freshness["status"] not in {"ready", "not_applicable"}:

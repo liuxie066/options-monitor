@@ -68,7 +68,7 @@ from src.application.runtime_portfolio_snapshot import (
     build_runtime_portfolio_snapshot,
     build_source_status_section,
     canonical_json_bytes,
-    compare_runtime_portfolio_snapshot,
+    LEDGER_SHADOW_SCHEMA_VERSION,
     BROKER_CASH_V1_FACT_KEYS,
     project_broker_positions_facts,
     project_cash_occupation_facts,
@@ -140,8 +140,8 @@ CURRENT_STATE_10X = {
 
 # Re-pinned only after both profiles pass all real owner validators.
 EXPECTED_FIXTURE_PAYLOAD_SHA256 = {
-    "current_scale": "9a735acf87602227578eee35c7f3a336db59f107ab11ec4e072cc1773dcb2270",
-    "current_state_10x": "4c81c6e53d4a0bfac8d4074f8691c3d516ac1df37a0646b8f0ab8b0de0e2063d",
+    "current_scale": "3956e0fd58359c3dc50c4b3b0cf4f03884f8e48ea2ef582920c87ac6271c1ba3",
+    "current_state_10x": "9d32430a3156de807442f9c263ad9eeb34d9ebb7503e32178378db61dc39086e",
 }
 
 _H = {
@@ -984,24 +984,14 @@ def generate_fixture(profile: str, *, verify_payload_hash: bool = True) -> dict[
         ),
     }
     sections["source_status"] = build_source_status_section(account=ACCOUNT, owner_receipts=receipts)
-    legacy = {
-        name: sections[name]["facts"]
-        for name in ("ledger_projection", "broker_cash", "broker_positions", "cash_occupation")
-    }
-    comparison = compare_runtime_portfolio_snapshot(
-        sections=sections,
-        chosen_results=chosen,
-        legacy_section_facts=legacy,
-        legacy_chosen_results=chosen,
-        ledger_shadow_status="matched",
-    )
+    ledger_shadow = {"schema_version": LEDGER_SHADOW_SCHEMA_VERSION, "status": "matched"}
     kwargs = {
         "run_id": RUN_ID,
         "account": ACCOUNT,
         "sections": sections,
         "replay_bindings": bindings,
         "chosen_results": chosen,
-        "legacy_comparison": comparison,
+        "ledger_shadow": ledger_shadow,
         "reference_payloads": reference_payloads,
     }
     hash_input = {
@@ -1150,12 +1140,8 @@ def run_profile(
     snapshot, build_calls, build_reads, preflight_error = _run_with_forbidden_spies(build_and_verify, executable_probe)
     executable = generation_calls + build_calls
     artifact_reads = generation_reads + build_reads
-    comparison = fixture["builder_kwargs"]["legacy_comparison"]
-    comparison_matches = (
-        comparison["status"] == "matched"
-        and comparison["mismatch_count"] == 0
-        and all(row["mismatch_count"] == 0 for row in comparison["sections"])
-    )
+    ledger_shadow = fixture["builder_kwargs"]["ledger_shadow"]
+    shadow_matches = ledger_shadow["status"] == "matched"
     preflight: list[str] = []
     preflight.extend(fixture["fixture_descriptor_violations"])
     for field in (
@@ -1175,8 +1161,8 @@ def run_profile(
         preflight.append("forbidden_history_executable_spy_calls")
     if artifact_reads:
         preflight.append("production_artifact_read_calls")
-    if not comparison_matches:
-        preflight.append("legacy_comparison_matches")
+    if not shadow_matches:
+        preflight.append("ledger_shadow_matches")
     elapsed: list[int] = []
     peak = 0
     if not preflight:
@@ -1217,11 +1203,8 @@ def run_profile(
         "fixture_shape_matches": fixture["fixture_shape_matches"],
         "fixture_owner_validators_passed": (fixture["fixture_owner_validators_passed"] and preflight_error is None),
         "owner_valid_schema_probe_passed": fixture["owner_valid_schema_probe_passed"],
-        "legacy_comparison_status": comparison["status"],
-        "legacy_comparison_mismatch_count": comparison["mismatch_count"],
-        "legacy_comparison_mismatch_samples": comparison["mismatch_samples"],
-        "legacy_comparison_sections": comparison["sections"],
-        "legacy_comparison_matches": comparison_matches,
+        "ledger_shadow_status": ledger_shadow["status"],
+        "ledger_shadow_matches": shadow_matches,
         "preflight_error": (None if preflight_error is None else type(preflight_error).__name__),
     }
     violations = list(preflight)
