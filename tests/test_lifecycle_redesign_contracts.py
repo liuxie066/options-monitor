@@ -1129,9 +1129,11 @@ def test_explicit_mapping_apply_rejects_source_drift(
     assert repo.list_trade_lifecycle_notifications() == []
 
 
+@pytest.mark.parametrize("prebound_policy", [False, True])
 def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    prebound_policy: bool,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
@@ -1263,6 +1265,8 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
             }
         ],
     }
+    if prebound_policy:
+        assert repo.insert_trade_lifecycle_timing_policy_once(policy)
     before_event_count = len(repo.list_trade_events())
     before_case_count = len(repo.list_trade_lifecycle_cases())
     inventory = build_lifecycle_migration_inventory(
@@ -1274,6 +1278,30 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
+    with pytest.raises(ValueError, match="notification slot shared by selected migration rows"):
+        select_lifecycle_migration_targets(
+            inventory,
+            target_keys=[target_key, f"lifecycle:{canonical_case_id}"],
+        )
+
+    if prebound_policy:
+        from src.application.ledger.notification_outbox import canonical_payload_hash
+
+        unsafe_rows = [
+            {**item, "selected": item["target_key"] in {target_key, f"lifecycle:{canonical_case_id}"}}
+            for item in inventory["rows"]
+        ]
+        unsafe_body = {"schema_version": inventory["schema_version"], "rows": unsafe_rows}
+        unsafe_manifest = {**unsafe_body, "manifest_hash": canonical_payload_hash(unsafe_body)}
+        with repo._optional_conn(None) as conn:
+            before_tables = tuple(conn.iterdump())
+        for apply_changes in (False, True):
+            with pytest.raises(ValueError, match="notification outbox immutable intent conflict"):
+                apply_lifecycle_migration_manifest(
+                    repo, manifest=unsafe_manifest, apply_changes=apply_changes,
+                )
+            with repo._optional_conn(None) as conn:
+                assert tuple(conn.iterdump()) == before_tables
 
     manifest = select_lifecycle_migration_targets(
         inventory,

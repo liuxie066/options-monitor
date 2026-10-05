@@ -237,8 +237,12 @@ def test_existing_notification_conflict_fails_in_preview_and_apply(tmp_path, app
     )
     # The canonical case does not exist yet, so this outbox does not alter the
     # legacy row inventory hash; its uniqueness constraint still gates the batch.
+    current = build_lifecycle_migration_inventory(repo)
+    row = next(item for item in current["rows"] if item["target_key"] == second["target_key"])
+    assert row["mapping_status"] == "needs_review"
+    assert "notification_slot_occupied" in row["review_reason_codes"]
     before = _dump(repo)
-    with pytest.raises(ValueError, match="notification outbox immutable intent conflict"):
+    with pytest.raises(ValueError, match="migration_needs_review"):
         apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=apply_changes)
     assert _dump(repo) == before
 
@@ -374,3 +378,69 @@ def test_nonempty_selection_still_requires_sqlite(tmp_path, apply_changes):
     _, manifest = _batch(tmp_path)
     with pytest.raises(TypeError, match="repository interface"):
         apply_lifecycle_migration_manifest(None, manifest=manifest, apply_changes=apply_changes)
+
+
+
+def test_notification_delivery_attempt_does_not_change_migration_source_hash(tmp_path):
+    from src.application.ledger.notification_outbox import build_notification_intent
+
+    repo, _ = _batch(tmp_path)
+    intent = build_notification_intent(
+        case_id="legacy-case-1", transition_type="resolution_confirmed",
+        resolution_revision=1, transition_key="lifecycle:legacy-case-1:resolution_confirmed",
+        state_fingerprint="frozen-intent", payload={"case_id": "legacy-case-1"},
+    )
+    assert repo.insert_trade_lifecycle_notification_once(intent)
+    before = build_lifecycle_migration_inventory(repo)
+    first = next(row for row in before["rows"] if row["target_key"] == "lifecycle:legacy-case-1")
+    assert repo.compare_and_set_trade_lifecycle_notification(
+        outbox_id=intent["outbox_id"], expected_status="pending", new_status="confirmed",
+        fields={"confirmed_at_ms": int(repo.get_trade_lifecycle_notification(intent["outbox_id"])["created_at_ms"])},
+    )
+    after = build_lifecycle_migration_inventory(repo)
+    updated = next(row for row in after["rows"] if row["target_key"] == first["target_key"])
+    assert updated["inventory_state_hash"] == first["inventory_state_hash"]
+    assert updated["mapping_status"] == first["mapping_status"] == "exact"
+
+
+def test_migration_owned_notification_slot_has_distinct_review_reason(tmp_path):
+    from src.application.ledger.notification_outbox import build_notification_intent
+
+    repo, manifest = _batch(tmp_path)
+    second = manifest["rows"][1]
+    canonical_id = second["legacy_upgrade"]["canonical_case"]["case_id"]
+    assert repo.insert_trade_lifecycle_notification_once(build_notification_intent(
+        case_id=canonical_id, transition_type="option_leg_closed",
+        resolution_revision=1, transition_key=f"lifecycle:{canonical_id}:option_leg_closed",
+        state_fingerprint="previous-migration",
+        payload={"schema_version": "migration_notification_suppression.v1",
+                 "migration_target": "lifecycle:other-case"},
+    ))
+    row = next(item for item in build_lifecycle_migration_inventory(repo)["rows"]
+               if item["target_key"] == second["target_key"])
+    assert row["mapping_status"] == "needs_review"
+    assert "notification_slot_owned_by_migration" in row["review_reason_codes"]
+    assert "notification_slot_occupied" not in row["review_reason_codes"]
+
+
+def test_normal_close_inventory_uses_writer_execution_namespace():
+    from src.application.ledger.external_event_key import futu_compatibility_source_key
+    from src.application.ledger.lifecycle_migration import _normal_close_inventory_rows
+
+    execution_input = {
+        "external_id_namespace": "manual.import",
+        "external_execution_id": "deal-1",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001",
+                               "environment": "REAL"},
+    }
+    event = {
+        "event_id": "close-1", "event_type": "close", "asset_type": "stock",
+        "account": "lx", "raw_payload": {"futu_account_id": "1001",
+            "source_deal_id": "deal-1", "execution_input": execution_input},
+    }
+    rows = _normal_close_inventory_rows([event], [], void_event_ids=set())
+    expected = futu_compatibility_source_key(account="lx", futu_account_id="1001",
+        source_deal_id="deal-1", execution_input=execution_input)
+    assert len(rows) == 1
+    assert rows[0]["broker_deal_key"] == expected
+    assert expected != "futu:lx:1001:deal-1"

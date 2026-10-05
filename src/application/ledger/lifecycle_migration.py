@@ -8,6 +8,7 @@ from domain.domain.option_lifecycle import build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import derive_position_side, require_option_multiplier
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.external_event_key import futu_compatibility_source_key
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
     lot_contract_value,
@@ -30,6 +31,41 @@ from src.application.ledger.source_consumption import (
 MIGRATION_SCHEMA = "lifecycle_cutover_manifest.v1"
 MIGRATION_RECEIPT_SCHEMA = "lifecycle_cutover_receipt.v1"
 EXPLICIT_MAPPING_SCHEMA = "lifecycle_explicit_mapping.v1"
+
+
+def _notification_intent_state(item: dict[str, Any]) -> dict[str, Any]:
+    """Freeze intent identity, not mutable delivery/claim state."""
+    fields = (
+        "outbox_id", "case_id", "transition_type", "resolution_revision",
+        "delivery_revision", "transition_key", "state_fingerprint",
+        "payload_hash", "payload",
+    )
+    return {field: item.get(field) for field in fields}
+
+
+def _mark_notification_slot_conflicts(
+    rows: list[dict[str, Any]], notifications: list[dict[str, Any]],
+) -> None:
+    existing = {
+        (item["transition_key"], item.get("delivery_revision", 0)): item
+        for item in notifications
+    }
+    for row in rows:
+        if not row.get("suppress_option_leg_closed", True) or not row.get("notification_case_id"):
+            continue
+        intent = _suppression_intent(row)
+        key = (intent["transition_key"], intent["delivery_revision"])
+        occupied = existing.get(key)
+        if occupied is None or occupied["outbox_id"] == intent["outbox_id"]:
+            continue
+        reasons = set(row.get("review_reason_codes") or [])
+        payload = occupied.get("payload") or {}
+        if payload.get("schema_version") == "migration_notification_suppression.v1":
+            reasons.add("notification_slot_owned_by_migration")
+        else:
+            reasons.add("notification_slot_occupied")
+        row["mapping_status"] = "needs_review"
+        row["review_reason_codes"] = sorted(reasons)
 
 
 def build_lifecycle_migration_inventory(
@@ -344,10 +380,8 @@ def _build_lifecycle_migration_inventory(
                 ),
             ),
             "notifications": sorted(
-                case_notifications,
-                key=lambda item: str(
-                    item.get("outbox_id") or ""
-                ),
+                (_notification_intent_state(item) for item in case_notifications),
+                key=lambda item: str(item.get("outbox_id") or ""),
             ),
             "timing_policy": timing_policies.get(case_id),
         }
@@ -434,6 +468,7 @@ def _build_lifecycle_migration_inventory(
             void_event_ids=set(void_ids),
         )
     )
+    _mark_notification_slot_conflicts(rows, notifications)
     manifest_body = {
         "schema_version": MIGRATION_SCHEMA,
         "rows": sorted(
@@ -1927,7 +1962,7 @@ def _explicit_inventory_state(
         ),
         "notifications": sorted(
             [
-                item
+                _notification_intent_state(item)
                 for item in all_notifications
                 if str(item.get("case_id") or "") in case_id_set
             ],
@@ -2247,6 +2282,19 @@ def select_lifecycle_migration_targets(
             "unknown lifecycle migration targets: "
             + ",".join(unknown)
         )
+    slots: dict[tuple[str, int], tuple[str, str]] = {}
+    for row in rows:
+        if not row["selected"] or not row.get("suppress_option_leg_closed", True):
+            continue
+        intent = _suppression_intent(row)
+        key = (intent["transition_key"], intent["delivery_revision"])
+        prior = slots.get(key)
+        if prior is not None and prior[1] != intent["outbox_id"]:
+            raise ValueError(
+                "notification slot shared by selected migration rows: "
+                + ", ".join(sorted((prior[0], row["target_key"])))
+            )
+        slots[key] = (row["target_key"], intent["outbox_id"])
     body = {
         "schema_version": MIGRATION_SCHEMA,
         "rows": rows,
@@ -2621,7 +2669,13 @@ def _normal_close_inventory_rows(
         if not account or not futu_account_id or not deal_id:
             review.append(event)
             continue
-        key = f"futu:{account}:{futu_account_id}:{deal_id}"
+        key = futu_compatibility_source_key(
+            account=account, futu_account_id=futu_account_id,
+            source_deal_id=deal_id, execution_input=raw.get("execution_input"),
+        )
+        if not key:
+            review.append(event)
+            continue
         grouped.setdefault(key, []).append(event)
     rows: list[dict[str, Any]] = []
     for broker_key, group in sorted(grouped.items()):
@@ -2651,7 +2705,7 @@ def _normal_close_inventory_rows(
                 group,
                 key=lambda item: str(item.get("event_id") or ""),
             ),
-            "notifications": current,
+            "notifications": [_notification_intent_state(item) for item in current],
         }
         rows.append(
             {
