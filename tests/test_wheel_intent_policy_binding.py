@@ -152,6 +152,89 @@ def _request(branch, snapshot, capacity, resolved):
                 policy_sha256=resolved["policy_sha256"], as_of_ms=5_000)
 
 
+def test_unowned_put_linkage_gates_branch_and_new_intent_until_rejected(tmp_path, monkeypatch):
+    repo, branch, snapshot, capacity, resolved = _environment(tmp_path, "put", monkeypatch)
+    assert branch["phase"] == "ready"
+    assert branch["stock_lot_id"] is None
+    persist_trade_event_objects_atomically(repo, [TradeEvent(
+        event_id="unowned-put-open", event_type="open", event_time_ms=4_500,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=100, expiration_ymd="2026-09-18"),
+        contracts=1, price=1, currency="USD", source="test", multiplier=100,
+        lot_id="unowned-put-lot",
+        raw_payload=_trusted_multiplier_payload("unowned-put-open", side="sell"),
+    )])
+
+    model = build_wheel_read_model(repo, "lx", 5_000, market="us")
+    candidate = next(item for item in model["linkage_candidates"] if item["direction"] == "put")
+    current = next(item for item in model["wheel_branches"]
+                   if item["wheel_branch_id"] == branch["wheel_branch_id"])
+    assert candidate["wheel_branch_id"] == current["wheel_branch_id"]
+    assert candidate.get("stock_lot_id") is None
+    assert current["stock_lot_id"] is None
+    assert current["phase"] == "linkage_unresolved"
+    assert "linkage_unresolved" in current["coverage"]["reason_codes"]
+
+    before = repo.list_wheel_events(account="lx")
+    for apply in (False, True):
+        with pytest.raises(ValueError, match="not ready for a Put intent"):
+            workflows.create_wheel_intent(
+                repo, **_request(branch, snapshot, capacity, resolved),
+                current_strategy_policy_sha256=strategy_policy_hash(POLICY_A),
+                apply_changes=apply,
+            )
+        assert repo.list_wheel_events(account="lx") == before
+
+    result = workflows.reject_wheel_linkage(
+        repo, account="lx", option_lot_id=candidate["option_record_id"],
+        wheel_branch_id=branch["wheel_branch_id"], direction="put",
+        linkage_candidate_id=candidate["linkage_candidate_id"],
+        expected_input_hash=candidate["input_snapshot_hash"],
+        expected_batch_generation_hash=candidate["batch_generation_hash"],
+        request_id="reject-unowned-put", actor="tester", reason="not this cycle",
+        market="us", apply_changes=True, as_of_ms=5_000,
+    )
+    assert result["status"] == "rejected"
+    after = build_wheel_read_model(repo, "lx", 5_000, market="us")
+    assert all(item["linkage_candidate_id"] != candidate["linkage_candidate_id"]
+               for item in after["linkage_candidates"])
+    restored = next(item for item in after["wheel_branches"]
+                    if item["wheel_branch_id"] == branch["wheel_branch_id"])
+    assert restored["phase"] == "ready"
+
+    # Attribution removes a later candidate and lets the normal option-open phase win.
+    persist_trade_event_objects_atomically(repo, [TradeEvent(
+        event_id="attributed-put-open", event_type="open", event_time_ms=4_600,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=100, expiration_ymd="2026-09-18"),
+        contracts=1, price=1, currency="USD", source="test", multiplier=100,
+        lot_id="attributed-put-lot",
+        raw_payload=_trusted_multiplier_payload("attributed-put-open", side="sell"),
+    )])
+    pending = build_wheel_read_model(repo, "lx", 5_000, market="us")
+    assert any(item["option_open_event_id"] == "attributed-put-open"
+               for item in pending["linkage_candidates"])
+    assert pending["wheel_branches"][0]["phase"] == "linkage_unresolved"
+    persist_trade_event_objects_atomically(repo, [TradeEvent(
+        event_id="attributed-put-proof", event_type="adjust", event_time_ms=4_700,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=100, expiration_ymd="2026-09-18"),
+        contracts=0, price=0, currency="USD", source="test", multiplier=100,
+        target_lot_id="attributed-put-lot",
+        raw_payload={"adjust_target_source_event_id": "attributed-put-open", "patch": {
+            "strategy": "wheel", "leg_role": "wheel_put",
+            "source_wheel_branch_id": branch["wheel_branch_id"],
+        }},
+    )])
+    attributed = build_wheel_read_model(repo, "lx", 5_000, market="us")
+    assert all(item["option_open_event_id"] != "attributed-put-open"
+               for item in attributed["linkage_candidates"])
+    assert attributed["wheel_branches"][0]["phase"] == "option_open"
+
+
 @pytest.mark.parametrize("entry", ["legacy_call", "call", "put"])
 def test_new_intent_rejects_old_policy_and_allows_restored_policy(tmp_path, monkeypatch, entry):
     direction = "put" if entry == "put" else "call"

@@ -169,15 +169,15 @@ def build_wheel_read_model_from_rows(
         scoped_rows["account_position_lots"],
         wheel_events,
     )
-    unresolved_lot_ids = {
-        str(item.get("stock_lot_id") or "").strip()
+    unresolved_branch_ids = {
+        str(item.get("wheel_branch_id") or "").strip()
         for item in linkage_candidates
-        if str(item.get("stock_lot_id") or "").strip()
+        if str(item.get("wheel_branch_id") or "").strip()
     }
     for projection in [*batches, *wheel_branches]:
         if (
-            str(projection.get("stock_lot_id") or "").strip()
-            in unresolved_lot_ids
+            str(projection.get("wheel_branch_id") or "").strip()
+            in unresolved_branch_ids
             and projection.get("lifecycle_status") == "active"
         ):
             projection["phase"] = "linkage_unresolved"
