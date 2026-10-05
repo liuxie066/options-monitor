@@ -432,7 +432,7 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         assert "1,500 股" in " ".join(grouped["details"])
         assert "成交归属待人工确认" in " ".join(grouped["details"])
         assert "可开数量以账户容量检查为准" in " ".join(grouped["details"])
-        assert all(f"{index:08d}" in " ".join(grouped["details"]) for index in (1, 2, 3))
+        assert all(f"{index:08d}" not in " ".join(grouped["details"]) for index in (1, 2, 3))
         for render in (render_fixed_report, render_fixed_report_card_markdown):
             message = render(current, context=_scheduled_context())
             assert "77.5P" in message
@@ -859,7 +859,7 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     assert "**B｜CSP" not in message
     assert "**C｜CSP" not in message
     assert "**D｜CSP" not in message
-    assert "汇总｜共 4 条，当前没有需要处理的持仓。" in message
+    assert "汇总｜共 4 条 · 暂无操作建议。" in message
     assert "持仓未展开" not in message
     assert "future_state" not in message
 
@@ -1152,10 +1152,10 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert fixed.startswith("# OM · 决策简报 · lx")
     assert "状态｜10:00 批次" in fixed
     assert "## CSP" in fixed
-    assert fixed.index("现金总额（折CNY）") < fixed.index("现金总额｜$180,000.00")
+    assert "现金总额｜$180,000.00" not in fixed
     assert "现金总额（折CNY）｜¥1,260,000.00" in fixed
-    assert "可用于期权开仓｜$75,000.00" in fixed
-    assert "可用于期权开仓（折CNY，展示值）｜¥525,000.00" in fixed
+    assert "可用于期权开仓｜$75,000.00" not in fixed
+    assert "可用于期权开仓（折CNY）｜¥525,000.00" in fixed
     assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
 
     alert_context = {**_scheduled_context(), "scheduled_target_market": "10:30"}
@@ -1173,7 +1173,7 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "MSFT｜CSP" in alert
     assert "NVDA｜CSP" in alert
     assert "较上一轮" not in alert
-    assert "现金总额｜$180,000.00" in alert
+    assert "现金总额｜$180,000.00" not in alert
     assert "现金总额（折CNY）｜¥1,260,000.00" in alert
 
     failure = render_fixed_failure(brief, context=_scheduled_context())
@@ -1227,10 +1227,10 @@ def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
     assert "现金总额｜$18,000.00" in message
     assert "可用于期权开仓｜HK$225,000.00" in message
     assert "现金总额（折CNY）｜暂不可用" in message
-    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
 
 
-def test_funds_display_only_cny_hkd_usd_native_currency_lines() -> None:
+def test_funds_totals_hide_redundant_native_currency_lines() -> None:
     brief = deepcopy(_brief())
     brief["funds"] = {
         "cash_total_by_currency": {"CNY": 100.0, "HKD": 20.0, "USD": 3.0, "JPY": 0.0, "SGD": 7.0},
@@ -1242,11 +1242,42 @@ def test_funds_display_only_cny_hkd_usd_native_currency_lines() -> None:
     message = render_fixed_report(brief, context=_scheduled_context())
 
     assert "现金总额（折CNY）｜¥130.00" in message
-    assert "可用于期权开仓（折CNY，展示值）｜¥80.00" in message
+    assert "可用于期权开仓（折CNY）｜¥80.00" in message
     for amount in ("¥100.00", "HK$20.00", "$3.00", "¥90.00", "-HK$10.00", "$2.00"):
-        assert amount in message
+        assert amount not in message
     assert "JPY" not in message
     assert "SGD" not in message
+
+
+def test_funds_fallback_preserves_zero_negative_and_unverified_source() -> None:
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {"HKD": 0.0, "USD": -10.0, "JPY": 20.0},
+        "option_opening_available_by_currency": {"HKD": -500.0},
+        "cash_total_reliable": False,
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "现金总额（折CNY）｜暂不可用" in message
+    assert "现金总额｜HK$0.00（来源未核实）" in message
+    assert "现金总额｜-$10.00（来源未核实）" in message
+    assert "可用于期权开仓｜-HK$500.00" in message
+    assert "JPY" not in message
+
+
+def test_pending_attribution_reminder_keeps_contract_but_hides_execution_id() -> None:
+    brief = deepcopy(_brief())
+    brief["attribution_pending"] = [{
+        "symbol": "3690.HK", "expiration": "2026-11-27", "strike": 80,
+        "option_type": "call", "execution_key": "execution:v1:" + "a" * 64,
+    }]
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "待确认归属｜1 笔 · 3690.HK 2026-11-27 80 CALL；OM Bot 确认" in message
+    assert "归属待办｜" not in message
+    assert "execution:v1:" not in message
 
 
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
@@ -1261,7 +1292,7 @@ def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
     message = render_fixed_report(brief, context=_scheduled_context())
 
     assert "现金总额（折CNY）｜暂不可用" in message
-    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
     assert "现金总额｜$0" not in message
 
 
@@ -1645,7 +1676,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "Put 担保资金代理 $10,000.00" in message
     assert "AMD｜CSP｜08-21 $150 Put｜建议平仓" in message
     assert "现金总额（折CNY）｜暂不可用" in message
-    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
@@ -1696,7 +1727,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额（折CNY）｜暂不可用" in message
-    assert "可用于期权开仓（折CNY，展示值）｜暂不可用" in message
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
 
 
@@ -1735,10 +1766,10 @@ def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
-        ("no_candidate", "当前没有通过门槛的期权"),
-        ("partial_data", "部分候选数据不完整，暂未形成推荐"),
-        ("data_unavailable", "候选数据不足，暂无法评估"),
-        ("wheel_candidate_data_unavailable", "候选数据不足，暂无法评估"),
+        ("no_candidate", "暂无合适合约"),
+        ("partial_data", "候选数据不完整，暂停建议"),
+        ("data_unavailable", "候选数据不足，无法评估"),
+        ("wheel_candidate_data_unavailable", "候选数据不足，无法评估"),
         ("unknown_wheel_reason", "unknown_wheel_reason"),
     ],
 )
@@ -1771,3 +1802,56 @@ def test_wheel_quantity_and_same_candidate_limit_price(direction,status,label):
     brief["wheel_batches"][0].pop("sell_limit")
     unavailable=render_fixed_report(brief,context=_scheduled_context())
     assert "建议价格暂不可用" in unavailable and "建议｜卖出 1 张 08-21 $110" not in unavailable
+
+
+@pytest.mark.parametrize("status,committed,reserved,reason,expected", [
+    ("full", 500, 0, "wheel_capacity_fully_committed_or_reserved", "已全覆盖 · 500 股"),
+    ("none", 0, 0, "no_candidate", "未覆盖 · 500 股"),
+    ("partial", 250, 250, "wheel_capacity_fully_committed_or_reserved", "部分覆盖 · 250 / 500 股"),
+    ("full", 500, 0, "strategy_attribution_conflict", "已全覆盖 · 500 股"),
+])
+def test_compact_wheel_keeps_quantities_reservations_and_conflicts(status, committed, reserved, reason, expected):
+    brief = _brief()
+    brief["wheel_batches"] = [{
+        "wheel_branch_id": "compact-call", "direction": "call", "symbol": "NVDA",
+        "shares_remaining": 500, "recommended_contracts": 0,
+        "status": "ready", "reason_codes": [reason],
+        "coverage": {"status": status, "target_shares": 500, "committed_shares": committed,
+                     "reserved_shares": reserved, "available_shares": 500 - committed - reserved},
+    }]
+    for render in (render_fixed_report, render_fixed_report_card_markdown):
+        message = render(brief, context=_scheduled_context())
+        assert f"CC 覆盖｜{expected}" in message
+        assert "剩余股份｜" not in message
+        assert "分支剩余｜" not in message
+        assert "分支额度已覆盖或预留" not in message
+        if reserved:
+            assert "意图预留｜250 股" in message
+        if reason == "no_candidate":
+            assert "状态｜暂无合适合约" in message
+        if reason == "strategy_attribution_conflict":
+            assert "成交策略归属冲突，暂停新增建议" in message
+
+
+@pytest.mark.parametrize("coverage_status", ["unavailable", "overallocated"])
+def test_uncertain_wheel_coverage_remains_explicit(coverage_status):
+    brief = _brief()
+    brief["wheel_batches"] = [{
+        "symbol": "NVDA", "direction": "call", "shares_remaining": 500,
+        "recommended_contracts": 0, "reason_codes": ["coverage_quantity_unavailable"],
+        "coverage": {"status": coverage_status, "target_shares": 500, "committed_shares": 500,
+                     "reserved_shares": 0, "available_shares": 0},
+    }]
+    message = render_fixed_report(brief, context=_scheduled_context())
+    assert "剩余股份｜500 股" in message
+    assert "待核实" in message
+    assert "覆盖数量待核实" in message
+
+
+def test_hk_data_time_does_not_repeat_identical_beijing_time():
+    brief = _brief()
+    brief["market"] = "HK"
+    brief["data_as_of_utc"] = "2026-07-20T06:02:00+00:00"
+    message = render_fixed_report(brief, context={})
+    assert "数据｜香港 14:02" in message
+    assert "/ 北京 14:02" not in message

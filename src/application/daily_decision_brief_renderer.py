@@ -448,15 +448,19 @@ def render_daily_brief_lifecycle(
 def _attribution_review_lines(view: Mapping[str, Any]) -> list[str]:
     rows = [row for row in view.get("attribution_pending") or [] if isinstance(row, Mapping)]
     out = []
-    if rows:
-        out.append(f"待确认归属｜{len(rows)} 笔已入账期权成交；请在 OM Bot 查看待确认归属，选目标后预览确认。")
+    if len(rows) == 1:
+        row = rows[0]
+        out.append(f"待确认归属｜1 笔 · {row.get('symbol')} {row.get('expiration')} "
+                   f"{row.get('strike')} {str(row.get('option_type') or '').upper()}；OM Bot 确认")
+    elif rows:
+        out.append(f"待确认归属｜{len(rows)} 笔 · OM Bot 确认")
         for row in rows[:5]:
             out.append(f"归属待办｜{row.get('symbol')} {row.get('expiration')} {row.get('strike')} "
-                       f"{str(row.get('option_type') or '').upper()}｜成交 `{row.get('execution_key')}`")
+                       f"{str(row.get('option_type') or '').upper()}")
         if len(rows) > 5:
             out.append(f"归属待办｜另有 {len(rows) - 5} 笔，请在 OM Bot 查看。")
     if view.get("attribution_read_error"):
-        out.append("归属待办｜账本读取失败，当前简报无法确认是否还有待办；请检查账本并在 OM Bot 查询。")
+        out.append("归属待办｜账本读取失败，待办情况未知")
     return out
 
 
@@ -1132,21 +1136,34 @@ def _wheel_batch_views(
         label = labels.get(coverage_status, {"unavailable": "待核实", "overallocated": "超额待核实",
             "not_applicable": "本阶段无待覆盖股份" if direction == "call" else "本阶段无待接股份"}.get(coverage_status, "待核实"))
         committed, target = coverage.get("committed_shares"), coverage.get("target_shares")
+        # Compact only complete, consistent Call quantities; uncertain facts stay explicit.
+        compact_coverage = (
+            direction == "call" and coverage_status in {"full", "partial", "none"}
+            and type(row.get("shares_remaining")) is int
+            and all(type(coverage.get(key)) is int and coverage[key] >= 0
+                    for key in ("target_shares", "committed_shares", "reserved_shares", "available_shares"))
+            and target == shares
+            and committed + coverage["reserved_shares"] <= target
+            and coverage["available_shares"] == target - committed - coverage["reserved_shares"]
+        )
+        if compact_coverage:
+            details = []
         quantity = ""
-        if committed is not None and target is not None:
+        if compact_coverage and ((coverage_status == "full" and committed == target)
+                                 or (coverage_status == "none" and committed == 0)):
+            quantity = f" · {target:,} 股"
+        elif committed is not None and target is not None:
             quantity = (f" · {committed:,} / {target:,} 股" if grouped_count else
                         f" · {committed} / {target} 股")
         details.append(f"{'CC 覆盖' if direction == 'call' else 'CSP 安排'}：{label}{quantity}")
         if coverage.get("reserved_shares"):
             reserved = coverage["reserved_shares"]
             details.append(f"意图预留：{reserved:,} 股" if grouped_count else f"意图预留：{reserved} 股")
-        if coverage.get("available_shares") is not None:
+        if not compact_coverage and coverage.get("available_shares") is not None:
             available = coverage["available_shares"]
             available_text = f"{available:,}" if grouped_count else str(available)
             label = "分支合计剩余" if grouped_count else "分支剩余"
             details.append(f"{label}：{available_text} 股；可开数量以账户容量检查为准")
-        if grouped_count:
-            details.append("批次：" + "、".join(branch[-8:] for branch in row["display_branch_ids"]))
         price = _number(row.get("sell_limit"))
         observed = str(row.get("quote_observed_at_utc") or "").strip()
         if contracts > 0 and (price is None or price <= 0 or not observed):
@@ -1197,14 +1214,14 @@ def _wheel_batch_views(
                 reasons.append(row["reason_code"])
             if grouped_count:
                 reasons.extend(coverage.get("reason_codes") or [])
-            details.append(
-                "状态：" + "；".join(
-                    dict.fromkeys(
-                        _wheel_reason_text(reason)
-                        for reason in (reasons or [row.get("status")])
-                    )
-                )
-            )
+            reasons = reasons or [row.get("status")]
+            if compact_coverage and coverage["available_shares"] == 0:
+                reasons = [reason for reason in reasons
+                           if reason not in ("wheel_capacity_fully_committed_or_reserved", "ready")]
+            if reasons:
+                details.append("状态：" + "；".join(dict.fromkeys(
+                    _wheel_reason_text(reason) for reason in reasons
+                )))
         out.append(
             {
                 "title": f"{symbol} · Wheel {direction.title()}{suffix}",
@@ -1239,14 +1256,14 @@ def _wheel_reason_text(value: Any) -> str:
         "cash_capacity_insufficient": "可用现金不足",
         "share_capacity_insufficient": "可覆盖股份不足",
         "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
-        "no_candidate": "当前没有通过门槛的期权",
-        "partial_data": "部分候选数据不完整，暂未形成推荐",
+        "no_candidate": "暂无合适合约",
+        "partial_data": "候选数据不完整，暂停建议",
         "wheel_scan_failed": "Wheel 扫描失败",
         "wheel_scan_prerequisite_unavailable": "扫描前置数据不可用",
         "wheel_coverage_facts_unavailable": "股票覆盖数据不可用",
         "wheel_cash_capacity_unavailable": "现金容量数据不可用",
-        "data_unavailable": "候选数据不足，暂无法评估",
-        "wheel_candidate_data_unavailable": "候选数据不足，暂无法评估",
+        "data_unavailable": "候选数据不足，无法评估",
+        "wheel_candidate_data_unavailable": "候选数据不足，无法评估",
         "multiplier_unproven": "合约乘数来源未核实，暂停推荐",
         "multiplier_conflict": "合约乘数冲突，暂停推荐",
         "assignment_cash_facts_unavailable": "指派交割金额或实际费用证据不完整，暂停推荐",
@@ -1546,7 +1563,7 @@ def _position_summary(
     elif actionable_total:
         summary += f"，需处理 {actionable_total} 条"
     else:
-        summary += "，当前没有需要处理的持仓"
+        summary += " · 暂无操作建议"
     if visible_actionable_count < actionable_total:
         summary += f"，本消息展示 {visible_actionable_count} 条"
     return summary + "。"
@@ -1868,33 +1885,21 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
     opening = _currency_amounts(funds.get("option_opening_available_by_currency"))
     cash_total_cny = _number(funds.get("cash_total_cny"))
     opening_cny = _number(funds.get("option_opening_available_cny"))
-    out = [
-        f"现金总额（折CNY）：{_currency_money('CNY', cash_total_cny)}" if cash_total_cny is not None
-        else f"现金总额（折CNY）：暂不可用（{funds.get('cash_total_cny_unavailable_reason') or '证据不足'}）",
-        f"可用于期权开仓（折CNY，展示值）：{_currency_money('CNY', opening_cny)}" if opening_cny is not None
-        else f"可用于期权开仓（折CNY，展示值）：暂不可用（{funds.get('option_opening_cny_unavailable_reason') or '证据不足'}）",
-    ]
-    pairs = funds.get("fx_pairs") if isinstance(funds.get("fx_pairs"), Mapping) else {}
-    used = {f"{currency}CNY" for currency in set(cash) | set(opening) if currency in {"USD", "HKD"}}
-    carried = []
-    for pair in ("USDCNY", "HKDCNY"):
-        row = pairs.get(pair) if isinstance(pairs.get(pair), Mapping) else {}
-        if pair in used and row.get("quality") == "holiday_carried":
-            carried.append(f"{pair[:3]}/CNY（{row.get('source') or '来源不明'}，原报价 {row.get('quote_at_utc') or '时间不明'}）")
-    if carried:
-        out.append("汇率：假期沿用 " + "、".join(carried))
+    out: list[str] = []
     reliability = "（来源未核实）" if funds.get("cash_total_reliable") is False else ""
-    visible_currencies = {"CNY", "HKD", "USD"}
-    out.extend(
-        f"现金总额：{_currency_money(currency, amount)}{reliability}"
-        for currency, amount in cash.items()
-        if currency in visible_currencies
-    )
-    out.extend(
-        f"可用于期权开仓：{_currency_money(currency, amount)}"
-        for currency, amount in opening.items()
-        if currency in visible_currencies
-    )
+    for label, total, amounts in (
+        ("现金总额", cash_total_cny, cash),
+        ("可用于期权开仓", opening_cny, opening),
+    ):
+        if total is not None:
+            out.append(f"{label}（折CNY）：{_currency_money('CNY', total)}")
+            continue
+        out.append(f"{label}（折CNY）：暂不可用")
+        out.extend(
+            f"{label}：{_currency_money(currency, amount)}{reliability if label == '现金总额' else ''}"
+            for currency, amount in amounts.items()
+            if currency in {"CNY", "HKD", "USD"}
+        )
     return out
 
 
@@ -2365,7 +2370,7 @@ def _data_as_of_label(brief: Mapping[str, Any], *, context: Mapping[str, Any]) -
     user_text = _local_time_text(user_local, trading_date=trading_date)
     market_label = _MARKET_TIME_LABELS.get(market, "市场")
     user_label = str(context.get("user_timezone_label") or "北京").strip() or "本地"
-    if market_tz.key == user_tz.key:
+    if market_local.utcoffset() == user_local.utcoffset():
         return f"数据截至：{market_label} {market_text}"
     return f"数据截至：{market_label} {market_text} / {user_label} {user_text}"
 
