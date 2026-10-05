@@ -12,12 +12,12 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_evidence_history import (
     NON_CONTRIBUTING_EXPERIENCE,
     load_account_candidate_evidence,
+    load_candidate_snapshot_bundle_for_inspection,
 )
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
-    load_candidate_snapshot_bundle_readonly,
     publish_candidate_snapshot_manifest,
 )
 from src.application.cc_lp_candidate_snapshot import (
@@ -459,7 +459,7 @@ def test_experience_bundle_is_readonly_only_and_non_contributing(tmp_path: Path)
         account=ACCOUNT,
     )
     assert current["manifest"]["scan_mode"] == "experience"
-    bundle = load_candidate_snapshot_bundle_readonly(
+    bundle = load_candidate_snapshot_bundle_for_inspection(
         base=tmp_path, run_id=RUN_ID, account=ACCOUNT
     )
     assert bundle["manifest"]["scan_mode"] == "experience"
@@ -506,7 +506,7 @@ def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> N
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="invalid: opening"):
-        load_candidate_snapshot_bundle_readonly(
+        load_candidate_snapshot_bundle_for_inspection(
             base=tmp_path,
             run_id=RUN_ID,
             account=ACCOUNT,
@@ -534,7 +534,7 @@ def test_experience_bundle_allows_no_supported_strategy_scope(tmp_path: Path) ->
     )
     assert manifest["markets"] == []
     assert manifest["expected_owners"] == []
-    assert load_candidate_snapshot_bundle_readonly(
+    assert load_candidate_snapshot_bundle_for_inspection(
         base=tmp_path,
         run_id=RUN_ID,
         account=ACCOUNT,

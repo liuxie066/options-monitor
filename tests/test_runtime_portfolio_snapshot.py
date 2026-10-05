@@ -24,10 +24,9 @@ from scripts.benchmark_runtime_portfolio_snapshot import (
     run_profile,
 )
 from src.application.candidate_snapshot_manifest import (
-    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
-    publish_candidate_snapshot_manifest_v3,
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
+    publish_candidate_snapshot_manifest,
 )
-from src.application.experience_mode import experience_fields
 from src.application.runtime_portfolio_snapshot import (
     LEDGER_SHADOW_SCHEMA_VERSION,
     LEGACY_SCHEMA_VERSION,
@@ -48,7 +47,7 @@ from src.application.runtime_portfolio_snapshot import (
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
 from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 from src.application.tick_run_workspace import (
@@ -59,8 +58,8 @@ from src.application.tick_run_workspace import (
 
 _CONTRACT_HASH = "f180e7bbcdd2f9bdaf6edfc540099b5c54156f3c6971ce83ef55c6fea51099c8"
 _INPUT_HASHES = {
-    "current_scale": "3956e0fd58359c3dc50c4b3b0cf4f03884f8e48ea2ef582920c87ac6271c1ba3",
-    "current_state_10x": "9d32430a3156de807442f9c263ad9eeb34d9ebb7503e32178378db61dc39086e",
+    "current_scale": "236afbeba01480b7c978a35bd94c9aeae0888efcdc52fbf025d8a9b8338c6352",
+    "current_state_10x": "7839c551f5e185e16ab4e0f7b6543022687c8f9f82fc1686ae4d769b4cb021d8",
 }
 def _current_scale_kwargs() -> dict:
     return generate_fixture("current_scale")["builder_kwargs"]
@@ -192,12 +191,13 @@ def _wheel_v3_assembly_kwargs(base: Path) -> dict:
             "candidate_owner": "wheel",
             "account_config_sha256": config_hash,
         })
-    publish_strategy_scan_status_index_v2(
+    publish_strategy_scan_status_index(
         report_dir=account_dir,
         run_id=run_id,
         account=account,
         account_config_sha256=config_hash,
         expected=expected,
+        run_mode={"scan_mode": "standard", "executable": True},
     )
     seal_wheel_candidate_snapshot(
         base=base,
@@ -221,15 +221,16 @@ def _wheel_v3_assembly_kwargs(base: Path) -> dict:
             for direction in ("call", "put")
         ],
         batches=[],
+        run_mode={"scan_mode": "standard", "executable": True},
     )
-    manifest = publish_candidate_snapshot_manifest_v3(
+    manifest = publish_candidate_snapshot_manifest(
         base=base,
         run_id=run_id,
         account=account,
         strategy_policy_sha256=policy_hash,
     )
     assembly["candidate_manifest_bytes"] = (
-        account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE
+        account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE
     ).read_bytes()
     assembly["candidate_status_index_bytes"] = (
         account_dir / manifest["status_index"]["relpath"]
@@ -373,8 +374,8 @@ def test_assembler_publishes_and_verifies_directional_wheel_bundle(tmp_path: Pat
         row for row in snapshot["replay_bindings"]
         if row["role"] == "candidate_snapshot_manifest"
     )
-    assert candidate_binding["schema_version"] == "candidate_snapshot_manifest.v3"
-    assert candidate_binding["relpath"] == "state/candidate_snapshot_manifest.v3.json"
+    assert candidate_binding["schema_version"] == "candidate_snapshot_manifest.v4"
+    assert candidate_binding["relpath"] == "state/candidate_snapshot_manifest.v4.json"
     assert {row["direction"] for row in snapshot["chosen_results"]["expected_scopes"]} == {
         "call", "put",
     }
@@ -390,11 +391,10 @@ def test_assembler_publishes_and_verifies_directional_wheel_bundle(tmp_path: Pat
     ) == snapshot
 
 
-def test_assembler_keeps_v1_manifest_with_v3_experience_index() -> None:
+def test_assembler_rejects_historical_experience_index_for_new_snapshot() -> None:
     assembly = _owner_assembly_kwargs()
     status = json.loads(assembly["candidate_status_index_bytes"])
     status["schema_version"] = "strategy_scan_status_index.v3"
-    status.update(experience_fields("模拟账户"))
     status_content = {key: value for key, value in status.items() if key != "content_sha256"}
     status["content_sha256"] = sha256_bytes(canonical_json_bytes(status_content))
     assembly["candidate_status_index_bytes"] = canonical_json_bytes(status)
@@ -410,20 +410,8 @@ def test_assembler_keeps_v1_manifest_with_v3_experience_index() -> None:
     )
     assembly["candidate_manifest_bytes"] = canonical_json_bytes(manifest)
 
-    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
-
-    candidate_binding = next(
-        row for row in snapshot["replay_bindings"]
-        if row["role"] == "candidate_snapshot_manifest"
-    )
-    assert candidate_binding["schema_version"] == "candidate_snapshot_manifest.v1"
-    assert snapshot["chosen_results"]["status_index"]["schema_version"] == (
-        "strategy_scan_status_index.v3"
-    )
-    assert _verified(
-        snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
-        reference_payloads=references,
-    ) == snapshot
+    with pytest.raises(RuntimePortfolioSnapshotError, match="candidate snapshot manifest"):
+        assemble_runtime_portfolio_snapshot(**assembly)
 
 
 def test_assembler_rejects_directional_wheel_reference_corruption(tmp_path: Path) -> None:

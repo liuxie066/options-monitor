@@ -14,8 +14,13 @@ from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA,
     CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
     CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA,
     CandidateSnapshotManifestError,
     validate_candidate_snapshot_manifest,
+)
+from src.application.candidate_evidence_history import (
+    validate_historical_candidate_snapshot_bundle_bytes,
 )
 from src.application.cc_lp_candidate_snapshot import (
     CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -50,19 +55,18 @@ from src.application.required_data_snapshot import (
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
-    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
-    STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA,
-    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
+    STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA,
     StrategyScanStatusError,
-    validate_strategy_scan_status_index_v2,
-    validate_strategy_scan_status_index_v3,
-    validate_strategy_scan_status_index_v4,
+    validate_strategy_scan_status_index,
 )
 from src.application.wheel.candidate_snapshot import (
-    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
-    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
     WheelCandidateSnapshotError,
     validate_wheel_candidate_snapshot,
+)
+from src.application.experience_candidate_snapshot import (
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+    EXPERIENCE_CANDIDATE_MANIFEST_SCHEMA,
 )
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
@@ -115,6 +119,10 @@ def _candidate_manifest_binding(schema_version: str) -> tuple[str, str]:
         return schema_version, f"state/{CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE}"
     if schema_version == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA:
         return schema_version, f"state/{CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE}"
+    if schema_version == EXPERIENCE_CANDIDATE_MANIFEST_SCHEMA:
+        return schema_version, f"state/{EXPERIENCE_CANDIDATE_MANIFEST_FILE}"
+    if schema_version == CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA:
+        return schema_version, f"state/{CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE}"
     _fail("REFERENCE_SCHEMA_INVALID", "candidate manifest schema is unsupported")
 
 
@@ -176,6 +184,7 @@ _OWNER_RECEIPT_KEYS = set(
 _REFERENCE_KEYS = set("schema_version relpath sha256 content_sha256".split())
 _BINDING_KEYS = {*_REFERENCE_KEYS, "role"}
 _OWNER_SNAPSHOT_KEYS = {*_REFERENCE_KEYS, "candidate_owner", "opening_status", "covered_scopes"}
+_OWNER_SNAPSHOT_MODE_KEYS = {"scan_mode", "executable"}
 _CHOSEN_KEYS = set("completion_reason expected_scopes expected_owners status_index owner_snapshots".split())
 _SCOPE_KEYS = set("market symbol strategy_family strategy_mode candidate_owner".split())
 _COMPARISON_NAMES = tuple("broker_cash broker_positions cash_occupation chosen_results ledger_projection".split())
@@ -382,6 +391,11 @@ def assemble_runtime_portfolio_snapshot(
         candidate_manifest_bytes,
         "candidate manifest",
     )
+    if candidate_manifest.get("schema_version") != CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA:
+        _fail(
+            "REFERENCE_SCHEMA_INVALID",
+            "new runtime snapshots require the current candidate manifest",
+        )
     if sha256_bytes(prepared_option_payload_bytes) != option_manifest.get("payload_sha256") or sha256_bytes(
         prepared_portfolio_payload_bytes
     ) != portfolio_manifest.get("payload_sha256"):
@@ -927,7 +941,7 @@ def _section(value: Any, name: str, account: str) -> dict[str, Any]:
         else _validated_section_facts(name, row.get("facts"), version=version)
     )
     if name == "ledger_projection":
-        current = _mapping(
+        _mapping(
             facts["current_decision"],
             "sections.ledger_projection.facts.current_decision",
             set(CURRENT_DECISION_READ_KEYS),
@@ -1041,13 +1055,29 @@ def _chosen_results(value: Any) -> dict[str, Any]:
         _fail("CHOSEN_RESULTS_INVALID", "owner_snapshots must be a sequence")
     snapshots = []
     for index, raw in enumerate(snapshots_raw):
-        item = _mapping(raw, f"owner_snapshots[{index}]", _OWNER_SNAPSHOT_KEYS)
+        item = _mapping(raw, f"owner_snapshots[{index}]")
+        if frozenset(item) not in {
+            frozenset(_OWNER_SNAPSHOT_KEYS),
+            frozenset(_OWNER_SNAPSHOT_KEYS | _OWNER_SNAPSHOT_MODE_KEYS),
+        }:
+            _fail(
+                "FIELD_INVALID",
+                f"owner_snapshots[{index}] fields do not match schema",
+            )
+        mode_fields: dict[str, Any] = {}
+        if "scan_mode" in item:
+            scan_mode = _text(item.get("scan_mode"), "owner scan_mode").lower()
+            executable = item.get("executable")
+            if scan_mode not in {"standard", "experience"} or type(executable) is not bool:
+                _fail("CHOSEN_RESULTS_INVALID", "owner run mode is invalid")
+            mode_fields = {"scan_mode": scan_mode, "executable": executable}
         snapshots.append(
             {
                 "candidate_owner": _text(item.get("candidate_owner"), "candidate_owner").lower(),
                 **_reference(item),
                 "opening_status": _text(item.get("opening_status"), "opening_status"),
                 "covered_scopes": _scopes(item.get("covered_scopes"), "covered_scopes"),
+                **mode_fields,
             }
         )
     snapshots.sort(key=lambda item: item["candidate_owner"])
@@ -1710,6 +1740,84 @@ def _validate_candidate_reference(
 ) -> None:
     if payload.get("schema_version") != binding["schema_version"]:
         _fail("REFERENCE_SCHEMA_INVALID", "candidate manifest binding schema mismatch")
+    if binding["schema_version"] != CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA:
+        projection = {
+            key: payload.get(key)
+            for key in (
+                "completion_reason",
+                "expected_scopes",
+                "expected_owners",
+                "status_index",
+                "owner_snapshots",
+            )
+        }
+        if projection != chosen:
+            _fail(
+                "CHOSEN_RESULTS_INVALID",
+                "chosen results differ from historical candidate manifest",
+            )
+        manifest_name = PurePosixPath(str(binding["relpath"])).name
+        candidate_files = {
+            str(binding["relpath"]): supplied[str(binding["relpath"])],
+            str(chosen["status_index"]["relpath"]): supplied[
+                str(chosen["status_index"]["relpath"])
+            ],
+            **{
+                str(row["relpath"]): supplied[str(row["relpath"])]
+                for row in chosen["owner_snapshots"]
+            },
+        }
+        try:
+            validate_historical_candidate_snapshot_bundle_bytes(
+                manifest_name=manifest_name,
+                files=candidate_files,
+                account_names=[
+                    PurePosixPath(name).name
+                    for name in candidate_files
+                    if not name.startswith("state/")
+                ],
+                state_names=[
+                    PurePosixPath(name).name
+                    for name in candidate_files
+                    if name.startswith("state/")
+                ],
+                run_id=expected_run_id,
+                account=expected_account,
+                dependencies={},
+                require_external_bindings=False,
+            )
+        except CandidateSnapshotManifestError as exc:
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_REFERENCE_PAYLOAD_INVALID",
+                "historical candidate snapshot bundle is invalid",
+            ) from exc
+        if payload.get("account_config_sha256") != expected_account_config_sha256:
+            _fail(
+                "REFERENCE_ACCOUNT_MISMATCH",
+                "historical candidate account config mismatch",
+            )
+        if binding["content_sha256"] != payload.get("content_sha256"):
+            _fail(
+                "REFERENCE_HASH_INVALID",
+                "historical candidate manifest content hash mismatch",
+            )
+        for reference in chosen["owner_snapshots"]:
+            owner_payload = _json_object(
+                supplied[reference["relpath"]],
+                f"historical candidate owner {reference['candidate_owner']}",
+            )
+            required_data_hash = owner_payload.get(
+                "required_data_manifest_sha256"
+            )
+            if (
+                required_data_hash is not None
+                and required_data_hash != expected_required_data_sha256
+            ):
+                _fail(
+                    "REFERENCE_PAYLOAD_INVALID",
+                    "historical candidate owner required-data binding mismatch",
+                )
+        return
     try:
         validate_candidate_snapshot_manifest(
             payload,
@@ -1738,17 +1846,14 @@ def _validate_candidate_reference(
     if projection != chosen:
         _fail("CHOSEN_RESULTS_INVALID", "chosen results differ from candidate manifest")
     status_payload = _json_object(supplied[chosen["status_index"]["relpath"]], "strategy status index")
-    status_validators = {
-        STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA: validate_strategy_scan_status_index_v2,
-        STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA: validate_strategy_scan_status_index_v3,
-        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA: validate_strategy_scan_status_index_v4,
-    }
     status_schema = chosen["status_index"]["schema_version"]
-    status_validator = status_validators.get(status_schema)
-    if status_validator is None or status_payload.get("schema_version") != status_schema:
+    if (
+        status_schema != STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA
+        or status_payload.get("schema_version") != status_schema
+    ):
         _fail("REFERENCE_SCHEMA_INVALID", "strategy status index schema mismatch")
     try:
-        status_validator(
+        validate_strategy_scan_status_index(
             status_payload,
             expected_run_id=expected_run_id,
             expected_account=expected_account,
@@ -1828,10 +1933,7 @@ def _validate_candidate_reference(
                     expected_account=expected_account,
                 )
             elif reference["candidate_owner"] == "wheel":
-                if reference["schema_version"] not in {
-                    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
-                    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
-                }:
+                if reference["schema_version"] != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA:
                     raise WheelCandidateSnapshotError("wheel schema mismatch")
                 validate_wheel_candidate_snapshot(
                     owner_payload,

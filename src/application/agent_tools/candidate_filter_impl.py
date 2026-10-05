@@ -11,10 +11,10 @@ from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
 from src.application.candidate_snapshot_contract import CandidateSnapshotContractError, sha256_text
-from src.application.candidate_snapshot_manifest import (
-    CandidateSnapshotManifestError,
-    load_candidate_snapshot_bundle_readonly,
-    load_latest_candidate_snapshot_bundle_readonly,
+from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+from src.application.candidate_evidence_history import (
+    load_candidate_snapshot_bundle_for_inspection,
+    load_latest_candidate_snapshot_bundle_for_inspection,
 )
 from src.application.notification_perception_read import (
     iter_notification_perception_events,
@@ -226,7 +226,7 @@ def candidate_filter_explain_tool(
     run_resolution: dict[str, Any] | None = None
     try:
         if str(payload.get("run_id") or "").strip():
-            bundle = load_candidate_snapshot_bundle_readonly(
+            bundle = load_candidate_snapshot_bundle_for_inspection(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
@@ -266,7 +266,7 @@ def candidate_filter_explain_tool(
                     },
                 )
             try:
-                bundle = load_candidate_snapshot_bundle_readonly(
+                bundle = load_candidate_snapshot_bundle_for_inspection(
                     base=base,
                     run_id=resolved["run_id"],
                     account=account,
@@ -294,7 +294,7 @@ def candidate_filter_explain_tool(
                 ),
             }
         else:
-            bundle = load_latest_candidate_snapshot_bundle_readonly(
+            bundle = load_latest_candidate_snapshot_bundle_for_inspection(
                 base=base,
                 account=account,
             )

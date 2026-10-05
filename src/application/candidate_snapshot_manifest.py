@@ -40,8 +40,6 @@ from src.application.wheel.candidate_snapshot import (
     WHEEL_CANDIDATE_SNAPSHOT_FILE_V1,
     WHEEL_CANDIDATE_SNAPSHOT_FILE_V2,
     WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
-    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
-    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
     WheelCandidateSnapshotError,
     load_wheel_candidate_snapshot,
     validate_wheel_candidate_snapshot,
@@ -50,21 +48,12 @@ from src.application.source_receipts import sha256_bytes
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
     STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
-    STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA,
     STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
-    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
     STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
     STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA,
     StrategyScanStatusError,
-    load_strategy_scan_status_index_v2,
-    validate_strategy_scan_status_index_v2,
-    load_strategy_scan_status_index_v3,
-    validate_strategy_scan_status_index_v3,
-    load_strategy_scan_status_index_v4,
     load_strategy_scan_status_index,
-    validate_strategy_scan_status_index_v4,
     validate_strategy_scan_status_index,
 )
 from src.application.tick_run_workspace import (
@@ -97,24 +86,11 @@ _BASE_OWNER_SCHEMAS = {
 }
 _OWNER_FILES_V1 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V1}
 _OWNER_FILES_V3 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V2}
-_OWNER_SCHEMAS_V1 = {
-    **_BASE_OWNER_SCHEMAS,
-    "wheel": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
-}
-_OWNER_SCHEMAS_V3 = {
-    **_BASE_OWNER_SCHEMAS,
-    "wheel": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
-}
 _OWNER_FILES_CURRENT = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE}
 _OWNER_SCHEMAS_CURRENT = {
     **_BASE_OWNER_SCHEMAS,
     "wheel": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
 }
-_FORMAL_MANIFEST_FILES = (
-    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
-    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
-    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
-)
 _KNOWN_MANIFEST_FILES = (
     CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
     "candidate_snapshot_manifest.v2.json",
@@ -437,209 +413,6 @@ def _assert_status_version_files(account_dir: Path, *, manifest_v3: bool) -> Non
     )
     if any(account_dir.glob(conflicting_pattern)):
         raise CandidateSnapshotManifestError("artifact_version_mismatch")
-
-
-def publish_candidate_snapshot_manifest(
-    *,
-    base: Path,
-    run_id: str,
-    account: str,
-    strategy_policy_sha256: str,
-    sealed_at: datetime | str | None = None,
-) -> dict[str, Any]:
-    """Commit all expected owner snapshots after every bound artifact validates."""
-
-    try:
-        run_id_norm = required_text(run_id, "run_id")
-        account_norm = required_text(account, "account").lower()
-        policy_hash = sha256_text(strategy_policy_sha256, "strategy_policy_sha256")
-        seal_time = utc_timestamp(sealed_at or datetime.now(timezone.utc))
-    except CandidateSnapshotContractError as exc:
-        raise CandidateSnapshotManifestError(str(exc)) from exc
-    account_dir = _run_account_dir(base, run_id_norm, account_norm)
-    index_candidates = [
-        filename
-        for filename in (
-            STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-            STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
-            STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
-        )
-        if (account_dir / filename).exists()
-    ]
-    if len(index_candidates) != 1:
-        if STRATEGY_SCAN_STATUS_INDEX_V4_FILE in index_candidates:
-            raise CandidateSnapshotManifestError("artifact_version_mismatch")
-        raise CandidateSnapshotManifestError("candidate status index is unavailable or ambiguous")
-    index_filename = index_candidates[0]
-    index_path = account_dir / index_filename
-    index = _load_status_index(
-        index_path,
-        run_id=run_id_norm,
-        account=account_norm,
-    )
-    manifest_v3 = index_filename == STRATEGY_SCAN_STATUS_INDEX_V4_FILE
-    manifest_schema = (
-        CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
-        if manifest_v3
-        else CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA
-    )
-    manifest_filename = (
-        CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE
-        if manifest_v3
-        else CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE
-    )
-    owner_files = _OWNER_FILES_V3 if manifest_v3 else _OWNER_FILES_V1
-    owner_schemas = _OWNER_SCHEMAS_V3 if manifest_v3 else _OWNER_SCHEMAS_V1
-    _assert_status_version_files(account_dir, manifest_v3=manifest_v3)
-    config_hash = str(index["account_config_sha256"])
-    scopes = _expected_scopes(index, require_wheel_direction=manifest_v3)
-    expected_owners = sorted({row["candidate_owner"] for row in scopes})
-    _assert_exact_owner_files(
-        account_dir,
-        expected_owners=expected_owners,
-        owner_files=owner_files,
-    )
-    owner_entries: list[dict[str, Any]] = []
-    for owner in expected_owners:
-        snapshot = _load_owner_snapshot(
-            base=Path(base),
-            run_id=run_id_norm,
-            account=account_norm,
-            owner=owner,
-        )
-        if snapshot.get("schema_version") != owner_schemas[owner]:
-            if owner == "wheel":
-                raise CandidateSnapshotManifestError("artifact_version_mismatch")
-            raise CandidateSnapshotManifestError(
-                f"candidate owner snapshot schema mismatch: {owner}"
-            )
-        if snapshot.get("account_config_sha256") != config_hash:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner config mismatch: {owner}"
-            )
-        if snapshot.get("strategy_policy_sha256") != policy_hash:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner policy mismatch: {owner}"
-            )
-        covered_scopes = _snapshot_strategy_scopes(
-            snapshot,
-            owner=owner,
-            index_items=list(index.get("items") or []),
-            require_wheel_direction=manifest_v3,
-        )
-        relpath = f"state/{owner_files[owner]}"
-        snapshot_path = account_dir / relpath
-        if not snapshot_path.is_file() or snapshot_path.is_symlink():
-            raise CandidateSnapshotManifestError(
-                f"candidate owner snapshot is unavailable: {owner}"
-            )
-        owner_entries.append(
-            {
-                "candidate_owner": owner,
-                "schema_version": snapshot["schema_version"],
-                "relpath": relpath,
-                "sha256": sha256_bytes(snapshot_path.read_bytes()),
-                "content_sha256": snapshot["content_sha256"],
-                "opening_status": snapshot["opening_status"],
-                "covered_scopes": covered_scopes,
-            }
-        )
-    payload: dict[str, Any] = {
-        "schema_version": manifest_schema,
-        "run_id": run_id_norm,
-        "account": account_norm,
-        "markets": sorted({row["market"] for row in scopes}),
-        "account_config_sha256": config_hash,
-        "strategy_policy_sha256": policy_hash,
-        "sealed_at_utc": seal_time,
-        "completion_reason": "complete" if scopes else "no_applicable_scope",
-        "expected_scopes": scopes,
-        "expected_owners": expected_owners,
-        "status_index": {
-            "schema_version": index["schema_version"],
-            "relpath": index_filename,
-            "sha256": sha256_bytes(index_path.read_bytes()),
-            "content_sha256": index["content_sha256"],
-        },
-        "owner_snapshots": owner_entries,
-    }
-    payload["content_sha256"] = canonical_sha256(payload)
-    validate_candidate_snapshot_manifest(
-        payload,
-        expected_run_id=run_id_norm,
-        expected_account=account_norm,
-    )
-    encoded = _canonical_json_bytes(payload)
-    try:
-        write_account_run_state_bytes_once_safely(
-            base=Path(base),
-            run_id=run_id_norm,
-            account=account_norm,
-            name=manifest_filename,
-            payload=encoded,
-        )
-    except AccountRunConfigError as exc:
-        raise CandidateSnapshotManifestError(
-            "terminal candidate snapshot manifest conflicts or cannot be published"
-        ) from exc
-    try:
-        adopted = json.loads(
-            read_account_run_state_bytes_safely(
-                base=Path(base),
-                run_id=run_id_norm,
-                account=account_norm,
-                name=manifest_filename,
-            ).decode("utf-8")
-        )
-    except Exception as exc:
-        raise CandidateSnapshotManifestError(
-            "candidate snapshot manifest adoption failed"
-        ) from exc
-    if adopted != payload:
-        raise CandidateSnapshotManifestError("candidate snapshot manifest adoption mismatch")
-    load_candidate_snapshot_bundle(
-        base=Path(base),
-        run_id=run_id_norm,
-        account=account_norm,
-    )
-    return payload
-
-
-def publish_candidate_snapshot_manifest_v3(
-    *,
-    base: Path,
-    run_id: str,
-    account: str,
-    strategy_policy_sha256: str,
-    sealed_at: datetime | str | None = None,
-) -> dict[str, Any]:
-    try:
-        run_id_norm = required_text(run_id, "run_id")
-        account_norm = required_text(account, "account").lower()
-    except CandidateSnapshotContractError as exc:
-        raise CandidateSnapshotManifestError(str(exc)) from exc
-    if (
-        run_id_norm in {".", ".."}
-        or Path(run_id_norm).name != run_id_norm
-        or account_norm in {".", ".."}
-        or Path(account_norm).name != account_norm
-    ):
-        raise CandidateSnapshotManifestError("candidate snapshot identity is invalid")
-    account_dir = _run_account_dir(base, run_id_norm, account_norm)
-    if not (account_dir / STRATEGY_SCAN_STATUS_INDEX_V4_FILE).is_file():
-        raise CandidateSnapshotManifestError(
-            "candidate snapshot manifest v3 requires status index v4"
-        )
-    payload = publish_candidate_snapshot_manifest(
-        base=base,
-        run_id=run_id_norm,
-        account=account_norm,
-        strategy_policy_sha256=strategy_policy_sha256,
-        sealed_at=sealed_at,
-    )
-    if payload.get("schema_version") != CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA:
-        raise CandidateSnapshotManifestError("candidate snapshot manifest v3 was not published")
-    return payload
 
 
 def publish_candidate_snapshot_manifest(
@@ -1129,8 +902,19 @@ def load_candidate_snapshot_bundle(
     account_dir = _run_account_dir(base, run_id_norm, account_norm)
     _validate_bundle_inventory(
         manifest_filename, manifest,
-        [item.name for item in account_dir.iterdir() if item.exists()],
-        list(set(present_manifests) | {item.name for item in state_dir.iterdir() if item.exists()}),
+        [
+            item.name
+            for item in account_dir.iterdir()
+            if item.exists() or item.is_symlink()
+        ],
+        list(
+            set(present_manifests)
+            | {
+                item.name
+                for item in state_dir.iterdir()
+                if item.exists() or item.is_symlink()
+            }
+        ),
     )
     index_binding = dict(manifest["status_index"])
     index_path = account_dir / str(index_binding["relpath"])
@@ -1169,17 +953,6 @@ def load_candidate_snapshot_bundle(
     return {"manifest": manifest, "status_index": index, "owners": owners}
 
 
-def load_candidate_snapshot_bundle_v3(
-    *,
-    base: Path,
-    run_id: str,
-    account: str,
-) -> dict[str, Any]:
-    raise CandidateSnapshotManifestError(
-        "candidate snapshot manifest v3 is available only through history"
-    )
-
-
 def _validate_v4_source_status_bindings(
     account_dir: Path,
     index: Mapping[str, Any],
@@ -1191,86 +964,6 @@ def _validate_v4_source_status_bindings(
             raise CandidateSnapshotManifestError("candidate source status is unavailable")
         encoded = source_path.read_bytes()
         _validate_source_status_bytes(row, encoded)
-
-
-def _adapt_legacy_wheel_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
-    adapted = json.loads(json.dumps(dict(bundle), ensure_ascii=False, allow_nan=False))
-    if "wheel" not in adapted.get("owners", {}):
-        return adapted
-    for row in adapted["status_index"].get("items") or []:
-        if row.get("strategy_family") == "wheel":
-            row["direction"] = "call"
-    for row in adapted["manifest"].get("expected_scopes") or []:
-        if row.get("strategy_family") == "wheel":
-            row["direction"] = "call"
-    for entry in adapted["manifest"].get("owner_snapshots") or []:
-        if entry.get("candidate_owner") != "wheel":
-            continue
-        for row in entry.get("covered_scopes") or []:
-            row["direction"] = "call"
-    snapshot = adapted["owners"]["wheel"]
-    for row in snapshot.get("scope_results") or []:
-        if row.get("scope") == "strategy":
-            row["direction"] = "call"
-    for batch in snapshot.get("batches") or []:
-        batch.setdefault("direction", "call")
-        for candidate in batch.get("raw_candidates") or []:
-            candidate.setdefault("direction", "call")
-        final_candidate = batch.get("final_candidate")
-        if isinstance(final_candidate, dict):
-            final_candidate.setdefault("direction", "call")
-    return adapted
-
-
-def load_candidate_snapshot_bundle_readonly(
-    *,
-    base: Path,
-    run_id: str,
-    account: str,
-) -> dict[str, Any]:
-    """Load formal or explicitly non-executable experience evidence."""
-
-    from src.application.experience_candidate_snapshot import (
-        EXPERIENCE_CANDIDATE_MANIFEST_FILE,
-        ExperienceCandidateSnapshotError,
-        load_experience_candidate_snapshot_bundle,
-    )
-
-    try:
-        run_id_norm = required_text(run_id, "run_id")
-        account_norm = required_text(account, "account").lower()
-    except CandidateSnapshotContractError as exc:
-        raise CandidateSnapshotManifestError(str(exc)) from exc
-    if (
-        run_id_norm in {".", ".."}
-        or Path(run_id_norm).name != run_id_norm
-        or account_norm in {".", ".."}
-        or Path(account_norm).name != account_norm
-    ):
-        raise CandidateSnapshotManifestError("candidate snapshot identity is invalid")
-    state_dir = _run_account_dir(base, run_id_norm, account_norm) / "state"
-    formal_paths = [state_dir / filename for filename in _FORMAL_MANIFEST_FILES]
-    experience_path = state_dir / EXPERIENCE_CANDIDATE_MANIFEST_FILE
-    formal_present = any(path.exists() or path.is_symlink() for path in formal_paths)
-    experience_present = experience_path.exists() or experience_path.is_symlink()
-    if formal_present and experience_present:
-        raise CandidateSnapshotManifestError(
-            "formal and experience candidate manifests conflict"
-        )
-    if experience_present:
-        try:
-            return load_experience_candidate_snapshot_bundle(
-                base=base,
-                run_id=run_id_norm,
-                account=account_norm,
-            )
-        except ExperienceCandidateSnapshotError as exc:
-            raise CandidateSnapshotManifestError(str(exc)) from exc
-    return load_candidate_snapshot_bundle(
-        base=base,
-        run_id=run_id_norm,
-        account=account_norm,
-    )
 
 
 def _frozen_account_market(
@@ -1459,18 +1152,6 @@ def load_latest_candidate_snapshot_bundle(
     )
 
 
-def load_latest_candidate_snapshot_bundle_readonly(
-    *,
-    base: Path,
-    account: str,
-) -> dict[str, Any]:
-    """Resolve the latest run for read-only formal or experience inspection."""
-
-    return _load_latest_candidate_snapshot_bundle(
-        base=base,
-        account=account,
-        loader=load_candidate_snapshot_bundle_readonly,
-    )
 
 
 __all__ = [
@@ -1484,11 +1165,7 @@ __all__ = [
     "CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA",
     "CandidateSnapshotManifestError",
     "load_candidate_snapshot_bundle",
-    "load_candidate_snapshot_bundle_readonly",
-    "load_candidate_snapshot_bundle_v3",
     "load_latest_candidate_snapshot_bundle",
-    "load_latest_candidate_snapshot_bundle_readonly",
     "publish_candidate_snapshot_manifest",
-    "publish_candidate_snapshot_manifest_v3",
     "validate_candidate_snapshot_manifest",
 ]

@@ -116,27 +116,28 @@ def test_account_cursor_cannot_cross_scope(tmp_path, monkeypatch):
                           action="read", relative_name=name, max_lines=1, cursor=page["next_cursor"])
 
 
-def test_v3_wheel_source_status_is_bound_and_not_exposed(tmp_path):
+def test_current_wheel_source_status_is_bound_and_not_exposed(tmp_path):
     from test_candidate_snapshot_manifest import (
-        CONFIG_HASH, POLICY_HASH, _account_dir, _dependencies, _publish_wheel_v4_statuses,
+        CONFIG_HASH, POLICY_HASH, _account_dir, _dependencies, _publish_wheel_statuses,
     )
-    from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest_v3
+    from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest
     from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 
     account_dir = _account_dir(tmp_path)
-    _publish_wheel_v4_statuses(account_dir)
+    _publish_wheel_statuses(account_dir)
     seal_wheel_candidate_snapshot(
         base=tmp_path, run_id="run-1", account="lx", market="us", account_config_sha256=CONFIG_HASH,
         strategy_policy_sha256=POLICY_HASH, dependencies=_dependencies(),
         scope_results=[{"symbol": "NVDA", "direction": direction, "status": "completed", "candidate_count": 0}
                        for direction in ("call", "put")], batches=[],
+        run_mode={"scan_mode": "standard", "executable": True},
     )
-    publish_candidate_snapshot_manifest_v3(base=tmp_path, run_id="run-1", account="lx",
-                                           strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
+    publish_candidate_snapshot_manifest(base=tmp_path, run_id="run-1", account="lx",
+                                        strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
     bundle = load_run_bundle(**_kwargs(tmp_path))
     assert len(bundle["resources"]) == 2
-    assert any("wheel_candidate_snapshot.v2" in name for name in bundle["resources"])
-    source = account_dir / "nvda_wheel_put_scan_status.v2.json"
+    assert any("wheel_candidate_snapshot.v3" in name for name in bundle["resources"])
+    source = account_dir / "nvda_wheel_put_scan_status.v3.json"
     source.write_bytes(source.read_bytes() + b" ")
     with pytest.raises(ProjectReaderError, match="bundle_invalid"):
         load_run_bundle(**_kwargs(tmp_path))
@@ -144,7 +145,7 @@ def test_v3_wheel_source_status_is_bound_and_not_exposed(tmp_path):
 
 def test_same_run_accounts_have_separate_validated_resources(tmp_path):
     from test_candidate_snapshot_manifest import CONFIG_HASH, POLICY_HASH
-    from src.application.strategy_scan_status import publish_strategy_scan_status_index_v2, publish_strategy_scan_status
+    from src.application.strategy_scan_status import publish_strategy_scan_status_index, publish_strategy_scan_status
     from src.application.combo_yield_candidate_snapshot import seal_combo_yield_candidate_snapshot
     from test_candidate_snapshot_manifest import _dependencies, _expected
     from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest
@@ -154,13 +155,15 @@ def test_same_run_accounts_have_separate_validated_resources(tmp_path):
     (other / "state").mkdir(parents=True)
     publish_strategy_scan_status(report_dir=other, run_id="run-1", account="sy", market="US",
                                  symbol="NVDA", strategy_family="combo_yield", status="completed", candidate_count=0)
-    publish_strategy_scan_status_index_v2(report_dir=other, run_id="run-1", account="sy",
-                                         account_config_sha256=CONFIG_HASH, expected=_expected())
+    publish_strategy_scan_status_index(report_dir=other, run_id="run-1", account="sy",
+                                      account_config_sha256=CONFIG_HASH, expected=_expected(),
+                                      run_mode={"scan_mode": "standard", "executable": True})
     seal_combo_yield_candidate_snapshot(base=tmp_path, run_id="run-1", account="sy", market="us",
                                         account_config_sha256=CONFIG_HASH, strategy_policy_sha256=POLICY_HASH,
                                         dependencies=_dependencies(), scan_statuses=[{
                                             "symbol": "NVDA", "strategy_mode": "combo_yield", "variant": "sp_lc", "status": "completed",
-                                        }], ranked_pairs=[], sealed_at="2026-08-12T01:00:00Z")
+                                        }], ranked_pairs=[], run_mode={"scan_mode": "standard", "executable": True},
+                                        sealed_at="2026-08-12T01:00:00Z")
     publish_candidate_snapshot_manifest(base=tmp_path, run_id="run-1", account="sy",
                                          strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
     sy = load_run_bundle(**{**_kwargs(tmp_path), "account": "sy"})
@@ -250,13 +253,14 @@ def test_query_keeps_root_descriptor_after_path_replacement(tmp_path, monkeypatc
 
 def test_empty_manifest_cannot_claim_requested_market(tmp_path):
     from test_candidate_snapshot_manifest import CONFIG_HASH, POLICY_HASH
-    from src.application.strategy_scan_status import publish_strategy_scan_status_index_v2
+    from src.application.strategy_scan_status import publish_strategy_scan_status_index
     from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest
 
     account_dir = tmp_path / "output_runs/run-1/accounts/lx"
     (account_dir / "state").mkdir(parents=True)
-    publish_strategy_scan_status_index_v2(report_dir=account_dir, run_id="run-1", account="lx",
-                                         account_config_sha256=CONFIG_HASH, expected=[])
+    publish_strategy_scan_status_index(report_dir=account_dir, run_id="run-1", account="lx",
+                                      account_config_sha256=CONFIG_HASH, expected=[],
+                                      run_mode={"scan_mode": "standard", "executable": True})
     publish_candidate_snapshot_manifest(base=tmp_path, run_id="run-1", account="lx",
                                          strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
     with pytest.raises(ProjectReaderError, match="market_unverifiable"):
