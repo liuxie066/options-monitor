@@ -277,6 +277,56 @@ def test_public_confirmation_read_hash_confirms_and_default_read_stays_local(tmp
     assert len(repo.list_trade_events()) == len(before) + 1
 
 
+
+def test_public_call_confirmation_rejects_insufficient_broker_shares_without_writes(tmp_path, monkeypatch):
+    from src.application.trades import attribution
+    from src.application.agent_tools.positions import TRADE_ATTRIBUTION_READ_TOOL
+    from src.application.wheel.read_model import build_wheel_read_model_from_rows
+
+    repo, config = _writable_call_scope(tmp_path, monkeypatch)
+    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config,
+        {"runtime_root": str(tmp_path), "config_path": str(tmp_path / "config.json")}, {}))
+    monkeypatch.setattr(attribution, "read_attribution_combo_evidence",
+        lambda *a, **kw: {"complete": True, "exposures": []})
+    good = _call_capacity_observation()
+    bad = deepcopy(good)
+    stock = next(row for row in bad["portfolio"]["position_snapshot_input"]["rows"]
+                 if row["instrument_ref"]["asset_type"] == "stock")
+    stock["quantity"] = "0"
+    observations = iter((good, bad, bad, bad))
+    monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity",
+        lambda **_: next(observations))
+
+    prepared, _, _ = TRADE_ATTRIBUTION_READ_TOOL.call(
+        {"account": "lx", "prepare_confirmation": True})
+    call = next(row for row in prepared["rows"]
+                if row["contract_key"]["option_type"] == "call")
+    model = build_wheel_read_model_from_rows(
+        read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        account="lx", market="us", as_of_ms=4000)
+    linkage = next(row for row in model["linkage_candidates"]
+                   if row["call_record_id"] == call["lot_id"])
+    args = dict(account="lx", config=config, runtime_root=tmp_path,
+        expected_input_hash=call["input_hash"], request_id="insufficient-call",
+        actor="operator", option_lot_id=call["lot_id"],
+        wheel_branch_id=linkage["wheel_branch_id"], direction="call",
+        linkage_candidate_id=linkage["linkage_candidate_id"],
+        expected_batch_generation_hash=linkage["batch_generation_hash"])
+    before_trade = repo.list_trade_events()
+    before_wheel = repo.list_wheel_events(account="lx")
+    with pytest.raises(ValueError, match="attribution evidence changed"):
+        attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=False)
+    with pytest.raises(ValueError, match="attribution evidence changed"):
+        attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=True)
+    refreshed, _, _ = TRADE_ATTRIBUTION_READ_TOOL.call(
+        {"account": "lx", "prepare_confirmation": True})
+    refreshed_call = next(row for row in refreshed["rows"]
+                          if row["contract_key"]["option_type"] == "call")
+    assert refreshed_call["selected_candidate_id"] is None
+    assert repo.list_trade_events() == before_trade
+    assert repo.list_wheel_events(account="lx") == before_wheel
+
 def test_confirmation_read_capacity_failure_stays_unavailable(tmp_path, monkeypatch):
     from src.application.trades import attribution
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
@@ -876,6 +926,16 @@ def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_pa
         invoke = lambda apply: apply_trade_attribution(repo, **args, apply_changes=apply)
     before = repo.list_trade_events()
     before_wheel = repo.list_wheel_events(account="lx")
+    if entrypoint == "manual_confirm":
+        insufficient = deepcopy(observation)
+        insufficient["portfolio"]["cash_by_currency"]["USD"] = 9000
+        context["capacity_observation"] = insufficient
+        for apply in (False, True):
+            with pytest.raises(ValueError, match="attribution evidence changed"):
+                invoke(apply)
+        assert repo.list_trade_events() == before
+        assert repo.list_wheel_events(account="lx") == before_wheel
+        context["capacity_observation"] = observation
     preview = invoke(False)
     assert not preview["write_applied"]
     assert repo.list_trade_events() == before
