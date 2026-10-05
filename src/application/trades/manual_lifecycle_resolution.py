@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from domain.domain.trade_contract_identity import require_option_multiplier
 
-from datetime import datetime
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
+from domain.domain.trade_execution import futu_execution_time, execution_instant_milliseconds
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.lifecycle_allocation import resolve_allocations
@@ -644,12 +643,7 @@ def _broker_evidence_for_ref(
                 ),
                 "stock_price": raw_row.get("price")
                 or raw_row.get("dealt_avg_price"),
-                "trade_time_ms": _trade_time_ms(
-                    raw_row.get("trade_time_ms")
-                    or raw_row.get("event_time_ms")
-                    or raw_row.get("create_time")
-                    or raw_row.get("updated_time")
-                ),
+                "trade_time_ms": _trade_time_ms(raw_row),
                 "order_id": raw_row.get("order_id"),
                 "clearing_date": (
                     raw_row.get("clearing_date")
@@ -672,30 +666,12 @@ def _broker_evidence_for_ref(
     return matched
 
 
-def _trade_time_ms(value: Any) -> int:
-    if value in (None, ""):
-        return 0
-    if isinstance(value, (int, float)):
-        numeric = int(value)
-        return (
-            numeric
-            if numeric > 10_000_000_000
-            else numeric * 1000
-        )
-    raw = str(value).strip()
-    if raw.isdigit():
-        return _trade_time_ms(int(raw))
-    try:
-        parsed = datetime.fromisoformat(
-            raw.replace("Z", "+00:00")
-        )
-    except ValueError:
-        return 0
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(
-            tzinfo=ZoneInfo("Asia/Shanghai")
-        )
-    return int(parsed.timestamp() * 1000)
+def _trade_time_ms(row: dict[str, Any]) -> int:
+    source = dict(row)
+    if source.get("trade_time_ms") in (None, "") and source.get("event_time_ms") not in (None, ""):
+        source["trade_time_ms"] = source["event_time_ms"]
+    normalized = futu_execution_time(source)
+    return execution_instant_milliseconds(normalized["occurred_at_utc"]) or 0
 
 
 def _list_trade_events(repo: Any) -> list[dict[str, Any]]:

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import normalize_option_type
 from domain.domain.option_position_identity import normalize_currency
@@ -17,6 +15,7 @@ from domain.domain.trade_execution import (
     _source_multiplier_errors,
     canonical_trade_execution_content as canonical_trade_execution_content,
     normalize_execution_input,
+    execution_instant_milliseconds,
 )
 from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
@@ -60,42 +59,6 @@ def _normalize_position_effect(value: Any) -> str | None:
 
 def _normalize_expiration(value: Any) -> str | None:
     return normalize_contract_expiration(value)
-
-
-_FUTU_TRADE_TIME_ZONE = ZoneInfo("Asia/Shanghai")
-
-
-def _normalize_trade_time_ms(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, (int, float)):
-        num = int(value)
-        if num > 10_000_000_000:
-            return num
-        return int(num * 1000)
-    raw = str(value).strip()
-    if raw.isdigit():
-        return _normalize_trade_time_ms(int(raw))
-    iso_raw = raw.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(iso_raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=_FUTU_TRADE_TIME_ZONE)
-        return int(dt.timestamp() * 1000)
-    except ValueError:
-        pass
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S.%f",
-        "%Y/%m/%d %H:%M:%S.%f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-    ):
-        try:
-            dt = datetime.strptime(raw, fmt).replace(tzinfo=_FUTU_TRADE_TIME_ZONE)
-            return int(dt.timestamp() * 1000)
-        except ValueError:
-            continue
-    return None
 
 
 @dataclass(frozen=True)
@@ -151,7 +114,7 @@ def _standard_trade_deal(src: dict[str, Any]) -> NormalizedTradeDeal:
         multiplier_source="input" if instrument.get("multiplier") is not None else None,
         expiration_ymd=instrument.get("expiration_ymd"),
         currency=execution["currency"],
-        trade_time_ms=_normalize_trade_time_ms(execution["occurred_at_utc"]),
+        trade_time_ms=execution_instant_milliseconds(execution["occurred_at_utc"]),
         raw_payload=dict(src),
         normalization_diagnostics={"execution_input": {"errors": execution["errors"]}},
         asset_type=instrument.get("asset_type"),
@@ -291,7 +254,7 @@ def normalize_trade_deal(
         multiplier_source=multiplier_source,
         expiration_ymd=expiration_ymd,
         currency=currency,
-        trade_time_ms=_normalize_trade_time_ms(_pick(src, "trade_time_ms", "create_time", "updated_time")),
+        trade_time_ms=execution_instant_milliseconds(execution["occurred_at_utc"]),
         raw_payload=dict(src),
         visible_account_fields=visible_account_fields,
         account_mapping_keys=sorted(str(key).strip() for key in (futu_account_mapping or {}).keys() if str(key).strip()),

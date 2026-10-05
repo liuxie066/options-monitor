@@ -10,6 +10,27 @@ Futu OpenD deal push 是实时成交入口。OM 标准化成交后维护期权�
 同步意图不携带推算持仓、成交数量或成本。OM 不直接写 PM/Feishu，PM
 也不写 OM ledger 或 Feishu `transactions`。
 
+## 成交时间契约
+
+Futu 原始成交时间统一由 `domain/domain/trade_execution.py` 的 `futu_execution_time`
+解析。非空字段优先级为 `occurred_at_utc`、`trade_time_ms`（Unix 毫秒）、
+`create_timestamp` / `createTimestamp`（Unix 秒），最后为 `create_time` / `updated_time`。
+高优先级字段无效时报告错误，不用低优先级时间掩盖。标准 `execution_input` 已归一化，不重新解释。
+
+无偏移的原始字符串先使用显式 `source_timezone`；未提供时依据证券市场：美股使用
+`America/New_York`（自动处理夏令时），港股使用 `Asia/Hong_Kong`，A 股通使用
+`Asia/Shanghai`。证券展示名称不构成市场证据。未知或冲突市场、无效时区、夏令时重复或
+不存在的本地时刻均不可用于入账。显式时间偏移保留其瞬间含义。
+内部 `occurred_at_utc` 使用 UTC 并保留源小数精度，账本毫秒值从该瞬间截取；来源证据保留原始时间与解析时区。
+
+本修正不会自动修改历史账本。错误时区会影响交易日、候选曝光关联、结算窗口和绩效时间归属；
+历史修复须先只读盘点原始来源、旧/新时间及关联 lot、生命周期和归属事件，生成精确预览。
+成交身份不因时间修正变化，但经济内容摘要会变化；不得通过重放、覆盖不可变事件或批量平移历史数据来绕过去重/冲突检查。
+生产修复须另行明确授权，并验证幂等、回读及投影结果。
+
+依据：[Futu 交易常见问题 Q6](https://openapi.futunn.com/futu-api-doc/qa/trade.html)
+说明股票交易接口沿用交易所时区；期货接口的 `display_format` 不适用于本股票成交路径。
+
 ## 启用
 
 权威 `config.yaml` 可增加：

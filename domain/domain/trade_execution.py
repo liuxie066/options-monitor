@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from domain.domain.trade_contract_identity import (
     require_option_multiplier,
@@ -156,6 +157,84 @@ def epoch_milliseconds_instant(value: Any) -> str | None:
     instant = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=whole)
     fractional_digits = str(fraction).zfill(decimal_places + 3).rstrip("0")
     return instant.strftime("%Y-%m-%dT%H:%M:%S") + (f".{fractional_digits}" if fractional_digits else "") + "Z"
+
+
+def execution_instant_milliseconds(value: Any) -> int | None:
+    """Project canonical UTC to ledger milliseconds, truncating sub-ms precision."""
+    instant = canonical_utc_instant(value)
+    if instant is None:
+        return None
+    match = _INSTANT_RE.fullmatch(instant)
+    day, clock, fraction, _ = match.groups()
+    whole = datetime.fromisoformat(f"{day}T{clock}+00:00")
+    delta = whole - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return (delta.days * 86400 + delta.seconds) * 1000 + int(((fraction or "") + "000")[:3])
+
+
+def futu_execution_time(src: Mapping[str, Any]) -> dict[str, Any]:
+    """Interpret raw Futu time once; equities use the exchange's local timezone."""
+    field = next((key for key in (
+        "occurred_at_utc", "trade_time_ms", "create_timestamp", "createTimestamp", "create_time", "updated_time",
+    ) if src.get(key) not in (None, "")), None)
+    raw = src.get(field) if field else None
+    result = {"occurred_at_utc": None, "source_time": raw, "source_timezone": None, "errors": []}
+    try:
+        if field is None:
+            result["errors"].append("missing:occurred_at_utc")
+            return result
+        if field == "occurred_at_utc":
+            result["source_timezone"] = "UTC"
+            instant = canonical_utc_instant(raw)
+        elif field in {"trade_time_ms", "create_timestamp", "createTimestamp"}:
+            result["source_timezone"] = "UTC"
+            # SDK timestamps may be doubles; never infer units from magnitude.
+            value = str(raw) if isinstance(raw, float) else raw
+            if field != "trade_time_ms":
+                text = canonical_decimal(value)
+                number = Decimal(text)
+                parts = number.as_tuple()
+                value = Decimal((parts.sign, parts.digits, parts.exponent + 3))
+            instant = epoch_milliseconds_instant(value)
+        else:
+            text = str(raw).strip().replace("/", "-")
+            explicit = _INSTANT_RE.fullmatch(text)
+            if explicit:
+                result["source_timezone"] = explicit.group(4)
+                instant = canonical_utc_instant(text)
+            else:
+                match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?", text)
+                if not match:
+                    raise ValueError("invalid_local_timestamp")
+                zone_name = src.get("source_timezone")
+                if not zone_name:
+                    markets = {str(src["market"]).upper()} if src.get("market") else set()
+                    for key in _SYMBOL_KEYS:
+                        if "name" in key or key == "underlying":
+                            continue
+                        if src.get(key):
+                            market = _parse_futu_option_code(src[key]).get("option_code_market") or symbol_market(src[key])
+                            if market:
+                                markets.add(market)
+                    markets = {"CN" if market in {"SH", "SZ"} else market for market in markets}
+                    zones = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai", "SH": "Asia/Shanghai", "SZ": "Asia/Shanghai"}
+                    if len(markets) != 1 or next(iter(markets)) not in zones:
+                        raise ValueError("unknown_or_conflicting_market")
+                    zone_name = zones[next(iter(markets))]
+                zone = ZoneInfo(str(zone_name))
+                result["source_timezone"] = str(zone_name)
+                day, clock, fraction = match.groups()
+                wall = datetime.fromisoformat(f"{day}T{clock}")
+                candidates = {wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+                              for fold in (0, 1)
+                              if wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) == wall}
+                if len(candidates) != 1:
+                    raise ValueError("ambiguous_or_nonexistent_local_time")
+                utc = candidates.pop()
+                instant = canonical_utc_instant(utc.strftime("%Y-%m-%dT%H:%M:%S") + (f".{fraction}" if fraction else "") + "Z")
+        result["occurred_at_utc"] = instant
+    except (ValueError, OverflowError, InvalidOperation, ZoneInfoNotFoundError) as exc:
+        result["errors"].append(f"invalid:occurred_at_utc:{exc}")
+    return result
 
 
 def execution_source_status(payload: Mapping[str, Any]) -> str | None:
@@ -507,20 +586,7 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
     option_info = _parse_futu_option_code(code)
     symbol = pick_first_normalized_symbol(src, *_SYMBOL_KEYS)
     asset_type = _futu_asset_type(src, option_info)
-    raw_time = _pick(src, "occurred_at_utc", "trade_time_ms", "create_time", "updated_time")
-    occurred_at = raw_time
-    try:
-        if "occurred_at_utc" in src:
-            occurred_at = canonical_utc_instant(raw_time)
-        elif "trade_time_ms" in src:
-            occurred_at = epoch_milliseconds_instant(str(raw_time) if isinstance(raw_time, float) else raw_time)
-        elif raw_time is not None:
-            time_text = str(raw_time).strip().replace("/", "-")
-            if not re.search(r"Z$|[+-]\d{2}:\d{2}$", time_text):
-                time_text += "+08:00"
-            occurred_at = canonical_utc_instant(time_text)
-    except (ValueError, OverflowError):
-        pass
+    time_input = futu_execution_time(src)
 
     def decimal_source(*keys: str) -> Any:
         value = _pick(src, *keys)
@@ -570,11 +636,12 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
         "quantity": decimal_source("contracts", "qty", "quantity"),
         "price": decimal_source("price", "execution_price", "dealt_price"),
         "currency": currency,
-        "occurred_at_utc": occurred_at,
-        "source_time": raw_time,
-        "source_timezone": src.get("source_timezone") or ("UTC" if "occurred_at_utc" in src or "trade_time_ms" in src else "Asia/Shanghai"),
+        "occurred_at_utc": time_input["occurred_at_utc"],
+        "source_time": time_input["source_time"],
+        "source_timezone": time_input["source_timezone"],
         "evidence_refs": src.get("evidence_refs") or [],
     }, source_payload=src)
+    execution["errors"].extend(error for error in time_input["errors"] if error not in execution["errors"])
     if asset_type == "option":
         execution["errors"].extend(_source_multiplier_errors(src))
     return execution
