@@ -80,13 +80,69 @@ def test_stage_only_notification_always_builds_compact_compatibility_bundle(monk
     assert any("not delivery evidence" in message for message in logs)
 
 
-def test_pipeline_runtime_has_no_config_driven_legacy_compatibility_bundle() -> None:
+def test_pipeline_runtime_has_no_ordinary_legacy_notification_pipeline() -> None:
     from src.application import pipeline_runtime as mod
 
     source = Path(mod.__file__).read_text(encoding="utf-8")
-    assert 'notifications_cfg.get("render_style")' not in source
-    assert 'render_style="compact"' in source
-    assert "not delivery evidence" in source
+    assert "run_pipeline_alert_stage" not in source
+    assert "run_pipeline_notification_stage" not in source
+    assert "symbols_alerts.txt" not in source
+    assert "symbols_changes.txt" not in source
+    assert "symbols_notification.txt" not in source
+
+
+def test_pipeline_runtime_all_writes_summary_without_legacy_notification_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_runtime as mod
+    from src.application import pipeline_watchlist
+
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    state_dir = tmp_path / "state"
+    summary_calls: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        mod.report_repo,
+        "prepare_dirs",
+        lambda **_kwargs: (report_dir, state_dir),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_runtime_pipeline_config",
+        lambda **_kwargs: {"symbols": [], "notifications": {"enabled": True}},
+    )
+    monkeypatch.setattr(
+        pipeline_watchlist,
+        "run_watchlist_pipeline_default",
+        lambda **_kwargs: [],
+    )
+
+    def _build_summary(rows, target, **_kwargs):
+        summary_calls.append(list(rows))
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "symbols_summary.csv").write_text("symbol\n", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "build_symbols_summary", _build_summary)
+    monkeypatch.setattr(mod, "build_symbols_digest", lambda *_args, **_kwargs: None)
+
+    assert mod.main(["--config", str(config_path), "--stage", "all", "--no-context"]) == 0
+    assert summary_calls == [[]]
+    assert (report_dir / "symbols_summary.csv").is_file()
+    assert not (report_dir / "symbols_alerts.txt").exists()
+    assert not (report_dir / "symbols_changes.txt").exists()
+    assert not (report_dir / "symbols_notification.txt").exists()
+
+
+def test_pipeline_runtime_rejects_legacy_cumulative_stages() -> None:
+    from src.application import pipeline_runtime as mod
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod.build_parser().parse_args(["--config", "config.us.json", "--stage", "notify"])
+
+    assert exc_info.value.code == 2
 
 
 def _authority_args(authority, *, base: Path) -> list[str]:

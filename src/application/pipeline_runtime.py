@@ -8,15 +8,9 @@ import os
 import sys
 from pathlib import Path
 
-from src.application.cash_summary_footer import append_cash_summary_footer
 from src.application.config_loader import load_config as load_runtime_pipeline_config
-from src.application.config_loader import resolve_data_config_path
 from src.application.config_sections import resolve_watchlist_config
 from src.application.report_builders import build_symbols_digest, build_symbols_summary
-from src.application.pipeline_reporting import (
-    run_pipeline_alert_stage,
-    run_pipeline_notification_stage,
-)
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
 )
@@ -65,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, help="Path to JSON config with symbols[].")
     parser.add_argument("--mode", default="dev", choices=["dev", "scheduled"], help="Runtime mode: dev (verbose) vs scheduled (fast)")
     parser.add_argument("--symbols", default=None, help="Comma-separated symbol whitelist; only process these symbols")
-    parser.add_argument("--stage", default="all", choices=["fetch", "scan", "alert", "notify", "all"], help="Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)")
+    parser.add_argument("--stage", default="all", choices=["fetch", "scan", "all"], help="Pipeline stage: fetch|scan|all (dev speed; runs up to this stage)")
     parser.add_argument("--stage-only", default=None, choices=["alert", "notify"], help="Run ONLY a late stage (no fetch/scan). Requires existing output files.")
     parser.add_argument("--refresh-multiplier-cache", action="store_true", help="Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).")
     parser.add_argument("--no-context", action="store_true", help="Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.")
@@ -182,8 +176,8 @@ def _want(step: str) -> bool:
             return stage_only == "notify"
         return False
 
-    order = {"fetch": 0, "scan": 1, "alert": 2, "notify": 3, "all": 3}
-    cur = order.get(str(stage or "all"), 3)
+    order = {"fetch": 0, "scan": 1, "all": 1}
+    cur = order.get(str(stage or "all"), 1)
     need = order.get(s)
     if need is None:
         return False
@@ -470,75 +464,10 @@ def main(argv: list[str] | None = None) -> int:
         if not is_scheduled:
             build_symbols_digest(symbols, report_dir)
 
-        changes_path = Path("/dev/null") if is_scheduled else (report_dir / "symbols_changes.txt").resolve()
-        policy_json: str | None = None
-        try:
-            policy = cfg.get("alert_policy")
-            if isinstance(policy, dict) and policy:
-                policy_path = (state_dir / "alert_policy.json").resolve()
-                report_repo.write_state_json_text(state_dir, "alert_policy.json", policy)
-                policy_json = str(policy_path)
-            elif isinstance(policy, str) and policy.strip():
-                policy_json = policy.strip()
-        except Exception:
-            pass
-        try:
-            from domain.domain import alert_rules as _alert_rules
-            from domain.domain.alert_policy import resolve_alert_policy as _resolve_alert_policy
-            _raw_policy = cfg.get("alert_policy") if isinstance(cfg, dict) else None
-            _alert_rules.set_active_alert_policy(
-                _resolve_alert_policy(_raw_policy if isinstance(_raw_policy, dict) else None)
-            )
-        except Exception:
-            pass
-        if _want("alert"):
-            run_pipeline_alert_stage(
-                summary_input=(report_dir / "symbols_summary.csv").resolve(),
-                output=(report_dir / "symbols_alerts.txt").resolve(),
-                changes_output=changes_path,
-                previous_summary=((state_dir / "symbols_summary_prev.csv").resolve() if not is_scheduled else None),
-                state_dir=state_dir,
-                update_snapshot=(not is_scheduled),
-                policy_json=policy_json,
-            )
-
-        if _want("notify"):
-            run_pipeline_notification_stage(
-                alerts_input=(report_dir / "symbols_alerts.txt").resolve(),
-                changes_input=changes_path,
-                output=(report_dir / "symbols_notification.txt").resolve(),
-                render_style="compact",
-            )
-
-        portfolio_cfg = cfg.get("portfolio", {}) or {}
-        data_config = str(resolve_data_config_path(base=runtime_root, data_config=portfolio_cfg.get("data_config")))
-        broker = str(portfolio_cfg.get("broker") or "富途")
-
-        try:
-            include_cash_footer = bool((cfg.get("notifications") or {}).get("include_cash_footer", True))
-        except Exception:
-            include_cash_footer = True
-
-        if include_cash_footer and (not is_scheduled):
-            append_cash_summary_footer(
-                base=runtime_root,
-                notification=report_dir / "symbols_notification.txt",
-                config=cfg_path,
-                data_config=data_config,
-                market=str(broker),
-            )
-
-        notifications_cfg = cfg.get("notifications", {}) or {}
-        if notifications_cfg.get("enabled", False):
-            log("[INFO] notifications enabled; generated Compact compatibility notification bundle (not delivery evidence).")
-        else:
-            log("[INFO] notifications disabled; generated Compact compatibility notification bundle only.")
+        log("[INFO] symbols scan finished; Daily Decision Brief owns ordinary notification rendering.")
         if not is_scheduled:
             print("\n[DONE] Symbols pipeline finished")
             print(f"- {report_dir}/symbols_summary.csv")
-            print(f"- {report_dir}/symbols_alerts.txt")
-            print(f"- {report_dir}/symbols_changes.txt")
-            print(f"- {report_dir}/symbols_notification.txt")
             print("")
         return 0
 
