@@ -641,6 +641,61 @@ def test_migration_manifest_requires_explicit_selection_and_replays_noop(
     )
     inventory = build_lifecycle_migration_inventory(repo)
     target_key = f"lifecycle:{case_id}"
+
+    # 未显式选择的裸 inventory 不是可 apply 的冻结清单：dry-run 仍如实报告
+    # 空选择，apply 必须失败关闭且零副作用。
+    receipts_before = repo.list_trade_lifecycle_migration_receipts()
+    claims_before = repo.list_trade_lifecycle_source_consumptions()
+    suppressed_before = [
+        item
+        for item in repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        )
+        if item["status"] == "suppressed"
+    ]
+    unselected_dry_run = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=inventory,
+        apply_changes=False,
+    )
+    assert unselected_dry_run["status"] == "dry_run"
+    assert unselected_dry_run["would_apply_target_keys"] == []
+    with pytest.raises(
+        ValueError,
+        match="lifecycle migration manifest has no selected rows",
+    ):
+        apply_lifecycle_migration_manifest(
+            repo,
+            manifest=inventory,
+            apply_changes=True,
+        )
+    assert repo.list_trade_lifecycle_migration_receipts() == receipts_before
+    assert repo.list_trade_lifecycle_source_consumptions() == claims_before
+    assert [
+        item
+        for item in repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        )
+        if item["status"] == "suppressed"
+    ] == suppressed_before
+
+    # 零行清单（空账本上的裸 inventory）与「有行但全未选中」同判：守卫不设
+    # rows 非空前置，否则最极端输入上的空转仍会被报成成功。
+    empty_repo = SQLiteOptionPositionsRepository(
+        tmp_path / "empty_ledger.sqlite3"
+    )
+    empty_inventory = build_lifecycle_migration_inventory(empty_repo)
+    assert empty_inventory["rows"] == []
+    with pytest.raises(
+        ValueError,
+        match="lifecycle migration manifest has no selected rows",
+    ):
+        apply_lifecycle_migration_manifest(
+            empty_repo,
+            manifest=empty_inventory,
+            apply_changes=True,
+        )
+
     manifest = select_lifecycle_migration_targets(
         inventory,
         target_keys=[target_key],
