@@ -1215,6 +1215,103 @@ def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path, monkeypa
     assert build_wheel_read_model(repo, "lx", 6000)["batches"][0]["phase"] == "call_open"
 
 
+def test_call_linkage_confirm_skips_put_candidates(tmp_path, monkeypatch):
+    from src.application.trades import attribution
+
+    repo, args, _candidate = _shared_linkage_scope(tmp_path, monkeypatch)
+    build_view = attribution.build_trade_attribution_view
+    put_candidate = {
+        "direction": "put",
+        "option_record_id": "unlinked-put-lot",
+        "wheel_branch_id": "put-branch",
+        "linkage_candidate_id": "put-candidate",
+        "batch_generation_hash": "put-generation",
+    }
+
+    def mixed_view(*view_args, **view_kwargs):
+        view = build_view(*view_args, **view_kwargs)
+        view["wheel_model"]["linkage_candidates"] = [
+            put_candidate,
+            *view["wheel_model"]["linkage_candidates"],
+        ]
+        return view
+
+    monkeypatch.setattr(attribution, "build_trade_attribution_view", mixed_view)
+
+    result = confirm_wheel_call_linkage(repo, **args, apply_changes=True)
+
+    assert result["status"] == "confirmed"
+    assert result["write_applied"] is True
+
+
+@pytest.mark.parametrize("failure", [None, "missing_candidate", "changed_input"])
+def test_call_linkage_reject_skips_put_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    repo, lot_id = _wheel_repo(tmp_path)
+    call_lot_id = _open_unlinked_call(repo)
+    candidate = build_wheel_read_model(repo, "lx", 4_000)["linkage_candidates"][0]
+    build_model = wheel_workflows.build_wheel_read_model_from_rows
+    put_candidate = {
+        "direction": "put",
+        "option_record_id": "unlinked-put-lot",
+        "wheel_branch_id": "put-branch",
+        "linkage_candidate_id": "put-candidate",
+        "batch_generation_hash": "put-generation",
+    }
+
+    def mixed_model(*model_args, **model_kwargs):
+        model = build_model(*model_args, **model_kwargs)
+        model["linkage_candidates"] = [
+            put_candidate,
+            *model["linkage_candidates"],
+            {**put_candidate, "linkage_candidate_id": "put-candidate-2"},
+        ]
+        return model
+
+    monkeypatch.setattr(wheel_workflows, "build_wheel_read_model_from_rows", mixed_model)
+    before = repo.list_wheel_events(account="lx")
+    kwargs = {
+        "account": "lx",
+        "call_lot_id": call_lot_id,
+        "lot_id": lot_id,
+        "linkage_candidate_id": (
+            "missing-call-candidate"
+            if failure == "missing_candidate"
+            else candidate["linkage_candidate_id"]
+        ),
+        "expected_input_hash": (
+            "old-input-hash"
+            if failure == "changed_input"
+            else candidate["input_snapshot_hash"]
+        ),
+        "expected_batch_generation_hash": candidate["batch_generation_hash"],
+        "request_id": "mixed-linkage-reject",
+        "actor": "tester",
+        "reason": "not this Wheel batch",
+        "market": "us",
+        "apply_changes": True,
+        "as_of_ms": 5_000,
+    }
+
+    if failure:
+        message = (
+            "candidate input changed"
+            if failure == "changed_input"
+            else "candidate is stale or unavailable"
+        )
+        with pytest.raises(ValueError, match=message):
+            reject_wheel_call_linkage(repo, **kwargs)
+        assert repo.list_wheel_events(account="lx") == before
+    else:
+        result = reject_wheel_call_linkage(repo, **kwargs)
+        assert result["status"] == "rejected"
+        assert result["write_applied"] is True
+        assert len(repo.list_wheel_events(account="lx")) == len(before) + 1
+
+
 @pytest.mark.parametrize("entry", ["cli", "tool_call", "tool_neutral"])
 @pytest.mark.parametrize("runtime_source", ["argument", "environment"])
 def test_public_linkage_entry_uses_complete_shared_decision(tmp_path, monkeypatch, entry, runtime_source):
