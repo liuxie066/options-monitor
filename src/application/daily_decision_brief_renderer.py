@@ -44,6 +44,7 @@ _CLOSE_RECOMMENDATION_LABELS = {
     "not_evaluable": "暂无法评估（证据不足）",
 }
 _PARTIAL_DATA_REASON_TEXT = {
+    "net_premium_cny_unavailable": "人民币净权利金无法计算",
     "term_matched_rv_unavailable": "期限匹配的已实现波动率（RV）证据不可用",
 }
 # 变化行按（分组名, 策略族）聚合计数，分组名决定末尾选用哪一句汇总文案；
@@ -190,7 +191,7 @@ def build_daily_brief_user_view(
                 "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
                 if evidence_holds
                 else (
-                    "本轮部分行情证据不可用，候选结果不完整。"
+                    "本轮部分数据不可用，候选结果不完整。"
                     if partial_data_gaps
                     else "本轮暂无符合条件的候选。"
                 )
@@ -1074,6 +1075,11 @@ def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any
                 for position, field in enumerate(("target_shares", "committed_shares", "reserved_shares", "available_shares"), start=1)
             },
         }
+        grouped["active_option_contracts"] = [
+            contract for member in members
+            for contract in (member.get("active_option_contracts") or
+                             ([{}] if member["coverage"]["committed_shares"] > 0 else []))
+        ]
         grouped["display_batch_count"] = len(members)
         grouped["display_assignment_price"] = key[4]
         grouped["display_branch_ids"] = branch_ids
@@ -1095,6 +1101,11 @@ def _wheel_batch_views(
     ]
     if delivery_kind == "fixed_report":
         rows = _group_fixed_wheel_batches(rows)
+    # Keep first-seen symbol order and original branch order within each symbol.
+    symbol_order = {symbol: index for index, symbol in enumerate(dict.fromkeys(
+        _upper(row.get("symbol")) for row in rows
+    ))}
+    rows.sort(key=lambda row: symbol_order[_upper(row.get("symbol"))])
     symbol_counts: dict[str, int] = {}
     for row in rows:
         symbol = _upper(row.get("symbol"))
@@ -1156,6 +1167,21 @@ def _wheel_batch_views(
             quantity = (f" · {committed:,} / {target:,} 股" if grouped_count else
                         f" · {committed} / {target} 股")
         details.append(f"{'CC 覆盖' if direction == 'call' else 'CSP 安排'}：{label}{quantity}")
+        if direction == "call" and committed is not None and committed > 0:
+            contracts_text = []
+            for contract in row.get("active_option_contracts") or []:
+                if not isinstance(contract, Mapping):
+                    contracts_text.append("合约信息不完整")
+                    continue
+                expiration = str(contract.get("expiration_ymd") or "")
+                strike = _decimal(contract.get("strike"))
+                if (not _expiration_label(expiration) or strike is None or strike <= 0
+                        or _lower(contract.get("option_type")) != "call"
+                        or _upper(contract.get("underlying_symbol")) != symbol):
+                    contracts_text.append("合约信息不完整")
+                else:
+                    contracts_text.append(f"{expiration[:10]} {_decimal_text(strike)} Call")
+            details.append("覆盖期权：" + "；".join(dict.fromkeys(contracts_text or ["合约信息待核实"])))
         if coverage.get("reserved_shares"):
             reserved = coverage["reserved_shares"]
             details.append(f"意图预留：{reserved:,} 股" if grouped_count else f"意图预留：{reserved} 股")
@@ -1773,7 +1799,7 @@ def _candidate_empty_summary_for_failures(
 ) -> str:
     subject = _strategy_failure_subject(items)
     if partial_data or evidence_holds:
-        return f"本轮部分行情证据不可用；{subject} 扫描失败。"
+        return f"本轮部分数据不可用；{subject} 扫描失败。"
     return f"本轮暂无符合条件的候选；{subject} 扫描失败。"
 
 
@@ -1830,7 +1856,7 @@ def _strategy_data_gap_reminders(
             reminders.append(
                 f"{symbol} {family}：{detail}，候选结果不完整"
                 if detail
-                else f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
+                else f"{symbol} {family}：本轮部分数据不可用，候选结果不完整"
             )
         seen.add(identity)
     return reminders

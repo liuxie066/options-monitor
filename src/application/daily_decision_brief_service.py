@@ -66,13 +66,8 @@ from src.application.wheel.candidate_snapshot import (
     validate_wheel_candidate_snapshot,
 )
 from src.application.candidate_snapshot_manifest import (
-    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
-)
-from src.application.strategy_scan_status import (
-    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
 )
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
@@ -217,13 +212,13 @@ def assemble_daily_decision_brief(
             (
                 {
                     "kind": "candidate_snapshot_manifest",
-                    "path": f"state/{CANDIDATE_SNAPSHOT_MANIFEST_FILE}",
+                    "path": f"state/{manifest['schema_version']}.json",
                     "row_count": len(manifest.get("owner_snapshots") or []),
                     "content_sha256": manifest.get("content_sha256"),
                 },
                 {
                     "kind": "strategy_scan_status_index",
-                    "path": STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+                    "path": manifest["status_index"]["relpath"],
                     "row_count": len(strategy_status_index.get("items") or []),
                     "content_sha256": strategy_status_index.get("content_sha256"),
                 },
@@ -1202,6 +1197,7 @@ def _load_wheel_snapshot_family(
             "reason_codes": list(batch.get("reason_codes") or []),
             "recommended_contracts": int(batch.get("granted_contracts") or 0) if price_available else 0,
             "coverage": dict(batch.get("coverage") or {}),
+            "active_option_contracts": list(batch.get("active_option_contracts") or []),
             **{key: (final or {}).get(key) for key in ("sell_limit", "price_tick", "bid", "ask",
                 "quote_update_time", "quote_observed_at_utc", "multiplier", "fee_basis", "granted_contracts")},
             "expiration": _text(
@@ -2704,11 +2700,11 @@ def _append_strategy_status_gaps(
     market: str,
     data_gaps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    # The candidate bundle owner has already validated schema, hashes and scope.
     if not index:
         return []
     if (
-        index.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA
-        or _text(index.get("run_id")) != run_id
+        _text(index.get("run_id")) != run_id
         or _text(index.get("account")).lower() != account
         or not isinstance(index.get("items"), list)
     ):

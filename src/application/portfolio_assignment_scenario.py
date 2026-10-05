@@ -785,7 +785,7 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         "",
         "## 仅富途期权资金覆盖（跨账户、币种 CNY 经济汇总）",
         "",
-        *( ["- 资金能力汇率：不可用；假期沿用价仅用于估值"] if cash.get("fx_status") == "unavailable" else [] ),
+        *( ["- 资金能力汇率：不可用"] if cash.get("fx_status") == "unavailable" else [] ),
         f"- 现金 + MMF：{cash.get('available_cash_and_mmf_cny') or '-'}",
         f"- 富途 CSP 指派需求：{cash.get('gross_put_requirement_cny') or '-'}",
         f"- CC 回款：{cash.get('call_assignment_inflow_cny') or '-'}",

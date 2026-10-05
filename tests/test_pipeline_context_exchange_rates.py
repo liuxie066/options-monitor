@@ -263,13 +263,14 @@ def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
 
 @pytest.mark.parametrize(
     ("secured", "expected_cny"),
-    [({"USD": 1000}, None), ({"CNY": 1000}, 1000.0)],
+    [({"USD": 1000}, 7200.0), ({"CNY": 1000}, 1000.0)],
 )
-def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path, secured, expected_cny) -> None:
+@pytest.mark.parametrize("reopened", [False, True])
+def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path, secured, expected_cny, reopened) -> None:
     from src.application import pipeline_context as ctx
     from src.infrastructure import exchange_rates as fx
 
-    now = datetime.fromisoformat("2026-10-02T01:43:00+00:00")
+    now = datetime.fromisoformat("2026-10-08T01:43:00+00:00" if reopened else "2026-10-02T01:43:00+00:00")
     monkeypatch.setattr(fx, "_utc_now", lambda: now)
     snapshot = {
         "schema_version": 2,
@@ -289,7 +290,7 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
         "prepared_authority": {"fx_status": "ready", "run_fx_snapshot_sha256": "f" * 64},
         "exchange_rates": old_fx,
         "cash_secured_total_by_ccy": secured,
-        "cash_secured_total_cny": 1000.0,
+        "cash_secured_total_cny": expected_cny,
     }
     monkeypatch.setattr(ctx, "load_prepared_portfolio_context", lambda **_kwargs: portfolio)
     monkeypatch.setattr(ctx, "load_prepared_option_positions_context", lambda **_kwargs: option)
@@ -308,7 +309,13 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
         prepared_option_positions_context_account_config_sha256="a" * 64,
     )
 
-    assert current_option["exchange_rates"]["rates"] == {}
-    assert current_option["cash_secured_total_cny"] == expected_cny
-    assert current_portfolio["exchange_rate_status"] == "unavailable_stale"
-    assert (usd, hkd) == (None, None)
+    if reopened:
+        assert current_option["exchange_rates"]["rates"] == {}
+        assert current_option["cash_secured_total_cny"] == (1000.0 if "CNY" in secured else None)
+        assert current_portfolio["exchange_rate_status"] == "unavailable_stale"
+        assert (usd, hkd) == (None, None)
+    else:
+        assert current_option["exchange_rates"]["rates"] == {"USDCNY": 7.2, "HKDCNY": 0.92}
+        assert current_option["cash_secured_total_cny"] == expected_cny
+        assert current_portfolio["exchange_rate_status"] == "ready"
+        assert (usd, hkd) == (1 / 7.2, 0.92)

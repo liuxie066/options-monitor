@@ -588,12 +588,28 @@ def test_wheel_v4_index_publishes_and_loads_manifest_v3(
     loaded = _load_v3(tmp_path)
     assert loaded["manifest"] == manifest
 
+    from datetime import datetime, timezone
+    from src.application.daily_decision_brief_service import assemble_daily_decision_brief
+    def brief():
+        return assemble_daily_decision_brief(base=tmp_path, run_id="run-1", account="lx", market="US",
+            scheduler_decision={"in_run_window": True}, account_result={"ran_scan": True},
+            pipeline_succeeded=True, config={"market": "us", "accounts": ["lx"]},
+            now_utc=datetime(2026, 8, 12, 1, tzinfo=timezone.utc))
+    result = brief()
+    assert not any(row.get("reason") == "strategy_scan_status_index_invalid" for row in result["data_gaps"])
+    sources = {row["kind"]: row["path"] for row in result["source_artifacts"]}
+    assert sources["strategy_scan_status_index"] == "strategy_scan_status_index.v4.json"
+    assert sources["candidate_snapshot_manifest"] == "state/candidate_snapshot_manifest.v3.json"
+
     (account_dir / "nvda_wheel_put_scan_status.v2.json").write_text(
         "{}\n",
         encoding="utf-8",
     )
     with pytest.raises(CandidateSnapshotManifestError, match="status hash mismatch"):
         load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
+    invalid = brief()
+    assert not any(row["kind"] == "strategy_scan_status_index" for row in invalid["source_artifacts"])
+    assert invalid["data_gaps"]
 
 
 def test_manifest_v3_rejects_legacy_wheel_snapshot(

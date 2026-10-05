@@ -153,11 +153,13 @@ def exchange_rate_observation_status(
     pairs = _verified_pairs(payload, now=now)
     if any(pair not in pairs for pair in _REQUIRED_RATES):
         return "unavailable"
-    return "ready" if all(
-        _pair_quality(pairs[pair], now=now)[0] == "fresh"
-        and now - _strict_timestamp(pairs[pair]["quote_at_utc"]) <= timedelta(hours=max_age_hours)
-        for pair in _REQUIRED_RATES
-    ) else "unavailable_stale"
+    for pair in _REQUIRED_RATES:
+        quality, _ = _pair_quality(pairs[pair], now=now)
+        if quality == "holiday_carried":
+            continue
+        if quality != "fresh" or now - _strict_timestamp(pairs[pair]["quote_at_utc"]) > timedelta(hours=max_age_hours):
+            return "unavailable_stale"
+    return "ready"
 
 
 def _read_cache(path: Path) -> dict | None:
@@ -470,7 +472,7 @@ def current_exchange_rate_snapshot(
         pairs[pair] = {
             **(row or {}), "quality": quality, "reason": reason,
             "display_eligible": quality in {"fresh", "holiday_carried"},
-            "capacity_eligible": quality == "fresh",
+            "capacity_eligible": quality in {"fresh", "holiday_carried"},
         }
     return {
         "schema_version": 2,
@@ -484,10 +486,12 @@ def current_exchange_rate_snapshot(
     }
 
 
-def _legacy_projection(snapshot: Mapping[str, Any], *, purpose: str | None = "capacity") -> dict[str, Any]:
+def _legacy_projection(
+    snapshot: Mapping[str, Any], *, purpose: str | None = "capacity", now: datetime | None = None,
+) -> dict[str, Any]:
     pairs = snapshot.get("pairs") or {}
     rates = (
-        rates_for_purpose(snapshot, purpose=purpose)
+        rates_for_purpose(snapshot, purpose=purpose, now=now)
         if purpose is not None else {pair: row["rate"] for pair, row in pairs.items()}
     )
     sources = {row.get("source") for row in pairs.values() if isinstance(row, Mapping) and row.get("source")}
@@ -523,7 +527,7 @@ def rates_for_purpose(
     for pair in _REQUIRED_RATES:
         row = _verified_pair(pairs.get(pair), now=evaluated)
         quality, _ = _pair_quality(row, now=evaluated)
-        if row is not None and (quality == "fresh" or purpose == "display" and quality == "holiday_carried"):
+        if row is not None and quality in {"fresh", "holiday_carried"}:
             out[pair] = row["rate"]
     return out
 
@@ -543,9 +547,9 @@ def project_exchange_rate_snapshot(
         pairs[pair] = {
             **(row or {}), "quality": quality, "reason": reason,
             "display_eligible": quality in {"fresh", "holiday_carried"},
-            "capacity_eligible": quality == "fresh",
+            "capacity_eligible": quality in {"fresh", "holiday_carried"},
         }
-    projection = _legacy_projection({"pairs": pairs}, purpose=purpose)
+    projection = _legacy_projection({"pairs": pairs}, purpose=purpose, now=evaluated)
     projection["evaluated_at_utc"] = evaluated.isoformat()
     projection["calendar"] = snapshot.get("calendar")
     return projection

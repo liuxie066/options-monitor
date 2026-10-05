@@ -129,7 +129,7 @@ def _snapshot():
     }
 
 
-def test_holiday_fx_values_distribution_without_authorizing_cash_coverage():
+def test_missing_capacity_fx_withholds_coverage_despite_valuation():
     evidence = _evidence(
         holdings=[_holding("HKD-CASH", "港币现金", "cash", quantity=100, market_value_cny=92, currency="HKD")],
         quotes=[_quote("0700.HK")],

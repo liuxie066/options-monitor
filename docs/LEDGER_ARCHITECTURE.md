@@ -838,6 +838,8 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 身份相悖、重复 lot 或跨账户证明均拒绝。指派股票是另一种对象，继续使用
 `domain/domain/assigned_stock.py` 的 `assigned_stock_lot_id_for_event`。
 
+历史 `wheel_call_linkage_confirmed.v1` 确认由归属事实读取边界识别：必须保留操作者、旧请求 ID、输入与分支 hash、精确开仓及 lot 身份，合约、币种、乘数和当前关系一致，且未被后续策略调整覆盖或 void。有效旧确认按人工选择读取，不补写账本。人工 Wheel 选择不因出现其他普通股票分支候选而失效；明确 intent、Combo 竞争证据、已记录的冲突和实际容量冲突仍按共同裁决规则处理。仅有历史关联而无确认凭证时继续视为继承关系。
+
 `src/application/trades/attribution.py` 的 `apply_trade_attribution` 接受单个决定或完整
 `member_decisions`，以及显式 `conflict_event_ids`。选中冲突涉及的成交、原 Combo 完整成员和
 目标 Combo 完整成员必须全部明确决定。先绑定真实输入 hash 和分支 generation，再在内存中
