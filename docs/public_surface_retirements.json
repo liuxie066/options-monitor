@@ -245,6 +245,11 @@
       "module": "src/interfaces/cli/symbols.py",
       "name": "load_json",
       "reason": "The runtime JSON symbol reader was retired; human symbol listing now reads config.yaml and resolves effective settings."
+    },
+    {
+      "module": "src/application/runtime_portfolio_snapshot.py",
+      "name": "compare_runtime_portfolio_snapshot",
+      "reason": "The five-section comparison used compact snapshot facts on both sides and could not establish independent legacy equality. New v2 artifacts retain only the sourced ledger_shadow status; historical v1 artifacts remain read-only."
     }
   ]
 }

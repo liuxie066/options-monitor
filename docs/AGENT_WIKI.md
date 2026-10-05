@@ -363,10 +363,12 @@ Important runtime paths:
 | Current pointers | `output_shared/state/current/` |
 | Per-account output | `output_accounts/<account>/` |
 | Run snapshots | `output_runs/<run_id>/` |
-| Compact runtime shadow | `output_runs/<run_id>/accounts/<account>/state/runtime_portfolio_snapshot.v1.json` |
+| Compact runtime shadow | `output_runs/<run_id>/accounts/<account>/state/runtime_portfolio_snapshot.v2.json`（旧 v1 产物仍可只读校验） |
 | Default reports | `output_shared/reports/` |
 | OpenD cache | `cache/opend_option_chain/`, `cache/opend_option_expirations/` |
 | Audit logs | `audit/run_logs/` |
+
+Compact runtime shadow 的 `ledger_shadow` 只记录当前决策 shadow 的状态；v2 不提供新旧五节对比结论。不可用的 current decision read 会让 ledger 和 cash occupation 明确标为不可用，并保留读取原因。历史 v1 的 `legacy_comparison` 五节相等结果来自自比，不能作为独立一致性证据。
 
 For runtime questions, prefer `runtime_status` because it already knows how to summarize these paths and distinguish latest run from latest scanned run.
 
