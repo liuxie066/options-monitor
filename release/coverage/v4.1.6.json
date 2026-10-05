@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.1.6",
+  "base": {
+    "tag": "v4.1.5",
+    "commit": "8a0425e3386bf69ce1c70961a243f7ecb34495a0"
+  },
+  "reviewed_head": "5afc69b5a6a8f7ed4c9f946a169d42c40a29995d",
+  "commits": [
+    {
+      "sha": "a6477aa4e91b701bd9c78d5a226a7986775a3c70",
+      "subject": "fix(brief): simplify decision brief copy"
+    },
+    {
+      "sha": "5afc69b5a6a8f7ed4c9f946a169d42c40a29995d",
+      "subject": "Merge pull request #452 from liuxie066/codex/brief-concise-copy"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "决策简报恢复简约资金汇总，不再提示正常假期汇率或重复展开原币明细；精简 Wheel 覆盖、归属待办、持仓和同一时刻的双时区文案，保留预留数量、待确认及异常信息。",
+      "commits": [
+        "a6477aa4e91b701bd9c78d5a226a7986775a3c70",
+        "5afc69b5a6a8f7ed4c9f946a169d42c40a29995d"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "a6477aa4e91b701bd9c78d5a226a7986775a3c70",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/452",
+        "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md",
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    },
+    {
+      "commit": "5afc69b5a6a8f7ed4c9f946a169d42c40a29995d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/452",
+        "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md",
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    }
+  ]
+}
