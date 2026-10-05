@@ -10,8 +10,10 @@ from typing import Any
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.account_config import normalize_account_label
 from src.application.candidate_snapshot_manifest import (
-    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
-    CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
     CandidateSnapshotManifestError,
     validate_candidate_snapshot_manifest,
 )
@@ -48,9 +50,19 @@ from src.application.required_data_snapshot import (
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
-    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
+    STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA,
+    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
     StrategyScanStatusError,
     validate_strategy_scan_status_index_v2,
+    validate_strategy_scan_status_index_v3,
+    validate_strategy_scan_status_index_v4,
+)
+from src.application.wheel.candidate_snapshot import (
+    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
+    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+    WheelCandidateSnapshotError,
+    validate_wheel_candidate_snapshot,
 )
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
@@ -86,18 +98,24 @@ _OWNER_BINDING_ROLES = {
 }
 _ROLE_RELPATHS = {
     "account_config": f"state/{ACCOUNT_RUN_CONFIG_NAME}",
-    "candidate_snapshot_manifest": f"state/{CANDIDATE_SNAPSHOT_MANIFEST_FILE}",
     "prepared_option_positions_context": (f"state/{PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"),
     "prepared_portfolio_context": "state/prepared_portfolio_context.v1.json",
     "required_data_snapshot": "state/required_data_snapshot_manifest.json",
 }
 _ROLE_SCHEMAS = {
     "account_config": "account_config.v1",
-    "candidate_snapshot_manifest": CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
     "prepared_option_positions_context": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
     "prepared_portfolio_context": PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
     "required_data_snapshot": REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
 }
+
+
+def _candidate_manifest_binding(schema_version: str) -> tuple[str, str]:
+    if schema_version == CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA:
+        return schema_version, f"state/{CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE}"
+    if schema_version == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA:
+        return schema_version, f"state/{CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE}"
+    _fail("REFERENCE_SCHEMA_INVALID", "candidate manifest schema is unsupported")
 
 
 def _prepared_option_binding(schema_version: str) -> tuple[str, str]:
@@ -407,6 +425,10 @@ def assemble_runtime_portfolio_snapshot(
             "prepared option decision fingerprint mismatch",
         )
 
+    candidate_schema, candidate_relpath = _candidate_manifest_binding(
+        str(candidate_manifest.get("schema_version") or "")
+    )
+
     bindings = [
         {
             "role": "account_config",
@@ -417,8 +439,8 @@ def assemble_runtime_portfolio_snapshot(
         },
         {
             "role": "candidate_snapshot_manifest",
-            "schema_version": CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
-            "relpath": _ROLE_RELPATHS["candidate_snapshot_manifest"],
+            "schema_version": candidate_schema,
+            "relpath": candidate_relpath,
             "sha256": sha256_bytes(candidate_manifest_bytes),
             "content_sha256": candidate_manifest.get("content_sha256"),
         },
@@ -458,7 +480,7 @@ def assemble_runtime_portfolio_snapshot(
     read_trusted = current_read.get("status") == "trusted"
     reference_payloads = {
         _ROLE_RELPATHS["account_config"]: account_config_bytes,
-        _ROLE_RELPATHS["candidate_snapshot_manifest"]: candidate_manifest_bytes,
+        candidate_relpath: candidate_manifest_bytes,
         option_relpath: prepared_option_manifest_bytes,
         _ROLE_RELPATHS["prepared_portfolio_context"]: prepared_portfolio_manifest_bytes,
         _ROLE_RELPATHS["required_data_snapshot"]: required_data_manifest_bytes,
@@ -1120,6 +1142,11 @@ def validate_replay_bundle(
             if binding["relpath"] != expected_relpath:
                 _fail("REFERENCE_PATH_INVALID", f"{role} reference path mismatch")
             continue
+        if role == "candidate_snapshot_manifest":
+            _, expected_relpath = _candidate_manifest_binding(binding["schema_version"])
+            if binding["relpath"] != expected_relpath:
+                _fail("REFERENCE_PATH_INVALID", f"{role} reference path mismatch")
+            continue
         if binding["schema_version"] != _ROLE_SCHEMAS[role]:
             _fail("REFERENCE_SCHEMA_INVALID", f"{role} reference schema mismatch")
         if binding["relpath"] != _ROLE_RELPATHS[role]:
@@ -1354,7 +1381,7 @@ def _validate_source_bindings(
         _fail("SOURCE_BINDING_INVALID", "candidate terminal status mismatch")
     _require_owner_receipt(
         owners["candidate_results"],
-        owner_schema_version=CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
+        owner_schema_version=by_role["candidate_snapshot_manifest"]["schema_version"],
         owner_status=candidate_status,
         reason_codes=[],
         observed=candidate_time,
@@ -1681,6 +1708,8 @@ def _validate_candidate_reference(
     expected_account_config_sha256: str,
     expected_required_data_sha256: str,
 ) -> None:
+    if payload.get("schema_version") != binding["schema_version"]:
+        _fail("REFERENCE_SCHEMA_INVALID", "candidate manifest binding schema mismatch")
     try:
         validate_candidate_snapshot_manifest(
             payload,
@@ -1709,8 +1738,17 @@ def _validate_candidate_reference(
     if projection != chosen:
         _fail("CHOSEN_RESULTS_INVALID", "chosen results differ from candidate manifest")
     status_payload = _json_object(supplied[chosen["status_index"]["relpath"]], "strategy status index")
+    status_validators = {
+        STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA: validate_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA: validate_strategy_scan_status_index_v3,
+        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA: validate_strategy_scan_status_index_v4,
+    }
+    status_schema = chosen["status_index"]["schema_version"]
+    status_validator = status_validators.get(status_schema)
+    if status_validator is None or status_payload.get("schema_version") != status_schema:
+        _fail("REFERENCE_SCHEMA_INVALID", "strategy status index schema mismatch")
     try:
-        validate_strategy_scan_status_index_v2(
+        status_validator(
             status_payload,
             expected_run_id=expected_run_id,
             expected_account=expected_account,
@@ -1724,7 +1762,13 @@ def _validate_candidate_reference(
     if status_payload.get("content_sha256") != chosen["status_index"]["content_sha256"]:
         _fail("REFERENCE_HASH_INVALID", "strategy status index content hash mismatch")
     status_scopes = _scopes(
-        [{key: row.get(key) for key in _SCOPE_KEYS} for row in status_payload.get("items", [])],
+        [
+            {
+                **{key: row.get(key) for key in _SCOPE_KEYS},
+                **({"direction": row["direction"]} if row.get("direction") else {}),
+            }
+            for row in status_payload.get("items", [])
+        ],
         "strategy status index scopes",
     )
     if status_scopes != chosen["expected_scopes"]:
@@ -1734,6 +1778,7 @@ def _validate_candidate_reference(
             scope["candidate_owner"],
             scope["symbol"],
             scope["strategy_mode"],
+            scope.get("direction", ""),
         ): row.get("status")
         for scope, row in zip(status_scopes, status_payload["items"], strict=True)
     }
@@ -1782,12 +1827,24 @@ def _validate_candidate_reference(
                     expected_run_id=expected_run_id,
                     expected_account=expected_account,
                 )
+            elif reference["candidate_owner"] == "wheel":
+                if reference["schema_version"] not in {
+                    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
+                    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+                }:
+                    raise WheelCandidateSnapshotError("wheel schema mismatch")
+                validate_wheel_candidate_snapshot(
+                    owner_payload,
+                    expected_run_id=expected_run_id,
+                    expected_account=expected_account,
+                )
             else:
                 _fail("REFERENCE_PAYLOAD_INVALID", "unsupported candidate owner")
         except (
             OpeningCandidateSnapshotError,
             ComboYieldCandidateSnapshotError,
             CcLpCandidateSnapshotError,
+            WheelCandidateSnapshotError,
         ) as exc:
             raise RuntimePortfolioSnapshotError(
                 "RUNTIME_PORTFOLIO_SNAPSHOT_REFERENCE_PAYLOAD_INVALID",
@@ -1800,11 +1857,15 @@ def _validate_candidate_reference(
             for row in owner_payload.get("scope_results", [])
             if isinstance(row, Mapping) and row.get("scope") == "strategy"
         ]
-        expected_by_key = {(row["symbol"], row["strategy_mode"]): row for row in expected_scopes}
+        expected_by_key = {
+            (row["symbol"], row["strategy_mode"], row.get("direction", "")): row
+            for row in expected_scopes
+        }
         actual_by_key = {
             (
                 str(row.get("symbol") or "").strip().upper(),
                 str(row.get("strategy_mode") or "").strip().lower(),
+                str(row.get("direction") or "").strip().lower(),
             ): row
             for row in owner_scope_rows
         }
@@ -1957,18 +2018,32 @@ def _scopes(value: Any, path: str) -> list[dict[str, str]]:
         _fail("CHOSEN_RESULTS_INVALID", f"{path} must be a sequence")
     scopes = []
     for index, raw in enumerate(value):
-        row = _mapping(raw, f"{path}[{index}]", _SCOPE_KEYS)
-        scopes.append(
-            {
-                "market": _text(row.get("market"), "scope market").upper(),
-                "symbol": _text(row.get("symbol"), "scope symbol").upper(),
-                "strategy_family": _text(row.get("strategy_family"), "scope strategy_family").lower(),
-                "strategy_mode": _text(row.get("strategy_mode"), "scope strategy_mode").lower(),
-                "candidate_owner": _text(row.get("candidate_owner"), "scope candidate_owner").lower(),
-            }
-        )
-    ordered = sorted(scopes, key=lambda item: (item["market"], item["symbol"], item["strategy_family"]))
-    identities = {tuple(item[key] for key in sorted(_SCOPE_KEYS)) for item in ordered}
+        row = _mapping(raw, f"{path}[{index}]")
+        if set(row) != _SCOPE_KEYS and set(row) != _SCOPE_KEYS | {"direction"}:
+            _fail("CHOSEN_RESULTS_INVALID", f"{path}[{index}] fields do not match schema")
+        scope = {
+            "market": _text(row.get("market"), "scope market").upper(),
+            "symbol": _text(row.get("symbol"), "scope symbol").upper(),
+            "strategy_family": _text(row.get("strategy_family"), "scope strategy_family").lower(),
+            "strategy_mode": _text(row.get("strategy_mode"), "scope strategy_mode").lower(),
+            "candidate_owner": _text(row.get("candidate_owner"), "scope candidate_owner").lower(),
+        }
+        if "direction" in row:
+            direction = _text(row["direction"], "scope direction").lower()
+            if scope["strategy_family"] != "wheel" or direction not in {"call", "put"}:
+                _fail("CHOSEN_RESULTS_INVALID", "scope direction is invalid")
+            scope["direction"] = direction
+        scopes.append(scope)
+    ordered = sorted(
+        scopes,
+        key=lambda item: (
+            item["market"], item["symbol"], item["strategy_family"], item.get("direction", ""),
+        ),
+    )
+    identities = {
+        tuple(item[key] for key in sorted(_SCOPE_KEYS)) + (item.get("direction", ""),)
+        for item in ordered
+    }
     if scopes != ordered or len(identities) != len(ordered):
         _fail("CHOSEN_RESULTS_INVALID", f"{path} is not canonical")
     return ordered

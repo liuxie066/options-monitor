@@ -1665,9 +1665,18 @@ def test_config_drift_isolated_to_one_account_before_shared_prefetch(
     assert outcome.ran_pipeline_accounts == ["sy"]
 
 
+@pytest.mark.parametrize(
+    ("manifest_schema", "manifest_name"),
+    [
+        ("candidate_snapshot_manifest.v1", "candidate_snapshot_manifest.v1.json"),
+        ("candidate_snapshot_manifest.v3", "candidate_snapshot_manifest.v3.json"),
+    ],
+)
 def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
     monkeypatch,
     tmp_path: Path,
+    manifest_schema: str,
+    manifest_name: str,
 ) -> None:
     from src.application import tick_account_execution as mod
 
@@ -1696,6 +1705,7 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
         status_path.write_bytes(f"status:{account}".encode())
         return {
             "manifest": {
+                "schema_version": manifest_schema,
                 "status_index": {"relpath": "status.json"},
                 "owner_snapshots": [
                     {
@@ -1790,6 +1800,10 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
     assert [call["account_config_bytes"] for call in assembly_calls] == [
         b"config:lx",
         b"config:sy",
+    ]
+    assert [call["candidate_manifest_bytes"] for call in assembly_calls] == [
+        f"{manifest_name}:lx".encode(),
+        f"{manifest_name}:sy".encode(),
     ]
     assert not any(forbidden_reads.values())
     assert vars(legacy) == legacy_before
