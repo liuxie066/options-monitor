@@ -346,19 +346,23 @@ def test_explicit_mapping_rejects_raw_invalid_event_and_lot_multipliers(tmp_path
 
 
 @pytest.mark.parametrize("apply_changes", [False, True])
-def test_empty_selection_validates_hash_without_requiring_sqlite(apply_changes):
+def test_empty_selection_validates_hash_and_rejects_apply_without_sqlite(apply_changes):
     manifest = {"schema_version": "lifecycle_cutover_manifest.v1", "rows": []}
     _rehash(manifest)
-    result = apply_lifecycle_migration_manifest(None, manifest=manifest, apply_changes=apply_changes)
-    assert result == {
-        "schema_version": "lifecycle_migration_apply_result.v1",
-        "status": "applied" if apply_changes else "dry_run",
-        "manifest_hash": manifest["manifest_hash"],
-        "selected_count": 0,
-        "applied_count": 0,
-        "existing_count": 0,
-        **({"results": []} if apply_changes else {"would_apply_target_keys": []}),
-    }
+    if apply_changes:
+        with pytest.raises(ValueError, match="no selected rows"):
+            apply_lifecycle_migration_manifest(None, manifest=manifest, apply_changes=True)
+    else:
+        result = apply_lifecycle_migration_manifest(None, manifest=manifest, apply_changes=False)
+        assert result == {
+            "schema_version": "lifecycle_migration_apply_result.v1",
+            "status": "dry_run",
+            "manifest_hash": manifest["manifest_hash"],
+            "selected_count": 0,
+            "applied_count": 0,
+            "existing_count": 0,
+            "would_apply_target_keys": [],
+        }
     manifest["manifest_hash"] = "invalid"
     with pytest.raises(ValueError, match="manifest hash mismatch"):
         apply_lifecycle_migration_manifest(None, manifest=manifest, apply_changes=apply_changes)

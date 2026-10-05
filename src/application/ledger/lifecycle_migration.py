@@ -2099,6 +2099,8 @@ def apply_lifecycle_migration_manifest(
     if any(not key for key in target_keys) or len(set(target_keys)) != len(target_keys):
         raise ValueError("lifecycle migration targets are empty or duplicated")
     selected.sort(key=lambda item: str(item["target_key"]))
+    if apply_changes and not selected:
+        raise ValueError("lifecycle migration manifest has no selected rows")
 
     def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
         prepared = (
