@@ -174,11 +174,9 @@ def build_lifecycle_datasets(
             if isinstance(timing_policies.get(case_id), dict)
             else {}
         )
-        deadline_ms = (
-            read_model.get("pending_until_ms")
-            if read_model.get("pending_until_ms") is not None
-            else timing_policy.get("settlement_deadline_ms")
-        )
+        deadline_ms = timing_policy.get("settlement_deadline_ms")
+        if deadline_ms is None and read_model.get("timing_policy_hash"):
+            deadline_ms = read_model.get("pending_until_ms")
         try:
             deadline = (
                 datetime.fromtimestamp(
@@ -581,7 +579,11 @@ def _legacy_operational_detail(
     expected_by = str(
         ((dataset.get("freshness") or {}).get("expected_by_utc") or "")
     ).strip()
-    deadline_ms = model.get("pending_until_ms")
+    deadline_ms = (
+        model.get("pending_until_ms")
+        if model.get("timing_policy_hash")
+        else None
+    )
     if deadline_ms is None and expected_by:
         parsed = _parse_utc(expected_by)
         deadline_ms = int(parsed.timestamp() * 1000) if parsed else None

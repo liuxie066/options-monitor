@@ -28,6 +28,13 @@ from src.application.ledger import (
     manual_trades,
     writer,
 )
+from src.application.ledger.current_decision_common import (
+    _fact_hash,
+    _lifecycle_case_current_generation_token,
+)
+from src.application.ledger.current_decision_quality import (
+    derive_lifecycle_case_current_view,
+)
 from src.application.ledger.current_decision_projection import (
     CurrentDecisionProjectionError,
     advance_assigned_stock_fact_for_trade_events,
@@ -441,6 +448,7 @@ def _case_fact(
     status: str = "pending",
     legacy_evidence_gap: bool = False,
     decision_type: str | None = None,
+    timing_policy_hash: str | None = "2" * 64,
 ) -> dict[str, object]:
     return build_lifecycle_case_decision_fact(
         lifecycle_case={
@@ -482,7 +490,7 @@ def _case_fact(
             "resolved_contracts_by_terminal_type": {},
             "observation_start_ms": 1_000,
             "pending_until_ms": 2_000,
-            "timing_policy_hash": "2" * 64,
+            "timing_policy_hash": timing_policy_hash,
         },
         evidence_revision=0,
         evidence_count=0,
@@ -1217,8 +1225,19 @@ def test_discovery_and_timing_bind_publish_one_compact_case_fact(
         )
     assert discovered_fact is not None
     assert discovered_fact["resolution"]["status"] == "missing"
-    trusted = _trusted(repo, 1_800_000_000_000)
-    assert trusted["status"] == "trusted"
+    review_until_ms = discovered_fact["timing"]["pending_until_ms"]
+    assert isinstance(review_until_ms, int)
+    assert discovered_fact["timing"]["settlement_deadline_ms"] is None
+    assert discovered_fact["timing"]["timing_policy_hash"] is None
+    for now_ms in (review_until_ms - 1, review_until_ms + 1):
+        trusted = _trusted(repo, now_ms)
+        assert trusted["status"] == "trusted"
+        quality = trusted["lifecycle_quality"]["operational_cases"][0]
+        assert quality["settlement_deadline_ms"] is None
+        assert quality["dataset_status"] == "unavailable"
+    assert "lifecycle_timing_policy_unavailable" in trusted["lifecycle_by_case"][case_id][
+        "lifecycle_reason_codes"
+    ]
 
     bound = _bind_test_timing(repo, lifecycle_case)
     assert bound["created"] is True
@@ -1236,6 +1255,13 @@ def test_discovery_and_timing_bind_publish_one_compact_case_fact(
     assert timed_fact["timing"]["timing_policy_hash"] == canonical_payload_hash(
         bound["policy"]
     )
+    deadline_ms = bound["policy"]["settlement_deadline_ms"]
+    assert _trusted(repo, deadline_ms - 1)["lifecycle_quality"]["operational_cases"][0][
+        "dataset_status"
+    ] == "partial"
+    assert _trusted(repo, deadline_ms + 1)["lifecycle_quality"]["operational_cases"][0][
+        "dataset_status"
+    ] == "untrusted"
     trusted = _trusted(repo, 1_800_000_000_000)
     oracle = _oracle(repo, 1_800_000_000_000)
     assert trusted["payload"]["lifecycle"]["operational_cases"] == oracle[
@@ -1247,6 +1273,38 @@ def test_discovery_and_timing_bind_publish_one_compact_case_fact(
     assert repeated["existing"] is True
     assert repeated["decision_projection"] is None
     assert repo.read_current_decision_storage_state("lx") == before
+
+
+
+def test_legacy_no_policy_quality_deadline_is_ignored_on_read() -> None:
+    fact = _case_fact(timing_policy_hash=None)
+    assert fact["timing"]["settlement_deadline_ms"] is None
+    quality = build_lifecycle_quality_fact(
+        account="lx", all_case_facts=[fact], operational_case_facts=[fact],
+    )
+    quality["operational_cases"][0]["settlement_deadline_ms"] = 2_000
+    quality["detail_fingerprint"] = canonical_sha256(quality["operational_cases"])
+
+    current = derive_lifecycle_quality_view(quality, now_ms=2_500)
+    detail = current["operational_cases"][0]
+    assert detail["settlement_deadline_ms"] is None
+    assert detail["dataset_status"] == "unavailable"
+
+    legacy_fact = deepcopy(fact)
+    legacy_fact["timing"]["settlement_deadline_ms"] = 2_000
+    legacy_fact["generation"]["generation_token"] = (
+        _lifecycle_case_current_generation_token(legacy_fact)
+    )
+    legacy_fact["fact_sha256"] = _fact_hash(legacy_fact)
+    validate_lifecycle_case_decision_fact(legacy_fact)
+    review_at_ms = 1_000 + 72 * 60 * 60 * 1_000
+    view = derive_lifecycle_case_current_view(
+        legacy_fact,
+        current_position_lots=[{"record_id": "lot-lx", "fields": {"contracts_open": 1}}],
+        now_ms=review_at_ms,
+    )
+    assert view["pending_until_ms"] == review_at_ms
+    assert view["lifecycle_reason_codes"] == ["lifecycle_timing_policy_unavailable"]
 
 
 def test_zero_price_close_publishes_direct_anchor_once(

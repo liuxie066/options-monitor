@@ -363,7 +363,11 @@ def derive_lifecycle_read_model(
     if current_ms >= pending_until:
         return _read_model(
             state="needs_review",
-            reasons=("settlement_evidence_deadline_elapsed",),
+            reasons=(
+                ("settlement_evidence_deadline_elapsed",)
+                if pending_until_ms_override is not None
+                else ("lifecycle_timing_policy_unavailable",)
+            ),
             observation_start=observation_start,
             pending_until=pending_until,
             resolution=resolution,
