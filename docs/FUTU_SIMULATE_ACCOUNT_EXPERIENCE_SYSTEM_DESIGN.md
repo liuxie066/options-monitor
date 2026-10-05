@@ -50,7 +50,7 @@ run tick --experience --no-send
 | CSP 和 CC 已有各自容量 owner | `src/application/sell_put_cash.py`、`src/application/scan_sell_call.py` | 演示容量只进入这些逐候选、逐合约入口 |
 | Combo 已复用 CSP / CC 容量并自行计算组合经济指标 | `src/application/combo_yield_steps.py`、`src/application/cc_lp_steps.py` | 只替换容量输入，不复制 Combo 公式或报价规则 |
 | 开仓快照当前要求 physical account 与五类依赖 | `src/application/opening_candidate_snapshot.py`、`src/application/candidate_snapshot_contract.py` | 体验快照需有明确的非 physical 合同，不能伪造依赖 |
-| pipeline runtime 会生成 alert、notification compatibility bundle，并可能追加 cash footer | `src/application/pipeline_runtime.py` | `--no-send` 不等于这些内部步骤零调用，体验模式必须显式跳过 |
+| 普通 pipeline runtime 不再生成 alert、notification compatibility bundle 或 cash footer；显式 `--stage-only alert|notify` 仍保留手工兼容入口 | `src/application/pipeline_runtime.py`、`src/application/pipeline_alert_steps.py` | 体验模式不得调用手工兼容入口；`--no-send` 仍不能代替该零调用边界 |
 | 候选由 run-scoped manifest 提交并被只读工具和 Research 归档共同消费 | `src/application/candidate_snapshot_manifest.py`、`src/application/candidate_evidence_history.py`、`src/application/research/` | 体验结果可供本地解释，但不得贡献正式候选 evidence |
 
 现有美股开盘前 option-chain warmup 只服务 scheduled trigger。体验模式仅允许手动入口，因此不进入
