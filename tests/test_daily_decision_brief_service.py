@@ -1285,9 +1285,13 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path, mo
     assert funds["fx_pairs"]["USDCNY"]["quality"] == "holiday_carried"
     assert funds["fx_snapshot_sha256"] == "a" * 64
     rendered = render_fixed_report(brief)
-    assert rendered.index("现金总额（折CNY）") < rendered.index("现金总额｜HK$")
-    assert "汇率｜假期沿用" in rendered
-    assert "可用于期权开仓｜-$8,500.00" in rendered
+    assert "现金总额（折CNY）" in rendered
+    assert "现金总额｜HK$" not in rendered
+    assert "汇率｜" not in rendered
+    assert "假期沿用" not in rendered
+    assert "可用于期权开仓｜-$8,500.00" not in rendered
+    assert "tencent_quote" not in rendered
+    assert "2026-09-30T07:00:00+00:00" not in rendered
 
 
 def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
