@@ -250,6 +250,41 @@
       "module": "src/application/runtime_portfolio_snapshot.py",
       "name": "compare_runtime_portfolio_snapshot",
       "reason": "The five-section comparison used compact snapshot facts on both sides and could not establish independent legacy equality. New v2 artifacts retain only the sourced ledger_shadow status; historical v1 artifacts remain read-only."
+    },
+    {
+      "module": "src/application/candidate_snapshot_manifest.py",
+      "name": "load_candidate_snapshot_bundle_readonly",
+      "reason": "The broad readonly loader was retired because current runtime reads now require the v4 manifest and retired bundles are available only through the explicit candidate_evidence_history inspection and replay boundary."
+    },
+    {
+      "module": "src/application/candidate_snapshot_manifest.py",
+      "name": "load_candidate_snapshot_bundle_v3",
+      "reason": "Manifest v3 is retired from current candidate reads; sealed v3 evidence remains readable only through candidate_evidence_history as limited, non-contributing history."
+    },
+    {
+      "module": "src/application/candidate_snapshot_manifest.py",
+      "name": "load_latest_candidate_snapshot_bundle_readonly",
+      "reason": "Latest-run discovery no longer performs broad legacy fallback; current discovery requires the v4 contract while explicit historical inspection owns retired bundle selection."
+    },
+    {
+      "module": "src/application/candidate_snapshot_manifest.py",
+      "name": "publish_candidate_snapshot_manifest_v3",
+      "reason": "New candidate runs publish only manifest v4 through publish_candidate_snapshot_manifest; manifest v3 remains an immutable historical format and has no writer."
+    },
+    {
+      "module": "src/application/experience_candidate_snapshot.py",
+      "name": "seal_experience_candidate_bundle",
+      "reason": "The standalone Experience manifest v2 writer was retired; Experience owner snapshots use the shared current owner schemas and terminate through the current manifest v4 publisher."
+    },
+    {
+      "module": "src/application/strategy_scan_status.py",
+      "name": "publish_strategy_scan_status_index_v2",
+      "reason": "Status index v2 is a sealed historical format and no longer has a writer; current runs publish index v5 and explicit history adapters validate archived v2 evidence."
+    },
+    {
+      "module": "src/application/strategy_scan_status.py",
+      "name": "publish_strategy_scan_status_index_v4",
+      "reason": "Status index v4 is a sealed historical format and no longer has a writer; current runs publish index v5 and explicit history adapters validate archived v4 evidence."
     }
   ]
 }
