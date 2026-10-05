@@ -70,7 +70,9 @@ from src.application.required_data_snapshot import (
     seal_required_data_snapshot,
 )
 from src.application.candidate_snapshot_manifest import (
-    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
     load_candidate_snapshot_bundle,
 )
 from src.application.runtime_portfolio_snapshot import (
@@ -1510,11 +1512,16 @@ def _publish_runtime_portfolio_snapshot_shadow(
             account=account,
         )
         candidate_manifest = candidate_bundle["manifest"]
+        candidate_manifest_name = (
+            CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE
+            if candidate_manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+            else CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE
+        )
         candidate_manifest_bytes = read_account_run_state_bytes_safely(
             base=request.base,
             run_id=request.run_id,
             account=account,
-            name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+            name=candidate_manifest_name,
         )
         account_dir = (
             Path(request.base).resolve()

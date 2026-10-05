@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from scripts import benchmark_runtime_portfolio_snapshot as benchmark_owner
 import src.application.ledger.api as ledger_api
 from scripts.benchmark_runtime_portfolio_snapshot import (
@@ -22,6 +23,11 @@ from scripts.benchmark_runtime_portfolio_snapshot import (
     owner_valid_schema_probe,
     run_profile,
 )
+from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    publish_candidate_snapshot_manifest_v3,
+)
+from src.application.experience_mode import experience_fields
 from src.application.runtime_portfolio_snapshot import (
     LEDGER_SHADOW_SCHEMA_VERSION,
     LEGACY_SCHEMA_VERSION,
@@ -40,6 +46,11 @@ from src.application.runtime_portfolio_snapshot import (
     verify_runtime_portfolio_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.strategy_scan_status import (
+    publish_strategy_scan_status,
+    publish_strategy_scan_status_index_v2,
+)
+from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
     write_account_run_state_bytes_once_safely,
@@ -148,6 +159,86 @@ def _owner_assembly_kwargs() -> dict:
             row["candidate_owner"]: references[row["relpath"]] for row in chosen["owner_snapshots"]
         },
     }
+
+
+def _wheel_v3_assembly_kwargs(base: Path) -> dict:
+    assembly = _owner_assembly_kwargs()
+    run_id = assembly["run_id"]
+    account = assembly["account"]
+    config_hash = sha256_bytes(assembly["account_config_bytes"])
+    required_hash = sha256_bytes(assembly["required_data_manifest_bytes"])
+    policy_hash = "b" * 64
+    account_dir = base / "output_runs" / run_id / "accounts" / account
+    (account_dir / "state").mkdir(parents=True)
+    expected = []
+    for direction in ("call", "put"):
+        publish_strategy_scan_status(
+            report_dir=account_dir,
+            run_id=run_id,
+            account=account,
+            market="US",
+            symbol="NVDA",
+            strategy_family="wheel",
+            direction=direction,
+            status="completed",
+            candidate_count=0,
+        )
+        expected.append({
+            "market": "US",
+            "symbol": "NVDA",
+            "strategy_family": "wheel",
+            "direction": direction,
+            "strategy_mode": "wheel",
+            "candidate_owner": "wheel",
+            "account_config_sha256": config_hash,
+        })
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id=run_id,
+        account=account,
+        account_config_sha256=config_hash,
+        expected=expected,
+    )
+    seal_wheel_candidate_snapshot(
+        base=base,
+        run_id=run_id,
+        account=account,
+        market="us",
+        account_config_sha256=config_hash,
+        strategy_policy_sha256=policy_hash,
+        dependencies=[
+            {"kind": kind, "relpath": None, "sha256": digest}
+            for kind, digest in (
+                ("required_data", required_hash),
+                ("portfolio", "2" * 64),
+                ("ledger", "3" * 64),
+                ("fx", "4" * 64),
+                ("earnings_rv", "5" * 64),
+            )
+        ],
+        scope_results=[
+            {"symbol": "NVDA", "direction": direction, "status": "completed", "candidate_count": 0}
+            for direction in ("call", "put")
+        ],
+        batches=[],
+    )
+    manifest = publish_candidate_snapshot_manifest_v3(
+        base=base,
+        run_id=run_id,
+        account=account,
+        strategy_policy_sha256=policy_hash,
+    )
+    assembly["candidate_manifest_bytes"] = (
+        account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE
+    ).read_bytes()
+    assembly["candidate_status_index_bytes"] = (
+        account_dir / manifest["status_index"]["relpath"]
+    ).read_bytes()
+    assembly["candidate_owner_snapshot_bytes"] = {
+        row["candidate_owner"]: (account_dir / row["relpath"]).read_bytes()
+        for row in manifest["owner_snapshots"]
+    }
+    return assembly
 
 
 def _assembly_with_current_read(current_read: dict) -> dict:
@@ -271,6 +362,100 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
         snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
     )
+
+
+def test_assembler_publishes_and_verifies_directional_wheel_bundle(tmp_path: Path) -> None:
+    assembly = _wheel_v3_assembly_kwargs(tmp_path)
+
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+
+    candidate_binding = next(
+        row for row in snapshot["replay_bindings"]
+        if row["role"] == "candidate_snapshot_manifest"
+    )
+    assert candidate_binding["schema_version"] == "candidate_snapshot_manifest.v3"
+    assert candidate_binding["relpath"] == "state/candidate_snapshot_manifest.v3.json"
+    assert {row["direction"] for row in snapshot["chosen_results"]["expected_scopes"]} == {
+        "call", "put",
+    }
+    assert snapshot == _verified(
+        snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
+        reference_payloads=references,
+    )
+    path = _published(tmp_path, snapshot, references)
+    assert path.is_file()
+    assert load_runtime_portfolio_snapshot(
+        base=tmp_path, run_id=assembly["run_id"], account=assembly["account"],
+        reference_payloads=references,
+    ) == snapshot
+
+
+def test_assembler_keeps_v1_manifest_with_v3_experience_index() -> None:
+    assembly = _owner_assembly_kwargs()
+    status = json.loads(assembly["candidate_status_index_bytes"])
+    status["schema_version"] = "strategy_scan_status_index.v3"
+    status.update(experience_fields("模拟账户"))
+    status_content = {key: value for key, value in status.items() if key != "content_sha256"}
+    status["content_sha256"] = sha256_bytes(canonical_json_bytes(status_content))
+    assembly["candidate_status_index_bytes"] = canonical_json_bytes(status)
+    manifest = json.loads(assembly["candidate_manifest_bytes"])
+    manifest["status_index"] = {
+        "schema_version": status["schema_version"],
+        "relpath": "strategy_scan_status_index.v3.json",
+        "sha256": sha256_bytes(assembly["candidate_status_index_bytes"]),
+        "content_sha256": status["content_sha256"],
+    }
+    manifest["content_sha256"] = canonical_sha256(
+        {key: value for key, value in manifest.items() if key != "content_sha256"}
+    )
+    assembly["candidate_manifest_bytes"] = canonical_json_bytes(manifest)
+
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+
+    candidate_binding = next(
+        row for row in snapshot["replay_bindings"]
+        if row["role"] == "candidate_snapshot_manifest"
+    )
+    assert candidate_binding["schema_version"] == "candidate_snapshot_manifest.v1"
+    assert snapshot["chosen_results"]["status_index"]["schema_version"] == (
+        "strategy_scan_status_index.v3"
+    )
+    assert _verified(
+        snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
+        reference_payloads=references,
+    ) == snapshot
+
+
+def test_assembler_rejects_directional_wheel_reference_corruption(tmp_path: Path) -> None:
+    assembly = _wheel_v3_assembly_kwargs(tmp_path)
+    owner = json.loads(assembly["candidate_owner_snapshot_bytes"]["wheel"])
+    owner["scope_results"][1]["direction"] = "call"
+    assembly["candidate_owner_snapshot_bytes"]["wheel"] = canonical_json_bytes(owner)
+
+    with pytest.raises(RuntimePortfolioSnapshotError):
+        assemble_runtime_portfolio_snapshot(**assembly)
+
+
+def test_directional_wheel_rejects_candidate_receipt_schema_drift(tmp_path: Path) -> None:
+    assembly = _wheel_v3_assembly_kwargs(tmp_path)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    sections = deepcopy(snapshot["sections"])
+    receipts = sections["source_status"]["facts"]
+    receipts["candidate_results"]["owner_schema_version"] = "candidate_snapshot_manifest.v1"
+    sections["source_status"] = build_source_status_section(
+        account=assembly["account"], owner_receipts=receipts,
+    )
+
+    with pytest.raises(RuntimePortfolioSnapshotError, match="candidate_results"):
+        build_runtime_portfolio_snapshot(
+            run_id=assembly["run_id"],
+            account=assembly["account"],
+            sections=sections,
+            replay_bindings=snapshot["replay_bindings"],
+            chosen_results=snapshot["chosen_results"],
+            reference_payloads=references,
+            ledger_shadow=snapshot["ledger_shadow"],
+        )
 
 
 @pytest.mark.parametrize("shape", ["fallback", "sparse", "full"])
