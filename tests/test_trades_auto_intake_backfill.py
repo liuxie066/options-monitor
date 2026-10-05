@@ -436,7 +436,7 @@ def test_push_lookup_persists_only_exact_deal_economics_once(tmp_path, monkeypat
     assert len(events) == 1
     assert events[0]["contracts"] == 2
     assert events[0]["price"] == "2.5"
-    assert events[0]["event_time_ms"] == int(datetime(2026, 9, 7, 2, 30, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    assert events[0]["event_time_ms"] == int(datetime(2026, 9, 7, 14, 30, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def test_push_lookup_account_mismatch_keeps_missing_economics_in_review(tmp_path, monkeypatch) -> None:

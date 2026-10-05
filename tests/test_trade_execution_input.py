@@ -70,7 +70,7 @@ def test_futu_aliases_match_standard_content_without_rounding() -> None:
         "external_order_namespace": "futu-orders", "orderID": "order-1",
         "code": "US.NVDA260918P100000", "trd_side": "SELL", "qty": "1.00",
         "dealt_price": standard["price"], "contract_multiplier": "100.00",
-        "create_time": "2026-09-07 09:02:03.123456789", "deliverable": {"symbol": "NVDA", "quantity": "100.00"},
+        "create_time": "2026-09-06 21:02:03.123456789", "deliverable": {"symbol": "NVDA", "quantity": "100.00"},
         "fee": "99", "strategy": "derived-csp", "diagnostics": "different-source",
     }
     left = canonical_trade_execution_content(standard)
@@ -78,7 +78,7 @@ def test_futu_aliases_match_standard_content_without_rounding() -> None:
     assert left["errors"] == right["errors"] == []
     assert left["economic"] == right["economic"]
     assert conflicting_execution_associations(left, right) == []
-    raw["create_time"] = "2026-09-07 09:02:03.123456788"
+    raw["create_time"] = "2026-09-06 21:02:03.123456788"
     assert canonical_trade_execution_content(raw)["economic"] != left["economic"]
 
 

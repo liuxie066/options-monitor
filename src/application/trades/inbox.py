@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from domain.domain.source_evidence import build_source_evidence
-from domain.domain.trade_execution import execution_source_revision, execution_source_status
+from domain.domain.trade_execution import execution_source_revision, execution_source_status, futu_execution_time
 from domain.domain.trade_account_identity import extract_primary_account_id
 
 from src.application.ledger.api import (
@@ -514,13 +514,13 @@ def _build_trade_source_evidence(
     source_timezone = execution.get("source_timezone") or payload.get("source_timezone")
     if not source_timezone and execution.get("occurred_at_utc"):
         source_timezone = "UTC"
-    if not source_timezone and source_context.get("opend_process") == "FutuOpenD":
-        source_timezone = "Asia/Shanghai"
-    if not source_timezone and payload.get("create_time") is not None and adapter_version in {
-        TRADE_INTAKE_ADAPTER_VERSIONS["push"],
-        TRADE_INTAKE_ADAPTER_VERSIONS["backfill"],
-    }:
-        source_timezone = "Asia/Shanghai"
+    if execution is payload and not payload.get("broker_account_ref") and (
+        source_context.get("opend_process") == "FutuOpenD"
+        or adapter_version in {TRADE_INTAKE_ADAPTER_VERSIONS["push"], TRADE_INTAKE_ADAPTER_VERSIONS["backfill"], TRADE_INTAKE_ADAPTER_VERSIONS["lookup"]}
+    ):
+        time_input = futu_execution_time(payload)
+        original_time = time_input["source_time"]
+        source_timezone = time_input["source_timezone"]
     evidence = build_source_evidence(
         source=source,
         source_id=str(source_id),

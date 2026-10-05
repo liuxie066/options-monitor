@@ -1902,3 +1902,56 @@ def test_wheel_reservation_and_candidate_are_not_covered_contracts() -> None:
     message=render_fixed_report(brief)
     assert "覆盖期权｜合约信息待核实" in message
     assert "2026-12-31" not in message
+
+
+def _settlement_pending_brief() -> dict:
+    brief = _brief()
+    brief['candidates'] = {}
+    brief['actions'] = []
+    brief['data_gaps'] = [
+        _strategy_partial_data_gap('FUTU', strategy_family='covered_call', reason_code='option_close_settlement_pending'),
+        {'scope': 'strategy', 'strategy_family': 'covered_call', 'reason': 'opening_candidate_strategy_data_unavailable'},
+        {'scope': 'strategy', 'market': 'US', 'symbol': 'FUTU', 'strategy_family': 'covered_call',
+         'reason': 'option_close_settlement_pending', 'source_status_path': 'futu_covered_call_scan_status.json'},
+    ]
+    return brief
+
+
+@pytest.mark.parametrize('render', [render_fixed_report, render_fixed_report_card_markdown, render_full_brief])
+def test_settlement_pending_names_capacity_without_quote_failure(render):
+    brief = _settlement_pending_brief()
+    before = deepcopy(brief)
+    message = render(brief)
+    assert '本轮有期权平仓待结算，相关开仓容量暂不可用。' in message
+    assert 'FUTU' in message
+    assert message.count('期权平仓待结算确认，相关开仓容量暂不可用') == 1
+    assert '行情证据不可用' not in message
+    assert '行情获取失败' not in message
+    assert '本轮暂无符合条件的候选' not in message
+    assert brief == before
+
+
+def test_settlement_and_quote_failure_are_both_visible():
+    brief = _settlement_pending_brief()
+    brief['data_gaps'].extend([
+        _strategy_partial_data_gap('NVDA', reason_code='quote_unavailable'),
+        {'source': 'required_data_prefetch_summary', 'symbol': 'NVDA', 'reason': 'fetch_failed'},
+    ])
+    for render in (render_fixed_report, render_fixed_report_card_markdown):
+        message = render(brief)
+        assert '期权平仓待结算确认' in message
+        assert 'NVDA：行情获取失败' in message.replace('｜', '：')
+        assert '本轮部分数据不可用，候选结果不完整。' in message
+    view = build_daily_brief_user_view(brief)
+    assert any('NVDA' in text and '部分数据不可用' in text for text in view['reminders'])
+
+
+def test_direct_settlement_gap_is_sufficient_and_does_not_hide_candidates():
+    brief = _settlement_pending_brief()
+    brief['data_gaps'] = brief['data_gaps'][-1:]
+    view = build_daily_brief_user_view(brief)
+    assert '平仓待结算' in view['candidate_empty_summary']
+    brief['candidates'] = _brief()['candidates']
+    message = render_fixed_report(brief)
+    assert '期权平仓待结算确认' in message
+    assert 'NVDA' in message

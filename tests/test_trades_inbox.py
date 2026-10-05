@@ -609,3 +609,20 @@ def test_derived_stock_currency_keeps_replayed_futu_payload_identical(
     summary = trade_inbox_summary(path)
     assert summary["conflict_count"] == 0
     assert summary["pending_count"] == 1
+
+
+def test_futu_evidence_timezone_tracks_exchange_and_preserves_standard_input(tmp_path):
+    path = tmp_path / 'inbox.sqlite3'
+    raw = {'deal_id': 'timezone', 'code': 'US.NVDA', 'create_time': '2026-09-08 10:43:37.674',
+           '_trade_intake_source': {'opend_process': 'FutuOpenD'}}
+    key = _enqueue(path, payload=raw, broker_deal_key='futu:lx:1001:timezone')
+    evidence = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(key))
+    assert evidence[0]['source_timezone'] == 'America/New_York'
+    assert evidence[0]['original_time'] == raw['create_time']
+    standard = {'deal_id': 'standard', 'execution_input': {
+        'occurred_at_utc': '2026-09-08T14:43:37.674Z',
+        'source_time': raw['create_time'], 'source_timezone': 'archived-source-zone',
+    }}
+    key = _enqueue(path, payload=standard, broker_deal_key='futu:lx:1001:standard')
+    evidence = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(key))
+    assert evidence[0]['source_timezone'] == 'archived-source-zone'
