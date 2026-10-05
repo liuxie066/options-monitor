@@ -1012,6 +1012,12 @@ audit JSONL，并在有实际 attempt 时追加 touched-head seal。任一 seal 
   --manifest <frozen-manifest.json> --dry-run
 ```
 
+迁移盘点会把数据库中已占用的通知槽标为 `needs_review`，并给出
+`notification_slot_occupied` 或 `notification_slot_owned_by_migration`；选择
+多个共享空槽的目标也会被拒绝。显式股票结算映射按股数建立来源 claim；
+桥接所需的时区、合约和日历证据缺失时须人工复核。`--dry-run` 与
+`apply` 都在写入前检查同一批目标的冲突，失败时整笔回滚。
+
 `--outbox-id` 仍可处理 legacy 未绑定记录和单成员批次；如果成员属于多成员
 批次，命令会拒绝并提示准确的 `--batch-id`。`accepted` 只能人工收敛为
 `confirmed` 或 `unknown`，不能直接 resend；进入 `unknown` 后才允许显式

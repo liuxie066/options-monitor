@@ -3,8 +3,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from domain.domain.lifecycle_allocation import resolve_allocations
-from domain.domain.option_lifecycle import build_lifecycle_case
+from domain.domain.lifecycle_allocation import normalize_target_manifest, resolve_allocations
+from domain.domain.option_lifecycle import MARKET_TIMEZONES, SUPPORTED_LAST_TRADE_SOURCES, build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import derive_position_side, require_option_multiplier
 from src.application.ledger.event_codec import valid_void_target_event_id
@@ -679,6 +679,27 @@ def _build_explicit_mapped_lifecycle_row(
         void_ids=void_ids,
     )
     notification_case_id = canonical_case_id or case_id
+    futu_account_ids = {
+        binding[1]
+        for item in mapping.get("evidence_sources") or []
+        if isinstance(item, dict)
+        for binding in [_canonical_futu_binding(str(item.get("source_key") or ""))]
+        if binding is not None
+    }
+    existing_futu_account_id = str(lifecycle_case.get("futu_account_id") or "").strip()
+    if len(futu_account_ids) > 1:
+        review_reasons.add("explicit_case_futu_account_ambiguous")
+    if (
+        existing_futu_account_id
+        and futu_account_ids
+        and existing_futu_account_id not in futu_account_ids
+    ):
+        review_reasons.add("explicit_case_futu_account_conflict")
+    planned_futu_account_binding = (
+        next(iter(futu_account_ids))
+        if len(futu_account_ids) == 1 and not existing_futu_account_id
+        else None
+    )
     return {
         "target_key": f"lifecycle:{case_id}",
         "kind": "lifecycle_case",
@@ -689,19 +710,7 @@ def _build_explicit_mapped_lifecycle_row(
         "review_reason_codes": sorted(review_reasons),
         "case_id": case_id,
         "account": contract.get("account"),
-        "futu_account_ids": sorted(
-            {
-                binding[1]
-                for item in mapping.get("evidence_sources") or []
-                if isinstance(item, dict)
-                for binding in [
-                    _canonical_futu_binding(
-                        str(item.get("source_key") or "")
-                    )
-                ]
-                if binding is not None
-            }
-        ),
+        "futu_account_ids": sorted(futu_account_ids),
         "contract_key": lifecycle_case.get("contract_key"),
         "target_contracts_by_lot": target,
         "resolution": resolution_payload,
@@ -738,7 +747,7 @@ def _build_explicit_mapped_lifecycle_row(
             if legacy_upgrade
             else None
         ),
-        "planned_futu_account_binding": None,
+        "planned_futu_account_binding": planned_futu_account_binding,
         "legacy_upgrade": legacy_upgrade,
         "legacy_terminal_frozen": (
             disposition == "terminal_frozen"
@@ -825,19 +834,11 @@ def _explicit_target_manifest(
     if not isinstance(raw, dict) or not raw:
         review_reasons.add("explicit_target_mapping_missing")
         return {}
-    normalized: dict[str, int] = {}
-    for lot_id_raw, contracts_raw in raw.items():
-        lot_id = str(lot_id_raw or "").strip()
-        try:
-            contracts = int(contracts_raw)
-        except (TypeError, ValueError, OverflowError):
-            review_reasons.add("explicit_target_mapping_invalid")
-            return {}
-        if not lot_id or contracts <= 0:
-            review_reasons.add("explicit_target_mapping_invalid")
-            return {}
-        normalized[lot_id] = contracts
-    return normalized
+    try:
+        return normalize_target_manifest(raw)
+    except (TypeError, ValueError):
+        review_reasons.add("explicit_target_mapping_invalid")
+        return {}
 
 
 def _validate_explicit_case_contract(
@@ -1202,6 +1203,33 @@ def _explicit_claim_payload(
         else {}
     )
     binding = _canonical_futu_binding(source_key) or ("", "")
+    if source_role == "stock_settlement":
+        shares = (
+            evidence.get("stock_qty")
+            if evidence.get("stock_qty") is not None
+            else evidence.get("shares")
+            if evidence.get("shares") is not None
+            else raw.get("contracts")
+        )
+        return {
+            "account": binding[0],
+            "futu_account_id": binding[1],
+            "symbol": evidence.get("symbol") or raw.get("symbol"),
+            "side": evidence.get("side") or raw.get("side"),
+            "shares": shares,
+            "price": (
+                evidence.get("stock_price")
+                if evidence.get("stock_price") is not None
+                else raw.get("price")
+            ),
+            "execution_time_ms": (
+                evidence.get("trade_time_ms")
+                or evidence.get("event_time_ms")
+                or raw.get("trade_time_ms")
+            ),
+            "order_id": evidence.get("order_id") or raw.get("order_id"),
+            "clearing_date": evidence.get("clearing_date") or raw.get("clearing_date"),
+        }
     contracts = sum(target_contracts_by_lot.values())
     payload = {
         **raw,
@@ -1218,17 +1246,6 @@ def _explicit_claim_payload(
         "currency": contract.get("currency"),
         "contracts": contracts,
     }
-    if source_role == "stock_settlement":
-        payload["shares"] = (
-            evidence.get("stock_qty")
-            or evidence.get("shares")
-            or raw.get("contracts")
-        )
-        payload["price"] = (
-            evidence.get("stock_price")
-            if evidence.get("stock_price") is not None
-            else raw.get("price")
-        )
     return payload
 
 
@@ -1408,8 +1425,10 @@ def _validate_explicit_terminal_frozen(
         "status": (
             "ok"
             if (
-                terminal_event_ids
+                target_contracts_by_lot
+                and terminal_event_ids
                 and resolved_by_lot == target_contracts_by_lot
+                and not review_reasons
             )
             else "invalid"
         ),
@@ -1426,7 +1445,7 @@ def _validate_explicit_terminal_frozen(
         }
         if terminal_type
         else {},
-        "reason_codes": [],
+        "reason_codes": sorted(review_reasons),
     }
 
 
@@ -1698,6 +1717,18 @@ def _plan_explicit_legacy_bridge(
         or cutoff_ms <= 0
         or deadline_ms <= 0
         or not str(policy.get("calendar_hash") or "").strip()
+        or str(policy.get("timezone") or "") != MARKET_TIMEZONES.get(
+            str(canonical_case.get("market") or "").strip().upper()
+        )
+        or str(policy.get("settlement_style") or "").strip().lower() != "physical"
+        or str(policy.get("underlying_security_type") or "").strip().lower() != "equity"
+        or str(policy.get("last_trade_cutoff_source") or "").strip().lower()
+        not in SUPPORTED_LAST_TRADE_SOURCES
+        or not str(policy.get("calendar_source") or "").strip()
+        or not isinstance(policy.get("trading_days"), list)
+        or not policy.get("trading_days")
+        or type(policy.get("calendar_observed_at_ms")) is not int
+        or policy["calendar_observed_at_ms"] <= 0
     ):
         review_reasons.add("explicit_bridge_timing_policy_invalid")
     canonical_payload = {
