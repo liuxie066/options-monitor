@@ -451,7 +451,6 @@ def _build_lifecycle_migration_inventory(
                     else case_id
                 ),
                 "suppress_option_leg_closed": True,
-                "seed_final_intent": False,
                 "inventory_state_hash": canonical_payload_hash(
                     state
                 ),
@@ -760,7 +759,6 @@ def _build_explicit_mapped_lifecycle_row(
         "explicit_state_source_keys": source_keys,
         "notification_case_id": notification_case_id,
         "suppress_option_leg_closed": True,
-        "seed_final_intent": False,
         "inventory_state_hash": canonical_payload_hash(state),
     }
 
@@ -2160,6 +2158,13 @@ def apply_lifecycle_migration_manifest(
     manifest_hash = canonical_payload_hash(body)
     if str(payload.get("manifest_hash") or "") != manifest_hash:
         raise ValueError("lifecycle migration manifest hash mismatch")
+    if any(
+        "seed_final_intent" in row and row["seed_final_intent"] is not False
+        for row in rows
+    ):
+        raise ValueError(
+            "historical lifecycle migration cannot seed final notifications"
+        )
     selected = [item for item in rows if bool(item.get("selected"))]
     target_keys = [str(item.get("target_key") or "").strip() for item in selected]
     if any(not key for key in target_keys) or len(set(target_keys)) != len(target_keys):
@@ -2253,6 +2258,7 @@ def _prepare_manifest_rows(
         explicit_mapping={"schema_version": EXPLICIT_MAPPING_SCHEMA, "rows": explicit_rows} if explicit_rows else None,
     )
     current_rows = {row["target_key"]: row for row in inventory["rows"]}
+    # Keep legacy false-only manifests comparable with new inventory rows.
     choices = {"selected", "suppress_option_leg_closed", "seed_final_intent", "resolution_revision"}
     intents_by_key = {
         (item["transition_key"], item.get("delivery_revision", 0)): item
@@ -2270,8 +2276,6 @@ def _prepare_manifest_rows(
         intents = []
         if bool(row.get("suppress_option_leg_closed", True)):
             intents.append(_suppression_intent(row))
-        if bool(row.get("seed_final_intent")):
-            intents.append(_final_intent(row))
         for intent in intents:
             key = (intent["transition_key"], intent["delivery_revision"])
             existing_intent = intents_by_key.get(key)
@@ -2510,13 +2514,6 @@ def _apply_manifest_row(
                 conn=conn,
             )
         )
-    if bool(row.get("seed_final_intent")):
-        outbox_created.append(
-            sqlite_repo.insert_trade_lifecycle_notification_once(
-                _final_intent(row),
-                conn=conn,
-            )
-        )
     receipt = {
         "schema_version": MIGRATION_RECEIPT_SCHEMA,
         "migration_schema": MIGRATION_SCHEMA,
@@ -2529,9 +2526,7 @@ def _apply_manifest_row(
         "suppression_requested": bool(
             row.get("suppress_option_leg_closed", True)
         ),
-        "final_intent_requested": bool(
-            row.get("seed_final_intent")
-        ),
+        "final_intent_requested": False,
         "canonical_case_id": canonical_case_id or None,
         "legacy_superseded": bool(legacy_upgrade),
         "explicit_mapping_disposition": (
@@ -2614,56 +2609,6 @@ def _suppression_intent(row: dict[str, Any]) -> dict[str, Any]:
         state_fingerprint=fingerprint,
         payload=payload,
         status="suppressed",
-    )
-
-
-def _final_intent(row: dict[str, Any]) -> dict[str, Any]:
-    if row.get("kind") != "lifecycle_case":
-        raise ValueError(
-            "only lifecycle cases may seed final migration intent"
-        )
-    resolution = dict(row.get("resolution") or {})
-    if any(
-        int(value or 0) > 0
-        for value in (
-            resolution.get("remaining_contracts_by_lot") or {}
-        ).values()
-    ):
-        raise ValueError(
-            "unresolved lifecycle case cannot seed final intent"
-        )
-    case_id = str(row.get("case_id") or "")
-    revision = max(1, int(row.get("resolution_revision") or 1))
-    fingerprint = canonical_state_fingerprint(
-        {
-            "migration_target": row.get("target_key"),
-            "inventory_state_hash": row.get(
-                "inventory_state_hash"
-            ),
-            "transition_type": "resolution_confirmed",
-        }
-    )
-    payload = {
-        "schema_version": "migration_final_notification.v1",
-        "case_id": case_id,
-        "account": row.get("account"),
-        "transition_type": "resolution_confirmed",
-        "resolution_revision": revision,
-        "state_fingerprint": fingerprint,
-        "resolved_contracts_by_terminal_type": (
-            resolution.get("resolved_contracts_by_terminal_type")
-            or {}
-        ),
-    }
-    return build_notification_intent(
-        case_id=case_id,
-        transition_type="resolution_confirmed",
-        resolution_revision=revision,
-        transition_key=(
-            f"lifecycle:{case_id}:resolution_confirmed"
-        ),
-        state_fingerprint=fingerprint,
-        payload=payload,
     )
 
 
@@ -2763,7 +2708,6 @@ def _normal_close_inventory_rows(
                 ],
                 "planned_source_claims": [],
                 "suppress_option_leg_closed": True,
-                "seed_final_intent": False,
                 "resolution_revision": 1,
                 "inventory_state_hash": canonical_payload_hash(
                     state
@@ -2784,7 +2728,6 @@ def _normal_close_inventory_rows(
                 "event_ids": [event_id],
                 "planned_source_claims": [],
                 "suppress_option_leg_closed": False,
-                "seed_final_intent": False,
                 "inventory_state_hash": canonical_payload_hash(
                     {"event": event}
                 ),
