@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Bug Fixes
+- 空选择的 lifecycle migration manifest 现在会在 apply 时失败关闭，CLI 返回错误信封与退出码 2；只读 inventory 和 dry-run 仍可用于盘点。
+- 重放已完成的 lifecycle migration manifest 若未产生新写入，返回 `status: "noop"`，并保留 `applied_count=0`、已有回执数及成功退出码。
+- `om wheel` 的 branch end、end、intent 和 linkage 在使用 `--config <path>` 时，现从已加载运行配置解析市场，不再因缺少 `--config-key` 而失败。
 - Wheel Call 关联拒绝遇到同账户同市场的 Put 待关联候选时，跳过不含 Call 身份字段的候选，避免未捕获的 `KeyError`。
 
 ### Improvements

@@ -2437,3 +2437,66 @@ def test_adjust_cli_validates_multiplier_before_float_conversion(monkeypatch, va
     with pytest.raises(SystemExit) as exc:
         cli_mod.main(["adjust", "--record-id", "lot-1", "--multiplier", value, "--dry-run"])
     assert exc.value.code == 2
+
+
+def test_option_positions_cli_lifecycle_migration_apply_rejects_zero_selection(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """零选中清单必须失败关闭，而不是报成功并退出 0（issue #392 F1）。
+
+    走公开入口 ``src.interfaces.cli.main.main``：``option_positions`` 子模块的
+    ``main`` 不捕获 ``ValueError``，在那里断言会看到裸异常而不是退出码。
+    """
+
+    import src.interfaces.cli.main as public_cli_mod
+    import src.interfaces.cli.option_positions as cli_mod
+    from src.application.ledger.lifecycle_migration import (
+        build_lifecycle_migration_inventory,
+    )
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+
+    # 空账本的裸 inventory：hash 合法、零选中，正是操作员最容易存成冻结清单的形状。
+    inventory = build_lifecycle_migration_inventory(repo)
+    assert inventory["row_count"] == 0
+    manifest_path = tmp_path / "frozen-manifest.json"
+    manifest_path.write_text(
+        json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    rc = public_cli_mod.main(
+        [
+            "option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "migration",
+            "apply",
+            "--manifest",
+            str(manifest_path),
+            "--apply",
+            "--confirm",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+    assert "no selected rows" in payload["error"]["message"]
+    assert repo.list_trade_lifecycle_migration_receipts() == []
