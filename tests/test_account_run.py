@@ -297,7 +297,6 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("hello world\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -308,7 +307,9 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
 
     assert outcome.ran_pipeline is True
     assert outcome.prefetch_done is True
-    assert outcome.result.notification_text == "hello world"
+    assert outcome.result.notification_text == ""
+    assert not (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").exists()
+    assert not (request.run_dir / "accounts" / "lx" / "symbols_notification.txt").exists()
     assert outcome.acct_metrics["ran_scan"] is True
     assert not any(evt["step"] == "fetch_chain_cache" for evt in runlog.events)
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
@@ -426,10 +427,6 @@ def test_run_one_account_fails_closed_when_prepared_option_context_changes_after
             == "a" * 64
         )
         kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
-        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
-            "must not notify\n",
-            encoding="utf-8",
-        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -515,10 +512,6 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         _drift_published_paths()
         observed_pipeline.update(kwargs)
         kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
-        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
-            "retained generation\n",
-            encoding="utf-8",
-        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -645,7 +638,6 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
         seen_pipeline.update(kwargs)
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("process split\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -708,7 +700,6 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("account due\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -720,7 +711,7 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
     assert seen_gate["should_run"] is True
     assert seen_gate["reason"] == "lx_due"
     assert outcome.ran_pipeline is True
-    assert outcome.result.notification_text == "account due"
+    assert outcome.result.notification_text == ""
 
 
 def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch, tmp_path: Path) -> None:
@@ -756,7 +747,7 @@ def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch,
     assert any(evt["action"] == "run_pipeline_result" for evt in env["audit_events"])
 
 
-def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_does_not_write_legacy_notification_artifact(monkeypatch, tmp_path: Path) -> None:
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
@@ -775,22 +766,24 @@ def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypa
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("artifact text\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
-    monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        env["mod"].run_repo,
+        "write_run_account_text",
+        lambda *args: pytest.fail(f"unexpected legacy notification write: {args}"),
+    )
 
     outcome = _run_account(request, env, runlog)
 
     assert outcome.ran_pipeline is True
-    assert outcome.result.notification_text == "artifact text"
+    assert outcome.result.notification_text == ""
     degraded = [evt for evt in runlog.events if evt["step"] == "account_run" and evt["status"] == "degraded"]
-    assert degraded
-    assert degraded[-1]["message"].startswith("write_run_account_artifacts failed for lx")
-    assert any(evt["action"] == "write_run_account_artifacts" and evt.get("status") == "error" for evt in env["audit_events"])
+    assert degraded == []
+    assert not any(evt["action"] == "write_run_account_artifacts" for evt in env["audit_events"])
 
 
 def test_run_one_account_does_not_notify_close_advice_diagnostics(
@@ -805,12 +798,11 @@ def test_run_one_account_does_not_notify_close_advice_diagnostics(
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
-    def _write_run_account_text(base, run_id, acct, name, text):
-        target = request.accounts_root / acct / "reports" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-
-    monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", _write_run_account_text)
+    monkeypatch.setattr(
+        env["mod"].run_repo,
+        "write_run_account_text",
+        lambda *args: pytest.fail(f"unexpected legacy notification write: {args}"),
+    )
 
     monkeypatch.setattr(
         env["mod"],
@@ -826,7 +818,6 @@ def test_run_one_account_does_not_notify_close_advice_diagnostics(
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -855,8 +846,7 @@ def test_run_one_account_does_not_notify_close_advice_diagnostics(
     outcome = _run_account(request, env, runlog)
 
     assert outcome.result.notification_text == ""
-    final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
-    assert final_text == "\n"
+    assert not (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").exists()
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
     assert close_events
     assert close_events[-1]["extra"]["quote_issue_rows"] == 2
@@ -888,10 +878,6 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text(
-            "candidate text\n",
-            encoding="utf-8",
-        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -955,7 +941,7 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
     assert close_events[-1]["status"] == "error"
 
 
-def test_run_one_account_reuses_validated_close_inputs_and_result_text(
+def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_projection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -993,10 +979,6 @@ def test_run_one_account_reuses_validated_close_inputs_and_result_text(
 
     def _run_pipeline_script(**kwargs):
         kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
-        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
-            "candidate text\n",
-            encoding="utf-8",
-        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
@@ -1043,10 +1025,8 @@ def test_run_one_account_reuses_validated_close_inputs_and_result_text(
 
     assert observed["context_override"] == validated_context
     assert observed["required_data_snapshot_manifest_sha256"] == "b" * 64
-    assert outcome.result.notification_text == (
-        "candidate text\n\nvalidated result text"
-    )
-    assert "unvalidated path text" not in outcome.result.notification_text
+    assert outcome.result.notification_text == ""
+    assert not (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").exists()
 
 
 @pytest.mark.parametrize("decision,expected", [

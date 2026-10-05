@@ -304,8 +304,6 @@ def run_one_account(
             ran_pipeline=False,
         )
 
-    notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
-
     notify_decisions: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView] = {}
     for key, value in (request.notify_decision_by_account or {}).items():
         if value is not None:
@@ -550,12 +548,12 @@ def run_one_account(
         except PreparedOptionPositionsContextError as exc:
             return _prepared_option_integrity_failure(exc)
 
-    text_path = (
-        (acct_report_dir / "experience_report.md").resolve()
-        if request.experience
-        else notif_path
+    experience_report_path = (acct_report_dir / "experience_report.md").resolve()
+    text = (
+        experience_report_path.read_text(encoding="utf-8", errors="replace").strip()
+        if request.experience and experience_report_path.exists()
+        else ""
     )
-    text = text_path.read_text(encoding="utf-8", errors="replace").strip() if text_path.exists() else ""
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if not request.experience and bool(close_advice_cfg.get("enabled", False)):
@@ -647,11 +645,6 @@ def run_one_account(
                     prefetch_done=prefetch_done,
                     ran_pipeline=False,
                 )
-            close_text = str(
-                close_result.get("notification_text") or ""
-            ).strip()
-            if close_text:
-                text = (text.strip() + "\n\n" + close_text.strip()).strip()
         except Exception as exc:
             audit_fn(
                 "tool_call",
@@ -663,26 +656,6 @@ def run_one_account(
                 message=str(exc),
             )
             runlog.safe_event("close_advice", "error", message=f"close advice failed for {acct}: {exc}")
-
-    if not request.experience:
-        try:
-            run_repo.write_run_account_text(
-                request.base,
-                request.run_id,
-                acct,
-                "symbols_notification.txt",
-                text + "\n",
-            )
-            audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
-        except Exception as exc:
-            _record_account_run_degraded(
-                runlog=runlog,
-                audit_fn=audit_fn,
-                run_id=request.run_id,
-                account=acct,
-                action="write_run_account_artifacts",
-                exc=exc,
-            )
 
     acct_metrics["ran_scan"] = True
     acct_metrics["ran_pipeline"] = True

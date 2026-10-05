@@ -267,4 +267,4 @@ def test_agent_tool_default_query_has_no_required_scope() -> None:
 def test_agent_tool_day_query_keeps_existing_us_market_default() -> None:
     import src.application.agent_tools.daily_brief as mod
 
-    mod._validate_daily_brief_input({"account": "lx", "date": "2026-07-19"})
+    mod.validate_daily_brief_query_input({"account": "lx", "date": "2026-07-19"})

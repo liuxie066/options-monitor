@@ -154,8 +154,9 @@ cat /var/lib/options-monitor/output_shared/state/last_run.json
 ./om daily-brief latest --account lx --market US
 ```
 
-Daily Brief 是普通调度通知的权威读取面。`symbols_notification.txt` 仅保留作兼容报告，
-不能证明通知已发送。本次运行的账户报告和 run-scoped state 位于
+Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再生成
+`symbols_notification.txt`；历史文件或显式 `--stage-only notify` 生成的文件仅供兼容诊断，
+不能证明当前运行已生成 Daily Brief 或通知已发送。本次运行的账户报告和 run-scoped state 位于
 `output_runs/<run_id>/accounts/<account>/`；账户级稳定状态/当前投影位于
 `output_accounts/<account>/`，跨账户共享状态位于 `output_shared/`。
 

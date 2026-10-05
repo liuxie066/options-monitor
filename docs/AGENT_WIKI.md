@@ -483,7 +483,7 @@ shared planning and required-data prefetch.
 Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
 written as Tick input authority.
 
-Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
+Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. Ordinary scan and Tick runs no longer create `symbols_alerts.txt`, `symbols_changes.txt`, or `symbols_notification.txt`; persisted Daily Brief state is their notification-content owner. Public runtime reads can still expose historical files or files created by the explicit manual `--stage-only alert|notify` compatibility commands as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`. Those files are never evidence that the current run prepared or sent a Daily Brief; the old `notification` fields remain deprecated Phase A/B aliases scheduled for removal in Phase C.
 
 The `scheduler` command is decision/mark-only. Its legacy `--run-if-due` flag remains parseable for compatibility but returns `UNSUPPORTED_OPERATION` without reading runtime config/state or starting a child process. Use `./om run tick ...` for explicit scans and `./om run tick-cron ...` for guarded scheduled execution.
 
@@ -745,7 +745,7 @@ notification token around Close Advice.
 
 ### Notifications
 
-- Per-account content: `src/application/notify_symbols.py`
+- Manual compatibility content: `src/application/notify_symbols.py`
 - Scheduled delivery flow: `src/application/tick_notification_flow.py`
 - Scheduled business renderer: `src/application/daily_decision_brief_renderer.py`
 - Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
@@ -762,7 +762,7 @@ and logical idempotency key. WeChat ClawBot sends the canonical flat string
 unchanged through `text_item.text`. Channel adapters may select the persisted
 transport projection but must not independently recalculate business content.
 
-Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
+Scheduled ordinary delivery and `preview_notification` have one renderer authority: Daily Decision Brief. The read-only preview accepts `account`, `market`, `date`, and `revision`, reads persisted successful Daily Brief state through the same query owner as `daily_decision_brief_read`, and reports `authority=daily_decision_brief` with `delivery_evidence=false`. Preview never scans, sends, changes delivery state, or accepts legacy alert/change text and paths. Direct legacy renderer and manual stage-only output remain compatibility-only and cannot be used as a scheduled fallback.
 
 System notices use `# OM · 系统通知 · <component>` and receipts use `# OM · 回执 · <account>` plus `类型｜成交` or `类型｜持仓维护`. `notification_shells.py` owns only the flat Markdown H1/field/section layout. OpenD rate limits and recovery, delivery-failure aggregation/retry, trade receipt warnings, and maintenance receipt status/dedupe/persistence remain with their existing callers; the shell must not send, retry, inspect provider byte limits, or classify business state.
 

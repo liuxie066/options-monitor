@@ -17,6 +17,59 @@ def _read_json_output(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
+def test_notify_preview_forwards_daily_brief_selectors(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _preview_notification(**kwargs):
+        calls.append(kwargs)
+        return {
+            "tool_name": "preview_notification",
+            "ok": True,
+            "data": {"notification_text": "# brief"},
+        }
+
+    monkeypatch.setattr(cli, "preview_notification", _preview_notification)
+
+    rc = cli.main(
+        [
+            "notify",
+            "preview",
+            "--account",
+            "lx",
+            "--market",
+            "us",
+            "--date",
+            "2026-10-05",
+            "--revision",
+            "2",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "preview_notification"
+    assert calls == [
+        {
+            "account": "lx",
+            "market": "us",
+            "date": "2026-10-05",
+            "revision": 2,
+        }
+    ]
+
+
+def test_notify_preview_rejects_removed_legacy_text_input(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["notify", "preview", "--alerts-text", "legacy"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
 def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

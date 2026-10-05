@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1113 (`src`: 548, `domain`: 88, `scripts`: 14, `tests`: 463)
-- Internal import edges: 8399 total, 3565 production/script edges excluding tests
+- Internal import edges: 8403 total, 3559 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|589| domain
+  application -->|586| domain
   application -->|4| domain_services
   application -->|172| infrastructure
   application -->|53| storage
@@ -46,11 +46,11 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3680| application
+  tests -->|3688| application
   tests -->|473| domain
   tests -->|2| domain_services
   tests -->|242| infrastructure
-  tests -->|287| interfaces
+  tests -->|289| interfaces
   tests -->|28| scripts
   tests -->|28| storage
 ```
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 589 |
+| application | domain | 586 |
 | interfaces | application | 191 |
 | application | infrastructure | 172 |
 | application | storage | 53 |
@@ -79,9 +79,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3680 |
+| tests | application | 3688 |
 | tests | domain | 473 |
-| tests | interfaces | 287 |
+| tests | interfaces | 289 |
 | tests | infrastructure | 242 |
 | tests | scripts | 28 |
 | tests | storage | 28 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 251 |
+| src.application | domain.domain | 248 |
 | src.interfaces | src.application | 153 |
 | src.application.ledger | domain.domain | 131 |
 | src.application | src.infrastructure | 123 |

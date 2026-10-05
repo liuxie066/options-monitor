@@ -27,12 +27,11 @@ def add_operator_commands(subparsers: Any) -> None:
 
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
-    preview = notify_sub.add_parser("preview", help="preview notification content")
-    preview.add_argument("--alerts-path", default=None)
-    preview.add_argument("--changes-path", default=None)
-    preview.add_argument("--alerts-text", default=None)
-    preview.add_argument("--changes-text", default=None)
-    preview.add_argument("--account-label", default=None)
+    preview = notify_sub.add_parser("preview", help="preview a persisted Daily Decision Brief")
+    preview.add_argument("--account", default=None)
+    preview.add_argument("--market", default=None, choices=("US", "HK", "us", "hk"))
+    preview.add_argument("--date", default=None)
+    preview.add_argument("--revision", default=None, type=int)
 
 
 def handle_operator_command(
@@ -65,11 +64,10 @@ def handle_operator_command(
 
     if args.command == "notify" and args.notify_command == "preview":
         return preview_notification_fn(
-            alerts_path=args.alerts_path,
-            changes_path=args.changes_path,
-            alerts_text=args.alerts_text,
-            changes_text=args.changes_text,
-            account_label=args.account_label,
+            account=args.account,
+            market=args.market,
+            date=args.date,
+            revision=args.revision,
         )
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operator command: {args.command}")

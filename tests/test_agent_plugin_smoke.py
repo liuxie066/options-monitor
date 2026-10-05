@@ -5170,45 +5170,93 @@ def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path
     assert "max_strike" not in added["sell_call"]
 
 
-def test_preview_notification_is_read_only() -> None:
+def test_preview_notification_is_canonical_daily_brief_projection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+    )
     from src.application.tool_execution import execute_tool as run_tool
 
-    alerts = """# Symbols Alerts
+    lifecycle = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief={
+            "market": "US",
+            "market_trading_date": "2026-10-05",
+            "account": "lx",
+            "revision": 999,
+            "run_id": "run-preview",
+            "generated_at_utc": "2026-10-05T08:00:00+00:00",
+            "data_as_of_utc": "2026-10-05T07:59:00+00:00",
+            "valid_until_utc": "2026-10-05T20:00:00+00:00",
+            "status": "ready",
+            "actionability": "live_actionable",
+            "strategy_summary": "preview test",
+            "actions": [],
+            "positions": [],
+            "capacity": {},
+            "candidates": {
+                "sell_put": [],
+                "covered_call": [],
+                "combo_yield": [],
+            },
+            "rejections": {},
+            "events": [],
+            "data_gaps": [],
+            "source_artifacts": [],
+        },
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    delivery_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / "daily_decision_brief.US.delivery.json"
+    )
 
-## 高优先级
-- NVDA | sell_put | 2026-06-18 156P | 年化 10.00% | 净收入 100.0 | DTE 30 | Strike 156 | 中性 | ccy USD | mid 1.000 | cash_req $15,600 | 通过准入后，收益/风险组合较强，值得优先看。
-"""
-    out = run_tool("preview_notification", {"alerts_text": alerts, "account_label": "user1"})
+    selectors = {
+        "account": "lx",
+        "market": "US",
+        "date": "2026-10-05",
+        "revision": lifecycle["brief"]["revision"],
+    }
+    canonical = run_tool("daily_decision_brief_read", selectors)
+    out = run_tool("preview_notification", selectors)
 
+    assert canonical["ok"] is True
     assert out["ok"] is True
-    assert "### CSP" in out["data"]["notification_text"]
-    assert "🟢 CSP NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]
-    assert out["data"]["renderer"] == "compact"
-    assert out["data"]["render_style"] == "compact"
-    assert out["data"]["authority"] == "compatibility_only"
+    assert out["data"]["schema_version"] == "preview_notification.output.v2"
+    assert out["data"]["query"] == canonical["data"]["query"]
+    assert out["data"]["reason"] == canonical["data"]["reason"]
+    assert out["data"]["source"] == canonical["data"]["source"]
+    assert out["data"]["freshness"] == canonical["data"]["freshness"]
+    assert out["data"]["notification_text"] == canonical["data"]["rendered_markdown"]
+    assert out["data"]["renderer"] == "daily_decision_brief.query"
+    assert out["data"]["authority"] == "daily_decision_brief"
     assert out["data"]["delivery_evidence"] is False
-    assert out["warnings"] == ["Compact Tick preview is compatibility-only and is not scheduled delivery evidence."]
+    assert out["warnings"] == canonical["warnings"]
+    assert out["meta"] == canonical["meta"]
+    assert not delivery_path.exists()
 
-    legacy = run_tool(
-        "preview_notification",
-        {"alerts_text": alerts, "account_label": "user1", "render_style": "legacy"},
-    )
-    assert legacy["ok"] is True
-    assert legacy["data"]["renderer"] == "legacy"
-    assert "deprecated" in legacy["warnings"][0].lower()
 
-    unknown = run_tool(
-        "preview_notification",
-        {"alerts_text": alerts, "account_label": "user1", "render_style": "unknown"},
-    )
-    assert unknown["ok"] is False
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"alerts_text": "legacy text"},
+        {"account": "lx", "market": "US", "revision": 0},
+        {"account": "lx", "market": "US", "date": "2026-10-05", "revision": -1},
+        {"market": "EU"},
+    ],
+)
+def test_preview_notification_rejects_legacy_or_invalid_selectors(payload) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
 
-    empty = run_tool(
-        "preview_notification",
-        {"alerts_text": alerts, "account_label": "user1", "render_style": ""},
-    )
-    assert empty["ok"] is False
-    assert empty["error"]["code"] == "INPUT_ERROR"
+    out = run_tool("preview_notification", payload)
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
 
 
 def test_version_update_auto_apply_requires_preview_fields(monkeypatch, tmp_path: Path) -> None:
