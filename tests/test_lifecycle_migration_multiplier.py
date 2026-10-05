@@ -309,6 +309,7 @@ def test_existing_receipt_and_new_valid_row_apply_once(tmp_path):
     assert preview["existing_count"] == 1
     assert preview["would_apply_target_keys"] == ["lifecycle:legacy-case-2"]
     result = apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=True)
+    assert result["status"] == "applied"
     assert (result["applied_count"], result["existing_count"]) == (1, 1)
     assert len(repo.list_trade_lifecycle_migration_receipts()) == 2
 

@@ -1057,9 +1057,10 @@ Phase 3B 只增加影子读面，legacy 决策仍是唯一业务权威。先在�
 保持 trade-intake 停止，先做 WAL-safe ledger 快照，再生成 inventory。
 `needs_review` 行不得 apply；只显式选择 `exact` 行，核对 manifest hash 和
 数量后先 dry-run。零选中清单在 apply 时失败关闭（CLI 错误信封与退出码 2），
-只读盘点和 dry-run 仍可返回空选择。apply 在单事务内写 source claim、历史通知 suppression
-和 migration receipt；重复 apply 相同 manifest 按行跳过，返回 `applied_count=0`
-与已存在回执的 `existing_count`；源状态漂移或 claim owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
+只读盘点和 dry-run 仍可返回空选择。apply 每行在单事务内写 source claim、
+历史通知 suppression 和 migration receipt；重复 apply 相同 manifest 按行跳过，
+无新写入时返回 `status: "noop"`、`applied_count=0` 与已存在回执的
+`existing_count`；源状态漂移或 claim owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
 和重复消息计数；启动服务与真实发送属于另一次明确授权。
 
 普通平仓的历史通知迁移只接受完整且一致的 canonical broker deal key：
