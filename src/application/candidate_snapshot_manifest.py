@@ -9,6 +9,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
+    current_candidate_owner_schema,
     required_text,
     sha256_text,
     utc_timestamp,
@@ -79,17 +80,12 @@ _BASE_OWNER_FILES = {
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
 }
-_BASE_OWNER_SCHEMAS = {
-    "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-    "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
-    "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
-}
 _OWNER_FILES_V1 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V1}
 _OWNER_FILES_V3 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V2}
 _OWNER_FILES_CURRENT = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE}
 _OWNER_SCHEMAS_CURRENT = {
-    **_BASE_OWNER_SCHEMAS,
-    "wheel": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
+    owner: current_candidate_owner_schema(owner)
+    for owner in _OWNER_FILES_CURRENT
 }
 _KNOWN_MANIFEST_FILES = (
     CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,

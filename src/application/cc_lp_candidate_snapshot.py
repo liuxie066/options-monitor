@@ -208,7 +208,6 @@ def seal_cc_lp_candidate_snapshot(
                 account=account_norm,
                 market=market_norm,
                 owner="cc_lp",
-                schema=CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
                 account_config_sha256=account_config_hash,
                 strategy_policy_sha256=policy_hash,
                 dependencies=dependency_input,

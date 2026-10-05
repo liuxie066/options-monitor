@@ -35,6 +35,9 @@ from src.application.experience_mode import (
     resolve_experience_account_display_name,
     validate_experience_request,
 )
+from src.application.experience_candidate_snapshot import (
+    seal_experience_candidate_owner,
+)
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
@@ -459,6 +462,10 @@ def test_experience_bundle_is_readonly_only_and_non_contributing(tmp_path: Path)
         account=ACCOUNT,
     )
     assert current["manifest"]["scan_mode"] == "experience"
+    assert (
+        current["owners"]["opening"]["schema_version"]
+        == "opening_candidate_snapshot.v3"
+    )
     bundle = load_candidate_snapshot_bundle_for_inspection(
         base=tmp_path, run_id=RUN_ID, account=ACCOUNT
     )
@@ -472,6 +479,77 @@ def test_experience_bundle_is_readonly_only_and_non_contributing(tmp_path: Path)
         "experience_candidate_not_executable"
     )
     assert evidence.contributes_evidence is False
+
+
+def test_experience_owner_writer_rejects_caller_selected_schema(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'schema'"):
+        seal_experience_candidate_owner(
+            base=tmp_path,
+            run_id=RUN_ID,
+            account=ACCOUNT,
+            market="US",
+            owner="opening",
+            account_config_sha256=CONFIG_HASH,
+            strategy_policy_sha256=POLICY_HASH,
+            dependencies=[],
+            scan_statuses=[],
+            selected_candidates=[],
+            evidence={},
+            run_mode=experience_fields(DISPLAY_NAME),
+            schema="opening_candidate_snapshot.v2",  # type: ignore[call-arg]
+        )
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / ACCOUNT
+        / "state"
+        / "opening_candidate_snapshot.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("owner", "strategy_mode", "expected_schema"),
+    [
+        ("opening", "put", "opening_candidate_snapshot.v3"),
+        ("sp_lc", "combo_yield", "combo_yield_candidate_snapshot.v4"),
+        ("cc_lp", "combo_yield", "cc_lp_candidate_snapshot.v4"),
+    ],
+)
+def test_experience_owner_writer_uses_current_schema_for_every_owner(
+    tmp_path: Path,
+    owner: str,
+    strategy_mode: str,
+    expected_schema: str,
+) -> None:
+    payload = seal_experience_candidate_owner(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account=ACCOUNT,
+        market="US",
+        owner=owner,
+        account_config_sha256=CONFIG_HASH,
+        strategy_policy_sha256=POLICY_HASH,
+        dependencies=_dependency_rows(tmp_path),
+        scan_statuses=[
+            {
+                "symbol": "DEMO",
+                "strategy_mode": strategy_mode,
+                "owner": owner,
+                "status": "completed",
+                "candidate_count": 0,
+            }
+        ],
+        selected_candidates=[],
+        evidence={},
+        run_mode=experience_fields(DISPLAY_NAME),
+    )
+
+    assert payload["schema_version"] == expected_schema
 
 
 def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> None:

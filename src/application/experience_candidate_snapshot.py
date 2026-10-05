@@ -10,6 +10,7 @@ from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
     combo_opening_status,
+    current_candidate_owner_schema,
     normalize_combo_scope_results,
     normalize_dependencies,
     normalize_json_value,
@@ -204,7 +205,7 @@ def _seal_owner(
     evidence: Mapping[str, Any],
     fields: Mapping[str, Any],
     sealed_at: str,
-    schema: str | None = None,
+    schema: str,
 ) -> dict[str, Any]:
     _assert_counts(scopes=scopes, selected=selected)
     opening_status = (
@@ -214,7 +215,7 @@ def _seal_owner(
     )
     payload = normalize_json_value(
         {
-            "schema_version": schema or EXPERIENCE_OWNER_SCHEMAS[owner],
+            "schema_version": schema,
             "run_id": run_id,
             "account": account,
             "market": market,
@@ -235,7 +236,7 @@ def _seal_owner(
     _validate_experience_owner(
         payload,
         owner=owner,
-        expected_schema=schema or EXPERIENCE_OWNER_SCHEMAS[owner],
+        expected_schema=schema,
     )
     try:
         write_account_run_state_bytes_once_safely(
@@ -259,7 +260,6 @@ def seal_experience_candidate_owner(
     account: str,
     market: str,
     owner: str,
-    schema: str,
     account_config_sha256: str,
     strategy_policy_sha256: str,
     dependencies: Iterable[Mapping[str, Any]],
@@ -274,8 +274,12 @@ def seal_experience_candidate_owner(
     run_id_norm = _identity(run_id, "run_id")
     account_norm = _identity(account, "account", lower=True)
     market_norm = required_text(market, "market").upper()
-    if owner not in EXPERIENCE_OWNER_SCHEMAS:
+    if owner not in EXPERIENCE_OWNER_FILES:
         raise ExperienceCandidateSnapshotError("experience owner is invalid")
+    try:
+        schema = current_candidate_owner_schema(owner)
+    except CandidateSnapshotContractError as exc:
+        raise ExperienceCandidateSnapshotError(str(exc)) from exc
     fields = validate_experience_fields(run_mode)
     dependency_rows = normalize_dependencies(
         dependencies,
@@ -324,7 +328,7 @@ def seal_experience_candidate_owner(
         evidence=tagged_evidence,
         fields=fields,
         sealed_at=utc_timestamp(sealed_at or datetime.now(timezone.utc)),
-        schema=required_text(schema, "schema"),
+        schema=schema,
     )
 
 

@@ -22,11 +22,17 @@ CANDIDATE_RUN_MODE_FIELDS = frozenset(
 CANDIDATE_CAPTURE_STATUSES = frozenset(
     {"completed", "not_applicable", "failed", "incomplete", "unavailable"}
 )
+_CURRENT_CANDIDATE_OWNER_FILES = {
+    "opening": "opening_candidate_snapshot.json",
+    "sp_lc": "combo_yield_candidate_snapshot.json",
+    "cc_lp": "cc_lp_candidate_snapshot.json",
+    "wheel": "wheel_candidate_snapshot.v3.json",
+}
 _CURRENT_CANDIDATE_OWNER_SCHEMAS = {
-    "opening_candidate_snapshot.json": "opening_candidate_snapshot.v3",
-    "combo_yield_candidate_snapshot.json": "combo_yield_candidate_snapshot.v4",
-    "cc_lp_candidate_snapshot.json": "cc_lp_candidate_snapshot.v4",
-    "wheel_candidate_snapshot.v3.json": "wheel_candidate_snapshot.v3",
+    "opening": "opening_candidate_snapshot.v3",
+    "sp_lc": "combo_yield_candidate_snapshot.v4",
+    "cc_lp": "cc_lp_candidate_snapshot.v4",
+    "wheel": "wheel_candidate_snapshot.v3",
 }
 _LEGACY_CANDIDATE_ROOT_FILES = (
     "strategy_scan_status_index.v1.json",
@@ -73,7 +79,8 @@ def assert_current_candidate_artifact_boundary(
         if any(path.exists() or path.is_symlink() for path in legacy_paths):
             raise CandidateSnapshotContractError("artifact_version_mismatch")
 
-        for filename, expected_schema in _CURRENT_CANDIDATE_OWNER_SCHEMAS.items():
+        for owner, filename in _CURRENT_CANDIDATE_OWNER_FILES.items():
+            expected_schema = _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner]
             path = state_dir / filename
             if not (path.exists() or path.is_symlink()):
                 continue
@@ -137,6 +144,16 @@ def candidate_run_mode_fields(
         "account_display_name": display_name,
         "executable": False,
     }
+
+
+def current_candidate_owner_schema(owner: Any) -> str:
+    """Return the only schema a current writer may publish for one owner."""
+
+    owner_norm = required_text(owner, "candidate owner").lower()
+    try:
+        return _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner_norm]
+    except KeyError as exc:
+        raise CandidateSnapshotContractError("candidate owner is invalid") from exc
 
 
 def validate_candidate_run_mode(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -392,6 +409,7 @@ __all__ = [
     "assert_current_candidate_artifact_boundary",
     "candidate_run_mode_fields",
     "combo_opening_status",
+    "current_candidate_owner_schema",
     "dependency_hash",
     "normalize_combo_scope_results",
     "normalize_dependencies",

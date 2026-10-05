@@ -157,7 +157,6 @@ def seal_opening_candidate_snapshot(
                 account=account_norm,
                 market=market_norm,
                 owner="opening",
-                schema=OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
                 account_config_sha256=account_config_hash,
                 strategy_policy_sha256=policy_hash,
                 dependencies=dependencies,
