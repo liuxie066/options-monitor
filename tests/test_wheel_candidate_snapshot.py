@@ -10,6 +10,7 @@ from src.application.wheel.candidate_snapshot import (
     WHEEL_CANDIDATE_SNAPSHOT_FILE_V1,
     WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
     WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V3,
     WheelCandidateSnapshotError,
     load_wheel_candidate_snapshot,
     seal_wheel_candidate_snapshot,
@@ -42,6 +43,7 @@ def _seal(base: Path, run_id: str = "run-1", **overrides) -> dict:
         account_config_sha256="a" * 64,
         strategy_policy_sha256="b" * 64,
         dependencies=_dependencies(),
+        run_mode={"scan_mode": "standard", "executable": True},
         **overrides,
     )
 
@@ -99,7 +101,7 @@ def test_wheel_candidate_snapshot_seals_one_account_run_owner(tmp_path: Path) ->
     )
 
     assert payload["candidate_owner"] == "wheel"
-    assert payload["schema_version"] == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2
+    assert payload["schema_version"] == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V3
     assert payload["opening_status"] == "candidates_found"
     assert load_wheel_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx") == payload
 
@@ -220,12 +222,12 @@ def test_wheel_candidate_snapshot_loader_adapts_legacy_file_location(
         encoding="utf-8",
     )
 
-    loaded = load_wheel_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-v1",
-        account="lx",
-    )
-    assert loaded["schema_version"] == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1
+    with pytest.raises(WheelCandidateSnapshotError, match="artifact_version_mismatch"):
+        load_wheel_candidate_snapshot(
+            base=tmp_path,
+            run_id="run-v1",
+            account="lx",
+        )
 
 
 def test_wheel_candidate_snapshot_rejects_mixed_v1_v2_files(tmp_path: Path) -> None:

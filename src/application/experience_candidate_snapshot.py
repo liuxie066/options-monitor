@@ -7,6 +7,8 @@ from typing import Any, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
     combo_opening_status,
     normalize_combo_scope_results,
     normalize_dependencies,
@@ -202,6 +204,7 @@ def _seal_owner(
     evidence: Mapping[str, Any],
     fields: Mapping[str, Any],
     sealed_at: str,
+    schema: str | None = None,
 ) -> dict[str, Any]:
     _assert_counts(scopes=scopes, selected=selected)
     opening_status = (
@@ -211,7 +214,7 @@ def _seal_owner(
     )
     payload = normalize_json_value(
         {
-            "schema_version": EXPERIENCE_OWNER_SCHEMAS[owner],
+            "schema_version": schema or EXPERIENCE_OWNER_SCHEMAS[owner],
             "run_id": run_id,
             "account": account,
             "market": market,
@@ -229,7 +232,11 @@ def _seal_owner(
         field=f"{owner} experience snapshot",
     )
     payload["content_sha256"] = canonical_sha256(payload)
-    _validate_owner(payload, owner=owner)
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=schema or EXPERIENCE_OWNER_SCHEMAS[owner],
+    )
     try:
         write_account_run_state_bytes_once_safely(
             base=base,
@@ -243,6 +250,82 @@ def _seal_owner(
             f"experience candidate snapshot cannot be published: {owner}"
         ) from exc
     return payload
+
+
+def seal_experience_candidate_owner(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+    market: str,
+    owner: str,
+    schema: str,
+    account_config_sha256: str,
+    strategy_policy_sha256: str,
+    dependencies: Iterable[Mapping[str, Any]],
+    scan_statuses: Iterable[Mapping[str, Any]],
+    selected_candidates: Iterable[Mapping[str, Any]],
+    evidence: Mapping[str, Iterable[Mapping[str, Any]]],
+    run_mode: Mapping[str, Any],
+    sealed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Seal one experience branch through a current owner schema."""
+
+    run_id_norm = _identity(run_id, "run_id")
+    account_norm = _identity(account, "account", lower=True)
+    market_norm = required_text(market, "market").upper()
+    if owner not in EXPERIENCE_OWNER_SCHEMAS:
+        raise ExperienceCandidateSnapshotError("experience owner is invalid")
+    fields = validate_experience_fields(run_mode)
+    dependency_rows = normalize_dependencies(
+        dependencies,
+        verify_root=Path(base).resolve(),
+        required_kinds=EXPERIENCE_CANDIDATE_DEPENDENCIES,
+    )
+    scopes = _scope_rows(scan_statuses, owner=owner)
+    selected = _tag_rows(selected_candidates, fields=fields)
+    tagged_evidence = {
+        key: _tag_rows(rows, fields=fields)
+        for key, rows in evidence.items()
+    }
+    _assert_no_authority_keys(
+        {
+            "dependencies": dependency_rows,
+            "scopes": scopes,
+            "selected": selected,
+            "evidence": tagged_evidence,
+        }
+    )
+    account_dir = _state_dir(base, run_id_norm, account_norm).parent
+    try:
+        assert_current_candidate_artifact_boundary(
+            account_dir=account_dir,
+            target=account_dir / "state" / EXPERIENCE_OWNER_FILES[owner],
+        )
+    except CandidateSnapshotContractError as exc:
+        raise ExperienceCandidateSnapshotError(str(exc)) from exc
+    return _seal_owner(
+        base=Path(base),
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        owner=owner,
+        account_config_sha256=sha256_text(
+            account_config_sha256,
+            "account_config_sha256",
+        ),
+        strategy_policy_sha256=sha256_text(
+            strategy_policy_sha256,
+            "strategy_policy_sha256",
+        ),
+        dependencies=dependency_rows,
+        scopes=scopes,
+        selected=selected,
+        evidence=tagged_evidence,
+        fields=fields,
+        sealed_at=utc_timestamp(sealed_at or datetime.now(timezone.utc)),
+        schema=required_text(schema, "schema"),
+    )
 
 
 def seal_experience_candidate_bundle(
@@ -413,8 +496,36 @@ def _assert_no_authority_keys(value: Any) -> None:
 
 
 def _validate_owner(payload: Mapping[str, Any], *, owner: str) -> None:
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=EXPERIENCE_OWNER_SCHEMAS[owner],
+    )
+
+
+def validate_experience_candidate_owner(
+    payload: Mapping[str, Any],
+    *,
+    owner: str,
+    schema: str,
+) -> None:
+    if owner not in EXPERIENCE_OWNER_SCHEMAS:
+        raise ExperienceCandidateSnapshotError("experience owner is invalid")
+    _validate_experience_owner(
+        payload,
+        owner=owner,
+        expected_schema=required_text(schema, "schema"),
+    )
+
+
+def _validate_experience_owner(
+    payload: Mapping[str, Any],
+    *,
+    owner: str,
+    expected_schema: str,
+) -> None:
     item = dict(payload)
-    if item.get("schema_version") != EXPERIENCE_OWNER_SCHEMAS[owner]:
+    if item.get("schema_version") != expected_schema:
         raise ExperienceCandidateSnapshotError("experience owner schema mismatch")
     validate_experience_fields(item)
     _identity(item.get("run_id"), "run_id")
@@ -714,5 +825,7 @@ __all__ = [
     "EXPERIENCE_CANDIDATE_MANIFEST_SCHEMA",
     "ExperienceCandidateSnapshotError",
     "load_experience_candidate_snapshot_bundle",
+    "seal_experience_candidate_owner",
     "seal_experience_candidate_bundle",
+    "validate_experience_candidate_owner",
 ]

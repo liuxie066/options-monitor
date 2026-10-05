@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError,
+    candidate_run_mode_fields,
+    validate_candidate_run_mode,
+)
 from src.application.account_config import (
     account_settings_from_config,
     resolve_account_futu_settings,
@@ -11,23 +16,29 @@ from src.infrastructure.futu_gateway import build_futu_gateway
 
 
 EXPERIENCE_BANNER = "体验模式｜演示账户假设｜未读取账户现金与持仓｜不可作为可执行建议"
-EXPERIENCE_FIELDS = {
-    "scan_mode": "experience",
-    "capacity_source": "demo_scenario",
-    "executable": False,
-}
+EXPERIENCE_FIELDS = candidate_run_mode_fields(
+    experience=True,
+    account_display_name="placeholder",
+)
+EXPERIENCE_FIELDS.pop("account_display_name")
 
 
 def experience_fields(account_display_name: str) -> dict[str, Any]:
-    name = str(account_display_name or "").strip()
-    if not name:
-        raise ValueError("experience account display name is required")
-    return {**EXPERIENCE_FIELDS, "account_display_name": name}
+    try:
+        return candidate_run_mode_fields(
+            experience=True,
+            account_display_name=account_display_name,
+        )
+    except CandidateSnapshotContractError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def validate_experience_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
-    fields = experience_fields(str(payload.get("account_display_name") or ""))
-    if any(payload.get(key) != value for key, value in fields.items()):
+    try:
+        fields = validate_candidate_run_mode(payload)
+    except CandidateSnapshotContractError as exc:
+        raise ValueError(str(exc)) from exc
+    if fields.get("scan_mode") != "experience":
         raise ValueError("experience result contract is invalid")
     return fields
 

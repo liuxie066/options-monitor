@@ -38,11 +38,11 @@ from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
-    load_strategy_scan_status_index_v2,
-    load_strategy_scan_status_index_v3,
+    load_strategy_scan_status_index,
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
+from src.application.candidate_snapshot_contract import candidate_run_mode_fields
 from src.application.opening_candidate_snapshot import (
     dependency_from_file,
     dependency_from_hash,
@@ -58,10 +58,6 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.candidate_snapshot_manifest import (
     publish_candidate_snapshot_manifest,
 )
-from src.application.experience_candidate_snapshot import (
-    seal_experience_candidate_bundle,
-)
-from src.application.experience_mode import experience_fields
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
@@ -857,16 +853,19 @@ def run_watchlist_pipeline(
                 else {}
             )
             if str(account_config_sha256 or "").strip():
-                publish_strategy_scan_status_index_v2(
+                publish_strategy_scan_status_index(
                     report_dir=report_dir,
                     run_id=str(source_producer_run_id),
                     account=str(portfolio_cfg.get("account") or ""),
                     account_config_sha256=str(account_config_sha256),
                     expected=expected_strategy_statuses,
-                    experience_fields=(
-                        experience_fields(str(account_display_name or ""))
-                        if experience
-                        else None
+                    run_mode=candidate_run_mode_fields(
+                        experience=experience,
+                        account_display_name=(
+                            str(account_display_name or "")
+                            if experience
+                            else None
+                        ),
                     ),
                 )
 
@@ -1059,17 +1058,12 @@ def run_watchlist_pipeline_default(
         portfolio_snapshot = {}
     if not isinstance(option_snapshot, dict):
         option_snapshot = {}
-    status_index_path = Path(report_dir) / (
-        "strategy_scan_status_index.v3.json"
-        if experience
-        else "strategy_scan_status_index.v2.json"
+    run_mode = candidate_run_mode_fields(
+        experience=experience,
+        account_display_name=(str(account_display_name or "") if experience else None),
     )
-    status_loader = (
-        load_strategy_scan_status_index_v3
-        if experience
-        else load_strategy_scan_status_index_v2
-    )
-    status_index = status_loader(
+    status_index_path = Path(report_dir) / "strategy_scan_status_index.v5.json"
+    status_index = load_strategy_scan_status_index(
         status_index_path,
         expected_run_id=account_run_id,
         expected_account=account,
@@ -1396,12 +1390,13 @@ def run_watchlist_pipeline_default(
             }
             for item in status_index["items"]
         ]
-        status_index = publish_strategy_scan_status_index_v2(
+        status_index = publish_strategy_scan_status_index(
             report_dir=report_dir,
             run_id=account_run_id,
             account=account,
             account_config_sha256=str(account_config_sha256 or ""),
             expected=existing_expected + wheel_expected,
+            run_mode=run_mode,
         )
     expected_scopes_by_owner: dict[str, set[tuple[str, str, str]]] = {
         "opening": set(),
@@ -1456,27 +1451,89 @@ def run_watchlist_pipeline_default(
                 if str(item.get("market") or "").strip()
             }
         )
-        seal_experience_candidate_bundle(
+        experience_dependencies = [
+            required_dependency,
+            fx_dependency,
+            dependency_from_hash(
+                kind="earnings_rv",
+                sha256=str(required_dependency["sha256"]),
+            ),
+        ]
+        snapshot_market = index_markets[0] if len(index_markets) == 1 else "MULTI"
+        if expected_scopes_by_owner["opening"]:
+            seal_opening_candidate_snapshot(
+                base=base,
+                run_id=account_run_id,
+                account=account,
+                market=snapshot_market,
+                physical_account={},
+                account_config_sha256=str(account_config_sha256 or ""),
+                strategy_policy_sha256=policy_hash,
+                dependencies=experience_dependencies,
+                scan_statuses=normalized_statuses,
+                final_candidates=captured_final_candidates,
+                candidate_evaluations=captured_candidate_decisions,
+                run_mode=run_mode,
+                sealed_at=captured_at,
+            )
+        if expected_scopes_by_owner["sp_lc"]:
+            sp_lc_evidence = combo_evidence_by_owner["sp_lc"]
+            seal_combo_yield_candidate_snapshot(
+                base=base,
+                run_id=account_run_id,
+                account=account,
+                market=snapshot_market,
+                account_config_sha256=str(account_config_sha256 or ""),
+                strategy_policy_sha256=policy_hash,
+                dependencies=experience_dependencies,
+                scan_statuses=statuses_by_owner["sp_lc"],
+                funding_put_decisions=(
+                    item
+                    for evidence in sp_lc_evidence
+                    for item in evidence.get("funding_put_decisions") or []
+                ),
+                pair_evaluations=(
+                    item
+                    for evidence in sp_lc_evidence
+                    for item in evidence.get("pair_evaluations") or []
+                ),
+                rank_records=(
+                    item
+                    for evidence in sp_lc_evidence
+                    for item in evidence.get("rank_records") or []
+                ),
+                ranked_pairs=(
+                    item
+                    for evidence in sp_lc_evidence
+                    for item in evidence.get("ranked_pairs") or []
+                ),
+                run_mode=run_mode,
+                sealed_at=captured_at,
+            )
+        if expected_scopes_by_owner["cc_lp"]:
+            cc_lp_evidence = combo_evidence_by_owner["cc_lp"]
+            seal_cc_lp_candidate_snapshot(
+                base=base,
+                run_id=account_run_id,
+                account=account,
+                market=snapshot_market,
+                account_config_sha256=str(account_config_sha256 or ""),
+                strategy_policy_sha256=policy_hash,
+                dependencies=experience_dependencies,
+                scan_statuses=statuses_by_owner["cc_lp"],
+                ranked_pairs=(
+                    item
+                    for evidence in cc_lp_evidence
+                    for item in evidence.get("ranked_pairs") or []
+                ),
+                run_mode=run_mode,
+                sealed_at=captured_at,
+            )
+        publish_candidate_snapshot_manifest(
             base=base,
             run_id=account_run_id,
             account=account,
-            market=(index_markets[0] if len(index_markets) == 1 else "MULTI"),
-            account_config_sha256=str(account_config_sha256 or ""),
             strategy_policy_sha256=policy_hash,
-            dependencies=[
-                required_dependency,
-                fx_dependency,
-                dependency_from_hash(
-                    kind="earnings_rv",
-                    sha256=str(required_dependency["sha256"]),
-                ),
-            ],
-            status_index=status_index,
-            statuses_by_owner=statuses_by_owner,
-            opening_candidates=captured_final_candidates,
-            opening_decisions=captured_candidate_decisions,
-            combo_evidence_by_owner=combo_evidence_by_owner,
-            account_display_name=str(account_display_name or ""),
             sealed_at=captured_at,
         )
         return result
@@ -1575,6 +1632,7 @@ def run_watchlist_pipeline_default(
             scan_statuses=normalized_statuses,
             final_candidates=captured_final_candidates,
             candidate_evaluations=captured_candidate_decisions,
+            run_mode=run_mode,
             sealed_at=captured_at,
         )
     if expected_scopes_by_owner["sp_lc"]:
@@ -1611,6 +1669,7 @@ def run_watchlist_pipeline_default(
             opening_status=_yield_snapshot_status(
                 statuses_by_owner["sp_lc"]
             ),
+            run_mode=run_mode,
             sealed_at=captured_at,
         )
     if expected_scopes_by_owner["cc_lp"]:
@@ -1632,6 +1691,7 @@ def run_watchlist_pipeline_default(
             opening_status=_yield_snapshot_status(
                 statuses_by_owner["cc_lp"]
             ),
+            run_mode=run_mode,
             sealed_at=captured_at,
         )
     if expected_scopes_by_owner["wheel"]:
@@ -1648,6 +1708,7 @@ def run_watchlist_pipeline_default(
             scope_results=wheel_capture["scope_results"],
             batches=wheel_capture["batches"],
             capacity_allocations=wheel_capture["allocations"],
+            run_mode=run_mode,
             sealed_at=captured_at,
         )
     publish_candidate_snapshot_manifest(

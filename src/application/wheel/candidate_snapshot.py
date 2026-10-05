@@ -9,12 +9,14 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
     CANDIDATE_CAPTURE_STATUSES,
     CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
     dependency_hash,
     normalize_dependencies,
     normalize_json_value,
     required_text,
     sha256_text,
     utc_timestamp,
+    validate_candidate_run_mode,
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -27,10 +29,12 @@ from src.application.tick_run_workspace import (
 
 WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1 = "wheel_candidate_snapshot.v1"
 WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2 = "wheel_candidate_snapshot.v2"
-WHEEL_CANDIDATE_SNAPSHOT_SCHEMA = WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2
+WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V3 = "wheel_candidate_snapshot.v3"
+WHEEL_CANDIDATE_SNAPSHOT_SCHEMA = WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V3
 WHEEL_CANDIDATE_SNAPSHOT_FILE_V1 = "wheel_candidate_snapshot.json"
 WHEEL_CANDIDATE_SNAPSHOT_FILE_V2 = "wheel_candidate_snapshot.v2.json"
-WHEEL_CANDIDATE_SNAPSHOT_FILE = WHEEL_CANDIDATE_SNAPSHOT_FILE_V2
+WHEEL_CANDIDATE_SNAPSHOT_FILE_V3 = "wheel_candidate_snapshot.v3.json"
+WHEEL_CANDIDATE_SNAPSHOT_FILE = WHEEL_CANDIDATE_SNAPSHOT_FILE_V3
 
 
 class WheelCandidateSnapshotError(RuntimeError):
@@ -87,7 +91,7 @@ def _scopes(
         symbol = required_text(raw.get("symbol"), "Wheel scope symbol").upper()
         direction = (
             required_text(raw.get("direction"), "Wheel scope direction").lower()
-            if schema_version == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2
+            if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1
             else "call"
         )
         if direction not in {"call", "put"}:
@@ -108,7 +112,7 @@ def _scopes(
                 "symbol": symbol,
                 **(
                     {"direction": direction}
-                    if schema_version == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2
+                    if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1
                     else {}
                 ),
                 "strategy_mode": "wheel",
@@ -137,7 +141,7 @@ def _batches(
     for index, raw in enumerate(rows):
         try:
             row = normalize_json_value(dict(raw), field=f"batches[{index}]")
-            if schema_version == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2:
+            if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1:
                 branch_id = required_text(row.get("wheel_branch_id"), "wheel_branch_id")
                 direction = required_text(row.get("direction"), "direction").lower()
                 if direction not in {"call", "put"}:
@@ -175,7 +179,7 @@ def _batches(
                 )
                 if final_id != candidate_ids[0] or granted <= 0 or int(final.get("granted_contracts") or 0) != granted:
                     raise CandidateSnapshotContractError("Wheel final candidate does not match allocation")
-                if schema_version == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2:
+                if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1:
                     if str(final.get("wheel_branch_id") or "").strip() != branch_id:
                         raise CandidateSnapshotContractError("Wheel final candidate branch mismatch")
                     final_direction = str(final.get("direction") or direction).strip().lower()
@@ -236,7 +240,7 @@ def _allocations(
     ):
         raise CandidateSnapshotContractError("Wheel capacity allocations are invalid")
     allocations = [dict(row) for row in normalized]
-    if schema_version == WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2:
+    if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1:
         seen: set[tuple[str, str]] = set()
         for row in allocations:
             if str(row.get("strategy_family") or "").strip().lower() != "wheel":
@@ -272,15 +276,15 @@ def validate_wheel_candidate_snapshot(
     try:
         item = normalize_json_value(dict(payload or {}), field="wheel_snapshot")
         schema_version = str(item.get("schema_version") or "")
-        if schema_version not in {
-            WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1,
-            WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
-        }:
+        if schema_version != WHEEL_CANDIDATE_SNAPSHOT_SCHEMA:
             raise WheelCandidateSnapshotError("Wheel candidate snapshot schema mismatch")
         if item.get("run_id") != expected_run_id or item.get("account") != expected_account:
             raise WheelCandidateSnapshotError("Wheel candidate snapshot identity mismatch")
         if item.get("candidate_owner") != "wheel":
             raise WheelCandidateSnapshotError("Wheel candidate snapshot owner mismatch")
+        mode_fields = validate_candidate_run_mode(item)
+        if mode_fields["scan_mode"] != "standard":
+            raise WheelCandidateSnapshotError("Wheel is unavailable in experience mode")
         for field in ("account_config_sha256", "strategy_policy_sha256", "required_data_manifest_sha256", "snapshot_hash", "content_sha256"):
             sha256_text(item.get(field), field)
         content = {key: value for key, value in item.items() if key != "content_sha256"}
@@ -334,6 +338,7 @@ def seal_wheel_candidate_snapshot(
     scope_results: Iterable[Mapping[str, Any]],
     batches: Iterable[Mapping[str, Any]],
     capacity_allocations: Iterable[Mapping[str, Any]] = (),
+    run_mode: Mapping[str, Any],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     try:
@@ -342,19 +347,22 @@ def seal_wheel_candidate_snapshot(
         market_value = required_text(market, "market").lower()
         config_hash = sha256_text(account_config_sha256, "account_config_sha256")
         policy_hash = sha256_text(strategy_policy_sha256, "strategy_policy_sha256")
+        mode_fields = validate_candidate_run_mode(run_mode)
+        if mode_fields["scan_mode"] != "standard":
+            raise WheelCandidateSnapshotError("Wheel is unavailable in experience mode")
         dependency_rows = normalize_dependencies(dependencies)
         scopes = _scopes(
             scope_results,
-            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
         )
         batch_rows = _batches(
             batches,
             account=acct,
-            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
         )
         allocation_rows = _allocations(
             [dict(row) for row in capacity_allocations],
-            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
+            schema_version=WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
         )
         seal_time = utc_timestamp(sealed_at or datetime.now(timezone.utc))
     except CandidateSnapshotContractError as exc:
@@ -386,9 +394,23 @@ def seal_wheel_candidate_snapshot(
         "batches": batch_rows,
         "capacity_allocations": allocation_rows,
         "snapshot_hash": canonical_sha256(binding),
+        **mode_fields,
     }
     payload["content_sha256"] = canonical_sha256(payload)
     validate_wheel_candidate_snapshot(payload, expected_run_id=run, expected_account=acct)
+    state_dir = Path(base).resolve() / "output_runs" / run / "accounts" / acct / "state"
+    try:
+        assert_current_candidate_artifact_boundary(
+            account_dir=state_dir.parent,
+            target=state_dir / WHEEL_CANDIDATE_SNAPSHOT_FILE,
+        )
+    except CandidateSnapshotContractError as exc:
+        raise WheelCandidateSnapshotError(str(exc)) from exc
+    if any(
+        (state_dir / name).exists() or (state_dir / name).is_symlink()
+        for name in (WHEEL_CANDIDATE_SNAPSHOT_FILE_V1, WHEEL_CANDIDATE_SNAPSHOT_FILE_V2)
+    ):
+        raise WheelCandidateSnapshotError("artifact_version_mismatch")
     try:
         write_account_run_state_bytes_once_safely(
             base=Path(base), run_id=run, account=acct, name=WHEEL_CANDIDATE_SNAPSHOT_FILE, payload=_canonical_bytes(payload)
@@ -405,27 +427,20 @@ def load_wheel_candidate_snapshot(*, base: Path, run_id: str, account: str) -> d
     try:
         run = required_text(run_id, "run_id")
         acct = required_text(account, "account").lower()
-        payloads = []
-        for name in (
-            WHEEL_CANDIDATE_SNAPSHOT_FILE_V2,
-            WHEEL_CANDIDATE_SNAPSHOT_FILE_V1,
+        state_dir = Path(base).resolve() / "output_runs" / run / "accounts" / acct / "state"
+        if any(
+            (state_dir / name).exists() or (state_dir / name).is_symlink()
+            for name in (WHEEL_CANDIDATE_SNAPSHOT_FILE_V1, WHEEL_CANDIDATE_SNAPSHOT_FILE_V2)
         ):
-            try:
-                payloads.append(json.loads(
-                    read_account_run_state_bytes_safely(
-                        base=Path(base),
-                        run_id=run,
-                        account=acct,
-                        name=name,
-                    ).decode()
-                ))
-            except AccountRunConfigError:
-                continue
-        if not payloads:
-            raise FileNotFoundError("Wheel candidate snapshot is missing")
-        if len(payloads) != 1:
             raise WheelCandidateSnapshotError("artifact_version_mismatch")
-        payload = payloads[0]
+        payload = json.loads(
+            read_account_run_state_bytes_safely(
+                base=Path(base),
+                run_id=run,
+                account=acct,
+                name=WHEEL_CANDIDATE_SNAPSHOT_FILE,
+            ).decode()
+        )
     except WheelCandidateSnapshotError:
         raise
     except Exception as exc:
@@ -522,9 +537,11 @@ __all__ = [
     "WHEEL_CANDIDATE_SNAPSHOT_FILE",
     "WHEEL_CANDIDATE_SNAPSHOT_FILE_V1",
     "WHEEL_CANDIDATE_SNAPSHOT_FILE_V2",
+    "WHEEL_CANDIDATE_SNAPSHOT_FILE_V3",
     "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA",
     "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1",
     "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2",
+    "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V3",
     "WheelCandidateSnapshotError",
     "current_wheel_candidate_policy_hash",
     "load_wheel_candidate_snapshot",

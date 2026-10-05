@@ -213,11 +213,16 @@ def load_account_candidate_evidence(
                 reason_code="candidate_snapshot_manifest_invalid",
                 detail=str(exc),
             )
+        is_experience = bundle["manifest"].get("scan_mode") == "experience"
         return _result(
             account_dir=account_dir,
             common=common,
-            status=SUPPORTED,
-            reason_code="candidate_snapshot_manifest_valid",
+            status=NON_CONTRIBUTING_EXPERIENCE if is_experience else SUPPORTED,
+            reason_code=(
+                "experience_candidate_not_executable"
+                if is_experience
+                else "candidate_snapshot_manifest_valid"
+            ),
             owners=dict(bundle["owners"]),
             status_index=dict(bundle["status_index"]),
             manifest=dict(bundle["manifest"]),

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
     combo_opening_status,
     dependency_hash,
     normalize_combo_scope_results,
@@ -16,6 +17,7 @@ from src.application.candidate_snapshot_contract import (
     required_text,
     sha256_text,
     utc_timestamp,
+    validate_candidate_run_mode,
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -25,7 +27,7 @@ from src.application.tick_run_workspace import (
 from src.application.payload_helpers import readable_json_bytes as _canonical_json_bytes
 
 
-CC_LP_CANDIDATE_SNAPSHOT_SCHEMA = "cc_lp_candidate_snapshot.v2"
+CC_LP_CANDIDATE_SNAPSHOT_SCHEMA = "cc_lp_candidate_snapshot.v4"
 CC_LP_CANDIDATE_SNAPSHOT_FILE = "cc_lp_candidate_snapshot.json"
 CC_LP_OPENING_STATUSES = frozenset(
     {
@@ -107,6 +109,22 @@ def validate_cc_lp_candidate_snapshot(
             raise CcLpCandidateSnapshotError("cc_lp candidate snapshot account mismatch")
         if item.get("candidate_owner") != "cc_lp":
             raise CcLpCandidateSnapshotError("cc_lp candidate snapshot owner mismatch")
+        mode_fields = validate_candidate_run_mode(item)
+        if mode_fields["scan_mode"] == "experience":
+            from src.application.experience_candidate_snapshot import (
+                ExperienceCandidateSnapshotError,
+                validate_experience_candidate_owner,
+            )
+
+            try:
+                validate_experience_candidate_owner(
+                    item,
+                    owner="cc_lp",
+                    schema=CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
+                )
+            except ExperienceCandidateSnapshotError as exc:
+                raise CcLpCandidateSnapshotError(str(exc)) from exc
+            return
         for field in (
             "account_config_sha256",
             "strategy_policy_sha256",
@@ -156,6 +174,7 @@ def seal_cc_lp_candidate_snapshot(
     scan_statuses: Iterable[Mapping[str, Any]],
     ranked_pairs: Iterable[Mapping[str, Any]],
     opening_status: str | None = None,
+    run_mode: Mapping[str, Any],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run CC+LP snapshot."""
@@ -166,14 +185,50 @@ def seal_cc_lp_candidate_snapshot(
         market_norm = required_text(market, "market").lower()
         account_config_hash = sha256_text(account_config_sha256, "account_config_sha256")
         policy_hash = sha256_text(strategy_policy_sha256, "strategy_policy_sha256")
-        dependency_rows = normalize_dependencies(dependencies)
-        scopes = normalize_combo_scope_results(scan_statuses, owner="cc_lp")
+        mode_fields = validate_candidate_run_mode(run_mode)
+    except CandidateSnapshotContractError as exc:
+        raise CcLpCandidateSnapshotError(str(exc)) from exc
+    dependency_input = [dict(item) for item in dependencies]
+    status_input = [dict(item) for item in scan_statuses]
+    pair_input = [dict(item) for item in ranked_pairs]
+    if mode_fields["scan_mode"] == "experience":
+        if opening_status is not None:
+            raise CcLpCandidateSnapshotError(
+                "experience candidate snapshot cannot accept opening_status"
+            )
+        from src.application.experience_candidate_snapshot import (
+            ExperienceCandidateSnapshotError,
+            seal_experience_candidate_owner,
+        )
+
+        try:
+            return seal_experience_candidate_owner(
+                base=Path(base),
+                run_id=run_id_norm,
+                account=account_norm,
+                market=market_norm,
+                owner="cc_lp",
+                schema=CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
+                account_config_sha256=account_config_hash,
+                strategy_policy_sha256=policy_hash,
+                dependencies=dependency_input,
+                scan_statuses=status_input,
+                selected_candidates=pair_input,
+                evidence={},
+                run_mode=mode_fields,
+                sealed_at=sealed_at,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise CcLpCandidateSnapshotError(str(exc)) from exc
+    try:
+        dependency_rows = normalize_dependencies(dependency_input)
+        scopes = normalize_combo_scope_results(status_input, owner="cc_lp")
         seal_time = utc_timestamp(sealed_at or datetime.now(timezone.utc))
     except CandidateSnapshotContractError as exc:
         raise CcLpCandidateSnapshotError(str(exc)) from exc
     try:
         pairs = _pairs(
-            list(ranked_pairs),
+            pair_input,
             run_id=run_id_norm,
             account=account_norm,
             allowed_symbols={str(row["symbol"]) for row in scopes},
@@ -201,6 +256,7 @@ def seal_cc_lp_candidate_snapshot(
         "opening_status": resolved_status,
         "scope_results": scopes,
         "ranked_pairs": pairs,
+        **mode_fields,
     }
     payload["content_sha256"] = canonical_sha256(payload)
     validate_cc_lp_candidate_snapshot(
@@ -210,6 +266,17 @@ def seal_cc_lp_candidate_snapshot(
     )
     encoded = _canonical_json_bytes(payload)
     try:
+        account_dir = (
+            Path(base).resolve()
+            / "output_runs"
+            / run_id_norm
+            / "accounts"
+            / account_norm
+        )
+        assert_current_candidate_artifact_boundary(
+            account_dir=account_dir,
+            target=account_dir / "state" / CC_LP_CANDIDATE_SNAPSHOT_FILE,
+        )
         write_account_run_state_bytes_once_safely(
             base=Path(base),
             run_id=run_id_norm,
@@ -217,7 +284,7 @@ def seal_cc_lp_candidate_snapshot(
             name=CC_LP_CANDIDATE_SNAPSHOT_FILE,
             payload=encoded,
         )
-    except AccountRunConfigError as exc:
+    except (AccountRunConfigError, CandidateSnapshotContractError) as exc:
         raise CcLpCandidateSnapshotError(
             "terminal cc_lp candidate snapshot conflicts or cannot be published"
         ) from exc

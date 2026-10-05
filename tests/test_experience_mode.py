@@ -14,13 +14,19 @@ from src.application.candidate_evidence_history import (
     load_account_candidate_evidence,
 )
 from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
     load_candidate_snapshot_bundle_readonly,
+    publish_candidate_snapshot_manifest,
 )
-from src.application.experience_candidate_snapshot import (
-    ExperienceCandidateSnapshotError,
-    seal_experience_candidate_bundle,
+from src.application.cc_lp_candidate_snapshot import (
+    CcLpCandidateSnapshotError,
+    seal_cc_lp_candidate_snapshot,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    ComboYieldCandidateSnapshotError,
+    seal_combo_yield_candidate_snapshot,
 )
 from src.application.experience_mode import (
     EXPERIENCE_BANNER,
@@ -30,9 +36,13 @@ from src.application.experience_mode import (
     validate_experience_request,
 )
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    seal_opening_candidate_snapshot,
+)
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -96,7 +106,7 @@ def _status_index(
         candidate_count=candidate_count,
         reason="no_candidate" if candidate_count == 0 else None,
     )
-    index = publish_strategy_scan_status_index_v2(
+    index = publish_strategy_scan_status_index(
         report_dir=report_dir,
         run_id=RUN_ID,
         account=ACCOUNT,
@@ -111,7 +121,7 @@ def _status_index(
                 "account_config_sha256": CONFIG_HASH,
             }
         ],
-        experience_fields=experience_fields(DISPLAY_NAME),
+        run_mode=experience_fields(DISPLAY_NAME),
     )
     return report_dir, index
 
@@ -119,15 +129,86 @@ def _status_index(
 def _seal_bundle(base: Path, index: dict, *, market: str = "US", statuses_by_owner: dict,
                  opening_candidates: dict, opening_decisions: dict,
                  combo_evidence_by_owner: dict, sealed_at: str | None = None) -> dict:
-    """Seal an experience bundle; only the per-case arguments differ between the tests."""
-    return seal_experience_candidate_bundle(
-        base=base, run_id=RUN_ID, account=ACCOUNT, market=market,
-        account_config_sha256=CONFIG_HASH, strategy_policy_sha256=POLICY_HASH,
-        dependencies=_dependency_rows(base), status_index=index,
-        statuses_by_owner=statuses_by_owner, opening_candidates=opening_candidates,
-        opening_decisions=opening_decisions, combo_evidence_by_owner=combo_evidence_by_owner,
-        account_display_name=DISPLAY_NAME,
-        **({"sealed_at": sealed_at} if sealed_at is not None else {}),
+    """Seal one current experience bundle through the shared owner writers."""
+    dependencies = _dependency_rows(base)
+    run_mode = experience_fields(DISPLAY_NAME)
+    owners = {
+        str(item.get("candidate_owner") or "").strip().lower()
+        for item in index.get("items") or []
+    }
+    optional_time = {"sealed_at": sealed_at} if sealed_at is not None else {}
+    if "opening" in owners:
+        seal_opening_candidate_snapshot(
+            base=base,
+            run_id=RUN_ID,
+            account=ACCOUNT,
+            market=market,
+            physical_account={},
+            account_config_sha256=CONFIG_HASH,
+            strategy_policy_sha256=POLICY_HASH,
+            dependencies=dependencies,
+            scan_statuses=statuses_by_owner.get("opening") or [],
+            final_candidates=opening_candidates,
+            candidate_evaluations=opening_decisions,
+            run_mode=run_mode,
+            **optional_time,
+        )
+    for owner in sorted(owners & {"sp_lc", "cc_lp"}):
+        evidence_rows = list(combo_evidence_by_owner.get(owner) or [])
+        ranked_pairs = [
+            row
+            for evidence in evidence_rows
+            for row in evidence.get("ranked_pairs") or []
+        ]
+        if owner == "sp_lc":
+            seal_combo_yield_candidate_snapshot(
+                base=base,
+                run_id=RUN_ID,
+                account=ACCOUNT,
+                market=market,
+                account_config_sha256=CONFIG_HASH,
+                strategy_policy_sha256=POLICY_HASH,
+                dependencies=dependencies,
+                scan_statuses=statuses_by_owner.get(owner) or [],
+                funding_put_decisions=[
+                    row
+                    for evidence in evidence_rows
+                    for row in evidence.get("funding_put_decisions") or []
+                ],
+                pair_evaluations=[
+                    row
+                    for evidence in evidence_rows
+                    for row in evidence.get("pair_evaluations") or []
+                ],
+                rank_records=[
+                    row
+                    for evidence in evidence_rows
+                    for row in evidence.get("rank_records") or []
+                ],
+                ranked_pairs=ranked_pairs,
+                run_mode=run_mode,
+                **optional_time,
+            )
+        else:
+            seal_cc_lp_candidate_snapshot(
+                base=base,
+                run_id=RUN_ID,
+                account=ACCOUNT,
+                market=market,
+                account_config_sha256=CONFIG_HASH,
+                strategy_policy_sha256=POLICY_HASH,
+                dependencies=dependencies,
+                scan_statuses=statuses_by_owner.get(owner) or [],
+                ranked_pairs=ranked_pairs,
+                run_mode=run_mode,
+                **optional_time,
+            )
+    return publish_candidate_snapshot_manifest(
+        base=base,
+        run_id=RUN_ID,
+        account=ACCOUNT,
+        strategy_policy_sha256=POLICY_HASH,
+        **optional_time,
     )
 
 
@@ -173,6 +254,78 @@ def test_experience_request_requires_manual_simulate_no_send() -> None:
             trigger_context={"source": "manual"},
             opend_phone_verify_continue=False,
         )
+
+
+def test_experience_opening_rejects_physical_account_authority_before_write(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(OpeningCandidateSnapshotError, match="physical account authority"):
+        seal_opening_candidate_snapshot(
+            base=tmp_path,
+            run_id=RUN_ID,
+            account=ACCOUNT,
+            market="US",
+            physical_account={"futu_account_id": "90000001"},
+            account_config_sha256=CONFIG_HASH,
+            strategy_policy_sha256=POLICY_HASH,
+            dependencies=[],
+            scan_statuses=[],
+            final_candidates={},
+            run_mode=experience_fields(DISPLAY_NAME),
+        )
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / ACCOUNT
+        / "state"
+        / "opening_candidate_snapshot.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("owner", "error_type", "filename"),
+    [
+        ("sp_lc", ComboYieldCandidateSnapshotError, "combo_yield_candidate_snapshot.json"),
+        ("cc_lp", CcLpCandidateSnapshotError, "cc_lp_candidate_snapshot.json"),
+    ],
+)
+def test_experience_pair_owner_rejects_standard_opening_status_before_write(
+    tmp_path: Path,
+    owner: str,
+    error_type: type[RuntimeError],
+    filename: str,
+) -> None:
+    kwargs = {
+        "base": tmp_path,
+        "run_id": RUN_ID,
+        "account": ACCOUNT,
+        "market": "US",
+        "account_config_sha256": CONFIG_HASH,
+        "strategy_policy_sha256": POLICY_HASH,
+        "dependencies": [],
+        "scan_statuses": [],
+        "ranked_pairs": [],
+        "opening_status": "no_candidate",
+        "run_mode": experience_fields(DISPLAY_NAME),
+    }
+    with pytest.raises(error_type, match="cannot accept opening_status"):
+        if owner == "sp_lc":
+            seal_combo_yield_candidate_snapshot(**kwargs)
+        else:
+            seal_cc_lp_candidate_snapshot(**kwargs)
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / ACCOUNT
+        / "state"
+        / filename
+    ).exists()
 
 
 def test_experience_display_name_uses_redacted_account_metadata(monkeypatch) -> None:
@@ -300,8 +453,12 @@ def test_sell_put_demo_capacity_uses_contract_multiplier_and_native_currency() -
 
 def test_experience_bundle_is_readonly_only_and_non_contributing(tmp_path: Path) -> None:
     _seal_opening_bundle(tmp_path)
-    with pytest.raises(CandidateSnapshotManifestError):
-        load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account=ACCOUNT)
+    current = load_candidate_snapshot_bundle(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account=ACCOUNT,
+    )
+    assert current["manifest"]["scan_mode"] == "experience"
     bundle = load_candidate_snapshot_bundle_readonly(
         base=tmp_path, run_id=RUN_ID, account=ACCOUNT
     )
@@ -323,7 +480,7 @@ def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> N
         tmp_path / "output_runs" / RUN_ID / "accounts" / ACCOUNT / "state"
     )
     owner_path = state_dir / "opening_candidate_snapshot.json"
-    manifest_path = state_dir / "candidate_snapshot_manifest.v2.json"
+    manifest_path = state_dir / CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE
     owner = json.loads(owner_path.read_text(encoding="utf-8"))
     owner["account"] = "other"
     owner["content_sha256"] = canonical_sha256(
@@ -348,7 +505,7 @@ def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    with pytest.raises(CandidateSnapshotManifestError, match="identity mismatch"):
+    with pytest.raises(CandidateSnapshotManifestError, match="invalid: opening"):
         load_candidate_snapshot_bundle_readonly(
             base=tmp_path,
             run_id=RUN_ID,
@@ -358,13 +515,13 @@ def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> N
 
 def test_experience_bundle_allows_no_supported_strategy_scope(tmp_path: Path) -> None:
     report_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / ACCOUNT
-    index = publish_strategy_scan_status_index_v2(
+    index = publish_strategy_scan_status_index(
         report_dir=report_dir,
         run_id=RUN_ID,
         account=ACCOUNT,
         account_config_sha256=CONFIG_HASH,
         expected=[],
-        experience_fields=experience_fields(DISPLAY_NAME),
+        run_mode=experience_fields(DISPLAY_NAME),
     )
     manifest = _seal_bundle(
         tmp_path,
@@ -394,7 +551,7 @@ def test_experience_combo_snapshot_rejects_candidate_count_mismatch(
         mode="combo_yield",
         candidate_count=0,
     )
-    with pytest.raises(ExperienceCandidateSnapshotError, match="count mismatch"):
+    with pytest.raises(ComboYieldCandidateSnapshotError, match="count mismatch"):
         _seal_bundle(
             tmp_path,
             index,
