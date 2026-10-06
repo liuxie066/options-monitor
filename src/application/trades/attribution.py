@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+from copy import deepcopy
 import json
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from src.application.ledger.api import (
     resolve_ledger_store, resolve_position_data_config_path,
     ledger_store_write_guard,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
-    read_trade_attribution_snapshot, trade_attribution_facts_from_events,
+    read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
     with_sqlite_repo_transaction, record_trade_attribution_conflict,
@@ -35,7 +36,7 @@ from src.application.ledger.api import (assert_trade_attribution_unclaimed)
 from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.wheel.capacity import trade_attribution_capacity_check
-from src.application.daily_decision_brief_repository import read_combo_candidate_exposures
+from src.application.daily_decision_brief_repository import DailyBriefReadScope, read_combo_candidate_exposures
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -97,6 +98,15 @@ def _multi_wheel_call_attribution(
     return preview
 
 
+def attribution_focus_open_event_id(rows: Mapping[str, Any], *, account: str, execution_key: str) -> str | None:
+    """Resolve only a unique execution; retain all ledger facts for competition."""
+    if not execution_key:
+        return None
+    matches = [row["open_event_id"] for row in trade_attribution_facts_from_events(rows["trade_events"], account=account)
+               if row["execution_key"] == execution_key]
+    return matches[0] if len(matches) == 1 else None
+
+
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
                                     now_ms: int, focus_open_event_id: str | None = None) -> dict[str, Any]:
     preview = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
@@ -104,9 +114,12 @@ def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, ru
     scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]
               if focus_open_event_id is None or item["open_event_id"] == focus_open_event_id}
     exposures, reads = {}, []
+    read_scopes = {}
     for market, market_date in sorted(scopes):
+        if market not in read_scopes:
+            read_scopes[market] = DailyBriefReadScope(base=runtime_root, account=account, market=market)
         result = read_combo_candidate_exposures(base=runtime_root, account=account, market=market,
-                                                market_trading_date=market_date)
+                                                market_trading_date=market_date, read_scope=read_scopes[market])
         reads.append({"market": market, "market_date": market_date, "complete": (
             result.get("available") is True and result.get("complete") is True
             and result.get("delivery_available") is True and result.get("reason") in {None, "ok"}
@@ -640,13 +653,15 @@ def apply_trade_attribution(
 
 
 def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], account: str,
-                                   runtime_root: Path) -> dict[str, Any]:
+                                   runtime_root: Path, execution_key: str = "",
+                                   snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
     observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root)
     market = runtime_config_market(config).lower()
-    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    rows = snapshot if snapshot is not None else read_trade_attribution_snapshot(repo, account=account, market=market)
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
-        now_ms=int(time.time() * 1000), focus_open_event_id=None)
+        now_ms=int(time.time() * 1000),
+        focus_open_event_id=attribution_focus_open_event_id(rows, account=account, execution_key=execution_key))
     return {"config": config, "market": market, "combo_evidence": evidence,
         "capacity_observation": observation, "combo_mode": combo_reconciliation_mode_for_account(config, account=account)}
 
@@ -705,31 +720,65 @@ def reconcile_trade_attribution_account(
     repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
     inbox_path: Path, combo_mode: str, cursor: str = "", stop_event: Any = None,
 ) -> dict[str, Any]:
+    with open_trade_attribution_snapshot_reader(repo, account=account, market=market) as read_if_changed:
+        return _reconcile_trade_attribution_batch(repo, config=config, account=account, market=market,
+            runtime_root=runtime_root, inbox_path=inbox_path, combo_mode=combo_mode, cursor=cursor,
+            stop_event=stop_event, read_if_changed=read_if_changed)
+
+
+def _reconcile_trade_attribution_batch(
+    repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
+    inbox_path: Path, combo_mode: str, cursor: str, stop_event: Any, read_if_changed: Any,
+) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
     from src.application.trades.inbox import cache_trade_attribution_result
 
-    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    rows = read_if_changed()
+    if rows is None:
+        raise RuntimeError("initial trade attribution snapshot is unavailable")
     facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
     selected = sorted((row for row in facts if row["execution_key"] and row["execution_key"] > cursor
         and str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market),
         key=lambda row: row["execution_key"])[:100]
     if not selected or stop_event is not None and stop_event.is_set():
         return {"status": "idle", "checked": 0, "next_cursor": ""}
-    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
-    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
     result = {"checked": 0, "linked": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
+    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
+    if stop_event is not None and stop_event.is_set():
+        return result
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
+    if stop_event is not None and stop_event.is_set():
+        return result
+    view = None
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():
             break
-        # Reuse one provider observation, but refresh all local competitors after each transaction.
-        rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-        view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=int(time.time() * 1000),
-            combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
+        # Every committed change (including in-place fees) invalidates the
+        # observation. After attempted effects, force a fresh snapshot as well.
+        fresh = read_if_changed(force=evidence is None)
+        if stop_event is not None and stop_event.is_set():
+            break
+        if fresh is not None and (fresh != rows or evidence is None):
+            rows = fresh
+            evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
+                now_ms=int(time.time() * 1000))
+            view = None
+        if stop_event is not None and stop_event.is_set():
+            break
+        if view is None:
+            view = build_trade_attribution_view(rows, config=config, account=account, market=market,
+                now_ms=int(time.time() * 1000), combo_evidence=evidence,
+                capacity_observation=observation, combo_mode=combo_mode)
         current = next((row for row in view["rows"] if row["execution_key"] == selected_fact["execution_key"]), None)
         if current is None:
             continue
+        current = deepcopy(current)
+        if stop_event is not None and stop_event.is_set():
+            break
+        action_attempted = False
         try:
             if current["selected_candidate_id"]:
+                action_attempted = True
                 request_id = "trade-attribution:" + canonical_sha256({"policy": ATTRIBUTION_POLICY_VERSION,
                     "execution": current["execution_key"], "candidate": current["selected_candidate_id"]})
                 applied = apply_trade_attribution(repo, account=account, market=market, config=config,
@@ -742,6 +791,7 @@ def reconcile_trade_attribution_account(
                 current = next(row for row in after_view["rows"] if row["execution_key"] == current["execution_key"])
                 result["linked"] += int(applied["write_applied"])
             elif current["status"] == "conflict" and current["rules_enabled"]:
+                action_attempted = True
                 def record_conflicts(active: Any, conn: Any) -> list[str]:
                     fresh = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
                     check = build_trade_attribution_view(fresh, config=config, account=account, market=market,
@@ -766,6 +816,12 @@ def reconcile_trade_attribution_account(
                 execution_key=current["execution_key"], result=attribution_result_payload(current))
         except Exception as exc:
             result["errors"].append({"execution_key": current["execution_key"], "error": type(exc).__name__})
+        finally:
+            # Writers recheck snapshot/time/hash in their own transaction. Even a
+            # failed attempt may have changed facts; never reuse its old view.
+            if action_attempted:
+                view = None
+                evidence = None
         result["checked"] += 1
         result["next_cursor"] = current["execution_key"]
     if len(selected) < 100 and result["checked"] == len(selected):
@@ -828,12 +884,14 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
             cursor = state["last_open_event_id"]
         except TradeEventPaginationError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=f"归属分页 cursor 无效或已过期，请重新查询：{exc}") from exc
-    context = (read_trade_attribution_context(repo, config=config, account=account,
-        runtime_root=Path(authority["runtime_root"])) if prepare_confirmation else None)
     snapshot = read_trade_attribution_snapshot(repo, account=account, market=market)
+    context = (read_trade_attribution_context(repo, config=config, account=account,
+        runtime_root=Path(authority["runtime_root"]), execution_key=filters["execution_key"], snapshot=snapshot)
+        if prepare_confirmation else None)
     now = int(time.time() * 1000)
     evidence = context["combo_evidence"] if context else read_attribution_combo_evidence(
-        snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now)
+        snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now,
+        focus_open_event_id=attribution_focus_open_event_id(snapshot, account=account, execution_key=filters["execution_key"]))
     view = build_trade_attribution_view(snapshot, config=config, account=account, market=market, now_ms=now, combo_evidence=evidence,
         capacity_observation=context["capacity_observation"] if context else None,
         combo_mode=combo_reconciliation_mode_for_account(config, account=account))

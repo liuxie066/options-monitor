@@ -315,6 +315,7 @@ from .trade_attribution import (
     ledger_resource_identity,
     read_trade_attribution_facts,
     read_trade_attribution_snapshot,
+    open_trade_attribution_snapshot_reader,
     record_trade_attribution_conflict,
     trade_attribution_facts_from_events,
 )
@@ -330,6 +331,7 @@ __all__ = [
     "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
     "ledger_resource_identity", "read_trade_attribution_facts",
     "read_trade_attribution_snapshot",
+    "open_trade_attribution_snapshot_reader",
     "read_trade_attribution_policy",
     "preview_trade_attribution_migration", "apply_trade_attribution_migration",
     "trade_attribution_facts_from_events", "record_trade_attribution_conflict",

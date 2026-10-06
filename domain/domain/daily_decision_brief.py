@@ -1253,6 +1253,13 @@ def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
     historical integrity verification; they are never normalized or exposed.
     """
 
+    return normalize_persisted_daily_decision_brief_with_digests(brief)[1]
+
+
+def normalize_persisted_daily_decision_brief_with_digests(
+    brief: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Normalize once and derive integrity digests from the same raw observation."""
     source = dict(brief or {})
     normalized = normalize_persisted_daily_decision_brief(brief)
     payload = {
@@ -1261,12 +1268,14 @@ def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
         if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
     }
     current = _digest(payload)
+    if not any(field in source for field in RETIRED_DAILY_BRIEF_FIELDS):
+        return normalized, (current,)
     legacy_payload = dict(payload)
     for field in RETIRED_DAILY_BRIEF_FIELDS:
         if field in source:
             legacy_payload[field] = source[field]
     legacy = _digest(legacy_payload)
-    return (current,) if legacy == current else (current, legacy)
+    return normalized, ((current,) if legacy == current else (current, legacy))
 
 
 def _ensure_same_brief_identity(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
@@ -1521,5 +1530,6 @@ __all__ = [
     "normalize_daily_brief_action",
     "normalize_daily_decision_brief",
     "normalize_persisted_daily_decision_brief",
+    "normalize_persisted_daily_decision_brief_with_digests",
     "reconcile_daily_decision_brief_evidence",
 ]

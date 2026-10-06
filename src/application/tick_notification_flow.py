@@ -36,6 +36,7 @@ from src.application.daily_decision_brief_renderer import (
     select_rendered_combo_candidate_rows,
 )
 from src.application.daily_decision_brief_repository import (
+    DailyBriefReadScope,
     classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
     persist_daily_decision_brief_success,
@@ -160,13 +161,22 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         return rc
 
     daily_brief_prepare_started = monotonic()
+    request.runlog.safe_event("daily_brief_prepare", "start")
+    prepare_outcome = "ok"
     try:
         daily_brief_prep = _prepare_daily_brief_notification(request)
+    except BaseException as exc:
+        prepare_outcome = "error"
+        request.runlog.safe_event("daily_brief_prepare", "error", data={"error_type": type(exc).__name__})
+        raise
+    else:
+        request.runlog.safe_event("daily_brief_prepare", "ok")
     finally:
         record_tick_latency(
             runlog=request.runlog,
             stage="daily_brief_prepare",
             started=daily_brief_prepare_started,
+            data={"outcome": prepare_outcome},
         )
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
@@ -299,12 +309,18 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         _run_post_delivery_sidecars_best_effort(request)
         if request.delivery_only:
             request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(
-            status="skipped",
-            message="no_retryable_delivery" if request.delivery_only else "no_daily_brief_delivery",
+            request.audit_helper.guard_mark_success()
+            request.complete_tick_idempotency_fn(status="skipped", message="no_retryable_delivery")
+            return 0
+        return finish_success(
+            lambda: finalize_no_account_notification(
+                base=request.base, run_id=request.run_id, runlog=request.runlog,
+                results=request.results, tick_metrics=request.tick_metrics,
+                no_send=request.no_send, state_repo=state_repo, utc_now_fn=utc_now,
+                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
+                on_success=request.audit_helper.guard_mark_success, reason="no_daily_brief_delivery",
+            ), status="skipped", message="no_daily_brief_delivery",
         )
-        return 0
 
     notify_route = resolve_notification_delivery_route(config=request.base_cfg)
     notif_cfg = notify_route.get("notifications") or {}
@@ -869,11 +885,13 @@ def _prepare_daily_brief_notification(
                 market_date = _daily_brief_market_date(scheduler)
                 if not market_date:
                     continue
+                read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
                 retry = read_retryable_daily_decision_brief_delivery(
                     base=request.base,
                     account=account,
                     market=market,
                     market_trading_date=market_date,
+                    read_scope=read_scope,
                 )
                 envelope = retry.get("envelope")
                 if not isinstance(envelope, dict):
@@ -884,6 +902,7 @@ def _prepare_daily_brief_notification(
                         market_date=market_date,
                         scheduler=scheduler,
                         daily_limits=daily_limits,
+                        read_scope=read_scope,
                     )
                     envelope = rebuilt.get("envelope")
                     if isinstance(envelope, dict):
@@ -954,11 +973,13 @@ def _prepare_daily_brief_notification(
             blocked_retry_classification: str | None = None
             blocked_market_date = _daily_brief_market_date(scheduler)
             if scheduled_trigger and not multi_market and blocked_market_date:
+                read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
                 retry_before_writes = read_retryable_daily_decision_brief_delivery(
                     base=request.base,
                     account=account,
                     market=markets[0],
                     market_trading_date=blocked_market_date,
+                    read_scope=read_scope,
                 )
                 envelope_before_writes = retry_before_writes.get("envelope")
                 if not isinstance(envelope_before_writes, dict):
@@ -967,6 +988,7 @@ def _prepare_daily_brief_notification(
                         account=account,
                         market=markets[0],
                         market_trading_date=blocked_market_date,
+                        read_scope=read_scope,
                     )
                     if fixed_recovery.get("available"):
                         rebuilt = _rebuild_daily_brief_delivery(
@@ -1335,6 +1357,7 @@ def _rebuild_daily_brief_delivery(
     scheduler: dict[str, Any],
     daily_limits: Any,
     fixed_recovery: Mapping[str, Any] | None = None,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Recreate only the missing envelope from the canonical persisted Brief."""
 
@@ -1348,6 +1371,7 @@ def _rebuild_daily_brief_delivery(
             account=account,
             market=market,
             market_trading_date=market_date,
+            read_scope=read_scope,
         )
     )
     recovering_fixed = bool(recovery_result.get("available"))
@@ -1373,6 +1397,7 @@ def _rebuild_daily_brief_delivery(
         base=request.base,
         account=account,
         market=market,
+        read_scope=read_scope,
     )
     state = delivery_state.get("state") if delivery_state.get("available") else None
     day = state.get("days", {}).get(market_date, {}) if isinstance(state, dict) else {}
