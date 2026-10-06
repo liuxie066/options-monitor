@@ -2073,7 +2073,7 @@ def test_combo_snapshot_partial_status_warns_without_csv_authority(
     ]
     assert len(combo_partial_gaps) == 1
     assert brief["candidates"]["combo_yield"] == []
-    assert "NVDA 组合增强｜本轮部分数据不可用，候选结果不完整" in (
+    assert "NVDA Combo｜本轮部分数据不可用，候选结果不完整" in (
         render_full_brief(brief)
     )
 

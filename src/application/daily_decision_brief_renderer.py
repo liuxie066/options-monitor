@@ -25,7 +25,7 @@ _STRATEGY_LABELS = {
     "sell_put": "CSP",
     "short_put": "CSP",
     "covered_call": "CC",
-    "combo_yield": "组合增强",
+    "combo_yield": "Combo",
     "wheel": "Wheel",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
@@ -185,6 +185,27 @@ def build_daily_brief_user_view(
         "change_summaries": _change_summaries(normalized_diff, market=market),
         "candidates": candidate_views,
         "candidate_omissions": candidate_omissions,
+        "candidate_empty_by_family": {
+            family: (
+                "候选数据不完整，暂无法评估"
+                if _fixed_report_error_reminders(
+                    {"data_gaps": [
+                        item for item in brief.get("data_gaps") or []
+                        if isinstance(item, Mapping)
+                        and _lower(item.get("strategy_family")) in {"", family}
+                    ]},
+                    strategy_failure_items=[
+                        item for item in strategy_failure_items if item["family"] == family
+                    ],
+                )
+                or any(
+                    _lower(item.get("strategy_family")) == family
+                    for item in [*partial_data_gaps, *evidence_holds]
+                )
+                else "暂无合适合约"
+            )
+            for family in ("sell_put", "covered_call", "combo_yield")
+        },
         "candidate_empty_summary": (
             _candidate_empty_summary_for_failures(
                 strategy_failure_items,
@@ -519,7 +540,11 @@ def _render_user_view(
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families
+    visible_families = (
+        {"sell_put", "covered_call", "combo_yield"}
+        if projection == "fixed_report"
+        else candidate_families
+    )
     if projection == "candidate_alert":
         if not candidates and not view.get("wheel_batches"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
@@ -566,6 +591,8 @@ def _render_user_view(
                         lines.append(_flat_field_line(leg))
                     for detail in item.get("details") or []:
                         lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
+            else:
+                lines.append(view["candidate_empty_by_family"][family])
             for note in omissions_by_family.get(family) or []:
                 lines.append(f"补充｜{note}")
         for note in other_omissions:
@@ -573,6 +600,10 @@ def _render_user_view(
         if not candidates and not visible_families and not view.get("wheel_batches"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
             lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+        if projection == "fixed_report" and not candidates:
+            summary = str(view.get("candidate_empty_summary") or "")
+            if summary and summary != "本轮暂无符合条件的候选。":
+                lines.extend([_VISIBLE_BLANK_LINE, summary])
 
     wheel_batches = [
         item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)
@@ -670,9 +701,11 @@ def _render_user_view_card(
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families
-    if projection == "candidate_alert":
-        visible_families = candidate_families
+    visible_families = (
+        {"sell_put", "covered_call", "combo_yield"}
+        if projection == "fixed_report"
+        else candidate_families
+    )
     if not visible_families and not view.get("wheel_batches"):
         lines.extend(["", "## 策略候选"])
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
@@ -687,8 +720,13 @@ def _render_user_view_card(
                     family,
                     family_rows,
                     candidate_heading=candidate_heading,
+                    empty_summary=view["candidate_empty_by_family"][family],
                 )
             )
+    if projection == "fixed_report" and not candidates:
+        summary = str(view.get("candidate_empty_summary") or "")
+        if summary and summary != "本轮暂无符合条件的候选。":
+            lines.extend(["", summary])
     wheel_batches = [
         item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)
     ]
@@ -790,9 +828,12 @@ def _render_candidate_family_card(
     rows: list[Mapping[str, Any]],
     *,
     candidate_heading: str = "策略候选",
+    empty_summary: str = "暂无合适合约",
 ) -> list[str]:
     heading = _STRATEGY_LABELS.get(family, family)
     lines = ["", f"## {heading}"]
+    if not rows:
+        lines.append(empty_summary)
     if rows and candidate_heading:
         lines.extend(["", f"### {candidate_heading}"])
     for item in rows:
@@ -948,7 +989,7 @@ def _candidate_views(
                         "choice": choice,
                         "symbol": symbol,
                         "candidate_id": str(row.get("candidate_id") or "") or None,
-                        "title": f"{symbol} · 组合增强（{choice}）",
+                        "title": f"{symbol} · {_STRATEGY_LABELS[family]}（{choice}）",
                         "legs": [put_leg, call_leg],
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),

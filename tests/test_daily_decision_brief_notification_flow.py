@@ -338,8 +338,9 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
     assert bundle.commits == [{"lx": FIXED_TARGET}]
 
 
-def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, tmp_path: Path) -> None:
-    _patch_assembler(monkeypatch)
+@pytest.mark.parametrize("candidate", [False, True])
+def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, tmp_path: Path, candidate: bool) -> None:
+    _patch_assembler(monkeypatch, candidate=candidate)
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
@@ -367,8 +368,13 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
     assert calls[0]["transport_envelope"] == transport
     card_markdown = transport["transport"]["content"]["body"]["elements"][0]["content"]
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in card_markdown
-    assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 1）**" in card_markdown
-    assert "指标｜权利金 $1.20" in card_markdown
+    if candidate:
+        assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 1）**" in card_markdown
+        assert "指标｜权利金 $1.20" in card_markdown
+    else:
+        assert "## CSP\n暂无合适合约" in card_markdown
+    assert "## CC\n暂无合适合约" in card_markdown
+    assert "## Combo\n暂无合适合约" in card_markdown
     assert "现金总额｜$100,000.00" in card_markdown
     assert "可用于期权开仓｜$60,000.00" in card_markdown
     assert "| 项目 | 数值 |" not in card_markdown
@@ -692,7 +698,9 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
     prep = mod._prepare_daily_brief_notification(bundle.request)
     message = prep.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
 
-    assert "本轮暂无符合条件的候选" in message
+    assert "## CSP\n暂无合适合约" in message
+    assert "## CC\n暂无合适合约" in message
+    assert "## Combo\n暂无合适合约" in message
     assert "## 持仓" in message
     assert "## 资金" in message
     assert "现金总额｜$100,000.00" in message
