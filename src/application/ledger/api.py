@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.ledger.events import lot_id_for_open_event
-from .futu_time_repair import prepare_futu_time_repair, open_futu_time_repair_store
+from .futu_time_repair import apply_futu_time_repair, prepare_futu_time_repair, open_futu_time_repair_store
 
 from src.application.ledger.commands import (
     accept_option_close_evidence,
@@ -321,7 +321,8 @@ from .trade_attribution import (
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
 __all__ = [
-    "prepare_futu_time_repair", "open_futu_time_repair_store",
+    "prepare_futu_time_repair",
+    "apply_futu_time_repair", "open_futu_time_repair_store",
     "write_trade_attribution_decision",
     "read_trade_attribution_decision",
     "lot_id_for_open_event",

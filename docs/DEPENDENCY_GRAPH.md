@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1117 (`src`: 549, `domain`: 88, `scripts`: 14, `tests`: 466)
-- Internal import edges: 8464 total, 3589 production/script edges excluding tests
+- Internal import edges: 8477 total, 3595 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,11 +46,11 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3706| application
+  tests -->|3711| application
   tests -->|480| domain
   tests -->|2| domain_services
   tests -->|243| infrastructure
-  tests -->|292| interfaces
+  tests -->|294| interfaces
   tests -->|28| scripts
   tests -->|28| storage
 ```
@@ -79,9 +79,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3706 |
+| tests | application | 3711 |
 | tests | domain | 480 |
-| tests | interfaces | 292 |
+| tests | interfaces | 294 |
 | tests | infrastructure | 243 |
 | tests | scripts | 28 |
 | tests | storage | 28 |
@@ -103,8 +103,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.storage | 41 |
 | src.application | src.application.ledger | 32 |
 | src.application.research | src.application | 32 |
+| src.application.trades | src.application.ledger | 32 |
 | scripts | src.application | 32 |
-| src.application.trades | src.application.ledger | 31 |
 | src.application.inbound | src.application | 27 |
 | domain.domain.ledger | domain.domain | 27 |
 | src.application | domain.domain.engine | 25 |
@@ -182,7 +182,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tool_contracts | 118 |
 | src.application.payload_helpers | 97 |
 | domain.domain.symbol_identity | 81 |
-| src.application.ledger.api | 79 |
+| src.application.ledger.api | 80 |
 | src.application.agent_tool_config | 74 |
 | domain.domain.trade_contract_identity | 68 |
 | src.infrastructure.io_utils | 56 |

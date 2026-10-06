@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import json
+import os
+import time
 from pathlib import Path
 import sqlite3
 from typing import Any, Callable
@@ -54,12 +56,15 @@ def open_futu_time_repair_store(*, data_config: Path, runtime_root: str | None =
     return repo, store.to_dict()
 
 
-def _read_connection(repo: Any) -> sqlite3.Connection:
+def _read_connection(repo: Any, *, recover_journals: bool = False) -> sqlite3.Connection:
     ledger, inbox = _paths(repo)
-    conn = sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)
+    # Apply/readback may recover hot journals or initialize WAL sidecars.
+    # Preview always uses mode=ro and never recovers by opening for writes.
+    mode = "rw" if recover_journals else "ro"
+    conn = sqlite3.connect(ledger.as_uri() + "?mode=" + mode, uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("ATTACH DATABASE ? AS repair_inbox", (inbox.as_uri() + "?mode=ro",))
+        conn.execute("ATTACH DATABASE ? AS repair_inbox", (inbox.as_uri() + "?mode=" + mode,))
         conn.execute("PRAGMA query_only=ON")
         conn.execute("BEGIN")
         return conn
@@ -69,7 +74,8 @@ def _read_connection(repo: Any) -> sqlite3.Connection:
 
 
 def _table_hashes(conn: sqlite3.Connection, schema: str) -> dict[str, str]:
-    hashes = {}
+    hashes = {"$schema": _hash([list(row) for row in conn.execute(
+        f"SELECT type,name,tbl_name,sql FROM {schema}.sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")])}
     for row in conn.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
         name = row[0]
         quoted = '"' + name.replace('"', '""') + '"'
@@ -159,12 +165,12 @@ def _proven_keys(event: dict[str, Any]) -> set[str]:
 
 def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any], plan_inbox: Callable) -> dict[str, Any]:
     _validate_request(request)
-    rows = [dict(row) for row in conn.execute("SELECT event_id,event_json,trade_time_ms FROM trade_events ORDER BY event_id")]
+    rows = [dict(row) for row in conn.execute("SELECT * FROM trade_events ORDER BY event_id")]
     by_id = {row["event_id"]: row for row in rows}
     payloads = {row["event_id"]: json.loads(row["event_json"]) for row in rows}
     voided = {valid_void_target_event_id(p) for p in payloads.values()}
     # Same connection is essential for a coherent read set and the EXCLUSIVE apply transaction.
-    fx = PerformanceEvidenceSQLiteRepository(repo.db_path)._read_fx_rates_conn(conn)
+    fx = PerformanceEvidenceSQLiteRepository(repo.db_path).read_fx_rates(conn=conn).fx_rates
     rates = cash_fx_daily_facts(fx)
     changes = []
     proposed = deepcopy(payloads)
@@ -225,7 +231,7 @@ def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any], plan_
         }
         if structured_deal_keys_from_ledger_event(after, include_legacy_execution_identity=True) != keys:
             raise ValueError(f"execution identity changed: {eid}")
-        changes.append({"event_id": eid, "before_json": row["event_json"], "after_json": _json(after),
+        changes.append({"event_id": eid, "before_row": row, "before_json": row["event_json"], "after_json": _json(after),
                         "before_payload": before, "after_payload": after,
                         "before_trade_time_ms": event.event_time_ms, "after_trade_time_ms": after_ms})
         proposed[eid] = after
@@ -242,7 +248,8 @@ def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any], plan_
     invariants = _project_invariants(list(payloads.values()), list(proposed.values()))
     patches = plan_inbox(conn, changes)
     plan = {"operation": "futu_trade_time_batch_repair", "mode": "dry_run", "request": request,
-            "request_hash": _hash(request), "events": changes, "inbox": patches,
+            "request_hash": _hash(request), "stores": dict(zip(("ledger", "inbox"), map(str, _paths(repo)))),
+            "events": changes, "inbox": patches,
             "invariants": invariants, "read_set": {schema: _table_hashes(conn, schema) for schema in ("main", "repair_inbox")}}
     plan["input_hash"] = _hash(plan)
     return plan
@@ -251,3 +258,194 @@ def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any], plan_
 def prepare_futu_time_repair(repo: Any, *, request: dict[str, Any], plan_inbox: Callable) -> dict[str, Any]:
     with closing(_read_connection(repo)) as conn:
         return _prepare(conn, repo, request, plan_inbox)
+
+
+def _stored_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return sorted([{"lot_id": row["lot_id"], "fields": json.loads(row["fields_json"])}
+                   for row in conn.execute("SELECT lot_id,fields_json FROM position_lots")], key=_json)
+
+
+def _assert_after(conn: sqlite3.Connection, plan: dict[str, Any]) -> None:
+    for change in plan["events"]:
+        row = conn.execute("SELECT event_json,trade_time_ms FROM trade_events WHERE event_id=?", (change["event_id"],)).fetchone()
+        if row is None or tuple(row) != (change["after_json"], change["after_trade_time_ms"]):
+            raise ValueError("repaired event readback mismatch")
+    for patch in plan["inbox"]:
+        row = conn.execute("SELECT * FROM repair_inbox.trade_inbox WHERE inbox_id=?", (patch["inbox_id"],)).fetchone()
+        if row is None or dict(row) != patch["after_row"]:
+            raise ValueError("repaired inbox readback mismatch")
+    if _stored_lots(conn) != sorted(plan["invariants"]["projection_lots"], key=_json):
+        raise ValueError("repaired position projection differs from preview")
+
+
+def _prior_receipt(conn: sqlite3.Connection, request: dict[str, Any], expected_input_hash: str) -> dict[str, Any] | None:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='futu_trade_time_repair_audit'").fetchone():
+        return None
+    row = conn.execute("SELECT * FROM futu_trade_time_repair_audit WHERE batch_id=?", (request["batch_id"],)).fetchone()
+    if row is None:
+        return None
+    if row["request_json"] != _json(request) or row["input_hash"] != expected_input_hash:
+        raise ValueError("repair batch ID was already used for different inputs")
+    plan = json.loads(row["plan_json"])
+    _assert_after(conn, plan)
+    return {**json.loads(row["receipt_json"]), "mode": "no_op", "write_applied": False, "durable_readback": True}
+
+
+def _back_up_files(paths: tuple[Path, Path], directory: Path) -> list[dict[str, str]]:
+    directory.mkdir(mode=0o700, parents=False, exist_ok=False)
+    backups = []
+    for path, name in zip(paths, ("ledger-before.sqlite3", "inbox-before.sqlite3")):
+        destination = directory / name
+        data = path.read_bytes()  # EXCLUSIVE rollback-mode transaction holds both files stable.
+        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        digest = hashlib.sha256(data).hexdigest()
+        if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+            raise ValueError("backup readback mismatch")
+        backups.append({"source": str(path), "path": str(destination), "sha256": digest})
+    for path in (directory, directory.parent):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return backups
+
+
+def _assert_preserved(conn: sqlite3.Connection, plan: dict[str, Any]) -> None:
+    # Substitute exactly the approved rows back into the after snapshot. Its
+    # original full-table hash must match, proving no untargeted row changed.
+    for schema, table, key, patches in (
+        ("main", "trade_events", "event_id", plan["events"]),
+        ("repair_inbox", "trade_inbox", "inbox_id", plan["inbox"]),
+    ):
+        before_rows = {patch[key]: patch["before_row"] for patch in patches}
+        reconstructed = []
+        for row in conn.execute(f"SELECT * FROM {schema}.{table}"):
+            values = before_rows.get(row[key], dict(row))
+            if key == "event_id" and row[key] in before_rows:
+                for column in row.keys():
+                    if column not in {"event_json", "trade_time_ms", "updated_at_ms"} and row[column] != values[column]:
+                        raise ValueError("repair changed protected trade event columns")
+            reconstructed.append([values[column] for column in row.keys()])
+        if _hash(sorted(reconstructed, key=_json)) != plan["read_set"][schema][table]:
+            raise ValueError(f"repair changed untargeted rows: {schema}.{table}")
+    for schema, before in plan["read_set"].items():
+        after = _table_hashes(conn, schema)
+        for table, digest in before.items():
+            protected = (schema == "repair_inbox" and table not in {"$schema", "trade_inbox", "trade_inbox_revisions"}) or (
+                schema == "main" and table.startswith(("trade_lifecycle_", "wheel_", "assigned_stock_")))
+            if protected and after.get(table) != digest:
+                raise ValueError(f"repair changed protected audit/business state: {schema}.{table}")
+
+
+def apply_futu_time_repair(repo: Any, *, request: dict[str, Any], expected_input_hash: str,
+                           backup_dir: str | Path, plan_inbox: Callable, apply_inbox: Callable) -> dict[str, Any]:
+    from .repository import initialize_ledger_connection, with_sqlite_repo_writer_lock
+    from .repository_trade_schema import _ensure_opend_trade_time_correction_guard
+    from .position_projection_runtime import run_position_projection_in_transaction
+    from .current_decision_projection import capture_trade_event_decision_projection_fence, finalize_current_decision_projection
+
+    _validate_request(request)
+    if not expected_input_hash or not backup_dir:
+        raise ValueError("apply requires expected_input_hash and a new backup_dir")
+    paths = _paths(repo)
+    if paths[0].stat().st_dev != paths[1].stat().st_dev:
+        raise ValueError("atomic repair requires both databases on the same filesystem")
+    with with_sqlite_repo_writer_lock(repo):
+        with closing(_read_connection(repo, recover_journals=True)) as read:
+            prior = _prior_receipt(read, request, expected_input_hash)
+            if prior:
+                return prior
+        conn = sqlite3.connect(paths[0].as_uri() + "?mode=rw", uri=True, timeout=2, isolation_level=None)
+        modes = {}
+        restoration = {}
+        cleanup_errors = []
+        committed = False
+        commit_error = None
+        try:
+            initialize_ledger_connection(conn)
+            conn.execute("ATTACH DATABASE ? AS repair_inbox", (paths[1].as_uri() + "?mode=rw",))
+            for schema in ("main", "repair_inbox"):
+                modes[schema] = conn.execute(f"PRAGMA {schema}.journal_mode").fetchone()[0]
+                if conn.execute(f"PRAGMA {schema}.journal_mode=DELETE").fetchone()[0] != "delete":
+                    raise ValueError("exclusive rollback journal mode unavailable")
+                conn.execute(f"PRAGMA {schema}.synchronous=FULL")
+            conn.execute("BEGIN EXCLUSIVE")
+            # BEGIN EXCLUSIVE acquires locks on all attached rollback databases.
+            plan = _prepare(conn, repo, request, plan_inbox)
+            if plan["input_hash"] != expected_input_hash:
+                raise ValueError("repair preview input hash changed; create a fresh preview")
+            before_events = [json.loads(row[0]) for row in conn.execute("SELECT event_json FROM trade_events")]
+            projected_before = project_stored_trade_events_to_position_lots(before_events)
+            if _stored_lots(conn) != sorted([lot.to_dict() for lot in projected_before.lots], key=_json):
+                raise ValueError("stored position projection is not current before repair")
+            backups = _back_up_files(paths, Path(backup_dir).resolve())
+            applied_at_ms = int(time.time() * 1000)
+            receipt = {"operation": "futu_trade_time_batch_repair", "mode": "applied", "batch_id": request["batch_id"],
+                       "input_hash": expected_input_hash, "request_hash": plan["request_hash"], "applied_at_ms": applied_at_ms,
+                       "event_count": len(plan["events"]), "inbox_count": len(plan["inbox"]),
+                       "position_lot_count": plan["invariants"]["position_lot_count"], "backups": backups,
+                       "write_applied": True}
+            fence = capture_trade_event_decision_projection_fence(repo, conn=conn)
+            _ensure_opend_trade_time_correction_guard(conn)
+            conn.execute("INSERT INTO futu_trade_time_repair_audit VALUES (?,?,?,?,?,?)",
+                         (request["batch_id"], _json(request), expected_input_hash, _json(plan), _json(receipt), applied_at_ms))
+            PerformanceEvidenceSQLiteRepository(repo.db_path).freeze_cash_fx_daily_rates(migrated_at_ms=request["prepared_at_ms"], conn=conn)
+            for change in plan["events"]:
+                if not repo.compare_and_swap_trade_event_time(event_id=change["event_id"], expected_event_json=change["before_json"],
+                        expected_trade_time_ms=change["before_trade_time_ms"], replacement_event_json=change["after_json"],
+                        replacement_trade_time_ms=change["after_trade_time_ms"], updated_at_ms=applied_at_ms, conn=conn):
+                    raise ValueError("trade time repair CAS conflict")
+            apply_inbox(conn, plan["inbox"], request["prepared_at_ms"])
+            run_position_projection_in_transaction(repo, (), conn=conn, mode="forced_full")
+            if fence is not None:
+                finalize_current_decision_projection(repo, fence=fence, updated_at_ms=applied_at_ms, conn=conn)
+            _assert_after(conn, plan)
+            _assert_preserved(conn, plan)
+            repo.assert_foreign_keys_clean(conn=conn)
+            if conn.execute("PRAGMA repair_inbox.foreign_key_check").fetchone():
+                raise ValueError("inbox foreign key check failed")
+            try:
+                conn.commit()
+                committed = True
+            except BaseException as exc:
+                # COMMIT may have succeeded before acknowledgement was lost.
+                # Resolve the durable receipt after closing this connection.
+                commit_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except BaseException as exc:
+                cleanup_errors.append(f"rollback: {type(exc).__name__}: {exc}")
+            try:
+                conn.close()
+            except BaseException as exc:
+                cleanup_errors.append(f"close: {type(exc).__name__}: {exc}")
+            # Cleanup failures must not bypass durable COMMIT outcome resolution.
+            # Restore each file after closing the atomic attached transaction.
+            for (schema, mode), path in zip(modes.items(), paths):
+                try:
+                    with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2, isolation_level=None)) as restore:
+                        restoration[schema] = restore.execute(f"PRAGMA journal_mode={mode}").fetchone()[0] == mode
+                except sqlite3.Error:
+                    restoration[schema] = False
+        try:
+            with closing(_read_connection(repo, recover_journals=True)) as read:
+                durable = _prior_receipt(read, request, expected_input_hash)
+                if durable is None:
+                    if commit_error is not None and _prepare(read, repo, request, plan_inbox)["input_hash"] == expected_input_hash:
+                        return {**receipt, "mode": "not_applied", "write_applied": False, "durable_readback": True,
+                                "error": commit_error, "journal_restored": restoration, "cleanup_warnings": cleanup_errors}
+                    raise ValueError("committed repair receipt not found")
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return {**receipt, "mode": "committed_readback_unavailable" if committed else "commit_outcome_unknown",
+                    "write_applied": True if committed else None, "durable_readback": False,
+                    "error": str(exc), "journal_restored": restoration, "cleanup_warnings": cleanup_errors,
+                    "retry": "re-run the exact same batch/request/hash to read its durable outcome"}
+        return {**receipt, "durable_readback": True, "journal_restored": restoration,
+                "cleanup_warnings": cleanup_errors,
+                **({"commit_warning": commit_error} if commit_error else {})}

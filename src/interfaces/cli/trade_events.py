@@ -21,6 +21,7 @@ from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
     apply_repair_trade_event,
     preview_futu_time_repair,
+    repair_futu_time_batch,
     apply_void_trade_event,
     list_trade_event_reviews,
     preview_repair_trade_event,
@@ -119,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--format", choices=["text", "json"], default="text")
     _add_write_flags(p_repair, high_risk=True)
 
-    p_times = sub.add_parser("repair-futu-times", help="preview a source-bound historical Futu time repair batch")
+    p_times = sub.add_parser("repair-futu-times", help="preview or apply a source-bound historical Futu time repair batch")
     p_times.add_argument("--request", required=True)
     p_times.add_argument("--expected-input-hash")
     p_times.add_argument("--backup-dir")
@@ -169,19 +170,23 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if args.cmd == "repair-futu-times":
         try:
-            if write_controls[args.cmd]["write_requested"]:
-                raise ValueError("batch apply is not yet supported")
             request = json.loads(Path(args.request).read_text(encoding="utf-8"))
             repo, ledger_store = open_futu_time_repair_store(data_config=data_config_path, runtime_root=_runtime_root_arg(args))
-            payload = preview_futu_time_repair(repo, request=request)
+            should_apply = write_controls[args.cmd]["write_requested"]
+            payload = (repair_futu_time_batch(repo, request=request, expected_input_hash=args.expected_input_hash, backup_dir=args.backup_dir)
+                       if should_apply else preview_futu_time_repair(repo, request=request))
         except (ValueError, OSError, sqlite3.Error) as exc:
             _print_json({"mode": "blocked", "write_applied": False, "error": str(exc)})
             return 2
         payload["ledger_store"] = ledger_store
-        payload = attach_write_contract(payload, dry_run=True, write_applied=False,
-            rollback_hint="read-only batch preview; no rollback needed")
+        if payload.get("mode") == "commit_outcome_unknown":
+            # Preserve tri-state outcome instead of coercing unknown to false.
+            _print_json({**payload, "dry_run": False})
+            return 2
+        payload = attach_write_contract(payload, dry_run=not should_apply, write_applied=bool(payload.get("write_applied")),
+            rollback_hint="retain both backups and the durable batch receipt; do not replay with a new batch ID")
         _print_json(payload)
-        return 0
+        return 2 if payload.get("durable_readback") is False or payload.get("mode") == "not_applied" else 0
 
     _data_config, repo = resolve_option_positions_repo(base=base, cfg=None, data_config=args.data_config, runtime_root=_runtime_root_arg(args))
     ledger_store = ledger_store_payload(_data_config, repo)
