@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +29,8 @@ from src.application.channels.feishu_notification_renderer import (
     feishu_notification_envelope_sha256,
     normalize_feishu_notification_envelope,
 )
-from src.application.file_locks import exclusive_lock as _exclusive_lock
+from src.application.file_locks import exclusive_lock as _shared_exclusive_lock
+from src.application.multi_tick_audit import daily_brief_phase
 from src.infrastructure.io_utils import utc_now as _utc_now_iso
 
 
@@ -86,6 +87,19 @@ class DailyBriefReadScope:
         if self._delivery is None:
             self._delivery = read_daily_decision_brief_delivery_state(base=identity[0], account=identity[1], market=identity[2])
         return deepcopy(self._delivery)
+
+
+@contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    with ExitStack() as stack:
+        with daily_brief_phase("lock_wait", operation="acquire"):
+            stack.enter_context(_shared_exclusive_lock(path))
+        yield
+
+
+def _persist_json(path: Path, payload: Any) -> None:
+    with daily_brief_phase("persist", operation="atomic_write"):
+        atomic_write_json(path, payload)
 
 
 def persist_daily_decision_brief_success(
@@ -184,10 +198,10 @@ def persist_daily_decision_brief_success(
                 "path": _relative_path(base_path, current_path),
             }
             shared_index["updated_at_utc"] = normalized.get("generated_at_utc") or _utc_now_iso()
-            atomic_write_json(revision_path, normalized)
-            atomic_write_json(current_path, normalized)
-            atomic_write_json(run_brief_path, normalized)
-            atomic_write_json(shared_index_path, shared_index)
+            _persist_json(revision_path, normalized)
+            _persist_json(current_path, normalized)
+            _persist_json(run_brief_path, normalized)
+            _persist_json(shared_index_path, shared_index)
 
         previous_ids = (
             _candidate_identity_set(previous)
@@ -273,7 +287,7 @@ def record_daily_decision_brief_candidates(
             for identity in identities
             if identity not in alerted
         }
-        atomic_write_json(delivery_path, state)
+        _persist_json(delivery_path, state)
         return {
             "state": state,
             "market_trading_date": date_norm,
@@ -382,7 +396,7 @@ def record_daily_decision_brief_fixed_recovery(
                 "path": recovery_path,
             }
         day[target_norm] = recovery
-        atomic_write_json(recovery_path, state)
+        _persist_json(recovery_path, state)
         return {
             "recorded": True,
             "reason": "recorded",
@@ -660,7 +674,7 @@ def prepare_daily_decision_brief_delivery(
                 preserve_attempt_metadata=False,
             )
             day["candidate_delivery"] = persisted
-        atomic_write_json(delivery_path, state)
+        _persist_json(delivery_path, state)
         if kind_norm == "fixed_report":
             _remove_daily_decision_brief_fixed_recovery(
                 base=base_path,
@@ -677,7 +691,7 @@ def prepare_daily_decision_brief_delivery(
             "market_trading_date": date_norm,
             "envelope": persisted,
         }
-        atomic_write_json(plan_path, plan)
+        _persist_json(plan_path, plan)
         return {
             "prepared": prepared,
             "reason": "prepared" if prepared else "already_prepared",
@@ -852,7 +866,7 @@ def record_daily_decision_brief_delivery_attempt(
         envelope["last_attempt_at_utc"] = attempted_at
         if ambiguous:
             envelope["status"] = "ambiguous"
-        atomic_write_json(delivery_path, state)
+        _persist_json(delivery_path, state)
         return {
             "updated": True,
             "reason": "ambiguous" if ambiguous else "definite_failure",
@@ -932,7 +946,7 @@ def confirm_daily_decision_brief_delivery_v2(
             envelope=envelope,
             confirmed_at=confirmed_at,
         )
-        atomic_write_json(delivery_path, state)
+        _persist_json(delivery_path, state)
         return {
             "advanced": True,
             "reason": "confirmed",
@@ -999,7 +1013,7 @@ def reconcile_daily_decision_brief_delivery_resolution(
                 envelope["last_attempt_at_utc"] = resolved_at
                 envelope["confirmed_at_utc"] = None
         if would_change and not dry_run:
-            atomic_write_json(delivery_path, state)
+            _persist_json(delivery_path, state)
         return {
             "updated": bool(would_change and not dry_run),
             "would_change": would_change,
@@ -1083,7 +1097,7 @@ def expire_daily_decision_brief_delivery_day(
                 envelope["status"] = "expired_unconfirmed"
                 changed = True
         if changed:
-            atomic_write_json(delivery_path, state)
+            _persist_json(delivery_path, state)
         return {
             "updated": changed,
             "reason": "expired" if changed else "already_final",
@@ -1417,6 +1431,7 @@ def _load_or_create_delivery_recovery_state(
     )
 
 
+@daily_brief_phase("history_validate", operation="normalize_delivery_recovery_state")
 def _normalize_delivery_recovery_state(
     raw: Any,
     *,
@@ -1524,7 +1539,7 @@ def _remove_daily_decision_brief_fixed_recovery(
     day.pop(scheduled_target_market, None)
     if not day:
         state["days"].pop(market_trading_date, None)
-    atomic_write_json(path, state)
+    _persist_json(path, state)
 
 
 def _delivery_day(state: dict[str, Any], market_date: str) -> dict[str, Any]:
@@ -1540,6 +1555,7 @@ def _delivery_day(state: dict[str, Any], market_date: str) -> dict[str, Any]:
     )
 
 
+@daily_brief_phase("history_validate", operation="normalize_delivery_state")
 def _normalize_delivery_state(
     raw: Any,
     *,
@@ -2247,6 +2263,7 @@ def _normalize_optional_utc_iso(value: Any, *, field: str) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+@daily_brief_phase("history_validate", operation="validate_current_revision")
 def _validate_current_revision(*, base: Path, current: Mapping[str, Any], current_path: Path) -> None:
     revision_path = _revision_path(
         base,

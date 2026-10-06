@@ -846,6 +846,11 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     _patch_sender(monkeypatch, calls=retry_calls)
     second = _request(tmp_path, run_id="delivery-only", delivery_only=True)
     assert mod.run_tick_notification_flow(second.request) == 0
+    phase_ends = [e for e in second.request.runlog.events
+                  if e["step"] == "daily_brief_phase" and e["status"] == "ok"]
+    assert {"account_prepare", "history_validate"} <= {e["data"]["phase"] for e in phase_ends}
+    assert all(e["data"]["account"] == "lx" and e["data"]["market"] == "US" for e in phase_ends)
+    assert not {"assemble", "render", "persist"} & {e["data"]["phase"] for e in phase_ends}
     assert retry_calls[0]["message"] == retry_before["rendered_message"]
     assert retry_calls[0]["idempotency_key"] == calls[0]["idempotency_key"]
     event = next(item for item in second.request.audit_helper.events
@@ -1174,6 +1179,12 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     retry = _request(tmp_path, run_id="delivery-recovery", delivery_only=True)
 
     assert mod.run_tick_notification_flow(retry.request) == 0
+    phase_ends = [e for e in retry.request.runlog.events
+                  if e["step"] == "daily_brief_phase" and e["status"] == "ok"]
+    assert {"account_prepare", "history_validate", "render", "persist", "lock_wait"} <= {
+        e["data"]["phase"] for e in phase_ends
+    }
+    assert all(e["data"]["account"] == "lx" and e["data"]["market"] == "US" for e in phase_ends)
     assert len(calls) == 1
     state = read_daily_decision_brief_delivery_state(
         base=tmp_path,
@@ -1441,3 +1452,72 @@ def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(mo
     assert postwrite and all(scope is None for _, scope, _ in postwrite)
     assert normalizations.count(False) == 1
     assert normalizations.count(True) >= 2
+
+
+def test_phase_timing_binds_two_accounts_without_changing_prepared_state(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    from datetime import datetime, timezone
+    import src.application.daily_decision_brief_repository as repo
+
+    monkeypatch.setattr(repo, "_utc_now_iso", lambda: "2026-07-21T14:00:30+00:00")
+    monkeypatch.setattr(mod, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
+    _patch_assembler(monkeypatch)
+    measured = _request(tmp_path / "timed", run_id="same-run", accounts=("lx", "sy"))
+    actual = mod._prepare_daily_brief_notification(measured.request)
+    phases = [e for e in measured.request.runlog.events if e["step"] == "daily_brief_phase"]
+    for account in ("lx", "sy"):
+        account_events = [e for e in phases if e["data"]["account"] == account]
+        assert account_events[0]["data"]["phase"] == "account_prepare"
+        assert account_events[0]["status"] == "start"
+        assert account_events[-1]["data"]["phase"] == "account_prepare"
+        assert account_events[-1]["status"] == "ok"
+        assert all(e["data"]["market"] == "US" for e in account_events)
+        assert {"persist", "render", "lock_wait", "history_validate"} <= {
+            e["data"]["phase"] for e in account_events if e["status"] == "ok"
+        }
+    monkeypatch.setattr(mod, "daily_brief_timing_scope", lambda **_: nullcontext())
+    unmeasured = _request(tmp_path / "unscoped", run_id="same-run", accounts=("lx", "sy"))
+    expected = mod._prepare_daily_brief_notification(unmeasured.request)
+    assert actual == expected
+    assert measured.commits == unmeasured.commits
+    assert measured.request.tick_metrics == unmeasured.request.tick_metrics
+    for account in ("lx", "sy"):
+        path = Path(f"output_accounts/{account}/state/daily_decision_brief.US.delivery.json")
+        assert (measured.request.base / path).read_bytes() == (unmeasured.request.base / path).read_bytes()
+    assert not [e for e in unmeasured.request.runlog.events if e["step"] == "daily_brief_phase"]
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_account_phase_failure_does_not_claim_later_account_success(monkeypatch, tmp_path, error_type):
+    error = error_type("assembly failed")
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", lambda **_: (_ for _ in ()).throw(error))
+    bundle = _request(tmp_path, run_id="account-failed", accounts=("lx", "sy"))
+    with pytest.raises(error_type) as caught:
+        mod._prepare_daily_brief_notification(bundle.request)
+    assert caught.value is error
+    phases = [e for e in bundle.request.runlog.events if e["step"] == "daily_brief_phase"]
+    assert phases[-1]["data"]["phase"] == "account_prepare"
+    assert phases[-1]["status"] == "error"
+    assert phases[-1]["data"]["error_type"] == error_type.__name__
+    assert all(e["data"]["account"] == "lx" for e in phases)
+    assert bundle.commits == []
+
+
+def test_phase_logging_failure_does_not_prevent_send_or_confirmation(monkeypatch, tmp_path):
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="logging-unavailable")
+    original = bundle.request.runlog.safe_event
+
+    def logger(step, status, **kwargs):
+        if step == "daily_brief_phase":
+            raise OSError("phase logger unavailable")
+        return original(step, status, **kwargs)
+
+    bundle.request.runlog.safe_event = logger
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert len(calls) == 1
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]
+    assert state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]["status"] == "confirmed"
+    assert bundle.commits == [{"lx": FIXED_TARGET}]

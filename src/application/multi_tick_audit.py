@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -28,6 +30,71 @@ def record_tick_latency(
     except Exception:
         pass
     return duration_ms
+
+
+# Diagnostic context only; reset at each synchronous account preparation boundary.
+_daily_brief_timing: ContextVar[tuple[Any, str, str] | None] = ContextVar(
+    "daily_brief_timing", default=None,
+)
+
+
+def _emit_daily_brief_phase(
+    runlog: Any, status: str, *, data: dict[str, Any], duration_ms: int | None = None,
+) -> None:
+    try:
+        runlog.safe_event("daily_brief_phase", status, data=data, duration_ms=duration_ms)
+    except Exception:
+        pass
+
+
+@contextmanager
+def daily_brief_phase(phase: str, *, operation: str) -> Iterator[None]:
+    """Time an actual owner boundary only inside account preparation.
+
+    Durations are inclusive. A start without a terminal is incomplete, not ok.
+    Diagnostics must preserve the operation's result and exception.
+    """
+    scope = _daily_brief_timing.get()
+    if scope is None:
+        yield
+        return
+    runlog, account, market = scope
+    data = {"account": account, "market": market, "phase": phase, "operation": operation}
+    try:
+        started = monotonic()
+    except Exception:
+        started = None
+    _emit_daily_brief_phase(runlog, "start", data=data)
+    outcome = "ok"
+    error_type = None
+    try:
+        yield
+    except BaseException as exc:
+        outcome = "error"
+        error_type = type(exc).__name__
+        raise
+    finally:
+        duration_ms = None
+        if started is not None:
+            try:
+                duration_ms = max(0, int((monotonic() - started) * 1000))
+            except Exception:
+                pass
+        terminal = {**data, "outcome": outcome}
+        if error_type is not None:
+            terminal["error_type"] = error_type
+        _emit_daily_brief_phase(runlog, outcome, data=terminal, duration_ms=duration_ms)
+
+
+@contextmanager
+def daily_brief_timing_scope(*, runlog: Any, account: str, market: str) -> Iterator[None]:
+    """Bind telemetry to one account; never retain it across preparation calls."""
+    token = _daily_brief_timing.set((runlog, account, market))
+    try:
+        with daily_brief_phase("account_prepare", operation="prepare"):
+            yield
+    finally:
+        _daily_brief_timing.reset(token)
 
 
 @dataclass
