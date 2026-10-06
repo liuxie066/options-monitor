@@ -17,6 +17,15 @@ def _read_json_output(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
+def test_close_advice_cli_requires_the_configure_subcommand(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["close-advice"])
+
+    assert exc_info.value.code == 2
+    assert "the following arguments are required" in capsys.readouterr().err
+
 def test_notify_preview_forwards_daily_brief_selectors(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

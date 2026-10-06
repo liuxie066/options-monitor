@@ -157,6 +157,10 @@ class _Source:
         self.account = account
         self.csv_bytes: bytes | None = None
         self.generated_at_utc: str | None = None
+        self.manifest_run_id: str | None = None
+        self.manifest_quote_mode: str | None = None
+        self.snapshot_manifest_sha256: str | None = None
+        self.required_data_plan_sha256: str | None = None
 
 
 def _query_from_payload(payload: dict[str, Any]) -> PositionQuery:
@@ -461,11 +465,20 @@ def _validate_source_manifest(
         desired_market=desired_market,
         account=source.account or query_account,
         expected_run_id=expected_run_id,
+        expected_quote_mode=(None if source.source_type == "explicit" else "frozen_snapshot"),
     )
     validation = snapshot["validation"]
     if validation.get("ok"):
         source.csv_bytes = snapshot["csv_bytes"]
         source.generated_at_utc = str(validation.get("generated_at_utc") or "").strip() or None
+        source.manifest_run_id = str(validation.get("run_id") or "").strip() or None
+        source.manifest_quote_mode = str(validation.get("quote_mode") or "").strip().lower() or None
+        source.snapshot_manifest_sha256 = (
+            str(validation.get("required_data_snapshot_manifest_sha256") or "").strip() or None
+        )
+        source.required_data_plan_sha256 = (
+            str(validation.get("close_advice_required_data_plan_sha256") or "").strip() or None
+        )
     return validation
 
 
@@ -495,7 +508,7 @@ def _invalid_report_error(
     return AgentToolError(
         code="DEPENDENCY_INVALID",
         message="平仓建议报告完整性校验失败。",
-        hint="请重新生成当前策略的平仓建议报告。",
+        hint="请等待或运行 sealed scheduled scan 生成当前平仓建议报告。",
         details={
             "csv_path": mask_path(source.path),
             "reason": str(validation.get("reason") or "unknown"),
@@ -534,21 +547,19 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
         )
     rows: list[dict[str, Any]] = []
     try:
-        reader = csv.DictReader(
-            StringIO(source.csv_bytes.decode("utf-8-sig"), newline="")
-        )
+        reader = csv.DictReader(StringIO(source.csv_bytes.decode("utf-8-sig"), newline=""))
         for raw in reader:
             if not isinstance(raw, dict):
                 continue
-            row = {
-                str(key): value
-                for key, value in raw.items()
-                if key is not None
-            }
+            row = {str(key): value for key, value in raw.items() if key is not None}
             if source.account and not str(row.get("account") or "").strip():
                 row["account"] = source.account
             row["_source_run_id"] = source.run_id
             row["_source_type"] = source.source_type
+            row["_source_manifest_run_id"] = source.manifest_run_id
+            row["_source_manifest_quote_mode"] = source.manifest_quote_mode
+            row["_source_snapshot_manifest_sha256"] = source.snapshot_manifest_sha256
+            row["_source_required_data_plan_sha256"] = source.required_data_plan_sha256
             rows.append(row)
     except (UnicodeError, csv.Error) as exc:
         raise AgentToolError(
@@ -863,8 +874,10 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         if recommendation == RECOMMENDATION_NOT_EVALUABLE
         else DECISION_EVIDENCE_COMPLETE
     )
+    sealed_provenance = _has_sealed_report_provenance(row)
     if (
-        policy_version == STRICT_CLOSE_POLICY_VERSION
+        sealed_provenance
+        and policy_version == STRICT_CLOSE_POLICY_VERSION
         and recommendation
         in {
             RECOMMENDATION_CLOSE,
@@ -875,14 +888,8 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         and evidence_status == expected_evidence_status
         and (recommendation != RECOMMENDATION_CLOSE or has_complete_close_metrics(row))
         and (
-            (
-                recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
-                and evaluation_status == "priced"
-            )
-            or (
-                recommendation == RECOMMENDATION_NOT_EVALUABLE
-                and evaluation_status != "priced"
-            )
+            (recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD} and evaluation_status == "priced")
+            or (recommendation == RECOMMENDATION_NOT_EVALUABLE and evaluation_status != "priced")
         )
     ):
         return {
@@ -892,7 +899,9 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
             "decision_evidence_status": evidence_status,
         }
 
-    if policy_version != STRICT_CLOSE_POLICY_VERSION:
+    if not sealed_provenance:
+        invalid_basis = "unsealed_or_incomplete_report_provenance"
+    elif policy_version != STRICT_CLOSE_POLICY_VERSION:
         invalid_basis = "unsupported_or_missing_strict_policy_version"
     elif recommendation not in {
         RECOMMENDATION_CLOSE,
@@ -904,15 +913,9 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         invalid_basis = "missing_strict_decision_basis"
     elif recommendation == RECOMMENDATION_CLOSE and not has_complete_close_metrics(row):
         invalid_basis = "missing_current_policy_decision_metrics"
-    elif (
-        recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
-        and evaluation_status != "priced"
-    ):
+    elif recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD} and evaluation_status != "priced":
         invalid_basis = "strict_decision_not_priced"
-    elif (
-        recommendation == RECOMMENDATION_NOT_EVALUABLE
-        and evaluation_status == "priced"
-    ):
+    elif recommendation == RECOMMENDATION_NOT_EVALUABLE and evaluation_status == "priced":
         invalid_basis = "strict_not_evaluable_marked_priced"
     else:
         invalid_basis = "invalid_strict_decision_evidence_status"
@@ -925,6 +928,25 @@ def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
         "quote_status": "not_evaluable",
     }
 
+
+def _has_sealed_report_provenance(row: dict[str, Any]) -> bool:
+    row_snapshot_sha256 = str(row.get("required_data_snapshot_manifest_sha256") or "").strip()
+    row_plan_sha256 = str(row.get("close_advice_required_data_plan_sha256") or "").strip()
+    source_snapshot_sha256 = str(row.get("_source_snapshot_manifest_sha256") or "").strip()
+    source_plan_sha256 = str(row.get("_source_required_data_plan_sha256") or "").strip()
+    return (
+        _lower(row.get("quote_mode")) == "frozen_snapshot"
+        and _lower(row.get("_source_manifest_quote_mode")) == "frozen_snapshot"
+        and bool(str(row.get("_source_manifest_run_id") or "").strip())
+        and _is_sha256(row_snapshot_sha256)
+        and _is_sha256(row_plan_sha256)
+        and row_snapshot_sha256 == source_snapshot_sha256
+        and row_plan_sha256 == source_plan_sha256
+    )
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 64 and text == text.lower() and all(char in "0123456789abcdef" for char in text)
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     recommendation_counts: dict[str, int] = {}

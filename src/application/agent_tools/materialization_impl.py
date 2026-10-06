@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import csv
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
-from io import StringIO
-from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 import json
-import re
-import uuid
 
 from src.application.agent_tool_contracts import AgentToolError
-from domain.domain.close_advice import (
-    DECISION_EVIDENCE_COMPLETE,
-    RECOMMENDATION_CLOSE,
-    RECOMMENDATION_HOLD,
-    STRICT_CLOSE_POLICY_VERSION,
-    has_complete_close_metrics,
-    sort_advice_rows,
-)
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import (
     PeriodRequest,
@@ -33,21 +20,6 @@ from domain.domain.strategy_vocab import (
     STRATEGY_SELL_PUT,
     canonical_strategy_id,
 )
-from domain.domain.trade_contract_identity import (
-    contract_key,
-    normalize_contract_expiration,
-    normalize_contract_option_type,
-)
-from src.application.expiration_normalization import find_unique_near_miss_expiration
-from src.application.close_advice_quote_cache import (
-    DEFAULT_QUOTE_MAX_AGE_SEC,
-    publish_quote_cache_metadata,
-    validate_quote_cache_metadata,
-)
-from src.application.close_advice_report_manifest import (
-    read_close_advice_report_snapshot,
-)
-from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.account_config import accounts_from_config
 from src.application.performance.adapters import (
     assigned_stock_instruments,
@@ -56,208 +28,6 @@ from src.application.performance.adapters import (
     load_option_valuation_inputs,
 )
 from src.application.performance.evidence_collection import collect_current_performance_evidence
-from src.application.symbol_mutations import normalize_symbol_read
-from src.application.payload_helpers import as_float_or_none as _as_float_or_none
-
-
-def _normalize_expiration(value: Any) -> str:
-    return normalize_contract_expiration(value, fallback_raw=True) or ""
-
-
-def _normalize_option_type(value: Any) -> str:
-    return normalize_contract_option_type(value)
-
-
-def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:
-    return contract_key(symbol, option_type, expiration, strike, expiration_fallback_raw=True)
-
-
-def _position_expiration_for_fetch(row: dict[str, Any]) -> str:
-    for value in (
-        row.get("expiration_ymd"),
-        row.get("expiration"),
-    ):
-        exp = _normalize_expiration(value)
-        if exp:
-            return exp
-    note = str(row.get("note") or "")
-    for token in note.replace(";", " ").split():
-        if token.startswith("exp="):
-            return _normalize_expiration(token.split("=", 1)[1])
-    return ""
-
-
-def _close_advice_scope_root(out_root: Path, payload: dict[str, Any]) -> Path:
-    raw = str(payload.get("_close_advice_scope_id") or "").strip()
-    if not raw:
-        return out_root
-    scope_id = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw).strip(".-")
-    if not scope_id:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="close_advice request scope is invalid",
-        )
-    return (out_root / "requests" / scope_id).resolve()
-
-
-def _validate_close_advice_context(ctx: Any) -> dict[str, Any]:
-    if not isinstance(ctx, dict):
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message="option positions context is unavailable",
-        )
-    status = str(ctx.get("context_status") or "").strip().lower()
-    ledger = ctx.get("ledger") if isinstance(ctx.get("ledger"), dict) else {}
-    if status == "unavailable" or bool(ledger.get("fail_closed")):
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message="option positions context is explicitly unavailable",
-            details={
-                "context_status": status or None,
-                "ledger_status": ledger.get("status"),
-            },
-        )
-    if not isinstance(ctx.get("open_positions_min"), list):
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message="option positions context has no valid open_positions_min list",
-        )
-    return ctx
-
-
-def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
-    grouped: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        symbol = normalize_symbol_read(row.get("symbol"))
-        if not symbol:
-            continue
-        item = grouped.get(symbol)
-        if item is None:
-            item = {
-                "symbol": symbol,
-                "requested_expirations": set(),
-                "option_types": set(),
-                "strikes": [],
-                "requested_contracts": set(),
-                "position_count": 0,
-            }
-            grouped[symbol] = item
-            order.append(symbol)
-        position_count = item.get("position_count")
-        item["position_count"] = (position_count if isinstance(position_count, int) else 0) + 1
-        option_type = _normalize_option_type(row.get("option_type"))
-        expiration = _position_expiration_for_fetch(row)
-        strike_num = _as_float_or_none(row.get("strike"))
-        if option_type:
-            cast(set[str], item["option_types"]).add(option_type)
-        if expiration:
-            cast(set[str], item["requested_expirations"]).add(expiration)
-        if strike_num is not None:
-            cast(list[float], item["strikes"]).append(strike_num)
-        key = _contract_key(symbol, option_type, expiration, strike_num)
-        if all(key):
-            cast(set[tuple[str, str, str, str]], item["requested_contracts"]).add(key)
-    out: list[dict[str, Any]] = []
-    for symbol in order:
-        item = grouped[symbol]
-        strikes = [float(v) for v in cast(list[float], item["strikes"])]
-        out.append(
-            {
-                "symbol": symbol,
-                "requested_expirations": sorted(item["requested_expirations"]),
-                "option_types": sorted(item["option_types"]),
-                "min_strike": min(strikes) if strikes else None,
-                "max_strike": max(strikes) if strikes else None,
-                "requested_contracts": set(item["requested_contracts"]),
-                "position_count": int(item["position_count"]),
-            }
-        )
-    return out
-
-
-def _read_required_data_coverage(csv_path: Path) -> tuple[set[tuple[str, str, str, str]], set[str]]:
-    contract_keys: set[tuple[str, str, str, str]] = set()
-    expirations: set[str] = set()
-    if not csv_path.exists():
-        return contract_keys, expirations
-    try:
-        with csv_path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                if not isinstance(row, dict):
-                    continue
-                key = _contract_key(
-                    row.get("symbol"),
-                    row.get("option_type"),
-                    row.get("expiration"),
-                    row.get("strike"),
-                )
-                if all(key):
-                    contract_keys.add(key)
-                    expirations.add(key[2])
-    except Exception:
-        return set(), set()
-    return contract_keys, expirations
-
-
-def _count_required_data_rows(csv_path: Path) -> int:
-    if not csv_path.exists():
-        return 0
-    try:
-        with csv_path.open("r", encoding="utf-8", newline="") as fh:
-            return sum(1 for row in csv.DictReader(fh) if isinstance(row, dict))
-    except Exception:
-        return 0
-
-
-def _find_contract_expiration_near_misses(
-    requested_contracts: set[tuple[str, str, str, str]],
-    available_contracts: set[tuple[str, str, str, str]],
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for key in sorted(requested_contracts):
-        if key in available_contracts or not all(key):
-            continue
-        symbol, option_type, expiration, strike = key
-        candidate_expirations = [
-            avail_exp
-            for avail_symbol, avail_option_type, avail_exp, avail_strike in available_contracts
-            if avail_symbol == symbol and avail_option_type == option_type and avail_strike == strike
-        ]
-        near_miss = find_unique_near_miss_expiration(expiration, candidate_expirations)
-        if not near_miss:
-            continue
-        out.append(
-            {
-                "symbol": symbol,
-                "option_type": option_type,
-                "strike": _as_float_or_none(strike),
-                "requested_expiration": expiration,
-                "matched_expiration": near_miss,
-                "quote_key": "|".join(key),
-            }
-        )
-    return out
-
-
-def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    missing_symbols = [
-        str(item.get("symbol") or "")
-        for item in symbol_rows
-        if isinstance(item, dict) and not bool(item.get("position_coverage_ok"))
-    ]
-    return {
-        "symbol_count": len(symbol_rows),
-        "position_count": sum(int(item.get("position_count") or 0) for item in symbol_rows if isinstance(item, dict)),
-        "covered_symbol_count": sum(1 for item in symbol_rows if isinstance(item, dict) and bool(item.get("position_coverage_ok"))),
-        "symbols_with_missing_coverage": missing_symbols,
-        "positions_missing_coverage": sum(int(item.get("missing_contract_count") or 0) for item in symbol_rows if isinstance(item, dict)),
-        "expiration_near_miss_count": sum(len(item.get("expiration_near_misses") or []) for item in symbol_rows if isinstance(item, dict)),
-    }
 
 
 def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[[Any], float | None]) -> dict[str, Any]:
@@ -284,7 +54,9 @@ def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[
                 "account": account or None,
                 "strategy": strategy or None,
                 "net_income": as_float(row.get("net_income")),
-                "annualized_return": as_float(row.get("annualized_net_return") or row.get("annualized_return") or row.get("annualized")),
+                "annualized_return": as_float(
+                    row.get("annualized_net_return") or row.get("annualized_return") or row.get("annualized")
+                ),
                 "strike": as_float(row.get("strike")),
                 "expiration": (str(row.get("expiration") or "").strip() or None),
             }
@@ -292,8 +64,8 @@ def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[
     top_candidates = sorted(
         candidates,
         key=lambda item: (
-            -(item["net_income"] if item["net_income"] is not None else -10**12),
-            -(item["annualized_return"] if item["annualized_return"] is not None else -10**12),
+            -(item["net_income"] if item["net_income"] is not None else -(10**12)),
+            -(item["annualized_return"] if item["annualized_return"] is not None else -(10**12)),
         ),
     )[:5]
     return {
@@ -302,94 +74,6 @@ def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[
         "strategy_counts": strategy_counts,
         "account_counts": account_counts,
         "top_candidates": top_candidates,
-    }
-
-
-def close_advice_rows_summary(
-    csv_path: Path,
-    text_path: Path,
-    *,
-    safe_read_csv: Callable[[Path], Any],
-    as_float: Callable[[Any], float | None],
-    csv_bytes: bytes | None = None,
-    text_bytes: bytes | None = None,
-) -> dict[str, Any]:
-    if csv_bytes is None:
-        df = safe_read_csv(csv_path)
-        rows = df.to_dict(orient="records") if not df.empty else []
-    else:
-        try:
-            rows = [
-                {
-                    str(key): value
-                    for key, value in raw.items()
-                    if key is not None
-                }
-                for raw in csv.DictReader(
-                    StringIO(csv_bytes.decode("utf-8-sig"), newline="")
-                )
-                if isinstance(raw, dict)
-            ]
-        except (UnicodeError, csv.Error):
-            rows = []
-    recommendation_counts: dict[str, int] = {}
-    account_counts: dict[str, int] = {}
-    top_rows: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if (
-            str(row.get("policy_version") or "").strip()
-            != STRICT_CLOSE_POLICY_VERSION
-            or str(row.get("evaluation_status") or "").strip().lower()
-            != "priced"
-            or str(row.get("decision_evidence_status") or "").strip().lower()
-            != DECISION_EVIDENCE_COMPLETE
-        ):
-            continue
-        recommendation = str(row.get("recommendation_state") or "").strip().lower()
-        if recommendation not in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}:
-            continue
-        if recommendation == RECOMMENDATION_CLOSE and not has_complete_close_metrics(row):
-            continue
-        recommendation_counts[recommendation] = (
-            recommendation_counts.get(recommendation, 0) + 1
-        )
-        account = normalize_account(row.get("account"))
-        if account:
-            account_counts[account] = account_counts.get(account, 0) + 1
-        top_rows.append(
-            {
-                "account": account or None,
-                "position_lot_id": (str(row.get("position_lot_id") or "").strip() or None),
-                "symbol": (str(row.get("symbol") or "").strip().upper() or None),
-                "option_type": (str(row.get("option_type") or "").strip().lower() or None),
-                "expiration": (str(row.get("expiration") or "").strip() or None),
-                "strike": as_float(row.get("strike")),
-                "recommendation_state": recommendation,
-                "net_capture_ratio": as_float(row.get("net_capture_ratio")),
-                "capital_basis": as_float(row.get("capital_basis")),
-                "remaining_max_annualized_return": as_float(row.get("remaining_max_annualized_return")),
-                "all_in_close_cost": as_float(row.get("all_in_close_cost")),
-            }
-        )
-    top_rows = sort_advice_rows(top_rows)[:5]
-    if text_bytes is not None:
-        try:
-            notification_preview = text_bytes.decode("utf-8").strip()
-        except UnicodeError:
-            notification_preview = ""
-    else:
-        try:
-            notification_preview = text_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            notification_preview = ""
-    return {
-        "row_count": len(rows),
-        "recommendation_counts": recommendation_counts,
-        "account_counts": account_counts,
-        "top_rows": top_rows,
-        "notification_preview": notification_preview,
     }
 
 
@@ -438,7 +122,11 @@ _OPTION_PERFORMANCE_INPUT_FIELDS = frozenset(
         "month",
         "year",
         "include_rows",
-        "view", "group_by", "symbol", "limit", "cursor",
+        "view",
+        "group_by",
+        "symbol",
+        "limit",
+        "cursor",
     }
 )
 
@@ -462,7 +150,9 @@ def normalize_option_performance_request(
     if include_rows is not None and not isinstance(include_rows, bool):
         raise AgentToolError("INPUT_ERROR", "include_rows must be a boolean")
     try:
-        period_request = PeriodRequest.from_mapping({name: payload[name] for name in ("period", "as_of_date", "month", "year") if name in payload})
+        period_request = PeriodRequest.from_mapping(
+            {name: payload[name] for name in ("period", "as_of_date", "month", "year") if name in payload}
+        )
         window = normalize_performance_period(
             period_request,
             report_now_ms=now_ms,
@@ -490,7 +180,9 @@ def normalize_option_performance_request(
         "year": period_request.year,
         "include_rows": bool(include_rows),
     }
-    normalized.update({name: payload[name] for name in ("view", "group_by", "symbol", "limit", "cursor") if name in payload})
+    normalized.update(
+        {name: payload[name] for name in ("view", "group_by", "symbol", "limit", "cursor") if name in payload}
+    )
     return normalized, window
 
 
@@ -509,14 +201,25 @@ def option_performance_report_now_ms(now_ms: int):
         _OPTION_PERFORMANCE_REPORT_NOW_MS.reset(token)
 
 
-_PERFORMANCE_GROUPS = ("opening_years", "opening_months", "accounts", "currencies", "leg_types",
-                       "attribution_strategies", "parent_universes", "symbols")
+_PERFORMANCE_GROUPS = (
+    "opening_years",
+    "opening_months",
+    "accounts",
+    "currencies",
+    "leg_types",
+    "attribution_strategies",
+    "parent_universes",
+    "symbols",
+)
 
 
 def _performance_page_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
     from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest
 
-    view = str(request.get("view") or ("breakdowns" if any(name in request for name in ("group_by", "symbol", "limit", "cursor")) else "summary"))
+    view = str(
+        request.get("view")
+        or ("breakdowns" if any(name in request for name in ("group_by", "symbol", "limit", "cursor")) else "summary")
+    )
     group = str(request.get("group_by") or "symbols")
     limit = request.get("limit", 20)
     if view not in {"summary", "breakdowns", "rows"} or group not in _PERFORMANCE_GROUPS:
@@ -540,8 +243,9 @@ def _performance_page_request(request: dict[str, Any]) -> tuple[dict[str, Any], 
     return {"view": view, "group_by": group, "symbol": symbol, "limit": limit, "binding": binding}, state
 
 
-def _page_option_performance(data: dict[str, Any], query: dict[str, Any], state: dict[str, Any] | None,
-                             *, report_now_ms: int) -> dict[str, Any]:
+def _page_option_performance(
+    data: dict[str, Any], query: dict[str, Any], state: dict[str, Any] | None, *, report_now_ms: int
+) -> dict[str, Any]:
     from src.application.agent_tools.project_reader import ProjectReaderError, digest, page_text, set_continuation
 
     view, group = query["view"], query["group_by"]
@@ -551,25 +255,53 @@ def _page_option_performance(data: dict[str, Any], query: dict[str, Any], state:
             # Keep whole existing groups when small; never truncate a financial row.
             breakdowns = result.pop("breakdowns", {})
             result["breakdowns"] = {}
-            for name in ("currencies", "leg_types", "accounts", "symbols", "opening_months", "opening_years", "attribution_strategies", "parent_universes"):
+            for name in (
+                "currencies",
+                "leg_types",
+                "accounts",
+                "symbols",
+                "opening_months",
+                "opening_years",
+                "attribution_strategies",
+                "parent_universes",
+            ):
                 candidate = {**result["breakdowns"], name: breakdowns.get(name, [])}
                 if len(json.dumps({**result, "breakdowns": candidate}, ensure_ascii=False).encode()) <= 6000:
                     result["breakdowns"] = candidate
             result["detail_query"] = {"view": "breakdowns", "group_by": "symbols", "limit": 20}
         return result
     all_rows = list(data.get("rows") or []) if view == "rows" else list((data.get("breakdowns") or {}).get(group) or [])
-    rows = [row for row in all_rows if not query["symbol"] or str(row.get("symbol" if view == "rows" else "key") or "").upper() == query["symbol"]]
-    source_hash = digest({"ledger_input_hash": data["quality"]["ledger_input_hash"], "period": data["period"], "scope": data["scope"], "rows": all_rows})
+    rows = [
+        row
+        for row in all_rows
+        if not query["symbol"] or str(row.get("symbol" if view == "rows" else "key") or "").upper() == query["symbol"]
+    ]
+    source_hash = digest(
+        {
+            "ledger_input_hash": data["quality"]["ledger_input_hash"],
+            "period": data["period"],
+            "scope": data["scope"],
+            "rows": all_rows,
+        }
+    )
     if state and state.get("hash") != source_hash:
-        raise AgentToolError("READ_ERROR", "source_changed", hint="Discard the old cursor and query the updated ledger.")
+        raise AgentToolError(
+            "READ_ERROR", "source_changed", hint="Discard the old cursor and query the updated ledger."
+        )
     offset = state.get("offset", 0) if state else 0
     if type(offset) is not int or not 0 <= offset <= len(rows):
         raise AgentToolError("INPUT_ERROR", "cursor_invalidated")
     end = min(len(rows), offset + query["limit"])
     result = {name: data[name] for name in ("period", "scope", "freshness", "quality")}
-    result.update(view=view, group_by=group if view == "breakdowns" else None,
-                  source={"label": "OM canonical option performance", "content_hash": source_hash,
-                          "ledger_input_hash": data["quality"]["ledger_input_hash"]})
+    result.update(
+        view=view,
+        group_by=group if view == "breakdowns" else None,
+        source={
+            "label": "OM canonical option performance",
+            "content_hash": source_hash,
+            "ledger_input_hash": data["quality"]["ledger_input_hash"],
+        },
+    )
     result["scope"] = {**data["scope"], "view": view, "group_by": result["group_by"], "symbol": query["symbol"]}
     while True:
         selected = rows[offset:end]
@@ -581,10 +313,13 @@ def _page_option_performance(data: dict[str, Any], query: dict[str, Any], state:
     next_body = None
     if selected and len(json.dumps(result, ensure_ascii=False).encode()) > 5000:
         try:
-            fragment = page_text(json.dumps(selected[0], ensure_ascii=False, sort_keys=True).encode(),
-                                 relative_name=view + "/" + str(offset), resource="option_performance_report",
-                                 scope={**result["scope"], "source_hash": source_hash},
-                                 cursor=state.get("body_cursor") if state else None)
+            fragment = page_text(
+                json.dumps(selected[0], ensure_ascii=False, sort_keys=True).encode(),
+                relative_name=view + "/" + str(offset),
+                resource="option_performance_report",
+                scope={**result["scope"], "source_hash": source_hash},
+                cursor=state.get("body_cursor") if state else None,
+            )
         except ProjectReaderError as exc:
             raise AgentToolError("READ_ERROR", exc.code) from exc
         result.update({name: fragment[name] for name in ("text", "body_range", "body_complete")})
@@ -595,15 +330,33 @@ def _page_option_performance(data: dict[str, Any], query: dict[str, Any], state:
         if fragment.get("continuation_status"):
             result["continuation_status"] = fragment["continuation_status"]
     has_more = end < len(rows)
-    result["pagination"] = {"total_count": len(all_rows), "matched_count": len(rows),
-                            "returned_count": len(result["rows"]), "scanned_count": len(all_rows),
-                            "has_more": has_more}
-    result["coverage"] = {"status": "complete", "complete_for": "point" if "text" in result else "requested_page",
-                           "included_count": len(result["rows"]), "total_count": len(rows),
-                           "omitted_count": len(rows) - len(result["rows"]), "has_more": has_more}
+    result["pagination"] = {
+        "total_count": len(all_rows),
+        "matched_count": len(rows),
+        "returned_count": len(result["rows"]),
+        "scanned_count": len(all_rows),
+        "has_more": has_more,
+    }
+    result["coverage"] = {
+        "status": "complete",
+        "complete_for": "point" if "text" in result else "requested_page",
+        "included_count": len(result["rows"]),
+        "total_count": len(rows),
+        "omitted_count": len(rows) - len(result["rows"]),
+        "has_more": has_more,
+    }
     try:
-        next_state = {"binding": query["binding"], "hash": source_hash, "offset": end,
-                      "report_now_ms": report_now_ms, "body_cursor": next_body} if has_more else None
+        next_state = (
+            {
+                "binding": query["binding"],
+                "hash": source_hash,
+                "offset": end,
+                "report_now_ms": report_now_ms,
+                "body_cursor": next_body,
+            }
+            if has_more
+            else None
+        )
         if result.get("continuation_status"):
             result["next_cursor"] = None
             result["coverage"]["status"] = "partial"
@@ -649,7 +402,9 @@ def option_performance_report_tool(
         if type(instant) is not int or instant <= 0 or instant > report_now_ms:
             raise AgentToolError("INPUT_ERROR", "cursor_invalidated")
         report_now_ms = instant
-        request, window = normalize_option_performance_request(payload, normalize_broker=normalize_broker, now_ms=instant)
+        request, window = normalize_option_performance_request(
+            payload, normalize_broker=normalize_broker, now_ms=instant
+        )
     if paged and query["view"] == "rows":
         request["include_rows"] = True
     try:
@@ -687,11 +442,15 @@ def option_performance_report_tool(
         ) from exc
     if paged:
         data = _page_option_performance(data, query, page_state, report_now_ms=report_now_ms)
-    return data, [], {
-        "config_path": mask_path(config_path),
-        "data_config": mask_path(data_config_path),
-        "freshness_status": data["period"]["freshness_status"],
-    }
+    return (
+        data,
+        [],
+        {
+            "config_path": mask_path(config_path),
+            "data_config": mask_path(data_config_path),
+            "freshness_status": data["period"]["freshness_status"],
+        },
+    )
 
 
 def capture_option_performance_evidence(
@@ -756,11 +515,7 @@ def capture_option_performance_evidence(
         cfg=cfg,
         base_dir=config_path.parent,
     )
-    migrated_at_ms = int(
-        now_ms
-        if now_ms is not None
-        else datetime.now(timezone.utc).timestamp() * 1000
-    )
+    migrated_at_ms = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     imported = evidence_repo.import_envelope(
         collection.envelope,
         apply=bool(apply),
@@ -775,10 +530,14 @@ def capture_option_performance_evidence(
         "account": request.get("account"),
         "broker": request.get("broker"),
     }
-    return data, [], {
-        "config_path": mask_path(config_path),
-        "data_config": mask_path(data_config_path),
-    }
+    return (
+        data,
+        [],
+        {
+            "config_path": mask_path(config_path),
+            "data_config": mask_path(data_config_path),
+        },
+    )
 
 
 def get_portfolio_context_tool(
@@ -793,7 +552,10 @@ def get_portfolio_context_tool(
     mask_path,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     if "ttl_sec" in payload:
-        raise AgentToolError(code="INPUT_ERROR", message="现金有效期统一使用 runtime.portfolio_context_ttl_sec；get_portfolio_context 不再接受 ttl_sec。")
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="现金有效期统一使用 runtime.portfolio_context_ttl_sec；get_portfolio_context 不再接受 ttl_sec。",
+        )
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
@@ -814,7 +576,9 @@ def get_portfolio_context_tool(
         runtime_config=cfg,
     )
     if not isinstance(ctx, dict):
-        raise AgentToolError(code="DEPENDENCY_MISSING", message="portfolio context is unavailable", details={"logs": logs[-5:]})
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING", message="portfolio context is unavailable", details={"logs": logs[-5:]}
+        )
     warnings = [item for item in logs if item.startswith("[WARN]")]
     return ctx, warnings, {"config_path": mask_path(config_path), "state_dir": mask_path(state_dir)}
 
@@ -843,7 +607,9 @@ def scan_opportunities_tool(
     state_dir.mkdir(parents=True, exist_ok=True)
     shared_state_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg_loaded = load_config(base=repo_base(), config_path=config_path, is_scheduled=False, log=_log, state_dir=state_dir)
+    cfg_loaded = load_config(
+        base=repo_base(), config_path=config_path, is_scheduled=False, log=_log, state_dir=state_dir
+    )
     if isinstance(cfg.get("portfolio"), dict):
         cfg_loaded["portfolio"] = deepcopy(cfg["portfolio"])
     if isinstance(cfg_loaded.get("portfolio"), dict):
@@ -854,8 +620,10 @@ def scan_opportunities_tool(
     top_n = int(payload.get("top_n") or (cfg_loaded.get("outputs", {}) or {}).get("top_n_alerts", 3) or 3)
     runtime = cfg_loaded.get("runtime", {}) or {}
     raw_symbols = payload.get("symbols")
-    symbols_arg = ",".join(str(item) for item in raw_symbols) if isinstance(raw_symbols, list) else (
-        str(raw_symbols) if raw_symbols is not None else None
+    symbols_arg = (
+        ",".join(str(item) for item in raw_symbols)
+        if isinstance(raw_symbols, list)
+        else (str(raw_symbols) if raw_symbols is not None else None)
     )
     summary_rows = run_watchlist_pipeline_default(
         py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
@@ -868,7 +636,9 @@ def scan_opportunities_tool(
         is_scheduled=False,
         top_n=top_n,
         symbol_timeout_sec=int(payload.get("symbol_timeout_sec") or runtime.get("symbol_timeout_sec", 120) or 120),
-        portfolio_timeout_sec=int(payload.get("portfolio_timeout_sec") or runtime.get("portfolio_timeout_sec", 60) or 60),
+        portfolio_timeout_sec=int(
+            payload.get("portfolio_timeout_sec") or runtime.get("portfolio_timeout_sec", 60) or 60
+        ),
         want_scan=True,
         no_context=bool(payload.get("no_context", False)),
         symbols_arg=symbols_arg,
@@ -876,348 +646,16 @@ def scan_opportunities_tool(
         want_fn=lambda _step: True,
     )
     summary = scan_summary_rows_fn(summary_rows)
-    return {
-        "summary_rows": summary_rows,
-        "symbol_count": len({str(r.get("symbol") or "").strip() for r in summary_rows if str(r.get("symbol") or "").strip()}),
-        "row_count": len(summary_rows),
-        "summary": summary,
-        "top_candidates": summary["top_candidates"],
-    }, [], {"config_path": str(config_path), "report_dir": str(report_dir)}
-
-
-def prepare_close_advice_inputs_tool(
-    payload: dict[str, Any],
-    *,
-    load_runtime_config,
-    resolve_public_data_config_path,
-    normalize_broker,
-    resolve_output_root,
-    load_option_positions_context,
-    symbol_fetch_config_map_fn,
-    extract_context_symbols_fn,
-    resolve_symbol_fetch_source,
-    fetch_symbol_opend,
-    save_required_data_opend,
-    repo_base,
-    mask_path,
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    data_config = str(resolve_public_data_config_path(payload, portfolio_cfg))
-    account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
-    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker"))
-    out_root = resolve_output_root(payload.get("output_dir"))
-    request_root = _close_advice_scope_root(out_root, payload)
-    state_dir = (request_root / "state").resolve()
-    shared_dir = (request_root / "shared").resolve()
-    required_data_root = (request_root / "required_data").resolve()
-    logs: list[str] = []
-    context_path = state_dir / "option_positions_context.json"
-    if not Path(data_config).exists():
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message="option positions data config not found",
-            hint="Check portfolio.data_config / SQLite position-lot setup before preparing close_advice inputs.",
-            details={"data_config": mask_path(Path(data_config))},
-        )
-    state_dir.mkdir(parents=True, exist_ok=True)
-    shared_dir.mkdir(parents=True, exist_ok=True)
-    required_data_root.mkdir(parents=True, exist_ok=True)
-    try:
-        ctx, _refreshed = load_option_positions_context(
-            base=repo_base(),
-            data_config=data_config,
-            market=broker,
-            account=account,
-            ttl_sec=int(payload.get("ttl_sec") or 0),
-            state_dir=state_dir,
-            shared_state_dir=shared_dir,
-            log=logs.append,
-            runtime_config=cfg,
-        )
-    except SystemExit as exc:
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message="option positions context refresh failed",
-            hint="Check portfolio.data_config / SQLite position-lot setup before preparing close_advice inputs.",
-            details={"exit_code": str(exc)},
-        ) from exc
-    try:
-        ctx = _validate_close_advice_context(ctx)
-    except AgentToolError as exc:
-        if logs:
-            exc.details.setdefault("logs", logs[-5:])
-        raise
-
-    position_requirements = _extract_position_fetch_requirements(ctx)
-    if not position_requirements:
-        return {
-            "account": account,
-            "broker": broker,
-            "context_rows": len(ctx.get("open_positions_min") or []),
-            "symbols": [],
-            "symbol_count": 0,
-            "coverage_summary": _build_coverage_summary([]),
-        }, [item for item in logs if item.startswith("[WARN]")], {
-            "config_path": mask_path(config_path),
-            "context_path": mask_path(context_path),
-            "required_data_root": mask_path(required_data_root),
-        }
-
-    symbol_map = symbol_fetch_config_map_fn(cfg)
-    fetched: list[dict[str, Any]] = []
-    warnings = [item for item in logs if item.startswith("[WARN]")]
-    force_required_data_refresh = bool(payload.get("force_required_data_refresh", False))
-    quote_max_age_sec = DEFAULT_QUOTE_MAX_AGE_SEC
-    for spec in position_requirements:
-        symbol = str(spec.get("symbol") or "").strip()
-        raw_symbol_cfg = symbol_map.get(symbol)
-        symbol_cfg = raw_symbol_cfg if isinstance(raw_symbol_cfg, dict) else {}
-        raw_fetch_cfg = symbol_cfg.get("fetch")
-        fetch_cfg = raw_fetch_cfg if isinstance(raw_fetch_cfg, dict) else {}
-        src, _decision = resolve_symbol_fetch_source(fetch_cfg)
-        limit_expirations = int(fetch_cfg.get("limit_expirations") or 8)
-        csv_path = (required_data_root / "parsed" / f"{symbol}_required_data.csv").resolve()
-        requested_expirations = list(spec.get("requested_expirations") or [])
-        requested_contracts = set(spec.get("requested_contracts") or set())
-        if force_required_data_refresh:
-            fetched_contracts: set[tuple[str, str, str, str]] = set()
-            fetched_expirations: set[str] = set()
-        else:
-            fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
-            freshness = validate_quote_cache_metadata(
-                csv_path=csv_path,
-                symbol=symbol,
-                max_age_sec=quote_max_age_sec,
-            )
-            if not freshness["ok"]:
-                fetched_contracts = set()
-                fetched_expirations = set()
-
-        cache_covers_all = (
-            not force_required_data_refresh
-            and bool(requested_contracts)
-            and all(item in fetched_contracts for item in requested_contracts)
-        )
-        if not cache_covers_all:
-            result = fetch_symbol_opend(
-                symbol,
-                limit_expirations=limit_expirations,
-                host=str(fetch_cfg.get("host") or "127.0.0.1"),
-                port=int(fetch_cfg.get("port") or 11111),
-                base_dir=repo_base(),
-                option_types=",".join(str(item) for item in (spec.get("option_types") or ["put", "call"])),
-                min_strike=spec.get("min_strike"),
-                max_strike=spec.get("max_strike"),
-                explicit_expirations=requested_expirations,
-                chain_cache=True,
-                chain_cache_force_refresh=force_required_data_refresh,
-                **opend_fetch_kwargs(cfg),
-            )
-            _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
-            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-            if meta.get("error"):
-                warnings.append(f"{symbol}: {meta['error']}")
-            else:
-                publish_quote_cache_metadata(
-                    csv_path=csv_path,
-                    symbol=symbol,
-                    source=str(src or "opend"),
-                    source_run_id=str(
-                        payload.get("_close_advice_scope_id")
-                        or f"prepare-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
-                    ),
-                    observed_at=datetime.now(timezone.utc),
-                )
-            fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
-            row_count = len(result.get("rows") or [])
-            expiration_count = int(result.get("expiration_count") or 0)
-        else:
-            row_count = _count_required_data_rows(csv_path)
-            expiration_count = len(fetched_expirations)
-        missing_expirations = [exp for exp in requested_expirations if exp not in fetched_expirations]
-        missing_contract_keys = [item for item in sorted(requested_contracts) if item not in fetched_contracts]
-        missing_contracts = sorted(
-            f"{item[2]} {item[3]}{'P' if item[1] == 'put' else 'C'}"
-            for item in missing_contract_keys
-        )
-        near_misses = _find_contract_expiration_near_misses(requested_contracts, fetched_contracts)
-        item = {
-            "symbol": symbol,
-            "source": src,
-            "rows": row_count,
-            "expiration_count": expiration_count,
-            "csv": mask_path(csv_path),
-            "position_count": int(spec.get("position_count") or 0),
-            "requested_expirations": requested_expirations,
-            "fetched_expirations": sorted(fetched_expirations),
-            "missing_expirations": missing_expirations,
-            "position_coverage_ok": not missing_contracts,
-            "missing_contract_count": len(missing_contracts),
-            "missing_contract_samples": missing_contracts[:3],
-            "missing_contracts": [
-                {
-                    "symbol": key[0],
-                    "option_type": key[1],
-                    "expiration": key[2],
-                    "strike": _as_float_or_none(key[3]),
-                    "quote_key": "|".join(key),
-                }
-                for key in missing_contract_keys
-            ],
-            "expiration_near_misses": near_misses,
-        }
-        if missing_expirations:
-            warnings.append(f"{symbol}: missing required expirations {', '.join(missing_expirations)}")
-        elif missing_contracts:
-            warnings.append(f"{symbol}: missing required contracts after fetch ({', '.join(missing_contracts[:3])})")
-        for near_miss in near_misses:
-            warnings.append(
-                f"{symbol}: expiration near miss {near_miss['requested_expiration']} -> {near_miss['matched_expiration']} "
-                f"for {near_miss['option_type']} {near_miss['strike']}"
-            )
-        fetched.append(item)
-
-    return {
-        "account": account,
-        "broker": broker,
-        "context_rows": len(ctx.get("open_positions_min") or []),
-        "symbols": fetched,
-        "symbol_count": len(fetched),
-        "coverage_summary": _build_coverage_summary(fetched),
-    }, warnings, {
-        "config_path": mask_path(config_path),
-        "context_path": mask_path(context_path),
-        "required_data_root": mask_path(required_data_root),
-        "force_required_data_refresh": force_required_data_refresh,
-        "quote_max_age_sec": quote_max_age_sec,
-    }
-
-
-def close_advice_tool(
-    payload: dict[str, Any],
-    *,
-    load_runtime_config,
-    resolve_output_root,
-    resolve_local_path,
-    run_close_advice,
-    close_advice_rows_summary_fn,
-    repo_base,
-    mask_path,
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
-    out_root = resolve_output_root(payload.get("output_dir"))
-    request_root = _close_advice_scope_root(out_root, payload)
-    context_path = resolve_local_path(payload.get("context_path"), default=(request_root / "state" / "option_positions_context.json"))
-    required_data_root = resolve_local_path(payload.get("required_data_root"), default=(request_root / "required_data"))
-    report_dir = (request_root / "reports").resolve()
-    if not context_path.exists():
-        raise AgentToolError(code="DEPENDENCY_MISSING", message="close_advice requires a local option_positions_context.json", hint="Run the scan/context pipeline first, or pass context_path explicitly.", details={"context_path": mask_path(context_path)})
-    if not required_data_root.exists():
-        raise AgentToolError(code="DEPENDENCY_MISSING", message="close_advice requires a local required_data directory", hint="Run the scan pipeline first, or pass required_data_root explicitly.", details={"required_data_root": mask_path(required_data_root)})
-    try:
-        market = str(payload.get("config_key") or "").strip().upper()
-        result = run_close_advice(
-            config=cfg,
-            context_path=context_path,
-            required_data_root=required_data_root,
-            output_dir=report_dir,
-            base_dir=repo_base(),
-            markets_to_run=[market] if market in {"US", "HK"} else None,
-        )
-    except ValueError as exc:
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING",
-            message=str(exc),
-            details={"context_path": mask_path(context_path)},
-        ) from exc
-    report_manifest = (
-        result.get("report_manifest")
-        if isinstance(result.get("report_manifest"), dict)
-        else {}
-    )
-    if not bool(result.get("enabled")) or str(
-        report_manifest.get("status") or ""
-    ).strip().lower() != "success":
-        advice_summary = {
-            "row_count": 0,
-            "recommendation_counts": {},
-            "account_counts": {},
-            "top_rows": [],
-            "notification_preview": "",
-        }
-    else:
-        snapshot = read_close_advice_report_snapshot(
-            csv_path=report_dir / "close_advice.csv",
-            desired_market=market if market in {"US", "HK"} else None,
-            account=normalize_account(payload.get("account")) or None,
-            expected_quote_mode=str(result.get("quote_mode") or "").strip()
-            or None,
-        )
-        validation = snapshot["validation"]
-        if not validation.get("ok"):
-            raise AgentToolError(
-                code="DEPENDENCY_INVALID",
-                message="平仓建议报告完整性校验失败。",
-                hint="请重新生成当前策略的平仓建议报告。",
-                details={
-                    "csv_path": mask_path(report_dir / "close_advice.csv"),
-                    "reason": str(validation.get("reason") or "unknown"),
-                },
-            )
-        advice_summary = close_advice_rows_summary_fn(
-            report_dir / "close_advice.csv",
-            report_dir / "close_advice.txt",
-            csv_bytes=snapshot["csv_bytes"],
-            text_bytes=snapshot["text_bytes"],
-        )
-    return {
-        **result,
-        "summary": {
-            "row_count": advice_summary["row_count"],
-            "recommendation_counts": advice_summary["recommendation_counts"],
-            "account_counts": advice_summary["account_counts"],
+    return (
+        {
+            "summary_rows": summary_rows,
+            "symbol_count": len(
+                {str(r.get("symbol") or "").strip() for r in summary_rows if str(r.get("symbol") or "").strip()}
+            ),
+            "row_count": len(summary_rows),
+            "summary": summary,
+            "top_candidates": summary["top_candidates"],
         },
-        "top_rows": advice_summary["top_rows"],
-        "notification_preview": advice_summary["notification_preview"],
-    }, [], {
-        "config_path": mask_path(config_path),
-        "context_path": mask_path(context_path),
-        "required_data_root": mask_path(required_data_root),
-        "output_dir": mask_path(report_dir),
-    }
-
-
-def get_close_advice_tool(
-    payload: dict[str, Any],
-    *,
-    prepare_close_advice_inputs_tool_fn,
-    close_advice_tool_fn,
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    scope_id = (
-        str(payload.get("request_id") or "").strip()
-        or f"close-advice-{uuid.uuid4().hex}"
+        [],
+        {"config_path": str(config_path), "report_dir": str(report_dir)},
     )
-    scoped_payload = dict(payload)
-    scoped_payload["_close_advice_scope_id"] = scope_id
-    prepared_data, prepare_warnings, prepare_meta = prepare_close_advice_inputs_tool_fn(scoped_payload)
-    advice_data, advice_warnings, advice_meta = close_advice_tool_fn(scoped_payload)
-    combined_summary = {
-        "prepared_symbol_count": int(prepared_data.get("symbol_count") or 0),
-        "prepared_context_rows": int(prepared_data.get("context_rows") or 0),
-        "advice_row_count": int(advice_data.get("rows") or advice_data.get("summary", {}).get("row_count") or 0),
-        "notify_row_count": int(advice_data.get("notify_rows") or 0),
-        "recommendation_counts": dict(advice_data.get("summary", {}).get("recommendation_counts")) if isinstance(advice_data.get("summary"), dict) and isinstance(advice_data.get("summary", {}).get("recommendation_counts"), dict) else {},
-        "coverage_summary": dict(prepared_data.get("coverage_summary")) if isinstance(prepared_data.get("coverage_summary"), dict) else {},
-    }
-    return {
-        "prepared": prepared_data,
-        "close_advice": advice_data,
-        "summary": combined_summary,
-        "top_rows": list(advice_data.get("top_rows") or []),
-        "notification_preview": advice_data.get("notification_preview"),
-    }, [*prepare_warnings, *advice_warnings], {
-        **prepare_meta,
-        **advice_meta,
-        "request_id": scope_id,
-    }

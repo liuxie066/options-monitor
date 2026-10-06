@@ -129,9 +129,6 @@
 
 ### Close Advice
 
-- `prepare_close_advice_inputs`
-- `close_advice`
-- `get_close_advice`
 - `close_advice_read`
 
 ### 通知
@@ -304,30 +301,14 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 
 ### Close Advice
 
-生成和物化新报告：
-
-```bash
-./om-agent run --tool get_close_advice \
-  --input-json '{"config_key":"us"}'
-```
-
-拆分诊断：
-
-```bash
-./om-agent run --tool prepare_close_advice_inputs \
-  --input-json '{"config_key":"us"}'
-./om-agent run --tool close_advice \
-  --input-json '{"config_key":"us"}'
-```
-
-只读取已有报告：
+读取由计划 Tick 生成的 sealed 报告：
 
 ```bash
 ./om-agent run --tool close_advice_read \
   --input-json '{"config_key":"us","query":{"option_type":"put","side":"short"}}'
 ```
 
-前三个入口可能写本地 input/report/cache；`close_advice_read` 不生成新建议。
+`close_advice_read` 不刷新持仓或行情，也不生成新建议。当前报告只能由计划 Tick 的 sealed required-data 路径产出；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
 新报告只支持 short put/call，并仅返回 `close`、`hold` 或
 `not_evaluable`。它不生成新仓、roll、replace 或 reallocate 建议。
 
