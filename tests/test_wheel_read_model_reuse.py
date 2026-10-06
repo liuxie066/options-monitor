@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from domain.domain.wheel import build_wheel_event, WHEEL_EVENT_SCHEMA_V1
+from domain.domain.wheel import build_legacy_wheel_event
 from src.application.ledger import assigned_stock_projection as assigned
 from src.application.wheel import read_model as model
 from tests.test_performance_assignment import _assign_put, _trade
@@ -22,8 +22,8 @@ def _mixed_rows():
                       contract_key=replace(contract, option_type='call'), currency=currency)
         events.extend({**item.to_dict(), "position_side": "short"} for item in (opened, assigned_event, call))
         if account == 'lx':
-            wheel_events.append(build_wheel_event(
-                event_id=f'wheel-{key}', event_schema_version=WHEEL_EVENT_SCHEMA_V1,
+            wheel_events.append(build_legacy_wheel_event(
+                event_id=f'wheel-{key}',
                 account=account, lot_id=f'assigned-stock-assign-{key}', event_type='wheel_started',
                 occurred_at_ms=2000, recorded_at_ms=2001, source_trade_event_id=f'assign-{key}',
                 payload={'request_id': f'assignment:assign-{key}'},
