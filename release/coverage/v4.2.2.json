@@ -1,0 +1,140 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.2",
+  "base": {
+    "tag": "v4.2.1",
+    "commit": "5ee2a559f2755768bc8a5a30310c48687b0ed051"
+  },
+  "reviewed_head": "0ac1c2e375209c2e4bcf2d9d1b806cad74ca0eb6",
+  "commits": [
+    {
+      "sha": "bb642266e6e7882ea9038b32bf5bfd6f317d766e",
+      "subject": "gateflow(observability): accept plan for daily-brief-account-timing"
+    },
+    {
+      "sha": "14756c36d8cb132513ae86ae71d34a084e7ae7b1",
+      "subject": "gateflow(observability): accept daily-brief-account-timing S1"
+    },
+    {
+      "sha": "0c99e454c5709124e70c7329519c087dcdb9da28",
+      "subject": "chore(gateflow): accept plan for wheel-attribution-capacity"
+    },
+    {
+      "sha": "27f62d2892909f8edb53a2de661ce5b396244ad5",
+      "subject": "gateflow(observability): accept deepreview for daily-brief-account-timing"
+    },
+    {
+      "sha": "8b3a55adcb757f680068c44dbc2313bce86d2ea5",
+      "subject": "gateflow(trades): accept wheel-attribution-capacity S1"
+    },
+    {
+      "sha": "b3c106036ce49ba29cbf2296babeee1c148e5ae4",
+      "subject": "gateflow(trades): accept deepreview for wheel-attribution-capacity"
+    },
+    {
+      "sha": "bb2b7a18e94dbab7016f82bd06cbc68c1670b345",
+      "subject": "Merge pull request #483 from liuxie066/codex/daily-brief-account-timing"
+    },
+    {
+      "sha": "364290d6d1f442a573a0d9ef52d7db69398ade11",
+      "subject": "chore(trades): merge main and refresh dependency graph"
+    },
+    {
+      "sha": "0ac1c2e375209c2e4bcf2d9d1b806cad74ca0eb6",
+      "subject": "Merge pull request #484 from liuxie066/codex/wheel-attribution-capacity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "日报运行日志增加按账户、市场和操作区分的组装、历史校验、持久化、渲染、锁等待及账户准备耗时；计时或日志失败保留业务结果，异常、取消和进程中断分别保留可核对的诊断证据。",
+      "commits": [
+        "14756c36d8cb132513ae86ae71d34a084e7ae7b1",
+        "bb2b7a18e94dbab7016f82bd06cbc68c1670b345",
+        "364290d6d1f442a573a0d9ef52d7db69398ade11"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "新 Call 成交归属不再把成交时和当前可信投影均证明已被其他 Call 满额覆盖的 Wheel 分支计入替代候选或竞争需求；唯一剩余分支仍需通过账户、实股容量及竞争核验，保留已有归属、明确意图和人工跨分支分配。",
+      "commits": [
+        "8b3a55adcb757f680068c44dbc2313bce86d2ea5",
+        "0ac1c2e375209c2e4bcf2d9d1b806cad74ca0eb6"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "bb642266e6e7882ea9038b32bf5bfd6f317d766e",
+      "reason": "Gateflow 接受计划或评审的空提交；没有新增源码、运行行为或用户影响，实际实现另列发布说明。"
+    },
+    {
+      "commit": "0c99e454c5709124e70c7329519c087dcdb9da28",
+      "reason": "Gateflow 接受计划或评审的空提交；没有新增源码、运行行为或用户影响，实际实现另列发布说明。"
+    },
+    {
+      "commit": "27f62d2892909f8edb53a2de661ce5b396244ad5",
+      "reason": "Gateflow 接受计划或评审的空提交；没有新增源码、运行行为或用户影响，实际实现另列发布说明。"
+    },
+    {
+      "commit": "b3c106036ce49ba29cbf2296babeee1c148e5ae4",
+      "reason": "Gateflow 接受计划或评审的空提交；没有新增源码、运行行为或用户影响，实际实现另列发布说明。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bb642266e6e7882ea9038b32bf5bfd6f317d766e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/483"
+      ]
+    },
+    {
+      "commit": "14756c36d8cb132513ae86ae71d34a084e7ae7b1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/483"
+      ]
+    },
+    {
+      "commit": "0c99e454c5709124e70c7329519c087dcdb9da28",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/484"
+      ]
+    },
+    {
+      "commit": "27f62d2892909f8edb53a2de661ce5b396244ad5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/483"
+      ]
+    },
+    {
+      "commit": "8b3a55adcb757f680068c44dbc2313bce86d2ea5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/484"
+      ]
+    },
+    {
+      "commit": "b3c106036ce49ba29cbf2296babeee1c148e5ae4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/484"
+      ]
+    },
+    {
+      "commit": "bb2b7a18e94dbab7016f82bd06cbc68c1670b345",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/483"
+      ]
+    },
+    {
+      "commit": "364290d6d1f442a573a0d9ef52d7db69398ade11",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/484"
+      ]
+    },
+    {
+      "commit": "0ac1c2e375209c2e4bcf2d9d1b806cad74ca0eb6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/484"
+      ]
+    }
+  ]
+}
