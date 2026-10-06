@@ -20,6 +20,10 @@ from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 BASE = Path(__file__).resolve().parents[1]
 
 
+_SEALED_SNAPSHOT_SHA256 = "a" * 64
+
+_SEALED_PLAN_SHA256 = "b" * 64
+
 def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
     return {
         "_generated": {
@@ -84,11 +88,7 @@ def _write_close_advice_report(
         context = json.loads(context_path.read_text(encoding="utf-8"))
     else:
         accounts = sorted(
-            {
-                str(row.get("account") or "").strip().lower()
-                for row in rows
-                if str(row.get("account") or "").strip()
-            }
+            {str(row.get("account") or "").strip().lower() for row in rows if str(row.get("account") or "").strip()}
         )
         context = {
             "context_status": "available",
@@ -99,17 +99,32 @@ def _write_close_advice_report(
             json.dumps(context, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    sealed_rows = []
+    for source_row in rows:
+        row = dict(source_row)
+        row.setdefault("quote_mode", "frozen_snapshot")
+        row.setdefault(
+            "required_data_snapshot_manifest_sha256",
+            _SEALED_SNAPSHOT_SHA256,
+        )
+        row.setdefault(
+            "close_advice_required_data_plan_sha256",
+            _SEALED_PLAN_SHA256,
+        )
+        sealed_rows.append(row)
+    pd.DataFrame(sealed_rows).to_csv(csv_path, index=False)
     text_path.write_text("", encoding="utf-8")
     publish_close_advice_report_manifest(
         csv_path=csv_path,
         text_path=text_path,
         context_path=context_path,
         context=context,
-        rows=rows,
+        rows=sealed_rows,
         markets_to_run=[market],
         run_id=run_id,
         quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256=_SEALED_SNAPSHOT_SHA256,
+        close_advice_required_data_plan_sha256=_SEALED_PLAN_SHA256,
     )
 
 
@@ -3369,137 +3384,6 @@ def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:
     assert "log_file" in out["error"]["message"]
 
 
-def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = tmp_path / "config.us.json"
-    cfg = _minimal_cfg()
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    out_root = tmp_path / "output_shared" / "agent_tools"
-    state_dir = out_root / "state"
-    required_dir = out_root / "required_data"
-    state_dir.mkdir(parents=True)
-    required_dir.mkdir(parents=True)
-    (state_dir / "option_positions_context.json").write_text(
-        json.dumps({"open_positions_min": []}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    reports_dir = out_root / "reports"
-    reports_dir.mkdir(parents=True)
-    (reports_dir / "close_advice.csv").write_text(
-        "account,symbol,recommendation_state,evaluation_status,net_capture_ratio\n",
-        encoding="utf-8",
-    )
-    (reports_dir / "close_advice.txt").write_text("", encoding="utf-8")
-
-    def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["context_path"] == (state_dir / "option_positions_context.json")
-        assert kwargs["required_data_root"] == required_dir
-        assert kwargs["output_dir"] == (out_root / "reports")
-        context = json.loads(
-            (state_dir / "option_positions_context.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        manifest = publish_close_advice_report_manifest(
-            csv_path=out_root / "reports" / "close_advice.csv",
-            text_path=out_root / "reports" / "close_advice.txt",
-            context_path=state_dir / "option_positions_context.json",
-            context=context,
-            rows=[],
-            markets_to_run=["US"],
-            quote_mode="legacy_mutable",
-        )
-        return {
-            "enabled": True,
-            "status": "ok",
-            "quote_mode": "legacy_mutable",
-            "rows": 0,
-            "notify_rows": 0,
-            "report_manifest": manifest,
-            "csv": str((out_root / "reports" / "close_advice.csv")),
-            "text": str((out_root / "reports" / "close_advice.txt")),
-        }
-
-    _patch_agent_tool_dependencies(monkeypatch, run_close_advice=_fake_run_close_advice)
-    out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(out_root)})
-
-    assert out["ok"] is True
-    assert out["data"]["enabled"] is True
-    assert out["data"]["summary"]["row_count"] == 0
-    assert out["data"]["top_rows"] == []
-    assert out["meta"]["context_path"] == ".../option_positions_context.json"
-    assert out["meta"]["required_data_root"] == ".../required_data"
-
-
-def test_close_advice_does_not_summarize_stale_report_after_failed_run(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = tmp_path / "config.us.json"
-    cfg = _minimal_cfg()
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    out_root = tmp_path / "output_shared" / "agent_tools"
-    state_dir = out_root / "state"
-    required_dir = out_root / "required_data"
-    report_dir = out_root / "reports"
-    state_dir.mkdir(parents=True)
-    required_dir.mkdir(parents=True)
-    report_dir.mkdir(parents=True)
-    (state_dir / "option_positions_context.json").write_text(
-        json.dumps({"open_positions_min": []}),
-        encoding="utf-8",
-    )
-    (report_dir / "close_advice.csv").write_text(
-        "account,symbol,recommendation_state,evaluation_status,"
-        "policy_version,decision_evidence_status\n"
-        "user1,NVDA,close,priced,strict_profit_capture.v1,complete\n",
-        encoding="utf-8",
-    )
-    (report_dir / "close_advice.txt").write_text(
-        "### [user1] 平仓建议\n",
-        encoding="utf-8",
-    )
-
-    def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["output_dir"] == report_dir
-        return {
-            "enabled": True,
-            "status": "snapshot_integrity_failed",
-            "rows": 0,
-            "notify_rows": 0,
-            "report_manifest": {
-                "status": "failed",
-                "reason": "snapshot_integrity_failed",
-            },
-        }
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        run_close_advice=_fake_run_close_advice,
-    )
-    out = run_tool(
-        "close_advice",
-        {"config_path": str(cfg_path), "output_dir": str(out_root)},
-    )
-
-    assert out["ok"] is True
-    assert out["data"]["status"] == "snapshot_integrity_failed"
-    assert out["data"]["summary"]["row_count"] == 0
-    assert out["data"]["summary"]["recommendation_counts"] == {}
-    assert out["data"]["top_rows"] == []
-    assert out["data"]["notification_preview"] == ""
-
-
 def test_close_advice_read_uses_the_bytes_bound_during_validation(
     tmp_path: Path,
 ) -> None:
@@ -3550,6 +3434,15 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
         _decision_fields_for_read,
     )
 
+    sealed = {
+        "quote_mode": "frozen_snapshot",
+        "required_data_snapshot_manifest_sha256": _SEALED_SNAPSHOT_SHA256,
+        "close_advice_required_data_plan_sha256": _SEALED_PLAN_SHA256,
+        "_source_manifest_run_id": "run-1",
+        "_source_manifest_quote_mode": "frozen_snapshot",
+        "_source_snapshot_manifest_sha256": _SEALED_SNAPSHOT_SHA256,
+        "_source_required_data_plan_sha256": _SEALED_PLAN_SHA256,
+    }
     for row in (
         {"recommendation_state": "close"},
         {
@@ -3565,13 +3458,10 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
             "policy_version": "remaining_yield_capture.v2",
         },
     ):
-        projected = _decision_fields_for_read(row)
+        projected = _decision_fields_for_read({**sealed, **row})
         assert projected["recommendation_state"] == "not_evaluable"
         assert projected["evaluation_status"] == "not_evaluable"
-        assert (
-            projected["decision_basis"]
-            == "unsupported_or_missing_strict_policy_version"
-        )
+        assert projected["decision_basis"] == "unsupported_or_missing_strict_policy_version"
 
     decision_metrics = {
         "capital_basis": 10000,
@@ -3620,7 +3510,7 @@ def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
             "strict_not_evaluable_marked_priced",
         ),
     ):
-        projected = _decision_fields_for_read(row)
+        projected = _decision_fields_for_read({**sealed, **row})
         assert projected["recommendation_state"] == "not_evaluable"
         assert projected["evaluation_status"] == "not_evaluable"
         assert projected["decision_basis"] == expected_basis
@@ -3644,12 +3534,31 @@ def test_close_advice_read_requires_new_metrics_and_sorts_by_remaining_yield(
         "decision_basis": "remaining_yield_capture_all_gates_passed",
         "decision_evidence_status": "complete",
         "capital_basis": 10000,
+        "quote_mode": "frozen_snapshot",
+        "required_data_snapshot_manifest_sha256": _SEALED_SNAPSHOT_SHA256,
+        "close_advice_required_data_plan_sha256": _SEALED_PLAN_SHA256,
+        "_source_manifest_run_id": "run-1",
+        "_source_manifest_quote_mode": "frozen_snapshot",
+        "_source_snapshot_manifest_sha256": _SEALED_SNAPSHOT_SHA256,
+        "_source_required_data_plan_sha256": _SEALED_PLAN_SHA256,
     }
     missing = {**common, "net_capture_ratio": 0.95}
     assert _decision_fields_for_read(missing)["decision_basis"] == "missing_current_policy_decision_metrics"
     rows = [
-        {**common, "position_lot_id": "high", "symbol": "HIGH", "net_capture_ratio": 0.95, "remaining_max_annualized_return": 0.08},
-        {**common, "position_lot_id": "low", "symbol": "LOW", "net_capture_ratio": 0.85, "remaining_max_annualized_return": 0.03},
+        {
+            **common,
+            "position_lot_id": "high",
+            "symbol": "HIGH",
+            "net_capture_ratio": 0.95,
+            "remaining_max_annualized_return": 0.08,
+        },
+        {
+            **common,
+            "position_lot_id": "low",
+            "symbol": "LOW",
+            "net_capture_ratio": 0.85,
+            "remaining_max_annualized_return": 0.03,
+        },
     ]
     report_dir = tmp_path / "report"
     _write_close_advice_report(report_dir, rows, run_id="run-1", market="US")
@@ -3709,6 +3618,68 @@ def test_close_advice_read_rejects_explicit_report_without_manifest(
         == "close_advice_manifest_missing"
     )
 
+
+def test_close_advice_read_projects_unsealed_explicit_history_as_not_evaluable(
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us")), encoding="utf-8")
+    report_dir = tmp_path / "legacy-report"
+    report_dir.mkdir()
+    csv_path = report_dir / "close_advice.csv"
+    text_path = report_dir / "close_advice.txt"
+    context_path = report_dir / "option_positions_context.json"
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "evaluation_status": "priced",
+            "recommendation_state": "close",
+            "policy_version": "remaining_yield_capture.v3",
+            "decision_basis": "remaining_yield_capture_all_gates_passed",
+            "decision_evidence_status": "complete",
+            "capital_basis": 10000,
+            "net_capture_ratio": 0.95,
+            "remaining_max_annualized_return": 0.03,
+        }
+    ]
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    text_path.write_text("", encoding="utf-8")
+    context = {
+        "context_status": "available",
+        "filters": {"account": "lx"},
+        "open_positions_min": [],
+    }
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=rows,
+        markets_to_run=["US"],
+        run_id="legacy-run",
+        quote_mode="legacy_mutable",
+    )
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "report_path": str(csv_path),
+            "account": "lx",
+        },
+    )
+
+    assert out["ok"] is True
+    row = out["data"]["rows"][0]
+    assert row["recommendation_state"] == "not_evaluable"
+    assert row["evaluation_status"] == "not_evaluable"
+    assert row["decision_basis"] == "unsealed_or_incomplete_report_provenance"
 
 def test_close_advice_read_rejects_report_with_tampered_text(
     tmp_path: Path,
@@ -3821,7 +3792,6 @@ def test_close_advice_read_skips_newer_run_with_invalid_manifest(
 
     assert out["ok"] is True
     assert out["data"]["source"]["run_id"] == "run-valid"
-
 
 
 def test_close_advice_read_stops_at_first_valid_request_report(monkeypatch, tmp_path: Path) -> None:
@@ -4179,9 +4149,6 @@ def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path:
 
 def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
-    from src.application.close_advice_report_manifest import (
-        publish_close_advice_report_manifest,
-    )
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -4209,32 +4176,11 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
                 "net_capture_ratio": net_capture,
             }
         ]
-        csv_path = report_dir / "close_advice.csv"
-        text_path = report_dir / "close_advice.txt"
-        context_path = report_dir / "option_positions_context.json"
-        pd.DataFrame(rows).to_csv(csv_path, index=False)
-        text_path.write_text("", encoding="utf-8")
-        context_path.write_text(
-            json.dumps(
-                {
-                    "context_status": "available",
-                    "filters": {"account": "lx"},
-                    "open_positions_min": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        publish_close_advice_report_manifest(
-            csv_path=csv_path,
-            text_path=text_path,
-            context_path=context_path,
-            context={
-                "context_status": "available",
-                "filters": {"account": "lx"},
-                "open_positions_min": [],
-            },
-            rows=rows,
-            markets_to_run=["US"],
+        _write_close_advice_report(
+            report_dir,
+            rows,
+            run_id=f"run-{symbol.lower()}",
+            market="US",
         )
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
@@ -4312,137 +4258,6 @@ def test_close_advice_read_rejects_agent_report_from_another_market(
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
 
 
-def test_close_advice_summary_orders_strict_recommendations(tmp_path: Path) -> None:
-    from src.infrastructure.io_utils import safe_read_csv
-    from src.application.agent_tools.runtime_helpers import as_float
-    from src.application.agent_tools.materialization_impl import close_advice_rows_summary
-
-    csv_path = tmp_path / "close_advice.csv"
-    text_path = tmp_path / "close_advice.txt"
-    pd.DataFrame(
-        [
-            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
-            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.91, "capital_basis": 10000, "remaining_max_annualized_return": 0.03},
-            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "remaining_yield_capture.v3", "decision_evidence_status": "complete", "net_capture_ratio": 0.95, "capital_basis": 10000, "remaining_max_annualized_return": 0.08},
-        ]
-    ).to_csv(csv_path, index=False)
-    text_path.write_text("", encoding="utf-8")
-
-    summary = close_advice_rows_summary(csv_path, text_path, safe_read_csv=safe_read_csv, as_float=as_float)
-
-    assert [row["symbol"] for row in summary["top_rows"]] == ["CLOSE2", "CLOSE1", "HOLD"]
-
-
-def test_close_advice_summary_uses_supplied_validated_bytes(
-    tmp_path: Path,
-) -> None:
-    from src.application.agent_tools.materialization_impl import (
-        close_advice_rows_summary,
-    )
-    from src.application.agent_tools.runtime_helpers import as_float
-    from src.infrastructure.io_utils import safe_read_csv
-
-    csv_path = tmp_path / "close_advice.csv"
-    text_path = tmp_path / "close_advice.txt"
-    pd.DataFrame(
-        [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "recommendation_state": "close",
-                "evaluation_status": "priced",
-                "policy_version": "remaining_yield_capture.v3",
-                "decision_evidence_status": "complete",
-                "net_capture_ratio": 0.95,
-                "capital_basis": 10000,
-                "remaining_max_annualized_return": 0.05,
-            }
-        ]
-    ).to_csv(csv_path, index=False)
-    text_path.write_text("NVDA preview\n", encoding="utf-8")
-    csv_bytes = csv_path.read_bytes()
-    text_bytes = text_path.read_bytes()
-    pd.DataFrame(
-        [
-            {
-                "account": "lx",
-                "symbol": "TSLA",
-                "recommendation_state": "hold",
-                "evaluation_status": "priced",
-                "policy_version": "remaining_yield_capture.v3",
-                "decision_evidence_status": "complete",
-                "net_capture_ratio": 0.10,
-            }
-        ]
-    ).to_csv(csv_path, index=False)
-    text_path.write_text("TSLA preview\n", encoding="utf-8")
-
-    summary = close_advice_rows_summary(
-        csv_path,
-        text_path,
-        safe_read_csv=safe_read_csv,
-        as_float=as_float,
-        csv_bytes=csv_bytes,
-        text_bytes=text_bytes,
-    )
-
-    assert [row["symbol"] for row in summary["top_rows"]] == ["NVDA"]
-    assert summary["notification_preview"] == "NVDA preview"
-
-
-def test_close_advice_summary_fails_closed_for_non_strict_or_incomplete_rows(
-    tmp_path: Path,
-) -> None:
-    from src.application.agent_tools.materialization_impl import (
-        close_advice_rows_summary,
-    )
-    from src.application.agent_tools.runtime_helpers import as_float
-    from src.infrastructure.io_utils import safe_read_csv
-
-    csv_path = tmp_path / "close_advice.csv"
-    text_path = tmp_path / "close_advice.txt"
-    pd.DataFrame(
-        [
-            {
-                "account": "lx",
-                "symbol": "LEGACY",
-                "recommendation_state": "close",
-                "evaluation_status": "priced",
-                "decision_evidence_status": "complete",
-            },
-            {
-                "account": "lx",
-                "symbol": "INCOMPLETE",
-                "recommendation_state": "close",
-                "evaluation_status": "priced",
-                "policy_version": "strict_profit_capture.v1",
-                "decision_evidence_status": "not_evaluable",
-            },
-            {
-                "account": "lx",
-                "symbol": "INVALID",
-                "recommendation_state": "reallocate",
-                "evaluation_status": "priced",
-                "policy_version": "strict_profit_capture.v1",
-                "decision_evidence_status": "complete",
-            },
-        ]
-    ).to_csv(csv_path, index=False)
-    text_path.write_text("", encoding="utf-8")
-
-    summary = close_advice_rows_summary(
-        csv_path,
-        text_path,
-        safe_read_csv=safe_read_csv,
-        as_float=as_float,
-    )
-
-    assert summary["row_count"] == 3
-    assert summary["recommendation_counts"] == {}
-    assert summary["account_counts"] == {}
-    assert summary["top_rows"] == []
-
-
 def test_scan_summary_rows_normalizes_account_labels() -> None:
     from src.application.agent_tools.materialization_impl import scan_summary_rows
 
@@ -4456,411 +4271,6 @@ def test_scan_summary_rows_normalizes_account_labels() -> None:
 
     assert summary["account_counts"] == {"lx": 2}
     assert [item["account"] for item in summary["top_candidates"]] == ["lx", "lx"]
-
-
-def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = tmp_path / "config.us.json"
-    cfg = _minimal_cfg()
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-
-    assert out["ok"] is False
-    assert out["error"]["code"] == "DEPENDENCY_MISSING"
-
-
-def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = _write_close_advice_config(tmp_path)
-
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["account"] == "user1"
-        return ({
-            "open_positions_min": [
-                {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
-                {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
-            ]
-        }, True)
-
-    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-        assert symbol == "NVDA"
-        assert kwargs["explicit_expirations"] == ["2026-06-19", "2026-07-17"]
-        assert kwargs["option_types"] == "call,put"
-        assert kwargs["min_strike"] == 100
-        assert kwargs["max_strike"] == 120
-        return {"rows": [{"symbol": "NVDA"}], "expiration_count": 2}
-
-    _fake_save_required_data_opend = _required_data_csv_stub(
-            "symbol,option_type,expiration,strike\n"
-            "NVDA,put,2026-06-19,100\n"
-            "NVDA,call,2026-07-17,120\n",
-    )
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fake_fetch_symbol_opend,
-        save_required_data_opend=_fake_save_required_data_opend,
-    )
-    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-
-    assert out["ok"] is True
-    assert out["data"]["account"] == "user1"
-    assert out["data"]["symbol_count"] == 1
-    assert out["data"]["symbols"][0]["symbol"] == "NVDA"
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
-    assert out["data"]["coverage_summary"]["covered_symbol_count"] == 1
-    assert out["meta"]["required_data_root"] == ".../required_data"
-
-
-def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_is_complete(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-    from src.application.close_advice_quote_cache import (
-        publish_quote_cache_metadata,
-    )
-
-    cfg_path = _write_close_advice_config(tmp_path)
-
-    required_root = (tmp_path / "output_shared" / "agent_tools" / "required_data" / "parsed")
-    required_root.mkdir(parents=True, exist_ok=True)
-    (required_root / "NVDA_required_data.csv").write_text(
-        "symbol,option_type,expiration,strike\n"
-        "NVDA,put,2026-06-19,100\n"
-        "NVDA,call,2026-07-17,120\n",
-        encoding="utf-8",
-    )
-    publish_quote_cache_metadata(
-        csv_path=required_root / "NVDA_required_data.csv",
-        symbol="NVDA",
-        source="opend",
-        source_run_id="cached-test-run",
-    )
-
-    _fake_load_option_positions_context = _open_positions_context_stub(
-        [
-                {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
-                {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
-        ]
-    )
-
-    def _fail_fetch_symbol_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("fetch_symbol_opend should not be called when cached coverage is complete")
-
-    def _fail_save_required_data_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("save_required_data_opend should not be called when cached coverage is complete")
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fail_fetch_symbol_opend,
-        save_required_data_opend=_fail_save_required_data_opend,
-    )
-    out = run_tool(
-        "prepare_close_advice_inputs",
-        {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")},
-    )
-
-    assert out["ok"] is True
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
-    assert out["data"]["symbols"][0]["rows"] == 2
-    assert out["data"]["symbols"][0]["expiration_count"] == 2
-
-
-def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["symbols"][0]["symbol"] = "9992.HK"
-    cfg["symbols"][0]["fetch"]["limit_expirations"] = 1
-    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
-
-    _fake_load_option_positions_context = _open_positions_context_stub(
-        [
-                {"symbol": "9992.HK", "option_type": "put", "strike": 135, "expiration": "2026-04-29"},
-                {"symbol": "9992.HK", "option_type": "call", "strike": 200, "expiration": "2026-06-29"},
-        ]
-    )
-
-    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-        assert symbol == "9992.HK"
-        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
-        return {"rows": [{"symbol": "9992.HK"}], "expiration_count": 1}
-
-    _fake_save_required_data_opend = _required_data_csv_stub(
-            "symbol,option_type,expiration,strike\n"
-            "9992.HK,put,2026-05-28,135\n",
-    )
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fake_fetch_symbol_opend,
-        save_required_data_opend=_fake_save_required_data_opend,
-    )
-    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-
-    assert out["ok"] is True
-    assert out["data"]["symbols"][0]["missing_expirations"] == ["2026-04-29", "2026-06-29"]
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is False
-    assert out["data"]["coverage_summary"]["positions_missing_coverage"] == 2
-    assert "missing required expirations" in out["warnings"][0]
-
-
-def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent_rewrite(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["symbols"][0]["symbol"] = "0700.HK"
-    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
-
-    _fake_load_option_positions_context = _open_positions_context_stub(
-        [
-                {"symbol": "0700.HK", "option_type": "put", "strike": 450, "expiration": "2026-05-27"},
-        ]
-    )
-
-    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["chain_cache_force_refresh"] is True
-        return {"rows": [{"symbol": "0700.HK"}], "expiration_count": 1}
-
-    _fake_save_required_data_opend = _required_data_csv_stub(
-            "symbol,option_type,expiration,strike\n"
-            "0700.HK,put,2026-05-28,450\n",
-    )
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fake_fetch_symbol_opend,
-        save_required_data_opend=_fake_save_required_data_opend,
-    )
-    out = run_tool(
-        "prepare_close_advice_inputs",
-        {
-            "config_path": str(cfg_path),
-            "output_dir": str(tmp_path / "output_shared" / "agent_tools"),
-            "force_required_data_refresh": True,
-        },
-    )
-
-    assert out["ok"] is True
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is False
-    assert out["data"]["symbols"][0]["missing_expirations"] == ["2026-05-27"]
-    assert out["data"]["symbols"][0]["expiration_near_misses"] == [
-        {
-            "symbol": "0700.HK",
-            "option_type": "put",
-            "strike": 450.0,
-            "requested_expiration": "2026-05-27",
-            "matched_expiration": "2026-05-28",
-            "quote_key": "0700.HK|put|2026-05-27|450.000000",
-        }
-    ]
-    assert out["data"]["coverage_summary"]["expiration_near_miss_count"] == 1
-    assert any("expiration near miss 2026-05-27 -> 2026-05-28" in item for item in out["warnings"])
-
-
-def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["symbols"][0]["symbol"] = "FUTU"
-    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
-
-    _fake_load_option_positions_context = _open_positions_context_stub(
-        [
-                {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": 1777420800000},
-                {"symbol": "FUTU", "option_type": "call", "strike": 130, "expiration": 1781740800},
-        ]
-    )
-
-    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-        assert symbol == "FUTU"
-        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-18"]
-        return {"rows": [{"symbol": "FUTU"}], "expiration_count": 2}
-
-    _fake_save_required_data_opend = _required_data_csv_stub(
-            "symbol,option_type,expiration,strike\n"
-            "FUTU,put,2026-04-29,120\n"
-            "FUTU,call,2026-06-18,130\n",
-    )
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fake_fetch_symbol_opend,
-        save_required_data_opend=_fake_save_required_data_opend,
-    )
-    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-
-    assert out["ok"] is True
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
-
-
-def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requirements(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["symbols"][0]["symbol"] = "FUTU"
-    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
-
-    _fake_load_option_positions_context = _open_positions_context_stub(
-        [
-                {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": None, "expiration_ymd": "2026-04-29"},
-        ]
-    )
-
-    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-        assert symbol == "FUTU"
-        assert kwargs["explicit_expirations"] == ["2026-04-29"]
-        assert kwargs["option_types"] == "put"
-        assert kwargs["min_strike"] == 120
-        assert kwargs["max_strike"] == 120
-        return {"rows": [{"symbol": "FUTU"}], "expiration_count": 1}
-
-    _fake_save_required_data_opend = _required_data_csv_stub(
-            "symbol,option_type,expiration,strike\n"
-            "FUTU,put,2026-04-29,120\n",
-    )
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        load_option_positions_context=_fake_load_option_positions_context,
-        fetch_symbol_opend=_fake_fetch_symbol_opend,
-        save_required_data_opend=_fake_save_required_data_opend,
-    )
-    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-
-    assert out["ok"] is True
-    assert out["data"]["symbols"][0]["requested_expirations"] == ["2026-04-29"]
-    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
-
-
-def test_prepare_close_advice_inputs_fails_when_data_config_is_missing(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = tmp_path / "config.us.json"
-    cfg = _minimal_cfg()
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path)})
-
-    assert out["ok"] is False
-    assert out["error"]["code"] == "DEPENDENCY_MISSING"
-
-
-def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tools.materialization as tools
-
-    cfg_path = tmp_path / "config.us.json"
-    cfg = _minimal_cfg()
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    calls: list[str] = []
-    old_prepare = tools._prepare_close_advice_inputs_tool
-    old_close = tools._close_advice_tool
-    try:
-        def _fake_prepare(payload):  # type: ignore[no-untyped-def]
-            calls.append("prepare")
-            assert payload["config_path"] == str(cfg_path)
-            return (
-                {"symbol_count": 1, "symbols": [{"symbol": "NVDA"}]},
-                ["prepare_warn"],
-                {"required_data_root": ".../required_data"},
-            )
-
-        def _fake_close(payload):  # type: ignore[no-untyped-def]
-            calls.append("close")
-            assert payload["config_path"] == str(cfg_path)
-            return (
-                {
-                    "enabled": True,
-                    "rows": 2,
-                    "notify_rows": 1,
-                    "summary": {
-                        "row_count": 2,
-                        "recommendation_counts": {"close": 1, "hold": 1},
-                    },
-                    "top_rows": [
-                        {"symbol": "NVDA", "recommendation_state": "close"}
-                    ],
-                    "notification_preview": "### [user1] 平仓建议",
-                },
-                ["close_warn"],
-                {"output_dir": ".../reports"},
-            )
-
-        tools._prepare_close_advice_inputs_tool = _fake_prepare  # type: ignore[assignment]
-        tools._close_advice_tool = _fake_close  # type: ignore[assignment]
-        out = run_tool("get_close_advice", {"config_path": str(cfg_path)})
-    finally:
-        tools._prepare_close_advice_inputs_tool = old_prepare  # type: ignore[assignment]
-        tools._close_advice_tool = old_close  # type: ignore[assignment]
-
-    assert out["ok"] is True
-    assert calls == ["prepare", "close"]
-    assert out["data"]["prepared"]["symbol_count"] == 1
-    assert out["data"]["close_advice"]["rows"] == 2
-    assert out["data"]["summary"]["advice_row_count"] == 2
-    assert out["data"]["top_rows"][0]["symbol"] == "NVDA"
-    assert "平仓建议" in out["data"]["notification_preview"]
-    assert out["warnings"] == ["prepare_warn", "close_warn"]
-
-
-def test_get_close_advice_uses_distinct_request_scope_for_concurrent_calls() -> None:
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier, Lock
-
-    from src.application.agent_tools.materialization_impl import (
-        get_close_advice_tool,
-    )
-
-    barrier = Barrier(2)
-    lock = Lock()
-    prepared_scopes: set[str] = set()
-
-    def prepare(payload):  # type: ignore[no-untyped-def]
-        scope = str(payload["_close_advice_scope_id"])
-        with lock:
-            prepared_scopes.add(scope)
-        barrier.wait()
-        return (
-            {"symbol_count": 0, "context_rows": 0},
-            [],
-            {"context_path": f".../{scope}/context.json"},
-        )
-
-    def close(payload):  # type: ignore[no-untyped-def]
-        scope = str(payload["_close_advice_scope_id"])
-        assert scope in prepared_scopes
-        return (
-            {"rows": 0, "notify_rows": 0, "summary": {"row_count": 0}},
-            [],
-            {"output_dir": f".../{scope}/reports"},
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(
-            pool.map(
-                lambda account: get_close_advice_tool(
-                    {"account": account},
-                    prepare_close_advice_inputs_tool_fn=prepare,
-                    close_advice_tool_fn=close,
-                ),
-                ("lx", "sy"),
-            )
-        )
-
-    request_ids = {result[2]["request_id"] for result in results}
-    assert len(request_ids) == 2
-    assert request_ids == prepared_scopes
 
 
 def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) -> None:

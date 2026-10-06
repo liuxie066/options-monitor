@@ -49,7 +49,7 @@ trade_events -> projection -> position_lots
 | CSP / CC | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
-| Close Advice | `om close-advice` | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
+| Close Advice | 计划 Tick 生产、`./om-agent run --tool close_advice_read` 读取、`om close-advice configure` 启停 | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Daily Decision Brief | `om daily-brief` | [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
@@ -289,15 +289,13 @@ Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维�
 
 ### Close Advice
 
-生成新报告会读取行情并物化本地报告：
+新报告只由计划 Tick 的 sealed required-data 路径生成。它把 run ID、snapshot manifest 和 Close Advice plan 绑定到同一份不可变输入；缺少或不一致时失败关闭。`om close-advice` 仅提供启停配置：
 
 ```bash
-om close-advice --config-key us
-om-agent run --tool get_close_advice \
-  --input-json '{"config_key":"us"}'
+om close-advice configure
 ```
 
-只读取已有报告：
+读取已有报告不会刷新持仓或行情，也不会生成新建议：
 
 ```bash
 om-agent run --tool close_advice_read \
@@ -398,7 +396,7 @@ Feishu 在本项目中的角色：
 | 类型 | 例子 | 默认边界 |
 |---|---|---|
 | 纯读取 | `config validate`、`runtime_status`、`daily-brief latest`、`query_cash_headroom` | 不写产品状态 |
-| 本地物化 | `run tick --no-send`、`scan_opportunities`、`get_close_advice` | 可写 run/report/cache，不发送 |
+| 本地物化 | `run tick --no-send`、`scan_opportunities` | 可写 run/report/cache，不发送 |
 | 受控本地写入 | config/symbol/account 编辑、Research artifact | 通常 dry-run 或显式 apply/write；以子命令为准 |
 | 高风险写入 | trade event、lot、服务、Feishu、真实发送 | 需要明确目标和显式确认 |
 

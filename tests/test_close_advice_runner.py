@@ -195,73 +195,38 @@ def test_disabled_close_advice_writes_empty_outputs(tmp_path: Path) -> None:
     assert pd.read_csv(output_dir / "close_advice.csv").empty
 
 
-def test_disabled_close_advice_invalidates_matching_old_empty_report(
-    tmp_path: Path,
-) -> None:
-    from src.application.close_advice_report_manifest import (
-        validate_close_advice_report_manifest,
-    )
+def test_enabled_close_advice_requires_sealed_run_inputs(tmp_path: Path) -> None:
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    old_csv = b"sentinel-csv\n"
+    old_text = "sentinel-text\n"
+    (output_dir / "close_advice.csv").write_bytes(old_csv)
+    (output_dir / "close_advice.txt").write_text(old_text, encoding="utf-8")
 
-    first, output_dir = _run(tmp_path, positions=[], quotes=[])
-    assert first["report_manifest"]["status"] == "success"
-
-    second = run_close_advice(
-        config={"close_advice": {"enabled": False}},
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
         context_path=tmp_path / "option_positions_context.json",
         required_data_root=tmp_path / "required_data",
         output_dir=output_dir,
         base_dir=Path.cwd(),
     )
 
-    assert second["status"] == "disabled"
-    validation = validate_close_advice_report_manifest(
-        csv_path=output_dir / "close_advice.csv",
-    )
-    assert validation["ok"] is False
-    assert validation["reason"] == "close_advice_manifest_not_success"
-    assert validation["status"] == "failed"
+    assert result["status"] == "snapshot_integrity_failed"
+    assert result["snapshot_authority"] == "invalid"
+    assert result["quote_mode"] == "frozen_snapshot"
+    assert result["report_manifest"]["status"] == "failed"
+    assert (output_dir / "close_advice.csv").read_bytes() == old_csv
+    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == old_text
 
-
-def test_disabled_close_advice_invalidates_manifest_before_writing_outputs(
+def _publish_sealed_report(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.application import close_advice_runner as runner
-    from src.application.close_advice_report_manifest import (
-        validate_close_advice_report_manifest,
-    )
-
-    first, output_dir = _run(tmp_path, positions=[], quotes=[])
-    assert first["report_manifest"]["status"] == "success"
-    original_write_csv = runner._write_csv
-    observed_status: list[str] = []
-
-    def _observed_write_csv(path: Path, rows: list[dict]) -> None:
-        validation = validate_close_advice_report_manifest(csv_path=path)
-        observed_status.append(str(validation.get("status") or ""))
-        assert validation["reason"] == "close_advice_manifest_not_success"
-        original_write_csv(path, rows)
-
-    monkeypatch.setattr(runner, "_write_csv", _observed_write_csv)
-
-    run_close_advice(
-        config={"close_advice": {"enabled": False}},
-        context_path=tmp_path / "option_positions_context.json",
-        required_data_root=tmp_path / "required_data",
-        output_dir=output_dir,
-        base_dir=Path.cwd(),
-    )
-
-    assert observed_status == ["failed"]
-
-
-def test_report_snapshot_returns_the_exact_validated_bytes(
-    tmp_path: Path,
-) -> None:
+    *,
+    rows: list[dict],
+    manifest_snapshot_sha256: str = "a" * 64,
+    manifest_plan_sha256: str = "b" * 64,
+) -> Path:
     from src.application.close_advice_report_manifest import (
         publish_close_advice_report_manifest,
-        read_close_advice_report_snapshot,
-        validate_close_advice_report_manifest,
     )
 
     output_dir = tmp_path / "reports"
@@ -269,7 +234,6 @@ def test_report_snapshot_returns_the_exact_validated_bytes(
     csv_path = output_dir / "close_advice.csv"
     text_path = output_dir / "close_advice.txt"
     context_path = output_dir / "option_positions_context.json"
-    rows = [{"account": "lx", "symbol": "NVDA"}]
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     text_path.write_text("NVDA\n", encoding="utf-8")
     context = {"filters": {"account": "lx"}}
@@ -283,8 +247,28 @@ def test_report_snapshot_returns_the_exact_validated_bytes(
         markets_to_run=["US"],
         run_id="run-1",
         quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256=manifest_snapshot_sha256,
+        close_advice_required_data_plan_sha256=manifest_plan_sha256,
+    )
+    return csv_path
+
+def test_report_snapshot_returns_exact_validated_sealed_bytes(tmp_path: Path) -> None:
+    from src.application.close_advice_report_manifest import (
+        read_close_advice_report_snapshot,
+        validate_close_advice_report_manifest,
     )
 
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "quote_mode": "frozen_snapshot",
+            "required_data_snapshot_manifest_sha256": "a" * 64,
+            "close_advice_required_data_plan_sha256": "b" * 64,
+        }
+    ]
+    csv_path = _publish_sealed_report(tmp_path, rows=rows)
+    text_path = csv_path.parent / "close_advice.txt"
     snapshot = read_close_advice_report_snapshot(
         csv_path=csv_path,
         desired_market="US",
@@ -292,398 +276,81 @@ def test_report_snapshot_returns_the_exact_validated_bytes(
         expected_run_id="run-1",
         expected_quote_mode="frozen_snapshot",
     )
+    original_csv = csv_path.read_bytes()
+    original_text = text_path.read_bytes()
     csv_path.write_text("account,symbol\nlx,TSLA\n", encoding="utf-8")
     text_path.write_text("TSLA\n", encoding="utf-8")
 
     assert snapshot["validation"]["ok"] is True
-    assert b"NVDA" in snapshot["csv_bytes"]
-    assert snapshot["text_bytes"] == b"NVDA\n"
+    assert snapshot["csv_bytes"] == original_csv
+    assert snapshot["text_bytes"] == original_text
     assert (
-        validate_close_advice_report_manifest(csv_path=csv_path)["reason"]
+        validate_close_advice_report_manifest(
+            csv_path=csv_path,
+            expected_quote_mode="frozen_snapshot",
+        )["reason"]
         == "close_advice_report_bytes_mismatch"
     )
 
-
-def test_legacy_run_failure_invalidates_old_success_report(
-    tmp_path: Path,
-) -> None:
+def test_sealed_report_rejects_row_to_manifest_hash_mismatch(tmp_path: Path) -> None:
     from src.application.close_advice_report_manifest import (
         validate_close_advice_report_manifest,
     )
 
-    first, output_dir = _run(tmp_path, positions=[], quotes=[])
-    assert first["report_manifest"]["status"] == "success"
-    context_path = tmp_path / "option_positions_context.json"
-    context_path.write_text("{}", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="open_positions_min"):
-        run_close_advice(
-            config={
-                "close_advice": {
-                    "enabled": True,
-                    "quote_source": "required_data",
-                }
-            },
-            context_path=context_path,
-            required_data_root=tmp_path / "required_data",
-            output_dir=output_dir,
-            base_dir=Path.cwd(),
-        )
+    csv_path = _publish_sealed_report(
+        tmp_path,
+        rows=[
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "quote_mode": "frozen_snapshot",
+                "required_data_snapshot_manifest_sha256": "c" * 64,
+                "close_advice_required_data_plan_sha256": "b" * 64,
+            }
+        ],
+    )
 
     validation = validate_close_advice_report_manifest(
-        csv_path=output_dir / "close_advice.csv",
+        csv_path=csv_path,
+        expected_quote_mode="frozen_snapshot",
     )
     assert validation["ok"] is False
-    assert validation["reason"] == "close_advice_manifest_not_success"
-    assert validation["status"] == "pending"
+    assert validation["reason"] == "close_advice_report_row_snapshot_hash_mismatch"
 
-
-def test_context_override_is_the_only_position_snapshot_evaluated(
-    tmp_path: Path,
-) -> None:
-    context_path = tmp_path / "option_positions_context.json"
-    required_data_root = tmp_path / "required_data"
-    output_dir = tmp_path / "reports"
-    _write_context(context_path, [_position(symbol="TSLA")])
-    _write_quotes(required_data_root, [_quote(symbol="NVDA")])
-    validated_context = {
-        "open_positions_min": [_position(symbol="NVDA")],
-    }
-
-    result = run_close_advice(
-        config={"close_advice": {"enabled": True}},
-        context_path=context_path,
-        context_override=validated_context,
-        required_data_root=required_data_root,
-        output_dir=output_dir,
-        base_dir=Path.cwd(),
+def test_empty_sealed_report_is_valid_with_complete_report_binding(tmp_path: Path) -> None:
+    from src.application.close_advice_report_manifest import (
+        publish_close_advice_report_manifest,
+        validate_close_advice_report_manifest,
     )
 
-    assert result["rows"] == 1
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["symbol"] == "NVDA"
-    assert "TSLA" not in result["notification_text"]
-
-
-def test_mutable_quote_cannot_notify_even_when_economic_gates_pass(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    result, output_dir = _run(
-        tmp_path,
-        positions=[
-            _position(
-                strategy_group_id="combo-group-1",
-                leg_role="funding_put",
-            )
-        ],
-        quotes=[_quote()],
-    )
-
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert result["rows"] == 1
-    assert result["notify_rows"] == 0
-    assert row["policy_version"] == "remaining_yield_capture.v3"
-    assert row["recommendation_state"] == "not_evaluable"
-    assert row["net_capture_ratio"] >= 0.80
-    assert row["capital_basis"] == 10000.0
-    assert row["remaining_max_annualized_return"] <= 0.10
-    assert row["strategy_group_id"] == "combo-group-1"
-    assert row["leg_role"] == "funding_put"
-    assert pd.isna(row["source_stock_lot_id"])
-    assert row["strategy_family"] == "sell_put"
-    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
-
-
-def test_rv_calendar_field_cannot_supply_close_advice_calendar_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "src.application.close_advice_runner.close_advice_market_date",
-        lambda _value, _market: date(2026, 9, 4),
-    )
-    quote = {
-        **_quote(bid=0.0, ask=0.01),
-        "expiration": "2026-09-08",  # Labor Day is September 7.
-        "delta": -0.04,
-        "term_matched_rv_status": "ok",
-        "term_matched_rv_remaining_sessions": 2,
-    }
-    (tmp_path / "calendar_ok").mkdir()
-    result, output_dir = _run(
-        tmp_path / "calendar_ok",
-        positions=[_position(expiration="2026-09-08")],
-        quotes=[quote],
-    )
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert result["notify_rows"] == 0
-    assert row["recommendation_state"] == "not_evaluable"
-    assert pd.isna(row["remaining_trading_sessions"])
-    assert row["delta"] == -0.04
-
-    quote["term_matched_rv_status"] = "data_unavailable"
-    (tmp_path / "calendar_missing").mkdir()
-    fallback, fallback_dir = _run(
-        tmp_path / "calendar_missing",
-        positions=[_position(expiration="2026-09-08")],
-        quotes=[quote],
-    )
-    fallback_row = pd.read_csv(fallback_dir / "close_advice.csv").iloc[0]
-    assert fallback["notify_rows"] == 0
-    assert fallback_row["recommendation_state"] == "not_evaluable"
-
-
-def test_lifecycle_not_evaluable_row_preserves_wheel_stock_relationship(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    result, output_dir = _run(
-        tmp_path,
-        positions=[
-            _position(
-                option_type="call",
-                expiration=BUSINESS_DATE.isoformat(),
-                leg_role="wheel_call",
-                source_lot_id="stock-lot-1",
-            )
-        ],
-        quotes=[],
-    )
-
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert result["rows"] == 1
-    assert row["recommendation_state"] == "not_evaluable"
-    assert row["position_lifecycle_state"] == "expiry_day"
-    assert pd.isna(row["strategy_group_id"])
-    assert row["leg_role"] == "wheel_call"
-    assert row["source_stock_lot_id"] == "stock-lot-1"
-    assert row["strategy_family"] == "covered_call"
-
-
-@pytest.mark.parametrize(
-    "quote",
-    [
-        _quote(bid=0.45, ask=0.50),
-        _quote(bid=0.02, ask=None),
-    ],
-)
-def test_non_close_states_are_recorded_but_not_notified(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    quote: dict,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    result, output_dir = _run(
-        tmp_path,
-        positions=[_position()],
-        quotes=[quote],
-    )
-
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["recommendation_state"] == "not_evaluable"
-    assert result["notify_rows"] == 0
-    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
-
-
-def test_fractional_multiplier_fails_closed_instead_of_truncating_fee_basis(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    position = _position()
-    position["multiplier"] = 100.5
-
-    result, output_dir = _run(
-        tmp_path,
-        positions=[position],
-        quotes=[_quote()],
-    )
-
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["recommendation_state"] == "not_evaluable"
-    assert "fee_evidence_unavailable" in row["data_quality_flags"]
-    assert result["notify_rows"] == 0
-
-
-@pytest.mark.parametrize(
-    ("field", "expected_flag"),
-    [
-        ("multiplier", "missing_multiplier"),
-        ("opened_at", "invalid_original_dte"),
-    ],
-)
-def test_boolean_position_evidence_fails_closed_before_domain_evaluation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    field: str,
-    expected_flag: str,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    position = _position()
-    position[field] = True
-
-    result, output_dir = _run(
-        tmp_path,
-        positions=[position],
-        quotes=[_quote()],
-    )
-
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["recommendation_state"] == "not_evaluable"
-    assert expected_flag in row["data_quality_flags"]
-    assert result["notify_rows"] == 0
-
-
-def test_missing_open_date_does_not_bypass_sealed_evidence_gate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    position = _position()
-    position.pop("opened_at")
-    result, output_dir = _run(tmp_path, positions=[position], quotes=[_quote()])
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert result["notify_rows"] == 0
-    assert row["recommendation_state"] == "not_evaluable"
-    assert pd.isna(row["original_dte"])
-
-
-def test_duplicate_short_lot_is_explicit_context_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    position = _position()
-    with pytest.raises(ValueError, match="duplicate account/lot_id"):
-        _run(tmp_path, positions=[position, dict(position)], quotes=[_quote()])
-
-
-def test_call_uses_spot_value_as_capital_proxy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    _, output_dir = _run(
-        tmp_path,
-        positions=[_position(option_type="call")],
-        quotes=[_quote(option_type="call", spot=80.0)],
-    )
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
-    assert row["capital_basis"] == 8000.0
-    assert row["remaining_max_annualized_return"] > 0
-    assert (output_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
-
-
-def test_long_options_are_outside_close_advice_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    result, output_dir = _run(
-        tmp_path,
-        positions=[_position(side="long")],
-        quotes=[_quote()],
-    )
-
-    assert result["rows"] == 0
-    assert result["notify_rows"] == 0
-    assert pd.read_csv(output_dir / "close_advice.csv").empty
-
-
-def test_notification_limit_cannot_promote_mutable_quotes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _freeze_business_date(monkeypatch)
-    positions = [
-        _position(lot_id="lot-a", symbol="NVDA", strike=100),
-        _position(lot_id="lot-b", symbol="AMD", strike=90),
-    ]
-    quotes = [
-        _quote(symbol="NVDA", strike=100, spot=120),
-        _quote(symbol="AMD", strike=90, spot=110),
-    ]
-    result, output_dir = _run(
-        tmp_path,
-        positions=positions,
-        quotes=quotes,
-        max_items_per_account=1,
-    )
-
-    rows = pd.read_csv(output_dir / "close_advice.csv")
-    assert set(rows["recommendation_state"]) == {"not_evaluable"}
-    assert result["rows"] == 2
-    assert result["notify_rows"] == 0
-
-
-def test_malformed_context_does_not_replace_last_good_report(
-    tmp_path: Path,
-) -> None:
-    context_path = tmp_path / "option_positions_context.json"
-    context_path.write_text("{not-json", encoding="utf-8")
     output_dir = tmp_path / "reports"
     output_dir.mkdir()
     csv_path = output_dir / "close_advice.csv"
     text_path = output_dir / "close_advice.txt"
-    csv_path.write_text("last-known-good-csv", encoding="utf-8")
-    text_path.write_text("last-known-good-text", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="missing or malformed"):
-        run_close_advice(
-            config={"close_advice": {"enabled": True}},
-            context_path=context_path,
-            required_data_root=tmp_path / "required_data",
-            output_dir=output_dir,
-            base_dir=Path.cwd(),
-        )
-
-    assert csv_path.read_text(encoding="utf-8") == "last-known-good-csv"
-    assert text_path.read_text(encoding="utf-8") == "last-known-good-text"
-
-
-def test_auto_quote_refresh_uses_default_futu_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import src.application.opend_symbol_fetching as opend_symbol_fetching
-    from src.application.close_advice_runner import (
-        _fetch_missing_quotes_via_opend,
-        _quote_key,
+    context_path = output_dir / "option_positions_context.json"
+    csv_path.write_text(
+        "quote_mode,required_data_snapshot_manifest_sha256,close_advice_required_data_plan_sha256\n",
+        encoding="utf-8",
+    )
+    text_path.write_text("", encoding="utf-8")
+    context = {"filters": {"account": "lx"}}
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=[],
+        markets_to_run=["US"],
+        run_id="run-empty",
+        quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256="a" * 64,
+        close_advice_required_data_plan_sha256="b" * 64,
     )
 
-    position = _position()
-    key = _quote_key(
-        position["symbol"],
-        position["option_type"],
-        position["expiration"],
-        position["strike"],
-        base_dir=tmp_path,
+    validation = validate_close_advice_report_manifest(
+        csv_path=csv_path,
+        expected_run_id="run-empty",
+        expected_quote_mode="frozen_snapshot",
     )
-    quotes = {key: _quote(bid=None, ask=None)}
-    calls: list[dict] = []
-
-    def _fetch_symbol(_symbol: str, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(dict(kwargs))
-        return {"rows": [_quote()]}
-
-    monkeypatch.setattr(opend_symbol_fetching, "fetch_symbol", _fetch_symbol)
-
-    reasons, details = _fetch_missing_quotes_via_opend(
-        config={
-            "close_advice": {"quote_source": "auto"},
-            "symbols": [{"symbol": "NVDA", "fetch": {}}],
-        },
-        positions=[position],
-        quotes=quotes,
-        covered_keys={key},
-        base_dir=tmp_path,
-    )
-
-    assert reasons == {}
-    assert details[key]["requested_symbol"] == "NVDA"
-    assert quotes[key]["bid"] == 0.018
-    assert quotes[key]["ask"] == 0.02
-    assert len(calls) == 1
+    assert validation["ok"] is True

@@ -57,9 +57,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "scheduler_status" in tool_names
     assert "symbol_resolve" in tool_names
     assert "symbol_config_read" in tool_names
-    assert "prepare_close_advice_inputs" in tool_names
-    assert "close_advice" in tool_names
-    assert "get_close_advice" in tool_names
+    assert "prepare_close_advice_inputs" not in tool_names
+    assert "close_advice" not in tool_names
+    assert "get_close_advice" not in tool_names
+    assert "close_advice_read" in tool_names
     assert "monthly_income_report" not in tool_names
     assert "analysis_catalog" not in tool_names
     assert "analysis_query" not in tool_names
@@ -83,10 +84,14 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "doctor" not in tool_names
     assert "research" not in tool_names
     assert spec["schema_version"] == "1.0"
-    assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
-    get_close_advice = _tool(spec, "get_close_advice")
-    assert "requires" in get_close_advice
-    assert "capabilities" in get_close_advice
+    assert spec["recommended_flow"] == [
+        "healthcheck",
+        "scan_opportunities",
+        "close_advice_read",
+    ]
+    close_advice_read = _tool(spec, "close_advice_read")
+    assert "requires" in close_advice_read
+    assert "capabilities" in close_advice_read
     runtime_status = _tool(spec, "runtime_status")
     assert runtime_status["risk_level"] == "read_only"
     assert runtime_status["requires_confirm"] is False
@@ -128,9 +133,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert assignment_scenario["safe_default_input"] == {}
     assert set(assignment_scenario["input_schema"]) == {"accounts"}
     assert assignment_scenario["input_json_schema"]["required"] == ["accounts"]
-    assert assignment_scenario["output_contract"]["schema_version"] == (
-        "portfolio.assignment_scenario.v1"
-    )
+    assert assignment_scenario["output_contract"]["schema_version"] == ("portfolio.assignment_scenario.v1")
     operation_timeline = _tool(spec, "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -277,9 +280,6 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "scan_opportunities",
         "query_cash_headroom",
         "get_portfolio_context",
-        "prepare_close_advice_inputs",
-        "close_advice",
-        "get_close_advice",
         "candidate_rank_explain",
         "candidate_filter_explain",
         "option_performance_report",

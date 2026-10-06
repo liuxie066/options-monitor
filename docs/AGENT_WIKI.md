@@ -103,7 +103,7 @@ Use the lowest-risk tool that can answer the question.
 | Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
 | Is Cash-Secured Put (CSP) cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
-| Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
+| What does the current Close Advice report say? | `close_advice_read` | Reads the latest sealed scheduled report without refreshing inputs or generating advice |
 | What evidence should MacBook Codex analyze? | `research` | Builds a redacted evidence bundle and handoff |
 
 ## 4. Research Workflow
@@ -692,7 +692,7 @@ unconfirmed record is also frozen and must not be automatically resent.
 
 - Domain policy: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
-- Recommended agent entry: `get_close_advice`
+- Recommended agent entry: `close_advice_read`
 - Contract: `docs/CLOSE_ADVICE_CONTRACT.md`
 
 Core domain functions:
@@ -701,10 +701,14 @@ Core domain functions:
 def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]: ...
 ```
 
-The domain has one fixed `remaining_yield_capture.v1` policy for short puts and
+The domain has one fixed `remaining_yield_capture.v3` policy for short puts and
 short calls. It returns only `close`, `hold`, or `not_evaluable`. The runner
 loads sealed position/quote facts, preserves fail-closed rows, and formats the
 report; it does not pair opening candidates or make replacement decisions.
+
+Only scheduled Tick produces current Close Advice reports. Agent callers use
+`close_advice_read`; the retired `prepare_close_advice_inputs`, `close_advice`,
+and `get_close_advice` tools no longer provide a mutable generation path.
 
 Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 
