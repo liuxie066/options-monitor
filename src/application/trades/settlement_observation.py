@@ -391,8 +391,8 @@ def collect_broker_settlement_observation(
         and str(item.get("date") or "")
         > str(lifecycle_case.get("expiration_ymd") or "")
         and str(item.get("type") or "").upper()
-        in {"WHOLE", "TRADING"}
-    ][:2]
+        in {"WHOLE", "MORNING", "AFTERNOON", "TRADING"}
+    ][:1]
     frozen_calendar_days = [
         str(item.get("date") or "").strip()
         for item in list(timing_policy.get("trading_days") or [])
@@ -526,8 +526,8 @@ def collect_broker_settlement_observation(
     extra_incomplete.update(anchor_reason_codes)
     if not contract_code:
         extra_incomplete.add("option_contract_code_missing")
-    if len(business_days) < 2:
-        extra_incomplete.add("two_business_days_unavailable")
+    if not business_days:
+        extra_incomplete.add("next_business_day_unavailable")
     if int(read_model.get("pending_until_ms") or 0) != deadline_ms:
         extra_incomplete.add("read_model_timing_policy_mismatch")
     if calendar.get("status") == "complete":

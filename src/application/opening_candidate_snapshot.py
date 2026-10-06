@@ -1058,7 +1058,11 @@ def _strategy_results(
             mode=mode,
         )
         partial_reasons = _CLEAN_NO_CANDIDATE_REASONS | {"partial_data"}
-        if values == {"not_applicable"}:
+        if counts:
+            # Fully evaluated candidates remain usable when another symbol is
+            # blocked. Scope completeness is reported separately.
+            status = "candidates_found"
+        elif values == {"not_applicable"}:
             status = (
                 "no_candidate"
                 if reasons
@@ -1070,8 +1074,8 @@ def _strategy_results(
             and "partial_data" in reasons
             and reasons <= partial_reasons
         ):
-            status = "partial_data" if not counts else "candidates_found"
-        elif not counts and unavailable_input_status is not None:
+            status = "partial_data"
+        elif unavailable_input_status is not None:
             # A contract that could not pass input normalization is missing
             # decision evidence. It cannot support a clean zero-candidate seal,
             # even if an upstream scope accidentally reported ``no_candidate``.
@@ -1081,11 +1085,25 @@ def _strategy_results(
             values <= {"completed", "not_applicable"}
             and reasons <= _CLEAN_NO_CANDIDATE_REASONS
         ):
-            status = "candidates_found" if counts else "no_candidate"
+            status = "no_candidate"
         elif values <= {"completed", "not_applicable"}:
             # Completed scopes that carry an evidence-availability reason other
             # than a clean no-candidate must not collapse into a silent empty.
-            status = "candidates_found" if counts else "data_unavailable"
+            status = "data_unavailable"
+        elif values & {"failed", "incomplete", "unavailable"} and any(
+            (
+                item["status"] == "completed"
+                and str(item.get("reason") or "") in partial_reasons
+            )
+            or (
+                item["status"] == "not_applicable"
+                and str(item.get("reason") or "") in _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS
+            )
+            for item in scoped
+        ):
+            # One blocked symbol leaves a partial universe, not an unavailable
+            # strategy, when another symbol has a usable result or a benign account skip.
+            status = "partial_data"
         else:
             status = "data_unavailable"
         out.append(

@@ -98,6 +98,7 @@ def _repo_with_pending_case(
     option_code: str = OPTION_CODE,
     seed_anchor: bool = True,
     second_open_lot: bool = False,
+    calendar_rows: list[dict[str, str]] | None = None,
 ) -> tuple[
     SQLiteOptionPositionsRepository,
     dict,
@@ -228,7 +229,7 @@ def _repo_with_pending_case(
                 "instrument_policy_registry"
             ),
         },
-        trading_days=_calendar_rows(),
+        trading_days=_calendar_rows() if calendar_rows is None else calendar_rows,
         calendar_source="futu_request_trading_days",
         calendar_observed_at_ms=anchor_time_ms,
     )
@@ -421,8 +422,10 @@ def _complete_receipt(rows: list[dict]) -> dict:
 def test_discovery_replay_does_not_override_canonical_timing_policy(
     tmp_path: Path,
 ) -> None:
+    calendar = _calendar_rows()
+    next(item for item in calendar if item["date"] == "2026-08-24")["type"] = "REST"
     repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
-        tmp_path
+        tmp_path, calendar_rows=calendar,
     )
     case_id = str(lifecycle_case["case_id"])
     fallback_deadline_ms = int(lifecycle_case["pending_until_ms"])
@@ -4058,3 +4061,192 @@ def test_settlement_matching_requires_actual_integral_multiplier(multiplier):
         row["qty"] += 1
         assert _stock_settlement_candidate(row, lifecycle_case=case, account="lx", futu_account_id="1001",
                                            timezone="America/New_York", settlement_deadline_ms=2000) is None
+
+
+@pytest.mark.parametrize(
+    ("market", "expiration", "trading_days", "expected_local", "expected_utc"),
+    [
+        ("HK", "2026-10-02", [
+            {"date": "2026-10-02", "type": "TRADING"},
+            {"date": "2026-10-03", "type": "REST"},
+            {"date": "2026-10-04", "type": "REST"},
+            {"date": "2026-10-05", "type": "WHOLE"},
+            {"date": "2026-10-06", "type": "TRADING"},
+        ], "2026-10-05T16:00:00+08:00", "2026-10-05T08:00:00+00:00"),
+        ("HK", "2026-12-23", [
+            {"date": "2026-12-24", "type": "MORNING"},
+        ], "2026-12-24T12:00:00+08:00", "2026-12-24T04:00:00+00:00"),
+        ("HK", "2026-10-02", [
+            {"date": "2026-10-05", "type": "AFTERNOON"},
+        ], "2026-10-05T16:00:00+08:00", "2026-10-05T08:00:00+00:00"),
+        ("US", "2026-10-02", [
+            {"date": "2026-10-05", "type": "TRADING"},
+            {"date": "2026-10-06", "type": "TRADING"},
+        ], "2026-10-05T16:00:00-04:00", "2026-10-05T20:00:00+00:00"),
+        ("HK", "2026-10-02", [
+            {"date": "2026-10-05", "type": "REST"},
+            {"date": "2026-10-06", "type": "TRADING"},
+        ], "2026-10-06T16:00:00+08:00", "2026-10-06T08:00:00+00:00"),
+        ("US", "2026-09-04", [
+            {"date": "2026-09-07", "type": "REST"},
+            {"date": "2026-09-08", "type": "TRADING"},
+        ], "2026-09-08T16:00:00-04:00", "2026-09-08T20:00:00+00:00"),
+        ("US", "2026-11-25", [
+            {"date": "2026-11-26", "type": "REST"},
+            {"date": "2026-11-27", "type": "MORNING"},
+        ], "2026-11-27T13:00:00-05:00", "2026-11-27T18:00:00+00:00"),
+        ("US", "2026-10-30", [
+            {"date": "2026-11-02", "type": "TRADING"},
+        ], "2026-11-02T16:00:00-05:00", "2026-11-02T21:00:00+00:00"),
+        ("US", "2026-03-06", [
+            {"date": "2026-03-09", "type": "TRADING"},
+        ], "2026-03-09T16:00:00-04:00", "2026-03-09T20:00:00+00:00"),
+    ],
+)
+def test_expiry_wait_ends_at_next_market_trading_close(
+    market, expiration, trading_days, expected_local, expected_utc,
+):
+    policy = build_lifecycle_timing_policy(
+        case_id="next-day-case",
+        market=market,
+        expiration_ymd=expiration,
+        contract_metadata={
+            "settlement_style": "physical",
+            "underlying_security_type": "equity",
+            "last_trade_cutoff_ms": 1,
+            "last_trade_cutoff_source": "instrument_policy_registry",
+        },
+        trading_days=trading_days,
+        calendar_source="test_calendar",
+        calendar_observed_at_ms=1,
+    )
+    expected = datetime.fromisoformat(expected_local)
+    assert policy["timezone"] == (
+        "Asia/Hong_Kong" if market == "HK" else "America/New_York"
+    )
+    assert policy["settlement_deadline_ms"] == int(expected.timestamp() * 1000)
+    assert expected.astimezone(ZoneInfo("UTC")).isoformat() == expected_utc
+
+
+def test_expiry_wait_requires_a_following_market_trading_day():
+    with pytest.raises(ValueError, match="next broker business day is unavailable"):
+        build_lifecycle_timing_policy(
+            case_id="no-trading-day-case",
+            market="HK",
+            expiration_ymd=EXPIRATION_YMD,
+            contract_metadata={
+                "settlement_style": "physical",
+                "underlying_security_type": "equity",
+                "last_trade_cutoff_ms": 1,
+                "last_trade_cutoff_source": "instrument_policy_registry",
+            },
+            trading_days=[
+                {"date": EXPIRATION_YMD, "type": "TRADING"},
+                {"date": "2026-08-22", "type": "REST"},
+            ],
+            calendar_source="test_calendar",
+            calendar_observed_at_ms=1,
+        )
+
+
+def test_next_day_boundary_collects_complete_evidence_and_resolves_once(tmp_path):
+    calendar = [
+        {"date": "2026-08-20", "type": "TRADING"},
+        {"date": EXPIRATION_YMD, "type": "TRADING"},
+        {"date": "2026-08-24", "type": "TRADING"},
+    ]
+    repo, case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path, calendar_rows=calendar,
+    )
+    deadline_ms = int(
+        datetime(2026, 8, 24, 16, tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000
+    )
+    assert policy["settlement_deadline_ms"] == deadline_ms
+    case_id = str(case["case_id"])
+    gateway = _Gateway(calendar_rows=calendar)
+    before = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case_id,
+        gateway=gateway, now_ms=deadline_ms - 1,
+    )
+    assert before["complete"] is False
+    waiting = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=deadline_ms - 1,
+        observation=before, apply_changes=False,
+    )
+    assert waiting["decision"]["status"] == "cause_pending"
+    _bootstrap_current_decision_shadow(repo, now_ms=deadline_ms)
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case_id,
+        gateway=gateway, now_ms=deadline_ms,
+    )
+    assert observation["complete"] is True
+    result = reconcile_lifecycle_close_reason(
+        repo, case_id=case_id, now_ms=deadline_ms,
+        observation=observation, apply_changes=True,
+    )
+    assert result["decision"]["status"] == "resolved"
+    assert result["decision"]["close_reason"] == "expiration_no_settlement"
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    events = repo.list_trade_events()
+    readback = lifecycle_case_read_model(repo, case_id=case_id, now_ms=deadline_ms)
+    assert readback["reason_state"] == "resolved"
+    assert readback["close_reason"] == "expiration_no_settlement"
+    retry = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=deadline_ms + 1,
+        observation_collector=lambda *_args: pytest.fail("resolved case must not be collected again"),
+        apply_changes=True,
+    )
+    assert retry["results"] == []
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence
+    assert repo.list_trade_events() == events
+
+
+def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_path):
+    repo, case, policy, _anchor_ms = _repo_with_pending_case(tmp_path)
+    case_id = str(case["case_id"])
+    deadline_ms = int(
+        datetime(2026, 8, 24, 16, tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000
+    )
+    assert policy["settlement_deadline_ms"] == deadline_ms
+    now_ms = deadline_ms - 1
+    gateway = _Gateway()
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001",
+        now_ms_fn=lambda: now_ms, source_id="lx",
+    )
+    source = {
+        "id": "lx", "account": "lx", "futu_account_ids": ["1001"],
+        "inbox_path": tmp_path / "inbox.sqlite3",
+        "settlement_observation": {"enabled": True},
+    }
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
+    seals = []
+    before = reconcile_due_lifecycle_cases_for_source(
+        repo, source=source, now_ms=now_ms,
+        apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+    )
+    assert before["provider_attempt_count"] == 0
+    assert gateway.history_deal_queries == []
+    assert lifecycle_case_read_model(
+        repo, case_id=case_id, now_ms=now_ms,
+    )["reason_state"] == "cause_pending"
+    now_ms = deadline_ms
+    due = reconcile_due_lifecycle_cases_for_source(
+        repo, source=source, now_ms=now_ms,
+        apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+    )
+    assert due["provider_attempt_count"] == 1
+    readback = lifecycle_case_read_model(repo, case_id=case_id, now_ms=now_ms)
+    assert readback["reason_state"] == "resolved"
+    assert readback["close_reason"] == "expiration_no_settlement"
+    events = repo.list_trade_events()
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    now_ms += 60_000
+    retry = reconcile_due_lifecycle_cases_for_source(
+        repo, source=source, now_ms=now_ms,
+        apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+    )
+    assert retry["provider_attempt_count"] == 0
+    assert len(gateway.history_deal_queries) == 1
+    assert repo.list_trade_events() == events
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence

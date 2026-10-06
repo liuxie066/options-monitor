@@ -4,6 +4,7 @@ from datetime import date, datetime, time
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from domain.domain.option_lifecycle import INSTRUMENT_POLICY_REGISTRY, INSTRUMENT_POLICY_SCHEMA
 from domain.domain.symbol_identity import symbol_market
 from src.application.ledger.api import record_lifecycle_timing_policy
 from src.application.trades.close_reason_evidence import (
@@ -12,29 +13,6 @@ from src.application.trades.close_reason_evidence import (
 )
 
 
-INSTRUMENT_POLICY_SCHEMA = "lifecycle_instrument_policy.v1"
-INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
-    "US:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "us_standard_equity_option.v1",
-        "market": "US",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "America/New_York",
-        "last_trade_session_close": "16:00:00",
-    },
-    "HK:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "hk_standard_equity_option.v1",
-        "market": "HK",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "Asia/Hong_Kong",
-        "last_trade_session_close": "16:00:00",
-    },
-}
 
 
 def resolve_authoritative_contract_timing(

@@ -2024,3 +2024,34 @@ def test_direct_settlement_gap_is_sufficient_and_does_not_hide_candidates():
     message = render_fixed_report(brief)
     assert '期权平仓待结算确认' in message
     assert 'NVDA' in message
+
+
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown])
+@pytest.mark.parametrize("reason", ["option_close_settlement_pending", "term_matched_rv_unavailable"])
+def test_scoped_call_block_does_not_mark_whole_call_strategy_unavailable(render, reason):
+    brief = _brief()
+    brief["candidates"] = {}
+    brief["data_gaps"] = [
+        _strategy_partial_data_gap("FUTU", strategy_family="covered_call", reason_code=reason),
+    ]
+    message = render(brief)
+    assert "## CC\n暂无可推荐合约" in message
+    assert "候选数据不完整，暂无法评估" not in message
+    assert "FUTU CC" in message.replace("｜", " ")
+    brief["candidates"] = {"covered_call": _brief()["candidates"]["covered_call"]}
+    populated = render(brief)
+    assert "策略排序 1" in populated
+    assert "FUTU CC" in populated.replace("｜", " ")
+    assert "候选数据不完整，暂无法评估" not in populated
+
+
+@pytest.mark.parametrize("reason", [
+    "opening_candidate_strategy_data_unavailable",
+    "opening_candidate_strategy_partial_data",
+    "opening_candidate_snapshot_unavailable",
+])
+def test_unscoped_call_unavailability_still_blocks_empty_family(reason):
+    brief = _brief()
+    brief["candidates"] = {}
+    brief["data_gaps"] = [{"scope": "strategy", "strategy_family": "covered_call", "reason": reason}]
+    assert "## CC\n候选数据不完整，暂无法评估" in render_fixed_report(brief)

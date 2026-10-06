@@ -35,6 +35,33 @@ SUPPORTED_LAST_TRADE_SOURCES = frozenset({
 })
 
 
+INSTRUMENT_POLICY_SCHEMA = "lifecycle_instrument_policy.v1"
+INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
+    "US:standard_equity_option": {
+        "schema_version": INSTRUMENT_POLICY_SCHEMA,
+        "policy_id": "us_standard_equity_option.v1",
+        "market": "US",
+        "contract_class": "standard_equity_option",
+        "underlying_security_type": "equity",
+        "settlement_style": "physical",
+        "timezone": "America/New_York",
+        "last_trade_session_close": "16:00:00",
+        "half_trade_session_close": "13:00:00",
+    },
+    "HK:standard_equity_option": {
+        "schema_version": INSTRUMENT_POLICY_SCHEMA,
+        "policy_id": "hk_standard_equity_option.v1",
+        "market": "HK",
+        "contract_class": "standard_equity_option",
+        "underlying_security_type": "equity",
+        "settlement_style": "physical",
+        "timezone": "Asia/Hong_Kong",
+        "last_trade_session_close": "16:00:00",
+        "half_trade_session_close": "12:00:00",
+    },
+}
+
+
 @dataclass(frozen=True)
 class LifecycleReadModel:
     lifecycle_state: str
@@ -496,6 +523,8 @@ def _read_model(
 __all__ = [
     "ASSIGNMENT_WAITING_STATUS",
     "FINAL_STATUSES",
+    "INSTRUMENT_POLICY_REGISTRY",
+    "INSTRUMENT_POLICY_SCHEMA",
     "LIFECYCLE_CASE_SCHEMA",
     "LifecycleReadModel",
     "MARKET_TIMEZONES",

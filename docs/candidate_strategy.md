@@ -258,6 +258,7 @@ annualized_net_premium_return = period_net_premium_return * 365 / DTE
 - 持仓事实来自同一物理 Futu 账户的 OpenD `qty`、`can_sell_qty`、`average_cost` 和 currency；其中 `average_cost` 映射为 OM `avg_cost`。
 - symbol 配置可以在多账户间共用；当前账户未持有该 symbol 时，该 CC scope 以 `covered_call_underlying_not_held` 正常跳过，不会将其他已完成 scope 降级为 `data_unavailable`。
 - 若当前账户的 CC scope 全部因未持股而跳过，账户级结果是合法的 `no_candidate`；持仓上下文缺失或损坏仍为 `data_unavailable`。
+- 单个标的因待结算、行情或其他局部证据缺失而受阻时，只保护该标的容量；其他标的继续筛选和排序。存在合格候选时策略为 `candidates_found`，其他标的已完成但无候选时为 `partial_data`，缺口保留具体 symbol；全部不可用或共享持仓上下文缺失仍为 `data_unavailable`。
 - 已开放 Short Call 的股票锁定来自权威 SQLite option-position ledger。
 - OpenD 持仓与 SQLite short-call 锁定无法一致解释时 fail closed。
 - 不跨账户借用股票，也不默认 multiplier。
