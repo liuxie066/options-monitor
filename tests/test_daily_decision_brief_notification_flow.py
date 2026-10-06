@@ -371,10 +371,11 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
     if candidate:
         assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 1）**" in card_markdown
         assert "指标｜权利金 $1.20" in card_markdown
+        assert "指标｜权利金 $1.20 · 最多 1 手" in card_markdown
     else:
         assert "## CSP\n暂无合适合约" in card_markdown
     assert "## CC\n暂无合适合约" in card_markdown
-    assert "## Combo\n暂无合适合约" in card_markdown
+    assert "## 组合增强\n暂无合适合约" in card_markdown
     assert "现金总额｜$100,000.00" in card_markdown
     assert "可用于期权开仓｜$60,000.00" in card_markdown
     assert "| 项目 | 数值 |" not in card_markdown
@@ -700,7 +701,7 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
 
     assert "## CSP\n暂无合适合约" in message
     assert "## CC\n暂无合适合约" in message
-    assert "## Combo\n暂无合适合约" in message
+    assert "## 组合增强\n暂无合适合约" in message
     assert "## 持仓" in message
     assert "## 资金" in message
     assert "现金总额｜$100,000.00" in message

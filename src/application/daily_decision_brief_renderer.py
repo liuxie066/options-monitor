@@ -25,7 +25,7 @@ _STRATEGY_LABELS = {
     "sell_put": "CSP",
     "short_put": "CSP",
     "covered_call": "CC",
-    "combo_yield": "Combo",
+    "combo_yield": "组合增强",
     "wheel": "Wheel",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
@@ -1395,6 +1395,11 @@ def _candidate_metric_details(
     net_income = _number(values.get("net_income"))
     if net_income is not None:
         parts.append(f"预计净收入 {_money(net_income, market=market)}")
+    if family in {"sell_put", "covered_call"}:
+        contracts = _capacity_contracts(candidate)
+        parts.append(
+            f"最多 {contracts} 手" if contracts is not None else "最多手数暂不可用"
+        )
     return [" · ".join(parts)] if parts else []
 
 
