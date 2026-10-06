@@ -29,6 +29,9 @@ from src.application.ledger.interventions import (
     build_manual_void_preview,
     is_opend_trade_time_repair_request,
     is_order_identity_repair_request,
+    is_futu_environment_repair_request,
+    preview_manual_futu_environment_binding,
+    persist_manual_futu_environment_binding,
     persist_manual_opend_trade_time_correction,
     persist_manual_order_identity_binding,
     persist_manual_repair_event,
@@ -2524,6 +2527,9 @@ def preview_trade_event_repair(
     overrides: dict[str, Any],
     reason: str,
 ) -> dict[str, Any]:
+    if is_futu_environment_repair_request(overrides):
+        return preview_manual_futu_environment_binding(repo, target_event_id=event_id,
+            overrides=overrides, repair_reason=reason)
     if is_order_identity_repair_request(overrides):
         return preview_manual_order_identity_binding(
             repo,
@@ -2570,6 +2576,9 @@ def record_trade_event_repair(
     reason: str,
     expected_input_hash: str | None = None,
 ) -> dict[str, Any]:
+    if is_futu_environment_repair_request(overrides):
+        return persist_manual_futu_environment_binding(repo, target_event_id=event_id,
+            overrides=overrides, repair_reason=reason, expected_input_hash=expected_input_hash)
     if is_order_identity_repair_request(overrides):
         return persist_manual_order_identity_binding(
             repo,

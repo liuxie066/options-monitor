@@ -30,7 +30,8 @@ from domain.domain.trade_contract_identity import (
     normalize_position_effect,
     normalize_trade_side,
 )
-from domain.domain.trade_execution import execution_instant_milliseconds, futu_execution_time
+from domain.domain.trade_execution import canonical_decimal, canonical_trade_execution_content, execution_instant_milliseconds, execution_source_status, futu_execution_time
+from domain.domain.trade_account_identity import extract_visible_account_fields
 from domain.domain.wheel import effective_wheel_events
 from src.application.cash_conversion import (
     attach_trade_event_cash_conversions,
@@ -627,6 +628,151 @@ def is_opend_trade_time_repair_request(overrides: dict[str, Any]) -> bool:
     return set(effective) == _OPEND_TRADE_TIME_OVERRIDE_KEYS
 
 
+def is_futu_environment_repair_request(overrides: dict[str, Any]) -> bool:
+    return overrides.get("trd_env") is not None or "futu_environment_evidence" in overrides
+
+
+def _futu_environment_binding_plan(
+    repo: Any, *, target_event_id: str, overrides: dict[str, Any], repair_reason: str,
+    conn: sqlite3.Connection | None = None, bound_at_ms: int | None = None,
+) -> dict[str, Any]:
+    effective = _repair_override_payload(overrides)
+    if set(effective) != {"trd_env", "futu_environment_evidence"} or effective["trd_env"] != "REAL":
+        raise ValueError("Futu environment repair only accepts REAL and exact OpenD history evidence")
+    reason = _order_identity_reason(repair_reason)
+    rows = _storage_trade_event_rows(repo, conn=conn)
+    target = next((row for row in rows if row["event_id"] == target_event_id), None)
+    if target is None or target_event_id in {valid_void_target_event_id(_storage_payload(row)) for row in rows}:
+        raise ValueError("Futu environment repair target is missing or voided")
+    before = _storage_payload(target)
+    event, diagnostics = stored_trade_event_to_ledger_event(before)
+    if (event is None or any(d.severity == "error" for d in diagnostics)
+            or event.event_type != "open" or event.asset_type != "option"
+            or normalize_broker(event.contract_key.broker) != "富途" or event.source != "opend_push"):
+        raise ValueError("Futu environment repair requires a canonical OpenD option open")
+    raw = before.get("raw_payload") or {}
+    physical = str(raw.get("futu_account_id") or "")
+    deal_id = str(raw.get("source_deal_id") or raw.get("deal_id") or "")
+    if (not physical.isascii() or not physical.isdigit() or physical.startswith("0") or not deal_id
+            or target_event_id != f"futu:{event.contract_key.account}:{physical}:{deal_id}"
+            or not raw.get("order_id") or not raw.get("code")):
+        raise ValueError("Futu environment repair requires exact stored source identity")
+    if (raw.get("execution_input") is not None
+            or raw.get("trd_env") not in (None, "", "REAL")
+            or raw.get("environment") not in (None, "", "REAL")
+            or raw.get("broker_account_id") not in (None, "", f"futu:REAL:{physical}")):
+        raise ValueError("Futu environment repair cannot replace existing execution identity")
+    proof = effective["futu_environment_evidence"]
+    if not isinstance(proof, dict):
+        raise ValueError("Futu environment repair evidence must be an object")
+    receipt = proof.get("diagnostics")
+    if not isinstance(receipt, dict):
+        raise ValueError("Futu environment repair history receipt must be an object")
+    accounts = receipt.get("account_results")
+    if not isinstance(accounts, list) or any(not isinstance(row, dict) for row in accounts):
+        raise ValueError("Futu environment repair account receipt must be a list of objects")
+    observed_ms = execution_instant_milliseconds(receipt.get("observed_at_utc"))
+    instant = now_ms()
+    if observed_ms is None or not 0 <= instant - observed_ms <= 60_000:
+        raise ValueError("Futu environment repair evidence is stale or future-dated")
+    if (receipt.get("schema_version") != "futu_history_query_receipt.v1"
+            or receipt.get("dataset") != "executions" or receipt.get("trd_env") != "REAL"
+            or receipt.get("coverage_status") != "complete" or len(accounts) != 1):
+        raise ValueError("Futu environment repair requires complete single-account history")
+    account = accounts[0]
+    if (account.get("futu_account_id") != physical or account.get("trd_env") != "REAL"
+            or account.get("coverage_status") != "complete"
+            or account.get("coverage_complete") is not True or account.get("pagination_complete") is not True
+            or account.get("truncated") is True or account.get("error") or account.get("ret") not in (0, "0")):
+        raise ValueError("Futu environment repair account or coverage mismatch")
+    for prefix in ("requested", "covered"):
+        start = execution_instant_milliseconds(account.get(prefix + "_start_utc"))
+        end = execution_instant_milliseconds(account.get(prefix + "_end_utc"))
+        if start is None or end is None or not start <= event.event_time_ms < end:
+            raise ValueError("Futu environment repair history does not cover source time")
+    matches = proof.get("matches")
+    if not isinstance(matches, list) or len(matches) != 1 or not isinstance(matches[0], dict):
+        raise ValueError("Futu environment repair requires one unique matching deal")
+    deal = matches[0]
+    if (str(deal.get("deal_id") or deal.get("dealID") or "") != deal_id
+            or str(deal.get("order_id") or "") != str(raw["order_id"])
+            or str(deal.get("code") or "") != str(raw["code"])
+            or deal.get("futu_account_id") != physical or deal.get("environment") != "REAL"
+            or deal.get("broker_account_id") != f"futu:REAL:{physical}"
+            or deal.get("trd_env") not in (None, "", "REAL")
+            or any(value != physical for value in extract_visible_account_fields(deal).values())
+            or deal.get("external_id_namespace") != "futu.deal"
+            or deal.get("external_order_namespace") != "futu.order"
+            or execution_source_status(deal) not in (None, "ok")):
+        raise ValueError("Futu environment repair source deal identity mismatch")
+    # Multiplier and canonical underlying are unchanged local instrument facts;
+    # history supplies the exact stored source code and all fill economics.
+    content = canonical_trade_execution_content({**deal, "internal_account": event.contract_key.account,
+        "underlying_symbol": event.contract_key.underlying_symbol, "multiplier": event.multiplier})
+    economic, associations = content["economic"], content["associations"]
+    instrument = economic["instrument"]
+    if (content["errors"] or economic["side"] != normalize_trade_side(event.raw_payload.get("side"))
+            or economic["quantity"] != canonical_decimal(str(event.contracts)) or economic["price"] != canonical_decimal(str(event.price))
+            or economic["currency"] != event.currency or associations["position_effect"] != "open"
+            or instrument.get("option_type") != event.contract_key.option_type
+            or instrument.get("strike") != canonical_decimal(str(event.contract_key.strike))
+            or instrument.get("expiration_ymd") != event.contract_key.expiration_ymd
+            or execution_instant_milliseconds(economic["occurred_at_utc"]) != event.event_time_ms):
+        raise ValueError("Futu environment repair source deal economics mismatch")
+    preserved = deepcopy(before)
+    for key in ("trd_env", "futu_environment_provenance"):
+        preserved.setdefault("raw_payload", {}).pop(key, None)
+    preserved_hash = canonical_sha256(preserved)
+    prior = raw.get("futu_environment_provenance")
+    before_hash = _sha256_text(str(target["event_json"]))
+    source_hash = prior.get("expected_before_sha256") if isinstance(prior, dict) else before_hash
+    input_hash = canonical_sha256({"event_id": target_event_id, "before_sha256": source_hash,
+        "deal_id": deal_id, "order_id": raw["order_id"], "content": content, "reason": reason})
+    common = {"operation": "futu_environment_binding", "target_event_id": target_event_id,
+        "before_environment": raw.get("trd_env") or None, "after_environment": "REAL",
+        "futu_account_id": physical, "source_deal_id": deal_id, "expected_input_hash": input_hash,
+        "expected_before_sha256": before_hash, "before_json": str(target["event_json"])}
+    if raw.get("trd_env") == "REAL":
+        if prior is not None and (not isinstance(prior, dict) or prior.get("input_hash") != input_hash
+                or prior.get("preserved_payload_sha256") != preserved_hash):
+            raise ValueError("Futu environment repair provenance conflict")
+        return common | {"binding_status": "no_op", "after_json": str(target["event_json"]),
+                         "after_sha256": before_hash}
+    if prior is not None:
+        raise ValueError("Futu environment repair provenance conflict")
+    if bound_at_ms is None:
+        return common | {"binding_status": "ready"}
+    after = deepcopy(before)
+    after["raw_payload"] = {**raw, "trd_env": "REAL", "futu_environment_provenance": {
+        "schema_version": "futu_environment_binding.v1", "binding_id": "futu_environment_binding_" + input_hash[:24],
+        "source": "opend_history", "reason": reason, "input_hash": input_hash,
+        "expected_before_sha256": before_hash, "preserved_payload_sha256": preserved_hash,
+        "bound_at_ms": bound_at_ms, "evidence": proof}}
+    before_outer, after_outer = deepcopy(before), deepcopy(after)
+    for payload in (before_outer, after_outer):
+        for key in ("trd_env", "futu_environment_provenance"):
+            payload.setdefault("raw_payload", {}).pop(key, None)
+    if before_outer != after_outer:
+        raise ValueError("Futu environment repair changed non-environment data")
+    after_json = json.dumps(after, ensure_ascii=False, sort_keys=True)
+    return common | {"binding_status": "ready", "after_json": after_json,
+                     "after_sha256": _sha256_text(after_json), "bound_at_ms": bound_at_ms}
+
+
+def preview_manual_futu_environment_binding(repo: Any, **kwargs: Any) -> dict[str, Any]:
+    plan = _futu_environment_binding_plan(repo, **kwargs)
+    return {k: v for k, v in (plan | {"mode": "no_op" if plan["binding_status"] == "no_op" else "dry_run",
+                                    "advisory": True}).items()
+            if k not in {"before_json", "after_json", "binding_status"}}
+
+
+def persist_manual_futu_environment_binding(repo: Any, *, expected_input_hash: str | None, **kwargs: Any) -> dict[str, Any]:
+    if not expected_input_hash:
+        raise ValueError("Futu environment repair requires --expected-input-hash from preview")
+    return _persist_manual_metadata_binding(repo, plan_builder=_futu_environment_binding_plan,
+                                           expected_input_hash=expected_input_hash, **kwargs)
+
+
 def _normalized_order_identity(overrides: dict[str, Any]) -> tuple[str, str]:
     effective = _repair_override_payload(overrides)
     if set(effective) != _ORDER_IDENTITY_OVERRIDE_KEYS:
@@ -947,11 +1093,19 @@ def persist_manual_order_identity_binding(
     overrides: dict[str, Any],
     repair_reason: str,
 ) -> dict[str, Any]:
+    return _persist_manual_metadata_binding(repo, target_event_id=target_event_id,
+        overrides=overrides, repair_reason=repair_reason, plan_builder=_order_identity_binding_plan)
+
+
+def _persist_manual_metadata_binding(
+    repo: Any, *, target_event_id: str, overrides: dict[str, Any], repair_reason: str,
+    plan_builder: Any, expected_input_hash: str | None = None,
+) -> dict[str, Any]:
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
         if conn is None:
-            raise TypeError("order identity repair requires SQLite transaction authority")
+            raise TypeError("identity repair requires SQLite transaction authority")
         applied_at_ms = now_ms()
-        plan = _order_identity_binding_plan(
+        plan = plan_builder(
             sqlite_repo,
             target_event_id=target_event_id,
             overrides=overrides,
@@ -959,6 +1113,8 @@ def persist_manual_order_identity_binding(
             conn=conn,
             bound_at_ms=applied_at_ms,
         )
+        if expected_input_hash is not None and plan.get("expected_input_hash") != expected_input_hash:
+            raise ValueError("Futu environment repair preview input hash changed")
         if plan["binding_status"] == "no_op":
             return {
                 key: value

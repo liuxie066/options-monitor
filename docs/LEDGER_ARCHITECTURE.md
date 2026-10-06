@@ -1101,6 +1101,31 @@ admission 需求，才重新评估 metadata-only tail support。
 开放项：无。批量响应丢失重试作为明确 deferred risk，在生产接入前解决。commit、push、merge、
 release、deploy 和生产写入继续是独立授权边界。
 
+## 历史 Futu 成交环境补证
+
+已保留精确 Futu 账户、成交号、订单号及原始代码的 OpenD 期权 open，若仅缺少
+`raw_payload.trd_env`，可以用现有修复入口补齐 `REAL` 环境。该入口从指定市场配置解析原事件账户，
+经同一 OpenD history adapter 重新查询成交当天；配置只绑定查询连接，历史成交回执才是环境证据。
+要求完整分页和覆盖、60 秒内的查询回执、唯一精确成交，以及账户、订单、代码、合约、方向、
+数量、价格和时间均匹配。历史查询不提供新的乘数或标的身份；已有本地 instrument facts 保持不变。
+不匹配、缺失、过期、已 void、既有 execution input 或冲突环境均拒绝写入，不用近似匹配或当前配置推断。
+
+```bash
+./om trade-events repair <精确源事件ID> --trd-env REAL --config-key hk \
+  --config /var/lib/options-monitor/config.hk.json --runtime-root /var/lib/options-monitor \
+  --reason "OpenD 精确历史成交环境补证" --dry-run --format json
+# 检查预览、独立备份并取得该源事件的生产写入授权后，使用相同参数及预览哈希：
+# --confirm --expected-input-hash <expected_input_hash>
+```
+
+补证只原地增加环境与 `futu_environment_provenance`，保留事件、成交顺序、订单、数量、价格、
+费用、时间、lot、cash conversions 和下游指派；不会创建 void 或替代经济事件。沿用元数据 writer 的
+事务锁、CAS、独立存储回读、position/current-decision 投影发布和外键校验，投影变化或发布失败整体回滚。
+apply 必须匹配预览输入哈希；重复请求会重新查询历史证据，核对原事件未变化后返回 no-op。
+若执行响应不明确，先查询同一源事件的 durable provenance，再决定是否以原哈希重试，不能重复补录成交。
+环境补证与 CC 的策略归属是两项写入；补证后仍须通过现有归属准入、容量及身份校验。
+当前仅支持 REAL 期权 open 的缺失环境补证，不支持修改已确认环境、SIMULATE、混合经济 override 或批量迁移。
+
 ## Futu 订单身份补录
 
 ### 目标、边界与成功信号

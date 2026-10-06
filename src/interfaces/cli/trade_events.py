@@ -20,6 +20,7 @@ from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
     apply_repair_trade_event,
+    collect_futu_environment_evidence,
     preview_futu_time_repair,
     repair_futu_time_batch,
     apply_void_trade_event,
@@ -58,6 +59,7 @@ def _repair_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "trade_time_ms": args.trade_time_ms,
         "futu_account_id": args.futu_account_id,
         "order_id": args.order_id,
+        "trd_env": args.trd_env,
         "record_id": args.record_id,
         "close_target_source_event_id": args.close_target_source_event_id,
     }
@@ -115,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--trade-time-ms", type=int, default=None)
     p_repair.add_argument("--futu-account-id", default=None)
     p_repair.add_argument("--order-id", default=None)
+    p_repair.add_argument("--trd-env", choices=["REAL"], default=None, help="verify exact OpenD history and enrich missing environment")
+    p_repair.add_argument("--config-key", choices=["us", "hk"], default=None)
+    p_repair.add_argument("--config", dest="config_path", default=None)
     p_repair.add_argument("--record-id", default=None, help="explicit close target record_id for repaired close events")
     p_repair.add_argument("--close-target-source-event-id", default=None)
     p_repair.add_argument("--format", choices=["text", "json"], default="text")
@@ -285,6 +290,12 @@ def main(argv: list[str] | None = None) -> int:
         should_apply = bool(write_controls["repair"]["write_requested"])
         overrides = _repair_overrides(args)
         try:
+            if args.trd_env is not None:
+                if not args.config_key:
+                    raise ValueError("Futu environment repair requires --config-key")
+                _, cfg = load_runtime_config({"config_key": args.config_key, "config_path": args.config_path})
+                overrides["futu_environment_evidence"] = collect_futu_environment_evidence(
+                    repo, event_id=args.event_id, config=cfg, market=args.config_key)
             payload = (
                 apply_repair_trade_event(
                     repo, event_id=args.event_id, overrides=overrides, reason=args.reason,
@@ -293,12 +304,13 @@ def main(argv: list[str] | None = None) -> int:
                 if should_apply
                 else preview_repair_trade_event(repo, event_id=args.event_id, overrides=overrides, reason=args.reason)
             )
-        except ValueError as exc:
+        except (ValueError, RuntimeError, OSError) as exc:
             print(str(exc))
             return 2
         identity_binding = payload.get("operation") == "futu_order_identity_binding"
         time_correction = payload.get("operation") == "opend_trade_time_correction"
-        in_place_repair = identity_binding or time_correction
+        environment_binding = payload.get("operation") == "futu_environment_binding"
+        in_place_repair = identity_binding or time_correction or environment_binding
         write_applied = bool(payload.get("mode") == "applied")
         payload["ledger_store"] = ledger_store
         payload = attach_write_contract(
@@ -322,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"from={payload.get('before_trade_time_ms')} to={payload.get('after_trade_time_ms')}；"
                 "仅核对已存原始时间，关联数据尚待验证，不支持 apply"
             )
+            return 0
+        if environment_binding:
+            print(f"[{str(payload.get('mode') or '').upper()}] Futu environment event_id={args.event_id} "
+                  f"environment=REAL expected_input_hash={payload.get('expected_input_hash')}")
             return 0
         if identity_binding:
             state = str(payload.get("mode") or "").upper()

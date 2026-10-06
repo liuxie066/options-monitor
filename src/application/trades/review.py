@@ -175,3 +175,34 @@ def repair_futu_time_batch(repo: Any, *, request: dict[str, Any], expected_input
     from src.application.trades.inbox import plan_futu_time_repair, apply_futu_time_repair as apply_inbox
     return apply_futu_time_repair(repo, request=request, expected_input_hash=expected_input_hash,
                                  backup_dir=backup_dir, plan_inbox=plan_futu_time_repair, apply_inbox=apply_inbox)
+
+
+def collect_futu_environment_evidence(repo: Any, *, event_id: str, config: dict[str, Any], market: str) -> dict[str, Any]:
+    """Read exact historical source fill through the owned account-bound adapter."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from domain.domain.symbol_identity import symbol_market
+    from src.application.account_config import resolve_account_broker_binding_sets
+    from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
+
+    target = next((row for row in trade_event_log(repo) if row["event_id"] == event_id), None)
+    if target is None or target.get("position_effect") != "open":
+        raise ValueError("Futu environment repair source open is unavailable")
+    account = target["account"]
+    binding = resolve_account_broker_binding_sets([(market, config)]).get(account)
+    raw = target.get("raw_payload") or {}
+    physical = str(raw.get("futu_account_id") or "")
+    if (binding is None or not binding.ok or binding.host is None or binding.port is None
+            or binding.trd_env != "REAL" or physical not in binding.required_account_ids
+            or str(symbol_market(target["symbol"]) or "").lower() != market):
+        raise ValueError("Futu environment repair configured broker/account/market mismatch")
+    instant = datetime.fromtimestamp(target["trade_time_ms"] / 1000, tz=ZoneInfo("Asia/Hong_Kong"))
+    end = instant.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    client = OpenDHistoryDealClient(host=binding.host, port=binding.port)
+    try:
+        rows, diagnostics = client.fetch(futu_account_ids=[physical], lookback_hours=24, now=end)
+    finally:
+        client.close()
+    deal_id = str(raw.get("source_deal_id") or raw.get("deal_id") or "")
+    return {"matches": [row for row in rows if str(row.get("deal_id") or row.get("dealID") or "") == deal_id],
+            "diagnostics": diagnostics}
