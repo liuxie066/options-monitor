@@ -52,7 +52,6 @@ from src.interfaces.cli.operator_ops import (
     add_operator_commands,
     handle_operator_command,
     preview_notification,
-    run_close_advice,
     run_scan,
 )
 from src.interfaces.cli.option_performance import (
@@ -260,7 +259,6 @@ def _main(argv: list[str] | None = None) -> int:
             return _print(handle_operator_command(
                 args,
                 run_scan_fn=run_scan,
-                run_close_advice_fn=run_close_advice,
                 preview_notification_fn=preview_notification,
             ))
 

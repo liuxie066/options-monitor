@@ -1016,7 +1016,6 @@ def test_frozen_v3_missing_calendar_uses_delta_only_when_conclusive(
 
 
 def test_frozen_close_advice_reads_only_sealed_snapshot(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
     from src.application import close_advice_runner as runner
@@ -1030,23 +1029,9 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
         },
     )
     config, context_path, required_root, output_dir, manifest_path = frozen
-    monkeypatch.setattr(
-        runner,
-        "_ensure_required_data_coverage_for_positions",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not repair coverage")
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_fetch_missing_quotes_via_opend",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not fetch fallback quotes")
-        ),
-    )
-    (
-        required_root / "parsed" / "NVDA_required_data.meta.json"
-    ).write_text(
+    assert not hasattr(runner, "_ensure_required_data_coverage_for_positions")
+    assert not hasattr(runner, "_fetch_missing_quotes_via_opend")
+    (required_root / "parsed" / "NVDA_required_data.meta.json").write_text(
         json.dumps(
             {
                 "symbol": "NVDA",
@@ -1063,35 +1048,16 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
             *required_root.glob("receipts/**/*"),
         ]
     )
-    before = {
-        path: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in tracked
-        if path.is_file()
-    }
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tracked if path.is_file()}
 
     result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
     assert result["quote_mode"] == "frozen_snapshot"
     assert result["quote_fetch_diagnostics"]["network_fetch_attempts"] == 0
-    assert (
-        result["quote_fetch_diagnostics"][
-            "required_data_write_attempts"
-        ]
-        == 0
-    )
-    assert (
-        result["quote_fetch_diagnostics"][
-            "position_requirements_validated"
-        ]
-        == 1
-    )
-    assert (
-        result["quote_fetch_diagnostics"][
-            "position_requirements_missing"
-        ]
-        == 0
-    )
+    assert result["quote_fetch_diagnostics"]["required_data_write_attempts"] == 0
+    assert result["quote_fetch_diagnostics"]["position_requirements_validated"] == 1
+    assert result["quote_fetch_diagnostics"]["position_requirements_missing"] == 0
     assert len(result["quote_fetch_diagnostics"]["binding_ids"]) == 1
     assert result["business_date"] == "2026-07-29"
     assert result["report_manifest"]["status"] == "success"
@@ -1112,16 +1078,11 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
     assert row["strategy_group_id"] == "combo-group-1"
     assert row["leg_role"] == "funding_put"
     assert pd.isna(row["source_stock_lot_id"])
-    assert result["report_manifest"]["csv_sha256"] == hashlib.sha256(
-        csv_path.read_bytes()
-    ).hexdigest()
+    assert result["report_manifest"]["csv_sha256"] == hashlib.sha256(csv_path.read_bytes()).hexdigest()
     assert "strategy_group_id" not in result["report_manifest"]
     assert "leg_role" not in result["report_manifest"]
     assert "source_stock_lot_id" not in result["report_manifest"]
-    assert {
-        path: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in before
-    } == before
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
 
 
 def _run_frozen_wheel_close_advice(tmp_path: Path):
@@ -1373,27 +1334,14 @@ def test_close_report_manifest_binds_run_and_quote_mode(tmp_path: Path) -> None:
 
 
 def test_frozen_missing_exact_contract_is_position_scoped_without_fetch(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
     from src.application import close_advice_runner as runner
 
     frozen = _frozen_workspace(tmp_path, quote_strike=105)
     config, context_path, required_root, output_dir, manifest_path = frozen
-    monkeypatch.setattr(
-        runner,
-        "_ensure_required_data_coverage_for_positions",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not repair coverage")
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_fetch_missing_quotes_via_opend",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not fetch fallback quotes")
-        ),
-    )
+    assert not hasattr(runner, "_ensure_required_data_coverage_for_positions")
+    assert not hasattr(runner, "_fetch_missing_quotes_via_opend")
 
     result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
@@ -1403,12 +1351,7 @@ def test_frozen_missing_exact_contract_is_position_scoped_without_fetch(
     assert result["flag_counts"]["required_data_missing_contract"] == 1
     assert result["notify_rows"] == 0
     assert result["quote_fetch_diagnostics"]["network_fetch_attempts"] == 0
-    assert (
-        result["quote_fetch_diagnostics"][
-            "position_requirements_missing"
-        ]
-        == 1
-    )
+    assert result["quote_fetch_diagnostics"]["position_requirements_missing"] == 1
 
 
 def test_frozen_evaluation_consumes_validated_receipt_bytes(
@@ -1459,8 +1402,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
     assert resolve_calls == 2
 
 
-def test_legacy_unbound_snapshot_degrades_positions_without_fetch(
-    monkeypatch,
+def test_unbound_snapshot_fails_closed_before_evaluation(
     tmp_path: Path,
 ) -> None:
     from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -1477,35 +1419,11 @@ def test_legacy_unbound_snapshot_degrades_positions_without_fetch(
         json.dumps(manifest, sort_keys=True),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        runner,
-        "close_advice_market_date",
-        lambda *_args, **_kwargs: date(2026, 7, 29),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_ensure_required_data_coverage_for_positions",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not repair coverage")
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_fetch_missing_quotes_via_opend",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frozen mode must not fetch fallback quotes")
-        ),
-    )
-
     result = runner.run_close_advice(**frozen.run_kwargs(tmp_path, plan=False))
 
-    assert result["snapshot_authority"] == "valid"
-    assert result["status"] == "degraded"
-    assert result["evaluation_gap_rows"] == 1
-    assert result["flag_counts"]["close_advice_plan_unavailable"] == 1
-    assert result["notify_rows"] == 0
-    assert result["quote_fetch_diagnostics"]["network_fetch_attempts"] == 0
-
+    assert result["snapshot_authority"] == "invalid"
+    assert result["status"] == "snapshot_integrity_failed"
+    assert "plan is unavailable" in result["integrity_failure"]["evidence"]["message"]
 
 def test_unsafe_bound_plan_path_fails_snapshot_authority(
     tmp_path: Path,

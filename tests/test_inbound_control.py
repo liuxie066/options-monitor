@@ -772,10 +772,7 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
         enforce_tool_allowed("scan_opportunities")
 
     assert exc.value.code == "PERMISSION_DENIED"
-    with pytest.raises(AgentToolError) as close_exc:
-        enforce_tool_allowed("get_close_advice")
-
-    assert close_exc.value.code == "PERMISSION_DENIED"
+    enforce_tool_allowed("close_advice_read")
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
 
 
@@ -3185,20 +3182,6 @@ def test_inbound_audit_schema_uses_single_control_record(tmp_path: Path) -> None
         "observation_json",
     ):
         assert removed_column not in columns
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_inbound_renderer_summarizes_position_rows() -> None:

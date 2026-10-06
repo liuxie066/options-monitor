@@ -70,7 +70,11 @@ def _registry_by_name() -> dict[str, AgentTool]:
 
 
 AGENT_TOOL_REGISTRY: dict[str, AgentTool] = _registry_by_name()
-RECOMMENDED_FLOW: tuple[str, ...] = ("healthcheck", "scan_opportunities", "get_close_advice")
+RECOMMENDED_FLOW: tuple[str, ...] = (
+    "healthcheck",
+    "scan_opportunities",
+    "close_advice_read",
+)
 
 
 def tool_names() -> tuple[str, ...]:
