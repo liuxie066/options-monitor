@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import csv
+
 from datetime import datetime, timezone
 import hashlib
+from io import StringIO
+
 import json
 from pathlib import Path
 from typing import Any
@@ -176,17 +180,11 @@ def read_close_advice_report_snapshot(
         manifest_bytes = manifest_path.read_bytes()
         payload = json.loads(manifest_bytes)
     except Exception:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_manifest_missing"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_manifest_missing"})
     if not isinstance(payload, dict):
-        return _snapshot_result(
-            {**base, "reason": "close_advice_manifest_malformed"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_manifest_malformed"})
     if payload.get("schema_version") != CLOSE_ADVICE_REPORT_SCHEMA:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_manifest_schema_invalid"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_manifest_schema_invalid"})
     status = str(payload.get("status") or "").strip().lower()
     if status != "success":
         return _snapshot_result(
@@ -196,30 +194,30 @@ def read_close_advice_report_snapshot(
                 "status": status,
             }
         )
-    if csv_bytes is None or payload.get("csv_sha256") != _sha256_bytes(
-        csv_bytes
-    ):
-        return _snapshot_result(
-            {**base, "reason": "close_advice_report_bytes_mismatch"}
-        )
-    if text_bytes is None or payload.get("text_sha256") != _sha256_bytes(
-        text_bytes
-    ):
-        return _snapshot_result(
-            {**base, "reason": "close_advice_text_bytes_mismatch"}
-        )
+    if csv_bytes is None or payload.get("csv_sha256") != _sha256_bytes(csv_bytes):
+        return _snapshot_result({**base, "reason": "close_advice_report_bytes_mismatch"})
+    if text_bytes is None or payload.get("text_sha256") != _sha256_bytes(text_bytes):
+        return _snapshot_result({**base, "reason": "close_advice_text_bytes_mismatch"})
     run_id = str(payload.get("run_id") or "").strip()
     expected_run = str(expected_run_id or "").strip()
     if expected_run and run_id != expected_run:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_report_run_mismatch"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_report_run_mismatch"})
     quote_mode = str(payload.get("quote_mode") or "").strip().lower()
     expected_mode = str(expected_quote_mode or "").strip().lower()
     if expected_mode and quote_mode != expected_mode:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_report_quote_mode_mismatch"}
+        return _snapshot_result({**base, "reason": "close_advice_report_quote_mode_mismatch"})
+    snapshot_manifest_sha256 = str(payload.get("required_data_snapshot_manifest_sha256") or "").strip()
+    required_data_plan_sha256 = str(payload.get("close_advice_required_data_plan_sha256") or "").strip()
+    if expected_mode == "frozen_snapshot":
+        sealed_reason = _validate_sealed_report_bindings(
+            csv_bytes=csv_bytes,
+            run_id=run_id,
+            snapshot_manifest_sha256=snapshot_manifest_sha256,
+            required_data_plan_sha256=required_data_plan_sha256,
+            expected_row_count=payload.get("row_count"),
         )
+        if sealed_reason is not None:
+            return _snapshot_result({**base, "reason": sealed_reason})
     markets = {
         str(item or "").strip().upper()
         for item in list(payload.get("included_markets") or [])
@@ -227,19 +225,11 @@ def read_close_advice_report_snapshot(
     }
     market = str(desired_market or "").strip().upper()
     if market and market not in markets:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_report_market_mismatch"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_report_market_mismatch"})
     account_norm = normalize_account(account)
-    accounts = {
-        normalize_account(item)
-        for item in list(payload.get("accounts") or [])
-        if normalize_account(item)
-    }
+    accounts = {normalize_account(item) for item in list(payload.get("accounts") or []) if normalize_account(item)}
     if account_norm and account_norm not in accounts:
-        return _snapshot_result(
-            {**base, "reason": "close_advice_report_account_mismatch"}
-        )
+        return _snapshot_result({**base, "reason": "close_advice_report_account_mismatch"})
     return _snapshot_result(
         {
             **base,
@@ -252,18 +242,9 @@ def read_close_advice_report_snapshot(
             "included_markets": sorted(markets),
             "accounts": sorted(accounts),
             "row_count": payload.get("row_count"),
-            "context_sha256": str(
-                payload.get("context_sha256") or ""
-            ).strip().lower()
-            or None,
-            "required_data_snapshot_manifest_sha256": str(
-                payload.get("required_data_snapshot_manifest_sha256") or ""
-            ).strip().lower()
-            or None,
-            "close_advice_required_data_plan_sha256": str(
-                payload.get("close_advice_required_data_plan_sha256") or ""
-            ).strip().lower()
-            or None,
+            "context_sha256": str(payload.get("context_sha256") or "").strip().lower() or None,
+            "required_data_snapshot_manifest_sha256": str(snapshot_manifest_sha256).strip().lower() or None,
+            "close_advice_required_data_plan_sha256": str(required_data_plan_sha256).strip().lower() or None,
         },
         csv_bytes=csv_bytes,
         text_bytes=text_bytes,
@@ -289,6 +270,49 @@ def _read_bytes(path: Path) -> bytes | None:
     except OSError:
         return None
 
+
+def _validate_sealed_report_bindings(
+    *,
+    csv_bytes: bytes,
+    run_id: str,
+    snapshot_manifest_sha256: str,
+    required_data_plan_sha256: str,
+    expected_row_count: Any,
+) -> str | None:
+    if not run_id:
+        return "close_advice_report_run_missing"
+    if not _is_sha256(snapshot_manifest_sha256):
+        return "close_advice_snapshot_manifest_hash_invalid"
+    if not _is_sha256(required_data_plan_sha256):
+        return "close_advice_required_data_plan_hash_invalid"
+    try:
+        reader = csv.DictReader(StringIO(csv_bytes.decode("utf-8-sig"), newline=""))
+        rows = list(reader)
+    except (UnicodeError, csv.Error):
+        return "close_advice_report_csv_malformed"
+    if not all(isinstance(row, dict) for row in rows):
+        return "close_advice_report_csv_malformed"
+    try:
+        row_count = int(expected_row_count)
+    except (TypeError, ValueError):
+        return "close_advice_report_row_count_invalid"
+    if row_count != len(rows):
+        return "close_advice_report_row_count_mismatch"
+    for row in rows:
+        quote_mode = str(row.get("quote_mode") or "").strip().lower()
+        row_snapshot_sha256 = str(row.get("required_data_snapshot_manifest_sha256") or "").strip()
+        row_plan_sha256 = str(row.get("close_advice_required_data_plan_sha256") or "").strip()
+        if quote_mode != "frozen_snapshot":
+            return "close_advice_report_row_quote_mode_mismatch"
+        if row_snapshot_sha256 != snapshot_manifest_sha256:
+            return "close_advice_report_row_snapshot_hash_mismatch"
+        if row_plan_sha256 != required_data_plan_sha256:
+            return "close_advice_report_row_plan_hash_mismatch"
+    return None
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 64 and text == text.lower() and all(char in "0123456789abcdef" for char in text)
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()

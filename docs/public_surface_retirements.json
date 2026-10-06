@@ -285,6 +285,66 @@
       "module": "src/application/strategy_scan_status.py",
       "name": "publish_strategy_scan_status_index_v4",
       "reason": "Status index v4 is a sealed historical format and no longer has a writer; current runs publish index v5 and explicit history adapters validate archived v4 evidence."
+    },
+    {
+      "module": "src/application/agent_tools/materialization.py",
+      "name": "CLOSE_ADVICE_TOOL",
+      "reason": "The mutable Agent Close Advice generator was retired so current advice can only be produced by the scheduled sealed required-data path."
+    },
+    {
+      "module": "src/application/agent_tools/materialization.py",
+      "name": "GET_CLOSE_ADVICE_TOOL",
+      "reason": "The one-shot Agent refresh-and-generate entry was retired because it bypassed the sealed scheduled snapshot boundary; close_advice_read is the surviving Agent surface."
+    },
+    {
+      "module": "src/application/agent_tools/materialization.py",
+      "name": "PREPARE_CLOSE_ADVICE_INPUTS_TOOL",
+      "reason": "The Agent-owned mutable input preparation entry was retired because required-data planning and sealing belong to the scheduled Tick path."
+    },
+    {
+      "module": "src/application/agent_tools/materialization_impl.py",
+      "name": "close_advice_rows_summary",
+      "reason": "The generator-only Close Advice summary helper was retired with the mutable Agent generation workflow; read projection now belongs to close_advice_read."
+    },
+    {
+      "module": "src/application/agent_tools/materialization_impl.py",
+      "name": "close_advice_tool",
+      "reason": "The mutable Agent Close Advice implementation was retired so the scheduled sealed runner is the sole report producer."
+    },
+    {
+      "module": "src/application/agent_tools/materialization_impl.py",
+      "name": "get_close_advice_tool",
+      "reason": "The one-shot mutable Agent implementation was retired because it refreshed data outside the sealed scheduled run."
+    },
+    {
+      "module": "src/application/agent_tools/materialization_impl.py",
+      "name": "prepare_close_advice_inputs_tool",
+      "reason": "The mutable Agent input preparation implementation was retired because Tick owns required-data acquisition, planning, and sealing."
+    },
+    {
+      "module": "src/application/close_advice_pipeline.py",
+      "name": "*",
+      "reason": "The compatibility pipeline that forwarded to the retired get_close_advice tool was deleted; callers use close_advice_read for existing sealed reports."
+    },
+    {
+      "module": "src/application/close_advice_runner.py",
+      "name": "load_config",
+      "reason": "The runner-local JSON loader was only used by the retired unsealed run_from_paths compatibility entry and no longer has a supported caller."
+    },
+    {
+      "module": "src/application/close_advice_runner.py",
+      "name": "load_required_data_coverage",
+      "reason": "Mutable required-data cache coverage loading was retired because Close Advice now accepts only manifest-bound sealed CSV bytes."
+    },
+    {
+      "module": "src/application/close_advice_runner.py",
+      "name": "load_required_data_quotes",
+      "reason": "Mutable required-data cache quote loading was retired because Close Advice now accepts only manifest-bound sealed CSV bytes."
+    },
+    {
+      "module": "src/application/close_advice_runner.py",
+      "name": "run_from_paths",
+      "reason": "The unsealed convenience runner was retired because every Close Advice execution now requires an explicit run, snapshot manifest, and bound plan."
     }
   ]
 }

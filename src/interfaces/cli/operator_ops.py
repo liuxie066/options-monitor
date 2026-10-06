@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from typing import Any, Callable
 
-from src.application.close_advice_pipeline import run_close_advice
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.notification_pipeline import preview_notification
 from src.application.scan_pipeline import run_scan
@@ -17,13 +16,19 @@ def add_operator_commands(subparsers: Any) -> None:
     scan.add_argument("--top-n", type=int, default=None)
     scan.add_argument("--no-context", action="store_true")
 
-    close_advice = subparsers.add_parser("close-advice", help="run close advice flow")
-    close_advice.add_argument("--config-key", default=None, choices=("us", "hk"))
-    close_advice.add_argument("--config-path", default=None)
-    close_advice.add_argument("--account", default=None)
-    close_advice.add_argument("--output-dir", default=None)
+    close_advice = subparsers.add_parser(
+        "close-advice",
+        help="configure the scheduled Close Advice feature",
+    )
     from src.interfaces.cli.feature_ops import add_feature_configure_parser
-    add_feature_configure_parser(close_advice.add_subparsers(dest="close_advice_command"), "close-advice")
+
+    add_feature_configure_parser(
+        close_advice.add_subparsers(
+            dest="close_advice_command",
+            required=True,
+        ),
+        "close-advice",
+    )
 
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
@@ -38,7 +43,6 @@ def handle_operator_command(
     args: argparse.Namespace,
     *,
     run_scan_fn: Callable[..., dict[str, Any]] = run_scan,
-    run_close_advice_fn: Callable[..., dict[str, Any]] = run_close_advice,
     preview_notification_fn: Callable[..., dict[str, Any]] = preview_notification,
 ) -> dict[str, Any]:
     if args.command == "scan":
@@ -54,12 +58,11 @@ def handle_operator_command(
     if args.command == "close-advice":
         if getattr(args, "close_advice_command", None) == "configure":
             from src.interfaces.cli.feature_ops import run_feature_configure
+
             return run_feature_configure(args)
-        return run_close_advice_fn(
-            config_key=args.config_key,
-            config_path=args.config_path,
-            account=args.account,
-            output_dir=args.output_dir,
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="close-advice only supports scheduled feature configuration",
         )
 
     if args.command == "notify" and args.notify_command == "preview":

@@ -98,9 +98,11 @@ def test_agent_launcher_spec_contract() -> None:
     payload = json.loads(p.stdout)
     assert payload["schema_version"] == "1.0"
     assert any(str(x.get("name")) == "manage_symbols" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "prepare_close_advice_inputs" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "close_advice" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "get_close_advice" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "close_advice_read" for x in payload.get("tools", []))
+    assert not any(
+        str(x.get("name")) in {"prepare_close_advice_inputs", "close_advice", "get_close_advice"}
+        for x in payload.get("tools", [])
+    )
 
 
 def test_installed_global_wrappers_work_outside_release_cwd() -> None:

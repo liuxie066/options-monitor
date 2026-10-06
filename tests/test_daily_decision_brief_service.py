@@ -66,10 +66,25 @@ def _write_close_report(
     run_id: str = "run-1",
     market: str = "US",
 ) -> None:
+    snapshot_sha256 = "a" * 64
+    plan_sha256 = "b" * 64
+    sealed_rows: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        row.setdefault("quote_mode", "frozen_snapshot")
+        row.setdefault(
+            "required_data_snapshot_manifest_sha256",
+            snapshot_sha256,
+        )
+        row.setdefault(
+            "close_advice_required_data_plan_sha256",
+            plan_sha256,
+        )
+        sealed_rows.append(row)
     csv_path = account_dir / "close_advice.csv"
     text_path = account_dir / "close_advice.txt"
-    if rows:
-        pd.DataFrame(rows).to_csv(csv_path, index=False)
+    if sealed_rows:
+        pd.DataFrame(sealed_rows).to_csv(csv_path, index=False)
     else:
         csv_path.write_text("", encoding="utf-8")
     text_path.write_text("", encoding="utf-8")
@@ -80,10 +95,12 @@ def _write_close_report(
         text_path=text_path,
         context_path=context_path,
         context=context,
-        rows=rows,
+        rows=sealed_rows,
         markets_to_run=[market],
         run_id=run_id,
         quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256=snapshot_sha256,
+        close_advice_required_data_plan_sha256=plan_sha256,
     )
 
 

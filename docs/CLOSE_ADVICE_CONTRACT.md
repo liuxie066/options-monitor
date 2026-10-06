@@ -94,7 +94,11 @@ SQLite ledger position_lots
   -> Daily Brief selects only current-policy, priced, complete-evidence CLOSE rows with decision metrics
 ```
 
-调度 Tick 使用 run-scoped required-data plan 和封存 snapshot。评估期间不得修复 cache、回退到 last price 或重新请求 OpenD。每行报告保留 plan、binding、snapshot、receipt、payload hash 和观测时间，用于追溯决策输入。
+调度 Tick 是当前报告的唯一生产入口，使用 run-scoped required-data plan 和封存 snapshot。Runner 必须同时取得 run ID、snapshot manifest 和该 manifest 绑定的 Close Advice plan；任一缺失或变更都在发布前失败关闭。评估期间不得修复 cache、回退到 last price 或重新请求 OpenD。每行报告保留 plan、binding、snapshot、receipt、payload hash 和观测时间，用于追溯决策输入。
+
+当前报告的 manifest 必须声明 `quote_mode=frozen_snapshot`、非空 `run_id`、snapshot manifest SHA-256 和 Close Advice plan SHA-256。每个 CSV 数据行的 `quote_mode` 及两个 SHA-256 必须与 manifest 完全一致；任一行不一致会使整份当前报告不可读。零行报告仍可有效，但报告级绑定必须完整。
+
+Agent 只保留 `close_advice_read`。默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告，不刷新持仓、不拉取行情、不生成建议。显式 `report_path` 可用于查看历史字节；缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
 
 保留的是通用安全能力：
 
@@ -185,7 +189,7 @@ remaining_max_annualized_return =
 | 行情的 `market_state`、观测时间、市场时区与封存 receipt/hash | 复用 `src/application/opening_quote_evidence.py` 及现有 required-data 封存链；新增 `market_state_received_at_utc` 记录该状态的独立接收时间，因为早于期权报价的状态不能证明报价时仍可交易 |
 | 市场日期及持仓筛选 | 复用 `src/application/close_advice_required_data.py` 与 `src/application/tick_account_execution.py` 的计划和 lot 视图入口，改为每个市场使用同一次 UTC 运行时间换算的日期 |
 | Close Advice 日历观测字段 | 新增到现有 required-data 行：`trading_calendar_market`、`trading_calendar_as_of_market_date`、`trading_calendar_expiration`、`trading_calendar_request_start`、`trading_calendar_request_end`、`trading_calendar_status`（`ok`/`unavailable`）、`remaining_trading_sessions`、`trading_calendar_dates`（ISO 日期 JSON 列表）、`trading_calendar_input_hash`、`trading_calendar_receipt`，不可用时附 `trading_calendar_reason`；封存的列表和请求区间可复算计数，RV 字段不能证明独立日历已取得或与该 lot 对齐 |
-| 非封存运行入口 | 复用 `src/application/close_advice_runner.py` 的单一领域判定；`src/application/agent_tools/materialization_impl.py` 当前走 `legacy_mutable`，须绑定合格的封存证据或保守不可评估，不保留另一套平仓规则 |
+| 非封存运行入口 | 这是设计时待收口边界；现行实现已删除 `legacy_mutable` 和 Agent 生成工具，只保留 sealed Tick 生产与 `close_advice_read` 读取 |
 | 策略版本 `remaining_yield_capture.v3` | 新增版本标识；v2 对缺失日历的不同处理不能被消费者当成 v3 建议 |
 
 实现时直接替换 `domain/domain/close_advice.py` 的 v2 判定，使它始终只执行一套 v3 策略；删除不再使用的旧阈值、条件和分支，不保留按版本选择 v1/v2/v3 的运行时策略入口。版本号仅标记报告契约：reader 和 Daily Brief 对旧版本 fail closed，不重新执行旧策略。回放对比读取已封存的旧报告或离线输入，不要求在产品代码中并行维护旧评分器。
