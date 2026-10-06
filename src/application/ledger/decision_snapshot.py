@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import (
     DECISION_STATE_FINGERPRINT_SCHEMA,
@@ -223,6 +224,80 @@ def decision_state_snapshot_from_locked_rows(
     )
 
 
+class _GlobalSnapshotProjection:
+    """Private reductions of one frozen observation; no account results retained."""
+
+    def __init__(self, events: list[Any], stored_lots: list[Any]) -> None:
+        self.events = events
+        self.stored_lots = stored_lots
+        self.projection = project_stored_trade_events_to_position_lots(events)
+        self.projected_lots = [item.to_dict() for item in self.projection.lots]
+        self.comparison = compare_projection_lots(
+            projected_lots=self.projected_lots,
+            current_lots=stored_lots,
+            diagnostics=self.projection.diagnostics,
+        )
+        self.error_count = sum(count for status, count in self.comparison["summary"].items() if status != "matched")
+        self._fingerprints: tuple[str, str, str] | None = None
+
+    def fingerprints(self) -> tuple[str, str, str]:
+        # Account source/lifecycle/Combo validation must precede hashing. Only a
+        # complete successful triple is retained; errors remain per account.
+        if self._fingerprints is None:
+            self._fingerprints = (
+                canonical_sha256(self.events),
+                canonical_sha256(self.stored_lots),
+                canonical_sha256(self.projected_lots),
+            )
+        return self._fingerprints
+
+
+def _global_snapshot_projection(rows: Mapping[str, Any]) -> _GlobalSnapshotProjection:
+    return _GlobalSnapshotProjection(list(rows["trade_events"]), list(rows["stored_position_lots"]))
+
+
+def decision_state_snapshots_from_rows_many(
+    rows_by_account: Mapping[str, Mapping[str, Any]],
+    *,
+    portfolio_scope_ids: Mapping[str, str],
+    source_observed_at: str,
+    current_projections: Mapping[str, Mapping[str, Any]] | None = None,
+    current_decision_now_ms: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Share global reductions only for identical ordered frozen row objects.
+
+    Repository batch reads shallow-copy their global row lists. Independently
+    copied or changed rows conservatively recompute; nothing survives this call.
+    """
+    baseline: _GlobalSnapshotProjection | None = None
+
+    def global_for_rows(rows: Mapping[str, Any]) -> _GlobalSnapshotProjection:
+        nonlocal baseline
+        events = list(rows["trade_events"])
+        stored_lots = list(rows["stored_position_lots"])
+        if (baseline is not None
+                and len(events) == len(baseline.events)
+                and len(stored_lots) == len(baseline.stored_lots)
+                and all(left is right for left, right in zip(events, baseline.events))
+                and all(left is right for left, right in zip(stored_lots, baseline.stored_lots))):
+            return baseline
+        result = _GlobalSnapshotProjection(events, stored_lots)
+        if baseline is None:
+            baseline = result
+        return result
+
+    return {
+        account: _decision_state_snapshot_from_rows(
+            rows, account=account, portfolio_scope_id=portfolio_scope_ids[account],
+            source_observed_at=source_observed_at,
+            current_projection=(current_projections or {}).get(account),
+            current_decision_now_ms=current_decision_now_ms,
+            global_for_rows=global_for_rows, isolate_projection=True,
+        )
+        for account, rows in rows_by_account.items()
+    }
+
+
 def decision_state_snapshot_from_rows(
     rows: Mapping[str, Any],
     *,
@@ -234,24 +309,33 @@ def decision_state_snapshot_from_rows(
 ) -> dict[str, Any]:
     """Build one account snapshot from an already-frozen ledger read."""
 
+    return _decision_state_snapshot_from_rows(
+        rows, account=account, portfolio_scope_id=portfolio_scope_id,
+        source_observed_at=source_observed_at, current_projection=current_projection,
+        current_decision_now_ms=current_decision_now_ms,
+        global_for_rows=_global_snapshot_projection, isolate_projection=False,
+    )
+
+
+def _decision_state_snapshot_from_rows(
+    rows: Mapping[str, Any], *, account: str, portfolio_scope_id: str,
+    source_observed_at: str, current_projection: Mapping[str, Any] | None,
+    current_decision_now_ms: int | None,
+    global_for_rows: Callable[[Mapping[str, Any]], _GlobalSnapshotProjection],
+    isolate_projection: bool,
+) -> dict[str, Any]:
     observed_at = str(source_observed_at or "").strip()
     if not observed_at:
         raise ValueError("source_observed_at is required")
     try:
-        events = list(rows["trade_events"])
-        stored_lots = list(rows["stored_position_lots"])
-        projection = project_stored_trade_events_to_position_lots(events)
-        projected_lots = [item.to_dict() for item in projection.lots]
-        comparison = compare_projection_lots(
-            projected_lots=projected_lots,
-            current_lots=stored_lots,
-            diagnostics=projection.diagnostics,
-        )
-        error_count = sum(
-            count
-            for status, count in comparison["summary"].items()
-            if status != "matched"
-        )
+        shared = global_for_rows(rows)
+        # Legacy snapshots each own their list, while raw row objects retain
+        # their existing aliases to the frozen input.
+        events = list(shared.events) if isolate_projection else shared.events
+        projection = shared.projection
+        projected_lots = deepcopy(shared.projected_lots) if isolate_projection else shared.projected_lots
+        comparison = deepcopy(shared.comparison) if isolate_projection else shared.comparison
+        error_count = shared.error_count
         account_value = str(account or "").strip().lower()
         source_constraints = rows.get("_account_trade_source_constraints")
         if not isinstance(source_constraints, Mapping):
@@ -282,6 +366,7 @@ def decision_state_snapshot_from_rows(
             projected_position_lots=projected_lots,
             identities=rows["account_combo_identities"],
         )
+        global_fingerprints = shared.fingerprints()
         fingerprint_payload = {
             "schema_version": DECISION_STATE_SNAPSHOT_SCHEMA,
             "position_fact_contract_version": (
@@ -289,11 +374,11 @@ def decision_state_snapshot_from_rows(
             ),
             "normalized_account": account_value,
             "portfolio_scope_id": str(portfolio_scope_id or "").strip(),
-            "event_fingerprint": canonical_sha256(events),
+            "event_fingerprint": global_fingerprints[0],
             "trade_events": events,
             "account_trade_source_constraints": dict(source_constraints),
-            "stored_position_lots_fingerprint": canonical_sha256(stored_lots),
-            "reprojected_position_lots_fingerprint": canonical_sha256(projected_lots),
+            "stored_position_lots_fingerprint": global_fingerprints[1],
+            "reprojected_position_lots_fingerprint": global_fingerprints[2],
             "account_position_lots": rows["account_position_lots"],
             "account_reprojected_position_lots": reprojected_account_lots,
             "account_lifecycle_cases": rows["account_lifecycle_cases"],
@@ -335,6 +420,8 @@ def decision_state_snapshot_from_rows(
             "projection_comparison": comparison,
             "projection_diagnostics": [item.to_dict() for item in projection.diagnostics],
         }
+        if isolate_projection:
+            snapshot["projection_diagnostics"] = deepcopy(snapshot["projection_diagnostics"])
         snapshot["current_decision_shadow"] = _build_current_decision_shadow(
             snapshot,
             source_rows=rows,

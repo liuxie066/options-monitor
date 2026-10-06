@@ -24,7 +24,7 @@ from src.application.current_fx_run import load_run_fx_snapshot
 from src.application.ledger.api import (
     CURRENT_DECISION_READ_SCHEMA,
     attach_event_strategy_metadata,
-    decision_state_snapshot_from_rows,
+    decision_state_snapshots_from_rows_many,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config,
     read_current_decision_projection,
@@ -653,7 +653,7 @@ def prepare_option_positions_contexts(
                 first_rows["stored_position_lots"],
                 first_rows.get("trade_events"),
             )
-            snapshots = {}
+            current_projections = {}
             for account in accounts:
                 try:
                     current_projection = read_current_decision_projection(
@@ -669,14 +669,14 @@ def prepare_option_positions_contexts(
                             f"{type(exc).__name__}"
                         ),
                     }
-                snapshots[account] = decision_state_snapshot_from_rows(
-                    rows_by_account[account],
-                    account=account,
-                    portfolio_scope_id=portfolio_scope_id(account),
-                    source_observed_at=observed_at_utc,
-                    current_projection=current_projection,
-                    current_decision_now_ms=lifecycle_now_ms,
-                )
+                current_projections[account] = current_projection
+            snapshots = decision_state_snapshots_from_rows_many(
+                {account: rows_by_account[account] for account in accounts},
+                portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
+                source_observed_at=observed_at_utc,
+                current_projections=current_projections,
+                current_decision_now_ms=lifecycle_now_ms,
+            )
         except Exception as exc:
             reason = f"coherent_position_projection_unavailable:{type(exc).__name__}"
             for account in accounts:
