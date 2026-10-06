@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Mapping
 
 from domain.domain.trade_contract_identity import contract_share_quantity
@@ -99,14 +100,8 @@ def _attach_candidates(
                 projection["candidate"] = dict(candidate)
 
 
-def build_wheel_read_model_from_rows(
-    rows: Mapping[str, Any],
-    *,
-    account: str,
-    as_of_ms: int,
-    candidate_snapshot: Mapping[str, Any] | None = None,
-    monitoring_readiness: Mapping[str, Any] | None = None,
-    market: str | None = None,
+def _build_wheel_read_model_base(
+    rows: Mapping[str, Any], *, account: str, as_of_ms: int,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     if not account_value:
@@ -139,6 +134,22 @@ def build_wheel_read_model_from_rows(
         wheel_events, trade_events, position_lots, assigned_stock, instant,
     )
     batches = _legacy_call_batches(wheel_branches)
+    return {
+        "account": account_value, "as_of_ms": instant,
+        "position_lots": position_lots, "assigned_stock": assigned_stock,
+        "wheel_events": wheel_events, "wheel_branches": wheel_branches,
+        "batches": batches,
+    }
+
+
+def _render_wheel_read_model(
+    base: dict[str, Any], *, candidate_snapshot: Mapping[str, Any] | None = None,
+    monitoring_readiness: Mapping[str, Any] | None = None, market: str | None = None,
+) -> dict[str, Any]:
+    account_value, instant = base["account"], base["as_of_ms"]
+    position_lots, assigned_stock = base["position_lots"], base["assigned_stock"]
+    wheel_events, wheel_branches = base["wheel_events"], base["wheel_branches"]
+    batches = base["batches"]
     market_value = str(market or "").strip().upper()
     if market_value:
         if market_value not in {"US", "HK"}:
@@ -166,7 +177,7 @@ def build_wheel_read_model_from_rows(
             projection["monitoring_gate_reason"] = readiness["reason_code"]
     linkage_candidates = project_wheel_linkage_candidates(
         wheel_branches,
-        scoped_rows["account_position_lots"],
+        position_lots,
         wheel_events,
     )
     unresolved_branch_ids = {
@@ -205,6 +216,35 @@ def build_wheel_read_model_from_rows(
         "linkage_candidates": linkage_candidates,
         "assigned_stock_projection": assigned_stock,
     }
+
+
+def build_wheel_read_model_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    as_of_ms: int,
+    candidate_snapshot: Mapping[str, Any] | None = None,
+    monitoring_readiness: Mapping[str, Any] | None = None,
+    market: str | None = None,
+) -> dict[str, Any]:
+    return _render_wheel_read_model(
+        _build_wheel_read_model_base(rows, account=account, as_of_ms=as_of_ms),
+        candidate_snapshot=candidate_snapshot, monitoring_readiness=monitoring_readiness,
+        market=market,
+    )
+
+
+def build_wheel_read_model_with_capacity_from_rows(
+    rows: Mapping[str, Any], *, account: str, as_of_ms: int, market: str | None,
+    monitoring_readiness: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive independent market and account-wide views from one observation."""
+    base = _build_wheel_read_model_base(rows, account=account, as_of_ms=as_of_ms)
+    market_model = _render_wheel_read_model(
+        deepcopy(base), market=market, monitoring_readiness=monitoring_readiness,
+    )
+    capacity_model = _render_wheel_read_model(base)
+    return market_model, capacity_model
 
 
 def build_assigned_stock_projection_from_rows(
@@ -248,4 +288,5 @@ __all__ = [
     "build_assigned_stock_projection_from_rows",
     "build_wheel_read_model",
     "build_wheel_read_model_from_rows",
+    "build_wheel_read_model_with_capacity_from_rows",
 ]

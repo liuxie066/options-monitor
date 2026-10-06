@@ -717,6 +717,16 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
         },
     )
 
+    from src.application.ledger import decision_snapshot as snapshot_owner
+    projection_calls = []
+    original_project = snapshot_owner.project_stored_trade_events_to_position_lots
+
+    def counted_projection(*args, **kwargs):
+        projection_calls.append(1)
+        return original_project(*args, **kwargs)
+
+    monkeypatch.setattr(snapshot_owner, "project_stored_trade_events_to_position_lots", counted_projection)
+
     batch = prepare_option_positions_contexts(
         base=tmp_path,
         run_id=run_id,
@@ -726,6 +736,7 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
         run_state_dir=tmp_path / "output_runs" / run_id / "state",
     )
 
+    assert projection_calls == [1]
     assert batch.ledger_read_count == 2
     assert batch.fx_observation_count == 1
     assert batch.unavailable_by_account == {}
