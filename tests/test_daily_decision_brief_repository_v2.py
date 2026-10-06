@@ -1566,3 +1566,80 @@ def test_record_candidates_round_trips_wheel_identity_through_delivery_state(tmp
     )
     readback = _read_state(tmp_path)
     assert set(readback["state"]["days"][MARKET_DATE]["pending_candidates"]) == {IDENTITY_WHEEL}
+
+
+def _confirmed_repeated_source(tmp_path: Path) -> tuple[dict, Path]:
+    from src.application.daily_decision_brief_repository import confirm_daily_decision_brief_delivery_v2
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action(), _action(symbol="AMD")])
+    prepared = _prepare_fixed(tmp_path, persisted)
+    envelope = prepared["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+        confirmed_at_utc="2026-07-21T14:00:04+00:00",
+    )
+    return persisted, prepared["paths"]["delivery"]
+
+
+@pytest.mark.parametrize("mutation", ["delete", "corrupt", "digest", "account", "market"])
+def test_delivery_normalization_reuses_source_but_independent_read_is_fresh(monkeypatch, tmp_path, mutation):
+    import src.application.daily_decision_brief_repository as repository
+
+    persisted, _ = _confirmed_repeated_source(tmp_path)
+    revision_path = persisted["paths"]["revision"]
+    original = repository._read_json_strict
+    reads = []
+
+    def counted(path):
+        if path == revision_path:
+            reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(repository, "_read_json_strict", counted)
+    first = _read_state(tmp_path)
+    assert len(first["state"]["days"][MARKET_DATE]["alerted_candidates"]) == 2
+    assert reads == [revision_path]  # fixed report and both alerted candidates
+    if mutation == "delete":
+        revision_path.unlink()
+        error = "missing revision"
+    elif mutation == "corrupt":
+        revision_path.write_text("{invalid")
+        error = "failed to read daily brief state"
+    else:
+        raw = json.loads(revision_path.read_text())
+        if mutation == "digest":
+            raw["strategy_summary"] = "changed facts"
+            error = "source digest mismatch"
+        else:
+            raw[mutation] = "sy" if mutation == "account" else "HK"
+            error = "identity mismatch" if mutation == "account" else "incompatible"
+        revision_path.write_text(json.dumps(raw))
+    rejected = _read_state(tmp_path)
+    assert rejected["available"] is False and rejected["reason"] == "state_invalid"
+    assert rejected["state"] is None and error in rejected["error"]
+    assert reads == [revision_path, revision_path]
+
+
+def test_delivery_source_reuse_does_not_hide_different_expected_digest(tmp_path):
+    _, path = _confirmed_repeated_source(tmp_path)
+    raw = json.loads(path.read_text())
+    raw["days"][MARKET_DATE]["alerted_candidates"][IDENTITY_NVDA]["brief_digest"] = "0" * 64
+    path.write_text(json.dumps(raw))
+    rejected = _read_state(tmp_path)
+    assert rejected["available"] is False and rejected["state"] is None
+    assert "source digest mismatch" in rejected["error"]
+
+
+def test_delivery_source_reuse_keeps_candidate_membership_check(tmp_path):
+    _, path = _confirmed_repeated_source(tmp_path)
+    raw = json.loads(path.read_text())
+    alerted = raw["days"][MARKET_DATE]["alerted_candidates"]
+    alerted["candidate:v1:lx:US:TSLA:sell_put"] = alerted.pop(IDENTITY_NVDA)
+    path.write_text(json.dumps(raw))
+    rejected = _read_state(tmp_path)
+    assert rejected["available"] is False and rejected["state"] is None
+    assert "absent from its revision" in rejected["error"]

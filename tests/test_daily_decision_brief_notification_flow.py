@@ -1320,3 +1320,123 @@ def test_report_reference_requires_confirmed_delivery(monkeypatch, tmp_path: Pat
     for event in events:
         assert event['send_summary']['sent_accounts'] == []
         assert not event.get('report_refs')
+
+
+def test_idle_delivery_only_validates_history_once(monkeypatch, tmp_path):
+    import src.application.daily_decision_brief_repository as repository
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    seed = _request(tmp_path, run_id='completed-before-idle')
+    assert mod.run_tick_notification_flow(seed.request) == 0
+    original = repository._normalize_delivery_state
+    validations = []
+    def counted(*args, **kwargs):
+        validations.append(kwargs['account'])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(repository, '_normalize_delivery_state', counted)
+    idle = _request(tmp_path, run_id='idle-history', delivery_only=True)
+    assert mod.run_tick_notification_flow(idle.request) == 0
+    assert validations == ['lx']
+    assert len(calls) == 1
+    assert idle.completions == [{'status': 'skipped', 'message': 'no_retryable_delivery'}]
+
+
+def test_ordinary_empty_scan_has_durable_terminal_and_no_send(monkeypatch, tmp_path):
+    from domain.storage import paths
+    _patch_assembler(monkeypatch, candidate=False)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id='empty-scan-terminal', fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert calls == []
+    assert bundle.request.tick_metrics['sent'] is False
+    assert bundle.request.tick_metrics['reason'] == 'no_daily_brief_delivery'
+    terminal = [e for e in bundle.request.runlog.events if e['step'] == 'run_end']
+    assert len(terminal) == 1 and terminal[0]['status'] == 'ok'
+    assert bundle.request.audit_helper.successes == 1
+    assert bundle.completions == [{'status': 'skipped', 'message': 'no_daily_brief_delivery'}]
+    shared = json.loads((paths.shared_state_dir(tmp_path)/'last_run.json').read_text())
+    account = json.loads((paths.account_state_dir(tmp_path, 'lx')/'last_run.json').read_text())
+    assert shared['sent'] is False and account['sent'] is False
+    # Real persistence, not just a mocked finalizer call.
+    for state_dir in (paths.shared_state_dir(tmp_path), paths.run_state_dir(tmp_path, 'empty-scan-terminal')):
+        metrics = json.loads((state_dir/'tick_metrics.json').read_text())
+        history = json.loads((state_dir/'tick_metrics_history.json').read_text())
+        assert metrics['sent'] is False
+        assert len(history) == 1 and history[0] == metrics
+    assert [e['status'] for e in bundle.request.runlog.events if e['step'] == 'daily_brief_prepare'] == ['start', 'ok']
+
+
+def test_ordinary_empty_scan_exposes_degraded_final_write(monkeypatch, tmp_path):
+    _patch_assembler(monkeypatch, candidate=False)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    monkeypatch.setattr(mod.state_repo, 'write_tick_metrics',
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError('fixture write failure')))
+    bundle = _request(tmp_path, run_id='empty-scan-degraded', fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert calls == []
+    assert len([e for e in bundle.request.runlog.events if e['step'] == 'run_end']) == 1
+    assert any(e['step'] == 'finalize' and e['status'] == 'degraded'
+               and e['data']['action'] == 'write_tick_metrics' for e in bundle.request.runlog.events)
+
+
+@pytest.mark.parametrize('error', [ValueError, KeyboardInterrupt])
+def test_prepare_failure_records_start_error_and_reraises(monkeypatch, tmp_path, error):
+    monkeypatch.setattr(mod, '_prepare_daily_brief_notification',
+                        lambda *_: (_ for _ in ()).throw(error('fixture failure')))
+    bundle = _request(tmp_path, run_id='prepare-failed')
+    with pytest.raises(error):
+        mod.run_tick_notification_flow(bundle.request)
+    stages = [e for e in bundle.request.runlog.events if e['step'] == 'daily_brief_prepare']
+    assert [e['status'] for e in stages] == ['start', 'error']
+    assert stages[-1]['data'] == {'error_type': error.__name__}
+    latency = next(e for e in bundle.request.runlog.events if e['step'] == 'tick_latency')
+    assert latency['data']['outcome'] == 'error'
+    assert bundle.completions == [] and bundle.request.audit_helper.successes == 0
+
+
+def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(monkeypatch, tmp_path):
+    import src.application.daily_decision_brief_repository as repository
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(monkeypatch)
+    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="scope-seed").request) == 0
+    observations = []
+    normalizations = []
+    writes = []
+    original_normalize = repository._normalize_delivery_state
+    original_persist = mod.persist_daily_decision_brief_success
+
+    def normalized(*args, **kwargs):
+        normalizations.append(bool(writes))
+        return original_normalize(*args, **kwargs)
+
+    def persist(**kwargs):
+        writes.append("persist")
+        return original_persist(**kwargs)
+
+    def observe(name):
+        original = getattr(mod, name)
+
+        def read(**kwargs):
+            observations.append((name, kwargs.get("read_scope"), bool(writes)))
+            return original(**kwargs)
+
+        monkeypatch.setattr(mod, name, read)
+
+    observe("read_retryable_daily_decision_brief_delivery")
+    observe("read_daily_decision_brief_fixed_recovery")
+    monkeypatch.setattr(repository, "_normalize_delivery_state", normalized)
+    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
+    mod._prepare_daily_brief_notification(_request(tmp_path, run_id="scope-next").request)
+    prewrite = [item for item in observations if not item[2]]
+    assert [item[0] for item in prewrite] == [
+        "read_retryable_daily_decision_brief_delivery", "read_daily_decision_brief_fixed_recovery",
+    ]
+    assert prewrite[0][1] is not None and prewrite[0][1] is prewrite[1][1]
+    postwrite = [item for item in observations if item[2]]
+    assert postwrite and all(scope is None for _, scope, _ in postwrite)
+    assert normalizations.count(False) == 1
+    assert normalizations.count(True) >= 2

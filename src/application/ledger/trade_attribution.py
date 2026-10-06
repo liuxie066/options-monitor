@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
-from typing import Any, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
@@ -64,6 +64,46 @@ def read_trade_attribution_snapshot(repo: Any, *, account: str, market: str, con
         else:
             rows["attribution_policy_enablings"] = []
         return rows
+
+
+@contextmanager
+def open_trade_attribution_snapshot_reader(
+    repo: Any, *, account: str, market: str,
+) -> Iterator[Callable[..., dict[str, Any] | None]]:
+    """Observe committed changes on one read-only connection for one batch.
+
+    None means unchanged since this reader's last full observation. The caller
+    owns snapshot rows; this reader retains only a connection-local data_version.
+    No transaction spans calls and no version is a policy or time-validity lease.
+    """
+    path = repo.db_path.resolve()
+    identity = _store_identity(path)
+
+    def check_identity() -> None:
+        if repo.db_path.resolve() != path or _store_identity(path) != identity:
+            raise ValueError("trade attribution ledger identity changed during observation")
+
+    with _read_only_connection(path) as observer:
+        version: int | None = None
+
+        def read_if_changed(*, force: bool = False) -> dict[str, Any] | None:
+            nonlocal version
+            check_identity()
+            row = observer.execute("PRAGMA data_version").fetchone()
+            if row is None or len(row) != 1 or type(row[0]) is not int or row[0] < 0:
+                raise ValueError("trade attribution ledger data_version is unavailable")
+            sampled_version = row[0]
+            check_identity()
+            if not force and version == sampled_version:
+                return None
+            rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+            check_identity()
+            # Remember the BEFORE-read version: a commit during materialization
+            # must cause another observation, even if this snapshot includes it.
+            version = sampled_version
+            return rows
+
+        yield read_if_changed
 
 
 def _effective_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
