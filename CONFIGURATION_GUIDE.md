@@ -170,6 +170,11 @@ Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真�
 不要设置 `runtime.pipeline_symbol_max_workers` 或 `runtime.watchlist_max_workers`；
 这两个键已退役，配置验证会要求删除。数据预取并发与账户并发是独立合同，不受影响。
 
+同市场多账户 Tick 默认按账户数全并行。可在 `config.yaml` 的 `runtime.multi_account_max_workers`
+设置正整数上限；实际 worker 数不会超过本轮账户数。旧键 `runtime.account_max_workers`
+仍兼容，两者同时出现时新键优先。`om config validate` 和 `om config build` 会拒绝
+这两个键的无效值及明显拼写错误；省略时保持默认全并行。
+
 ## 账户
 
 账户类型为 `futu`：

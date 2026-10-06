@@ -117,6 +117,67 @@ inbound:
 """
 
 
+@pytest.mark.parametrize('key', ['multi_account_max_workers', 'account_max_workers'])
+@pytest.mark.parametrize('value', [0, -1, True, 1.5, 'two', '2.0', None])
+def test_account_worker_config_rejects_invalid_value_before_build_write(
+    tmp_path: Path, key: str, value: object,
+) -> None:
+    doc = yaml.safe_load(_minimal_yaml())
+    doc['runtime'] = {key: value}
+    source = _write_yaml(tmp_path / 'config.yaml', yaml.safe_dump(doc))
+    output = tmp_path / 'config.us.json'
+
+    with pytest.raises(AgentToolError, match=f'runtime\\.{key}'):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=source)
+    with pytest.raises(AgentToolError, match=f'runtime\\.{key}'):
+        build_yaml_runtime_config_file(
+            repo_root=REPO_ROOT, market='us', config_path=source,
+            output_config_path=output,
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('key,expected', [
+    ('multi_account_max_wokers', 'multi_account_max_workers'),
+    ('account_max_worker', 'account_max_workers'),
+])
+def test_account_worker_config_rejects_obvious_typo(
+    tmp_path: Path, key: str, expected: str,
+) -> None:
+    doc = yaml.safe_load(_minimal_yaml())
+    doc['runtime'] = {key: 2}
+    source = _write_yaml(tmp_path / 'config.yaml', yaml.safe_dump(doc))
+    output = tmp_path / 'config.us.json'
+
+    with pytest.raises(AgentToolError, match=f'runtime\\.{key}.*runtime\\.{expected}'):
+        build_yaml_runtime_config_file(
+            repo_root=REPO_ROOT, market='us', config_path=source,
+            output_config_path=output,
+        )
+    assert not output.exists()
+
+
+def test_account_worker_config_preserves_legacy_and_modern_precedence(tmp_path: Path) -> None:
+    doc = yaml.safe_load(_minimal_yaml())
+    doc['runtime'] = {'account_max_workers': 1, 'multi_account_max_workers': 9}
+    source = _write_yaml(tmp_path / 'config.yaml', yaml.safe_dump(doc))
+    cfg, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=source)
+    validate_config(deepcopy(cfg))
+    assert cfg['runtime']['account_max_workers'] == 1
+    assert cfg['runtime']['multi_account_max_workers'] == 9
+
+    doc['runtime'] = {'account_max_workers': 1}
+    source.write_text(yaml.safe_dump(doc), encoding='utf-8')
+    cfg, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=source)
+    assert cfg['runtime']['account_max_workers'] == 1
+
+    doc.pop('runtime')
+    source.write_text(yaml.safe_dump(doc), encoding='utf-8')
+    cfg, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=source)
+    assert 'multi_account_max_workers' not in cfg['runtime']
+    assert 'account_max_workers' not in cfg['runtime']
+
+
 _US_FUTU_YAML_HEAD = """\
 accounts:
   lx:

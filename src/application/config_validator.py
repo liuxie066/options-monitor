@@ -308,6 +308,29 @@ def validate_positive_integer(value, path: str):
         die(f'{path} must be > 0')
 
 
+ACCOUNT_WORKER_KEYS = ('multi_account_max_workers', 'account_max_workers')
+
+
+def validate_account_worker_config(runtime: dict) -> None:
+    for key in ACCOUNT_WORKER_KEYS:
+        if key not in runtime:
+            continue
+        path = f'runtime.{key}'
+        value = runtime[key]
+        validate_positive_integer(value, path)
+        try:
+            int(value)
+        except (TypeError, ValueError, OverflowError):
+            die(f'{path} must be an integer')
+
+    for key in runtime:
+        if key in ACCOUNT_WORKER_KEYS or not isinstance(key, str):
+            continue
+        match = get_close_matches(key, ACCOUNT_WORKER_KEYS, n=1, cutoff=0.85)
+        if match:
+            die(f'runtime.{key} is unsupported; did you mean runtime.{match[0]}?')
+
+
 def validate_rate_limit_object(raw: dict, path: str):
     for key in ('window_sec', 'max_wait_sec'):
         if key in raw and raw.get(key) is not None:
@@ -1193,6 +1216,7 @@ def validate_config(cfg: dict):
         die('runtime must be an object')
     if isinstance(runtime, dict):
         validate_retired_symbol_worker_config(cfg)
+        validate_account_worker_config(runtime)
         st = runtime.get('symbol_timeout_sec', 120)
         pt = runtime.get('portfolio_timeout_sec', 60)
         try:
