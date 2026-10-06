@@ -728,10 +728,17 @@ History backfill 只从本次查询的 Futu account IDs 与 canonical account ma
   `assignment`，long option 判定 `exercise`。
 - 截止时间后，存在唯一、数量匹配的股票交收，short option 判定
   `assignment`，long option 判定 `exercise`。
-- 截止时间后，只有在第二个后续 broker business day 结束后，完整观察同时
+- 截止时间后，只有在到期后的第一个市场交易日收盘后，完整观察同时
   证明期权仓位已消失、没有股票交收、没有现金交收、没有正常平仓订单、
   projection 与冻结余量一致、source reservation 唯一时，才判定
   `expiration_no_settlement`。
+
+HK 和 US 共用“到期后的下一个交易日收盘”截止规则，各自使用市场交易日历和
+时区；股票期权正常交易日均取市场当地 16:00，日历标记上午交易时 HK 取 12:00、
+US 取 13:00，下午交易仍取 16:00。跳过周末、休市日，美股自动处理夏令时。
+到点后仍须取得并校验完整券商结算证据，不能仅凭时间确认平仓原因。新建 timing policy
+按此规则冻结；已有 policy 的期限和 hash 保持不变，生产历史期限调整须经受控
+预览、授权和读回，不能由扫描重算覆盖。
 
 结算观察必须冻结并校验历史成交、历史订单、fresh positions、逐 clearing
 date cash flow、交易日历和合约元数据的查询输入、返回码、覆盖范围、行及

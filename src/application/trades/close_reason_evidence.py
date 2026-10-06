@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from domain.domain.option_lifecycle import MARKET_TIMEZONES, SUPPORTED_LAST_TRADE_SOURCES
+from domain.domain.option_lifecycle import (
+    INSTRUMENT_POLICY_REGISTRY,
+    MARKET_TIMEZONES,
+    SUPPORTED_LAST_TRADE_SOURCES,
+)
 
 from src.application.ledger.api import (
     attach_settlement_semantics,
@@ -77,15 +81,20 @@ def build_lifecycle_timing_policy(
         item
         for item in normalized_days
         if date.fromisoformat(item["date"]) > expiration
-        and item["type"] in {"WHOLE", "TRADING"}
+        and item["type"] in {"WHOLE", "MORNING", "AFTERNOON", "TRADING"}
     ]
-    if len(following) < 2:
-        raise ValueError("two following broker business days are unavailable")
-    selected = following[:2]
+    if not following:
+        raise ValueError("next broker business day is unavailable")
     timezone = ZoneInfo(timezone_name)
+    next_day = following[0]
+    instrument_policy = INSTRUMENT_POLICY_REGISTRY[f"{market_value}:standard_equity_option"]
+    close_key = (
+        "half_trade_session_close" if next_day["type"] == "MORNING"
+        else "last_trade_session_close"
+    )
     deadline_local = datetime.combine(
-        date.fromisoformat(selected[1]["date"]) + timedelta(days=1),
-        time.min,
+        date.fromisoformat(next_day["date"]),
+        time.fromisoformat(str(instrument_policy[close_key])),
         tzinfo=timezone,
     )
     calendar_hash = canonical_hash(normalized_days)

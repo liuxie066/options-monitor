@@ -174,6 +174,44 @@ def build_daily_brief_user_view(
             strategy_failure_items=strategy_failure_items,
         )
     )
+    candidate_empty_by_family: dict[str, str] = {}
+    for family in ("sell_put", "covered_call", "combo_yield"):
+        family_gaps = [
+            item for item in brief.get("data_gaps") or []
+            if isinstance(item, Mapping)
+            and _lower(item.get("strategy_family")) in {"", family}
+        ]
+        family_holds = [
+            item for item in [*partial_data_gaps, *evidence_holds]
+            if _lower(item.get("strategy_family")) == family
+        ]
+        family_failures = [
+            item for item in strategy_failure_items if item["family"] == family
+        ]
+        # Symbol-scoped holds do not make the whole family unevaluable.
+        # An empty partial scan is still distinct from a clean zero result.
+        unscoped_gaps = [item for item in family_gaps if not item.get("symbol")]
+        if (
+            _fixed_report_error_reminders(
+                {"data_gaps": unscoped_gaps},
+                strategy_failure_items=[
+                    item for item in family_failures if not item["symbol"]
+                ],
+            )
+            or any(not item.get("symbol") for item in family_holds)
+            or any(
+                _lower(item.get("reason")) == "opening_candidate_strategy_data_unavailable"
+                for item in unscoped_gaps
+            )
+        ):
+            candidate_empty_by_family[family] = "候选数据不完整，暂无法评估"
+        elif family_holds or _fixed_report_error_reminders(
+            {"data_gaps": family_gaps},
+            strategy_failure_items=family_failures,
+        ):
+            candidate_empty_by_family[family] = "暂无可推荐合约"
+        else:
+            candidate_empty_by_family[family] = "暂无合适合约"
     view = {
         "account": account,
         "market": market,
@@ -186,27 +224,7 @@ def build_daily_brief_user_view(
         "change_summaries": _change_summaries(normalized_diff, market=market),
         "candidates": candidate_views,
         "candidate_omissions": candidate_omissions,
-        "candidate_empty_by_family": {
-            family: (
-                "候选数据不完整，暂无法评估"
-                if _fixed_report_error_reminders(
-                    {"data_gaps": [
-                        item for item in brief.get("data_gaps") or []
-                        if isinstance(item, Mapping)
-                        and _lower(item.get("strategy_family")) in {"", family}
-                    ]},
-                    strategy_failure_items=[
-                        item for item in strategy_failure_items if item["family"] == family
-                    ],
-                )
-                or any(
-                    _lower(item.get("strategy_family")) == family
-                    for item in [*partial_data_gaps, *evidence_holds]
-                )
-                else "暂无合适合约"
-            )
-            for family in ("sell_put", "covered_call", "combo_yield")
-        },
+        "candidate_empty_by_family": candidate_empty_by_family,
         "candidate_empty_summary": (
             _candidate_empty_summary_for_failures(
                 strategy_failure_items,

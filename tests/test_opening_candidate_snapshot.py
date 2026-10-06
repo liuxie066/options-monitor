@@ -1149,3 +1149,72 @@ def test_missing_cny_premium_survives_seal_and_brief_as_data_gap(tmp_path):
         source_artifacts=[], data_gaps=gaps, snapshot=payload)
     assert any(row.get("reason_code") == "net_premium_cny_unavailable" for row in gaps)
     assert any("人民币净权利金无法计算" in line for line in _strategy_data_gap_reminders({"data_gaps": gaps}))
+
+
+@pytest.mark.parametrize("blocked_status", ["unavailable", "failed", "incomplete"])
+@pytest.mark.parametrize("reason", ["option_close_settlement_pending", "quote_unavailable"])
+@pytest.mark.parametrize("has_candidate", [False, True])
+def test_one_blocked_call_scope_preserves_other_call_results(
+    tmp_path, blocked_status, reason, has_candidate,
+):
+    from src.application.daily_decision_brief_service import _load_opening_candidate_families
+
+    candidate = _candidate(contract_symbol="NVDA260918C00100000", period_return=0.04)
+    candidate.update(
+        option_type="call", strike=100,
+        period_net_premium_return=0.04,
+        annualized_net_premium_return=0.04 * 365 / 43,
+    )
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-scoped-call", account="sy",
+        scan_statuses=[
+            _scan_status("FUTU", "call", blocked_status, reason=reason),
+            _scan_status("NVDA", "call", "completed", reason=None if has_candidate else "no_candidate"),
+            _scan_status("TCOM", "call", "not_applicable", reason="covered_call_underlying_not_held"),
+        ],
+        final_candidates={"call": [candidate] if has_candidate else []},
+    )
+    assert payload["strategy_results"][0]["strategy_status"] == (
+        "candidates_found" if has_candidate else "partial_data"
+    )
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [{"symbol": "FUTU", "strategy_mode": "call", "reason_code": reason}],
+    }
+    gaps = []
+    _puts, _put_available, calls, call_available, accepted = _load_opening_candidate_families(
+        base=tmp_path, run_id="run-scoped-call", account="sy", market="US",
+        data_gaps=gaps, source_artifacts=[], snapshot=payload, applicable_modes=("call",),
+    )
+    assert accepted is not None
+    assert call_available is True
+    assert len(calls) == int(has_candidate)
+    assert [gap["symbol"] for gap in gaps] == ["FUTU"]
+    assert all(gap["reason"] == "opening_candidate_strategy_partial_data" for gap in gaps)
+
+
+def test_all_call_scopes_blocked_remain_unavailable(tmp_path):
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-all-call-blocked",
+        scan_statuses=[
+            _scan_status("FUTU", "call", "unavailable", reason="option_close_settlement_pending"),
+            _scan_status("NVDA", "call", "unavailable", reason="quote_unavailable"),
+        ],
+        final_candidates={"call": []},
+    )
+    assert payload["strategy_results"][0]["strategy_status"] == "data_unavailable"
+
+
+def test_blocked_call_with_only_unheld_siblings_is_still_symbol_scoped(tmp_path):
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-call-unheld-siblings",
+        scan_statuses=[
+            _scan_status("FUTU", "call", "unavailable", reason="option_close_settlement_pending"),
+            _scan_status("NVDA", "call", "not_applicable", reason="covered_call_underlying_not_held"),
+        ],
+        final_candidates={"call": []},
+    )
+    assert payload["strategy_results"][0]["strategy_status"] == "partial_data"
+    assert candidate_universe_summary(payload)["affected_scopes"] == [
+        {"symbol": "FUTU", "strategy_mode": "call", "reason_code": "option_close_settlement_pending"}
+    ]
