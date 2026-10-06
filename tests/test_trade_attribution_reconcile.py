@@ -6,6 +6,7 @@ import pytest
 
 from src.application.trades import attribution as mod
 from src.application.ledger.api import read_trade_attribution_snapshot
+from src.application.ledger import trade_attribution as ledger_attribution
 from test_trade_attribution_view import _writable_call_scope, _call_capacity_observation
 
 
@@ -41,13 +42,21 @@ def _setup(tmp_path, monkeypatch, *, actions=False):
 
 def test_unchanged_batch_builds_one_view_and_next_call_refreshes(tmp_path, monkeypatch):
     repo, args, observed, evidence, views, cached, _ = _setup(tmp_path, monkeypatch)
+    snapshots = []
+    original = ledger_attribution.read_trade_attribution_snapshot
+    def counted(*a, **kw):
+        snapshots.append(1)
+        return original(*a, **kw)
+    monkeypatch.setattr(ledger_attribution, "read_trade_attribution_snapshot", counted)
     first = mod.reconcile_trade_attribution_account(repo, **args)
+    assert len(snapshots) == 1
     assert first['checked'] >= 2 and first['errors'] == [] and first['next_cursor'] == ''
     assert len(views) == len(observed) == len(evidence) == 1
     expected = {row['execution_key']: mod.attribution_result_payload(row) for row in views[0]['rows']}
     assert all(row == expected[row['execution_key']] for row in cached)
     monkeypatch.setattr(mod.time, 'time', lambda: 65)
     mod.reconcile_trade_attribution_account(repo, **args)
+    assert len(snapshots) == 2
     assert len(views) == len(observed) == len(evidence) == 2
     assert views[1]['rows'][0]['evaluated_at_ms'] == 65000
 
@@ -155,16 +164,25 @@ def test_cancellation_stops_at_phase_boundary_and_preserves_cursor(tmp_path, mon
 def test_cancel_during_changed_snapshot_does_not_start_evidence_refresh(tmp_path, monkeypatch):
     repo, args, observed, evidence, views, cached, _ = _setup(tmp_path, monkeypatch)
     stop = Event()
-    original = mod.read_trade_attribution_snapshot
+    original = ledger_attribution.read_trade_attribution_snapshot
+    original_evidence = mod.read_attribution_combo_evidence
+    def mutate_during_evidence(*a, **kw):
+        result = original_evidence(*a, **kw)
+        with repo._writer_connection(begin_immediate=True) as conn:
+            conn.execute('''INSERT INTO trade_attribution_policy_enablings
+                SELECT broker, 'different-account-id', environment, account, market, policy_version,
+                       effective_from_ms, created_at_ms, actor, 'concurrent-policy', request_hash
+                FROM trade_attribution_policy_enablings''')
+        return result
+    monkeypatch.setattr(mod, 'read_attribution_combo_evidence', mutate_during_evidence)
     reads = []
     def cancelling(*a, **kw):
         rows = original(*a, **kw)
         reads.append(1)
         if len(reads) == 2:
-            rows['trade_events'][0]['raw_payload']['fee_evidence'] = {'amount': 1}
             stop.set()
         return rows
-    monkeypatch.setattr(mod, 'read_trade_attribution_snapshot', cancelling)
+    monkeypatch.setattr(ledger_attribution, 'read_trade_attribution_snapshot', cancelling)
     result = mod.reconcile_trade_attribution_account(repo, **args, stop_event=stop)
     assert result['checked'] == 0 and result['next_cursor'] == ''
     assert len(evidence) == len(observed) == 1 and views == cached == []

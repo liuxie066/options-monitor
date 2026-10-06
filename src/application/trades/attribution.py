@@ -16,7 +16,7 @@ from src.application.ledger.api import (
     resolve_ledger_store, resolve_position_data_config_path,
     ledger_store_write_guard,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
-    read_trade_attribution_snapshot, trade_attribution_facts_from_events,
+    read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
     with_sqlite_repo_transaction, record_trade_attribution_conflict,
@@ -720,10 +720,22 @@ def reconcile_trade_attribution_account(
     repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
     inbox_path: Path, combo_mode: str, cursor: str = "", stop_event: Any = None,
 ) -> dict[str, Any]:
+    with open_trade_attribution_snapshot_reader(repo, account=account, market=market) as read_if_changed:
+        return _reconcile_trade_attribution_batch(repo, config=config, account=account, market=market,
+            runtime_root=runtime_root, inbox_path=inbox_path, combo_mode=combo_mode, cursor=cursor,
+            stop_event=stop_event, read_if_changed=read_if_changed)
+
+
+def _reconcile_trade_attribution_batch(
+    repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
+    inbox_path: Path, combo_mode: str, cursor: str, stop_event: Any, read_if_changed: Any,
+) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
     from src.application.trades.inbox import cache_trade_attribution_result
 
-    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    rows = read_if_changed()
+    if rows is None:
+        raise RuntimeError("initial trade attribution snapshot is unavailable")
     facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
     selected = sorted((row for row in facts if row["execution_key"] and row["execution_key"] > cursor
         and str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market),
@@ -741,12 +753,12 @@ def reconcile_trade_attribution_account(
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():
             break
-        # Cache rows describe one as-of observation, not a freshness lease. Compare
-        # every fact (including in-place fee updates), not event counts or IDs.
-        fresh = read_trade_attribution_snapshot(repo, account=account, market=market)
+        # Every committed change (including in-place fees) invalidates the
+        # observation. After attempted effects, force a fresh snapshot as well.
+        fresh = read_if_changed(force=evidence is None)
         if stop_event is not None and stop_event.is_set():
             break
-        if fresh != rows or evidence is None:
+        if fresh is not None and (fresh != rows or evidence is None):
             rows = fresh
             evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
                 now_ms=int(time.time() * 1000))
