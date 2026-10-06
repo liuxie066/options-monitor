@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1124 (`src`: 548, `domain`: 89, `scripts`: 14, `tests`: 473)
-- Internal import edges: 8484 total, 3573 production/script edges excluding tests
+- Python files scanned: 1125 (`src`: 548, `domain`: 89, `scripts`: 14, `tests`: 474)
+- Internal import edges: 8500 total, 3577 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|588| domain
+  application -->|590| domain
   application -->|4| domain_services
-  application -->|171| infrastructure
+  application -->|172| infrastructure
   application -->|55| storage
   domain_services -->|6| domain
   domain_services -->|2| storage
@@ -46,11 +46,11 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3722| application
-  tests -->|488| domain
+  tests -->|3731| application
+  tests -->|489| domain
   tests -->|2| domain_services
   tests -->|240| infrastructure
-  tests -->|295| interfaces
+  tests -->|297| interfaces
   tests -->|28| scripts
   tests -->|39| storage
 ```
@@ -59,9 +59,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 588 |
+| application | domain | 590 |
 | interfaces | application | 190 |
-| application | infrastructure | 171 |
+| application | infrastructure | 172 |
 | application | storage | 55 |
 | scripts | application | 39 |
 | infrastructure | application | 9 |
@@ -79,9 +79,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3722 |
-| tests | domain | 488 |
-| tests | interfaces | 295 |
+| tests | application | 3731 |
+| tests | domain | 489 |
+| tests | interfaces | 297 |
 | tests | infrastructure | 240 |
 | tests | storage | 39 |
 | tests | scripts | 28 |
@@ -95,11 +95,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 244 |
 | src.interfaces | src.application | 152 |
-| src.application.ledger | domain.domain | 134 |
+| src.application.ledger | domain.domain | 135 |
 | src.application | src.infrastructure | 121 |
 | src.application.ledger | domain.domain.ledger | 70 |
-| src.application.trades | domain.domain | 56 |
-| src.application.trades | src.application | 44 |
+| src.application.trades | domain.domain | 57 |
+| src.application.trades | src.application | 45 |
 | src.application | domain.storage | 43 |
 | src.application | src.application.ledger | 32 |
 | src.application.research | src.application | 32 |
@@ -119,8 +119,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.multi_tick | 16 |
 | src.application.ledger | src.infrastructure | 15 |
 | src.interfaces | src.application.trades | 15 |
+| src.application.trades | src.infrastructure | 14 |
 | src.application | src.application.positions | 13 |
-| src.application.trades | src.infrastructure | 13 |
 | src.application.multi_tick | src.infrastructure | 10 |
 | src.application.trades | domain.domain.ledger | 10 |
 | src.application.positions | domain.storage | 9 |
@@ -181,14 +181,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 117 |
 | src.application.payload_helpers | 96 |
-| domain.domain.symbol_identity | 81 |
+| domain.domain.symbol_identity | 82 |
 | src.application.ledger.api | 80 |
 | src.application.agent_tool_config | 74 |
 | domain.domain.trade_contract_identity | 67 |
 | src.infrastructure.io_utils | 55 |
 | domain.domain.ledger.position_fields | 53 |
+| src.application.account_config | 52 |
 | domain.domain.decision_state_fingerprint | 52 |
-| src.application.account_config | 51 |
 | domain.domain.option_position_identity | 50 |
 | src.application.runtime_paths | 32 |
 | domain.domain.ledger.events | 31 |
