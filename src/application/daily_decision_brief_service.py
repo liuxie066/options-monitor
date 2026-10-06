@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from domain.domain.daily_decision_brief import (
+    DAILY_DECISION_BRIEF_SCHEMA_VERSION,
     build_daily_brief_candidate_identity,
     normalize_daily_decision_brief,
 )
@@ -748,30 +749,31 @@ def assemble_daily_decision_brief(
         capacity_observation={"portfolio": portfolio_context} if portfolio_context else None,
     )
     brief_payload = {
-            "attribution_pending": attribution_pending,
-            "attribution_read_error": attribution_read_error,
-            "market": market_norm,
-            "market_trading_date": market_date,
-            "account": account_norm,
-            "revision": 0,
-            "run_id": run_id_norm,
-            "generated_at_utc": generated_at,
-            "data_as_of_utc": data_as_of,
-            "valid_until_utc": valid_until.isoformat(),
-            "status": status,
-            "actionability": actionability,
-            "strategy_summary": strategy_summary,
-            "actions": deduped_actions,
-            "positions": positions,
-            "capacity": capacity,
-            "funds": funds,
-            "candidates": candidate_payloads,
-            "candidate_index": candidate_index,
-            "rejections": _json_safe(rejections),
-            "events": events,
-            "data_gaps": deduped_data_gaps,
-            "source_artifacts": _dedupe_source_artifacts(source_artifacts),
-        }
+        "schema_version": DAILY_DECISION_BRIEF_SCHEMA_VERSION,
+        "attribution_pending": attribution_pending,
+        "attribution_read_error": attribution_read_error,
+        "market": market_norm,
+        "market_trading_date": market_date,
+        "account": account_norm,
+        "revision": 0,
+        "run_id": run_id_norm,
+        "generated_at_utc": generated_at,
+        "data_as_of_utc": data_as_of,
+        "valid_until_utc": valid_until.isoformat(),
+        "status": status,
+        "actionability": actionability,
+        "strategy_summary": strategy_summary,
+        "actions": deduped_actions,
+        "positions": positions,
+        "capacity": capacity,
+        "funds": funds,
+        "candidates": candidate_payloads,
+        "candidate_index": candidate_index,
+        "rejections": _json_safe(rejections),
+        "events": events,
+        "data_gaps": deduped_data_gaps,
+        "source_artifacts": _dedupe_source_artifacts(source_artifacts),
+    }
     if wheel_applicable or wheel_batches:
         brief_payload["wheel_batches"] = wheel_batches
     return normalize_daily_decision_brief(brief_payload)

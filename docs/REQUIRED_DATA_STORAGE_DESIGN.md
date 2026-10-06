@@ -201,10 +201,12 @@ publishes the canonical blob from those exact bytes.
 - When blob publication succeeds, the receipt keeps `scan_blob_ref`, fetch
   contract, policy, hashes, timestamps, and the existing provenance relpaths,
   but omits both inline base64 fields.
-- When no `runtime_root` is supplied, the existing legacy/manual receipt keeps
-  inline base64 and loose-file binding unchanged.
-- Blob publication failure remains fatal for the scheduled canonical path; it
-  does not silently produce a legacy scheduled receipt.
+- `runtime_root` is required. Every new receipt contains `scan_blob_ref` and
+  cannot select the historical inline representation.
+- Blob publication failure remains fatal and never produces a legacy receipt.
+- A persisted receipt without `scan_blob_ref` is read only through
+  `_resolve_legacy_required_data_quote_snapshot_bytes`; it still requires both
+  inline byte fields and exact matching safe loose files.
 
 Keeping the relpaths preserves receipt and manifest compatibility. For a
 blob-backed sealed entry they name the former producer shadows and are not a
@@ -327,7 +329,7 @@ make persistent cleanup failures visible as capacity risk.
 
 | Owner | Contract |
 |---|---|
-| `src/application/opend_symbol_outputs.py` | New blob-backed receipts omit inline base64; manual receipts without a runtime root retain it |
+| `src/application/opend_symbol_outputs.py` | New receipts require a runtime root and are blob-backed; the named historical reader alone accepts legacy inline receipts |
 | `src/application/required_data_blobs.py` | Blob publication is durable and shadow retirement uses the verified no-follow primitive |
 | `src/application/required_data_snapshot.py` | Cleanup is manifest-bound, non-fatal, payload-bounded, and returns four scalar counts |
 | `src/application/tick_account_execution.py` | New-seal and recovery cleanup are isolated and emit one audit/runlog event |

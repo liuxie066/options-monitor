@@ -57,6 +57,7 @@ def _brief(
     market_date: str = MARKET_DATE,
 ) -> dict:
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": market,
         "market_trading_date": market_date,
         "account": account,

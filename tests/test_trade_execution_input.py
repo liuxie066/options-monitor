@@ -5,17 +5,20 @@ import json
 import pytest
 
 from domain.domain.trade_execution import (
+    EXECUTION_INPUT_VERSION,
     canonical_decimal,
     canonical_utc_instant,
     conflicting_execution_associations,
     epoch_milliseconds_instant,
     normalize_execution_input,
+    normalize_persisted_execution_input,
 )
 from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
 
 
 def execution_input() -> dict:
     return {
+        "schema_version": EXECUTION_INPUT_VERSION,
         "broker_account_ref": {
             "broker_account_id": "account-1",
             "broker_id": "futu",
@@ -61,6 +64,15 @@ def test_standard_input_stays_exact_and_offline(monkeypatch) -> None:
     assert deal.asset_type == "option"
     assert json.loads(json.dumps(deal.execution_input, allow_nan=False))["price"] == payload["price"]
 
+
+def test_current_execution_requires_version_and_history_adapter_is_explicit() -> None:
+    versionless = execution_input()
+    versionless.pop("schema_version")
+
+    assert "missing:schema_version" in normalize_execution_input(versionless)["errors"]
+    persisted = normalize_persisted_execution_input(versionless)
+    assert persisted["schema_version"] == EXECUTION_INPUT_VERSION
+    assert "missing:schema_version" not in persisted["errors"]
 
 def test_futu_aliases_match_standard_content_without_rounding() -> None:
     standard = execution_input()

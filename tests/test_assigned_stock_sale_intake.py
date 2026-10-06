@@ -763,6 +763,7 @@ def test_resolve_trade_broker_assigned_stock_sale_ambiguous_lot_is_unresolved(tm
 def _standard_stock_sale_deal(**overrides) -> NormalizedTradeDeal:
     deal = _stock_sale_deal(**overrides)
     execution = normalize_execution_input({
+        "schema_version": "trade_execution.v1",
         "broker_account_ref": {
             "broker_account_id": f"futu:REAL:{deal.futu_account_id}",
             "broker_id": "futu", "external_account_id": deal.futu_account_id,

@@ -46,7 +46,9 @@ def normalize_position_snapshot_input(payload: Mapping[str, Any]) -> dict[str, A
             errors.append(f"invalid:{name}:integer_required")
         return result
 
-    if payload.get("schema_version") not in (None, POSITION_SNAPSHOT_VERSION):
+    if payload.get("schema_version") in (None, ""):
+        errors.append("missing:schema_version")
+    elif payload.get("schema_version") != POSITION_SNAPSHOT_VERSION:
         errors.append("unsupported:schema_version")
     raw_account = payload.get("broker_account_ref")
     raw_account = raw_account if isinstance(raw_account, Mapping) else {}
@@ -156,6 +158,17 @@ def normalize_position_snapshot_input(payload: Mapping[str, Any]) -> dict[str, A
         "errors": sorted(set(errors + list(payload.get("errors") or []))),
         **({"source_payload": payload["source_payload"]} if "source_payload" in payload else {}),
     }
+
+
+def normalize_persisted_position_snapshot_input(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read a stored pre-version snapshot through the historical boundary."""
+
+    persisted = dict(payload)
+    if persisted.get("schema_version") in (None, ""):
+        persisted["schema_version"] = POSITION_SNAPSHOT_VERSION
+    return normalize_position_snapshot_input(persisted)
 
 
 def position_snapshot_scope_errors(

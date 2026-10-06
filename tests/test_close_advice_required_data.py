@@ -914,6 +914,7 @@ def _frozen_workspace(
         output_root=required_root,
     )
     publish_required_data_quote_snapshot(
+        runtime_root=tmp_path,
         producer_root=required_root,
         producer_run_id=run_id,
         symbol="NVDA",

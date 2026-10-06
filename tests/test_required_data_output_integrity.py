@@ -464,6 +464,7 @@ def _publish(
 ) -> None:
     plan = _fetch_plan()
     publish_required_data_quote_snapshot(
+        runtime_root=root,
         producer_root=root,
         producer_run_id="run-output-integrity",
         symbol="NVDA",
@@ -1551,6 +1552,7 @@ def test_direct_publisher_rejects_child_coverage_drift_without_receipt(
 
     with pytest.raises(SourceReceiptError, match="child request"):
         publish_required_data_quote_snapshot(
+            runtime_root=tmp_path,
             producer_root=tmp_path,
             producer_run_id="run-child-drift",
             symbol="NVDA",
@@ -1588,6 +1590,7 @@ def test_direct_publisher_rejects_child_rv_drift_without_receipt(
         match="child request realized volatility mismatch",
     ):
         publish_required_data_quote_snapshot(
+            runtime_root=tmp_path,
             producer_root=tmp_path,
             producer_run_id="run-child-rv-drift",
             symbol="NVDA",

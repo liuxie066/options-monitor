@@ -277,7 +277,9 @@ def normalize_execution_input(
 ) -> dict[str, Any]:
     """Validate source-independent, per-execution input without external lookups."""
     errors: list[str] = []
-    if payload.get("schema_version") not in (None, EXECUTION_INPUT_VERSION):
+    if payload.get("schema_version") in (None, ""):
+        errors.append("missing:schema_version")
+    elif payload.get("schema_version") != EXECUTION_INPUT_VERSION:
         errors.append("unsupported:schema_version")
 
     def text(value: Any) -> str | None:
@@ -417,6 +419,17 @@ def normalize_execution_input(
     if execution_source_identity_conflicts(payload if source_payload is None else source_payload, result):
         errors.append("invalid:source_execution_identity")
     return result
+
+
+def normalize_persisted_execution_input(
+    payload: Mapping[str, Any], *, source_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read a stored pre-version execution through the historical boundary."""
+
+    persisted = dict(payload)
+    if persisted.get("schema_version") in (None, ""):
+        persisted["schema_version"] = EXECUTION_INPUT_VERSION
+    return normalize_execution_input(persisted, source_payload=source_payload)
 
 
 def execution_economic_content(execution: Mapping[str, Any]) -> dict[str, Any]:
@@ -606,6 +619,7 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
     ):
         data_type = "order_summary"
     execution = normalize_execution_input({
+        "schema_version": EXECUTION_INPUT_VERSION,
         "broker_account_ref": {
             "broker_account_id": src.get("broker_account_id"),
             "broker_id": "futu",
@@ -650,7 +664,10 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
 def canonical_trade_execution_content(payload: dict[str, Any]) -> dict[str, Any]:
     nested = payload.get("execution_input")
     if isinstance(nested, dict):
-        execution = normalize_execution_input(nested, source_payload=payload)
+        execution = normalize_persisted_execution_input(
+            nested,
+            source_payload=payload,
+        )
     elif _is_standard_execution(payload):
         execution = normalize_execution_input(payload)
     else:
