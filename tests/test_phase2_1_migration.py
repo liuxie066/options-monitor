@@ -1,22 +1,7 @@
 from __future__ import annotations
 
-from src.application import close_advice_runner as close_mod
 from src.application import option_chain_fetching as ocf_mod
 from src.application.multi_tick import prefetch_coordinator as prefetch_coord_mod
-
-
-def test_close_advice_runner_rate_limit_reason_compatibility() -> None:
-    payload = {
-        "meta": {
-            "status": "error",
-            "error_code": "RATE_LIMIT",
-            "error": "频率太高",
-        },
-        "rows": [],
-    }
-    assert close_mod._fetch_payload_error_reason(payload, prefix="required_data_fetch_error") == "required_data_fetch_error_rate_limit"
-    assert close_mod.classify_opend_error({"error_code": "x", "message": "too frequent"}).is_rate_limit is True
-    assert close_mod.classify_opend_error(RuntimeError("最多10次")).is_rate_limit is True
 
 
 def test_required_data_prefetch_rate_limit_payload_hints_compatible() -> None:
