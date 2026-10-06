@@ -21,7 +21,7 @@ from domain.domain.wheel import (
     attach_lot_strategy_metadata,
     lot_contract_key,
     lot_strategy_metadata_from_trade_events,
-    normalize_wheel_event,
+    normalize_persisted_wheel_event,
 )
 from src.application.ledger.combo_membership import resolve_combo_group_membership
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
@@ -40,7 +40,7 @@ def _rows(reader: Any, conn: sqlite3.Connection, account: str) -> dict[str, Any]
     # These reads deliberately require the installed schema; no migration or fallback.
     events = reader._read_trade_events(conn, strict=True)
     lots = reader._read_position_lots(conn, strict=True)
-    wheels = [normalize_wheel_event({
+    wheels = [normalize_persisted_wheel_event({
         **dict(row),
         "stock_lot_id": row["lot_id"],
         "payload": json.loads(row["payload_json"]),

@@ -142,9 +142,9 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
     assert "broker_ledger_positions_mismatch" in mismatched["reason_codes"]
     assert "account_stock_capacity_exceeded" in mismatched["reason_codes"]
     from test_wheel_strategy import _started_event, _assignment_trade, _assigned_stock
-    from domain.domain.wheel import build_wheel_event, project_wheel_branches, WHEEL_EVENT_SCHEMA_V1
-    intent = build_wheel_event(event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1, event_type="wheel_call_intent_created",
+    from domain.domain.wheel import build_legacy_wheel_event, project_wheel_branches
+    intent = build_legacy_wheel_event(event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
+        event_type="wheel_call_intent_created",
         occurred_at_ms=2100, recorded_at_ms=2101, intent_id="invalid-units",
         payload={"contracts": 1, "multiplier": "100.5", "expires_at_ms": now + 9000})
     branches = project_wheel_branches(
@@ -152,12 +152,11 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
     unknown = trade_attribution_capacity_check(**{**args, "wheel_read_model": {"wheel_branches": branches}}, now_ms=now)
     assert "capacity_basis_unavailable" in unknown["reason_codes"]
     for conflict_type in ("creation", "consumption"):
-        created = build_wheel_event(event_id="created", account="lx", lot_id="assigned-stock-assign-put",
-            event_schema_version=WHEEL_EVENT_SCHEMA_V1, event_type="wheel_call_intent_created",
+        created = build_legacy_wheel_event(event_id="created", account="lx", lot_id="assigned-stock-assign-put",
+            event_type="wheel_call_intent_created",
             occurred_at_ms=2100, recorded_at_ms=2100, intent_id="conflicted",
             payload={"contracts": 1, "multiplier": 100, "expires_at_ms": now + 9000})
-        conflicting = build_wheel_event(event_id="conflicting", account="lx", lot_id="assigned-stock-assign-put",
-            event_schema_version=WHEEL_EVENT_SCHEMA_V1,
+        conflicting = build_legacy_wheel_event(event_id="conflicting", account="lx", lot_id="assigned-stock-assign-put",
             event_type="wheel_call_intent_created" if conflict_type == "creation" else "wheel_call_intent_consumed",
             occurred_at_ms=2200, recorded_at_ms=2200, intent_id="conflicted", source_trade_event_id="unknown-fill",
             payload={"contracts": 1, "multiplier": 100, "expires_at_ms": now + 9000})
@@ -523,6 +522,7 @@ def test_two_booked_intent_fills_are_linked_and_consumed_atomically(tmp_path, mo
     assert apply_trade_attribution(repo, **args)["origin"] == "intent"
     consumes = [row for row in repo.list_wheel_events(account="lx") if row["event_type"] == "wheel_call_intent_consumed"]
     assert len(consumes) == 2 and sum(row["payload"]["contracts"] for row in consumes) == 2
+    assert {row["event_schema_version"] for row in consumes} == {"wheel_event.v2"}
     assert len(repo.list_trade_events()) == len(before) + 2
 
 

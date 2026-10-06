@@ -813,7 +813,11 @@ def test_assignment_starts_wheel_and_manual_end_is_cas_idempotent(
     assert applied["write_applied"] is True
     assert replay["idempotent"] is True
     assert replay["write_applied"] is False
-    assert len(repo.list_wheel_events(account="lx")) == 2
+    events = repo.list_wheel_events(account="lx")
+    assert len(events) == 2
+    assert next(
+        event for event in events if event["event_type"] == "wheel_manual_ended"
+    )["event_schema_version"] == "wheel_event.v2"
     terminal = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
     assert terminal["lifecycle_status"] == "manual_ended"
     assert terminal["phase"] is None
@@ -1129,6 +1133,21 @@ def test_wheel_call_intent_create_and_cancel(tmp_path: Path) -> None:
     assert cancelled["status"] == "cancelled"
     assert ready["phase"] == "ready"
     assert ready["active_intent_ids"] == []
+    intent_events = {
+        event["event_type"]: event
+        for event in repo.list_wheel_events(account="lx")
+        if event["event_type"] in {
+            "wheel_call_intent_created",
+            "wheel_call_intent_cancelled",
+        }
+    }
+    assert {
+        event_type: event["event_schema_version"]
+        for event_type, event in intent_events.items()
+    } == {
+        "wheel_call_intent_created": "wheel_event.v2",
+        "wheel_call_intent_cancelled": "wheel_event.v2",
+    }
     already_inactive = cancel_wheel_call_intent(
         repo,
         account="lx",
@@ -1428,6 +1447,12 @@ def test_manual_wheel_call_linkage_rejects_only_selected_relation(
     assert model["linkage_candidates"] == []
     assert repo.get_position_lot_fields(call_lot_id).get("strategy") is None
     assert model["batches"][0]["phase"] == "ready"
+    rejection = next(
+        event
+        for event in repo.list_wheel_events(account="lx")
+        if event["event_type"] == "wheel_call_linkage_rejected"
+    )
+    assert rejection["event_schema_version"] == "wheel_event.v2"
 
 
 @pytest.mark.parametrize("apply_changes", [False, True])

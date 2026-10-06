@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from domain.domain.risk_capacity import evaluate_cash_snapshot
-from domain.domain.position_snapshot import position_snapshot_scope_errors
+from domain.domain.position_snapshot import (
+    normalize_persisted_position_snapshot_input,
+    position_snapshot_scope_errors,
+)
 from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
 from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
@@ -190,6 +193,12 @@ def load_account_portfolio_context(
     except Exception:
         cached = None
     if isinstance(cached, dict):
+        cached_snapshot = cached.get("position_snapshot_input")
+        if isinstance(cached_snapshot, Mapping):
+            cached = deepcopy(cached)
+            cached["position_snapshot_input"] = (
+                normalize_persisted_position_snapshot_input(cached_snapshot)
+            )
         result = evaluate(cached, "account_cache")
         assets = required_position_asset_types or (("stock", "option") if include_options else ())
         snapshot = result.get("position_snapshot_input")

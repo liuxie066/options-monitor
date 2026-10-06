@@ -26,7 +26,7 @@ from domain.domain.wheel import (
     merge_lot_strategy_metadata,
     project_wheel_branches,
     project_wheel_call_intents,
-    wheel_called_away_event_from_call_assignment,
+    build_legacy_wheel_called_away_event_from_call_assignment,
 )
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
@@ -695,7 +695,7 @@ def append_wheel_trade_companions(
             stock_lot_after["shares_remaining"] = int(
                 (stock_lot_before or {}).get("shares_remaining") or 0
             ) - settlement_shares
-            legacy_terminal = wheel_called_away_event_from_call_assignment(
+            legacy_terminal = build_legacy_wheel_called_away_event_from_call_assignment(
                 event,
                 fields,
                 stock_lot_before,

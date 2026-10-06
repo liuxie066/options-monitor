@@ -10,15 +10,20 @@ import src.application.ledger.manual_trades as ledger_manual_trades
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.wheel import (
     WHEEL_EVENT_TYPES,
-    WHEEL_EVENT_SCHEMA_V1,
+    build_legacy_wheel_event,
     build_wheel_call_rank_key,
     build_wheel_put_rank_key,
     build_wheel_event,
     evaluate_wheel_call_candidate,
     evaluate_wheel_put_candidate,
+    normalize_persisted_wheel_event,
+    normalize_wheel_event,
+    plan_wheel_manual_end,
     project_wheel_call_intents,
     project_wheel_call_linkage_candidates,
+    project_wheel_branches,
     project_wheel_lifecycles,
+    wheel_event_payload_hash,
 )
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -26,9 +31,8 @@ from src.application.wheel import build_wheel_read_model, build_wheel_read_model
 
 
 def _started_event(*, source_trade_event_id: str = "assign-put") -> dict:
-    return build_wheel_event(
+    return build_legacy_wheel_event(
         event_id="wheel-start-1",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
         lot_id="assigned-stock-assign-put",
         event_type="wheel_started",
@@ -52,6 +56,46 @@ def _assignment_trade() -> dict:
     }
 
 
+def test_current_wheel_event_requires_version_and_persisted_history_is_explicit() -> None:
+    current = build_wheel_event(
+        event_id="current-v2",
+        account="lx",
+        lot_id="assigned-stock-current",
+        event_type="wheel_manual_ended",
+        occurred_at_ms=2_000,
+        recorded_at_ms=2_001,
+        payload={"request_id": "current"},
+    )
+    legacy = _started_event()
+    versionless = dict(legacy)
+    versionless.pop("event_schema_version")
+
+    assert current["event_schema_version"] == "wheel_event.v2"
+    assert legacy["event_schema_version"] == "wheel_event.v1"
+    assert wheel_event_payload_hash(legacy) == (
+        "7c415b447b4938866c6e0e0a0c964be534564d59e98644f66f3a95786948a60c"
+    )
+    with pytest.raises(ValueError, match="requires event_schema_version"):
+        normalize_wheel_event(versionless)
+    with pytest.raises(ValueError, match="requires event_schema_version"):
+        wheel_event_payload_hash(versionless)
+    assert normalize_persisted_wheel_event(versionless) == legacy
+
+    legacy_branch = project_wheel_branches(
+        [legacy], [_assignment_trade()], [], _assigned_stock(), 3_000
+    )[0]
+    legacy_continuation = plan_wheel_manual_end(
+        legacy_branch,
+        "legacy-end",
+        "tester",
+        occurred_at_ms=3_000,
+        recorded_at_ms=3_001,
+        account="lx",
+    )
+    assert legacy_branch["legacy_call_adapter"] is True
+    assert legacy_continuation["event_schema_version"] == "wheel_event.v1"
+
+
 def _call_lot(*, status: str = "open", contracts_open: int = 1) -> dict:
     return {
         "record_id": "call-lot-1",
@@ -72,9 +116,8 @@ def _call_lot(*, status: str = "open", contracts_open: int = 1) -> dict:
 
 
 def _legacy_wheel_start(event_id: str) -> dict:
-    return build_wheel_event(
+    return build_legacy_wheel_event(
         event_id=event_id,
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
         lot_id="assigned-stock-legacy",
         event_type="wheel_started",
@@ -282,9 +325,8 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
         item for item in repo.list_trade_events() if item["event_type"] == "assignment"
     )
     lot_id = f"assigned-stock-{assignment['event_id']}"
-    event = build_wheel_event(
+    event = build_legacy_wheel_event(
         event_id=f"wheel-start-{assignment['event_id']}",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
         lot_id=lot_id,
         event_type="wheel_started",
@@ -799,13 +841,15 @@ def test_wheel_put_candidate_fails_closed_and_ranks_remainder_first() -> None:
 
 
 def test_wheel_assignment_requires_exact_event_units_without_lot_fallback():
-    from domain.domain.wheel import wheel_started_event_from_assignment
+    from domain.domain.wheel import build_legacy_wheel_started_event_from_assignment
 
     event = {**_assignment_trade(), "contracts": 1, "raw_payload": {
         "stock_settlement": {"side": "buy", "shares": 100, "price": 10},
     }}
     lot = {"fields": {"contract_key": {"option_type": "put"}, "position_side": "short", "multiplier": 100}}
-    assert wheel_started_event_from_assignment(event, lot, recorded_at_ms=3000)
+    assert build_legacy_wheel_started_event_from_assignment(
+        event, lot, recorded_at_ms=3000
+    )
     for patch in (
         {"multiplier": "100.5"},
         {"multiplier": None},
@@ -813,13 +857,14 @@ def test_wheel_assignment_requires_exact_event_units_without_lot_fallback():
         {"raw_payload": {"stock_settlement": {"side": "buy", "shares": 0, "stock_qty": 100, "price": 10}}},
     ):
         with pytest.raises(ValueError):
-            wheel_started_event_from_assignment({**event, **patch}, lot, recorded_at_ms=3000)
+            build_legacy_wheel_started_event_from_assignment(
+                {**event, **patch}, lot, recorded_at_ms=3000
+            )
 
 
 def test_wheel_invalid_intent_units_are_unknown_and_block_the_batch():
-    intent = build_wheel_event(
+    intent = build_legacy_wheel_event(
         event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         event_type="wheel_call_intent_created", occurred_at_ms=2100, recorded_at_ms=2101,
         intent_id="intent-invalid-units",
         payload={"contracts": 1, "multiplier": "100.5", "expires_at_ms": 9000},

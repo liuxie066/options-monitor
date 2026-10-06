@@ -737,6 +737,15 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
     assert parent["shares_remaining"] == 0
     assert len(children) == 2
     assert {child["lifecycle_status"] for child in children} == {"pending_decision"}
+    called_away = [
+        event
+        for event in repo.list_wheel_events(account="lx")
+        if event["event_type"] == "wheel_called_away"
+    ]
+    assert len(called_away) == 1
+    assert {event["event_schema_version"] for event in called_away} == {
+        "wheel_event.v1"
+    }
 
 
 def test_unproven_assignment_fee_creates_visible_blocked_child(tmp_path) -> None:

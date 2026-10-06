@@ -335,6 +335,7 @@ def _sale_request(repo, lot_id: str, *, broker: bool, dry_run: bool, identity: s
             shares=shares, price=105, trade_time_ms=_ms("2026-07-23T11:00:00"),
             source_deal_id=identity, dry_run=dry_run)
     deal = normalize_trade_deal({
+        "schema_version": "trade_execution.v1",
         "broker_account_ref": {"broker_account_id": "futu:REAL:123", "broker_id": "futu",
             "external_account_id": "123", "environment": "REAL", "account_label": "lx"},
         "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "market": "US", "currency": "USD"},

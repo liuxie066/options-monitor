@@ -432,6 +432,16 @@ def test_normalize_brief_builds_stable_ids_and_rejects_invalid_contracts() -> No
         normalize_daily_decision_brief(invalid)
 
 
+def test_current_brief_requires_version_and_persisted_history_accepts_absence() -> None:
+    versionless = _brief(revision=0, actions=[_action()])
+    versionless.pop("schema_version")
+
+    with pytest.raises(ValueError, match="requires schema_version"):
+        normalize_daily_decision_brief(versionless)
+    persisted = normalize_persisted_daily_decision_brief(versionless)
+    assert persisted["schema_version"] == "daily_decision_brief.v1"
+
+
 def test_candidate_evidence_hold_lifecycle_preserves_identity_without_false_invalidation() -> None:
     active = normalize_daily_decision_brief(_brief(revision=0, actions=[_action()]))
     unavailable_source = _brief(revision=1)

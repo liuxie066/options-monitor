@@ -101,6 +101,7 @@ def _brief(
             "metrics": {},
         })
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": market,
         "market_trading_date": MARKET_DATE,
         "account": account,

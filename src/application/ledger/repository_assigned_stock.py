@@ -14,6 +14,7 @@ from .repository_schema import (
     _json_object,
     _json_text,
     json,
+    normalize_persisted_wheel_event,
     normalize_wheel_event,
     now_ms,
     sqlite3,
@@ -339,7 +340,7 @@ class AssignedStockRepositoryMixin(WheelPolicyRepositoryMixin):
                     """
                 ).fetchall()
         return [
-            normalize_wheel_event(
+            normalize_persisted_wheel_event(
                 {
                     "event_id": row["event_id"],
                     "event_schema_version": row["event_schema_version"],

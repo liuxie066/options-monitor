@@ -31,7 +31,10 @@ from domain.domain.ledger.position_fingerprint import (
 
 from domain.domain.symbol_identity import symbol_market
 
-from domain.domain.wheel import normalize_wheel_event
+from domain.domain.wheel import (
+    normalize_persisted_wheel_event,
+    normalize_wheel_event,
+)
 
 from src.application.ledger.event_codec import (
     encode_trade_event_for_storage,

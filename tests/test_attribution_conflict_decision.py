@@ -547,7 +547,7 @@ def test_assignment_companion_keeps_historical_internal_transition_after_future_
 def test_full_history_companion_projection_ignores_future_strategy_proof_and_void(tmp_path, monkeypatch, legacy):
     from dataclasses import replace
     from domain.domain.ledger import TradeEvent
-    from domain.domain.wheel import build_wheel_event, WHEEL_EVENT_SCHEMA_V1
+    from domain.domain.wheel import build_legacy_wheel_event, build_wheel_event
     from src.application.ledger.wheel_assignment_recovery import _wheel_branches_from_rows
 
     repo, config = _scope(tmp_path, monkeypatch)
@@ -568,8 +568,8 @@ def test_full_history_companion_projection_ignores_future_strategy_proof_and_voi
         creation = next(row for row in rows["account_wheel_events"] if row["wheel_branch_id"] == branch_id
                         and row["event_type"] == "wheel_branch_created")
         rows["account_wheel_events"] = [row for row in rows["account_wheel_events"] if row != creation]
-        rows["account_wheel_events"].append(build_wheel_event(event_id="legacy-start",
-            event_schema_version=WHEEL_EVENT_SCHEMA_V1, account="lx", lot_id=creation["stock_lot_id"],
+        rows["account_wheel_events"].append(build_legacy_wheel_event(event_id="legacy-start",
+            account="lx", lot_id=creation["stock_lot_id"],
             event_type="wheel_started", occurred_at_ms=creation["occurred_at_ms"],
             recorded_at_ms=creation["recorded_at_ms"], source_trade_event_id=creation["source_trade_event_id"],
             payload={"request_id": "legacy-fixture"}))

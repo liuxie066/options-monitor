@@ -350,6 +350,26 @@
       "module": "src/application/tick_run_workspace.py",
       "name": "account_run_config_paths",
       "reason": "The plural path helper encoded the retired account-root shadow copy as part of the run-config contract; new runs now publish and read only the canonical state/config.override.json path through account_run_config_path."
+    },
+    {
+      "module": "domain/domain/wheel/intents.py",
+      "name": "wheel_started_event_from_assignment",
+      "reason": "The generic Wheel v1 assignment helper was retired so current construction cannot accidentally select a historical schema; persisted legacy assignment continuation now uses build_legacy_wheel_started_event_from_assignment explicitly."
+    },
+    {
+      "module": "domain/domain/wheel/intents.py",
+      "name": "wheel_called_away_event_from_call_assignment",
+      "reason": "The generic Wheel v1 assignment helper was retired so current construction cannot accidentally select a historical schema; persisted legacy Call continuation now uses build_legacy_wheel_called_away_event_from_call_assignment explicitly."
+    },
+    {
+      "module": "domain/domain/wheel/__init__.py",
+      "name": "wheel_started_event_from_assignment",
+      "reason": "The facade no longer exposes a schema-ambiguous Wheel start helper; historical assignment continuation is available only through build_legacy_wheel_started_event_from_assignment."
+    },
+    {
+      "module": "domain/domain/wheel/__init__.py",
+      "name": "wheel_called_away_event_from_call_assignment",
+      "reason": "The facade no longer exposes a schema-ambiguous Wheel terminal helper; historical Call continuation is available only through build_legacy_wheel_called_away_event_from_call_assignment."
     }
   ]
 }
