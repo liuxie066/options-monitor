@@ -23,9 +23,7 @@ from src.application.tick_run_workspace import (
     AccountRunConfigError,
     load_retained_account_run_config,
 )
-from src.application.experience_candidate_snapshot import (
-    load_experience_candidate_snapshot_bundle,
-)
+from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
 from src.application.experience_mode import render_experience_report
 from src.infrastructure.io_utils import write_text
 
@@ -436,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(cfg.get("portfolio"), dict)
                 else {}
             )
-            bundle = load_experience_candidate_snapshot_bundle(
+            bundle = load_candidate_snapshot_bundle(
                 base=runtime_root,
                 run_id=str(args.source_account_run_id or ""),
                 account=str(portfolio_cfg.get("account") or ""),

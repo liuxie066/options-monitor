@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -12,13 +13,170 @@ from typing import Any, Iterable, Mapping
 REQUIRED_CANDIDATE_DEPENDENCIES = frozenset(
     {"required_data", "portfolio", "ledger", "fx", "earnings_rv"}
 )
+EXPERIENCE_CANDIDATE_DEPENDENCIES = frozenset(
+    {"required_data", "fx", "earnings_rv"}
+)
+CANDIDATE_RUN_MODE_FIELDS = frozenset(
+    {"scan_mode", "capacity_source", "account_display_name", "executable"}
+)
 CANDIDATE_CAPTURE_STATUSES = frozenset(
     {"completed", "not_applicable", "failed", "incomplete", "unavailable"}
 )
+_CURRENT_CANDIDATE_OWNER_FILES = {
+    "opening": "opening_candidate_snapshot.json",
+    "sp_lc": "combo_yield_candidate_snapshot.json",
+    "cc_lp": "cc_lp_candidate_snapshot.json",
+    "wheel": "wheel_candidate_snapshot.v3.json",
+}
+_CURRENT_CANDIDATE_OWNER_SCHEMAS = {
+    "opening": "opening_candidate_snapshot.v3",
+    "sp_lc": "combo_yield_candidate_snapshot.v4",
+    "cc_lp": "cc_lp_candidate_snapshot.v4",
+    "wheel": "wheel_candidate_snapshot.v3",
+}
+_LEGACY_CANDIDATE_ROOT_FILES = (
+    "strategy_scan_status_index.v1.json",
+    "strategy_scan_status_index.v2.json",
+    "strategy_scan_status_index.v3.json",
+    "strategy_scan_status_index.v4.json",
+)
+_LEGACY_CANDIDATE_STATE_FILES = (
+    "candidate_snapshot_manifest.v1.json",
+    "candidate_snapshot_manifest.v2.json",
+    "candidate_snapshot_manifest.v3.json",
+    "wheel_candidate_snapshot.json",
+    "wheel_candidate_snapshot.v2.json",
+)
+_LEGACY_CANDIDATE_STATUS_PATTERNS = (
+    "*_scan_status.json",
+    "*_scan_status.v2.json",
+)
+_CURRENT_CANDIDATE_MANIFEST_FILE = "candidate_snapshot_manifest.v4.json"
 
 
 class CandidateSnapshotContractError(ValueError):
     """Raised when shared candidate-snapshot evidence is not canonical."""
+
+
+def assert_current_candidate_artifact_boundary(
+    *,
+    account_dir: Path,
+    target: Path | None = None,
+) -> None:
+    """Reject legacy or post-seal additions before a current artifact write."""
+
+    root = Path(account_dir)
+    state_dir = root / "state"
+    try:
+        if root.is_symlink() or state_dir.is_symlink():
+            raise CandidateSnapshotContractError("artifact_version_mismatch")
+        legacy_paths = [root / name for name in _LEGACY_CANDIDATE_ROOT_FILES]
+        legacy_paths.extend(
+            state_dir / name for name in _LEGACY_CANDIDATE_STATE_FILES
+        )
+        for pattern in _LEGACY_CANDIDATE_STATUS_PATTERNS:
+            legacy_paths.extend(root.glob(pattern))
+        if any(path.exists() or path.is_symlink() for path in legacy_paths):
+            raise CandidateSnapshotContractError("artifact_version_mismatch")
+
+        for owner, filename in _CURRENT_CANDIDATE_OWNER_FILES.items():
+            expected_schema = _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner]
+            path = state_dir / filename
+            if not (path.exists() or path.is_symlink()):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise CandidateSnapshotContractError("artifact_version_mismatch")
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CandidateSnapshotContractError(
+                    "artifact_version_mismatch"
+                ) from exc
+            if not isinstance(payload, Mapping) or payload.get(
+                "schema_version"
+            ) != expected_schema:
+                raise CandidateSnapshotContractError("artifact_version_mismatch")
+
+        manifest_path = state_dir / _CURRENT_CANDIDATE_MANIFEST_FILE
+        if manifest_path.exists() or manifest_path.is_symlink():
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise CandidateSnapshotContractError("artifact_version_mismatch")
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CandidateSnapshotContractError(
+                    "artifact_version_mismatch"
+                ) from exc
+            if not isinstance(manifest, Mapping) or manifest.get(
+                "schema_version"
+            ) != "candidate_snapshot_manifest.v4":
+                raise CandidateSnapshotContractError("artifact_version_mismatch")
+            if target is not None:
+                target_path = Path(target)
+                if not (target_path.exists() or target_path.is_symlink()):
+                    raise CandidateSnapshotContractError("artifact_version_mismatch")
+    except CandidateSnapshotContractError:
+        raise
+    except OSError as exc:
+        raise CandidateSnapshotContractError("artifact_version_mismatch") from exc
+
+
+def candidate_run_mode_fields(
+    *,
+    experience: bool,
+    account_display_name: str | None = None,
+) -> dict[str, Any]:
+    """Build the single persisted mode discriminator for candidate evidence."""
+
+    if not experience:
+        if str(account_display_name or "").strip():
+            raise CandidateSnapshotContractError(
+                "standard candidate mode cannot have an account display name"
+            )
+        return {"scan_mode": "standard", "executable": True}
+    display_name = required_text(
+        account_display_name,
+        "experience account display name",
+    )
+    return {
+        "scan_mode": "experience",
+        "capacity_source": "demo_scenario",
+        "account_display_name": display_name,
+        "executable": False,
+    }
+
+
+def current_candidate_owner_schema(owner: Any) -> str:
+    """Return the only schema a current writer may publish for one owner."""
+
+    owner_norm = required_text(owner, "candidate owner").lower()
+    try:
+        return _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner_norm]
+    except KeyError as exc:
+        raise CandidateSnapshotContractError("candidate owner is invalid") from exc
+
+
+def validate_candidate_run_mode(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project the current candidate run-mode discriminator."""
+
+    scan_mode = str(payload.get("scan_mode") or "").strip().lower()
+    if scan_mode == "standard":
+        expected = candidate_run_mode_fields(experience=False)
+    elif scan_mode == "experience":
+        expected = candidate_run_mode_fields(
+            experience=True,
+            account_display_name=str(payload.get("account_display_name") or ""),
+        )
+    else:
+        raise CandidateSnapshotContractError("candidate scan mode is invalid")
+    present = {
+        key: payload.get(key)
+        for key in CANDIDATE_RUN_MODE_FIELDS
+        if key in payload
+    }
+    if present != expected:
+        raise CandidateSnapshotContractError("candidate run mode contract is invalid")
+    return expected
 
 
 def required_text(value: Any, field: str) -> str:
@@ -243,10 +401,15 @@ def combo_opening_status(
 
 
 __all__ = [
+    "CANDIDATE_RUN_MODE_FIELDS",
     "CANDIDATE_CAPTURE_STATUSES",
     "CandidateSnapshotContractError",
+    "EXPERIENCE_CANDIDATE_DEPENDENCIES",
     "REQUIRED_CANDIDATE_DEPENDENCIES",
+    "assert_current_candidate_artifact_boundary",
+    "candidate_run_mode_fields",
     "combo_opening_status",
+    "current_candidate_owner_schema",
     "dependency_hash",
     "normalize_combo_scope_results",
     "normalize_dependencies",
@@ -254,4 +417,5 @@ __all__ = [
     "required_text",
     "sha256_text",
     "utc_timestamp",
+    "validate_candidate_run_mode",
 ]

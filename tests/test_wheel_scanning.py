@@ -171,6 +171,7 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: P
         base=tmp_path, run_id="finite-rank", account="lx", market="us",
         account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
         dependencies=_seal_dependencies(),
+        run_mode={"scan_mode": "standard", "executable": True},
         scope_results=captured["scope_results"], batches=captured["batches"],
         capacity_allocations=captured["allocations"], sealed_at=AS_OF,
     )
@@ -673,6 +674,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
         base=tmp_path, run_id="finite-put-rank", account="lx", market="us",
         account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
         dependencies=_seal_dependencies(),
+        run_mode={"scan_mode": "standard", "executable": True},
         scope_results=captured["scope_results"], batches=captured["batches"],
         capacity_allocations=captured["allocations"], sealed_at=AS_OF,
     )
@@ -1082,6 +1084,7 @@ def test_covered_wheel_contracts_reach_sealed_snapshot_and_brief(tmp_path: Path)
         base=tmp_path, run_id="covered", account="lx", market="us",
         account_config_sha256="a"*64, strategy_policy_sha256="b"*64,
         dependencies=_seal_dependencies(), scope_results=captured["scope_results"],
+        run_mode={"scan_mode": "standard", "executable": True},
         batches=captured["batches"], capacity_allocations=captured["allocations"], sealed_at=AS_OF,
     )
     assert load_wheel_candidate_snapshot(base=tmp_path,run_id="covered",account="lx") == payload

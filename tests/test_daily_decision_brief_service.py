@@ -118,7 +118,7 @@ def test_brief_omits_retired_ai_decision_advice_section(tmp_path: Path) -> None:
     assert "ai_decision_advice_evidence_index" not in brief
 
 
-def test_wheel_v2_snapshot_maps_put_branch_identity(monkeypatch) -> None:
+def test_current_wheel_snapshot_maps_put_branch_identity(monkeypatch) -> None:
     from src.application import daily_decision_brief_service as service
 
     monkeypatch.setattr(
@@ -135,7 +135,7 @@ def test_wheel_v2_snapshot_maps_put_branch_identity(monkeypatch) -> None:
         source_artifacts=artifacts,
         data_gaps=gaps,
         snapshot={
-            "schema_version": "wheel_candidate_snapshot.v2",
+            "schema_version": "wheel_candidate_snapshot.v3",
             "snapshot_hash": "a" * 64,
             "content_sha256": "b" * 64,
             "batches": [
@@ -167,8 +167,8 @@ def test_wheel_v2_snapshot_maps_put_branch_identity(monkeypatch) -> None:
     assert batches[0]["direction"] == "put"
     assert candidates[0]["position_lot_id"] == ""
     assert candidates[0]["wheel_branch_id"] == "put-branch-1"
-    assert candidates[0]["_source_path"] == "state/wheel_candidate_snapshot.v2.json"
-    assert artifacts[0]["path"] == "state/wheel_candidate_snapshot.v2.json"
+    assert candidates[0]["_source_path"] == "state/wheel_candidate_snapshot.v3.json"
+    assert artifacts[0]["path"] == "state/wheel_candidate_snapshot.v3.json"
 
 
 def test_brief_uses_explicit_candidate_snapshot(
@@ -269,7 +269,7 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
     if not account_dir.is_dir():
         return
     if (
-        account_dir / "state" / "candidate_snapshot_manifest.v1.json"
+        account_dir / "state" / "candidate_snapshot_manifest.v4.json"
     ).is_file():
         return
     path_groups = {
@@ -363,7 +363,13 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
     for mode, scopes in scopes_by_mode.items():
         family = "sell_put" if mode == "put" else "covered_call"
         for scope in scopes.values():
-            status_path = account_dir / f"{str(scope['symbol']).lower()}_{family}_scan_status.json"
+            from src.application.strategy_scan_status import strategy_status_path
+
+            status_path = strategy_status_path(
+                report_dir=account_dir,
+                symbol=str(scope["symbol"]),
+                strategy_family=family,
+            )
             try:
                 status_payload = json.loads(status_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -435,6 +441,7 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
             mode: rows_by_mode[mode] for mode in observed_modes
         },
         candidate_evaluations=candidate_evaluations,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
 
@@ -521,6 +528,7 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
         ],
         rank_records=rank_records,
         ranked_pairs=ranked_pairs,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
 
@@ -584,6 +592,7 @@ def _seal_combo_status_snapshot(
         ],
         ranked_pairs=pairs,
         opening_status=opening_status,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
 
@@ -591,36 +600,25 @@ def _seal_combo_status_snapshot(
 def _materialize_candidate_bundle_fixture(base: Path) -> None:
     from src.application.candidate_snapshot_manifest import (
         CANDIDATE_SNAPSHOT_MANIFEST_FILE,
-        CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
         publish_candidate_snapshot_manifest,
     )
     from src.application.strategy_scan_status import (
         publish_strategy_scan_status,
-        publish_strategy_scan_status_index_v2,
+        publish_strategy_scan_status_index,
         strategy_status_path,
     )
 
     account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
     if not account_dir.is_dir():
         return
-    if any(
-        (account_dir / "state" / filename).is_file()
-        for filename in (
-            CANDIDATE_SNAPSHOT_MANIFEST_FILE,
-            CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
-        )
-    ):
+    if (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_FILE).is_file():
         return
-    wheel_v2_path = account_dir / "state" / "wheel_candidate_snapshot.v2.json"
+    wheel_path = account_dir / "state" / "wheel_candidate_snapshot.v3.json"
     snapshot_paths = {
         "opening": account_dir / "state" / "opening_candidate_snapshot.json",
         "sp_lc": account_dir / "state" / "combo_yield_candidate_snapshot.json",
         "cc_lp": account_dir / "state" / "cc_lp_candidate_snapshot.json",
-        "wheel": (
-            wheel_v2_path
-            if wheel_v2_path.is_file()
-            else account_dir / "state" / "wheel_candidate_snapshot.json"
-        ),
+        "wheel": wheel_path,
     }
     snapshots: dict[str, dict[str, Any]] = {}
     for owner, path in snapshot_paths.items():
@@ -728,12 +726,13 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     **({"direction": direction} if direction else {}),
                 }
             )
-    publish_strategy_scan_status_index_v2(
+    publish_strategy_scan_status_index(
         report_dir=account_dir,
         run_id="run-1",
         account="lx",
         account_config_sha256="f" * 64,
         expected=expected,
+        run_mode={"scan_mode": "standard", "executable": True},
     )
     publish_candidate_snapshot_manifest(
         base=base,
@@ -1073,7 +1072,7 @@ def test_success_empty_opening_snapshot_remains_non_actionable(
     )
 
 
-def test_success_empty_bundle_does_not_publish_v1_status_index(
+def test_success_empty_bundle_publishes_only_current_status_index(
     tmp_path: Path,
 ) -> None:
     now_utc, _evidence = _install_success_empty_strategy_evidence(tmp_path)
@@ -1087,7 +1086,7 @@ def test_success_empty_bundle_does_not_publish_v1_status_index(
     account_dir = _account_dir(tmp_path)
     assert brief["candidates"]["sell_put"] == []
     assert not (account_dir / "strategy_scan_status_index.v1.json").exists()
-    assert (account_dir / "strategy_scan_status_index.v2.json").is_file()
+    assert (account_dir / "strategy_scan_status_index.v5.json").is_file()
 
 
 def _call_row(*, symbol: str = "NVDA", contract: str = "NVDA260821C00140000", annualized: float = 0.1) -> dict:
@@ -1192,7 +1191,9 @@ def test_brief_consumes_shared_capacity_without_raw_holdings_fallback(
                 {"symbol": "NVDA", "direction": "call", "status": "failed", "reason_code": "wheel_scan_failed"},
                 {"symbol": "AAPL", "direction": "call", "status": "not_applicable", "reason_code": "wheel_not_applicable"},
             ],
-        capacity_allocations=allocations, sealed_at="2026-07-17T13:59:59Z",
+        capacity_allocations=allocations,
+        run_mode={"scan_mode": "standard", "executable": True},
+        sealed_at="2026-07-17T13:59:59Z",
     )
 
     brief = _assemble(tmp_path)
@@ -2254,6 +2255,7 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
                 }
             ],
         },
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
 

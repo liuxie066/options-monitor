@@ -185,7 +185,9 @@ class PerformanceEvidenceSQLiteRepository:
         except (sqlite3.DatabaseError, ValueError, json.JSONDecodeError) as exc:
             return EvidenceReadBundle(schema_state="unsupported_schema", message=str(exc))
 
-    def read_fx_rates(self) -> EvidenceReadBundle:
+    def read_fx_rates(self, *, conn: sqlite3.Connection | None = None) -> EvidenceReadBundle:
+        if conn is not None:
+            return EvidenceReadBundle("initialized_v1", fx_rates=self._read_fx_rates_conn(conn))
         state = self.schema_state()
         if state != "initialized_v1":
             return EvidenceReadBundle(schema_state=state)

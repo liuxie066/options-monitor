@@ -476,7 +476,6 @@ def test_tick_account_execution_isolates_one_account_exception(
             run_dir=tmp_path / "output_runs" / "isolated-run",
             shared_required=tmp_path / "required",
             accounts_root=tmp_path / "accounts",
-            prefetch_done=False,
             force_mode=False,
             smoke=False,
             no_send=True,
@@ -627,7 +626,7 @@ def test_mark_scheduler_accounts_does_not_regress_processed_target(tmp_path) -> 
     assert data["last_processed_scan_target_utc_by_account"]["lx"] == "2026-07-21T14:30:00+00:00"
 
 
-def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
+def test_tick_account_execution_keeps_pipeline_results_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
     from src.application import tick_account_execution as mod
     from src.application.tick_account_execution import TickAccountExecutionRequest
 
@@ -636,13 +635,11 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             SimpleNamespace(
                 result=SimpleNamespace(account="lx"),
                 acct_metrics={"account": "lx"},
-                prefetch_done=True,
                 ran_pipeline=True,
             ),
             SimpleNamespace(
                 result=SimpleNamespace(account="sy"),
                 acct_metrics={"account": "sy"},
-                prefetch_done=False,
                 ran_pipeline=False,
             ),
         ]
@@ -667,7 +664,6 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             run_dir=tmp_path / "output_runs" / "run-1",
             shared_required=tmp_path / "output_runs" / "run-1" / "required_data",
             accounts_root=tmp_path / "output_accounts",
-            prefetch_done=False,
             force_mode=False,
             smoke=False,
             no_send=True,
@@ -690,7 +686,6 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
         )
     )
 
-    assert outcome.prefetch_done is True
     assert outcome.ran_any_pipeline is True
     assert outcome.ran_pipeline_accounts == ["lx"]
     assert outcome.scheduled_scan_targets_by_account == {

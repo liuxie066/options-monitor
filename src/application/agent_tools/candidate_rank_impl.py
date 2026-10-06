@@ -6,10 +6,10 @@ from typing import Any, Callable
 
 from domain.domain.engine import normalize_strategy_mode
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.candidate_snapshot_manifest import (
-    CandidateSnapshotManifestError,
-    load_candidate_snapshot_bundle_readonly,
-    load_latest_candidate_snapshot_bundle_readonly,
+from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+from src.application.candidate_evidence_history import (
+    load_candidate_snapshot_bundle_for_inspection,
+    load_latest_candidate_snapshot_bundle_for_inspection,
 )
 from src.application.opening_candidate_snapshot import ranked_opening_candidates
 from src.application.runtime_paths import resolve_runtime_root
@@ -48,13 +48,13 @@ def _snapshot(
     ).runtime_root
     try:
         if str(payload.get("run_id") or "").strip():
-            bundle = load_candidate_snapshot_bundle_readonly(
+            bundle = load_candidate_snapshot_bundle_for_inspection(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
             )
         else:
-            bundle = load_latest_candidate_snapshot_bundle_readonly(
+            bundle = load_latest_candidate_snapshot_bundle_for_inspection(
                 base=base,
                 account=account,
             )

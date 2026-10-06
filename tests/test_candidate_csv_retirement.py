@@ -12,6 +12,17 @@ LEGACY_METADATA_CLASSIFIERS = {
     ROOT / "src" / "application" / "candidate_evidence_history.py",
     ROOT / "src" / "application" / "research" / "archive.py",
 }
+LEGACY_STATUS_VERSION_BOUNDARIES = LEGACY_METADATA_CLASSIFIERS | {
+    ROOT / "src" / "application" / "candidate_snapshot_contract.py",
+    ROOT / "src" / "application" / "candidate_snapshot_manifest.py",
+    ROOT / "src" / "application" / "strategy_scan_status.py",
+}
+RETIRED_CANDIDATE_WRITER_NAMES = (
+    "publish_candidate_snapshot_manifest_v3",
+    "publish_strategy_scan_status_index_v2",
+    "publish_strategy_scan_status_index_v4",
+    "seal_experience_candidate_bundle",
+)
 RETIRED_CANDIDATE_CSV_FRAGMENTS = (
     "_candidates.csv", "_candidates_labeled.csv", "_candidates_reject_log.csv", "_reject_log.csv",
     "_pair_diagnostics.csv", "_rank_shadow.csv", "_put_universe.csv", "_put_universe_labeled.csv",
@@ -154,9 +165,35 @@ def test_allow_stale_config_cannot_revive_removed_combo_output_mode() -> None:
         validate_resolved_watchlist_item_runtime_config(resolved)
 
 
-def test_v1_strategy_status_name_exists_only_in_history_classifiers() -> None:
+def test_v1_strategy_status_name_exists_only_in_history_or_rejection_boundaries() -> None:
     matches = []
     for path in (ROOT / "src" / "application").rglob("*.py"):
         if "strategy_scan_status_index.v1" in path.read_text(encoding="utf-8"):
             matches.append(path)
-    assert set(matches) == LEGACY_METADATA_CLASSIFIERS
+    assert set(matches) == LEGACY_STATUS_VERSION_BOUNDARIES
+
+
+def test_retired_candidate_writers_are_absent_from_production() -> None:
+    violations: list[str] = []
+    for path in _production_python_files():
+        text = path.read_text(encoding="utf-8")
+        for name in RETIRED_CANDIDATE_WRITER_NAMES:
+            if name in text:
+                violations.append(f"{path.relative_to(ROOT)}: {name}")
+    assert violations == []
+
+
+def test_candidate_producers_do_not_delete_versioned_artifacts() -> None:
+    producer_paths = (
+        ROOT / "src" / "application" / "candidate_snapshot_manifest.py",
+        ROOT / "src" / "application" / "strategy_scan_status.py",
+        ROOT / "src" / "application" / "opening_candidate_snapshot.py",
+        ROOT / "src" / "application" / "combo_yield_candidate_snapshot.py",
+        ROOT / "src" / "application" / "cc_lp_candidate_snapshot.py",
+        ROOT / "src" / "application" / "experience_candidate_snapshot.py",
+        ROOT / "src" / "application" / "wheel" / "candidate_snapshot.py",
+    )
+    for path in producer_paths:
+        text = path.read_text(encoding="utf-8")
+        assert ".unlink(" not in text, path.relative_to(ROOT)
+        assert "os.remove(" not in text, path.relative_to(ROOT)

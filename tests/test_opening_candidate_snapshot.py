@@ -34,7 +34,7 @@ from src.application.candidate_snapshot_manifest import (
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
 
 
@@ -167,6 +167,7 @@ def _seal_snapshot(
         dependencies=_dependencies(base, run_id, account),
         scan_statuses=scan_statuses,
         final_candidates=final_candidates,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at=NOW,
         **extra,
     )
@@ -275,12 +276,13 @@ def _publish_opening_manifest(base: Path, payload: dict) -> dict:
                 "account_config_sha256": str(payload["account_config_sha256"]),
             }
         )
-    publish_strategy_scan_status_index_v2(
+    publish_strategy_scan_status_index(
         report_dir=account_dir,
         run_id=str(payload["run_id"]),
         account=str(payload["account"]),
         account_config_sha256=str(payload["account_config_sha256"]),
         expected=expected,
+        run_mode={"scan_mode": "standard", "executable": True},
     )
     return publish_candidate_snapshot_manifest(
         base=base,

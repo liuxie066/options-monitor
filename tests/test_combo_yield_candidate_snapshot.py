@@ -116,6 +116,7 @@ def _seal(
         "market": "us",
         "account_config_sha256": "a" * 64,
         "strategy_policy_sha256": "b" * 64,
+        "run_mode": {"scan_mode": "standard", "executable": True},
         "dependencies": _dependencies(),
         "scan_statuses": [
             _scope(
@@ -135,7 +136,7 @@ def _seal(
 def test_combo_yield_snapshot_seals_full_evidence_and_loads(tmp_path: Path) -> None:
     payload = _seal(tmp_path)
 
-    assert payload["schema_version"] == "combo_yield_candidate_snapshot.v2"
+    assert payload["schema_version"] == "combo_yield_candidate_snapshot.v4"
     assert payload["candidate_owner"] == "sp_lc"
     assert payload["opening_status"] == "candidates_found"
     assert payload["pair_evaluations"][0]["eligibility_status"] == "eligible"
@@ -155,6 +156,22 @@ def test_combo_yield_snapshot_empty_result_seals_no_candidate(tmp_path: Path) ->
 
     assert payload["opening_status"] == "no_candidate"
     assert payload["ranked_pairs"] == []
+
+
+def test_current_owner_rejects_legacy_run_before_writing(tmp_path: Path) -> None:
+    state_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "state"
+    state_dir.mkdir(parents=True)
+    legacy = state_dir / "candidate_snapshot_manifest.v1.json"
+    legacy.write_bytes(b"legacy-manifest-bytes")
+
+    with pytest.raises(
+        ComboYieldCandidateSnapshotError,
+        match="conflicts or cannot be published",
+    ):
+        _seal(tmp_path)
+
+    assert legacy.read_bytes() == b"legacy-manifest-bytes"
+    assert not (state_dir / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE).exists()
 
 
 def test_combo_snapshot_derives_pair_from_legs_and_preserves_real_group(tmp_path: Path) -> None:

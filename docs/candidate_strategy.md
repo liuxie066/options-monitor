@@ -525,12 +525,47 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - CSP / CC 的计算、硬筛和排序由 Candidate Engine 唯一所有；
 - 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
-- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，并由最后发布的
-  `candidate_snapshot_manifest.v1` 绑定完整 owner/scope；Agent 和 Daily Brief 只通过
+- 每个账户/run 封存不可变 `opening_candidate_snapshot.v3`，并由最后发布的
+  `candidate_snapshot_manifest.v4` 绑定完整 owner/scope；Agent 和 Daily Brief 只通过
   terminal manifest gate 读取同一封存事实，不会挽救未完成运行中的单个 owner；
 - yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV 权威路径和重复候选
   artifact 已退出当前开仓路径；JSONL 只保留为当前决策追踪证据，历史候选文件只在
   research/archive/shadow 的受限元数据分类边界中识别且不再解析。
+
+当前标准扫描只写一套可执行合同：
+
+| 角色 | 当前 schema / 文件 |
+|---|---|
+| 单范围终态 | `strategy_scan_status.v3` / `*_scan_status.v3.json` |
+| 账户终态索引 | `strategy_scan_status_index.v5` / `strategy_scan_status_index.v5.json` |
+| Opening owner | `opening_candidate_snapshot.v3` / `opening_candidate_snapshot.json` |
+| Combo Yield owner | `combo_yield_candidate_snapshot.v4` / `combo_yield_candidate_snapshot.json` |
+| CC+LP owner | `cc_lp_candidate_snapshot.v4` / `cc_lp_candidate_snapshot.json` |
+| Wheel owner | `wheel_candidate_snapshot.v3` / `wheel_candidate_snapshot.v3.json` |
+| 账户终态提交 | `candidate_snapshot_manifest.v4` / `candidate_snapshot_manifest.v4.json` |
+
+`scan_mode`、`executable` 和 Wheel `direction` 都是已校验的数据字段，不再靠选择旧文件名
+表达运行分支。标准扫描依赖集合固定为 `required_data`、`portfolio`、`ledger`、`fx`、
+`earnings_rv`。体验扫描使用独立的非执行合同，只允许 `required_data`、`fx`、
+`earnings_rv`，且必须是 `scan_mode=experience`、`executable=false`，不得携带真实账户
+authority。
+
+```mermaid
+flowchart LR
+  S["per-scope status v3"] --> I["status index v5"]
+  D["sealed dependencies"] --> O["current owner snapshots"]
+  I --> O
+  I --> M["manifest v4"]
+  O --> M
+  M --> C["Daily Brief / runtime / Agent current consumers"]
+  H["v1 / v3 historical manifests"] --> A["candidate_evidence_history inspection adapter"]
+  A --> R["Research / explicit replay"]
+```
+
+当前消费者遇到 v1/v3/v4 混存、旧索引、旧 Wheel 文件或封存后的额外候选文件时直接
+失败。v1、v3 正式历史 bundle 只由 `candidate_evidence_history` 在显式 inspection/replay
+入口读取并标为受限历史证据；当前执行路径、Daily Brief 和新 runtime assembly 不协商旧
+版本，也不重写或删除历史 artifact。
 
 发布记录只证明源码和产物已交付。受控远程升级是独立授权边界；在完成升级和运行时
 验证前，不得宣称目标环境已按本合同运行。
@@ -550,7 +585,7 @@ CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp
 - 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
 - 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；
 - 排序：保留率主键，次键反转腿 delta 趋近 0.12，再 spread/OI；
-- 候选写入独立 `cc_lp_candidate_snapshot.v1`，Daily Brief 加载快照到数据源（不渲染）；
+- 候选写入独立 `cc_lp_candidate_snapshot.v4`，Daily Brief 加载快照到数据源（不渲染）；
 - 当前不启用（`combo_yield.variant` 默认 `sp_lc`），启用由运行时配置决定。
 
 ## 14. 排序键的有限数值契约

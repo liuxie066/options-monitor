@@ -145,7 +145,7 @@ def _run_default_capture(
     def _fake_pipeline(**kwargs: Any) -> list[dict[str, Any]]:
         from src.application.strategy_scan_status import (
             publish_strategy_scan_status,
-            publish_strategy_scan_status_index_v2,
+            publish_strategy_scan_status_index,
         )
 
         selected_pairs = [dict(item) for item in (pairs or [])]
@@ -252,12 +252,13 @@ def _run_default_capture(
                 status="failed",
                 reason="strategy_scan_status_missing",
             )
-        publish_strategy_scan_status_index_v2(
+        publish_strategy_scan_status_index(
             report_dir=report_dir,
             run_id=RUN_ID,
             account="lx",
             account_config_sha256=ACCOUNT_CONFIG_SHA256,
             expected=expected,
+            run_mode={"scan_mode": "standard", "executable": True},
         )
 
         evidence_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -423,9 +424,9 @@ def _run_wheel_scan_failure_capture(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
     from src.application import pipeline_watchlist as mod
     from src.application.strategy_scan_status import (
-        load_strategy_scan_status_index_v4,
+        load_strategy_scan_status_index,
         publish_strategy_scan_status,
-        publish_strategy_scan_status_index_v2,
+        publish_strategy_scan_status_index,
     )
     from src.application.wheel.candidate_snapshot import (
         load_wheel_candidate_snapshot,
@@ -521,12 +522,13 @@ def _run_wheel_scan_failure_capture(
                     "account_config_sha256": ACCOUNT_CONFIG_SHA256,
                 }
             )
-        publish_strategy_scan_status_index_v2(
+        publish_strategy_scan_status_index(
             report_dir=report_dir,
             run_id=RUN_ID,
             account="lx",
             account_config_sha256=ACCOUNT_CONFIG_SHA256,
             expected=expected,
+            run_mode={"scan_mode": "standard", "executable": True},
         )
         candidates = [
             {
@@ -636,8 +638,8 @@ def _run_wheel_scan_failure_capture(
         run_id=RUN_ID,
         account="lx",
     )
-    status_index = load_strategy_scan_status_index_v4(
-        report_dir / "strategy_scan_status_index.v4.json",
+    status_index = load_strategy_scan_status_index(
+        report_dir / "strategy_scan_status_index.v5.json",
         expected_run_id=RUN_ID,
         expected_account="lx",
         expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
@@ -1178,8 +1180,8 @@ def test_full_capture_preserves_unheld_covered_call_scope(
         load_opening_candidate_snapshot,
     )
     from src.application.strategy_scan_status import (
-        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-        load_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
+        load_strategy_scan_status_index,
     )
 
     observed = _run_full_symbol_capture(
@@ -1197,8 +1199,8 @@ def test_full_capture_preserves_unheld_covered_call_scope(
     assert observed["opening_scans"] == []
     assert observed["required_data"] == []
     account_dir = _account_dir(tmp_path)
-    status_index = load_strategy_scan_status_index_v2(
-        account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    status_index = load_strategy_scan_status_index(
+        account_dir / STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
         expected_run_id=RUN_ID,
         expected_account="lx",
         expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
@@ -1255,8 +1257,8 @@ def test_candidate_csv_retirement_account_run_matrix(
         load_candidate_snapshot_bundle,
     )
     from src.application.strategy_scan_status import (
-        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-        load_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
+        load_strategy_scan_status_index,
     )
 
     observed = _run_full_symbol_capture(
@@ -1298,8 +1300,8 @@ def test_candidate_csv_retirement_account_run_matrix(
     expected_owners = [] if scenario == "disabled" else sorted(["opening", variant])
     assert sorted(bundle["owners"]) == expected_owners
 
-    status_index = load_strategy_scan_status_index_v2(
-        account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    status_index = load_strategy_scan_status_index(
+        account_dir / STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
         expected_run_id=RUN_ID,
         expected_account="lx",
         expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
@@ -1340,8 +1342,8 @@ def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
     )
     from src.application import sell_put_call_helper
     from src.application.strategy_scan_status import (
-        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-        load_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
+        load_strategy_scan_status_index,
     )
 
     pair_metrics_calls: list[str] = []
@@ -1362,8 +1364,8 @@ def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
     )
     assert pair_metrics_calls == ["called"]
     account_dir = _account_dir(tmp_path)
-    status_index = load_strategy_scan_status_index_v2(
-        account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    status_index = load_strategy_scan_status_index(
+        account_dir / STRATEGY_SCAN_STATUS_INDEX_V5_FILE,
         expected_run_id=RUN_ID,
         expected_account="lx",
         expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
@@ -1716,7 +1718,7 @@ def test_default_pipeline_enforces_combo_capture_contract(
             )
 
         assert not _state_path(
-            tmp_path, "candidate_snapshot_manifest.v1.json"
+            tmp_path, "candidate_snapshot_manifest.v4.json"
         ).exists()
         return
 

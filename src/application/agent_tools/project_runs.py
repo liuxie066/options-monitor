@@ -12,15 +12,33 @@ from typing import Any, Callable
 
 from src.application.agent_tools.project_reader import ProjectReaderError, list_names, read_bytes
 from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
     CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
     CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
     validate_candidate_snapshot_bundle_bytes,
     validate_candidate_snapshot_manifest,
 )
+from src.application.candidate_evidence_history import (
+    validate_historical_candidate_snapshot_bundle_bytes,
+)
+from src.application.experience_candidate_snapshot import (
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+)
 from src.application.runtime_paths import RuntimeRootResolution
 
 _MAX_BYTES = 8 * 1024 * 1024
-_MANIFESTS = (CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE, CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE)
+_MANIFESTS = (
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
+)
+_MANIFEST_SCHEMAS = {
+    CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE: "candidate_snapshot_manifest.v1",
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE: "candidate_snapshot_manifest.v2",
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE: "candidate_snapshot_manifest.v3",
+    CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE: "candidate_snapshot_manifest.v4",
+}
 _DIAGNOSTIC_REASONS = {
     "account_config_hash_mismatch": "该次账户配置内容与权威哈希不一致。",
     "prepared_option_context_integrity_failed": "该次预备期权上下文未通过完整性校验。",
@@ -95,7 +113,22 @@ def load_run_bundle(
         manifest_name = present[0]
         files = {"state/" + manifest_name: read(prefix + "/state/" + manifest_name)}
         manifest = json.loads(files["state/" + manifest_name])
-        validate_candidate_snapshot_manifest(manifest, expected_run_id=run_id, expected_account=account)
+        if not isinstance(manifest, dict):
+            raise ProjectReaderError("bundle_invalid")
+        if manifest_name == CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE:
+            validate_candidate_snapshot_manifest(
+                manifest,
+                expected_run_id=run_id,
+                expected_account=account,
+            )
+        elif (
+            manifest.get("schema_version") != _MANIFEST_SCHEMAS[manifest_name]
+            or manifest.get("run_id") != run_id
+            or manifest.get("account") != account
+            or not isinstance(manifest.get("status_index"), dict)
+            or not isinstance(manifest.get("owner_snapshots"), list)
+        ):
+            raise ProjectReaderError("bundle_invalid")
         if not manifest["markets"]:
             raise ProjectReaderError("market_unverifiable")
         if set(manifest["markets"]) - {market.upper()}:
@@ -103,6 +136,9 @@ def load_run_bundle(
         index_name = manifest["status_index"]["relpath"]
         resource_names = [index_name] + [row["relpath"] for row in manifest["owner_snapshots"]]
         for name in resource_names:
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ProjectReaderError("permission_denied")
             files[name] = read(prefix + "/" + name)
         index = json.loads(files[index_name])
         for row in index.get("items", []):
@@ -127,7 +163,12 @@ def load_run_bundle(
                 )):
                     raise ProjectReaderError("permission_denied")
                 dependencies[name] = read(name)
-        bundle = validate_candidate_snapshot_bundle_bytes(
+        validator = (
+            validate_candidate_snapshot_bundle_bytes
+            if manifest_name == CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE
+            else validate_historical_candidate_snapshot_bundle_bytes
+        )
+        bundle = validator(
             manifest_name=manifest_name, files=files, account_names=account_names,
             state_names=state_names, run_id=run_id, account=account,
             dependencies=dependencies, check=check,
