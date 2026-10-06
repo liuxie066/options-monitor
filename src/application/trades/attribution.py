@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+from copy import deepcopy
 import json
 import time
 from pathlib import Path
@@ -729,21 +730,43 @@ def reconcile_trade_attribution_account(
         key=lambda row: row["execution_key"])[:100]
     if not selected or stop_event is not None and stop_event.is_set():
         return {"status": "idle", "checked": 0, "next_cursor": ""}
-    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
-    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
     result = {"checked": 0, "linked": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
+    evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
+    if stop_event is not None and stop_event.is_set():
+        return result
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
+    if stop_event is not None and stop_event.is_set():
+        return result
+    view = None
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():
             break
-        # Reuse one provider observation, but refresh all local competitors after each transaction.
-        rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-        view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=int(time.time() * 1000),
-            combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
+        # Cache rows describe one as-of observation, not a freshness lease. Compare
+        # every fact (including in-place fee updates), not event counts or IDs.
+        fresh = read_trade_attribution_snapshot(repo, account=account, market=market)
+        if stop_event is not None and stop_event.is_set():
+            break
+        if fresh != rows or evidence is None:
+            rows = fresh
+            evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
+                now_ms=int(time.time() * 1000))
+            view = None
+        if stop_event is not None and stop_event.is_set():
+            break
+        if view is None:
+            view = build_trade_attribution_view(rows, config=config, account=account, market=market,
+                now_ms=int(time.time() * 1000), combo_evidence=evidence,
+                capacity_observation=observation, combo_mode=combo_mode)
         current = next((row for row in view["rows"] if row["execution_key"] == selected_fact["execution_key"]), None)
         if current is None:
             continue
+        current = deepcopy(current)
+        if stop_event is not None and stop_event.is_set():
+            break
+        action_attempted = False
         try:
             if current["selected_candidate_id"]:
+                action_attempted = True
                 request_id = "trade-attribution:" + canonical_sha256({"policy": ATTRIBUTION_POLICY_VERSION,
                     "execution": current["execution_key"], "candidate": current["selected_candidate_id"]})
                 applied = apply_trade_attribution(repo, account=account, market=market, config=config,
@@ -756,6 +779,7 @@ def reconcile_trade_attribution_account(
                 current = next(row for row in after_view["rows"] if row["execution_key"] == current["execution_key"])
                 result["linked"] += int(applied["write_applied"])
             elif current["status"] == "conflict" and current["rules_enabled"]:
+                action_attempted = True
                 def record_conflicts(active: Any, conn: Any) -> list[str]:
                     fresh = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
                     check = build_trade_attribution_view(fresh, config=config, account=account, market=market,
@@ -780,6 +804,12 @@ def reconcile_trade_attribution_account(
                 execution_key=current["execution_key"], result=attribution_result_payload(current))
         except Exception as exc:
             result["errors"].append({"execution_key": current["execution_key"], "error": type(exc).__name__})
+        finally:
+            # Writers recheck snapshot/time/hash in their own transaction. Even a
+            # failed attempt may have changed facts; never reuse its old view.
+            if action_attempted:
+                view = None
+                evidence = None
         result["checked"] += 1
         result["next_cursor"] = current["execution_key"]
     if len(selected) < 100 and result["checked"] == len(selected):
