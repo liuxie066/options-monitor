@@ -1320,3 +1320,23 @@ def test_report_reference_requires_confirmed_delivery(monkeypatch, tmp_path: Pat
     for event in events:
         assert event['send_summary']['sent_accounts'] == []
         assert not event.get('report_refs')
+
+
+def test_idle_delivery_only_validates_history_once(monkeypatch, tmp_path):
+    import src.application.daily_decision_brief_repository as repository
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    seed = _request(tmp_path, run_id='completed-before-idle')
+    assert mod.run_tick_notification_flow(seed.request) == 0
+    original = repository._normalize_delivery_state
+    validations = []
+    def counted(*args, **kwargs):
+        validations.append(kwargs['account'])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(repository, '_normalize_delivery_state', counted)
+    idle = _request(tmp_path, run_id='idle-history', delivery_only=True)
+    assert mod.run_tick_notification_flow(idle.request) == 0
+    assert validations == ['lx']
+    assert len(calls) == 1
+    assert idle.completions == [{'status': 'skipped', 'message': 'no_retryable_delivery'}]

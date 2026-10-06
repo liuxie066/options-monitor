@@ -35,7 +35,7 @@ from src.application.ledger.api import (assert_trade_attribution_unclaimed)
 from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.wheel.capacity import trade_attribution_capacity_check
-from src.application.daily_decision_brief_repository import read_combo_candidate_exposures
+from src.application.daily_decision_brief_repository import DailyBriefReadScope, read_combo_candidate_exposures
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -97,6 +97,15 @@ def _multi_wheel_call_attribution(
     return preview
 
 
+def attribution_focus_open_event_id(rows: Mapping[str, Any], *, account: str, execution_key: str) -> str | None:
+    """Resolve only a unique execution; retain all ledger facts for competition."""
+    if not execution_key:
+        return None
+    matches = [row["open_event_id"] for row in trade_attribution_facts_from_events(rows["trade_events"], account=account)
+               if row["execution_key"] == execution_key]
+    return matches[0] if len(matches) == 1 else None
+
+
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
                                     now_ms: int, focus_open_event_id: str | None = None) -> dict[str, Any]:
     preview = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
@@ -104,9 +113,12 @@ def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, ru
     scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]
               if focus_open_event_id is None or item["open_event_id"] == focus_open_event_id}
     exposures, reads = {}, []
+    read_scopes = {}
     for market, market_date in sorted(scopes):
+        if market not in read_scopes:
+            read_scopes[market] = DailyBriefReadScope(base=runtime_root, account=account, market=market)
         result = read_combo_candidate_exposures(base=runtime_root, account=account, market=market,
-                                                market_trading_date=market_date)
+                                                market_trading_date=market_date, read_scope=read_scopes[market])
         reads.append({"market": market, "market_date": market_date, "complete": (
             result.get("available") is True and result.get("complete") is True
             and result.get("delivery_available") is True and result.get("reason") in {None, "ok"}
@@ -640,13 +652,15 @@ def apply_trade_attribution(
 
 
 def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], account: str,
-                                   runtime_root: Path) -> dict[str, Any]:
+                                   runtime_root: Path, execution_key: str = "",
+                                   snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
     observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root)
     market = runtime_config_market(config).lower()
-    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    rows = snapshot if snapshot is not None else read_trade_attribution_snapshot(repo, account=account, market=market)
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
-        now_ms=int(time.time() * 1000), focus_open_event_id=None)
+        now_ms=int(time.time() * 1000),
+        focus_open_event_id=attribution_focus_open_event_id(rows, account=account, execution_key=execution_key))
     return {"config": config, "market": market, "combo_evidence": evidence,
         "capacity_observation": observation, "combo_mode": combo_reconciliation_mode_for_account(config, account=account)}
 
@@ -828,12 +842,14 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
             cursor = state["last_open_event_id"]
         except TradeEventPaginationError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=f"归属分页 cursor 无效或已过期，请重新查询：{exc}") from exc
-    context = (read_trade_attribution_context(repo, config=config, account=account,
-        runtime_root=Path(authority["runtime_root"])) if prepare_confirmation else None)
     snapshot = read_trade_attribution_snapshot(repo, account=account, market=market)
+    context = (read_trade_attribution_context(repo, config=config, account=account,
+        runtime_root=Path(authority["runtime_root"]), execution_key=filters["execution_key"], snapshot=snapshot)
+        if prepare_confirmation else None)
     now = int(time.time() * 1000)
     evidence = context["combo_evidence"] if context else read_attribution_combo_evidence(
-        snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now)
+        snapshot, account=account, runtime_root=Path(authority["runtime_root"]), now_ms=now,
+        focus_open_event_id=attribution_focus_open_event_id(snapshot, account=account, execution_key=filters["execution_key"]))
     view = build_trade_attribution_view(snapshot, config=config, account=account, market=market, now_ms=now, combo_evidence=evidence,
         capacity_observation=context["capacity_observation"] if context else None,
         combo_mode=combo_reconciliation_mode_for_account(config, account=account))

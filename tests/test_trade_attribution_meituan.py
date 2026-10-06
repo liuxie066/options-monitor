@@ -409,3 +409,40 @@ def test_legacy_manual_wheel_confirmation_survives_other_branches(tmp_path, monk
                    target_lot_id=None, target_event_id=proof.event_id, raw_payload={}).to_dict()
     voided = fact([*rows["trade_events"], void])
     assert voided["origin"] is None and voided["status"] == "pending"
+
+
+@pytest.mark.parametrize('prepare', [False, True])
+def test_exact_execution_read_focuses_evidence_with_complete_ledger(tmp_path, monkeypatch, prepare):
+    repo, config, receipt = _meituan_repo(tmp_path)
+    execution = receipt['attribution_result']['execution_key']
+    monkeypatch.setattr(attribution, 'attribution_runtime', lambda **_: (
+        repo, config, {'runtime_root': str(tmp_path)}, {}))
+    monkeypatch.setattr('src.application.wheel.capacity.observe_trade_attribution_capacity', lambda **_: {})
+    monkeypatch.setattr(attribution.time, 'time', lambda: _ms('2026-10-01T00:00:00Z') / 1000)
+    original = attribution.read_attribution_combo_evidence
+    observed = []
+    def evidence(rows, **kwargs):
+        observed.append((len(rows['trade_events']), kwargs.get('focus_open_event_id')))
+        return original(rows, **kwargs)
+    monkeypatch.setattr(attribution, 'read_attribution_combo_evidence', evidence)
+    all_rows, _, _ = attribution.trade_attribution_read({'config_key': 'hk', 'account': 'lx', 'prepare_confirmation': prepare})
+    selected, _, _ = attribution.trade_attribution_read({'config_key': 'hk', 'account': 'lx',
+        'execution_key': execution, 'prepare_confirmation': prepare})
+    assert selected['rows'] == [row for row in all_rows['rows'] if row['execution_key'] == execution]
+    assert observed[0][0] == observed[1][0] and observed[0][1] is None
+    assert observed[1][1] == selected['rows'][0]['open_event_id']
+    unknown, _, _ = attribution.trade_attribution_read({'config_key': 'hk', 'account': 'lx', 'execution_key': 'unknown'})
+    assert unknown['rows'] == []
+    context = attribution.read_trade_attribution_context(repo, config=config, account='lx', runtime_root=tmp_path)
+    assert set(context) == {'config', 'market', 'combo_evidence', 'capacity_observation', 'combo_mode'}
+
+
+def test_ingress_receipt_focuses_known_execution(tmp_path, monkeypatch):
+    original = attribution.read_attribution_combo_evidence
+    focused = []
+    def evidence(rows, **kwargs):
+        focused.append(kwargs.get('focus_open_event_id'))
+        return original(rows, **kwargs)
+    monkeypatch.setattr(attribution, 'read_attribution_combo_evidence', evidence)
+    _repo, _config, receipt = _meituan_repo(tmp_path)
+    assert focused == [receipt['attribution_result']['open_event_id']]

@@ -1257,6 +1257,8 @@ def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
         if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
     }
     current = _digest(payload)
+    if not any(field in source for field in RETIRED_DAILY_BRIEF_FIELDS):
+        return (current,)
     legacy_payload = dict(payload)
     for field in RETIRED_DAILY_BRIEF_FIELDS:
         if field in source:

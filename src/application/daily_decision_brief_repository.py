@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -60,6 +61,26 @@ _RETIRED_AI_MESSAGE_MARKERS = (
 
 class DailyDecisionBriefStateError(RuntimeError):
     """Raised when persisted Daily Decision Brief state is unsafe to infer from."""
+
+
+class DailyBriefReadScope:
+    """One account/market delivery observation for a bounded read operation.
+
+    Create a new scope for every operation. Never carry it across a write or
+    provider attempt; mutable delivery writers always read afresh under lock.
+    """
+
+    def __init__(self, *, base: Path, account: str, market: str) -> None:
+        self._identity = (Path(base).resolve(), _normalize_account(account), _normalize_market(market))
+        self._delivery: dict[str, Any] | None = None
+
+    def delivery_state(self, *, base: Path, account: str, market: str) -> dict[str, Any]:
+        identity = (Path(base).resolve(), _normalize_account(account), _normalize_market(market))
+        if identity != self._identity:
+            raise ValueError("daily brief read scope identity mismatch")
+        if self._delivery is None:
+            self._delivery = read_daily_decision_brief_delivery_state(base=identity[0], account=identity[1], market=identity[2])
+        return deepcopy(self._delivery)
 
 
 def persist_daily_decision_brief_success(
@@ -371,6 +392,7 @@ def read_daily_decision_brief_fixed_recovery(
     account: str,
     market: str,
     market_trading_date: str,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Read the oldest exact fixed-report recovery not superseded by an envelope."""
 
@@ -378,7 +400,6 @@ def read_daily_decision_brief_fixed_recovery(
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     date_norm = _normalize_market_date(market_trading_date)
-    delivery_path = _delivery_path(base_path, account_norm, market_norm)
     recovery_path = _delivery_recovery_path(base_path, account_norm, market_norm)
     raw = _read_json_strict(recovery_path)
     if raw is _MISSING:
@@ -396,16 +417,13 @@ def read_daily_decision_brief_fixed_recovery(
         market=market_norm,
     )
     fixed_reports: Mapping[str, Any] = {}
-    delivery_raw = _read_json_strict(delivery_path)
-    if delivery_raw is not _MISSING:
-        delivery = _normalize_delivery_state(
-            delivery_raw,
-            base=base_path,
-            path=delivery_path,
-            account=account_norm,
-            market=market_norm,
-        )
-        delivery_day = delivery["days"].get(date_norm)
+    delivery_result = read_daily_decision_brief_delivery_state(
+        base=base_path, account=account_norm, market=market_norm, read_scope=read_scope,
+    )
+    if delivery_result.get("reason") == "state_invalid":
+        raise DailyDecisionBriefStateError(delivery_result["error"])
+    if delivery_result.get("available"):
+        delivery_day = delivery_result["state"]["days"].get(date_norm)
         if isinstance(delivery_day, Mapping):
             fixed_reports = delivery_day["fixed_reports"]
     recoveries = state["days"].get(date_norm, {})
@@ -670,8 +688,14 @@ def read_daily_decision_brief_delivery_state(
     account: str,
     market: str,
     bounded: bool = False,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Read and validate only v2 delivery state without writing anything."""
+
+    if read_scope is not None:
+        if bounded:
+            raise ValueError("bounded receipt reads cannot share an unbounded read scope")
+        return read_scope.delivery_state(base=base, account=account, market=market)
 
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -703,11 +727,12 @@ def read_retryable_daily_decision_brief_delivery(
     account: str,
     market: str,
     market_trading_date: str,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Return the next exact pending/ambiguous envelope without mutation."""
 
     date_norm = _normalize_market_date(market_trading_date)
-    result = read_daily_decision_brief_delivery_state(base=base, account=account, market=market)
+    result = read_daily_decision_brief_delivery_state(base=base, account=account, market=market, read_scope=read_scope)
     if not result.get("available"):
         return {**result, "envelope": None}
     day = result["state"]["days"].get(date_norm)
@@ -1156,6 +1181,7 @@ def read_combo_candidate_exposures(
     account: str,
     market: str,
     market_trading_date: str,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Rebuild exact Combo exposure facts from frozen Brief and delivery state."""
 
@@ -1175,6 +1201,7 @@ def read_combo_candidate_exposures(
         base=base_path,
         account=account_norm,
         market=market_norm,
+        read_scope=read_scope,
     )
     delivery_day = (
         (delivery_result.get("state") or {}).get("days", {}).get(date_norm)
@@ -1200,18 +1227,20 @@ def read_combo_candidate_exposures(
     out_by_id: dict[str, dict[str, Any]] = {}
     invalid_revisions: list[int] = []
     for revision in listed["revisions"]:
-        result = read_daily_decision_brief(
-            base=base_path,
+        source_raw: list[Mapping[str, Any]] = []
+        result = _read_brief_result(
+            path=_revision_path(base_path, account_norm, market_norm, date_norm, int(revision)),
             account=account_norm,
             market=market_norm,
             market_trading_date=date_norm,
             revision=int(revision),
+            source_raw=source_raw,
         )
         if not result.get("available"):
             invalid_revisions.append(int(revision))
             continue
         brief = result["brief"]
-        raw_brief = _read_json_strict(result["path"])
+        raw_brief = source_raw[0]
         compatible_digests = set(daily_brief_compatible_digests(raw_brief))
         exposures = derive_combo_candidate_exposures(brief)
         for exposure in exposures:
@@ -1255,6 +1284,7 @@ def _read_brief_result(
     market: str,
     market_trading_date: str | None = None,
     revision: int | None = None,
+    source_raw: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
         raw = _read_json_strict(path)
@@ -1267,6 +1297,8 @@ def _read_brief_result(
             raise DailyDecisionBriefStateError(f"daily brief revision mismatch: {path}")
     except DailyDecisionBriefStateError as exc:
         return {"available": False, "reason": "state_invalid", "error": str(exc), "brief": None, "path": path}
+    if source_raw is not None:
+        source_raw.append(raw)
     return {
         "available": True,
         "reason": "ok",

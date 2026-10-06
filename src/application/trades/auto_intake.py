@@ -723,7 +723,8 @@ def _process_payload(
             current = before_receipt_fn(current) or current
         if isinstance(config, dict) and runtime_root is not None and current.get("action") == "open":
             from src.application.trades.attribution import (
-                read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload)
+                read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload,
+                attribution_focus_open_event_id)
             from src.application.ledger.api import read_trade_attribution_snapshot
             from domain.domain.symbol_identity import symbol_market
             execution = getattr(normalized_deal, "execution_input", None) or {}
@@ -732,12 +733,14 @@ def _process_payload(
             try:
                 rows = read_trade_attribution_snapshot(repo, account=account, market=market)
                 instant = int(time.time() * 1000)
-                evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant)
+                from domain.domain.trade_execution import execution_identity_from_input
+                execution_key = execution_identity_from_input(execution)
+                evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant,
+                    focus_open_event_id=attribution_focus_open_event_id(rows, account=account, execution_key=execution_key))
                 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
                 view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
                     combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(config, account=account))
-                from domain.domain.trade_execution import execution_identity_from_input
-                matched = [row for row in view["rows"] if row["execution_key"] == execution_identity_from_input(execution)]
+                matched = [row for row in view["rows"] if row["execution_key"] == execution_key]
                 if len(matched) == 1:
                     current = {**current, "attribution_result": attribution_result_payload(matched[0])}
             except Exception as exc:

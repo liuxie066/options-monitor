@@ -36,6 +36,7 @@ from src.application.daily_decision_brief_renderer import (
     select_rendered_combo_candidate_rows,
 )
 from src.application.daily_decision_brief_repository import (
+    DailyBriefReadScope,
     classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
     persist_daily_decision_brief_success,
@@ -869,11 +870,13 @@ def _prepare_daily_brief_notification(
                 market_date = _daily_brief_market_date(scheduler)
                 if not market_date:
                     continue
+                read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
                 retry = read_retryable_daily_decision_brief_delivery(
                     base=request.base,
                     account=account,
                     market=market,
                     market_trading_date=market_date,
+                    read_scope=read_scope,
                 )
                 envelope = retry.get("envelope")
                 if not isinstance(envelope, dict):
@@ -884,6 +887,7 @@ def _prepare_daily_brief_notification(
                         market_date=market_date,
                         scheduler=scheduler,
                         daily_limits=daily_limits,
+                        read_scope=read_scope,
                     )
                     envelope = rebuilt.get("envelope")
                     if isinstance(envelope, dict):
@@ -1335,6 +1339,7 @@ def _rebuild_daily_brief_delivery(
     scheduler: dict[str, Any],
     daily_limits: Any,
     fixed_recovery: Mapping[str, Any] | None = None,
+    read_scope: DailyBriefReadScope | None = None,
 ) -> dict[str, Any]:
     """Recreate only the missing envelope from the canonical persisted Brief."""
 
@@ -1348,6 +1353,7 @@ def _rebuild_daily_brief_delivery(
             account=account,
             market=market,
             market_trading_date=market_date,
+            read_scope=read_scope,
         )
     )
     recovering_fixed = bool(recovery_result.get("available"))
@@ -1373,6 +1379,7 @@ def _rebuild_daily_brief_delivery(
         base=request.base,
         account=account,
         market=market,
+        read_scope=read_scope,
     )
     state = delivery_state.get("state") if delivery_state.get("available") else None
     day = state.get("days", {}).get(market_date, {}) if isinstance(state, dict) else {}
