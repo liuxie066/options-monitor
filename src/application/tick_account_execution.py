@@ -1110,22 +1110,71 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             )
         except Exception as exc:
             reason = f"account_execution_exception:{type(exc).__name__}"
-            request.audit_helper.audit(
-                "account_run",
-                "account_execution_exception",
-                run_id=request.run_id,
-                account=acct,
-                status="error",
-                message=str(exc),
-                extra={"exception_type": type(exc).__name__, "isolated": True},
-            )
-            request.runlog.safe_event(
-                "account_run",
-                "error",
-                error_code="ACCOUNT_EXECUTION_EXCEPTION",
-                message=str(exc),
-                data={"account": acct, "exception_type": type(exc).__name__},
-            )
+            metrics = {
+                "run_id": request.run_id,
+                "account": acct,
+                "scheduler_ms": request.scheduler_ms,
+                "pipeline_ms": None,
+                "ran_scan": False,
+                "ran_pipeline": False,
+                "should_notify": False,
+                "meaningful": False,
+                "reason": reason,
+                "typed_reason": reason,
+                "error_code": "ACCOUNT_EXECUTION_EXCEPTION",
+                "error": str(exc),
+            }
+            try:
+                previous = json.loads(
+                    read_account_run_state_bytes_safely(
+                        base=request.base,
+                        run_id=request.run_id,
+                        account=acct,
+                        name="account_metrics.json",
+                    )
+                )
+                if (
+                    isinstance(previous, dict)
+                    and previous.get("run_id") == request.run_id
+                    and previous.get("account") == acct
+                ):
+                    metrics = {**previous, **metrics}
+            except Exception:
+                pass
+            safe_run_path = True
+            try:
+                write_account_run_state_json_safely(
+                    base=request.base,
+                    run_id=request.run_id,
+                    account=acct,
+                    name="account_metrics.json",
+                    payload=metrics,
+                )
+            except Exception:
+                safe_run_path = False
+            if safe_run_path:
+                try:
+                    request.audit_helper.audit(
+                        "account_run",
+                        "account_execution_exception",
+                        run_id=request.run_id,
+                        account=acct,
+                        status="error",
+                        message=str(exc),
+                        extra={"exception_type": type(exc).__name__, "isolated": True},
+                    )
+                except Exception:
+                    pass
+            try:
+                request.runlog.safe_event(
+                    "account_run",
+                    "error",
+                    error_code="ACCOUNT_EXECUTION_EXCEPTION",
+                    message=str(exc),
+                    data={"account": acct, "exception_type": type(exc).__name__},
+                )
+            except Exception:
+                pass
             return AccountRunOutcome(
                 result=AccountResult(
                     account=acct,
@@ -1134,17 +1183,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     decision_reason=reason,
                     notification_text="",
                 ),
-                acct_metrics={
-                    "account": acct,
-                    "scheduler_ms": request.scheduler_ms,
-                    "pipeline_ms": None,
-                    "ran_scan": False,
-                    "ran_pipeline": False,
-                    "should_notify": False,
-                    "meaningful": False,
-                    "reason": reason,
-                    "error": str(exc),
-                },
+                acct_metrics=metrics,
                 prefetch_done=prefetch_done,
                 ran_pipeline=False,
             )
