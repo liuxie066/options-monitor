@@ -41,3 +41,9 @@ OpenD 已自行产生按日期分片的 `.ftlog`/`.logs` 文件。部署侧保�
 仓库提供 `deploy/logrotate/options-monitor.conf.in` 作为普通 runtime `.log` 文件模板。部署时需按 service profile 填入 runtime root 和用户，并安排小时级 logrotate 调用；该模板不处理正在写入的审计段或 OpenD 自身日志。审计写入锁拒绝超过 64 MiB 的单条记录，避免单条记录突破段上限。
 
 新生成的 `service.profile.json` 为各 OpenD service 记录 `host`/`port`。受控升级重启 OpenD 后，服务健康检查用现有 watchdog 子进程对该端点做一次无 `--ensure` 的只读登录态探测，35 秒超时；端点缺失或登录失效均使健康检查失败。同版本升级返回 `already_current`；清理默认 `dry_run`，重复预览不会删除文件。
+
+### 日报准备与无通知扫描终态
+
+runlog 的 `daily_brief_prepare` 记录 `start` 和 `ok`/`error`，`tick_latency` 中同名阶段的 `outcome` 表示准备结果。进程被硬超时终止时可能仅有 start，应结合 wrapper 的超时终态判断，不能将缺少结束记录当作成功。
+
+普通扫描完成但无可发送日报时仍通过统一 finalization 写入账户及共享 last_run、tick metrics/history 和唯一的 `run_end`；`sent=false`，原因是 `no_daily_brief_delivery`。空闲 delivery-only 无待重试内容仍保持只读跳过。执行完成不代表通知已送达，也不改变要求全部请求账户完成的恢复回执条件。

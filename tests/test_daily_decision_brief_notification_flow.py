@@ -1340,3 +1340,58 @@ def test_idle_delivery_only_validates_history_once(monkeypatch, tmp_path):
     assert validations == ['lx']
     assert len(calls) == 1
     assert idle.completions == [{'status': 'skipped', 'message': 'no_retryable_delivery'}]
+
+
+def test_ordinary_empty_scan_has_durable_terminal_and_no_send(monkeypatch, tmp_path):
+    from domain.storage import paths
+    _patch_assembler(monkeypatch, candidate=False)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id='empty-scan-terminal', fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert calls == []
+    assert bundle.request.tick_metrics['sent'] is False
+    assert bundle.request.tick_metrics['reason'] == 'no_daily_brief_delivery'
+    terminal = [e for e in bundle.request.runlog.events if e['step'] == 'run_end']
+    assert len(terminal) == 1 and terminal[0]['status'] == 'ok'
+    assert bundle.request.audit_helper.successes == 1
+    assert bundle.completions == [{'status': 'skipped', 'message': 'no_daily_brief_delivery'}]
+    shared = json.loads((paths.shared_state_dir(tmp_path)/'last_run.json').read_text())
+    account = json.loads((paths.account_state_dir(tmp_path, 'lx')/'last_run.json').read_text())
+    assert shared['sent'] is False and account['sent'] is False
+    # Real persistence, not just a mocked finalizer call.
+    for state_dir in (paths.shared_state_dir(tmp_path), paths.run_state_dir(tmp_path, 'empty-scan-terminal')):
+        metrics = json.loads((state_dir/'tick_metrics.json').read_text())
+        history = json.loads((state_dir/'tick_metrics_history.json').read_text())
+        assert metrics['sent'] is False
+        assert len(history) == 1 and history[0] == metrics
+    assert [e['status'] for e in bundle.request.runlog.events if e['step'] == 'daily_brief_prepare'] == ['start', 'ok']
+
+
+def test_ordinary_empty_scan_exposes_degraded_final_write(monkeypatch, tmp_path):
+    _patch_assembler(monkeypatch, candidate=False)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    monkeypatch.setattr(mod.state_repo, 'write_tick_metrics',
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError('fixture write failure')))
+    bundle = _request(tmp_path, run_id='empty-scan-degraded', fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert calls == []
+    assert len([e for e in bundle.request.runlog.events if e['step'] == 'run_end']) == 1
+    assert any(e['step'] == 'finalize' and e['status'] == 'degraded'
+               and e['data']['action'] == 'write_tick_metrics' for e in bundle.request.runlog.events)
+
+
+@pytest.mark.parametrize('error', [ValueError, KeyboardInterrupt])
+def test_prepare_failure_records_start_error_and_reraises(monkeypatch, tmp_path, error):
+    monkeypatch.setattr(mod, '_prepare_daily_brief_notification',
+                        lambda *_: (_ for _ in ()).throw(error('fixture failure')))
+    bundle = _request(tmp_path, run_id='prepare-failed')
+    with pytest.raises(error):
+        mod.run_tick_notification_flow(bundle.request)
+    stages = [e for e in bundle.request.runlog.events if e['step'] == 'daily_brief_prepare']
+    assert [e['status'] for e in stages] == ['start', 'error']
+    assert stages[-1]['data'] == {'error_type': error.__name__}
+    latency = next(e for e in bundle.request.runlog.events if e['step'] == 'tick_latency')
+    assert latency['data']['outcome'] == 'error'
+    assert bundle.completions == [] and bundle.request.audit_helper.successes == 0

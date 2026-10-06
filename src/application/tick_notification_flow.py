@@ -161,13 +161,22 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         return rc
 
     daily_brief_prepare_started = monotonic()
+    request.runlog.safe_event("daily_brief_prepare", "start")
+    prepare_outcome = "ok"
     try:
         daily_brief_prep = _prepare_daily_brief_notification(request)
+    except BaseException as exc:
+        prepare_outcome = "error"
+        request.runlog.safe_event("daily_brief_prepare", "error", data={"error_type": type(exc).__name__})
+        raise
+    else:
+        request.runlog.safe_event("daily_brief_prepare", "ok")
     finally:
         record_tick_latency(
             runlog=request.runlog,
             stage="daily_brief_prepare",
             started=daily_brief_prepare_started,
+            data={"outcome": prepare_outcome},
         )
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
@@ -300,12 +309,18 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         _run_post_delivery_sidecars_best_effort(request)
         if request.delivery_only:
             request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(
-            status="skipped",
-            message="no_retryable_delivery" if request.delivery_only else "no_daily_brief_delivery",
+            request.audit_helper.guard_mark_success()
+            request.complete_tick_idempotency_fn(status="skipped", message="no_retryable_delivery")
+            return 0
+        return finish_success(
+            lambda: finalize_no_account_notification(
+                base=request.base, run_id=request.run_id, runlog=request.runlog,
+                results=request.results, tick_metrics=request.tick_metrics,
+                no_send=request.no_send, state_repo=state_repo, utc_now_fn=utc_now,
+                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
+                on_success=request.audit_helper.guard_mark_success, reason="no_daily_brief_delivery",
+            ), status="skipped", message="no_daily_brief_delivery",
         )
-        return 0
 
     notify_route = resolve_notification_delivery_route(config=request.base_cfg)
     notif_cfg = notify_route.get("notifications") or {}
