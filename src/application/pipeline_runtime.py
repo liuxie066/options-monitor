@@ -100,11 +100,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-config-base", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--account-config-run-id", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--account-config-account", default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--account-config-compatibility-path",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument("--account-config-sha256", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--experience", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--account-display-name", default=None, help=argparse.SUPPRESS)
@@ -120,7 +115,6 @@ def _load_account_config_authority(
         getattr(args, "account_config_base", None),
         getattr(args, "account_config_run_id", None),
         getattr(args, "account_config_account", None),
-        getattr(args, "account_config_compatibility_path", None),
         getattr(args, "account_config_sha256", None),
     )
     if not any(value is not None for value in raw_values):
@@ -147,7 +141,6 @@ def _load_account_config_authority(
             run_id=str(args.account_config_run_id),
             account=str(args.account_config_account),
             state_path=cfg_path,
-            compatibility_path=Path(str(args.account_config_compatibility_path)),
             account_config_sha256=digest,
             canonical_bytes=canonical_bytes,
         )

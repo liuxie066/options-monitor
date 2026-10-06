@@ -453,7 +453,7 @@ def test_legacy_variant_selects_exact_configured_owner(tmp_path: Path) -> None:
     assert evidence.classification["owner_snapshots"] == [owner]
 
 
-def test_legacy_config_mismatch_is_unsupported_schema(tmp_path: Path) -> None:
+def test_legacy_account_level_config_is_ignored(tmp_path: Path) -> None:
     _write_legacy_combo_bundle(tmp_path)
     compatibility = _account_dir(tmp_path) / "config.override.json"
     compatibility.write_text(
@@ -463,8 +463,7 @@ def test_legacy_config_mismatch_is_unsupported_schema(tmp_path: Path) -> None:
 
     evidence = _classify(tmp_path)
 
-    assert evidence.classification["status"] == UNSUPPORTED_SNAPSHOT_SCHEMA
-    assert evidence.classification["reason_code"] == "legacy_config_authority_invalid"
+    assert evidence.classification["status"] == SUPPORTED_LIMITED_LEGACY_SNAPSHOT
 
 
 def test_csv_only_is_metadata_classified_without_opening_bytes(tmp_path: Path) -> None:

@@ -161,9 +161,8 @@ def _fake_prepare(**kwargs):
     for account, state_dir in kwargs["account_state_dirs"].items():
         authority = kwargs["account_config_authorities"][account]
         assert authority.state_path.is_file()
-        assert authority.compatibility_path.is_file()
         assert authority.state_path.read_bytes() == authority.canonical_bytes
-        assert authority.compatibility_path.read_bytes() == authority.canonical_bytes
+        assert not (authority.state_path.parent.parent / "config.override.json").exists()
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
         context = _portfolio_context(account)
@@ -1264,81 +1263,18 @@ def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(
     ]
 
 
-def test_config_archive_conflict_fails_closed_before_any_account_child(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import tick_account_execution as mod
-    from src.application.tick_run_workspace import account_run_config_paths
-
-    request = _lx_request(tmp_path)
-    historical = (
-        tmp_path
-        / "output_accounts"
-        / "lx"
-        / "state"
-        / "config.override.json"
-    )
-    historical.parent.mkdir(parents=True)
-    historical.write_text("historical\n", encoding="utf-8")
-    state_path, compatibility_path = account_run_config_paths(
-        base=tmp_path,
-        run_id=request.run_id,
-        account="lx",
-    )
-    compatibility_path.parent.mkdir(parents=True, exist_ok=True)
-    compatibility_path.write_text("conflicting archive\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        mod,
-        "prepare_portfolio_contexts",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("prepared worker must not start")
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "prefetch_required_data",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("required-data prefetch must not start")
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "run_one_account",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("pipeline and Close Advice must not start")
-        ),
-    )
-
-    outcome = mod.run_tick_account_execution(request)
-
-    assert outcome.ran_pipeline_accounts == []
-    assert [item.decision_reason for item in outcome.results] == [
-        "account_config_compatibility_conflict"
-    ]
-    assert outcome.account_metrics[0]["error_code"] == (
-        "ACCOUNT_CONFIG_COMPATIBILITY_CONFLICT"
-    )
-    assert state_path.is_file()
-    assert compatibility_path.read_text(encoding="utf-8") == (
-        "conflicting archive\n"
-    )
-    assert historical.read_text(encoding="utf-8") == "historical\n"
-
-
 def test_config_hash_drift_returns_typed_failure_before_pipeline_and_close_advice(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     from src.application import account_run as account_run_mod
     from src.application import tick_account_execution as mod
-    from src.application.tick_run_workspace import account_run_config_paths
+    from src.application.tick_run_workspace import account_run_config_path
 
     request = _lx_request(tmp_path)
 
     def _tamper_after_publication(**_kwargs):
-        state_path, _compatibility_path = account_run_config_paths(
+        state_path = account_run_config_path(
             base=tmp_path,
             run_id=request.run_id,
             account="lx",
@@ -1372,10 +1308,10 @@ def test_config_hash_drift_returns_typed_failure_before_pipeline_and_close_advic
     outcome = mod.run_tick_account_execution(request)
 
     assert [item.decision_reason for item in outcome.results] == [
-        "account_config_artifact_mismatch"
+        "account_config_parent_bytes_mismatch"
     ]
     assert outcome.account_metrics[0]["error_code"] == (
-        "ACCOUNT_CONFIG_ARTIFACT_MISMATCH"
+        "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH"
     )
     assert outcome.ran_pipeline_accounts == []
 
@@ -1551,7 +1487,6 @@ def test_config_drift_isolated_to_one_account_before_shared_prefetch(
         replacement.setdefault("runtime", {})["generation"] = "replacement"
         replacement_bytes = canonical_account_run_config_bytes(replacement)
         authority.state_path.write_bytes(replacement_bytes)
-        authority.compatibility_path.write_bytes(replacement_bytes)
         return prepared
 
     def _prefetch(**kwargs):

@@ -62,7 +62,7 @@ from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
     AccountRunConfigError,
-    account_run_config_paths,
+    account_run_config_path,
     canonical_account_run_config_bytes,
     load_published_account_run_config,
     read_account_run_state_bytes_safely,
@@ -1375,7 +1375,7 @@ def _load_legacy_account_config(
         name=ACCOUNT_RUN_CONFIG_NAME,
     )
     digest = sha256(state_bytes).hexdigest()
-    state_path, compatibility_path = account_run_config_paths(
+    state_path = account_run_config_path(
         base=base,
         run_id=run_id,
         account=account,
@@ -1385,7 +1385,6 @@ def _load_legacy_account_config(
         run_id=run_id,
         account=account,
         state_path=state_path,
-        compatibility_path=compatibility_path,
         account_config_sha256=digest,
         expected_bytes=state_bytes,
     )

@@ -1,7 +1,7 @@
 # 兼容面冻结反馈
 
 - **状态**：当前约束
-- **更新时间**：2026-08-29
+- **更新时间**：2026-10-06
 
 本文冻结仍在使用、但不再承接新功能的兼容入口。冻结不是立即删除：bug、数据正确性、安全、
 幂等和 readback 可以修；新字段、新命令、新策略和新 schema 必须进入 canonical owner。只有退出
@@ -35,8 +35,9 @@
 `preview_notification` 已退出 frozen legacy renderer：它现在只投影持久化 Daily Brief，
 并与 `daily_decision_brief_read` 共用 selector、查询与 renderer owner。
 
-`account_config_compatibility_path` 仍是 account 子进程配置权威链的一部分，不属于冻结兼容面，也不得
-因此新增第二条 account config 文件通道。
+account 子进程配置权威只绑定
+`output_runs/<run_id>/accounts/<account>/state/config.override.json`、其 SHA-256 与父进程保留的 canonical bytes。
+历史 run account 目录下的同名 sibling 文件仅保留原始证据，不读取、不回退，也不得恢复为第二条配置通道。
 
 ## 变更检查
 
