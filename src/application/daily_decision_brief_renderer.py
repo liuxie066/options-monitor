@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from src.application.multi_tick_audit import daily_brief_phase
 from src.application.payload_helpers import parse_utc as _parse_datetime
 
 _DEFAULT_MAX_ACTIONS = 5
@@ -242,6 +243,7 @@ def build_daily_brief_user_view(
     return view
 
 
+@daily_brief_phase("render", operation="render_fixed_report")
 def render_fixed_report(
     brief: Mapping[str, Any],
     *,
@@ -259,6 +261,7 @@ def render_fixed_report(
     return _render_user_view(view, projection="fixed_report")
 
 
+@daily_brief_phase("render", operation="render_fixed_report_card_markdown")
 def render_fixed_report_card_markdown(
     brief: Mapping[str, Any],
     *,
@@ -276,6 +279,7 @@ def render_fixed_report_card_markdown(
     return _render_user_view_card(view, projection="fixed_report")
 
 
+@daily_brief_phase("render", operation="render_candidate_alert")
 def render_candidate_alert(
     brief: Mapping[str, Any],
     candidate_identities: Iterable[str],
@@ -299,6 +303,7 @@ def render_candidate_alert(
     return _render_user_view(view, projection="candidate_alert")
 
 
+@daily_brief_phase("render", operation="render_candidate_alert_card_markdown")
 def render_candidate_alert_card_markdown(
     brief: Mapping[str, Any],
     candidate_identities: Iterable[str],
@@ -348,6 +353,7 @@ def select_rendered_combo_candidate_rows(
     return [dict(item) for item in selected.get("combo_yield") or []]
 
 
+@daily_brief_phase("render", operation="render_fixed_failure")
 def render_fixed_failure(
     failure: Mapping[str, Any],
     *,

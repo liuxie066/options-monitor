@@ -30,6 +30,7 @@ from domain.domain.cash_secured_utils import (
 )
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
+from src.application.multi_tick_audit import daily_brief_phase
 from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
 from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
@@ -121,6 +122,7 @@ def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
         return [], type(exc).__name__
 
 
+@daily_brief_phase("assemble", operation="assemble_daily_decision_brief")
 def assemble_daily_decision_brief(
     *,
     base: Path,
