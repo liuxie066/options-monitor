@@ -22,6 +22,11 @@ from domain.domain.engine.candidate_engine import (
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from domain.domain.symbol_identity import symbol_market
+from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError,
+    assert_current_candidate_artifact_boundary,
+    validate_candidate_run_mode,
+)
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
     read_account_run_state_bytes_safely,
@@ -35,7 +40,7 @@ from src.application.payload_helpers import canonical_json_bytes_lines as _canon
 _required_text = partial(required_text, error=lambda m: OpeningCandidateSnapshotError(m))
 
 
-OPENING_CANDIDATE_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v1"
+OPENING_CANDIDATE_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v3"
 OPENING_CANDIDATE_SNAPSHOT_FILE = "opening_candidate_snapshot.json"
 OPENING_STATUSES = frozenset(
     {
@@ -110,6 +115,7 @@ def seal_opening_candidate_snapshot(
     candidate_evaluations: (
         Mapping[str, Iterable[Mapping[str, Any]]] | None
     ) = None,
+    run_mode: Mapping[str, Any],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run snapshot."""
@@ -119,9 +125,52 @@ def seal_opening_candidate_snapshot(
     market_norm = _market(market)
     account_config_hash = _sha256(account_config_sha256, "account_config_sha256")
     policy_hash = _sha256(strategy_policy_sha256, "strategy_policy_hash")
+    try:
+        mode_fields = validate_candidate_run_mode(run_mode)
+    except CandidateSnapshotContractError as exc:
+        raise OpeningCandidateSnapshotError(str(exc)) from exc
+    status_rows = [dict(item) for item in scan_statuses]
+    if mode_fields["scan_mode"] == "experience":
+        if dict(physical_account or {}):
+            raise OpeningCandidateSnapshotError(
+                "experience candidate snapshot cannot accept physical account authority"
+            )
+        from src.application.experience_candidate_snapshot import (
+            ExperienceCandidateSnapshotError,
+            seal_experience_candidate_owner,
+        )
+
+        selected = [
+            {**dict(row), "strategy_mode": mode, "rank": rank}
+            for mode, rows in final_candidates.items()
+            for rank, row in enumerate(rows, start=1)
+        ]
+        decisions = [
+            {**dict(row), "strategy_mode": mode}
+            for mode, rows in (candidate_evaluations or {}).items()
+            for row in rows
+        ]
+        try:
+            return seal_experience_candidate_owner(
+                base=Path(base),
+                run_id=run_id_norm,
+                account=account_norm,
+                market=market_norm,
+                owner="opening",
+                account_config_sha256=account_config_hash,
+                strategy_policy_sha256=policy_hash,
+                dependencies=dependencies,
+                scan_statuses=status_rows,
+                selected_candidates=selected,
+                evidence={"candidate_decisions": decisions},
+                run_mode=mode_fields,
+                sealed_at=sealed_at,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise OpeningCandidateSnapshotError(str(exc)) from exc
     authority = _physical_account(physical_account, account=account_norm, market=market_norm)
     dependency_rows = _dependencies(dependencies)
-    statuses = _scan_statuses(scan_statuses)
+    statuses = _scan_statuses(status_rows)
     modes = sorted({str(item["strategy_mode"]) for item in statuses})
     if not modes:
         raise OpeningCandidateSnapshotError("opening candidate strategy modes are missing")
@@ -188,6 +237,7 @@ def seal_opening_candidate_snapshot(
         "scope_results": scope_results,
         "candidate_decisions": decisions,
         "ranked_candidates": ranked,
+        **mode_fields,
     }
     payload["content_sha256"] = canonical_sha256(payload)
     validate_opening_candidate_snapshot(
@@ -199,6 +249,17 @@ def seal_opening_candidate_snapshot(
     )
     encoded = _canonical_json_bytes(payload)
     try:
+        account_dir = (
+            Path(base).resolve()
+            / "output_runs"
+            / run_id_norm
+            / "accounts"
+            / account_norm
+        )
+        assert_current_candidate_artifact_boundary(
+            account_dir=account_dir,
+            target=account_dir / "state" / OPENING_CANDIDATE_SNAPSHOT_FILE,
+        )
         write_account_run_state_bytes_once_safely(
             base=Path(base),
             run_id=run_id_norm,
@@ -206,7 +267,7 @@ def seal_opening_candidate_snapshot(
             name=OPENING_CANDIDATE_SNAPSHOT_FILE,
             payload=encoded,
         )
-    except AccountRunConfigError as exc:
+    except (AccountRunConfigError, CandidateSnapshotContractError) as exc:
         raise OpeningCandidateSnapshotError(
             "terminal opening candidate snapshot conflicts or cannot be published"
         ) from exc
@@ -329,6 +390,25 @@ def validate_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError("opening candidate snapshot run mismatch")
     if item.get("account") != expected_account:
         raise OpeningCandidateSnapshotError("opening candidate snapshot account mismatch")
+    try:
+        mode_fields = validate_candidate_run_mode(item)
+    except CandidateSnapshotContractError as exc:
+        raise OpeningCandidateSnapshotError(str(exc)) from exc
+    if mode_fields["scan_mode"] == "experience":
+        from src.application.experience_candidate_snapshot import (
+            ExperienceCandidateSnapshotError,
+            validate_experience_candidate_owner,
+        )
+
+        try:
+            validate_experience_candidate_owner(
+                item,
+                owner="opening",
+                schema=OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise OpeningCandidateSnapshotError(str(exc)) from exc
+        return
     for field in (
         "account_config_sha256",
         "strategy_policy_sha256",

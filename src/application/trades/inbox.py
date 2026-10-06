@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from domain.domain.source_evidence import build_source_evidence
-from domain.domain.trade_execution import execution_source_revision, execution_source_status
+from domain.domain.trade_execution import execution_source_revision, execution_source_status, futu_execution_time
 from domain.domain.trade_account_identity import extract_primary_account_id
 
 from src.application.ledger.api import (
@@ -514,13 +514,13 @@ def _build_trade_source_evidence(
     source_timezone = execution.get("source_timezone") or payload.get("source_timezone")
     if not source_timezone and execution.get("occurred_at_utc"):
         source_timezone = "UTC"
-    if not source_timezone and source_context.get("opend_process") == "FutuOpenD":
-        source_timezone = "Asia/Shanghai"
-    if not source_timezone and payload.get("create_time") is not None and adapter_version in {
-        TRADE_INTAKE_ADAPTER_VERSIONS["push"],
-        TRADE_INTAKE_ADAPTER_VERSIONS["backfill"],
-    }:
-        source_timezone = "Asia/Shanghai"
+    if execution is payload and not payload.get("broker_account_ref") and (
+        source_context.get("opend_process") == "FutuOpenD"
+        or adapter_version in {TRADE_INTAKE_ADAPTER_VERSIONS["push"], TRADE_INTAKE_ADAPTER_VERSIONS["backfill"], TRADE_INTAKE_ADAPTER_VERSIONS["lookup"]}
+    ):
+        time_input = futu_execution_time(payload)
+        original_time = time_input["source_time"]
+        source_timezone = time_input["source_timezone"]
     evidence = build_source_evidence(
         source=source,
         source_id=str(source_id),
@@ -4006,3 +4006,99 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
     if skipped_unlinkable:
         _LOGGER.warning("trade_receipt_account_unlinkable skipped_unlinkable=%d", skipped_unlinkable)
     return result
+
+
+def plan_futu_time_repair(conn: sqlite3.Connection, event_changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Plan current inbox metadata only; historical source receipts are immutable."""
+    from copy import deepcopy
+    from domain.domain.trade_execution import (
+        structured_deal_keys_from_ledger_event, execution_instant_milliseconds,
+        futu_execution_time,
+    )
+    patches = []
+    for stored in conn.execute("SELECT * FROM repair_inbox.trade_inbox ORDER BY inbox_id"):
+        row = dict(stored)
+        source_key = str(row["broker_deal_key"] or "")
+        payload = json.loads(row["payload_json"])
+        if (not source_key and row["economic_payload_hash"] is None and row["status"] == "handled"
+                and row["claim_id"] is None and not payload.get("execution_input")
+                and not any(key in payload for key in ("broker_account_ref", "instrument_ref", "occurred_at_utc"))
+                and payload.get("schema_version") != "trade_execution.v1"):
+            # Historical unbound receipts have no canonical time/hash projection.
+            # Preserve them byte-for-byte; do not infer environment or attribution.
+            continue
+        content = _inbox_execution_content(source_key, payload)
+        def keys_for_scope(value: dict[str, Any], account: str) -> set[str]:
+            return structured_deal_keys_from_ledger_event(
+                {"raw_payload": value, "contract_key": {"account": account, "broker": "futu"}},
+                include_legacy_execution_identity=True,
+            )
+        raw_source = {k: v for k, v in payload.items() if k not in {"execution_input", "execution_id"}}
+        # Push evidence may predate internal-account enrichment. Bind its proven
+        # physical execution to the unique target ledger scope, without editing
+        # or inventing an internal-account label in the source payload.
+        scopes = {change["before_payload"]["contract_key"]["account"] for change in event_changes}
+        candidate_keys = {source_key}
+        for scope in scopes:
+            candidate_keys.update(keys_for_scope(payload, scope))
+            candidate_keys.update(keys_for_scope(raw_source, scope))
+        related = [change for change in event_changes if candidate_keys & structured_deal_keys_from_ledger_event(
+            change["before_payload"], include_legacy_execution_identity=True)]
+        if not related:
+            continue
+        if row["status"] != "handled" or row["claim_id"] is not None:
+            raise ValueError(f"inbox is not quiescent and handled: {row['inbox_id']}")
+        accounts = {change["before_payload"]["contract_key"]["account"] for change in related}
+        if len(accounts) != 1 or any(str(e).startswith("invalid:") for e in content.get("errors", ())):
+            raise ValueError(f"inbox identity conflict: {row['inbox_id']}")
+        actual_account = next(iter(accounts))
+        payload_keys = keys_for_scope(payload, actual_account)
+        raw_keys = keys_for_scope(raw_source, actual_account)
+        nested_account = ((payload.get("execution_input") or {}).get("broker_account_ref") or {}).get("account_label")
+        labels = [payload.get(k) for k in ("internal_account", "account", "account_label")] + [nested_account]
+        if raw_keys != payload_keys or any(str(label).strip().lower() != actual_account for label in labels if label not in (None, "")):
+            raise ValueError(f"inbox raw and normalized identity conflict: {row['inbox_id']}")
+        if source_key not in payload_keys:
+            raise ValueError(f"inbox source key does not match physical execution: {row['inbox_id']}")
+        after_ms = {change["after_trade_time_ms"] for change in related}
+        if len(after_ms) != 1:
+            raise ValueError("split execution proposed times disagree")
+        proposed_ms = next(iter(after_ms))
+        evidence = futu_execution_time(payload)
+        if evidence["errors"] or execution_instant_milliseconds(evidence["occurred_at_utc"]) != proposed_ms:
+            raise ValueError(f"inbox raw time disagrees with ledger evidence: {row['inbox_id']}")
+        updated = deepcopy(payload)
+        if isinstance(updated.get("execution_input"), dict):
+            updated["execution_input"]["occurred_at_utc"] = evidence["occurred_at_utc"]
+            updated["execution_input"]["source_timezone"] = evidence["source_timezone"]
+        revised = _inbox_execution_content(source_key, updated)
+        for receipt in conn.execute("SELECT payload_json FROM repair_inbox.trade_inbox_evidence WHERE inbox_id=?", (row["inbox_id"],)):
+            historical = _inbox_execution_content(source_key, json.loads(receipt[0]))
+            if _economic_values_conflict(historical.get("economic"), revised.get("economic")):
+                raise ValueError(f"historical inbox evidence conflicts with corrected content: {row['inbox_id']}")
+        after = dict(row)
+        after["payload_json"] = json.dumps(updated, ensure_ascii=False, sort_keys=True) if updated != payload else row["payload_json"]
+        after["economic_payload_hash"] = _execution_content_hash(revised)
+        after["payload_version"] += 1
+        after["updated_at_ms"] = related[0]["after_payload"]["raw_payload"]["trade_time_correction_provenance"]["corrected_at_ms"]
+        patches.append({"inbox_id": row["inbox_id"], "before_row": row, "after_row": after})
+    return patches
+
+
+def apply_futu_time_repair(conn: sqlite3.Connection, patches: list[dict[str, Any]], prepared_at_ms: int) -> None:
+    """CAS current inbox rows on the ledger owner's attached transaction."""
+    if not conn.in_transaction:
+        raise ValueError("inbox time correction requires an active transaction")
+    conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+    for patch in patches:
+        before, after = patch["before_row"], patch["after_row"]
+        current = conn.execute("SELECT * FROM repair_inbox.trade_inbox WHERE inbox_id=?", (patch["inbox_id"],)).fetchone()
+        if current is None or dict(current) != before or after["updated_at_ms"] != prepared_at_ms:
+            raise ValueError("inbox time correction CAS conflict")
+        changed = conn.execute("""UPDATE repair_inbox.trade_inbox
+            SET payload_json=?, economic_payload_hash=?, payload_version=?, updated_at_ms=?
+            WHERE inbox_id=? AND payload_version=? AND payload_json=? AND claim_id IS NULL AND status='handled'""",
+            (after["payload_json"], after["economic_payload_hash"], after["payload_version"], prepared_at_ms,
+             patch["inbox_id"], before["payload_version"], before["payload_json"]))
+        if changed.rowcount != 1:
+            raise ValueError("inbox time correction CAS conflict")

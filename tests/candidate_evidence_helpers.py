@@ -19,7 +19,7 @@ from src.application.opening_candidate_snapshot import (
 )
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
-    publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index,
 )
 
 
@@ -203,14 +203,16 @@ def seal_opening_candidate_fixture(
         scan_statuses=scan_statuses,
         final_candidates=final_candidates,
         candidate_evaluations=evaluations,
+        run_mode={"scan_mode": "standard", "executable": True},
         sealed_at=sealed_at,
     )
-    publish_strategy_scan_status_index_v2(
+    publish_strategy_scan_status_index(
         report_dir=account_dir,
         run_id=run_id,
         account=account,
         account_config_sha256=CONFIG_HASH,
         expected=expected,
+        run_mode={"scan_mode": "standard", "executable": True},
     )
     return publish_candidate_snapshot_manifest(
         base=base,

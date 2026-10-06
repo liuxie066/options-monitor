@@ -40,6 +40,7 @@ def test_incomplete_assignment_is_visible_in_brief_without_trade_capacity(tmp_pa
         base=tmp_path, run_id='run-1', account='lx', market='us',
         account_config_sha256='a' * 64, strategy_policy_sha256='b' * 64,
         dependencies=_dependencies(), scope_results=finalized['scope_results'],
+        run_mode={'scan_mode': 'standard', 'executable': True},
         batches=finalized['batches'],
     )
     gaps = []

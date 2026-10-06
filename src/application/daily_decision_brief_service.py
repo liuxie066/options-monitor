@@ -62,6 +62,7 @@ from src.application.cc_lp_candidate_snapshot import (
     validate_cc_lp_candidate_snapshot,
 )
 from src.application.wheel.candidate_snapshot import (
+    WHEEL_CANDIDATE_SNAPSHOT_FILE,
     WheelCandidateSnapshotError,
     validate_wheel_candidate_snapshot,
 )
@@ -1237,22 +1238,14 @@ def _load_wheel_snapshot_family(
                 ),
                 "granted_contracts": int(batch.get("granted_contracts") or 0),
                 "candidate_snapshot_hash": snapshot.get("snapshot_hash"),
-                "_source_path": (
-                    "state/wheel_candidate_snapshot.v2.json"
-                    if snapshot.get("schema_version") == "wheel_candidate_snapshot.v2"
-                    else "state/wheel_candidate_snapshot.json"
-                ),
+                "_source_path": f"state/{WHEEL_CANDIDATE_SNAPSHOT_FILE}",
                 "_source_row": source_row,
             }
         )
     source_artifacts.append(
         {
             "kind": "wheel_candidate_snapshot",
-            "path": (
-                "state/wheel_candidate_snapshot.v2.json"
-                if snapshot.get("schema_version") == "wheel_candidate_snapshot.v2"
-                else "state/wheel_candidate_snapshot.json"
-            ),
+            "path": f"state/{WHEEL_CANDIDATE_SNAPSHOT_FILE}",
             "row_count": len(batch_views),
             "opening_status": snapshot.get("opening_status"),
             "content_sha256": snapshot.get("content_sha256"),

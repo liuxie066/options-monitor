@@ -228,27 +228,30 @@ capacity_source = demo_scenario
 output_runs/<run_id>/accounts/<account>/state/
 ```
 
-不新增体验目录或额外 run ID 规则，但不可在原 schema 内静默增加可选体验字段。旧消费者会忽略
-`executable=false`，存在把演示容量摄取为正式证据的风险。采用同目录、同 owner、显式新版本：
+不新增体验目录或额外 run ID 规则。普通和体验扫描现在写同一套当前 artifact 版本，模式差异由
+manifest、index 和 owner snapshot 中经过校验的 run-mode 字段表达：
 
-| Artifact | 普通模式保持 | 体验模式拟新增 |
-|---|---|---|
-| opening snapshot | `opening_candidate_snapshot.v1` | `opening_candidate_snapshot.v2` |
-| SP+LC snapshot | `combo_yield_candidate_snapshot.v2` | `combo_yield_candidate_snapshot.v3` |
-| CC+LP snapshot | `cc_lp_candidate_snapshot.v2` | `cc_lp_candidate_snapshot.v3` |
-| status index | `strategy_scan_status_index.v2.json` | `strategy_scan_status_index.v3.json` |
-| terminal manifest | `candidate_snapshot_manifest.v1.json` | `candidate_snapshot_manifest.v2.json` |
+| Artifact | 普通与体验共用的当前合同 |
+|---|---|
+| per-scope status | `strategy_scan_status.v3` / `*_scan_status.v3.json` |
+| opening snapshot | `opening_candidate_snapshot.v3` / `opening_candidate_snapshot.json` |
+| SP+LC snapshot | `combo_yield_candidate_snapshot.v4` / `combo_yield_candidate_snapshot.json` |
+| CC+LP snapshot | `cc_lp_candidate_snapshot.v4` / `cc_lp_candidate_snapshot.json` |
+| status index | `strategy_scan_status_index.v5` / `strategy_scan_status_index.v5.json` |
+| terminal manifest | `candidate_snapshot_manifest.v4` / `candidate_snapshot_manifest.v4.json` |
 
 版本合同：
 
-- 体验 owner snapshot、status index 和 manifest 必须同时携带四个体验字段；
+- 体验 owner snapshot、status index 和 manifest 必须同时携带 `scan_mode=experience`、
+  `capacity_source=demo_scenario`、非空 `account_display_name` 和 `executable=false`；
 - `executable` 在体验版本中只能为 `false`；
 - 体验 manifest 发布前校验所有 owner snapshot 的版本、模式和四个字段完全一致；
-- 新读取面可显式识别普通版本与体验版本，不能把缺失 `scan_mode` 猜测成体验模式；
-- 只识别 v1 manifest 的旧读取面不得回退摄取体验 artifact；遇到 v2 manifest 或未知 owner schema
-  时必须按严格校验 fail closed；
+- 当前读取面只接纳 v4 manifest 及其 v5 index/current owner matrix，不能把缺失 `scan_mode` 猜测成
+  体验模式，也不能把 `executable=false` 的证据送入执行路径；
+- 已封存的体验 manifest v2 和旧 owner schema 只经 `candidate_evidence_history` 的显式
+  inspection/replay 边界读取，并保持 non-contributing；混合新旧版本严格 fail closed；
 - content hash、文件 hash、write-once 和 manifest owner binding 继续覆盖新增字段；
-- 普通 REAL / SIMULATE writer 与现有历史读取合同不变。
+- 普通和体验 writer 均不得发布 v1-v3 manifest、v2-v4 index 或旧 owner schema。
 
 ### 8.2 Authority 与依赖
 

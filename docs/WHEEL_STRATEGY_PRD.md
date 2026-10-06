@@ -1010,29 +1010,27 @@ cancel 都在事务内重读全部 reservation，并校验 capacity hash、curre
 继续使用现有账户+标的股票覆盖池。候选推荐本身只在冻结快照内分配展示额度，不形成持久 broker 或
 ledger 预留；只有显式 intent 才持久预留相应股票或现金。
 
-新双向 run 只产一份 sealed `wheel_candidate_snapshot.v2.json`，schema 为
-`wheel_candidate_snapshot.v2`。其 `scope_results` 数据 scope 以 `(symbol, direction)` 唯一，branch
+新双向 run 只产一份 sealed `wheel_candidate_snapshot.v3.json`，schema 为
+`wheel_candidate_snapshot.v3`。其 `scope_results` 数据 scope 以 `(symbol, direction)` 唯一，branch
 batch/claim 以 `(wheel_branch_id, direction)` 唯一，并绑定 projection、policy、required-data、capacity
-allocation、authority/cash/FX hash 和 intent input hash。
+allocation、authority/cash/FX hash、intent input hash，以及 `scan_mode=standard`、`executable=true`。
 
-同一身份贯穿 upstream producer：新 Wheel status 使用 `strategy_scan_status.v2`，文件名
-`<symbol>_wheel_<direction>_scan_status.v2.json`；新 index 使用
-`strategy_scan_status_index.v4.json`/`strategy_scan_status_index.v4`；新 live manifest 使用
-`candidate_snapshot_manifest.v3.json`/`candidate_snapshot_manifest.v3`。四者的 status path、index key、
+同一身份贯穿 upstream producer：当前 Wheel status 使用 `strategy_scan_status.v3`，文件名
+`<symbol>_wheel_<direction>_scan_status.v3.json`；当前 index 使用
+`strategy_scan_status_index.v5.json`/`strategy_scan_status_index.v5`；当前 live manifest 使用
+`candidate_snapshot_manifest.v4.json`/`candidate_snapshot_manifest.v4`。四者的 status path、index key、
 expected rows、manifest owner/schema projection 和 Daily Brief linkage 均使用
-`(symbol, strategy_family=wheel, direction)`。非 Wheel family 不升级其 per-scope identity；现有 experience
-`candidate_snapshot_manifest.v2` 保持原合同，不被本次复用或改写。
+`(symbol, strategy_family=wheel, direction)`。同一 v5/v4 链路同时绑定非 Wheel 的当前 status 和 owner
+schema；Wheel 在体验模式中仍不可用。
 
-新 Wheel writer 只产上述新版本；新 manifest v3/index v4 继续接纳非 Wheel family 的既有 status/snapshot
-schema，只对 Wheel owner 要求 status v2/snapshot v2。新 reader dual-read：合法 legacy live bundle
-`wheel_candidate_snapshot.v1` + `strategy_scan_status.v1` + index v2/v3 + manifest v1 适配为
-`direction=call` 和 legacy branch identity；新 bundle 必须符合 manifest v3 声明的 per-owner version
-matrix。Wheel v1 artifact 出现在新 manifest，或 Wheel v2 artifact 出现在 legacy manifest，均以明确
-`artifact_version_mismatch` fail closed；旧 binary 不要求读取新双向 artifacts。strict manifest、
-archive、candidate evidence history、Agent candidate explain 和 Daily Brief loader 同步更新 owner schema/
-filename matrix 与 content hash 校验，不能覆盖旧 sealed file。一侧 failure/data unavailable 只污染该
-direction scope。Daily Brief 在现有 Wheel 区块区分 Call、Put、pending decision、合法等待和
-data unavailable，不新增 scheduler 或通知通道。
+当前 Wheel writer 只产上述版本；当前 manifest v4/index v5 不接纳旧 status、owner 或 manifest。
+`wheel_candidate_snapshot.v1/v2`、`strategy_scan_status.v1/v2`、index v2-v4 和 manifest v1/v3 只由
+`candidate_evidence_history` 在显式 inspection/replay 边界校验；合法 manifest v1 的 legacy Call 可在
+该边界适配 `direction=call`，不会进入当前执行路径。任意新旧混存都以
+`artifact_version_mismatch` fail closed，旧 sealed file 不覆盖、不重写。strict manifest、archive、
+candidate evidence history、Agent candidate explain 和 Daily Brief loader 使用各自明确的 current 或
+history 边界。一侧 failure/data unavailable 只污染该 direction scope。Daily Brief 在现有 Wheel 区块
+区分 Call、Put、pending decision、合法等待和 data unavailable，不新增 scheduler 或通知通道。
 
 ### 13.7 Owner 和端到端数据流
 
@@ -1048,7 +1046,7 @@ data unavailable，不新增 scheduler 或通知通道。
 | activation descriptor/window readiness | `src/application/agent_tools/runtime_status_impl.py`、`src/application/healthcheck.py` |
 | 两侧扫描、快照和股票/现金 grant | `src/application/wheel/scanning.py`、`src/application/wheel/candidate_snapshot.py`、`src/application/wheel/capacity.py`；唯一 Put 现金 allocator 为 `domain/domain/risk_capacity.py` |
 | 现有 tick、direction-aware status、required-data、manifest 和 Daily Brief 集成 | `src/application/pipeline_watchlist.py`、`src/application/strategy_scan_status.py`、`src/application/required_data_prefetch_planning.py`、`src/application/candidate_snapshot_manifest.py`、`src/application/daily_decision_brief_service.py`、`src/application/daily_decision_brief_renderer.py` |
-| sealed artifact legacy/new dual-read | `src/application/candidate_evidence_history.py`、`src/application/research/archive.py`、`src/application/agent_tools/candidate.py`、`src/application/agent_tools/candidate_filter_impl.py`、`src/application/agent_tools/candidate_rank_impl.py` |
+| sealed artifact current read 与显式 history/replay | `src/application/candidate_evidence_history.py`、`src/application/research/archive.py`、`src/application/agent_tools/candidate.py`、`src/application/agent_tools/candidate_filter_impl.py`、`src/application/agent_tools/candidate_rank_impl.py` |
 | 人工与 Agent facade | `src/interfaces/cli/wheel.py`、`src/application/agent_tools/positions.py` |
 
 权威数据流：
@@ -1170,9 +1168,10 @@ Wheel stock overlap；同一 assignment fact set 按正序、逆序、分事务�
 parent remainder、projection/hash 完全相同；唯一 cash allocator 对 ordinary CSP prior claims、FX 缺失、
 Wheel intents 和历史预算非现金的处理；Call/Put 对称 phase 的 intent/open/close/expire/partial/full/
 unresolved 转移与容量释放；同一账户/标的 Call+Put 在 status 路径/index、snapshot、manifest、Daily Brief
-中无覆盖，一侧 failure/data unavailable 不污染另一侧；legacy sealed bundle dual-read 为 Call、新 bundle
-seal/readback、old/new mixed bundle 精确拒绝、content tamper、experience manifest v2 不变、compatible
-rollback；迟到启用前事件、source void、终态重放、Wheel-disabled 和普通策略输出不变。完成 focused
+中无覆盖，一侧 failure/data unavailable 不污染另一侧；legacy sealed bundle 只经 history/replay 边界
+适配为 Call、当前 v3/v5/v4 bundle seal/readback、old/new mixed bundle 精确拒绝、content tamper、
+experience 非执行且不含 Wheel、compatible rollback；迟到启用前事件、source void、终态重放、
+Wheel-disabled 和普通策略输出不变。完成 focused
 checks 后再按实际改动范围运行 repository analyze、完整测试和文档/敏感产物 guardrail。
 
 ### 13.11 残余风险和发布前核实

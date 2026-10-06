@@ -339,6 +339,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         account_config_sha256=authority.account_config_sha256,
         strategy_policy_sha256=strategy_policy_hash(retained),
         dependencies=_cash_dependencies(tmp_path, "scoped") if direction == "put" else _dependencies(),
+        run_mode={"scan_mode": "standard", "executable": True},
         scope_results=[{"symbol": "NVDA", "direction": direction,
                         "status": "completed", "candidate_count": 1}], batches=[batch],
     )

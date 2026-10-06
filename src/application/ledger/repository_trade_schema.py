@@ -317,9 +317,22 @@ def _trade_event_pagination_guard_definitions_current(conn: sqlite3.Connection) 
     )
 
 
+def ensure_futu_time_repair_audit_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS futu_trade_time_repair_audit (
+        batch_id TEXT PRIMARY KEY, request_json TEXT NOT NULL,
+        input_hash TEXT NOT NULL, plan_json TEXT NOT NULL,
+        receipt_json TEXT NOT NULL, applied_at_ms INTEGER NOT NULL
+    )""")
+    for action in ("UPDATE", "DELETE"):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS trg_futu_time_repair_audit_{action.lower()}
+            BEFORE {action} ON futu_trade_time_repair_audit
+            BEGIN SELECT RAISE(ABORT, 'Futu time repair audit is append-only'); END""")
+
+
 def _publish_trade_event_query_projection_immutable_trigger(
     conn: sqlite3.Connection,
 ) -> None:
+    ensure_futu_time_repair_audit_schema(conn)
     conn.execute("DROP TRIGGER IF EXISTS trg_trade_events_query_projection_immutable")
     conn.execute(
         f"""
@@ -353,7 +366,7 @@ def _publish_trade_event_query_projection_immutable_trigger(
               OR json_extract(NEW.event_json, '$.event_time_ms')
                  IS NOT json_extract(OLD.event_json, '$.event_time_ms')
             )
-            AND NOT (
+            AND NOT COALESCE((
               NEW.trade_time_ms IS NOT OLD.trade_time_ms
               AND json_extract(NEW.event_json, '$.event_time_ms')
                   IS NOT json_extract(OLD.event_json, '$.event_time_ms')
@@ -408,6 +421,16 @@ def _publish_trade_event_query_projection_immutable_trigger(
                   '$.raw_payload.opend_order_evidence.orders'
                 )
               )
+            ), 0)
+            AND NOT EXISTS (
+              SELECT 1 FROM futu_trade_time_repair_audit AS a, json_each(a.plan_json, '$.events') AS e
+              WHERE a.batch_id = json_extract(NEW.event_json, '$.raw_payload.trade_time_correction_provenance.batch_id')
+                AND json_extract(NEW.event_json, '$.raw_payload.trade_time_correction_provenance.schema_version') = 'futu_raw_trade_time_correction.v1'
+                AND json_extract(e.value, '$.event_id') IS OLD.event_id
+                AND json_extract(e.value, '$.before_json') IS OLD.event_json
+                AND json_extract(e.value, '$.after_json') IS NEW.event_json
+                AND json_extract(e.value, '$.before_trade_time_ms') IS OLD.trade_time_ms
+                AND json_extract(e.value, '$.after_trade_time_ms') IS NEW.trade_time_ms
             )
           )
         )
@@ -426,7 +449,7 @@ def _ensure_opend_trade_time_correction_guard(conn: sqlite3.Connection) -> None:
         WHERE type = 'trigger' AND name = 'trg_trade_events_query_projection_immutable'
         """
     ).fetchone()
-    if row is None or _OPEND_TRADE_TIME_CORRECTION_SCHEMA not in str(row["sql"] or ""):
+    if row is None or _OPEND_TRADE_TIME_CORRECTION_SCHEMA not in str(row["sql"] or "") or "futu_raw_trade_time_correction.v1" not in str(row["sql"] or ""):
         _publish_trade_event_query_projection_immutable_trigger(conn)
 
 def _publish_trade_event_pagination_schema(

@@ -153,6 +153,11 @@ def build_daily_brief_user_view(
         if isinstance(item, Mapping)
         and _lower(item.get("reason")) == "opening_candidate_strategy_partial_data"
     ]
+    settlement_reminders = _settlement_pending_reminders(brief)
+    other_partial_data = any(
+        _lower(item.get("reason_code")) != "option_close_settlement_pending"
+        for item in partial_data_gaps
+    )
     for item in evidence_holds:
         symbol = _upper(item.get("symbol")) or "相关标的"
         strategy = _STRATEGY_LABELS.get(
@@ -191,9 +196,13 @@ def build_daily_brief_user_view(
                 "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
                 if evidence_holds
                 else (
-                    "本轮部分数据不可用，候选结果不完整。"
-                    if partial_data_gaps
-                    else "本轮暂无符合条件的候选。"
+                    "本轮有期权平仓待结算，相关开仓容量暂不可用。"
+                    if settlement_reminders and not other_partial_data
+                    else (
+                        "本轮部分数据不可用，候选结果不完整。"
+                        if partial_data_gaps
+                        else "本轮暂无符合条件的候选。"
+                    )
                 )
             )
         ),
@@ -1690,6 +1699,21 @@ def _strategy_failure_reminders(items: list[dict[str, str]]) -> list[str]:
     return reminders
 
 
+def _settlement_pending_reminders(brief: Mapping[str, Any]) -> list[str]:
+    reminders: list[str] = []
+    for item in brief.get("data_gaps") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if "option_close_settlement_pending" not in {
+            _lower(item.get("reason")), _lower(item.get("reason_code")),
+        }:
+            continue
+        symbol = _upper(item.get("symbol")) or "相关标的"
+        family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "策略")
+        reminders.append(f"{symbol} {family}：期权平仓待结算确认，相关开仓容量暂不可用")
+    return list(dict.fromkeys(reminders))
+
+
 def _fixed_report_error_reminders(
     brief: Mapping[str, Any],
     *,
@@ -1698,6 +1722,7 @@ def _fixed_report_error_reminders(
     """Keep the fixed-report reminder surface for confirmed operational errors."""
 
     reminders = _strategy_failure_reminders(strategy_failure_items)
+    reminders.extend(_settlement_pending_reminders(brief))
     fetch_symbols: list[str] = []
     prefetch_error_count = 0
     snapshot_failures: dict[str, list[str]] = {}
@@ -1735,6 +1760,8 @@ def _fixed_report_error_reminders(
             )
             continue
         if reason == "opening_candidate_strategy_partial_data":
+            if _lower(item.get("reason_code")) == "option_close_settlement_pending":
+                continue
             detail = _PARTIAL_DATA_REASON_TEXT.get(
                 _lower(item.get("reason_code"))
             )
@@ -1806,7 +1833,7 @@ def _candidate_empty_summary_for_failures(
 def _strategy_data_gap_reminders(
     brief: Mapping[str, Any],
 ) -> list[str]:
-    reminders: list[str] = []
+    reminders = _settlement_pending_reminders(brief)
     seen: set[tuple[str, str, str]] = set()
     for item in brief.get("data_gaps") or []:
         if not isinstance(item, Mapping):
@@ -1850,6 +1877,8 @@ def _strategy_data_gap_reminders(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
             )
         elif reason == "opening_candidate_strategy_partial_data":
+            if _lower(item.get("reason_code")) == "option_close_settlement_pending":
+                continue
             detail = _PARTIAL_DATA_REASON_TEXT.get(
                 _lower(item.get("reason_code"))
             )

@@ -104,9 +104,9 @@ def scan_blob_refs(run_dir):
     return [refs[key] for key in sorted(refs)], "ready", None
 
 def critical_files(run_dir):
-    candidate_manifests = relative_matches(run_dir, ("candidate_snapshot_manifest.v1.json", "candidate_snapshot_manifest.v2.json", "candidate_snapshot_manifest.v3.json"))
-    candidate_snapshots = relative_matches(run_dir, ("opening_candidate_snapshot.json", "combo_yield_candidate_snapshot.json", "cc_lp_candidate_snapshot.json", "wheel_candidate_snapshot.json", "wheel_candidate_snapshot.v2.json"))
-    candidate_status = relative_matches(run_dir, ("strategy_scan_status_index.v1.json", "strategy_scan_status_index.v2.json", "strategy_scan_status_index.v3.json", "strategy_scan_status_index.v4.json", "*_scan_status.json", "*_wheel_*_scan_status.v2.json"))
+    candidate_manifests = relative_matches(run_dir, ("candidate_snapshot_manifest.v1.json", "candidate_snapshot_manifest.v2.json", "candidate_snapshot_manifest.v3.json", "candidate_snapshot_manifest.v4.json"))
+    candidate_snapshots = relative_matches(run_dir, ("opening_candidate_snapshot.json", "combo_yield_candidate_snapshot.json", "cc_lp_candidate_snapshot.json", "wheel_candidate_snapshot.json", "wheel_candidate_snapshot.v2.json", "wheel_candidate_snapshot.v3.json"))
+    candidate_status = relative_matches(run_dir, ("strategy_scan_status_index.v1.json", "strategy_scan_status_index.v2.json", "strategy_scan_status_index.v3.json", "strategy_scan_status_index.v4.json", "strategy_scan_status_index.v5.json", "*_scan_status.json", "*_scan_status.v2.json", "*_scan_status.v3.json"))
     trace_files = relative_matches(run_dir, ("candidate_filter_trace.jsonl",))
     legacy_candidate_files = relative_matches(run_dir, ("*_candidates.csv", "*_candidates_labeled.csv", "*_candidates_reject_log.csv", "*_reject_log.csv", "*_pair_diagnostics.csv", "*_rank_shadow.csv", "*_put_universe.csv", "*_put_universe_labeled.csv", "*_put_universe_cash_filtered.csv", "*_put_universe_underwritten.csv"))
     state_files = relative_matches(run_dir, ("last_run.json", "tick_metrics.json", "scheduler_decision.json"))
@@ -1194,6 +1194,7 @@ def _critical_files(run_dir: Path) -> dict[str, Any]:
             "candidate_snapshot_manifest.v1.json",
             "candidate_snapshot_manifest.v2.json",
             "candidate_snapshot_manifest.v3.json",
+            "candidate_snapshot_manifest.v4.json",
         ),
     )
     candidate_snapshots = _relative_matches(
@@ -1204,6 +1205,7 @@ def _critical_files(run_dir: Path) -> dict[str, Any]:
             "cc_lp_candidate_snapshot.json",
             "wheel_candidate_snapshot.json",
             "wheel_candidate_snapshot.v2.json",
+            "wheel_candidate_snapshot.v3.json",
         ),
     )
     candidate_status = _relative_matches(
@@ -1213,8 +1215,10 @@ def _critical_files(run_dir: Path) -> dict[str, Any]:
             "strategy_scan_status_index.v2.json",
             "strategy_scan_status_index.v3.json",
             "strategy_scan_status_index.v4.json",
+            "strategy_scan_status_index.v5.json",
             "*_scan_status.json",
             "*_wheel_*_scan_status.v2.json",
+            "*_scan_status.v3.json",
         ),
     )
     trace_files = _relative_matches(run_dir, ("candidate_filter_trace.jsonl",))
