@@ -16,6 +16,7 @@ from domain.domain.daily_decision_brief import (
     daily_brief_digest,
     normalize_daily_decision_brief,
     normalize_persisted_daily_decision_brief,
+    normalize_persisted_daily_decision_brief_with_digests,
     reconcile_daily_decision_brief_evidence,
 )
 from domain.domain.combo_candidate_evidence import (
@@ -51,6 +52,10 @@ _CANDIDATE_IDENTITY_RE = re.compile(
     r"^candidate:v1:(?P<account>[^:]+):(?P<market>[A-Z0-9_-]+):(?P<symbol>[^:]+):"
     r"(?P<family>[^:]+)(?::(?P<branch_id>[^:]+))?$"
 )
+_SuccessfulRevisionSources = dict[
+    tuple[str, str, str, str, int, str],
+    tuple[dict[str, Any], Mapping[str, Any]],
+]
 _MISSING = object()
 _RETIRED_AI_MESSAGE_MARKERS = (
     "AI建议",
@@ -1558,6 +1563,9 @@ def _normalize_delivery_state(
     if not isinstance(raw_days, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief delivery days are invalid: {path}")
 
+    # One normalization observes each immutable source key once. Independent
+    # reads and all writer/readback operations create a fresh map.
+    successful_sources: _SuccessfulRevisionSources = {}
     days: dict[str, Any] = {}
     for raw_date, raw_day in sorted(raw_days.items()):
         try:
@@ -1587,6 +1595,7 @@ def _normalize_delivery_state(
                 market_date=market_date,
                 expected_target=target,
                 expected_candidate=False,
+                successful_sources=successful_sources,
             )
 
         pending: dict[str, Any] = {}
@@ -1650,6 +1659,7 @@ def _normalize_delivery_state(
                 market_trading_date=market_date,
                 revision=alerted_revision,
                 source_digest=alerted_digest,
+                successful_sources=successful_sources,
             )
             if identity not in _candidate_identity_set(source_brief):
                 raise DailyDecisionBriefStateError(
@@ -1675,6 +1685,7 @@ def _normalize_delivery_state(
                 market_date=market_date,
                 expected_target=None,
                 expected_candidate=True,
+                successful_sources=successful_sources,
             )
         history_raw = raw_day.get("candidate_delivery_history", [])
         if not isinstance(history_raw, list):
@@ -1693,6 +1704,7 @@ def _normalize_delivery_state(
                 market_date=market_date,
                 expected_target=None,
                 expected_candidate=True,
+                successful_sources=successful_sources,
             )
             if normalized_envelope["status"] != "confirmed":
                 raise DailyDecisionBriefStateError(
@@ -1740,6 +1752,7 @@ def _normalize_delivery_envelope(
     expected_target: str | None,
     expected_candidate: bool,
     validated_source_raw: list[Mapping[str, Any]] | None = None,
+    successful_sources: _SuccessfulRevisionSources | None = None,
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief delivery envelope is not an object: {path}")
@@ -1829,6 +1842,7 @@ def _normalize_delivery_envelope(
             market_trading_date=market_date,
             revision=revision,
             source_digest=source_digest,
+            successful_sources=successful_sources,
         )
         source_run_id = str(source_brief.get("run_id") or "").strip() or None
         if validated_source_raw is not None:
@@ -2017,6 +2031,7 @@ def _validate_successful_revision_source(
     market_trading_date: str,
     revision: int,
     source_digest: str,
+    successful_sources: _SuccessfulRevisionSources | None = None,
 ) -> dict[str, Any]:
     brief, _ = _read_validated_successful_revision_source(
         base=base,
@@ -2025,6 +2040,7 @@ def _validate_successful_revision_source(
         market_trading_date=market_trading_date,
         revision=revision,
         source_digest=source_digest,
+        successful_sources=successful_sources,
     )
     return brief
 
@@ -2037,16 +2053,31 @@ def _read_validated_successful_revision_source(
     market_trading_date: str,
     revision: int,
     source_digest: str,
+    successful_sources: _SuccessfulRevisionSources | None = None,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    key = (str(base.resolve()), account, market, market_trading_date, revision, source_digest)
+    if successful_sources is not None and key in successful_sources:
+        return successful_sources[key]
     revision_path = _revision_path(base, account, market, market_trading_date, revision)
     raw = _read_json_strict(revision_path)
     if raw is _MISSING:
         raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
-    brief = _normalize_persisted_brief(raw, path=revision_path, account=account, market=market)
+    if not isinstance(raw, Mapping):
+        raise DailyDecisionBriefStateError(f"daily brief state is not an object: {revision_path}")
+    try:
+        brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
+    except (TypeError, ValueError) as exc:
+        raise DailyDecisionBriefStateError(
+            f"daily brief state is incompatible: {revision_path}: {exc}"
+        ) from exc
+    if brief["account"] != account or brief["market"] != market:
+        raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {revision_path}")
     if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
         raise DailyDecisionBriefStateError(f"daily brief delivery revision identity mismatch: {revision_path}")
-    if source_digest not in daily_brief_compatible_digests(raw):
+    if source_digest not in compatible_digests:
         raise DailyDecisionBriefStateError(f"daily brief delivery source digest mismatch: {revision_path}")
+    if successful_sources is not None:
+        successful_sources[key] = (brief, raw)
     return brief, raw
 
 

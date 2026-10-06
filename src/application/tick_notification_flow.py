@@ -973,11 +973,13 @@ def _prepare_daily_brief_notification(
             blocked_retry_classification: str | None = None
             blocked_market_date = _daily_brief_market_date(scheduler)
             if scheduled_trigger and not multi_market and blocked_market_date:
+                read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
                 retry_before_writes = read_retryable_daily_decision_brief_delivery(
                     base=request.base,
                     account=account,
                     market=markets[0],
                     market_trading_date=blocked_market_date,
+                    read_scope=read_scope,
                 )
                 envelope_before_writes = retry_before_writes.get("envelope")
                 if not isinstance(envelope_before_writes, dict):
@@ -986,6 +988,7 @@ def _prepare_daily_brief_notification(
                         account=account,
                         market=markets[0],
                         market_trading_date=blocked_market_date,
+                        read_scope=read_scope,
                     )
                     if fixed_recovery.get("available"):
                         rebuilt = _rebuild_daily_brief_delivery(

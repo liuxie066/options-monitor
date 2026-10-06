@@ -1395,3 +1395,48 @@ def test_prepare_failure_records_start_error_and_reraises(monkeypatch, tmp_path,
     latency = next(e for e in bundle.request.runlog.events if e['step'] == 'tick_latency')
     assert latency['data']['outcome'] == 'error'
     assert bundle.completions == [] and bundle.request.audit_helper.successes == 0
+
+
+def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(monkeypatch, tmp_path):
+    import src.application.daily_decision_brief_repository as repository
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(monkeypatch)
+    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="scope-seed").request) == 0
+    observations = []
+    normalizations = []
+    writes = []
+    original_normalize = repository._normalize_delivery_state
+    original_persist = mod.persist_daily_decision_brief_success
+
+    def normalized(*args, **kwargs):
+        normalizations.append(bool(writes))
+        return original_normalize(*args, **kwargs)
+
+    def persist(**kwargs):
+        writes.append("persist")
+        return original_persist(**kwargs)
+
+    def observe(name):
+        original = getattr(mod, name)
+
+        def read(**kwargs):
+            observations.append((name, kwargs.get("read_scope"), bool(writes)))
+            return original(**kwargs)
+
+        monkeypatch.setattr(mod, name, read)
+
+    observe("read_retryable_daily_decision_brief_delivery")
+    observe("read_daily_decision_brief_fixed_recovery")
+    monkeypatch.setattr(repository, "_normalize_delivery_state", normalized)
+    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
+    mod._prepare_daily_brief_notification(_request(tmp_path, run_id="scope-next").request)
+    prewrite = [item for item in observations if not item[2]]
+    assert [item[0] for item in prewrite] == [
+        "read_retryable_daily_decision_brief_delivery", "read_daily_decision_brief_fixed_recovery",
+    ]
+    assert prewrite[0][1] is not None and prewrite[0][1] is prewrite[1][1]
+    postwrite = [item for item in observations if item[2]]
+    assert postwrite and all(scope is None for _, scope, _ in postwrite)
+    assert normalizations.count(False) == 1
+    assert normalizations.count(True) >= 2

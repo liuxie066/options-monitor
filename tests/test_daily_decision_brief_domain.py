@@ -917,3 +917,33 @@ def test_daily_brief_notification_decision_matrix() -> None:
 
     for inputs, expected in cases:
         assert decide_daily_brief_notification(**inputs)["action"] == expected
+
+
+def test_combined_persisted_normalization_derives_exact_legacy_digest_once(monkeypatch):
+    import hashlib
+    import json
+    import domain.domain.daily_decision_brief as domain
+
+    raw = _brief(revision=0)
+    raw["ai_decision_advice"] = {"opaque": [1, {"different": None}]}
+    expected_brief = normalize_persisted_daily_decision_brief(raw)
+    payload = {key: value for key, value in expected_brief.items()
+               if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}}
+
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+    expected = (digest(payload), digest({**payload, "ai_decision_advice": raw["ai_decision_advice"]}))
+    original = domain.normalize_persisted_daily_decision_brief
+    calls = []
+
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(domain, "normalize_persisted_daily_decision_brief", counted)
+    normalized, digests = domain.normalize_persisted_daily_decision_brief_with_digests(raw)
+    assert normalized == expected_brief
+    assert digests == expected
+    assert calls == [raw]
