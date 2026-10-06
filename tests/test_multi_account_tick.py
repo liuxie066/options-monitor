@@ -541,6 +541,8 @@ def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
     # 兼容旧键 account_max_workers
     assert mod._resolve_account_run_max_workers({"runtime": {"account_max_workers": 2}}, 5) == 2
+    # 两键并存时新键优先
+    assert mod._resolve_account_run_max_workers({"runtime": {"account_max_workers": 1, "multi_account_max_workers": 3}}, 5) == 3
     # 单账户不并行
     assert mod._resolve_account_run_max_workers({"runtime": {}}, 1) == 1
 
