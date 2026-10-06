@@ -299,6 +299,18 @@ def build_trade_attribution_view(
             except (KeyError, TypeError, ValueError):
                 available = None
                 reasons.append("wheel_branch_capacity_unavailable")
+            # Trusted coverage at both times proves this unrelated branch is
+            # already occupied, not an alternative target or competing demand.
+            # Keep unknown evidence, intents and prior single/multi ownership.
+            if (branch["direction"] == "call" and available == 0 and intent is None
+                    and reasons == ["wheel_branch_capacity_exceeded"]
+                    and fact["wheel_branch_id"] != branch_id
+                    and not any(item["wheel_branch_id"] == branch_id
+                                for item in fact.get("wheel_call_allocations") or [])
+                    and all(projection.get("coverage", {}).get("status") == "full"
+                            and lot not in projection.get("active_option_lot_ids", [])
+                            for projection in (prior, branch))):
+                continue
             check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
                 observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=consumed_reservation)
             reasons.extend(check["reason_codes"])
