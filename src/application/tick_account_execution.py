@@ -36,9 +36,6 @@ from src.application.prepared_portfolio_context import (
 )
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsBatch,
-    PreparedOptionPositionsContextError,
-    find_prepared_option_positions_manifest,
-    load_prepared_option_positions_context,
     load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
 )
@@ -48,12 +45,10 @@ from src.application.required_data_prefetch_planning import (
     merge_wheel_requirements_into_prefetch_config,
 )
 from src.application.close_advice_required_data import (
-    CloseAdviceRequiredDataPlanError,
     PLAN_FILE_NAME,
     build_close_advice_required_data_plan,
     enrich_close_advice_required_data_plan_bounded,
     publish_close_advice_required_data_plan,
-    resolve_bound_close_advice_required_data_plan,
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.ledger.api import (
@@ -64,8 +59,6 @@ from src.application.ledger.api import (
 )
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from src.application.required_data_snapshot import (
-    RequiredDataSnapshotError,
-    load_required_data_snapshot_manifest_snapshot,
     retire_required_data_snapshot_shadows,
     seal_required_data_snapshot,
 )
@@ -182,7 +175,6 @@ class TickAccountExecutionRequest:
     run_dir: Path
     shared_required: Path
     accounts_root: Path
-    prefetch_done: bool
     force_mode: bool
     smoke: bool
     no_send: bool
@@ -215,7 +207,6 @@ class TickAccountExecutionOutcome:
     ran_any_pipeline: bool
     ran_pipeline_accounts: list[str]
     scheduled_scan_targets_by_account: dict[str, str | None]
-    prefetch_done: bool
     prefetch_invocation_count: int = 0
     snapshot_status: str | None = None
     snapshot_manifest_sha256: str | None = None
@@ -503,7 +494,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     prepared_contexts: dict[str, dict[str, Any]] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
-    prefetch_done = bool(request.prefetch_done)
+    prefetch_done = False
     prefetch_invocation_count = 0
     snapshot_manifest_sha256: str | None = None
     close_advice_required_data_plan_path: Path | None = None
@@ -540,7 +531,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     extra={"error_type": type(exc).__name__},
                 )
 
-    if scanning_accounts and not request.prefetch_done:
+    if scanning_accounts:
         run_started_at_utc = datetime.now(timezone.utc)
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
         fx_snapshot_sha256 = (
@@ -1040,164 +1031,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 message=str(exc),
                 data={"snapshot_status": snapshot_status},
             )
-    elif scanning_accounts and request.prefetch_done:
-        invalid_recovery_accounts: set[str] = set()
-        for account in list(scanning_accounts):
-            account_key = str(account).strip().lower()
-            config = account_configs[account_key]
-            authority = account_config_authorities[account_key]
-            account_state_dir = run_repo.get_run_account_state_dir(
-                request.base,
-                request.run_id,
-                account_key,
-            )
-            prepared = (
-                account_state_dir / "prepared_portfolio_context.v1.json"
-            ).resolve()
-            prepared_option = find_prepared_option_positions_manifest(
-                base=request.base,
-                run_id=request.run_id,
-                account=account_key,
-            )
-            try:
-                if not prepared.is_file():
-                    raise AccountRunConfigError(
-                        "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                        "prepared portfolio context manifest is unavailable",
-                    )
-                prepared_digest = sha256_bytes(prepared.read_bytes())
-                prepared_context = load_prepared_portfolio_context(
-                    manifest_path=prepared,
-                    expected_base=request.base,
-                    expected_run_id=request.run_id,
-                    expected_account=account_key,
-                    expected_account_config_sha256=(
-                        authority.account_config_sha256
-                    ),
-                    expected_manifest_sha256=prepared_digest,
-                    expected_runtime_config=config,
-                )
-                if not isinstance(prepared_context, dict):
-                    raise AccountRunConfigError(
-                        "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                        "prepared portfolio context is unavailable",
-                    )
-                if prepared_option is None:
-                    raise AccountRunConfigError(
-                        "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
-                        "prepared option context manifest is unavailable",
-                    )
-                prepared_option_digest = sha256_bytes(
-                    prepared_option.read_bytes()
-                )
-                recovered_option_context = load_prepared_option_positions_context(
-                    manifest_path=prepared_option,
-                    expected_base=request.base,
-                    expected_run_id=request.run_id,
-                    expected_account=account_key,
-                    expected_account_config_sha256=(
-                        authority.account_config_sha256
-                    ),
-                    expected_manifest_sha256=prepared_option_digest,
-                    expected_runtime_config=config,
-                )
-                model = recovered_option_context.get("wheel_read_model")
-                wheel_scope_by_account[account_key] = bool(
-                    isinstance(model, Mapping)
-                    and any(
-                        isinstance(batch, Mapping)
-                        and str(batch.get("lifecycle_status") or "") == "active"
-                        for batch in model.get("batches") or []
-                    )
-                )
-            except PreparedPortfolioContextError as exc:
-                account_config_errors[account_key] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                    str(exc),
-                )
-                invalid_recovery_accounts.add(account_key)
-                continue
-            except PreparedOptionPositionsContextError as exc:
-                account_config_errors[account_key] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
-                    str(exc),
-                )
-                invalid_recovery_accounts.add(account_key)
-                continue
-            except OSError as exc:
-                account_config_errors[account_key] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                    f"prepared recovery artifact is unavailable: {exc}",
-                )
-                invalid_recovery_accounts.add(account_key)
-                continue
-            except AccountRunConfigError as exc:
-                account_config_errors[account_key] = exc
-                invalid_recovery_accounts.add(account_key)
-                continue
-            prepared_contexts[account_key] = prepared_context
-            prepared_manifest_paths[account_key] = prepared
-            prepared_manifest_sha256_by_account[account_key] = prepared_digest
-            prepared_option_manifest_paths[account_key] = prepared_option
-            prepared_option_manifest_sha256_by_account[account_key] = (
-                prepared_option_digest
-            )
-
-        if invalid_recovery_accounts:
-            scanning_accounts = [
-                account
-                for account in scanning_accounts
-                if account not in invalid_recovery_accounts
-            ]
-        candidate = (
-            run_repo.get_run_state_dir(request.base, request.run_id)
-            / "required_data_snapshot_manifest.json"
-        ).resolve()
-        try:
-            manifest, _root, manifest_bytes = (
-                load_required_data_snapshot_manifest_snapshot(
-                    manifest_path=candidate,
-                    expected_run_id=request.run_id,
-                    expected_required_data_root=request.shared_required,
-                )
-            )
-            snapshot_manifest_path = candidate
-            snapshot_status = str(manifest["status"])
-            snapshot_manifest_sha256 = sha256_bytes(manifest_bytes)
-            try:
-                resolved_plan = (
-                    resolve_bound_close_advice_required_data_plan(
-                        manifest_path=candidate,
-                        manifest=manifest,
-                        expected_run_id=request.run_id,
-                    )
-                )
-                if resolved_plan is not None:
-                    _plan, close_advice_required_data_plan_path = (
-                        resolved_plan
-                    )
-            except CloseAdviceRequiredDataPlanError as exc:
-                request.audit_helper.audit(
-                    "plan",
-                    "close_advice_required_data_plan_recovery",
-                    run_id=request.run_id,
-                    status="error",
-                    message=str(exc),
-                    extra={"error_type": type(exc).__name__},
-                )
-            if snapshot_status == "failed":
-                barrier_reason = "required_data_snapshot_failed"
-            _retire_required_data_shadows_after_manifest(
-                request=request,
-                manifest_path=candidate,
-                manifest=manifest,
-                manifest_bytes=manifest_bytes,
-                trigger="recovery",
-            )
-        except (OSError, RequiredDataSnapshotError):
-            barrier_reason = "required_data_snapshot_manifest_unavailable"
-            snapshot_status = "unavailable"
-            prefetch_done = False
 
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip().lower()
@@ -1350,10 +1183,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         RuntimePortfolioSnapshotShadowTask
     ] = []
     for outcome in outcomes:
-        prefetch_done = bool(
-            prefetch_done
-            or outcome.prefetch_done
-        )
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
         account = str(outcome.result.account)
         if outcome.ran_pipeline:
@@ -1387,7 +1216,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         ran_any_pipeline=ran_any_pipeline,
         ran_pipeline_accounts=ran_pipeline_accounts,
         scheduled_scan_targets_by_account=scheduled_scan_targets_by_account,
-        prefetch_done=prefetch_done,
         prefetch_invocation_count=prefetch_invocation_count,
         snapshot_status=snapshot_status,
         snapshot_manifest_sha256=snapshot_manifest_sha256,

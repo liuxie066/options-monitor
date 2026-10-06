@@ -734,7 +734,7 @@ Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 
 - Before the single cross-account prefetch, enabled accounts contribute exact active position requirements to `output_runs/<run_id>/state/close_advice_required_data_plan.json`. Disabled accounts are `not_applicable` and are not part of the readiness denominator.
 - Candidate demand owns an already-selected symbol fetch route. A position requirement may join that route only when its resolved source, host, and port match; conflicting or ambiguous requirements become typed `required_data_route_conflict` gaps and never create a second fetch.
-- `required_data_snapshot_manifest.json` binds the requirements-plan path and hashes. Re-entry restores that binding from the manifest instead of rereading the ledger or rebuilding requirements.
+- `required_data_snapshot_manifest.json` binds the requirements-plan path and hashes for the current run.
 - Scheduled Close Advice receives `quote_mode=frozen_snapshot` and may only read sealed required-data bytes and receipts. It performs zero OpenD fallback calls, cache repairs, or required-data writes. Missing coverage is a per-position `not_evaluable` gap; manifest, plan, receipt, or payload integrity failure invalidates the account pipeline and suppresses its normal Daily Brief.
 - Each Close Advice CSV row carries the snapshot-plan, manifest, requirement-plan, route-binding, snapshot, receipt, payload, observation-time, and expiry identifiers needed to trace the decision to its frozen inputs.
 
