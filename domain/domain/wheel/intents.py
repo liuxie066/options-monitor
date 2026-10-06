@@ -18,13 +18,13 @@ from domain.domain.ledger.events import persisted_stock_settlement
 from domain.domain.trade_execution import futu_order_namespace_issue
 from domain.domain.trade_contract_identity import contract_share_quantity
 
-from ._common import (
-    WHEEL_EVENT_SCHEMA_V1,
-    WHEEL_EVENT_SCHEMA_V2,
-    _finite_float,
-    _wheel_market,
+from ._common import _finite_float, _wheel_market
+from .events import (
+    _positive_int,
+    _required_text,
+    build_legacy_wheel_event,
+    build_wheel_event,
 )
-from .events import _positive_int, _required_text, build_wheel_event
 from .projection import (
     _event_type,
     _lot_fields,
@@ -109,7 +109,6 @@ def plan_wheel_branch_decision(
     )[:24]
     return build_wheel_event(
         event_id=f"wheel-branch-decided:{digest}",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
         lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
@@ -171,7 +170,7 @@ def _stock_settlement(event: Mapping[str, Any]) -> dict[str, Any]:
     stock = payload.get("stock_settlement")
     return persisted_stock_settlement(stock)
 
-def wheel_started_event_from_assignment(
+def build_legacy_wheel_started_event_from_assignment(
     terminal_event: Any,
     source_put_lot: Mapping[str, Any],
     *,
@@ -210,9 +209,8 @@ def wheel_started_event_from_assignment(
         "assignment occurred_at_ms",
     )
     lot_id = assigned_stock_lot_id_for_event(event_id)
-    return build_wheel_event(
+    return build_legacy_wheel_event(
         event_id=f"wheel-started:{event_id}",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
         lot_id=lot_id,
         event_type="wheel_started",
@@ -228,7 +226,7 @@ def wheel_started_event_from_assignment(
         },
     )
 
-def wheel_called_away_event_from_call_assignment(
+def build_legacy_wheel_called_away_event_from_call_assignment(
     terminal_event: Any,
     source_call_lot: Mapping[str, Any],
     stock_lot_before: Mapping[str, Any] | None,
@@ -287,9 +285,8 @@ def wheel_called_away_event_from_call_assignment(
         stock.get("event_time_ms") or event.get("event_time_ms"),
         "assignment occurred_at_ms",
     )
-    return build_wheel_event(
+    return build_legacy_wheel_event(
         event_id=f"wheel-called-away:{source_event_id}:{lot_id}",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
         lot_id=lot_id,
         event_type="wheel_called_away",
@@ -331,13 +328,13 @@ def plan_wheel_manual_end(
             "request_id": request,
         }
     )[:24]
-    return build_wheel_event(
+    event_builder = (
+        build_legacy_wheel_event
+        if wheel_batch.get("legacy_call_adapter")
+        else build_wheel_event
+    )
+    return event_builder(
         event_id=f"wheel-manual-ended:{event_digest}",
-        event_schema_version=(
-            WHEEL_EVENT_SCHEMA_V1
-            if wheel_batch.get("legacy_call_adapter")
-            else WHEEL_EVENT_SCHEMA_V2
-        ),
         account=account_value,
         lot_id=lot_id,
         event_type="wheel_manual_ended",
@@ -593,13 +590,13 @@ def _plan_intent_create(
         intent_payload["cash_reservation_currency"] = binding["currency"]
     intent_payload["expires_at_ms"] = expiry
     intent_payload["broker_order_id"] = str(broker_order_id or "").strip() or None
-    return build_wheel_event(
+    event_builder = (
+        build_legacy_wheel_event
+        if call_side and source.get("legacy_call_adapter")
+        else build_wheel_event
+    )
+    return event_builder(
         event_id=f"wheel-{direction}-intent-created:{digest}",
-        event_schema_version=(
-            WHEEL_EVENT_SCHEMA_V1
-            if call_side and source.get("legacy_call_adapter")
-            else WHEEL_EVENT_SCHEMA_V2
-        ),
         account=account,
         wheel_branch_id=None if call_side else intent_owner_id,
         lot_id=(
@@ -753,13 +750,13 @@ def _plan_intent_cancel(
         cancellation_payload["cash_reservation_currency"] = intent_payload.get(
             "cash_reservation_currency"
         )
-    return build_wheel_event(
+    event_builder = (
+        build_legacy_wheel_event
+        if direction == "call" and source.get("legacy_call_adapter")
+        else build_wheel_event
+    )
+    return event_builder(
         event_id=f"wheel-{direction}-intent-cancelled:{digest}",
-        event_schema_version=(
-            WHEEL_EVENT_SCHEMA_V1
-            if direction == "call" and source.get("legacy_call_adapter")
-            else WHEEL_EVENT_SCHEMA_V2
-        ),
         account=account,
         wheel_branch_id=None if direction == "call" else intent_owner_id,
         lot_id=(
@@ -900,13 +897,13 @@ def _plan_intent_consume(
         if direction == "call"
         else _required_text(source.get("wheel_branch_id"), "wheel_branch_id")
     )
-    return build_wheel_event(
+    event_builder = (
+        build_legacy_wheel_event
+        if direction == "call" and source.get("legacy_call_adapter")
+        else build_wheel_event
+    )
+    return event_builder(
         event_id=f"wheel-{direction}-intent-consumed:{intent_id}:{fill_event_id}",
-        event_schema_version=(
-            WHEEL_EVENT_SCHEMA_V1
-            if direction == "call" and source.get("legacy_call_adapter")
-            else WHEEL_EVENT_SCHEMA_V2
-        ),
         account=account,
         wheel_branch_id=None if direction == "call" else intent_owner_id,
         lot_id=(
@@ -947,4 +944,3 @@ def plan_wheel_put_intent_consume(
     return _plan_intent_consume(
         branch, intent, fill, cash_capacity_fact, direction="put", recorded_at_ms=recorded_at_ms,
     )
-

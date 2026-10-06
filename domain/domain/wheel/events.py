@@ -38,9 +38,9 @@ def wheel_event_payload_hash(event: Mapping[str, Any]) -> str:
     payload = event.get("payload")
     if not isinstance(payload, Mapping):
         raise ValueError("wheel event payload must be an object")
-    schema_version = str(
-        event.get("event_schema_version") or WHEEL_EVENT_SCHEMA_V1
-    ).strip()
+    schema_version = str(event.get("event_schema_version") or "").strip()
+    if not schema_version:
+        raise ValueError("wheel event requires event_schema_version")
     if schema_version not in {WHEEL_EVENT_SCHEMA_V1, WHEEL_EVENT_SCHEMA_V2}:
         raise ValueError(f"unsupported wheel event schema: {schema_version}")
     canonical = {
@@ -72,9 +72,9 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
     account = _required_text(event.get("account"), "account")
     if account != account.lower():
         raise ValueError("wheel event account must be lowercase")
-    event_schema_version = str(
-        event.get("event_schema_version") or WHEEL_EVENT_SCHEMA_V1
-    ).strip()
+    event_schema_version = str(event.get("event_schema_version") or "").strip()
+    if not event_schema_version:
+        raise ValueError("wheel event requires event_schema_version")
     if event_schema_version not in {WHEEL_EVENT_SCHEMA_V1, WHEEL_EVENT_SCHEMA_V2}:
         raise ValueError(
             f"unsupported wheel event schema: {event_schema_version}"
@@ -159,13 +159,24 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def build_wheel_event(
+def normalize_persisted_wheel_event(
+    event: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read an event stored before explicit Wheel schema versions."""
+
+    persisted = dict(event)
+    if persisted.get("event_schema_version") in (None, ""):
+        persisted["event_schema_version"] = WHEEL_EVENT_SCHEMA_V1
+    return normalize_wheel_event(persisted)
+
+
+def _build_wheel_event(
     *,
     event_id: str,
     account: str,
     lot_id: str | None,
-    wheel_branch_id: str | None = None,
-    event_schema_version: str = WHEEL_EVENT_SCHEMA_V2,
+    wheel_branch_id: str | None,
+    event_schema_version: str,
     event_type: str,
     occurred_at_ms: int,
     recorded_at_ms: int,
@@ -187,6 +198,66 @@ def build_wheel_event(
             "source_trade_event_id": source_trade_event_id,
             "payload": dict(payload),
         }
+    )
+
+
+def build_wheel_event(
+    *,
+    event_id: str,
+    account: str,
+    lot_id: str | None,
+    wheel_branch_id: str | None = None,
+    event_type: str,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    payload: Mapping[str, Any],
+    intent_id: str | None = None,
+    source_trade_event_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a current Wheel v2 event."""
+
+    return _build_wheel_event(
+        event_id=event_id,
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account,
+        wheel_branch_id=wheel_branch_id,
+        lot_id=lot_id,
+        event_type=event_type,
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        source_trade_event_id=source_trade_event_id,
+        payload=payload,
+    )
+
+
+def build_legacy_wheel_event(
+    *,
+    event_id: str,
+    account: str,
+    lot_id: str,
+    wheel_branch_id: str | None = None,
+    event_type: str,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    payload: Mapping[str, Any],
+    intent_id: str | None = None,
+    source_trade_event_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a v1 continuation for an already historical Call lifecycle."""
+
+    return _build_wheel_event(
+        event_id=event_id,
+        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
+        account=account,
+        wheel_branch_id=wheel_branch_id or lot_id,
+        lot_id=lot_id,
+        event_type=event_type,
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        source_trade_event_id=source_trade_event_id,
+        payload=payload,
     )
 
 
@@ -293,7 +364,6 @@ def build_wheel_branch_created_event(
     }
     return build_wheel_event(
         event_id=f"wheel-branch-created:{source_event_id}:{direction_value}",
-        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account_value,
         wheel_branch_id=branch_id,
         lot_id=stock_lot_value,
