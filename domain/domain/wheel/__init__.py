@@ -39,9 +39,11 @@ from .evaluation import (
 from .events import (
     _positive_int,
     _required_text,
+    build_legacy_wheel_event,
     build_wheel_branch_created_event,
     build_wheel_event,
     deterministic_wheel_branch_id,
+    normalize_persisted_wheel_event,
     normalize_wheel_event,
     wheel_event_payload_hash,
 )
@@ -59,8 +61,8 @@ from .intents import (
     plan_wheel_put_intent_cancel,
     plan_wheel_put_intent_consume,
     plan_wheel_put_intent_create,
-    wheel_called_away_event_from_call_assignment,
-    wheel_started_event_from_assignment,
+    build_legacy_wheel_called_away_event_from_call_assignment,
+    build_legacy_wheel_started_event_from_assignment,
 )
 from .projection import (
     STRATEGY_METADATA_KEYS,
@@ -101,6 +103,9 @@ __all__ = [
     "build_wheel_intent_capacity_binding",
     "build_wheel_call_rank_key",
     "build_wheel_put_rank_key",
+    "build_legacy_wheel_event",
+    "build_legacy_wheel_called_away_event_from_call_assignment",
+    "build_legacy_wheel_started_event_from_assignment",
     "build_wheel_event",
     "build_wheel_branch_created_event",
     "deterministic_wheel_branch_id",
@@ -108,6 +113,7 @@ __all__ = [
     "evaluate_wheel_call_candidate",
     "evaluate_wheel_put_candidate",
     "normalize_wheel_event",
+    "normalize_persisted_wheel_event",
     "plan_wheel_call_intent_cancel",
     "plan_wheel_call_intent_consume",
     "plan_wheel_call_intent_create",
@@ -122,7 +128,5 @@ __all__ = [
     "project_wheel_linkage_candidates",
     "project_wheel_lifecycles",
     "project_wheel_branches",
-    "wheel_called_away_event_from_call_assignment",
     "wheel_event_payload_hash",
-    "wheel_started_event_from_assignment",
 ]

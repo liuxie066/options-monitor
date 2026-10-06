@@ -18,7 +18,11 @@ from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.futu_option_terms import _enrich_option_contract_terms
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.position_snapshot import normalize_position_snapshot_input, position_snapshot_scope_errors
+from domain.domain.position_snapshot import (
+    POSITION_SNAPSHOT_VERSION,
+    normalize_position_snapshot_input,
+    position_snapshot_scope_errors,
+)
 from domain.domain.source_evidence import build_source_evidence
 from domain.domain.symbol_identity import (
     canonical_symbol,
@@ -191,6 +195,7 @@ def build_futu_position_snapshot(
             "source_row": dict(row),
         })
     content = {
+        "schema_version": POSITION_SNAPSHOT_VERSION,
         "source_id": "futu-opend.positions", "broker_account_ref": dict(broker_account_ref),
         "scope": {"markets": markets, "asset_types": asset_types, "filtered": filtered},
         "observed_at_utc": observed_at_utc, "source_as_of_utc": source_as_of_utc,

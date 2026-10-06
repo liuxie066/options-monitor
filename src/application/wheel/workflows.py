@@ -22,8 +22,7 @@ from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
-    WHEEL_EVENT_SCHEMA_V1,
-    WHEEL_EVENT_SCHEMA_V2,
+    build_legacy_wheel_event,
     build_wheel_event,
     plan_wheel_call_intent_cancel,
     plan_wheel_call_intent_create,
@@ -1512,13 +1511,13 @@ def reject_wheel_call_linkage(
                 "request_id": values["request_id"],
             }
         )[:24]
-        event = build_wheel_event(
+        event_builder = (
+            build_legacy_wheel_event
+            if batch.get("legacy_call_adapter")
+            else build_wheel_event
+        )
+        event = event_builder(
             event_id=f"wheel-call-linkage-rejected:{digest}",
-            event_schema_version=(
-                WHEEL_EVENT_SCHEMA_V1
-                if batch.get("legacy_call_adapter")
-                else WHEEL_EVENT_SCHEMA_V2
-            ),
             account=values["account"],
             lot_id=values["stock_lot_id"],
             event_type="wheel_call_linkage_rejected",
@@ -2341,7 +2340,6 @@ def reject_wheel_linkage(
             )[:24]
             event = build_wheel_event(
                 event_id=f"wheel-put-linkage-rejected:{digest}",
-                event_schema_version=WHEEL_EVENT_SCHEMA_V2,
                 account=account_value,
                 lot_id=None,
                 wheel_branch_id=branch_id,

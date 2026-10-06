@@ -56,6 +56,7 @@ from .repository_common import (
     lifecycle_invocation_id_bytes,
     lifecycle_receipt_sha256,
     lifecycle_sha256_bytes,
+    normalize_persisted_wheel_event,
     normalize_wheel_event,
     now_ms,
     option_positions_bootstrap_from_feishu_enabled,

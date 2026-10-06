@@ -391,8 +391,8 @@ def _publish_quote(
         ],
     }
     raw_path, csv_path = save_outputs(root.parent.parent.parent, symbol, payload, output_root=root)
-    publish_required_data_quote_snapshot(
-        runtime_root=(root.parents[2] if canonical_blob else None),
+    receipt_path, _receipt = publish_required_data_quote_snapshot(
+        runtime_root=root.parents[2],
         producer_root=root,
         producer_run_id=run_id,
         symbol=symbol,
@@ -408,6 +408,25 @@ def _publish_quote(
         source_observed_at=observed_at,
         completed_at=observed_at,
     )
+    if not canonical_blob:
+        def make_historical_inline_bundle(bundle: dict) -> None:
+            bundle.pop("scan_blob_ref", None)
+            bundle.update(
+                {
+                    "raw_json_base64": base64.b64encode(
+                        raw_path.read_bytes()
+                    ).decode(),
+                    "required_data_csv_base64": base64.b64encode(
+                        csv_path.read_bytes()
+                    ).decode(),
+                }
+            )
+
+        _rewrite_quote_bundle(
+            root,
+            make_historical_inline_bundle,
+            receipt_path=receipt_path,
+        )
 
 
 def _publish_empty_quote(
@@ -464,6 +483,7 @@ def _publish_empty_quote(
         output_root=root,
     )
     publish_required_data_quote_snapshot(
+        runtime_root=root.parents[2],
         producer_root=root,
         producer_run_id=run_id,
         symbol=symbol,
@@ -525,8 +545,15 @@ def _summary(
     }
 
 
-def _rewrite_quote_bundle(root: Path, update) -> None:
-    receipt_path = next(root.glob("source_receipts/quotes/*/*/*/receipt.json"))
+def _rewrite_quote_bundle(
+    root: Path,
+    update,
+    *,
+    receipt_path: Path | None = None,
+) -> None:
+    receipt_path = receipt_path or next(
+        root.glob("source_receipts/quotes/*/*/*/receipt.json")
+    )
     receipt = json.loads(receipt_path.read_bytes())
     payload_path = root / receipt["payload_relpath"]
     bundle = json.loads(payload_path.read_bytes())

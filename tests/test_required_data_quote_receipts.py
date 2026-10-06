@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -370,7 +369,7 @@ def _publish_quote(
     runtime_root: Path | None = None,
     ) -> tuple[Path, dict[str, object]]:
     return publish_required_data_quote_snapshot(
-    runtime_root=runtime_root,
+    runtime_root=runtime_root or tmp_path,
     producer_root=tmp_path,
     producer_run_id=producer_run_id,
     symbol="NVDA",
@@ -405,8 +404,14 @@ def test_quote_receipt_binds_exact_json_csv_and_fetch_policy(
     validated["payload_path"].write_text("{}\n", encoding="utf-8")
     bundle = json.loads(validated_payload_bytes)
 
-    assert base64.b64decode(bundle["raw_json_base64"]) == raw_path.read_bytes()
-    assert base64.b64decode(bundle["required_data_csv_base64"]) == csv_path.read_bytes()
+    loaded = load_required_data_scan_blob(
+        runtime_root=tmp_path,
+        blob_ref=bundle["scan_blob_ref"],
+    )
+    assert loaded["raw_json_bytes"] == raw_path.read_bytes()
+    assert loaded["required_data_csv_bytes"] == csv_path.read_bytes()
+    assert "raw_json_base64" not in bundle
+    assert "required_data_csv_base64" not in bundle
     assert bundle["fetch_plan"]["symbol"] == "NVDA"
     assert bundle["expected_fetch_contract"] == expected_contract
     assert bundle["fetch_policy"] == _policy()
@@ -970,6 +975,7 @@ def test_exact_receipt_resolution_rejects_mutated_scan_bytes(
     )
 
     exact = resolve_exact_fresh_required_data_quote_receipt(
+        runtime_root=tmp_path,
         producer_root=tmp_path,
         symbol="NVDA",
         now=NOW + timedelta(minutes=10),
@@ -991,6 +997,7 @@ def test_exact_receipt_resolution_rejects_mutated_scan_bytes(
 
     assert (
         resolve_exact_fresh_required_data_quote_receipt(
+            runtime_root=tmp_path,
             producer_root=tmp_path,
             symbol="NVDA",
             now=NOW + timedelta(minutes=10),

@@ -75,7 +75,7 @@ def _repo_with_assignment(
     )
     assignment_event_id = str(result["result"]["event_id"])
     if wheel_start_enabled:
-        from domain.domain.wheel import wheel_started_event_from_assignment
+        from domain.domain.wheel import build_legacy_wheel_started_event_from_assignment
 
         assignment = next(
             row
@@ -89,7 +89,7 @@ def _repo_with_assignment(
         )
         with repo._writer_connection(begin_immediate=True) as conn:  # noqa: SLF001 - explicit legacy Wheel history fixture
             repo.append_wheel_event_once(
-                wheel_started_event_from_assignment(
+                build_legacy_wheel_started_event_from_assignment(
                     assignment,
                     source_put_lot,
                     recorded_at_ms=2_000,

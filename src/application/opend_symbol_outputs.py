@@ -1973,7 +1973,7 @@ def finalize_required_data_quote_candidate(
 
 def publish_required_data_quote_snapshot(
     *,
-    runtime_root: Path | None = None,
+    runtime_root: Path,
     producer_root: Path,
     producer_run_id: str,
     symbol: str,
@@ -2073,29 +2073,19 @@ def publish_required_data_quote_snapshot(
         "raw_json_relpath": raw_relpath,
         "required_data_csv_relpath": csv_relpath,
     }
-    if runtime_root is None:
-        bundle.update(
-            {
-                "raw_json_base64": base64.b64encode(raw_bytes).decode("ascii"),
-                "required_data_csv_base64": base64.b64encode(csv_bytes).decode(
-                    "ascii"
-                ),
-            }
+    try:
+        bundle["scan_blob_ref"] = publish_required_data_scan_blob(
+            runtime_root=Path(runtime_root),
+            symbol=symbol_norm,
+            market=market,
+            raw_json_bytes=raw_bytes,
+            required_data_csv_bytes=csv_bytes,
+            columns=REQUIRED_DATA_COLUMNS,
         )
-    else:
-        try:
-            bundle["scan_blob_ref"] = publish_required_data_scan_blob(
-                runtime_root=Path(runtime_root),
-                symbol=symbol_norm,
-                market=market,
-                raw_json_bytes=raw_bytes,
-                required_data_csv_bytes=csv_bytes,
-                columns=REQUIRED_DATA_COLUMNS,
-            )
-        except RequiredDataBlobError as exc:
-            raise SourceReceiptError(
-                "required-data canonical blob publication failed"
-            ) from exc
+    except RequiredDataBlobError as exc:
+        raise SourceReceiptError(
+            "required-data canonical blob publication failed"
+        ) from exc
     bundle_bytes = (
         json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
@@ -2266,6 +2256,92 @@ def find_fresh_required_data_quote_receipts(
     return {symbol: item[1] for symbol, item in sorted(found.items())}
 
 
+def _resolve_legacy_required_data_quote_snapshot_bytes(
+    *,
+    payload: Mapping[str, Any],
+    raw_path: Path,
+    csv_path: Path,
+) -> tuple[bytes, bytes]:
+    """Read one persisted inline receipt; new publishers cannot enter here."""
+
+    try:
+        captured_raw = base64.b64decode(
+            str(payload.get("raw_json_base64") or ""),
+            validate=True,
+        )
+        captured_csv = base64.b64decode(
+            str(payload.get("required_data_csv_base64") or ""),
+            validate=True,
+        )
+    except (ValueError, TypeError) as exc:
+        raise SourceReceiptError(
+            "legacy required-data receipt inline bytes are invalid"
+        ) from exc
+    if (
+        not raw_path.is_file()
+        or raw_path.is_symlink()
+        or not csv_path.is_file()
+        or csv_path.is_symlink()
+    ):
+        raise SourceReceiptError(
+            "legacy required-data receipt loose files are unavailable"
+        )
+    try:
+        raw_bytes = raw_path.read_bytes()
+        csv_bytes = csv_path.read_bytes()
+    except OSError as exc:
+        raise SourceReceiptError(
+            "legacy required-data receipt loose files are unreadable"
+        ) from exc
+    if captured_raw != raw_bytes or captured_csv != csv_bytes:
+        raise SourceReceiptError(
+            "legacy required-data receipt bytes do not match loose files"
+        )
+    return raw_bytes, csv_bytes
+
+
+def _verify_legacy_required_data_quote_snapshot_shadows(
+    *,
+    payload: Mapping[str, Any],
+    raw_path: Path,
+    csv_path: Path,
+    raw_bytes: bytes,
+    csv_bytes: bytes,
+) -> bool | None:
+    """Verify optional shadows kept by persisted transitional blob receipts."""
+
+    legacy_shadow_match: bool | None = None
+    for field, expected_bytes in (
+        ("raw_json_base64", raw_bytes),
+        ("required_data_csv_base64", csv_bytes),
+    ):
+        if field not in payload:
+            continue
+        if not required_data_shadow_base64_matches(
+            payload.get(field),
+            expected_bytes,
+        ):
+            raise SourceReceiptError(
+                "legacy required-data receipt inline shadow does not match blob"
+            )
+        legacy_shadow_match = True
+    for legacy_path, expected_bytes in (
+        (raw_path, raw_bytes),
+        (csv_path, csv_bytes),
+    ):
+        if not (legacy_path.exists() or legacy_path.is_symlink()):
+            continue
+        if not required_data_shadow_file_matches(
+            legacy_path,
+            expected_bytes,
+        ):
+            raise SourceReceiptError(
+                "legacy required-data receipt loose shadow does not match blob"
+            )
+        legacy_shadow_match = True
+    return legacy_shadow_match
+
+
 def resolve_exact_fresh_required_data_quote_receipt(
     *,
     runtime_root: Path | None = None,
@@ -2394,54 +2470,23 @@ def resolve_exact_fresh_required_data_quote_receipt(
                 raw_bytes = loaded["raw_json_bytes"]
                 csv_bytes = loaded["required_data_csv_bytes"]
                 read_source = "canonical_blob"
-                legacy_shadow_match = None
-                inline_pairs = (
-                    ("raw_json_base64", raw_bytes),
-                    ("required_data_csv_base64", csv_bytes),
+                legacy_shadow_match = (
+                    _verify_legacy_required_data_quote_snapshot_shadows(
+                        payload=payload,
+                        raw_path=raw_path,
+                        csv_path=csv_path,
+                        raw_bytes=raw_bytes,
+                        csv_bytes=csv_bytes,
+                    )
                 )
-                for field, expected_bytes in inline_pairs:
-                    if field not in payload:
-                        continue
-                    if not required_data_shadow_base64_matches(
-                        payload.get(field),
-                        expected_bytes,
-                    ):
-                        return None
-                    legacy_shadow_match = True
-                for legacy_path, expected_bytes in (
-                    (raw_path, raw_bytes),
-                    (csv_path, csv_bytes),
-                ):
-                    if legacy_path.exists() or legacy_path.is_symlink():
-                        if not required_data_shadow_file_matches(
-                            legacy_path,
-                            expected_bytes,
-                        ):
-                            return None
-                        legacy_shadow_match = True
             else:
-                captured_raw = base64.b64decode(
-                    str(payload.get("raw_json_base64") or ""),
-                    validate=True,
+                raw_bytes, csv_bytes = (
+                    _resolve_legacy_required_data_quote_snapshot_bytes(
+                        payload=payload,
+                        raw_path=raw_path,
+                        csv_path=csv_path,
+                    )
                 )
-                captured_csv = base64.b64decode(
-                    str(payload.get("required_data_csv_base64") or ""),
-                    validate=True,
-                )
-                if (
-                    not raw_path.is_file()
-                    or raw_path.is_symlink()
-                    or not csv_path.is_file()
-                    or csv_path.is_symlink()
-                ):
-                    continue
-                try:
-                    raw_bytes = raw_path.read_bytes()
-                    csv_bytes = csv_path.read_bytes()
-                except OSError:
-                    continue
-                if captured_raw != raw_bytes or captured_csv != csv_bytes:
-                    continue
             observed = datetime.fromisoformat(
                 str(validated["source_observed_at"]).replace("Z", "+00:00")
             )

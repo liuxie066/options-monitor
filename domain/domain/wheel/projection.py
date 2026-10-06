@@ -32,7 +32,11 @@ from ._common import (
     _finite_float,
     _wheel_market,
 )
-from .events import _positive_int, _required_text, normalize_wheel_event
+from .events import (
+    _positive_int,
+    _required_text,
+    normalize_persisted_wheel_event,
+)
 
 
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -523,7 +527,7 @@ def effective_wheel_events(
             ).strip(),
         )
         try:
-            event = normalize_wheel_event(raw)
+            event = normalize_persisted_wheel_event(raw)
         except (TypeError, ValueError):
             if all(group):
                 invalid_by_group[group].add("invalid_wheel_event")

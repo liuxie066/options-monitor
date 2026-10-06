@@ -6,7 +6,12 @@ import hashlib
 
 import pytest
 
-from domain.domain.position_snapshot import normalize_position_snapshot_input, position_snapshot_scope_errors
+from domain.domain.position_snapshot import (
+    POSITION_SNAPSHOT_VERSION,
+    normalize_persisted_position_snapshot_input,
+    normalize_position_snapshot_input,
+    position_snapshot_scope_errors,
+)
 from src.application.futu_portfolio_context import build_futu_portfolio_context, build_futu_position_snapshot
 from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 from src.application.quality.position_checks import build_position_dataset
@@ -18,6 +23,7 @@ ACCOUNT = {"broker_account_id": "futu:REAL:123", "broker_id": "futu", "external_
 
 def _snapshot(*, stock: bool = False, rows: list | None = None) -> dict:
     return normalize_position_snapshot_input({
+        "schema_version": POSITION_SNAPSHOT_VERSION,
         "snapshot_id": "snapshot-1", "source_id": "test.positions",
         "broker_account_ref": ACCOUNT,
         "scope": {"markets": ["US"], "asset_types": ["stock" if stock else "option"], "filtered": False},
@@ -87,6 +93,18 @@ def test_only_complete_same_scope_empty_snapshot_proves_zero() -> None:
     wrong_account = deepcopy(_snapshot())
     wrong_account["broker_account_ref"]["external_account_id"] = "456"
     assert "snapshot_physical_account_mismatch" in _scope_errors(wrong_account)
+
+
+def test_current_snapshot_requires_version_and_history_adapter_is_explicit() -> None:
+    versionless = _snapshot()
+    versionless.pop("schema_version")
+
+    assert "missing:schema_version" in normalize_position_snapshot_input(
+        versionless
+    )["errors"]
+    persisted = normalize_persisted_position_snapshot_input(versionless)
+    assert persisted["schema_version"] == POSITION_SNAPSHOT_VERSION
+    assert "missing:schema_version" not in persisted["errors"]
 
 
 def test_position_contract_retains_exact_quantity_and_rejects_missing_or_nonfinite() -> None:

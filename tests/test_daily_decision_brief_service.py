@@ -986,6 +986,7 @@ def _install_success_empty_strategy_evidence(
     )
     quote_receipt_path, _quote_receipt = (
         publish_required_data_quote_snapshot(
+            runtime_root=base,
             producer_root=required_data_root,
             producer_run_id="run-1",
             symbol="NVDA",

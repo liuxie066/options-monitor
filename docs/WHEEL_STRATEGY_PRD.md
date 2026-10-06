@@ -771,7 +771,9 @@ OM 完成，实际下单继续由用户完成。
 - 事件行新增持久化 `event_schema_version`。旧 `wheel_event.v1` 行使用
   `wheel_branch_id=stock_lot_id`，仍按原字段集合重算旧 hash，新增列不得进入 v1 hash；`wheel_event.v2`
   的 hash 必须覆盖 `wheel_branch_id`、可选 `stock_lot_id` 及包含 `parent_branch_id`、`direction` 的
-  normalized payload。读取按版本分派并拒绝 v2 篡改。
+  normalized payload。当前 `build_wheel_event` 只构造 v2，当前 normalize/hash/append 都要求显式版本；
+  旧 v1 行及早期无版本行只由 `normalize_persisted_wheel_event` 读取，已有 legacy Call 生命周期的续写
+  只由 `build_legacy_wheel_event` 及两个具名 assignment helper 构造。读取按版本分派并拒绝 v2 篡改。
 - 迁移必须证明新 normalize/hash 分派对每个 v1 事件重算后得到原 hash；仅比较迁移前后存储值不算验证。
   原 event ID、payload、payload hash 和时间保持不变，旧 `called_away` / `manual_ended` 只作历史终态
   解释，不回建 CSP child。

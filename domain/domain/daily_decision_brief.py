@@ -323,7 +323,11 @@ def _normalize_daily_decision_brief(
     legacy_hold_actions: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     src = dict(payload or {})
-    schema_version = str(src.get("schema_version") or DAILY_DECISION_BRIEF_SCHEMA_VERSION).strip()
+    if persisted and src.get("schema_version") in (None, ""):
+        src["schema_version"] = DAILY_DECISION_BRIEF_SCHEMA_VERSION
+    schema_version = str(src.get("schema_version") or "").strip()
+    if not schema_version:
+        raise ValueError("daily brief requires schema_version")
     if schema_version != DAILY_DECISION_BRIEF_SCHEMA_VERSION:
         raise ValueError(f"unsupported daily brief schema version: {schema_version}")
 

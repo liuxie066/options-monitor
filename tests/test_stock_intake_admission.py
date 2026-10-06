@@ -16,7 +16,8 @@ def _stock() -> dict:
     ref = {"broker_account_id": "futu:REAL:123", "broker_id": "futu", "external_account_id": "123",
            "environment": "REAL", "account_label": "lx"}
     instrument = {"asset_type": "stock", "symbol": "NVDA", "market": "US", "currency": "USD"}
-    return {"broker_account_ref": ref, "instrument_ref": instrument, "external_id_namespace": "futu.deal",
+    return {"schema_version": "trade_execution.v1", "broker_account_ref": ref,
+            "instrument_ref": instrument, "external_id_namespace": "futu.deal",
             "external_execution_id": "stock-1", "side": "buy", "quantity": "0.5", "price": "100",
             "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z"}
 
