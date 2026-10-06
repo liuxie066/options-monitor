@@ -10,6 +10,7 @@ import stat
 from typing import Any
 from uuid import uuid4
 
+from domain.storage.no_follow import atomic_replace_bytes, open_directory_chain
 from domain.storage.repositories import run_repo, state_repo
 from src.application.account_config import normalize_account_label
 from src.application.multi_tick.misc import (
@@ -547,44 +548,16 @@ def _atomic_replace_at(
     payload: bytes,
     code: str,
 ) -> None:
-    parent_descriptor = _open_directory_chain(
-        base=base,
-        components=components,
-        create=True,
-        code=code,
-    )
-    temp_name = f".{name}.{uuid4().hex}.tmp"
-    descriptor: int | None = None
     try:
-        descriptor = os.open(
-            temp_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o644,
-            dir_fd=parent_descriptor,
+        atomic_replace_bytes(
+            base=base,
+            components=tuple(
+                _identity_component(component, "path component")
+                for component in components
+            ),
+            name=_identity_component(name, "state file name"),
+            payload=payload,
         )
-        view = memoryview(payload)
-        written = 0
-        while written < len(view):
-            count = os.write(descriptor, view[written:])
-            if count <= 0:
-                raise OSError("run-account state write made no progress")
-            written += count
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        os.replace(
-            temp_name,
-            name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-        try:
-            os.fsync(parent_descriptor)
-        except OSError:
-            pass
     except AccountRunConfigError:
         raise
     except (OSError, TypeError, ValueError) as exc:
@@ -592,16 +565,6 @@ def _atomic_replace_at(
             code,
             f"cannot publish run-account state artifact {name}",
         ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            os.unlink(temp_name, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
-        os.close(parent_descriptor)
 
 
 def _read_regular_file_at_chain(
@@ -661,36 +624,18 @@ def _open_directory_chain(
     create: bool,
     code: str,
 ) -> int:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    descriptor: int | None = None
     try:
-        descriptor = os.open(Path(base).resolve(), flags)
-        for raw_component in components:
-            component = _identity_component(raw_component, "path component")
-            if create:
-                try:
-                    os.mkdir(component, 0o755, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-            child = os.open(
-                component,
-                flags | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=descriptor,
-            )
-            os.close(descriptor)
-            descriptor = child
-        return descriptor
+        return open_directory_chain(
+            base=base,
+            components=tuple(
+                _identity_component(component, "path component")
+                for component in components
+            ),
+            create=create,
+        )
     except AccountRunConfigError:
-        if descriptor is not None:
-            os.close(descriptor)
         raise
     except OSError as exc:
-        if descriptor is not None:
-            os.close(descriptor)
         raise AccountRunConfigError(
             code,
             "account config directory chain is unavailable or unsafe",
