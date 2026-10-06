@@ -1822,13 +1822,38 @@ def _terminal_barrier_outcomes(
             "typed_reason": barrier_reason,
             "snapshot_status": snapshot_status,
         }
-        state_repo.write_account_run_state(
-            request.base,
-            request.run_id,
-            account,
-            "account_metrics.json",
-            metrics,
-        )
+        try:
+            state_repo.write_account_run_state(
+                request.base,
+                request.run_id,
+                account,
+                "account_metrics.json",
+                metrics,
+            )
+        except Exception as exc:
+            try:
+                request.audit_helper.audit(
+                    "write",
+                    "account_metrics_write_failed",
+                    run_id=request.run_id,
+                    account=account,
+                    status="degraded",
+                    message=str(exc),
+                    extra={"error_type": type(exc).__name__},
+                    shared_only=True,
+                )
+            except Exception:
+                pass
+            try:
+                request.runlog.safe_event(
+                    "account_run",
+                    "degraded",
+                    error_code="ACCOUNT_METRICS_WRITE_FAILED",
+                    message=str(exc),
+                    data={"run_id": request.run_id, "account": account},
+                )
+            except Exception:
+                pass
         outcomes.append(
             AccountRunOutcome(
                 result=AccountResult(

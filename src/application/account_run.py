@@ -42,6 +42,7 @@ from src.application.tick_run_workspace import (
 from src.application.experience_mode import experience_fields
 
 from domain.storage.repositories import run_repo, state_repo
+from domain.storage.no_follow import UnsafePathError
 
 
 @dataclass(frozen=True)
@@ -193,8 +194,21 @@ def run_one_account(
         acct_metrics.update(
             experience_fields(str(request.account_display_name or ""))
         )
-    ensure_account_output_dir(acct_out)
+    try:
+        run_repo.ensure_run_account_state_dir(request.base, request.run_id, acct)
+    except UnsafePathError:
+        raise
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="ensure_run_account_state_dir",
+            exc=exc,
+        )
 
+    ensure_account_output_dir(acct_out)
     acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
     acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
     audit_fn(
@@ -210,22 +224,12 @@ def run_one_account(
         },
     )
 
-    try:
-        run_repo.ensure_run_account_state_dir(request.base, request.run_id, acct)
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="ensure_run_account_state_dir",
-            exc=exc,
-        )
-
     def _write_acct_run_state(name: str, payload: dict[str, Any]) -> None:
         try:
             state_repo.write_account_run_state(request.base, request.run_id, acct, name, payload)
             audit_fn("write", f"write_account_run_state:{name}", run_id=request.run_id, account=acct)
+        except UnsafePathError:
+            raise
         except Exception as exc:
             _record_account_run_degraded(
                 runlog=runlog,

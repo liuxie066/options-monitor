@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import shutil
+import os
 from pathlib import Path
 
 from domain.storage import paths
+from domain.storage.no_follow import open_directory_chain, safe_component
 
 
 def get_run_dir(base: Path, run_id: str) -> Path:
@@ -41,9 +43,21 @@ def get_run_account_state_dir(base: Path, run_id: str, account: str) -> Path:
 
 
 def ensure_run_account_state_dir(base: Path, run_id: str, account: str) -> Path:
-    p = get_run_account_state_dir(base, run_id, account)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    components = (
+        "output_runs",
+        safe_component(run_id),
+        "accounts",
+        safe_component(account),
+        "state",
+    )
+    descriptor = open_directory_chain(
+        base=base,
+        components=components,
+        create=True,
+        final_mode=0o700,
+    )
+    os.close(descriptor)
+    return Path(base).resolve().joinpath(*components)
 
 
 def write_run_account_text(base: Path, run_id: str, account: str, name: str, text: str) -> Path:

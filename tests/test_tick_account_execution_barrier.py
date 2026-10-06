@@ -1161,6 +1161,7 @@ def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
     )
 
 
+@pytest.mark.parametrize("write_failure_account", [None, "lx"])
 @pytest.mark.parametrize(
     ("seal_behavior", "reason", "prefetch_done"),
     [
@@ -1175,6 +1176,7 @@ def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
 def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipeline(
     monkeypatch,
     tmp_path: Path,
+    write_failure_account: str | None,
     seal_behavior: str,
     reason: str,
     prefetch_done: bool,
@@ -1215,14 +1217,23 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
         ),
     )
 
-    outcome = mod.run_tick_account_execution(
-        _request(
-            tmp_path,
-            accounts=["lx", "sy"],
-            workers=2,
-            force=False,
-        )
+    if write_failure_account is not None:
+        write_state = mod.state_repo.write_account_run_state
+
+        def fail_one_metrics(base, run_id, account, name, payload):
+            if account == write_failure_account and name == "account_metrics.json":
+                raise OSError("metrics disk unavailable")
+            return write_state(base, run_id, account, name, payload)
+
+        monkeypatch.setattr(mod.state_repo, "write_account_run_state", fail_one_metrics)
+
+    request = _request(
+        tmp_path,
+        accounts=["lx", "sy"],
+        workers=2,
+        force=False,
     )
+    outcome = mod.run_tick_account_execution(request)
 
     assert outcome.ran_pipeline_accounts == []
     assert outcome.prefetch_done is prefetch_done
@@ -1234,6 +1245,111 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
         and item["snapshot_status"] in {"failed", "unavailable"}
         for item in outcome.account_metrics
     )
+    if write_failure_account is not None:
+        assert not (
+            tmp_path / "output_runs/run-1/accounts/lx/state/account_metrics.json"
+        ).exists()
+        assert (
+            tmp_path / "output_runs/run-1/accounts/sy/state/account_metrics.json"
+        ).is_file()
+        assert any(
+            item.get("account") == "lx" and item.get("status") == "degraded"
+            for item in request.audit_helper.events
+        )
+        assert any(
+            item.get("error_code") == "ACCOUNT_METRICS_WRITE_FAILED"
+            for item in request.runlog.events
+        )
+
+
+def test_barrier_and_prefetch_writers_do_not_follow_output_runs_symlink(
+    tmp_path: Path,
+) -> None:
+    from domain.storage.no_follow import UnsafePathError
+    from domain.storage.repositories import state_repo
+    from src.application import tick_account_execution as mod
+    from src.application.multi_tick_audit import MultiTickAuditHelper
+
+    request = _lx_request(tmp_path)
+    request = replace(
+        request,
+        audit_helper=MultiTickAuditHelper(
+            base=tmp_path,
+            base_cfg={},
+            runlog=request.runlog,
+            safe_data_fn=dict,
+            append_audit_event=state_repo.append_audit_event,
+            record_project_failure=lambda *_args, **_kwargs: {},
+            record_project_success=lambda *_args, **_kwargs: {},
+            build_failure_audit_fields=lambda *_args, **_kwargs: {},
+            run_id=request.run_id,
+            idempotency_key="issue-460",
+            write_run_artifacts=True,
+        ),
+    )
+    output_runs = tmp_path / "output_runs"
+    output_runs.rename(tmp_path / "output_runs-preserved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_runs.symlink_to(outside, target_is_directory=True)
+
+    outcomes = mod._terminal_barrier_outcomes(
+        request=request,
+        scanning_accounts={"lx"},
+        barrier_reason="required_data_snapshot_failed",
+        snapshot_status="failed",
+        run_account_fn=lambda _account: (_ for _ in ()).throw(
+            AssertionError("account pipeline must not start")
+        ),
+    )
+    assert [item.result.account for item in outcomes] == ["lx"]
+    assert outcomes[0].result.should_notify is True
+    with pytest.raises(UnsafePathError):
+        mod._publish_prefetch_summary_to_accounts(
+            request=request, accounts=["lx"], payload={"status": "failed"}
+        )
+    assert list(outside.iterdir()) == []
+    shared_audit = tmp_path / "output_shared/state/audit_events.jsonl"
+    assert any(
+        item.get("action") == "account_metrics_write_failed"
+        for item in (
+            json.loads(line)
+            for line in shared_audit.read_text(encoding="utf-8").splitlines()
+        )
+    )
+
+
+def test_barrier_metrics_and_telemetry_failure_keeps_account_outcome(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+
+    request = _lx_request(tmp_path)
+    monkeypatch.setattr(
+        mod.state_repo,
+        "write_account_run_state",
+        lambda *_args: (_ for _ in ()).throw(OSError("metrics disk unavailable")),
+    )
+    request.audit_helper.audit = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        OSError("audit unavailable")
+    )
+    request.runlog.safe_event = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        OSError("runlog unavailable")
+    )
+
+    outcomes = mod._terminal_barrier_outcomes(
+        request=request,
+        scanning_accounts={"lx"},
+        barrier_reason="required_data_snapshot_failed",
+        snapshot_status="failed",
+        run_account_fn=lambda _account: (_ for _ in ()).throw(
+            AssertionError("account pipeline must not start")
+        ),
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].result.decision_reason == "required_data_snapshot_failed"
+    assert outcomes[0].result.should_notify is True
 
 
 def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(

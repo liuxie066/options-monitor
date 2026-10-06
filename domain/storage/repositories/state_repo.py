@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from domain.storage import paths
+from domain.storage.no_follow import atomic_replace_bytes, safe_component
 from domain.storage.json_io import append_private_text
 from domain.storage.json_io import rotating_private_jsonl_lock
 from domain.storage.json_io import atomic_write_private_json as write_json
@@ -117,15 +118,28 @@ def write_account_state_json_text(base: Path, account: str, name: str, payload: 
 
 
 def write_run_account_last_run(base: Path, run_id: str, account: str, payload: dict[str, Any]) -> Path:
-    out = (run_account_state_dir(base, run_id, account) / "last_run.json").resolve()
-    write_json(out, payload)
-    return out
+    return write_account_run_state(base, run_id, account, "last_run.json", payload)
 
 
 def write_account_run_state(base: Path, run_id: str, account: str, name: str, payload: dict[str, Any]) -> Path:
-    out = (run_account_state_dir(base, run_id, account) / str(name)).resolve()
-    write_json(out, payload)
-    return out
+    components = (
+        "output_runs",
+        safe_component(run_id),
+        "accounts",
+        safe_component(account),
+        "state",
+    )
+    name = safe_component(name)
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    atomic_replace_bytes(
+        base=base,
+        components=components,
+        name=name,
+        payload=encoded,
+        file_mode=0o600,
+        final_dir_mode=0o700,
+    )
+    return Path(base).resolve().joinpath(*components, name)
 
 
 def write_last_run_dir_pointer(base: Path, run_id: str) -> Path:

@@ -53,6 +53,7 @@ class MultiTickAuditHelper:
         status: str = "ok",
         run_id: str | None = None,
         account: str | None = None,
+        shared_only: bool = False,
         **kwargs,
     ) -> None:
         try:
@@ -65,7 +66,11 @@ class MultiTickAuditHelper:
                 "idempotency_key": self.idempotency_key,
             }
             payload.update(kwargs)
-            run_scope = (run_id or self.run_id) if self.write_run_artifacts else None
+            run_scope = (
+                (run_id or self.run_id)
+                if self.write_run_artifacts and not shared_only
+                else None
+            )
             self.append_audit_event(self.base, payload, run_id=run_scope)
         except Exception:
             pass

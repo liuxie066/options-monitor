@@ -168,6 +168,64 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     }
 
 
+def test_run_one_account_rejects_unsafe_state_path_before_output_creation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.storage.no_follow import UnsafePathError
+    from src.application import account_run as mod
+
+    request = _make_request(tmp_path)
+    output_runs = request.base / "output_runs"
+    output_runs.rename(request.base / "output_runs-preserved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_runs.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(mod, "load_account_run_config", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        mod,
+        "ensure_account_output_dir",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("account output must not be created through an unsafe run path")
+        ),
+    )
+
+    with pytest.raises(UnsafePathError):
+        mod.run_one_account(
+            request=request,
+            runlog=_FakeRunlog(),
+            audit_fn=lambda *_args, **_kwargs: None,
+            fail_schema_validation=_reject_schema_validation,
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_run_one_account_stops_on_unsafe_metrics_writer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.storage.no_follow import UnsafePathError
+
+    request = _make_request(tmp_path)
+    env = _install_common_patches(monkeypatch, request)
+    mod = env["mod"]
+    monkeypatch.setattr(
+        mod.state_repo,
+        "write_account_run_state",
+        lambda *_args: (_ for _ in ()).throw(UnsafePathError("unsafe run state")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_pipeline_script",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pipeline must not run after unsafe metrics path")
+        ),
+    )
+
+    with pytest.raises(UnsafePathError):
+        _run_account(request, env, _FakeRunlog())
+
+
 def test_build_account_runtime_config_is_pure_and_applies_shared_filters(
     tmp_path: Path,
 ) -> None:
