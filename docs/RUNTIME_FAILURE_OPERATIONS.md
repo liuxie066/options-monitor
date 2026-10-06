@@ -47,3 +47,30 @@ OpenD 已自行产生按日期分片的 `.ftlog`/`.logs` 文件。部署侧保�
 runlog 的 `daily_brief_prepare` 记录 `start` 和 `ok`/`error`，`tick_latency` 中同名阶段的 `outcome` 表示准备结果。进程被硬超时终止时可能仅有 start，应结合 wrapper 的超时终态判断，不能将缺少结束记录当作成功。
 
 普通扫描完成但无可发送日报时仍通过统一 finalization 写入账户及共享 last_run、tick metrics/history 和唯一的 `run_end`；`sent=false`，原因是 `no_daily_brief_delivery`。空闲 delivery-only 无待重试内容仍保持只读跳过。执行完成不代表通知已送达，也不改变要求全部请求账户完成的恢复回执条件。
+
+
+### 日报账户分段计时
+
+本节描述源码诊断能力；发布并部署后才会出现在实际 Tick 的 runlog 中。
+`daily_brief_phase` 复用现有 runlog，`data` 含 `account`、`market`、`phase` 和
+`operation`。每次实际操作先记录 `start`，结束记录 `ok` 或 `error`，附
+`duration_ms` 和 `data.outcome`；异常只记录类型 `error_type`，不记录异常正文或业务 payload。
+
+| phase | 测量边界 |
+| --- | --- |
+| `account_prepare` | 一个账户的普通或 delivery-only 日报准备 |
+| `assemble` | 单市场日报组装，包括它实际读取的封存产物 |
+| `history_validate` | 投递/恢复历史归一化、来源校验及其引用读取，或 current/revision 一致性校验 |
+| `persist` | 日报仓库每次原子 JSON 编码及写入 |
+| `render` | 固定日报、候选提醒、失败日报的文本或卡片 Markdown 渲染 |
+| `lock_wait` | 日报仓库锁获取，含目录/文件准备和等待；不含取得锁后的业务工作 |
+
+阶段耗时包含嵌套操作，不能把这些值相加作为总耗时。同一账户同一阶段的多次操作按日志顺序
+配对；`operation` 区分具体责任函数。投递确认和 provider 发送不属于 `account_prepare`。
+阶段 `ok` 表示该操作正常返回，不表示现金/候选有效或通知已送达；例如历史读取可能在捕获校验
+异常后返回不可用，内层校验为 `error`，外层账户准备是否正常结束仍由实际控制流决定。
+
+软取消/异常在展开栈时记录 `error` 并保持原异常；硬超时或强杀可能仅留下 `start`，须结合
+wrapper 终态取证，不能补推成功或虚构耗时。时钟不可用时省略耗时；日志不可用不改变原业务
+结果。计时只在显式账户准备范围内启用，范围结束即复原；独立查询、投递确认和其他仓库调用
+不会因为这项诊断新增日志，也不更改锁策略、通知内容、持久化合同或超时配置。

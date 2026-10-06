@@ -54,7 +54,7 @@ from src.application.daily_decision_brief_repository import (
 from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
 from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
-from src.application.multi_tick_audit import record_tick_latency
+from src.application.multi_tick_audit import daily_brief_timing_scope, record_tick_latency
 from src.application.multi_tick_finalization import (
     _record_finalize_degraded,
     finalize_multi_tick_run,
@@ -885,63 +885,64 @@ def _prepare_daily_brief_notification(
                 market_date = _daily_brief_market_date(scheduler)
                 if not market_date:
                     continue
-                read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
-                retry = read_retryable_daily_decision_brief_delivery(
-                    base=request.base,
-                    account=account,
-                    market=market,
-                    market_trading_date=market_date,
-                    read_scope=read_scope,
-                )
-                envelope = retry.get("envelope")
-                if not isinstance(envelope, dict):
-                    rebuilt = _rebuild_daily_brief_delivery(
-                        request=request,
+                with daily_brief_timing_scope(runlog=request.runlog, account=account, market=market):
+                    read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
+                    retry = read_retryable_daily_decision_brief_delivery(
+                        base=request.base,
                         account=account,
                         market=market,
-                        market_date=market_date,
-                        scheduler=scheduler,
-                        daily_limits=daily_limits,
+                        market_trading_date=market_date,
                         read_scope=read_scope,
                     )
-                    envelope = rebuilt.get("envelope")
-                    if isinstance(envelope, dict):
-                        retry = {
-                            **retry,
-                            "reason": "rebuilt_from_persisted_brief",
-                            "envelope": envelope,
-                        }
-                if not isinstance(envelope, dict):
-                    continue
-                retired_classification = classify_retryable_daily_decision_brief_payload(
-                    base=request.base,
-                    account=account,
-                    market=market,
-                    market_trading_date=market_date,
-                    envelope=envelope,
-                )
-                if retired_classification != "clean":
-                    blocked_error_code = "legacy_ai_payload_retired"
-                    lifecycle_audit.append(
-                        _daily_brief_retired_envelope_audit(
-                            account,
-                            market,
-                            market_date,
-                            envelope,
+                    envelope = retry.get("envelope")
+                    if not isinstance(envelope, dict):
+                        rebuilt = _rebuild_daily_brief_delivery(
+                            request=request,
+                            account=account,
+                            market=market,
+                            market_date=market_date,
+                            scheduler=scheduler,
+                            daily_limits=daily_limits,
+                            read_scope=read_scope,
                         )
+                        envelope = rebuilt.get("envelope")
+                        if isinstance(envelope, dict):
+                            retry = {
+                                **retry,
+                                "reason": "rebuilt_from_persisted_brief",
+                                "envelope": envelope,
+                            }
+                    if not isinstance(envelope, dict):
+                        continue
+                    retired_classification = classify_retryable_daily_decision_brief_payload(
+                        base=request.base,
+                        account=account,
+                        market=market,
+                        market_trading_date=market_date,
+                        envelope=envelope,
                     )
-                    continue
-                messages_by_account[account] = str(envelope["rendered_message"])
-                delivery_keys_by_account[account] = str(envelope["delivery_key"])
-                if isinstance(envelope.get("rendered_transport"), dict):
-                    transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
-                lifecycles_by_account[account] = {
-                    "envelope": envelope,
-                    "market": market,
-                    "market_trading_date": market_date,
-                    "retry_reason": retry.get("reason"),
-                }
-                lifecycle_audit.append(_daily_brief_envelope_audit(account, market, envelope, retry=True))
+                    if retired_classification != "clean":
+                        blocked_error_code = "legacy_ai_payload_retired"
+                        lifecycle_audit.append(
+                            _daily_brief_retired_envelope_audit(
+                                account,
+                                market,
+                                market_date,
+                                envelope,
+                            )
+                        )
+                        continue
+                    messages_by_account[account] = str(envelope["rendered_message"])
+                    delivery_keys_by_account[account] = str(envelope["delivery_key"])
+                    if isinstance(envelope.get("rendered_transport"), dict):
+                        transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
+                    lifecycles_by_account[account] = {
+                        "envelope": envelope,
+                        "market": market,
+                        "market_trading_date": market_date,
+                        "retry_reason": retry.get("reason"),
+                    }
+                    lifecycle_audit.append(_daily_brief_envelope_audit(account, market, envelope, retry=True))
     else:
         feishu_card_delivery = (
             str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
@@ -967,341 +968,342 @@ def _prepare_daily_brief_notification(
             )
             if not ran_scan:
                 continue
-            scheduler = _daily_brief_scheduler_decision(request, account)
-            blocked_retry: dict[str, Any] | None = None
-            blocked_retry_envelope: dict[str, Any] | None = None
-            blocked_retry_classification: str | None = None
-            blocked_market_date = _daily_brief_market_date(scheduler)
-            if scheduled_trigger and not multi_market and blocked_market_date:
-                read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
-                retry_before_writes = read_retryable_daily_decision_brief_delivery(
-                    base=request.base,
-                    account=account,
-                    market=markets[0],
-                    market_trading_date=blocked_market_date,
-                    read_scope=read_scope,
-                )
-                envelope_before_writes = retry_before_writes.get("envelope")
-                if not isinstance(envelope_before_writes, dict):
-                    fixed_recovery = read_daily_decision_brief_fixed_recovery(
+            with daily_brief_timing_scope(runlog=request.runlog, account=account, market=markets[0]):
+                scheduler = _daily_brief_scheduler_decision(request, account)
+                blocked_retry: dict[str, Any] | None = None
+                blocked_retry_envelope: dict[str, Any] | None = None
+                blocked_retry_classification: str | None = None
+                blocked_market_date = _daily_brief_market_date(scheduler)
+                if scheduled_trigger and not multi_market and blocked_market_date:
+                    read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
+                    retry_before_writes = read_retryable_daily_decision_brief_delivery(
                         base=request.base,
                         account=account,
                         market=markets[0],
                         market_trading_date=blocked_market_date,
                         read_scope=read_scope,
                     )
-                    if fixed_recovery.get("available"):
-                        rebuilt = _rebuild_daily_brief_delivery(
-                            request=request,
+                    envelope_before_writes = retry_before_writes.get("envelope")
+                    if not isinstance(envelope_before_writes, dict):
+                        fixed_recovery = read_daily_decision_brief_fixed_recovery(
+                            base=request.base,
                             account=account,
                             market=markets[0],
-                            market_date=blocked_market_date,
-                            scheduler=scheduler,
-                            daily_limits=daily_limits,
-                            fixed_recovery=fixed_recovery,
+                            market_trading_date=blocked_market_date,
+                            read_scope=read_scope,
                         )
-                        envelope_before_writes = rebuilt.get("envelope")
-                        if isinstance(envelope_before_writes, dict):
-                            retry_before_writes = {
-                                **retry_before_writes,
-                                "reason": "rebuilt_from_fixed_recovery",
-                                "envelope": envelope_before_writes,
-                            }
-                if isinstance(envelope_before_writes, dict):
-                    blocked_retry_classification = classify_retryable_daily_decision_brief_payload(
-                        base=request.base,
-                        account=account,
-                        market=markets[0],
-                        market_trading_date=blocked_market_date,
-                        envelope=envelope_before_writes,
-                    )
-                    if blocked_retry_classification == "legacy_ai_payload_retired":
-                        blocked_error_code = "legacy_ai_payload_retired"
-                        blocked_retry = retry_before_writes
-                        blocked_retry_envelope = envelope_before_writes
-            briefs = assemble_daily_decision_briefs(
-                base=request.base,
-                run_id=request.run_id,
-                account=account,
-                markets_to_run=list(markets),
-                scheduler_decision=scheduler,
-                account_result=result,
-                pipeline_succeeded=account in ran_pipeline_accounts,
-                config=request.base_cfg,
-            )
-            for market in markets:
-                brief = briefs.get(market)
-                if brief is None:
-                    raise ValueError(f"daily brief assembler did not return market {market} for {account}")
-                fixed_target = (
-                    str(scheduler.get("scheduled_target_market") or "").strip()
-                    if request.trigger_kind == "scheduled"
-                    else ""
-                )
-                pipeline_reliable = bool(
-                    account in ran_pipeline_accounts
-                    and brief.get("status") in {"ready", "degraded"}
-                    and brief.get("actionability") != "blocked"
-                )
-                pending: list[str] = []
-                persisted: dict[str, Any] | None = None
-                diff: dict[str, Any] = {}
-                failure_source: tuple[str, str] | None = None
-                if pipeline_reliable:
-                    persisted = persist_daily_decision_brief_success(base=request.base, brief=brief)
-                    previous = persisted.get("previous_successful_brief")
-                    if (
-                        isinstance(previous, dict)
-                        and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]
-                    ):
-                        diff = diff_daily_decision_briefs(previous, persisted["brief"])
-                    if scheduled_trigger and blocked_retry_envelope is None:
-                        recorded = record_daily_decision_brief_candidates(
-                            base=request.base,
-                            account=account,
-                            market=market,
-                            market_trading_date=str(persisted["brief"]["market_trading_date"]),
-                            revision=int(persisted["current_revision"]),
-                            brief_digest=str(persisted["current_brief_digest"]),
-                            candidate_identities=persisted["current_candidate_identities"],
-                        )
-                        pending = list(recorded["pending_candidate_identities"])
-                    if fixed_target and blocked_retry_envelope is None and not request.no_send:
-                        record_daily_decision_brief_fixed_recovery(
-                            base=request.base,
-                            account=account,
-                            market=market,
-                            market_trading_date=str(persisted["brief"]["market_trading_date"]),
-                            scheduled_target_market=fixed_target,
-                            revision=int(persisted["current_revision"]),
-                            brief_digest=str(persisted["current_brief_digest"]),
-                            candidate_identities=persisted["current_candidate_identities"],
-                        )
-                    if scheduled_trigger:
-                        commit_started = monotonic()
-                        try:
-                            _commit_scan_target_after_brief(
-                                request,
+                        if fixed_recovery.get("available"):
+                            rebuilt = _rebuild_daily_brief_delivery(
+                                request=request,
                                 account=account,
-                                target=scan_targets[account],
-                                brief_digest=str(persisted["current_brief_digest"]),
+                                market=markets[0],
+                                market_date=blocked_market_date,
+                                scheduler=scheduler,
+                                daily_limits=daily_limits,
+                                fixed_recovery=fixed_recovery,
                             )
-                        finally:
-                            record_tick_latency(
-                                runlog=request.runlog,
-                                stage="scheduler_target_commit",
-                                started=commit_started,
-                            )
-                else:
-                    failure_source = _write_daily_brief_failure_artifact(
-                        request=request,
-                        account=account,
-                        market=market,
-                        brief=brief,
-                        result=result,
-                    )
-
-                decision = (
-                    decide_daily_brief_notification(
-                        ran_scan=True,
-                        pipeline_reliable=pipeline_reliable,
-                        fixed_due=bool(fixed_target),
-                        pending_candidate_identities=pending,
-                    )
-                    if scheduled_trigger
-                    else {"action": "none", "reason": "non_scheduled_snapshot_only"}
-                )
-                action = str(decision["action"])
-                existing_retry = None
-                if scheduled_trigger and not multi_market:
-                    existing_retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
-                        base=request.base,
-                        account=account,
-                        market=market,
-                        market_trading_date=str(brief["market_trading_date"]),
-                    )
-                existing_envelope = existing_retry.get("envelope") if isinstance(existing_retry, dict) else None
-                pending_delivery_status = (
-                    "existing_pending_preserved" if isinstance(existing_envelope, Mapping) else "not_applicable"
-                )
-                should_prepare = not (isinstance(existing_retry, dict) and isinstance(existing_envelope, dict))
-                if (
-                    not multi_market
-                    and not request.no_send
-                    and should_prepare
-                    and action in {"fixed_report", "candidate_alert", "fixed_failure"}
-                ):
-                    render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
-                    if action == "fixed_failure":
-                        message = render_fixed_failure(
-                            brief,
-                            context=render_context,
+                            envelope_before_writes = rebuilt.get("envelope")
+                            if isinstance(envelope_before_writes, dict):
+                                retry_before_writes = {
+                                    **retry_before_writes,
+                                    "reason": "rebuilt_from_fixed_recovery",
+                                    "envelope": envelope_before_writes,
+                                }
+                    if isinstance(envelope_before_writes, dict):
+                        blocked_retry_classification = classify_retryable_daily_decision_brief_payload(
+                            base=request.base,
+                            account=account,
+                            market=markets[0],
+                            market_trading_date=blocked_market_date,
+                            envelope=envelope_before_writes,
                         )
-                        assert failure_source is not None
-                        prepared = prepare_daily_decision_brief_delivery(
+                        if blocked_retry_classification == "legacy_ai_payload_retired":
+                            blocked_error_code = "legacy_ai_payload_retired"
+                            blocked_retry = retry_before_writes
+                            blocked_retry_envelope = envelope_before_writes
+                briefs = assemble_daily_decision_briefs(
+                    base=request.base,
+                    run_id=request.run_id,
+                    account=account,
+                    markets_to_run=list(markets),
+                    scheduler_decision=scheduler,
+                    account_result=result,
+                    pipeline_succeeded=account in ran_pipeline_accounts,
+                    config=request.base_cfg,
+                )
+                for market in markets:
+                    brief = briefs.get(market)
+                    if brief is None:
+                        raise ValueError(f"daily brief assembler did not return market {market} for {account}")
+                    fixed_target = (
+                        str(scheduler.get("scheduled_target_market") or "").strip()
+                        if request.trigger_kind == "scheduled"
+                        else ""
+                    )
+                    pipeline_reliable = bool(
+                        account in ran_pipeline_accounts
+                        and brief.get("status") in {"ready", "degraded"}
+                        and brief.get("actionability") != "blocked"
+                    )
+                    pending: list[str] = []
+                    persisted: dict[str, Any] | None = None
+                    diff: dict[str, Any] = {}
+                    failure_source: tuple[str, str] | None = None
+                    if pipeline_reliable:
+                        persisted = persist_daily_decision_brief_success(base=request.base, brief=brief)
+                        previous = persisted.get("previous_successful_brief")
+                        if (
+                            isinstance(previous, dict)
+                            and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]
+                        ):
+                            diff = diff_daily_decision_briefs(previous, persisted["brief"])
+                        if scheduled_trigger and blocked_retry_envelope is None:
+                            recorded = record_daily_decision_brief_candidates(
+                                base=request.base,
+                                account=account,
+                                market=market,
+                                market_trading_date=str(persisted["brief"]["market_trading_date"]),
+                                revision=int(persisted["current_revision"]),
+                                brief_digest=str(persisted["current_brief_digest"]),
+                                candidate_identities=persisted["current_candidate_identities"],
+                            )
+                            pending = list(recorded["pending_candidate_identities"])
+                        if fixed_target and blocked_retry_envelope is None and not request.no_send:
+                            record_daily_decision_brief_fixed_recovery(
+                                base=request.base,
+                                account=account,
+                                market=market,
+                                market_trading_date=str(persisted["brief"]["market_trading_date"]),
+                                scheduled_target_market=fixed_target,
+                                revision=int(persisted["current_revision"]),
+                                brief_digest=str(persisted["current_brief_digest"]),
+                                candidate_identities=persisted["current_candidate_identities"],
+                            )
+                        if scheduled_trigger:
+                            commit_started = monotonic()
+                            try:
+                                _commit_scan_target_after_brief(
+                                    request,
+                                    account=account,
+                                    target=scan_targets[account],
+                                    brief_digest=str(persisted["current_brief_digest"]),
+                                )
+                            finally:
+                                record_tick_latency(
+                                    runlog=request.runlog,
+                                    stage="scheduler_target_commit",
+                                    started=commit_started,
+                                )
+                    else:
+                        failure_source = _write_daily_brief_failure_artifact(
+                            request=request,
+                            account=account,
+                            market=market,
+                            brief=brief,
+                            result=result,
+                        )
+
+                    decision = (
+                        decide_daily_brief_notification(
+                            ran_scan=True,
+                            pipeline_reliable=pipeline_reliable,
+                            fixed_due=bool(fixed_target),
+                            pending_candidate_identities=pending,
+                        )
+                        if scheduled_trigger
+                        else {"action": "none", "reason": "non_scheduled_snapshot_only"}
+                    )
+                    action = str(decision["action"])
+                    existing_retry = None
+                    if scheduled_trigger and not multi_market:
+                        existing_retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
                             base=request.base,
                             account=account,
                             market=market,
                             market_trading_date=str(brief["market_trading_date"]),
-                            run_id=request.run_id,
-                            delivery_kind="fixed_failure",
-                            source_kind="scan_failure",
-                            source_digest=failure_source[1],
-                            source_reference=failure_source[0],
-                            scheduled_target_market=fixed_target,
-                            rendered_message=message,
-                            render_context=render_context,
                         )
-                    else:
-                        assert persisted is not None
-                        identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
-                        rendered_combo_rows = select_rendered_combo_candidate_rows(
-                            persisted["brief"],
-                            delivery_kind=action,
-                            candidate_identities=identities,
-                            diff=diff,
-                            limits=daily_limits,
-                        )
-                        rendered_combo_identities = combo_candidate_identities_for_rendered_rows(
-                            persisted["brief"],
-                            rendered_combo_rows,
-                        )
-                        render_context.update(
-                            combo_exposure_render_context(
-                                derive_combo_candidate_exposures(
-                                    persisted["brief"],
-                                    candidate_identities=rendered_combo_identities,
-                                )
-                            )
-                        )
-                        render_context["rendered_combo_candidate_identities"] = rendered_combo_identities
-                        if action == "fixed_report":
-                            message = render_fixed_report(
-                                persisted["brief"],
-                                diff=diff,
-                                limits=daily_limits,
-                                context=render_context,
-                            )
-                            card_markdown = render_fixed_report_card_markdown(
-                                persisted["brief"],
-                                diff=diff,
-                                limits=daily_limits,
-                                context=render_context,
-                            )
-                        else:
-                            message = render_candidate_alert(
-                                persisted["brief"],
-                                identities,
-                                limits=daily_limits,
-                                context=render_context,
-                            )
-                            card_markdown = render_candidate_alert_card_markdown(
-                                persisted["brief"],
-                                identities,
-                                limits=daily_limits,
-                                context=render_context,
-                            )
-                        rendered_transport = (
-                            render_feishu_notification_card(
-                                markdown=card_markdown,
-                                fallback_text=message,
-                            )
-                            if feishu_card_delivery
-                            else None
-                        )
-                        prepared = prepare_daily_decision_brief_delivery(
-                            base=request.base,
-                            account=account,
-                            market=market,
-                            market_trading_date=str(persisted["brief"]["market_trading_date"]),
-                            run_id=request.run_id,
-                            delivery_kind=action,
-                            source_kind="successful_brief",
-                            revision=int(persisted["current_revision"]),
-                            source_digest=str(persisted["current_brief_digest"]),
-                            scheduled_target_market=(fixed_target or None),
-                            candidate_identities=identities,
-                            rendered_message=message,
-                            rendered_transport=rendered_transport,
-                            render_context=render_context,
-                        )
-
-                retry = None
-                retired_classification: str | None = None
-                if scheduled_trigger and not multi_market:
-                    retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
-                        base=request.base,
-                        account=account,
-                        market=market,
-                        market_trading_date=str(brief["market_trading_date"]),
+                    existing_envelope = existing_retry.get("envelope") if isinstance(existing_retry, dict) else None
+                    pending_delivery_status = (
+                        "existing_pending_preserved" if isinstance(existing_envelope, Mapping) else "not_applicable"
                     )
-                    envelope = retry.get("envelope")
-                    if isinstance(envelope, dict):
-                        retired_classification = (
-                            blocked_retry_classification
-                            or classify_retryable_daily_decision_brief_payload(
+                    should_prepare = not (isinstance(existing_retry, dict) and isinstance(existing_envelope, dict))
+                    if (
+                        not multi_market
+                        and not request.no_send
+                        and should_prepare
+                        and action in {"fixed_report", "candidate_alert", "fixed_failure"}
+                    ):
+                        render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+                        if action == "fixed_failure":
+                            message = render_fixed_failure(
+                                brief,
+                                context=render_context,
+                            )
+                            assert failure_source is not None
+                            prepared = prepare_daily_decision_brief_delivery(
                                 base=request.base,
                                 account=account,
                                 market=market,
                                 market_trading_date=str(brief["market_trading_date"]),
-                                envelope=envelope,
+                                run_id=request.run_id,
+                                delivery_kind="fixed_failure",
+                                source_kind="scan_failure",
+                                source_digest=failure_source[1],
+                                source_reference=failure_source[0],
+                                scheduled_target_market=fixed_target,
+                                rendered_message=message,
+                                render_context=render_context,
                             )
-                        )
-                        if retired_classification == "clean":
-                            messages_by_account[account] = str(envelope["rendered_message"])
-                            delivery_keys_by_account[account] = str(envelope["delivery_key"])
-                            if isinstance(envelope.get("rendered_transport"), dict):
-                                transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
-                            lifecycles_by_account[account] = {
-                                "brief": persisted["brief"] if persisted is not None else brief,
-                                "diff": diff,
-                                "delivery_kind": "full" if envelope["delivery_kind"].startswith("fixed_") else "delta",
-                                "delivery_key": envelope["delivery_key"],
-                                "envelope": envelope,
-                                "market": market,
-                                "market_trading_date": str(brief["market_trading_date"]),
-                            }
                         else:
-                            blocked_error_code = "legacy_ai_payload_retired"
-                selected_envelope = retry.get("envelope") if isinstance(retry, dict) else None
-                lifecycle_audit.append(
-                    {
-                        "account": account,
-                        "market": market,
-                        "market_trading_date": str(brief["market_trading_date"]),
-                        "brief_id": (persisted or {}).get("brief", brief).get("brief_id"),
-                        "pipeline_reliable": pipeline_reliable,
-                        "decision": action,
-                        "decision_reason": decision["reason"],
-                        "fixed_target": fixed_target or None,
-                        "pending_candidate_count": len(pending),
-                        "pending_delivery_status": pending_delivery_status,
-                        "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
-                        "selected_delivery_kind": (
-                            selected_envelope.get("delivery_kind") if isinstance(selected_envelope, dict) else None
-                        ),
-                        "delivery_key": selected_envelope.get("delivery_key")
-                        if isinstance(selected_envelope, dict)
-                        else None,
-                        "message_sha256": selected_envelope.get("message_sha256")
-                        if isinstance(selected_envelope, dict)
-                        else None,
-                        "rendered_transport_sha256": (
-                            selected_envelope.get("rendered_transport_sha256")
+                            assert persisted is not None
+                            identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
+                            rendered_combo_rows = select_rendered_combo_candidate_rows(
+                                persisted["brief"],
+                                delivery_kind=action,
+                                candidate_identities=identities,
+                                diff=diff,
+                                limits=daily_limits,
+                            )
+                            rendered_combo_identities = combo_candidate_identities_for_rendered_rows(
+                                persisted["brief"],
+                                rendered_combo_rows,
+                            )
+                            render_context.update(
+                                combo_exposure_render_context(
+                                    derive_combo_candidate_exposures(
+                                        persisted["brief"],
+                                        candidate_identities=rendered_combo_identities,
+                                    )
+                                )
+                            )
+                            render_context["rendered_combo_candidate_identities"] = rendered_combo_identities
+                            if action == "fixed_report":
+                                message = render_fixed_report(
+                                    persisted["brief"],
+                                    diff=diff,
+                                    limits=daily_limits,
+                                    context=render_context,
+                                )
+                                card_markdown = render_fixed_report_card_markdown(
+                                    persisted["brief"],
+                                    diff=diff,
+                                    limits=daily_limits,
+                                    context=render_context,
+                                )
+                            else:
+                                message = render_candidate_alert(
+                                    persisted["brief"],
+                                    identities,
+                                    limits=daily_limits,
+                                    context=render_context,
+                                )
+                                card_markdown = render_candidate_alert_card_markdown(
+                                    persisted["brief"],
+                                    identities,
+                                    limits=daily_limits,
+                                    context=render_context,
+                                )
+                            rendered_transport = (
+                                render_feishu_notification_card(
+                                    markdown=card_markdown,
+                                    fallback_text=message,
+                                )
+                                if feishu_card_delivery
+                                else None
+                            )
+                            prepared = prepare_daily_decision_brief_delivery(
+                                base=request.base,
+                                account=account,
+                                market=market,
+                                market_trading_date=str(persisted["brief"]["market_trading_date"]),
+                                run_id=request.run_id,
+                                delivery_kind=action,
+                                source_kind="successful_brief",
+                                revision=int(persisted["current_revision"]),
+                                source_digest=str(persisted["current_brief_digest"]),
+                                scheduled_target_market=(fixed_target or None),
+                                candidate_identities=identities,
+                                rendered_message=message,
+                                rendered_transport=rendered_transport,
+                                render_context=render_context,
+                            )
+
+                    retry = None
+                    retired_classification: str | None = None
+                    if scheduled_trigger and not multi_market:
+                        retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
+                            base=request.base,
+                            account=account,
+                            market=market,
+                            market_trading_date=str(brief["market_trading_date"]),
+                        )
+                        envelope = retry.get("envelope")
+                        if isinstance(envelope, dict):
+                            retired_classification = (
+                                blocked_retry_classification
+                                or classify_retryable_daily_decision_brief_payload(
+                                    base=request.base,
+                                    account=account,
+                                    market=market,
+                                    market_trading_date=str(brief["market_trading_date"]),
+                                    envelope=envelope,
+                                )
+                            )
+                            if retired_classification == "clean":
+                                messages_by_account[account] = str(envelope["rendered_message"])
+                                delivery_keys_by_account[account] = str(envelope["delivery_key"])
+                                if isinstance(envelope.get("rendered_transport"), dict):
+                                    transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
+                                lifecycles_by_account[account] = {
+                                    "brief": persisted["brief"] if persisted is not None else brief,
+                                    "diff": diff,
+                                    "delivery_kind": "full" if envelope["delivery_kind"].startswith("fixed_") else "delta",
+                                    "delivery_key": envelope["delivery_key"],
+                                    "envelope": envelope,
+                                    "market": market,
+                                    "market_trading_date": str(brief["market_trading_date"]),
+                                }
+                            else:
+                                blocked_error_code = "legacy_ai_payload_retired"
+                    selected_envelope = retry.get("envelope") if isinstance(retry, dict) else None
+                    lifecycle_audit.append(
+                        {
+                            "account": account,
+                            "market": market,
+                            "market_trading_date": str(brief["market_trading_date"]),
+                            "brief_id": (persisted or {}).get("brief", brief).get("brief_id"),
+                            "pipeline_reliable": pipeline_reliable,
+                            "decision": action,
+                            "decision_reason": decision["reason"],
+                            "fixed_target": fixed_target or None,
+                            "pending_candidate_count": len(pending),
+                            "pending_delivery_status": pending_delivery_status,
+                            "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
+                            "selected_delivery_kind": (
+                                selected_envelope.get("delivery_kind") if isinstance(selected_envelope, dict) else None
+                            ),
+                            "delivery_key": selected_envelope.get("delivery_key")
                             if isinstance(selected_envelope, dict)
-                            else None
-                        ),
-                        "message_chars": len(str(selected_envelope.get("rendered_message") or ""))
-                        if isinstance(selected_envelope, dict)
-                        else 0,
-                        "render_limits": dict(daily_limits),
-                        "error_code": (
-                            "legacy_ai_payload_retired"
-                            if retired_classification == "legacy_ai_payload_retired"
-                            else None
-                        ),
-                    }
-                )
+                            else None,
+                            "message_sha256": selected_envelope.get("message_sha256")
+                            if isinstance(selected_envelope, dict)
+                            else None,
+                            "rendered_transport_sha256": (
+                                selected_envelope.get("rendered_transport_sha256")
+                                if isinstance(selected_envelope, dict)
+                                else None
+                            ),
+                            "message_chars": len(str(selected_envelope.get("rendered_message") or ""))
+                            if isinstance(selected_envelope, dict)
+                            else 0,
+                            "render_limits": dict(daily_limits),
+                            "error_code": (
+                                "legacy_ai_payload_retired"
+                                if retired_classification == "legacy_ai_payload_retired"
+                                else None
+                            ),
+                        }
+                    )
 
     request.tick_metrics["daily_brief"] = {
         "enabled": True,
