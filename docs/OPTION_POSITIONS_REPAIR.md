@@ -182,6 +182,49 @@ OpenD 订单后先预览；`reason` 必须写明 OpenD 核对证据：
 只在 dry-run 选出的事件与本次时间修正目标一致时 apply，并对其他账户分别执行。任一事件缺少 OpenD 证据、订单数量与事件数量不一致、目标时间不是证据最早
 成交时间、事件已 void 或投影出现额外变更时，命令都会失败且整个事务回滚。
 
+### 场景 E2：按已保存原始 Futu 时间修复一批历史成交
+
+适用于 `opend_push` 的 Futu 期权 open/close/expire_close，需保留原始成交时间与完整身份。
+缺原始时间、身份冲突、缺拆分事件、FX 不足或投影发生原币经济变化都会阻断。
+先使用既有 `option-performance evidence import` 预览并导入经核实的历史 FX；证据导入单独留回执。
+
+请求 JSON 的字段必须精确如下；毫秒时间和 SHA256 从逐笔原始证据预览确定，不用当前行情推断：
+
+```json
+{
+  "schema_version": "futu_trade_time_repair_request.v1",
+  "batch_id": "<unique-batch-id>",
+  "reason": "<verified correction reason>",
+  "prepared_at_ms": 1791240000000,
+  "targets": [
+    {"event_id": "<exact-event-id>", "before_sha256": "<stored-event-json-sha256>", "after_trade_time_ms": 1791200000000}
+  ]
+}
+```
+
+```bash
+./om trade-events repair-futu-times --runtime-root <runtime>   --request <request.json> --format json
+./om trade-events repair-futu-times --runtime-root <runtime>   --request <same-request.json> --expected-input-hash <preview-input-hash>   --backup-dir <new-private-backup-directory> --confirm --format json
+```
+
+预览只读现存数据库；input_hash 绑定两库绝对路径、schema、完整读集、请求和拟写内容。
+复制环境的 hash 不能用于另一目录。预览后任何相关数据或 schema 变化必须重新预览。
+`--backup-dir` 的父目录须已存在，目标目录须尚不存在；备份含完整账本和 inbox，须按敏感数据保护。
+
+写入持有共同 writer lock，临时将同文件系统上的两库切换为 DELETE journal/FULL synchronous，
+在一个 ATTACH EXCLUSIVE 事务内保留备份、追加不可变审计、CAS 事件和 inbox、重建投影并回读。
+拿不到数据库锁时拒绝写入，不自动停止服务。成交 ID、原始 provider 字段、原币经济数据、归属证明、
+生命周期状态/期限和历史通知保留；inbox 自有修订计数器随当前行更新。
+
+提交后使用新连接回读，返回 `durable_readback`、备份 SHA 和 journal 恢复状态。
+同一 request/batch/input_hash 重试返回 `no_op`；批次复用冲突或修复后目标状态漂移会拒绝。
+遇 `committed_readback_unavailable` 表示提交已发生但独立回读未完成，保留原请求和 hash 重试检查；
+不能新建 batch 或直接重放成交。若 COMMIT 本身报错，新连接会裁决回执；`not_applied` 表示完整原读集仍在，
+`commit_outcome_unknown` 的 `write_applied` 为 null，须保留请求/hash复核。回滚后的再次 apply 使用新的备份目录，
+已提交批次的重试可沿用原目录而不会再备份。进程中断后由 SQLite 恢复完整事务；恢复写操作只允许在确认入口，
+只读预览遇需恢复的日志会失败。备份不自动覆盖回生产，回退需核验停写窗口与之后的新数据。
+该命令不发送通知、不更新生产配置或服务。
+
 ### 场景 F：Futu 当前期权条款与账本不同
 
 分红、拆并股等公司行动可能调整存量合约的 strike、multiplier 或其他交割条款。

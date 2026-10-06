@@ -390,9 +390,14 @@ def test_tick_idempotency_separates_symbol_diagnostic_from_full_schedule(
     assert diagnostic.key != other_symbol.key
 
 
+@pytest.mark.parametrize(
+    "write_mode",
+    ["normal", "raises", "symlink", "telemetry_raises", "existing", "existing_mismatch"],
+)
 def test_tick_account_execution_isolates_one_account_exception(
     monkeypatch,
     tmp_path,
+    write_mode: str,
 ) -> None:
     from src.application import tick_account_execution as mod
     from src.application.account_run import AccountRunOutcome
@@ -400,9 +405,50 @@ def test_tick_account_execution_isolates_one_account_exception(
 
     events: list[dict[str, Any]] = []
     audits: list[dict[str, Any]] = []
+    outside = tmp_path / "outside"
+
+    def record_event(step, status, **kwargs):
+        if write_mode == "telemetry_raises" and step == "account_run":
+            raise OSError("runlog unavailable")
+        events.append({"step": step, "status": status, **kwargs})
+
+    def record_audit(event_type, action, **kwargs):
+        if write_mode == "telemetry_raises" and action == "account_execution_exception":
+            raise OSError("audit unavailable")
+        audits.append({"event_type": event_type, "action": action, **kwargs})
+
+    if write_mode == "raises":
+        monkeypatch.setattr(
+            mod,
+            "write_account_run_state_json_safely",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError("metrics write failed")),
+        )
 
     def fake_run_one_account(*, request, **_kwargs):
         if request.acct == "lx":
+            if write_mode in {"existing", "existing_mismatch"}:
+                mod.write_account_run_state_json_safely(
+                    base=tmp_path,
+                    run_id="isolated-run",
+                    account="lx",
+                    name="account_metrics.json",
+                    payload={
+                        "run_id": (
+                            "another-run" if write_mode == "existing_mismatch"
+                            else "isolated-run"
+                        ),
+                        "account": "lx",
+                        "as_of_utc": "2026-10-06T01:00:00Z",
+                        "snapshot_manifest_sha256": "a" * 64,
+                        "ran_scan": True,
+                        "reason": "running",
+                    },
+                )
+            if write_mode == "symlink":
+                output_runs = tmp_path / "output_runs"
+                output_runs.rename(tmp_path / "output_runs-preserved")
+                outside.mkdir()
+                output_runs.symlink_to(outside, target_is_directory=True)
             raise OSError("lx output unavailable")
         return AccountRunOutcome(
             result=AccountResult("sy", False, False, "not_due", ""),
@@ -415,7 +461,7 @@ def test_tick_account_execution_isolates_one_account_exception(
     outcome = mod.run_tick_account_execution(
         mod.TickAccountExecutionRequest(
             account_ids=["lx", "sy"],
-            account_workers=2,
+            account_workers=1 if write_mode == "symlink" else 2,
             base=tmp_path,
             base_cfg={},
             cfg_path=tmp_path / "config.us.json",
@@ -430,7 +476,6 @@ def test_tick_account_execution_isolates_one_account_exception(
             run_dir=tmp_path / "output_runs" / "isolated-run",
             shared_required=tmp_path / "required",
             accounts_root=tmp_path / "accounts",
-            prefetch_done=False,
             force_mode=False,
             smoke=False,
             no_send=True,
@@ -441,14 +486,10 @@ def test_tick_account_execution_isolates_one_account_exception(
             state_path=tmp_path / "scheduler.json",
             scheduler_schedule_key="schedule",
             runlog=SimpleNamespace(
-                safe_event=lambda step, status, **kwargs: events.append(
-                    {"step": step, "status": status, **kwargs}
-                )
+                safe_event=record_event,
             ),
             audit_helper=SimpleNamespace(
-                audit=lambda event_type, action, **kwargs: audits.append(
-                    {"event_type": event_type, "action": action, **kwargs}
-                ),
+                audit=record_audit,
                 fail_schema_validation=lambda **_kwargs: None,
             ),
         )
@@ -457,7 +498,33 @@ def test_tick_account_execution_isolates_one_account_exception(
     assert [item.account for item in outcome.results] == ["lx", "sy"]
     assert outcome.results[0].decision_reason == "account_execution_exception:OSError"
     assert outcome.results[1].decision_reason == "not_due"
-    assert any(item["action"] == "account_execution_exception" for item in audits)
+    metrics = outcome.account_metrics[0]
+    assert metrics["run_id"] == "isolated-run"
+    assert metrics["typed_reason"] == "account_execution_exception:OSError"
+    assert metrics["error_code"] == "ACCOUNT_EXECUTION_EXCEPTION"
+    metrics_path = (
+        tmp_path / "output_runs" / "isolated-run" / "accounts" / "lx"
+        / "state" / "account_metrics.json"
+    )
+    if write_mode in {"normal", "telemetry_raises", "existing", "existing_mismatch"}:
+        assert json.loads(metrics_path.read_text(encoding="utf-8")) == metrics
+    else:
+        assert not metrics_path.exists()
+    assert any(item["action"] == "account_execution_exception" for item in audits) is (
+        write_mode in {"normal", "existing", "existing_mismatch"}
+    )
+    if write_mode == "symlink":
+        assert list(outside.iterdir()) == []
+    if write_mode == "existing":
+        assert metrics["as_of_utc"] == "2026-10-06T01:00:00Z"
+        assert metrics["snapshot_manifest_sha256"] == "a" * 64
+        assert metrics["ran_scan"] is False
+        assert metrics["reason"] == "account_execution_exception:OSError"
+    if write_mode == "existing_mismatch":
+        assert "snapshot_manifest_sha256" not in metrics
+    assert any(item.get("error_code") == "ACCOUNT_EXECUTION_EXCEPTION" for item in events) is (
+        write_mode != "telemetry_raises"
+    )
 
 
 def test_account_worker_count_is_bounded_by_runtime_config() -> None:
@@ -559,7 +626,7 @@ def test_mark_scheduler_accounts_does_not_regress_processed_target(tmp_path) -> 
     assert data["last_processed_scan_target_utc_by_account"]["lx"] == "2026-07-21T14:30:00+00:00"
 
 
-def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
+def test_tick_account_execution_keeps_pipeline_results_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
     from src.application import tick_account_execution as mod
     from src.application.tick_account_execution import TickAccountExecutionRequest
 
@@ -568,13 +635,11 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             SimpleNamespace(
                 result=SimpleNamespace(account="lx"),
                 acct_metrics={"account": "lx"},
-                prefetch_done=True,
                 ran_pipeline=True,
             ),
             SimpleNamespace(
                 result=SimpleNamespace(account="sy"),
                 acct_metrics={"account": "sy"},
-                prefetch_done=False,
                 ran_pipeline=False,
             ),
         ]
@@ -599,7 +664,6 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             run_dir=tmp_path / "output_runs" / "run-1",
             shared_required=tmp_path / "output_runs" / "run-1" / "required_data",
             accounts_root=tmp_path / "output_accounts",
-            prefetch_done=False,
             force_mode=False,
             smoke=False,
             no_send=True,
@@ -622,7 +686,6 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
         )
     )
 
-    assert outcome.prefetch_done is True
     assert outcome.ran_any_pipeline is True
     assert outcome.ran_pipeline_accounts == ["lx"]
     assert outcome.scheduled_scan_targets_by_account == {

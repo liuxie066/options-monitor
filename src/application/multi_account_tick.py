@@ -700,7 +700,6 @@ def main(argv: list[str] | None = None) -> int:
     audit_helper.enable_run_artifacts()
     accounts_root = workspace.accounts_root
     run_dir = workspace.run_dir
-    prefetch_done = False
     shared_required = workspace.shared_required
 
     tick_metrics: dict[str, Any] = {
@@ -737,7 +736,6 @@ def main(argv: list[str] | None = None) -> int:
         run_dir=run_dir,
         shared_required=shared_required,
         accounts_root=accounts_root,
-        prefetch_done=prefetch_done,
         force_mode=force_mode,
         smoke=smoke,
         no_send=no_send,

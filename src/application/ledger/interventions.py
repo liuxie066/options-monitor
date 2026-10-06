@@ -30,6 +30,7 @@ from domain.domain.trade_contract_identity import (
     normalize_position_effect,
     normalize_trade_side,
 )
+from domain.domain.trade_execution import execution_instant_milliseconds, futu_execution_time
 from domain.domain.wheel import effective_wheel_events
 from src.application.cash_conversion import (
     attach_trade_event_cash_conversions,
@@ -1041,6 +1042,57 @@ def persist_manual_order_identity_binding(
     )
 
 
+def _preview_futu_raw_trade_time(
+    event: TradeEvent,
+    *,
+    raw_payload: dict[str, Any],
+    before_json: str,
+    requested_time_ms: int,
+) -> dict[str, Any]:
+    """Inspect stored raw time only; this is not an executable repair plan."""
+    if event.source != "opend_push" or event.event_type not in {"open", "close", "expire_close"}:
+        raise ValueError("raw Futu time preview requires an OpenD fill event")
+    if event.asset_type != "option":
+        raise ValueError("raw Futu time preview only supports option events")
+    if "trade_time_correction_provenance" in raw_payload:
+        raise ValueError("trade time correction provenance already exists")
+    # The archived execution_input may contain the original normalization error.
+    # Only the raw provider fields are evidence for reinterpreting the instant.
+    evidence = futu_execution_time(raw_payload)
+    evidence_ms = execution_instant_milliseconds(evidence["occurred_at_utc"])
+    if evidence["errors"] or evidence_ms is None:
+        raise ValueError(f"raw Futu trade time unavailable: {','.join(evidence['errors'])}")
+    if requested_time_ms != evidence_ms:
+        raise ValueError(f"trade_time_ms must equal the stored raw Futu time: {evidence_ms}")
+    execution = raw_payload.get("execution_input")
+    conversions = raw_payload.get("cash_conversions")
+    return {
+        "operation": "futu_raw_trade_time_preview",
+        "correction_status": "preview_only",
+        "apply_supported": False,
+        "evidence_scope": "stored_raw_time_only",
+        "target_event_id": event.event_id,
+        "target_event_type": event.event_type,
+        "target_lot_id": lot_id_for_open_event(event) if event.event_type == "open" else event.target_lot_id,
+        "before_trade_time_ms": event.event_time_ms,
+        "after_trade_time_ms": evidence_ms,
+        "time_change_required": event.event_time_ms != evidence_ms,
+        "source_time": evidence["source_time"],
+        "source_timezone": evidence["source_timezone"],
+        "occurred_at_utc": evidence["occurred_at_utc"],
+        "expected_before_sha256": _sha256_text(before_json),
+        "stored_execution_input_present": execution is not None,
+        "stored_execution_time": execution.get("occurred_at_utc") if isinstance(execution, dict) else None,
+        "cash_conversion_keys": sorted(str(key) for key in conversions) if isinstance(conversions, dict) else [],
+        "apply_blockers": [
+            "raw_futu_time_apply_not_supported",
+            "source_identity_and_execution_content_require_reconciliation",
+            "cash_conversions_require_recomputation",
+            "lot_allocation_lifecycle_attribution_and_inbox_require_validation",
+        ],
+    }
+
+
 def _opend_trade_time_correction_plan(
     repo: Any,
     *,
@@ -1079,8 +1131,6 @@ def _opend_trade_time_correction_plan(
             "trade time correction requires a canonical trade event: "
             f"{target_id}; diagnostics={','.join(errors) or 'event_decode_failed'}"
         )
-    if event.event_type != "open":
-        raise ValueError("trade time correction only supports option open events")
     if normalize_broker(event.contract_key.broker) != "富途":
         raise ValueError("trade time correction only supports Futu events")
     stored_time_ms = int(target_row.get("trade_time_ms") or 0)
@@ -1089,6 +1139,17 @@ def _opend_trade_time_correction_plan(
     raw_payload = before_payload.get("raw_payload") or {}
     if not isinstance(raw_payload, dict):
         raise ValueError("trade event raw_payload must be an object")
+    if "opend_order_evidence" not in raw_payload and event.source == "opend_push":
+        if corrected_at_ms is not None:
+            raise ValueError("raw Futu trade time is preview-only; apply is not supported")
+        return _preview_futu_raw_trade_time(
+            event,
+            raw_payload=raw_payload,
+            before_json=before_json,
+            requested_time_ms=requested_time_ms,
+        )
+    if event.event_type != "open":
+        raise ValueError("trade time correction only supports option open events")
     evidence_time_ms, evidence_order_ids, evidence_observed_at_ms = (
         _validated_opend_trade_time_evidence(event, raw_payload)
     )

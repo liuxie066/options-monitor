@@ -1253,9 +1253,21 @@ OpenD 证据和最早成交时间同时吻合时放行；其他交易时间更�
 只有目标 lot 的 `opened_at` 改变，否则整体回滚。
 
 旧事件时间形成的 `cash_conversions` 会在同一 CAS 中移除并记录失效的 fact kind，避免错误时点的
-CNY 金额继续通过读取校验。批次时间修正后必须独立 dry-run/apply 现有
+CNY 金额继续通过读取校验。上述订单证据路径修正后必须独立 dry-run/apply 现有
 `option-performance cash-conversion backfill`；旧 backfill audit 保留，新换算写入独立时间修正 audit，
 再验证月度报告。备份、生产写入和运行环境升级仍是独立授权边界。
+
+### 原始 Futu 成交时间预览
+
+同一 `trade-events repair --trade-time-ms <毫秒> --reason "OpenD 原始成交时间核对" --dry-run`
+入口也可检查没有 `opend_order_evidence` 的 `opend_push` 期权 open、close、expire_close 事件。
+它使用统一的 `futu_execution_time` 解释已存原始字段，拒绝缺失、无效、已 void、SQL/JSON 时间冲突
+或与提议时间不一致的记录；不会用旧 `execution_input` 时间替代原始来源。已有订单证据无效时不回退。
+
+结果为 `operation=futu_raw_trade_time_preview`、`apply_supported=false`，包含单笔旧 JSON 哈希、
+旧/新时间、原始时间和时区、已存标准成交时间与换算键。此结果只核对原始时间，不证明券商身份、
+完整成交内容或关联投影一致，不是可执行修复清单。归属、生命周期、持仓及经济分配、inbox/成交索引、
+标准成交内容和现金换算仍需另做联合验证；`--confirm` 拒绝该路径。未保留原始时间的历史记录不能推断修复。
 
 ## 读取语义
 
@@ -1356,3 +1368,15 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：利润、现金、activity 和组合桥接。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股成本与收益。
 - [Architecture](ARCHITECTURE.md)：ledger 与 interfaces/application/domain/infrastructure 的整体边界。
+
+批次检查使用 `om trade-events repair-futu-times --request <request.json>`。请求 schema 为
+`futu_trade_time_repair_request.v1`，包含 `batch_id`、`reason`、`prepared_at_ms` 和明确的
+`targets`（每项 `event_id`、`before_sha256`、`after_trade_time_ms`）。预览从原始 Futu
+证据推导时间，同时检查现金换算、持仓/分配经济不变量与权威 inbox；缺少 FX、身份冲突、
+处理中的 inbox 或原行漂移均拒绝。输出 `input_hash` 绑定完整读集与拟写内容，原始来源记录保留。
+
+确认写入还须传入 `--expected-input-hash` 和新的 `--backup-dir`。预览绑定精确两库路径与 schema；
+写入使用共同 writer lock、两库 DELETE/FULL ATTACH 事务，备份后通过不可变 audit 精确授权事件 CAS，
+同时更新 inbox 当前摘要和投影。原始收据、生命周期/期限与原币事实保持，未入选行严格不变。
+无 canonical key/hash 且无标准时间字段的旧原始收据不新增身份或摘要。提交后独立回读；同批重试 no_op，
+结果未知时保留原请求/hash复核，不能新建批次重放。完整操作与恢复边界见修复手册场景 E2。

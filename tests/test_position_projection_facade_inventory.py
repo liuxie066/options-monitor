@@ -110,6 +110,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
 
     assert runtime_calls == Counter(
         {
+            (
+                "src/application/ledger/futu_time_repair.py",
+                "apply_futu_time_repair",
+                "'forced_full'",
+            ): 1,
             ("src/application/ledger/trade_attribution.py", "write_trade_attribution_decision", "'forced_full'"): 1,
             ("src/application/ledger/trade_attribution_migration.py", "apply_trade_attribution_migration", "'forced_full'"): 1,
             (
@@ -213,6 +218,18 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
 
     assert full_calls == Counter(
         {
+            # Repair preview compares both full projections; apply checks the
+            # existing stored projection before publishing through the runtime.
+            (
+                "src/application/ledger/futu_time_repair.py",
+                "_project_invariants",
+                "project_stored_trade_events_to_position_lots",
+            ): 2,
+            (
+                "src/application/ledger/futu_time_repair.py",
+                "apply_futu_time_repair",
+                "project_stored_trade_events_to_position_lots",
+            ): 1,
             ("src/application/ledger/trade_attribution.py", "trade_attribution_facts_from_events", "project_stored_trade_events_to_position_lots"): 1,
             (
                 "src/application/ledger/bootstrap.py",

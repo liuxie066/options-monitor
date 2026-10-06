@@ -127,7 +127,6 @@ def _request(
         run_dir=run_dir,
         shared_required=shared,
         accounts_root=tmp_path / "output_accounts",
-        prefetch_done=False,
         force_mode=force,
         smoke=False,
         no_send=True,
@@ -284,23 +283,6 @@ def _stub_prepared_option_context(monkeypatch):
         "prepare_option_positions_contexts",
         _fake_prepare_options,
     )
-    monkeypatch.setattr(
-        mod,
-        "load_prepared_option_positions_context",
-        lambda **kwargs: {
-            "prepared_authority": {
-                "run_id": kwargs["expected_run_id"],
-                "account": kwargs["expected_account"],
-            },
-            "filters": {
-                "account": kwargs["expected_account"],
-                "broker": "futu",
-            },
-            "context_status": "available",
-            "decision_snapshot_status": "trusted",
-            "open_positions_min": [],
-        },
-    )
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -431,12 +413,12 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     assert prefetch_calls[0]["force_refresh"] is force
     assert {item.acct for item in account_requests} == set(accounts)
     assert all(item.required_data_snapshot_manifest for item in account_requests)
+    assert all(item.prefetch_done is True for item in account_requests)
     assert all(item.prepared_portfolio_context_manifest for item in account_requests)
     assert all(
         item.prepared_option_positions_context_manifest
         for item in account_requests
     )
-    assert outcome.prefetch_done is True
     assert set(outcome.ran_pipeline_accounts) == set(accounts)
     summaries = [
         (
@@ -940,165 +922,6 @@ def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
     )
 
 
-def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from dataclasses import replace
-    from datetime import date, datetime, timezone
-
-    from domain.domain.decision_state_fingerprint import canonical_sha256
-    from src.application import tick_account_execution as mod
-    from src.application.close_advice_required_data import (
-        PLAN_FILE_NAME,
-        build_close_advice_required_data_plan,
-        publish_close_advice_required_data_plan,
-    )
-    from src.application.prepared_option_positions_context import (
-        PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-        PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
-    )
-    from src.application.source_receipts import sha256_bytes
-    from src.infrastructure.io_utils import atomic_write_json
-
-    request = replace(
-        _lx_request(tmp_path),
-        prefetch_done=True,
-    )
-    state_dir = request.run_dir / "state"
-    state_dir.mkdir(parents=True)
-    plan_path = state_dir / PLAN_FILE_NAME
-    plan = build_close_advice_required_data_plan(
-        run_id=request.run_id,
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        account_configs={
-            "lx": {"close_advice": {"enabled": False}}
-        },
-        base_config=request.base_cfg,
-        markets_to_run=["US"],
-        position_records_by_account={},
-    )
-    publish_close_advice_required_data_plan(
-        path=plan_path,
-        payload=plan,
-    )
-    manifest_path = state_dir / "required_data_snapshot_manifest.json"
-    manifest = {
-        "schema_version": "required_data_snapshot_manifest.v1",
-        "run_id": request.run_id,
-        "status": "complete",
-        "plan_id": "a" * 64,
-        "sealed_at_utc": datetime.now(timezone.utc).isoformat(),
-        "required_data_root_relpath": "../required_data",
-        "symbols": {},
-        "summary": {"symbols_total": 0, "ready": 0, "failed": 0},
-        "close_advice_required_data_plan_relpath": PLAN_FILE_NAME,
-        "close_advice_required_data_plan_sha256": sha256_bytes(
-            plan_path.read_bytes()
-        ),
-    }
-    manifest["content_sha256"] = canonical_sha256(manifest)
-    atomic_write_json(manifest_path, manifest)
-    option_manifest_path = (
-        request.run_dir
-        / "accounts"
-        / "lx"
-        / "state"
-        / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
-    )
-    option_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(
-        option_manifest_path.parent / "prepared_portfolio_context.v1.json",
-        {"schema_version": "prepared_portfolio_context.v1"},
-    )
-    atomic_write_json(
-        option_manifest_path,
-        {
-            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-            "run_id": request.run_id,
-            "account": "lx",
-            "status": "ready",
-        },
-    )
-    account_requests = []
-    cleanup_calls: list[dict] = []
-    monkeypatch.setattr(
-        mod,
-        "load_required_data_snapshot_manifest_snapshot",
-        lambda **_kwargs: (
-            manifest,
-            request.shared_required.resolve(),
-            manifest_path.read_bytes(),
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "load_prepared_portfolio_context",
-        lambda **_kwargs: _portfolio_context("lx"),
-    )
-    monkeypatch.setattr(
-        mod,
-        "load_prepared_option_positions_context",
-        lambda **_kwargs: {"wheel_read_model": {"batches": []}},
-    )
-    monkeypatch.setattr(
-        mod,
-        "prepare_portfolio_contexts",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("re-entry must not prepare contexts")
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "_build_close_advice_barrier_plan",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("re-entry must not rebuild the plan")
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "prefetch_required_data",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("re-entry must not prefetch again")
-        ),
-    )
-    monkeypatch.setattr(
-        mod,
-        "_retire_required_data_shadows_after_manifest",
-        lambda **kwargs: cleanup_calls.append(kwargs),
-    )
-
-    def _run_one_account(*, request, **_kwargs):
-        account_requests.append(request)
-        return _outcome(request.acct)
-
-    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
-
-    outcome = mod.run_tick_account_execution(request)
-
-    assert outcome.prefetch_invocation_count == 0
-    assert outcome.snapshot_status == "complete"
-    assert len(cleanup_calls) == 1
-    assert cleanup_calls[0]["trigger"] == "recovery"
-    assert cleanup_calls[0]["manifest_bytes"] == manifest_path.read_bytes()
-    assert len(account_requests) == 1
-    assert (
-        account_requests[0].close_advice_required_data_plan
-        == plan_path.resolve()
-    )
-    assert (
-        account_requests[0].prepared_option_positions_context_manifest
-        == option_manifest_path.resolve()
-    )
-
-
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
     monkeypatch,
@@ -1163,14 +986,10 @@ def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
 
 @pytest.mark.parametrize("write_failure_account", [None, "lx"])
 @pytest.mark.parametrize(
-    ("seal_behavior", "reason", "prefetch_done"),
+    ("seal_behavior", "reason"),
     [
-        ("failed", "required_data_snapshot_failed", True),
-        (
-            "raise",
-            "required_data_snapshot_manifest_unavailable",
-            False,
-        ),
+        ("failed", "required_data_snapshot_failed"),
+        ("raise", "required_data_snapshot_manifest_unavailable"),
     ],
 )
 def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipeline(
@@ -1179,7 +998,6 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
     write_failure_account: str | None,
     seal_behavior: str,
     reason: str,
-    prefetch_done: bool,
 ) -> None:
     from src.application import tick_account_execution as mod
     from src.infrastructure.io_utils import atomic_write_json
@@ -1236,7 +1054,6 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
     outcome = mod.run_tick_account_execution(request)
 
     assert outcome.ran_pipeline_accounts == []
-    assert outcome.prefetch_done is prefetch_done
     assert [item.decision_reason for item in outcome.results] == [reason, reason]
     assert all(item.should_notify is True for item in outcome.results)
     assert set(outcome.scheduled_scan_targets_by_account) == {"lx", "sy"}
