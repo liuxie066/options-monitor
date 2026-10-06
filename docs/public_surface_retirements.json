@@ -345,6 +345,11 @@
       "module": "src/application/close_advice_runner.py",
       "name": "run_from_paths",
       "reason": "The unsealed convenience runner was retired because every Close Advice execution now requires an explicit run, snapshot manifest, and bound plan."
+    },
+    {
+      "module": "src/application/tick_run_workspace.py",
+      "name": "account_run_config_paths",
+      "reason": "The plural path helper encoded the retired account-root shadow copy as part of the run-config contract; new runs now publish and read only the canonical state/config.override.json path through account_run_config_path."
     }
   ]
 }
