@@ -351,3 +351,39 @@ def test_service_rejects_control_target_identity_and_time_errors(mismatch):
     with pytest.raises(OptionPerformanceReadError) as caught:
         _build_report(_Repo([original.to_dict(), void.to_dict()]))
     assert caught.value.reason_codes == ("ledger_control_graph_invalid",)
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_report_uses_one_day_floor_for_each_account_without_mutating_ledger(current):
+    from copy import deepcopy
+
+    first = _event("floor-lx", "open", "2026-09-01T10:00:00")
+    second = replace(_event("floor-sy", "open", "2026-09-01T11:00:00"),
+        contract_key=replace(first.contract_key, account="sy"), lot_id="lot-sy")
+    rows = [first.to_dict(), second.to_dict()]
+    if not current:
+        rows.extend([
+            _event("close-lx", "close", "2026-09-01T12:00:00", target_lot_id="lot-1").to_dict(),
+            replace(_event("close-sy", "close", "2026-09-01T12:30:00", target_lot_id="lot-sy"),
+                    contract_key=second.contract_key).to_dict(),
+        ])
+    repo = _Repo(rows)
+    before = deepcopy(rows)
+    period = normalize_performance_period(
+        PeriodRequest(period="mtd", as_of_date="2026-09-01"),
+        report_now_ms=_ms("2026-09-01T12:00:00") - 1 if current else _ms("2026-09-02T12:00:00"),
+    )
+    report = _build_report(repo, period=period, configured_accounts=("lx", "sy"), include_rows=True)
+    returns = report["option_return"]["by_currency"]["USD"]
+    assert [row["capital_days"] for row in report["rows"]] == [10000.0, 10000.0]
+    assert returns["capital_days"] == 20000.0
+    assert returns["average_occupied_capital"] == (40000.0 if current else 20000.0)
+    assert returns["rate"] == 0.01
+    assert returns["annualized_rate"] == (7.3 if current else 3.65)
+    assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == (400.0 if current else 200.0)
+    assert {item["key"] for item in report["breakdowns"]["accounts"]} == {"lx", "sy"}
+    for item in report["breakdowns"]["accounts"]:
+        assert item["option_return"]["by_currency"]["USD"]["capital_days"] == 10000.0
+    again = _build_report(repo, period=period, configured_accounts=("lx", "sy"), include_rows=True)
+    assert again == report
+    assert repo.rows == before

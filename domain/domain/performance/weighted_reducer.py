@@ -663,7 +663,9 @@ def _capital(
         return occupied, None, {"capital_non_positive"}
     if unresolved_reason:
         return occupied, None, {unresolved_reason}
-    capital_days = (occupied * Decimal(end_at_ms - opened_at_ms) / MILLISECONDS_PER_DAY).quantize(CAPITAL_DAYS_QUANTUM)
+    # Each disjoint contract share has a one-day minimum; longer holds keep fractional days.
+    duration_ms = max(Decimal(end_at_ms - opened_at_ms), MILLISECONDS_PER_DAY)
+    capital_days = (occupied * duration_ms / MILLISECONDS_PER_DAY).quantize(CAPITAL_DAYS_QUANTUM)
     return occupied, capital_days, set()
 
 

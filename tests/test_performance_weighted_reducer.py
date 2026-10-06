@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -905,3 +905,84 @@ def test_currency_conflict_fails_only_the_affected_scoped_allocation() -> None:
     account_rows = {row["key"]: row for row in aggregate.breakdowns["accounts"]}
     assert account_rows["lx"]["status"] == MetricStatus.PARTIAL
     assert account_rows["sy"]["status"] == MetricStatus.OBSERVED
+
+
+@pytest.mark.parametrize("side,option_type,principal", [
+    ("short", "put", "20000"), ("short", "call", "20000"),
+    ("long", "put", "400"), ("long", "call", "400"),
+])
+@pytest.mark.parametrize("elapsed_ms,days", [
+    (1, "1"), (3 * 3_600_000, "1"), (86_399_999, "1"),
+    (86_400_000, "1"), (129_600_000, "1.5"),
+])
+@pytest.mark.parametrize("terminated", [False, True])
+def test_occupied_time_floor_at_report_boundaries(side, option_type, principal, elapsed_ms, days, terminated):
+    opened = datetime.fromisoformat("2026-09-01T23:00:00")
+    ended = opened + timedelta(milliseconds=elapsed_ms)
+    key = _key(side=side, option_type=option_type)
+    events = [_event("floor-open", "open", opened.isoformat(), key=key,
+                     lot_id="floor-lot", contracts=2, price=2, fee=1)]
+    if terminated:
+        events.append(_event("floor-close", "close", ended.isoformat(), key=key,
+            target_lot_id="floor-lot", contracts=2, price=1, fee=0.5,
+            close_type="buy_to_close" if side == "short" else "sell_to_close"))
+        period = _period(now="2026-09-04T00:00:00")
+    else:
+        # The current period includes report_now itself (exclusive end = now + 1ms).
+        period = _period(now=(ended - timedelta(milliseconds=1)).isoformat())
+    reduction = reduce_option_performance(project_trade_events(events), period=period)
+    fact, = reduction.facts
+    expected_capital_days = Decimal(principal) * Decimal(days)
+    assert fact.occupied_capital == Decimal(principal)
+    assert fact.capital_days == expected_capital_days
+    assert fact.state == ("terminated" if terminated else "open")
+    expected_cash = Decimal("400" if side == "short" else "-400") - 1
+    if terminated:
+        expected_cash += Decimal("-200" if side == "short" else "200") - Decimal("0.5")
+    assert fact.option_net_cashflow == expected_cash
+    result = reduction.bundle["option_return"]["by_currency"]["USD"]
+    assert result["capital_days"] == expected_capital_days
+    assert result["average_occupied_capital"] == (expected_capital_days / period.statistic_days).quantize(Decimal("0.000001"))
+    assert result["rate"] == (expected_cash * period.statistic_days / expected_capital_days).quantize(Decimal("0.000000000001"))
+    assert result["annualized_rate"] == (expected_cash * 365 / expected_capital_days).quantize(Decimal("0.000000000001"))
+
+
+def test_occupied_time_floor_counts_disjoint_partial_close_shares():
+    events = [
+        _event("split-open", "open", "2026-09-01T10:00:00", lot_id="split-lot", contracts=3, price=2),
+        _event("split-early", "close", "2026-09-01T11:00:00", target_lot_id="split-lot", price=1, close_type="buy_to_close"),
+        _event("split-late", "close", "2026-09-02T22:00:00", target_lot_id="split-lot", price=1, close_type="buy_to_close"),
+    ]
+    period = _period(now="2026-09-03T09:59:59.999")
+    reduction = reduce_option_performance(project_trade_events(events), period=period)
+    facts = {fact.terminal_event_id: fact for fact in reduction.facts}
+    assert facts["split-early"].capital_days == Decimal("10000")
+    assert facts["split-late"].capital_days == Decimal("15000")
+    assert facts[None].capital_days == Decimal("20000")
+    assert sum(fact.contracts for fact in facts.values()) == 3
+    assert reduction.bundle["option_return"]["by_currency"]["USD"]["capital_days"] == Decimal("45000")
+    assert reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == Decimal("400")
+
+
+@pytest.mark.parametrize("elapsed_ms,contracts,strike,unresolved,expected_issue", [
+    (0, 1, 100, None, None),
+    (-1, 1, 100, None, "capital_identity_missing"),
+    (1, 0, 100, None, "capital_identity_missing"),
+    (1, 1, 0, None, "capital_non_positive"),
+    (1, 1, 100, "terminal_evidence_missing", "terminal_evidence_missing"),
+    (1, 1, 100, "terminal_evidence_conflict", "terminal_evidence_conflict"),
+])
+def test_occupied_time_floor_preserves_invalid_and_unresolved_guards(elapsed_ms, contracts, strike, unresolved, expected_issue):
+    from domain.domain.performance.weighted_reducer import _capital
+
+    lot, = project_trade_events([_event("guard-open", "open", "2026-09-01T10:00:00", lot_id="guard-lot")]).lots
+    lot = replace(lot, contract_key=replace(lot.contract_key, strike=strike))
+    occupied, capital_days, missing = _capital(lot, contracts=contracts,
+        opened_at_ms=lot.opened_at_ms, end_at_ms=lot.opened_at_ms + elapsed_ms,
+        unresolved_reason=unresolved)
+    if expected_issue:
+        assert capital_days is None
+        assert missing == {expected_issue}
+    else:
+        assert occupied == capital_days == Decimal("10000")
+        assert missing == set()

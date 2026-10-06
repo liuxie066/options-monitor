@@ -393,16 +393,25 @@ aggregate win-rate value and status still follow the table above.
 The public Chinese name remains **期权收益率**. The annualized companion is **年化收益率**.
 
 ```text
-资本天数 = Σ(每段占用资金 × 实际占用天数)
+计入占用天数 = max(实际占用毫秒数 / 86,400,000, 1)
+资本天数 = Σ(每份合约占用资金 × 该份计入占用天数)
 平均占用资金 = 资本天数 / 统计天数
 期权收益率 = 期权净现金流 / 平均占用资金
            = 期权净现金流 × 统计天数 / 资本天数
 年化收益率 = 期权净现金流 / 资本天数 × 365
 ```
 
-Actual occupied days use exact event-time overlap divided by 86,400,000 milliseconds. A partial close
-reduces capital at its exact close time. A terminal share stops capital at its terminal time; an open
-share runs until `end_exclusive_at_ms`.
+Each terminated allocation and open residual uses its original opening time: a terminal share ends
+at its terminal time, and an open share ends at `end_exclusive_at_ms`. Each disjoint contract share
+has a minimum of one day (24 hours), including a valid zero-length holding. Longer durations retain
+fractional days: 36 hours count as 1.5 days. Crossing midnight does not add an extra day. Partial
+closes apply this floor separately to the closed quantities and the remaining open quantity; they
+do not repeatedly floor chronological inventory intervals or count the same contracts twice.
+
+The floor applies only after identity, positive-capital and terminal-evidence checks. An end time
+before the opening time or unavailable/conflicting required terminal evidence remains unavailable.
+The reporting period's `statistic_days` is unchanged. Current and historical report reads recompute
+capital-days using this rule without rewriting ledger events or their timestamps.
 
 The return numerator is the native currency's `option_net_cashflow.total.amount`; it never substitutes
 the open/terminated split.
