@@ -34,7 +34,10 @@ from domain.domain.ledger.position_fields import build_open_adjustment_patch_con
 from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 from src.application.ledger.api import (assert_trade_attribution_unclaimed)
 from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
-from src.application.wheel.read_model import build_wheel_read_model_from_rows
+from src.application.wheel.read_model import (
+    build_wheel_read_model_from_rows,
+    build_wheel_read_model_with_capacity_from_rows,
+)
 from src.application.wheel.capacity import trade_attribution_capacity_check
 from src.application.daily_decision_brief_repository import DailyBriefReadScope, read_combo_candidate_exposures
 
@@ -191,9 +194,9 @@ def build_trade_attribution_view(
     late_intent_allowed = (readiness["reason_code"] in {"closed_window", "account_not_configured"}
         and intent_history_readiness["reason_code"] in {None, "closed_window"}
         and not intent_history_readiness.get("policy_drift"))
-    model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=now_ms, market=market,
-                                            monitoring_readiness=readiness)
-    capacity_model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=now_ms)
+    model, capacity_model = build_wheel_read_model_with_capacity_from_rows(
+        rows, account=account, as_of_ms=now_ms, market=market, monitoring_readiness=readiness,
+    )
     branches = model["wheel_branches"]
     conflict_statuses = {}
     wheel_events, _wheel_errors = effective_wheel_events(rows["account_wheel_events"], as_of_ms=now_ms, trade_events=rows["trade_events"],

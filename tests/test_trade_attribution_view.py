@@ -999,3 +999,32 @@ def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkey
     assert connection.result["portfolio"]["exchange_rates"] is None
     assert len(calls) == (0 if cached else 1)
     assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_attribution_pair_keeps_complete_view_and_historical_instants(tmp_path, monkeypatch):
+    import src.application.trades.attribution as attribution
+    from src.application.wheel import read_model
+
+    rows, config, _branch = _call_scope(tmp_path, monkeypatch)
+    args = dict(config=config, account='lx', market='us', now_ms=4000,
+                combo_evidence={'complete': True, 'exposures': []})
+    paired = attribution.build_wheel_read_model_with_capacity_from_rows
+    def independent(rows, *, account, as_of_ms, market, monitoring_readiness=None):
+        return (read_model.build_wheel_read_model_from_rows(
+            rows, account=account, as_of_ms=as_of_ms, market=market, monitoring_readiness=monitoring_readiness),
+            read_model.build_wheel_read_model_from_rows(rows, account=account, as_of_ms=as_of_ms))
+    monkeypatch.setattr(attribution, 'build_wheel_read_model_with_capacity_from_rows', independent)
+    expected = attribution.build_trade_attribution_view(rows, **args)
+    monkeypatch.setattr(attribution, 'build_wheel_read_model_with_capacity_from_rows', paired)
+    base = read_model._build_wheel_read_model_base
+    instants = []
+    def counted(*a, **kw):
+        instants.append(kw['as_of_ms'])
+        return base(*a, **kw)
+    monkeypatch.setattr(read_model, '_build_wheel_read_model_base', counted)
+    assert attribution.build_trade_attribution_view(rows, **args) == expected
+    assert instants.count(4000) == 1
+    assert instants.count(3000) == 1  # Matching call fill still needs its historical branch.
+    put_times = {event['event_time_ms'] for event in rows['trade_events']
+                 if event['event_type'] == 'open' and event['option_type'] == 'put'}
+    assert not put_times.intersection(instants)
