@@ -1,0 +1,971 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.1",
+  "base": {
+    "tag": "v4.2.0",
+    "commit": "fb82b2bf620a2eec20c1155ddcd8e512a0169dc2"
+  },
+  "reviewed_head": "a8f7330ce95f0e16e3bcef7c9ea898591e159a62",
+  "commits": [
+    {
+      "sha": "0bc47e90c9d2e2912d609b32dbd4ab2f06d93fb6",
+      "subject": "chore(gateflow): accept plan for issue 461"
+    },
+    {
+      "sha": "15a55046edb67ac351847007d84603fa338d3f49",
+      "subject": "fix(config): validate account worker limits"
+    },
+    {
+      "sha": "8cf4e16e1fa4f9755aba44436cf31a9f7c577e94",
+      "subject": "chore(gateflow): accept issue 461 implementation slice"
+    },
+    {
+      "sha": "1ae029f0959c61a5826f0f60b3980481f390a6a9",
+      "subject": "chore(gateflow): accept close advice sealed-path plan"
+    },
+    {
+      "sha": "0e204fb6c79c8e2afe4dff4e8e08ca83beed19d7",
+      "subject": "chore(gateflow): accept close-advice-sealed-path S1"
+    },
+    {
+      "sha": "f93344cff9a1dd28c8fb266137fc1ca1429441ed",
+      "subject": "chore(gateflow): accept deepreview for close-advice-sealed-path"
+    },
+    {
+      "sha": "80966a88db3435d1ae426472093d7f1f5071474f",
+      "subject": "docs(close-advice): align README with sealed path"
+    },
+    {
+      "sha": "9bb63ba8bf756b548fba50d25d2647ae6c605da9",
+      "subject": "chore(gateflow): accept PR review for close-advice-sealed-path"
+    },
+    {
+      "sha": "161ca351b532dadc0cb3537636df93d9ebff15f1",
+      "subject": "test(close-advice): retire mutable path coverage"
+    },
+    {
+      "sha": "85462815c505617792288869ec8c1a3b9b006a25",
+      "subject": "chore(gateflow): accept PR re-review for close-advice-sealed-path"
+    },
+    {
+      "sha": "abff6099940d99e99c0eac6d75de2e01ec85a325",
+      "subject": "docs(graph): refresh after close advice test retirement"
+    },
+    {
+      "sha": "d45271d8a9661c88b661fe4963d1c16223662779",
+      "subject": "chore(gateflow): accept final PR review for close-advice-sealed-path"
+    },
+    {
+      "sha": "050d22ee560128676b66be6d41f5f1e17b3df4bd",
+      "subject": "chore(gateflow): accept post-rebase PR review for close-advice-sealed-path"
+    },
+    {
+      "sha": "75a5e0b6cb6f47a7722472ddd48f98c61f8d03df",
+      "subject": "chore(gateflow): accept latest-base PR review for close-advice-sealed-path"
+    },
+    {
+      "sha": "1c7661c764624263990a9c3f4d643b2354f474d5",
+      "subject": "chore(gateflow): accept conflict-resolution PR review"
+    },
+    {
+      "sha": "ac172938166094c36d1562ca907cff7fb0a36198",
+      "subject": "chore(gateflow): accept deepreview for issue 461"
+    },
+    {
+      "sha": "67fe3f051e8a3e90172678197ba71601fe34bd32",
+      "subject": "fix(brief): always show default strategy sections"
+    },
+    {
+      "sha": "88705a87a330e26152dc792ee91d7cc108957e8e",
+      "subject": "Merge pull request #469 from liuxie066/codex/close-advice-sealed-path"
+    },
+    {
+      "sha": "a4c0051c2f210dca08824bd74192b950f7e51141",
+      "subject": "chore(brief): merge latest main for verified delivery"
+    },
+    {
+      "sha": "f68d80860b81174a9cbf46547bf0ed86be0be741",
+      "subject": "Merge pull request #472 from liuxie066/codex/brief-default-strategy-sections"
+    },
+    {
+      "sha": "0877614be498af197cb1f3b987ca87406d8845c0",
+      "subject": "chore(config): sync issue 461 with main"
+    },
+    {
+      "sha": "8a7c735596fb9e901d8363fdd3fdb23fc86ce9bf",
+      "subject": "fix(brief): show candidate capacity and unify combo label"
+    },
+    {
+      "sha": "1a439ef227b729b7fafb468c2bda992598869e2f",
+      "subject": "Merge pull request #471 from liuxie066/codex/issue461-account-worker-config"
+    },
+    {
+      "sha": "77d4cf0db5c70d4d6805fd48ecb93aceb1d20af5",
+      "subject": "chore(brief): merge latest main before delivery"
+    },
+    {
+      "sha": "342a5c10d5a145cf8d9405bf5866f14c782373de",
+      "subject": "chore(gateflow): accept plan for close-advice-plan-contract-key"
+    },
+    {
+      "sha": "fe19f282a3b16e281b86f99275e78e704f29e5ba",
+      "subject": "fix(close-advice): plan canonical position lots"
+    },
+    {
+      "sha": "1ac72489f5a3bcc9546bf136c9c6f6f3dd3e85a2",
+      "subject": "chore(gateflow): accept deepreview for close-advice-plan-contract-key"
+    },
+    {
+      "sha": "a9926cbf436608c53f436d01afc898e6389b0b5e",
+      "subject": "chore(gateflow): accept latest-base deepreview"
+    },
+    {
+      "sha": "bb4c47c9eddec173b288b67912710b50784ac6ae",
+      "subject": "chore(gateflow): accept PR review for close-advice-plan-contract-key"
+    },
+    {
+      "sha": "811bb2c91209a2596d6d955be0647972282ff24b",
+      "subject": "Merge pull request #473 from liuxie066/codex/brief-capacity-and-combo-label"
+    },
+    {
+      "sha": "3d19e0a26f5c014e09ee35263b7e7195a4ab29ef",
+      "subject": "chore(gateflow): merge latest main for PR review"
+    },
+    {
+      "sha": "44e9b38a101d4bc7563fb0e373e71b49e582e66d",
+      "subject": "chore(gateflow): accept latest-base PR review"
+    },
+    {
+      "sha": "1b156eeff3a22e45882b664ea882e5b57bd1dfbf",
+      "subject": "Merge pull request #474 from liuxie066/codex/close-advice-plan-contract-key"
+    },
+    {
+      "sha": "df5ba6f6f96dc5fddd37ab04aeb1a617e29d93e4",
+      "subject": "chore(gateflow): accept plan for hk-tick-evidence-performance"
+    },
+    {
+      "sha": "bf0791e0e26e9e220686c05239c701c965862a50",
+      "subject": "chore(gateflow): accept plan for run-config-single-copy"
+    },
+    {
+      "sha": "c4789d01fc9f6d9c0cb303d5cf7b39aa5ffc063d",
+      "subject": "chore(gateflow): accept hk-tick-evidence-performance S1"
+    },
+    {
+      "sha": "d96589467af17ae9afbe83f398279f018a075a62",
+      "subject": "chore(gateflow): accept hk-tick-evidence-performance S2"
+    },
+    {
+      "sha": "17d49c6bb25e10d7e672fd816d8cf2a5d5b0a94d",
+      "subject": "refactor(config): use one run config authority"
+    },
+    {
+      "sha": "f539432b339a31b34254350d88ab957ebab75069",
+      "subject": "chore(gateflow): accept deepreview for run-config-single-copy"
+    },
+    {
+      "sha": "5fa8a60743888ae9cafba111dec4a0e5b97fa104",
+      "subject": "chore(gateflow): accept hk-tick-evidence-performance S3"
+    },
+    {
+      "sha": "3ff474fc8db6d0c389b2616732c4913f2b491bf2",
+      "subject": "docs(deps): refresh dependency graph"
+    },
+    {
+      "sha": "d86ec085d34c629203a5af968b63f321db1bef88",
+      "subject": "chore(gateflow): reaccept deepreview for run-config-single-copy"
+    },
+    {
+      "sha": "1d07e618d9fc66382874a8df11e827c26da04271",
+      "subject": "chore(gateflow): accept deepreview for hk-tick-evidence-performance"
+    },
+    {
+      "sha": "e32a6b3beeffad6396891170bbfc889f2996a732",
+      "subject": "chore(gateflow): accept PR review for run-config-single-copy"
+    },
+    {
+      "sha": "29fc0cb89b81e1719f343f039525d1c7e1bc8f07",
+      "subject": "docs(guardrails): record run config path retirement"
+    },
+    {
+      "sha": "2366f95731e163c2fe80962861356f852e39141d",
+      "subject": "Merge pull request #475 from liuxie066/codex/run-config-single-copy"
+    },
+    {
+      "sha": "d577904fdd85321e97e2f82a1ef0f991623539bd",
+      "subject": "chore(gateflow): accept legacy adapter boundary plan"
+    },
+    {
+      "sha": "2af92b295c216f166febdd4fdd351410f1875b80",
+      "subject": "chore(gateflow): accept plan for hk-tick-performance-round2"
+    },
+    {
+      "sha": "09581201c1932b2377fb9c47679efc883ed25e6e",
+      "subject": "chore(gateflow): accept hk-tick-performance-round2 S1"
+    },
+    {
+      "sha": "4179c9ef53994e69e876732f7b3b05ff177ec2bf",
+      "subject": "refactor(contracts): seal legacy payload adapters"
+    },
+    {
+      "sha": "fb158a509cf46cc7e2cd0a0cf567786e36820b6e",
+      "subject": "chore(gateflow): accept hk-tick-performance-round2 S2"
+    },
+    {
+      "sha": "eda17cec882fb9307171080608e437fabc043db6",
+      "subject": "chore(integration): merge main and refresh dependency graph"
+    },
+    {
+      "sha": "48aa773f9fb90a351048f9e89fe0e582d408e1b4",
+      "subject": "chore(gateflow): accept deepreview for hk-tick-performance-round2"
+    },
+    {
+      "sha": "4090df942626a18acac37f08f617f0b62dc934e8",
+      "subject": "refactor(wheel): isolate v1 history adapters"
+    },
+    {
+      "sha": "1ad79764ec997251dd4d8f00bc56202538eb4df8",
+      "subject": "Merge pull request #476 from liuxie066/codex/hk-tick-evidence-performance"
+    },
+    {
+      "sha": "a90a4579ecbcfbd8a8dab09d65ff39a430368757",
+      "subject": "test(contracts): version current payload fixtures"
+    },
+    {
+      "sha": "40ef06c084610f15a80b9ad937d29d3c1ec315fc",
+      "subject": "chore(merge): sync latest main"
+    },
+    {
+      "sha": "13b0155ceaff646d851f13db93eabed1ead9dfe2",
+      "subject": "chore(gateflow): accept PR review for legacy adapters"
+    },
+    {
+      "sha": "43abc7392e7b72380532622c77d5cd4c4e2abefa",
+      "subject": "docs(guardrails): record Wheel helper retirements"
+    },
+    {
+      "sha": "0250acdee2a87b49ca9867b57435df5f7a935f8f",
+      "subject": "chore(gateflow): accept plan for shared-projection-reuse"
+    },
+    {
+      "sha": "f3a387207d42b58598d3b8688b822bda852e8d15",
+      "subject": "Merge pull request #477 from liuxie066/codex/legacy-adapter-boundaries"
+    },
+    {
+      "sha": "2efecee5c8dc4296c71087f8122bd24cc872d5fe",
+      "subject": "chore(gateflow): accept shared-projection-reuse S2"
+    },
+    {
+      "sha": "e7127f3f8145ca2b1fca26c4298fe58019b71673",
+      "subject": "chore(gateflow): accept shared-projection-reuse S1"
+    },
+    {
+      "sha": "6665f6ebc6506b9d2831eff593f0ceb2d760f849",
+      "subject": "chore(gateflow): accept deepreview for shared-projection-reuse"
+    },
+    {
+      "sha": "9125c7ad14c97f7968af3603ccbf98cbc0675474",
+      "subject": "chore(integration): sync current main contracts"
+    },
+    {
+      "sha": "15fe9124766e1c90bd1f2e284aef0fbab001896f",
+      "subject": "chore(gateflow): accept shared-projection new-base review"
+    },
+    {
+      "sha": "fe565d6e9fc4abb75c4c48b7129daffa7c2638a2",
+      "subject": "chore(gateflow): accept PR review for shared-projection-reuse"
+    },
+    {
+      "sha": "7161af9d6b482d3e100de285ae3ad913fe0f5c98",
+      "subject": "Merge pull request #478 from liuxie066/codex/shared-projection-reuse"
+    },
+    {
+      "sha": "6ae073d49239350640c8901a88308860deac30bd",
+      "subject": "gateflow(performance): accept plan for option-capital-one-day"
+    },
+    {
+      "sha": "a52a4afe4e9bca8bcf5a4e8ddfb64b74f340630d",
+      "subject": "gateflow(performance): accept option-capital-one-day S1"
+    },
+    {
+      "sha": "205afbe24152b7e3cde46900d2a6e1e480b7cfdd",
+      "subject": "gateflow(performance): accept deepreview for option-capital-one-day"
+    },
+    {
+      "sha": "a8f7330ce95f0e16e3bcef7c9ea898591e159a62",
+      "subject": "Merge pull request #479 from liuxie066/codex/option-capital-one-day"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Close Advice 当前报告只由计划 Tick 的封存行情路径生成；移除 Agent 的可变行情准备、生成入口和兼容流水线，读取要求报告及每一行绑定同一 snapshot 和计划，历史未封存报告保守显示为不可评估。",
+      "commits": [
+        "0e204fb6c79c8e2afe4dff4e8e08ca83beed19d7",
+        "161ca351b532dadc0cb3537636df93d9ebff15f1",
+        "80966a88db3435d1ae426472093d7f1f5071474f",
+        "88705a87a330e26152dc792ee91d7cc108957e8e",
+        "abff6099940d99e99c0eac6d75de2e01ec85a325"
+      ]
+    },
+    {
+      "category": "Breaking Changes",
+      "text": "当前交易执行、持仓快照、Daily Brief 和 Wheel 输入要求显式版本；无版本持久历史仅经具名适配器读取，新 required-data quote receipt 必须发布 canonical blob。",
+      "commits": [
+        "4090df942626a18acac37f08f617f0b62dc934e8",
+        "4179c9ef53994e69e876732f7b3b05ff177ec2bf",
+        "43abc7392e7b72380532622c77d5cd4c4e2abefa",
+        "a90a4579ecbcfbd8a8dab09d65ff39a430368757",
+        "f3a387207d42b58598d3b8688b822bda852e8d15"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "同一次冻结账本读取中，多账户决策快照复用公共投影、比较与摘要；成交归属的当前市场视图和全账户容量视图共享 Wheel 基础投影，保留账户隔离、历史时点计算和事务重验。",
+      "commits": [
+        "15fe9124766e1c90bd1f2e284aef0fbab001896f",
+        "2efecee5c8dc4296c71087f8122bd24cc872d5fe",
+        "6665f6ebc6506b9d2831eff593f0ceb2d760f849",
+        "7161af9d6b482d3e100de285ae3ad913fe0f5c98",
+        "e7127f3f8145ca2b1fca26c4298fe58019b71673",
+        "fe565d6e9fc4abb75c4c48b7129daffa7c2638a2"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "日报准备在连续只读阶段及单次历史校验内复用已验证来源，减少重复解析与摘要计算；后台归属通过同一只读连接观察账本提交变化，无变化时复用批次快照，保留并发更新、事务内重验和写后读回。",
+      "commits": [
+        "09581201c1932b2377fb9c47679efc883ed25e6e",
+        "1ad79764ec997251dd4d8f00bc56202538eb4df8",
+        "5fa8a60743888ae9cafba111dec4a0e5b97fa104",
+        "c4789d01fc9f6d9c0cb303d5cf7b39aa5ffc063d",
+        "d96589467af17ae9afbe83f398279f018a075a62",
+        "fb158a509cf46cc7e2cd0a0cf567786e36820b6e"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "新账户运行只发布 canonical state config；旧 sibling 配置副本仅保留历史读取，不再参与当前候选、Wheel、审计或 Close Advice 选择。",
+      "commits": [
+        "17d49c6bb25e10d7e672fd816d8cf2a5d5b0a94d",
+        "2366f95731e163c2fe80962861356f852e39141d",
+        "29fc0cb89b81e1719f343f039525d1c7e1bc8f07",
+        "3ff474fc8db6d0c389b2616732c4913f2b491bf2"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "配置构建和校验会拒绝非正整数的多账户 worker 上限及两个已知键的明显拼写错误，保留现代键优先、旧键兼容和账户数量上限。",
+      "commits": [
+        "15a55046edb67ac351847007d84603fa338d3f49",
+        "1a439ef227b729b7fafb468c2bda992598869e2f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "决策简报固定展示 CSP、CC 和 Combo 栏目，并按候选已有容量显示最多手数；缺失与真实零容量分别呈现，组合标签保持统一。",
+      "commits": [
+        "67fe3f051e8a3e90172678197ba71601fe34bd32",
+        "811bb2c91209a2596d6d955be0647972282ff24b",
+        "8a7c735596fb9e901d8363fdd3fdb23fc86ce9bf",
+        "f68d80860b81174a9cbf46547bf0ed86be0be741"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Close Advice 计划通过 canonical ledger read model 解析嵌套合约身份，避免合格持仓被漏出 required-data plan。",
+      "commits": [
+        "1b156eeff3a22e45882b664ea882e5b57bd1dfbf",
+        "fe19f282a3b16e281b86f99275e78e704f29e5ba"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "期权收益计算的资金占用时间下限为 24 小时，避免刚开仓或极短持仓把现金流收益率异常放大；36 小时仍按 1.5 天计算。",
+      "commits": [
+        "a52a4afe4e9bca8bcf5a4e8ddfb64b74f340630d",
+        "a8f7330ce95f0e16e3bcef7c9ea898591e159a62"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0250acdee2a87b49ca9867b57435df5f7a935f8f",
+      "reason": "PR #478 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "050d22ee560128676b66be6d41f5f1e17b3df4bd",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "0877614be498af197cb1f3b987ca87406d8845c0",
+      "reason": "PR #471 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "0bc47e90c9d2e2912d609b32dbd4ab2f06d93fb6",
+      "reason": "PR #471 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "13b0155ceaff646d851f13db93eabed1ead9dfe2",
+      "reason": "PR #477 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "1ac72489f5a3bcc9546bf136c9c6f6f3dd3e85a2",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "1ae029f0959c61a5826f0f60b3980481f390a6a9",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "1c7661c764624263990a9c3f4d643b2354f474d5",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "1d07e618d9fc66382874a8df11e827c26da04271",
+      "reason": "PR #476 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "205afbe24152b7e3cde46900d2a6e1e480b7cfdd",
+      "reason": "PR #479 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "2af92b295c216f166febdd4fdd351410f1875b80",
+      "reason": "PR #476 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "342a5c10d5a145cf8d9405bf5866f14c782373de",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "3d19e0a26f5c014e09ee35263b7e7195a4ab29ef",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "40ef06c084610f15a80b9ad937d29d3c1ec315fc",
+      "reason": "PR #477 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "44e9b38a101d4bc7563fb0e373e71b49e582e66d",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "48aa773f9fb90a351048f9e89fe0e582d408e1b4",
+      "reason": "PR #476 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "6ae073d49239350640c8901a88308860deac30bd",
+      "reason": "PR #479 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "75a5e0b6cb6f47a7722472ddd48f98c61f8d03df",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "77d4cf0db5c70d4d6805fd48ecb93aceb1d20af5",
+      "reason": "PR #473 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "85462815c505617792288869ec8c1a3b9b006a25",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "8cf4e16e1fa4f9755aba44436cf31a9f7c577e94",
+      "reason": "PR #471 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "9125c7ad14c97f7968af3603ccbf98cbc0675474",
+      "reason": "PR #478 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "9bb63ba8bf756b548fba50d25d2647ae6c605da9",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "a4c0051c2f210dca08824bd74192b950f7e51141",
+      "reason": "PR #472 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "a9926cbf436608c53f436d01afc898e6389b0b5e",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "ac172938166094c36d1562ca907cff7fb0a36198",
+      "reason": "PR #471 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "bb4c47c9eddec173b288b67912710b50784ac6ae",
+      "reason": "PR #474 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "bf0791e0e26e9e220686c05239c701c965862a50",
+      "reason": "PR #475 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "d45271d8a9661c88b661fe4963d1c16223662779",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "d577904fdd85321e97e2f82a1ef0f991623539bd",
+      "reason": "PR #477 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "d86ec085d34c629203a5af968b63f321db1bef88",
+      "reason": "PR #475 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "df5ba6f6f96dc5fddd37ab04aeb1a617e29d93e4",
+      "reason": "PR #476 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "e32a6b3beeffad6396891170bbfc889f2996a732",
+      "reason": "PR #475 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "eda17cec882fb9307171080608e437fabc043db6",
+      "reason": "PR #476 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "f539432b339a31b34254350d88ab957ebab75069",
+      "reason": "PR #475 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    },
+    {
+      "commit": "f93344cff9a1dd28c8fb266137fc1ca1429441ed",
+      "reason": "PR #469 process checkpoint with no tracked source, runtime, configuration, or documentation change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "0250acdee2a87b49ca9867b57435df5f7a935f8f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "050d22ee560128676b66be6d41f5f1e17b3df4bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "0877614be498af197cb1f3b987ca87406d8845c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "09581201c1932b2377fb9c47679efc883ed25e6e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "0bc47e90c9d2e2912d609b32dbd4ab2f06d93fb6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "0e204fb6c79c8e2afe4dff4e8e08ca83beed19d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "13b0155ceaff646d851f13db93eabed1ead9dfe2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "15a55046edb67ac351847007d84603fa338d3f49",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "15fe9124766e1c90bd1f2e284aef0fbab001896f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "161ca351b532dadc0cb3537636df93d9ebff15f1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "17d49c6bb25e10d7e672fd816d8cf2a5d5b0a94d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "1a439ef227b729b7fafb468c2bda992598869e2f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "1ac72489f5a3bcc9546bf136c9c6f6f3dd3e85a2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "1ad79764ec997251dd4d8f00bc56202538eb4df8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "1ae029f0959c61a5826f0f60b3980481f390a6a9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "1b156eeff3a22e45882b664ea882e5b57bd1dfbf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "1c7661c764624263990a9c3f4d643b2354f474d5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "1d07e618d9fc66382874a8df11e827c26da04271",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "205afbe24152b7e3cde46900d2a6e1e480b7cfdd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/479"
+      ]
+    },
+    {
+      "commit": "2366f95731e163c2fe80962861356f852e39141d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "29fc0cb89b81e1719f343f039525d1c7e1bc8f07",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "2af92b295c216f166febdd4fdd351410f1875b80",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "2efecee5c8dc4296c71087f8122bd24cc872d5fe",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "342a5c10d5a145cf8d9405bf5866f14c782373de",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "3d19e0a26f5c014e09ee35263b7e7195a4ab29ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "3ff474fc8db6d0c389b2616732c4913f2b491bf2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "4090df942626a18acac37f08f617f0b62dc934e8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "40ef06c084610f15a80b9ad937d29d3c1ec315fc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "4179c9ef53994e69e876732f7b3b05ff177ec2bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "43abc7392e7b72380532622c77d5cd4c4e2abefa",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "44e9b38a101d4bc7563fb0e373e71b49e582e66d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "48aa773f9fb90a351048f9e89fe0e582d408e1b4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "5fa8a60743888ae9cafba111dec4a0e5b97fa104",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "6665f6ebc6506b9d2831eff593f0ceb2d760f849",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "67fe3f051e8a3e90172678197ba71601fe34bd32",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/472"
+      ]
+    },
+    {
+      "commit": "6ae073d49239350640c8901a88308860deac30bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/479"
+      ]
+    },
+    {
+      "commit": "7161af9d6b482d3e100de285ae3ad913fe0f5c98",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "75a5e0b6cb6f47a7722472ddd48f98c61f8d03df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "77d4cf0db5c70d4d6805fd48ecb93aceb1d20af5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/473"
+      ]
+    },
+    {
+      "commit": "80966a88db3435d1ae426472093d7f1f5071474f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "811bb2c91209a2596d6d955be0647972282ff24b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/473"
+      ]
+    },
+    {
+      "commit": "85462815c505617792288869ec8c1a3b9b006a25",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "88705a87a330e26152dc792ee91d7cc108957e8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "8a7c735596fb9e901d8363fdd3fdb23fc86ce9bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/473"
+      ]
+    },
+    {
+      "commit": "8cf4e16e1fa4f9755aba44436cf31a9f7c577e94",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "9125c7ad14c97f7968af3603ccbf98cbc0675474",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "9bb63ba8bf756b548fba50d25d2647ae6c605da9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "a4c0051c2f210dca08824bd74192b950f7e51141",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/472"
+      ]
+    },
+    {
+      "commit": "a52a4afe4e9bca8bcf5a4e8ddfb64b74f340630d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/479"
+      ]
+    },
+    {
+      "commit": "a8f7330ce95f0e16e3bcef7c9ea898591e159a62",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/479"
+      ]
+    },
+    {
+      "commit": "a90a4579ecbcfbd8a8dab09d65ff39a430368757",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "a9926cbf436608c53f436d01afc898e6389b0b5e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "abff6099940d99e99c0eac6d75de2e01ec85a325",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "ac172938166094c36d1562ca907cff7fb0a36198",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/471"
+      ]
+    },
+    {
+      "commit": "bb4c47c9eddec173b288b67912710b50784ac6ae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "bf0791e0e26e9e220686c05239c701c965862a50",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "c4789d01fc9f6d9c0cb303d5cf7b39aa5ffc063d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "d45271d8a9661c88b661fe4963d1c16223662779",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "d577904fdd85321e97e2f82a1ef0f991623539bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "d86ec085d34c629203a5af968b63f321db1bef88",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "d96589467af17ae9afbe83f398279f018a075a62",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "df5ba6f6f96dc5fddd37ab04aeb1a617e29d93e4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "e32a6b3beeffad6396891170bbfc889f2996a732",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "e7127f3f8145ca2b1fca26c4298fe58019b71673",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    },
+    {
+      "commit": "eda17cec882fb9307171080608e437fabc043db6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "f3a387207d42b58598d3b8688b822bda852e8d15",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/477"
+      ]
+    },
+    {
+      "commit": "f539432b339a31b34254350d88ab957ebab75069",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/475"
+      ]
+    },
+    {
+      "commit": "f68d80860b81174a9cbf46547bf0ed86be0be741",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/472"
+      ]
+    },
+    {
+      "commit": "f93344cff9a1dd28c8fb266137fc1ca1429441ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/469"
+      ]
+    },
+    {
+      "commit": "fb158a509cf46cc7e2cd0a0cf567786e36820b6e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/476"
+      ]
+    },
+    {
+      "commit": "fe19f282a3b16e281b86f99275e78e704f29e5ba",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/474"
+      ]
+    },
+    {
+      "commit": "fe565d6e9fc4abb75c4c48b7129daffa7c2638a2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/478"
+      ]
+    }
+  ]
+}
