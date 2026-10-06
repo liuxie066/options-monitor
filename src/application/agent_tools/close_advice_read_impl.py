@@ -629,7 +629,7 @@ def _run_market_values(*, run_dir: Path, account_dir: Path | None) -> set[str]:
     if account_dir is not None:
         payloads.extend(
             [
-                _read_json(account_dir / "config.override.json"),
+                _read_json(account_dir / "state" / "config.override.json"),
                 _read_json(account_dir / "state" / "account_metrics.json"),
                 _read_json(account_dir / "state" / "last_run.json"),
             ]

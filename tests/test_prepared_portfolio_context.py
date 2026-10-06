@@ -167,7 +167,6 @@ def _write_worker_request(
                 "state_dir": str(authority.state_path.parent),
                 "shared_state_dir": str(tmp_path / "output_runs" / run_id / "state"),
                 "account_config_path": str(authority.state_path),
-                "account_config_compatibility_path": str(authority.compatibility_path),
                 "account_config_sha256": authority.account_config_sha256,
                 "account_config_canonical_json": authority.canonical_bytes.decode("utf-8"),
                 "result_path": str(result_path),
@@ -423,7 +422,7 @@ def test_worker_request_uses_exact_published_config_authority(
         authority = authorities[account]
         assert "runtime_config" not in worker_request
         assert worker_request["account_config_path"] == str(authority.state_path)
-        assert worker_request["account_config_compatibility_path"] == str(authority.compatibility_path)
+        assert "account_config_compatibility_path" not in worker_request
         assert worker_request["account_config_sha256"] == (authority.account_config_sha256)
         assert manifests[account]["account_config_sha256"] == (authority.account_config_sha256)
 
@@ -433,7 +432,7 @@ def test_invalid_config_authority_is_isolated_from_healthy_prepared_worker(
 ) -> None:
     shared, states = _state_dirs(tmp_path, "run-invalid")
     authorities = _config_authorities(tmp_path, "run-invalid")
-    authorities["lx"].compatibility_path.write_text(
+    authorities["lx"].state_path.write_text(
         "{}\n",
         encoding="utf-8",
     )
@@ -450,7 +449,7 @@ def test_invalid_config_authority_is_isolated_from_healthy_prepared_worker(
     assert started_accounts == ["sy"]
     assert manifests["sy"]["status"] == "ready"
     assert manifests["lx"]["status"] == "unavailable"
-    assert manifests["lx"]["error_code"] == "ACCOUNT_CONFIG_ARTIFACT_MISMATCH"
+    assert manifests["lx"]["error_code"] == "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH"
 
 
 def test_worker_consumes_published_config_bytes_and_hash(
@@ -667,7 +666,6 @@ def test_same_run_config_failure_does_not_degrade_healthy_existing_generation(
     replacement.setdefault("runtime", {})["generation"] = "drifted"
     replacement_bytes = canonical_account_run_config_bytes(replacement)
     authorities["lx"].state_path.write_bytes(replacement_bytes)
-    authorities["lx"].compatibility_path.write_bytes(replacement_bytes)
 
     second = _prepare(
         tmp_path,

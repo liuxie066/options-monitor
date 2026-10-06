@@ -95,7 +95,6 @@ def run_pipeline_script(
     account_config_base: Path | None = None,
     account_config_run_id: str | None = None,
     account_config_account: str | None = None,
-    account_config_compatibility_path: Path | None = None,
     account_config_sha256: str | None = None,
     account_config_canonical_bytes: bytes | None = None,
     capture_output: bool = False,
@@ -199,7 +198,6 @@ def run_pipeline_script(
         account_config_base,
         account_config_run_id,
         account_config_account,
-        account_config_compatibility_path,
         account_config_sha256,
         account_config_canonical_bytes,
     )
@@ -212,22 +210,11 @@ def run_pipeline_script(
         assert account_config_base is not None
         assert account_config_run_id is not None
         assert account_config_account is not None
-        assert account_config_compatibility_path is not None
         assert account_config_sha256 is not None
         if not isinstance(account_config_canonical_bytes, bytes) or not account_config_canonical_bytes:
             raise ValueError(
                 "account config authority requires retained canonical bytes"
             )
-        compatibility_authority_path = Path(
-            account_config_compatibility_path
-        ).expanduser()
-        if not compatibility_authority_path.is_absolute():
-            raise ValueError(
-                "account config compatibility authority path must be absolute"
-            )
-        compatibility_authority_path = Path(
-            os.path.abspath(str(compatibility_authority_path))
-        )
         cmd.extend(
             [
                 "--account-config-base",
@@ -236,8 +223,6 @@ def run_pipeline_script(
                 str(account_config_run_id).strip(),
                 "--account-config-account",
                 str(account_config_account).strip(),
-                "--account-config-compatibility-path",
-                str(compatibility_authority_path),
                 "--account-config-sha256",
                 str(account_config_sha256).strip().lower(),
             ]

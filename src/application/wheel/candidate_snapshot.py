@@ -20,7 +20,7 @@ from src.application.candidate_snapshot_contract import (
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
-    account_run_config_paths,
+    account_run_config_path,
     load_published_account_run_config,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
@@ -54,10 +54,9 @@ def current_wheel_candidate_policy_hash(
     if current_hash == snapshot.get("strategy_policy_sha256"):
         return current_hash
     try:
-        state_path, compatibility_path = account_run_config_paths(base=base, run_id=run_id, account=account)
+        state_path = account_run_config_path(base=base, run_id=run_id, account=account)
         retained = load_published_account_run_config(
             base=base, run_id=run_id, account=account, state_path=state_path,
-            compatibility_path=compatibility_path,
             account_config_sha256=snapshot.get("account_config_sha256"),
         )
         if strategy_policy_hash(retained) != snapshot.get("strategy_policy_sha256"):
@@ -471,10 +470,10 @@ def load_wheel_candidate_cash_fact(*, base: Path, snapshot: Mapping[str, Any]) -
         run, account = str(snapshot["run_id"]), str(snapshot["account"])
         dependencies = normalize_dependencies(snapshot.get("dependencies") or [], verify_root=base)
         dependency = next(row for row in dependencies if row["kind"] == "portfolio")
-        state_path, compatibility_path = account_run_config_paths(base=base, run_id=run, account=account)
+        state_path = account_run_config_path(base=base, run_id=run, account=account)
         config = load_published_account_run_config(
             base=base, run_id=run, account=account, state_path=state_path,
-            compatibility_path=compatibility_path, account_config_sha256=snapshot["account_config_sha256"],
+            account_config_sha256=snapshot["account_config_sha256"],
         )
         def read_dependency(row):
             relpath = row.get("relpath")

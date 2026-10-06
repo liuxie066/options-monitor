@@ -59,7 +59,7 @@ from src.application.strategy_scan_status import (
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
-    account_run_config_paths,
+    account_run_config_path,
     load_published_account_run_config,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
@@ -965,7 +965,7 @@ def _validate_v4_source_status_bindings(
 def _frozen_account_market(
     *, base: Path, run_id: str, account: str, config_hash: str,
 ) -> str:
-    state_path, compatibility_path = account_run_config_paths(
+    state_path = account_run_config_path(
         base=base, run_id=run_id, account=account,
     )
     config = load_published_account_run_config(
@@ -973,7 +973,6 @@ def _frozen_account_market(
         run_id=run_id,
         account=account,
         state_path=state_path,
-        compatibility_path=compatibility_path,
         account_config_sha256=config_hash,
     )
     market = runtime_config_market(config)
@@ -1042,7 +1041,7 @@ def _load_latest_candidate_snapshot_bundle(
     root = Path(base).resolve()
     try:
         account_norm = required_text(account, "account").lower()
-        account_run_config_paths(base=root, run_id="identity-check", account=account_norm)
+        account_run_config_path(base=root, run_id="identity-check", account=account_norm)
     except (CandidateSnapshotContractError, AccountRunConfigError) as exc:
         raise CandidateSnapshotManifestError("candidate account identity is invalid") from exc
     runs_root = root / "output_runs"

@@ -147,8 +147,8 @@ def test_pipeline_runtime_rejects_legacy_cumulative_stages() -> None:
 
 def _authority_args(authority, *, base: Path) -> list[str]:
     return ["--config", str(authority.state_path), "--account-config-base", str(base), "--account-config-run-id",
-        authority.run_id, "--account-config-account", authority.account, "--account-config-compatibility-path",
-        str(authority.compatibility_path), "--account-config-sha256", authority.account_config_sha256,]
+        authority.run_id, "--account-config-account", authority.account,
+        "--account-config-sha256", authority.account_config_sha256,]
 
 
 def _set_authority_env(monkeypatch, authority) -> None:
@@ -245,17 +245,12 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(monkeypa
         return object()
 
     monkeypatch.setattr(mod, "run_command", _run_command)
-    compatibility = tmp_path / "run" / "config.override.json"
-    compatibility.parent.mkdir(parents=True)
-    replacement = tmp_path / "replacement.json"
-    replacement.write_text("{}\n", encoding="utf-8")
-    compatibility.symlink_to(replacement)
     prepared_options = tmp_path / "prepared-options.json"
     prepared_options.write_text("{}\n", encoding="utf-8")
     mod.run_pipeline_script(vpy=tmp_path / "python", base=tmp_path,
         config=tmp_path / "run" / "state" / "config.override.json", report_dir=tmp_path / "reports",
         state_dir=tmp_path / "state", account_config_base=tmp_path, account_config_run_id="run-1",
-        account_config_account="lx", account_config_compatibility_path=compatibility, account_config_sha256="a" * 64,
+        account_config_account="lx", account_config_sha256="a" * 64,
         account_config_canonical_bytes=b"{}\n", prepared_option_positions_context_manifest=prepared_options,
         prepared_option_positions_context_manifest_sha256="b" * 64,)
 
@@ -263,7 +258,7 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(monkeypa
     assert command[command.index("--account-config-base") + 1] == str(tmp_path.resolve())
     assert command[command.index("--account-config-run-id") + 1] == "run-1"
     assert command[command.index("--account-config-account") + 1] == "lx"
-    assert command[command.index("--account-config-compatibility-path") + 1] == str(compatibility)
+    assert "--account-config-compatibility-path" not in command
     assert command[command.index("--account-config-sha256") + 1] == "a" * 64
     assert command[command.index("--prepared-option-positions-context-manifest") + 1] == str(prepared_options.resolve())
     assert command[command.index("--prepared-option-positions-context-manifest-sha256") + 1] == "b" * 64

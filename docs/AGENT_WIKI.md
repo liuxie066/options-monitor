@@ -459,10 +459,10 @@ Tick flow:
 ```
 
 For each account, Tick serializes the effective runtime config once before prepared workers or account execution. The
-authoritative input is `output_runs/<run_id>/accounts/<account>/state/config.override.json`; the sibling
-`output_runs/<run_id>/accounts/<account>/config.override.json` is a byte-identical compatibility artifact. Both are
-write-once/adopt and bound to the same SHA-256. Before shared planning or provider I/O, Tick validates both files against
-the parent-retained canonical bytes; a mismatch makes that account terminal for the run. After this final barrier, all
+authoritative input is the write-once/adopt
+`output_runs/<run_id>/accounts/<account>/state/config.override.json`, bound to its SHA-256. Before shared planning or
+provider I/O, Tick validates that file against the parent-retained canonical bytes; a mismatch makes that account
+terminal for the run. After this final barrier, all
 parent and scan-child consumers use the retained generation instead of reopening mutable paths, so a later path
 replacement cannot split one run across two configs. Account labels are canonical lowercase path components
 (`[a-z0-9][a-z0-9_-]{0,63}`); an explicit empty scope, unsafe label, or symlinked artifact ancestor fails closed before
@@ -481,7 +481,8 @@ the account-config SHA-256, and verifies that Futu portfolio context and `filter
 Global Holdings risk uses a separate all-accounts context with source and observation evidence. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
 shared planning and required-data prefetch.
 Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
-written as Tick input authority.
+written as Tick input authority. Historical sibling files directly under a run account directory are also preserved but
+ignored; they are not a fallback or an additional trust input.
 
 Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. Ordinary scan and Tick runs no longer create `symbols_alerts.txt`, `symbols_changes.txt`, or `symbols_notification.txt`; persisted Daily Brief state is their notification-content owner. Public runtime reads can still expose historical files or files created by the explicit manual `--stage-only alert|notify` compatibility commands as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`. Those files are never evidence that the current run prepared or sent a Daily Brief; the old `notification` fields remain deprecated Phase A/B aliases scheduled for removal in Phase C.
 

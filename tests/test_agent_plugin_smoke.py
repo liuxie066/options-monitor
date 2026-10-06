@@ -72,6 +72,15 @@ def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
     }
 
 
+def _write_run_account_config(account_dir: Path, *, market: str) -> None:
+    path = account_dir / "state" / "config.override.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_minimal_cfg(market=market), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _write_close_advice_report(
     report_dir: Path,
     rows: list[dict[str, Any]],
@@ -3746,11 +3755,7 @@ def test_close_advice_read_skips_newer_run_with_invalid_manifest(
     )
     runs_root = tmp_path / "output_runs"
     valid_report = runs_root / "run-valid" / "accounts" / "lx"
-    (valid_report / "config.override.json").parent.mkdir(parents=True)
-    (valid_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(valid_report, market="us")
     rows = [
         {
             "account": "lx",
@@ -3773,10 +3778,7 @@ def test_close_advice_read_skips_newer_run_with_invalid_manifest(
 
     invalid_report = runs_root / "run-invalid" / "accounts" / "lx"
     invalid_report.mkdir(parents=True)
-    (invalid_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(invalid_report, market="us")
     pd.DataFrame(rows).to_csv(invalid_report / "close_advice.csv", index=False)
     os.utime(runs_root / "run-valid", (1_000_000, 1_000_000))
     os.utime(runs_root / "run-invalid", (2_000_000, 2_000_000))
@@ -3859,10 +3861,7 @@ def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path
 
     us_report = runs_root / "run-us" / "accounts" / "lx"
     us_report.mkdir(parents=True)
-    (us_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(us_report, market="us")
     us_rows = [
             {
                 "account": "lx",
@@ -3887,10 +3886,7 @@ def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path
 
     hk_report = runs_root / "run-hk" / "accounts" / "sy"
     hk_report.mkdir(parents=True)
-    (hk_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(hk_report, market="hk")
     hk_rows = [
             {
                 "account": "sy",
@@ -3942,10 +3938,7 @@ def test_close_advice_read_all_market_scope_does_not_infer_missing_side_from_con
 
     us_report = runs_root / "run-us" / "accounts" / "lx"
     us_report.mkdir(parents=True)
-    (us_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(us_report, market="us")
     us_rows = [
             {
                 "account": "lx",
@@ -3970,10 +3963,7 @@ def test_close_advice_read_all_market_scope_does_not_infer_missing_side_from_con
 
     hk_report = runs_root / "run-hk" / "accounts" / "sy"
     (hk_report / "state").mkdir(parents=True)
-    (hk_report / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(hk_report, market="hk")
     (hk_report / "state" / "option_positions_context.json").write_text(
         json.dumps(
             {
@@ -4047,10 +4037,7 @@ def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_
         (run_hk, "hk", "0700.HK", 0.91),
     ):
         account_dir.mkdir(parents=True)
-        (account_dir / "config.override.json").write_text(
-            json.dumps(_minimal_cfg(market=market), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_run_account_config(account_dir, market=market)
         rows = [
                 {
                     "account": "lx",
@@ -4105,10 +4092,7 @@ def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path:
 
     report_dir = runtime_root / "output_runs" / "run-1" / "accounts" / "lx"
     report_dir.mkdir(parents=True)
-    (report_dir / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_run_account_config(report_dir, market="us")
     rows = [
             {
                 "account": "lx",

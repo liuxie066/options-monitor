@@ -92,13 +92,42 @@ def test_account_config_publication_is_run_scoped_under_overlap(tmp_path) -> Non
         authority_b = second.result()
 
     assert authority_a.state_path != authority_b.state_path
-    assert authority_a.compatibility_path != authority_b.compatibility_path
     assert authority_a.account_config_sha256 != authority_b.account_config_sha256
     assert "/run-a/accounts/lx/" in authority_a.state_path.as_posix()
     assert "/run-b/accounts/lx/" in authority_b.state_path.as_posix()
     assert _load_config(authority_a, "run-a", base=tmp_path)["runtime"]["marker"] == "a"
     assert _load_config(authority_b, "run-b", base=tmp_path)["runtime"]["marker"] == "b"
+    assert not (authority_a.state_path.parent.parent / "config.override.json").exists()
+    assert not (authority_b.state_path.parent.parent / "config.override.json").exists()
     assert historical.read_text(encoding="utf-8") == "historical\n"
+
+
+def test_account_config_publication_ignores_existing_account_level_sibling(
+    tmp_path,
+) -> None:
+    sibling = (
+        tmp_path
+        / "output_runs"
+        / "run-existing"
+        / "accounts"
+        / "lx"
+        / "config.override.json"
+    )
+    sibling.parent.mkdir(parents=True)
+    historical_bytes = b"historical sibling bytes\n"
+    sibling.write_bytes(historical_bytes)
+
+    authority = _publish_config(
+        tmp_path,
+        "run-existing",
+        config=_account_config(marker="canonical"),
+    )
+
+    assert authority.state_path.read_bytes() == authority.canonical_bytes
+    assert _load_config(authority, "run-existing", base=tmp_path)["runtime"] == {
+        "marker": "canonical"
+    }
+    assert sibling.read_bytes() == historical_bytes
 
 
 def test_same_run_identical_config_is_adopted_concurrently(tmp_path) -> None:
@@ -112,11 +141,10 @@ def test_same_run_identical_config_is_adopted_concurrently(tmp_path) -> None:
         )
 
     assert len({item.state_path for item in authorities}) == 1
-    assert len({item.compatibility_path for item in authorities}) == 1
     assert len({item.account_config_sha256 for item in authorities}) == 1
     authority = authorities[0]
     assert authority.state_path.read_bytes() == authority.canonical_bytes
-    assert authority.compatibility_path.read_bytes() == authority.canonical_bytes
+    assert not (authority.state_path.parent.parent / "config.override.json").exists()
     assert not list(authority.state_path.parent.glob(".*.tmp"))
 
 
@@ -125,7 +153,6 @@ def test_same_run_different_config_fails_without_overwrite(tmp_path) -> None:
         tmp_path, "run-conflict", config=_account_config(marker="original")
     )
     state_before = original.state_path.read_bytes()
-    compatibility_before = original.compatibility_path.read_bytes()
 
     with pytest.raises(AccountRunConfigError) as raised:
         _publish_config(
@@ -134,7 +161,7 @@ def test_same_run_different_config_fails_without_overwrite(tmp_path) -> None:
 
     assert raised.value.code == "ACCOUNT_CONFIG_STATE_CONFLICT"
     assert original.state_path.read_bytes() == state_before
-    assert original.compatibility_path.read_bytes() == compatibility_before
+    assert not (original.state_path.parent.parent / "config.override.json").exists()
 
 
 def test_account_config_authority_rejects_cross_run_consumption(tmp_path) -> None:
@@ -187,7 +214,7 @@ def test_account_config_publication_rejects_symlinked_ancestor(tmp_path) -> None
 
 def test_account_config_load_rejects_account_directory_symlink_swap(tmp_path) -> None:
     authority = _publish_config(tmp_path, "run-swap", config=_account_config())
-    account_dir = authority.compatibility_path.parent
+    account_dir = authority.state_path.parent.parent
     preserved = account_dir.with_name("lx-preserved")
     account_dir.rename(preserved)
     outside = tmp_path / "outside-account"
