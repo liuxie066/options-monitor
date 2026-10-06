@@ -39,7 +39,6 @@ class AccountRunConfigAuthority:
     run_id: str
     account: str
     state_path: Path
-    compatibility_path: Path
     account_config_sha256: str
     canonical_bytes: bytes = field(repr=False)
 
@@ -70,21 +69,18 @@ def canonical_account_run_config_bytes(config: Mapping[str, Any]) -> bytes:
     return (payload + "\n").encode("utf-8")
 
 
-def account_run_config_paths(
+def account_run_config_path(
     *,
     base: Path,
     run_id: str,
     account: str,
-) -> tuple[Path, Path]:
-    """Return the canonical state path and run-account compatibility path."""
+) -> Path:
+    """Return the canonical immutable config path for one account run."""
 
     run_id_norm = _identity_component(run_id, "run_id")
     account_norm = _account_identity_component(account)
     run_account_dir = Path(base).resolve() / "output_runs" / run_id_norm / "accounts" / account_norm
-    return (
-        run_account_dir / "state" / ACCOUNT_RUN_CONFIG_NAME,
-        run_account_dir / ACCOUNT_RUN_CONFIG_NAME,
-    )
+    return run_account_dir / "state" / ACCOUNT_RUN_CONFIG_NAME
 
 
 def publish_account_run_config(
@@ -94,14 +90,14 @@ def publish_account_run_config(
     account: str,
     config: Mapping[str, Any],
 ) -> AccountRunConfigAuthority:
-    """Atomically publish or adopt both immutable copies for one account run."""
+    """Atomically publish or adopt one immutable config for an account run."""
 
     run_id_norm = _identity_component(run_id, "run_id")
     account_norm = _account_identity_component(account)
     payload = canonical_account_run_config_bytes(config)
     _decode_account_run_config(payload, expected_account=account_norm)
     digest = sha256(payload).hexdigest()
-    state_path, compatibility_path = account_run_config_paths(
+    state_path = account_run_config_path(
         base=base,
         run_id=run_id_norm,
         account=account_norm,
@@ -114,19 +110,10 @@ def publish_account_run_config(
         conflict_code="ACCOUNT_CONFIG_STATE_CONFLICT",
         write_code="ACCOUNT_CONFIG_STATE_WRITE_FAILED",
     )
-    _write_once_or_adopt_at(
-        base=base,
-        components=("output_runs", run_id_norm, "accounts", account_norm),
-        name=ACCOUNT_RUN_CONFIG_NAME,
-        payload=payload,
-        conflict_code="ACCOUNT_CONFIG_COMPATIBILITY_CONFLICT",
-        write_code="ACCOUNT_CONFIG_COMPATIBILITY_WRITE_FAILED",
-    )
     authority = AccountRunConfigAuthority(
         run_id=run_id_norm,
         account=account_norm,
         state_path=state_path,
-        compatibility_path=compatibility_path,
         account_config_sha256=digest,
         canonical_bytes=payload,
     )
@@ -159,7 +146,6 @@ def load_account_run_config(
         run_id=authority.run_id,
         account=authority.account,
         state_path=authority.state_path,
-        compatibility_path=authority.compatibility_path,
         account_config_sha256=authority.account_config_sha256,
         expected_bytes=authority.canonical_bytes,
     )
@@ -175,7 +161,7 @@ def load_retained_account_run_config(
 ) -> dict[str, Any]:
     """Decode the immutable generation retained by the parent process.
 
-    Publication validates both on-disk artifacts once.  After the final
+    Publication validates the on-disk artifact once.  After the final
     pre-side-effect barrier, consumers use these retained bytes so a later
     path replacement cannot split parent and child configuration semantics.
     """
@@ -192,19 +178,15 @@ def load_retained_account_run_config(
             "ACCOUNT_CONFIG_IDENTITY_MISMATCH",
             "account config authority does not match the requested run/account",
         )
-    expected_state, expected_compatibility = account_run_config_paths(
+    expected_state = account_run_config_path(
         base=base,
         run_id=run_id_norm,
         account=account_norm,
     )
-    if (
-        _absolute_without_symlink_resolution(authority.state_path) != expected_state
-        or _absolute_without_symlink_resolution(authority.compatibility_path)
-        != expected_compatibility
-    ):
+    if _absolute_without_symlink_resolution(authority.state_path) != expected_state:
         raise AccountRunConfigError(
             "ACCOUNT_CONFIG_PATH_MISMATCH",
-            "account config authority paths are outside the requested run/account",
+            "account config authority path is outside the requested run/account",
         )
     if sha256(authority.canonical_bytes).hexdigest() != authority.account_config_sha256:
         raise AccountRunConfigError(
@@ -382,25 +364,23 @@ def load_published_account_run_config(
     run_id: str,
     account: str,
     state_path: Path,
-    compatibility_path: Path,
     account_config_sha256: str,
     expected_bytes: bytes | None = None,
 ) -> dict[str, Any]:
-    """Validate both published artifacts and decode the exact state bytes."""
+    """Validate and decode the exact canonical state bytes."""
 
     run_id_norm = _identity_component(run_id, "run_id")
     account_norm = _account_identity_component(account)
-    expected_state, expected_compatibility = account_run_config_paths(
+    expected_state = account_run_config_path(
         base=base,
         run_id=run_id_norm,
         account=account_norm,
     )
     actual_state = _absolute_without_symlink_resolution(state_path)
-    actual_compatibility = _absolute_without_symlink_resolution(compatibility_path)
-    if actual_state != expected_state or actual_compatibility != expected_compatibility:
+    if actual_state != expected_state:
         raise AccountRunConfigError(
             "ACCOUNT_CONFIG_PATH_MISMATCH",
-            "account config authority paths are outside the requested run/account",
+            "account config authority path is outside the requested run/account",
         )
     digest = str(account_config_sha256 or "").strip().lower()
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
@@ -414,17 +394,6 @@ def load_published_account_run_config(
         name=ACCOUNT_RUN_CONFIG_NAME,
         code="ACCOUNT_CONFIG_STATE_UNAVAILABLE",
     )
-    compatibility_bytes = _read_regular_file_at_chain(
-        base=base,
-        components=("output_runs", run_id_norm, "accounts", account_norm),
-        name=ACCOUNT_RUN_CONFIG_NAME,
-        code="ACCOUNT_CONFIG_COMPATIBILITY_UNAVAILABLE",
-    )
-    if state_bytes != compatibility_bytes:
-        raise AccountRunConfigError(
-            "ACCOUNT_CONFIG_ARTIFACT_MISMATCH",
-            "state and compatibility account config bytes differ",
-        )
     if expected_bytes is not None and state_bytes != expected_bytes:
         raise AccountRunConfigError(
             "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH",

@@ -220,7 +220,6 @@ def run_one_account(
         extra={
             "account_config_sha256": request.account_config_authority.account_config_sha256,
             "state_path": str(cfg_override),
-            "compatibility_path": str(request.account_config_authority.compatibility_path),
         },
     )
 
@@ -430,9 +429,6 @@ def run_one_account(
         account_config_base=request.base,
         account_config_run_id=request.run_id,
         account_config_account=acct,
-        account_config_compatibility_path=(
-            request.account_config_authority.compatibility_path
-        ),
         account_config_sha256=(
             request.account_config_authority.account_config_sha256
         ),

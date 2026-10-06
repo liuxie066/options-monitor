@@ -270,9 +270,6 @@ def prepare_portfolio_contexts(
                 "shared_state_dir": str(run_state_dir),
                 "fx_snapshot_sha256": fx_snapshot_sha256,
                 "account_config_path": str(authority.state_path),
-                "account_config_compatibility_path": str(
-                    authority.compatibility_path
-                ),
                 "account_config_sha256": authority.account_config_sha256,
                 "account_config_canonical_json": authority.canonical_bytes.decode(
                     "utf-8"
@@ -698,12 +695,6 @@ def run_worker(request_path: Path) -> int:
                 _required_text(
                     request.get("account_config_path"),
                     "account_config_path",
-                )
-            ),
-            compatibility_path=Path(
-                _required_text(
-                    request.get("account_config_compatibility_path"),
-                    "account_config_compatibility_path",
                 )
             ),
             account_config_sha256=account_config_sha256,

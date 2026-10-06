@@ -442,7 +442,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     extra={
                         "account_config_sha256": authority.account_config_sha256,
                         "state_path": str(authority.state_path),
-                        "compatibility_path": str(authority.compatibility_path),
                     },
                 )
             except Exception:

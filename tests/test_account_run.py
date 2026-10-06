@@ -302,7 +302,7 @@ def test_run_one_account_rejects_tampered_prepublished_config_before_children(
             fail_schema_validation=lambda **_kwargs: None,
         )
 
-    assert raised.value.code == "ACCOUNT_CONFIG_ARTIFACT_MISMATCH"
+    assert raised.value.code == "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH"
 
 
 def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
@@ -561,9 +561,6 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         replacement.setdefault("runtime", {})["generation"] = "late-replacement"
         replacement_bytes = canonical_account_run_config_bytes(replacement)
         request.account_config_authority.state_path.write_bytes(replacement_bytes)
-        request.account_config_authority.compatibility_path.write_bytes(
-            replacement_bytes
-        )
     observed_pipeline: dict[str, Any] = {}
 
     def _run_pipeline_script(**kwargs):
@@ -711,17 +708,17 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
     assert seen_pipeline["account_config_base"] == request.base
     assert seen_pipeline["account_config_run_id"] == request.run_id
     assert seen_pipeline["account_config_account"] == "lx"
-    assert seen_pipeline["account_config_compatibility_path"] == (
-        request.account_config_authority.compatibility_path
-    )
+    assert "account_config_compatibility_path" not in seen_pipeline
     assert seen_pipeline["account_config_sha256"] == (
         request.account_config_authority.account_config_sha256
     )
-    assert (
-        request.account_config_authority.state_path.read_bytes()
-        == request.account_config_authority.compatibility_path.read_bytes()
-        == request.account_config_authority.canonical_bytes
+    assert request.account_config_authority.state_path.read_bytes() == (
+        request.account_config_authority.canonical_bytes
     )
+    assert not (
+        request.account_config_authority.state_path.parent.parent
+        / "config.override.json"
+    ).exists()
     assert outcome.acct_metrics["account_config_sha256"] == (
         request.account_config_authority.account_config_sha256
     )

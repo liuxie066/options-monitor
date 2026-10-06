@@ -726,7 +726,6 @@ def test_latest_skip_rejects_corrupt_legacy_unsafe_or_output_evidence(tmp_path, 
         encoded = json.dumps(config).encode()
         config_path.write_bytes(encoded)
         if artifact != "config_corrupt":
-            (config_path.parent.parent / "config.override.json").write_bytes(encoded)
             metrics = json.loads(metrics_path.read_text())
             metrics["account_config_sha256"] = sha256(encoded).hexdigest()
             metrics_path.write_text(json.dumps(metrics))
@@ -761,7 +760,6 @@ def test_skip_chain_preserves_frozen_target_scope_and_stops_at_failed_scan(tmp_p
         config["_generated"]["market"] = "hk"
         encoded = json.dumps(config).encode()
         config_path.write_bytes(encoded)
-        (state.parent / config_path.name).write_bytes(encoded)
     elif conflict == "intervening_failure":
         broken = tmp_path / "output_runs" / "run-failed" / "accounts" / "lx" / "state"
         broken.mkdir(parents=True)
@@ -776,7 +774,6 @@ def test_skip_chain_preserves_frozen_target_scope_and_stops_at_failed_scan(tmp_p
         config["_generated"]["market"] = "hk"
         encoded = json.dumps(config).encode()
         config_path.write_bytes(encoded)
-        (path.parent.parent / config_path.name).write_bytes(encoded)
         metrics = json.loads(path.read_text())
         metrics.update(account_config_sha256=sha256(encoded).hexdigest(), markets_to_run=["HK"])
         path.write_text(json.dumps(metrics))
