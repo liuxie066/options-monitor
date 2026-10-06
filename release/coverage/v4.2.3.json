@@ -1,0 +1,58 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.3",
+  "base": {
+    "tag": "v4.2.2",
+    "commit": "68ec7994964763d99a0529d7b406b5e189f6113f"
+  },
+  "reviewed_head": "2b732a0451fecd340356588255302889e2e8a47b",
+  "commits": [
+    {
+      "sha": "81abb613d36e00b65189a378a508bb5c674f34b3",
+      "subject": "fix(ledger): prove missing Futu environment from exact history"
+    },
+    {
+      "sha": "e5dafbd81089cbeecdc8f0d78672b8207c37ff9c",
+      "subject": "test(ledger): inventory shared metadata projection owner"
+    },
+    {
+      "sha": "2b732a0451fecd340356588255302889e2e8a47b",
+      "subject": "Merge pull request #486 from liuxie066/codex/futu-environment-repair"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "历史富途期权成交缺少交易环境时，可经原成交日的完整 OpenD 回执和唯一精确成交补证 REAL 环境；保留成交、价格、数量、lot 及下游指派，拒绝冲突和过期证据，支持预览哈希、事务回滚及幂等重试，使满足身份与容量要求的历史 Wheel 分支可继续接收 Call 归属。",
+      "commits": [
+        "81abb613d36e00b65189a378a508bb5c674f34b3",
+        "e5dafbd81089cbeecdc8f0d78672b8207c37ff9c",
+        "2b732a0451fecd340356588255302889e2e8a47b"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "81abb613d36e00b65189a378a508bb5c674f34b3",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/486"
+      ]
+    },
+    {
+      "commit": "e5dafbd81089cbeecdc8f0d78672b8207c37ff9c",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/486"
+      ]
+    },
+    {
+      "commit": "2b732a0451fecd340356588255302889e2e8a47b",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/486"
+      ]
+    }
+  ]
+}
