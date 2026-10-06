@@ -43,25 +43,29 @@ def _position(
     *,
     account: str,
     lot_id: str,
+    broker: str = "富途",
     expiration: str = "2026-08-28",
 ) -> dict:
     return {
         "record_id": lot_id,
         "fields": {
-            "broker": "富途",
-            "account": account,
-            "symbol": "NVDA",
+            "contract_key": {
+                "broker": broker,
+                "account": account,
+                "underlying_symbol": "NVDA",
+                "option_type": "put",
+                "strike": "100",
+                "expiration_ymd": expiration,
+                "asset_type": "option",
+            },
             "status": "open",
-            "side": "short",
-            "option_type": "put",
-            "contracts": 1,
+            "position_side": "short",
+            "contracts_opened": 1,
             "contracts_open": 1,
             "multiplier": 100,
-            "strike": 100,
-            "expiration_ymd": expiration,
             "currency": "USD",
-            "premium": 2.0,
-            "opened_at": int(
+            "premium_open": "2.000000",
+            "opened_at_ms": int(
                 datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
                 * 1000
             ),
@@ -120,6 +124,33 @@ def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> 
     )
     assert requirement["fetch_binding"]["binding_id"]
     assert forward["summary"]["requirements_total"] == 1
+
+
+def test_plan_reads_canonical_contract_key_and_isolates_shared_lots() -> None:
+    configs = {
+        "lx": _config(account="lx"),
+        "sy": _config(account="sy"),
+    }
+    shared = [
+        _position(account="lx", lot_id="lot-lx"),
+        _position(account="sy", lot_id="lot-sy"),
+        _position(account="lx", lot_id="lot-lx-other-broker", broker="IBKR"),
+    ]
+
+    plan = _plan(
+        account_configs=configs,
+        base_config=configs["lx"],
+        position_records_by_account={"lx": shared, "sy": shared},
+    )
+
+    lx_requirements = plan["accounts"]["lx"]["requirements"]
+    sy_requirements = plan["accounts"]["sy"]["requirements"]
+    assert [item["position_lot_id"] for item in lx_requirements] == ["lot-lx"]
+    assert [item["position_lot_id"] for item in sy_requirements] == ["lot-sy"]
+    assert lx_requirements[0]["symbol"] == "NVDA"
+    assert lx_requirements[0]["market"] == "US"
+    assert lx_requirements[0]["quote_key"] == "NVDA|put|2026-08-28|100.000000"
+    assert plan["summary"]["requirements_total"] == 2
 
 
 def test_plan_uses_market_local_date_and_seals_independent_calendar(tmp_path: Path) -> None:
@@ -691,7 +722,7 @@ def _frozen_workspace(
     else:
         record = _position(account="lx", lot_id="lot-lx")
         record["fields"].update(position_fields or {})
-        record["fields"]["expiration_ymd"] = quote_expiration
+        record["fields"]["contract_key"]["expiration_ymd"] = quote_expiration
         position_records = [record]
     started = run_started_at_utc or datetime(2026, 7, 29, 14, 40, tzinfo=timezone.utc)
     plan = build_close_advice_required_data_plan(

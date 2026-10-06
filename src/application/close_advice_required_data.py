@@ -280,8 +280,10 @@ def build_close_advice_required_data_plan(
         expected_broker = normalize_broker(portfolio_cfg.get("broker"))
         for record in position_records_by_account.get(account, []):
             try:
-                raw_fields = record.get("fields") if isinstance(record.get("fields"), Mapping) else record
-                market_hint = str(symbol_market(raw_fields.get("symbol")) or "").upper()
+                view = position_lot_risk_view(record)
+                market_hint = str(
+                    symbol_market(view.canonical_underlying_symbol) or ""
+                ).upper()
                 if market_hint not in market_dates:
                     continue
                 as_of_date = market_dates[market_hint]
