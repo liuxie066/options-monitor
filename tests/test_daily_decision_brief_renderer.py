@@ -297,7 +297,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in message
     assert "NVDA｜CSP｜08-21 $100 Put（策略排序 2）" in message
     assert "AAPL｜CC｜08-21 $250 Call（策略排序 1）" in message
-    assert "TSLA｜组合增强（策略排序 1）" in message
+    assert "TSLA｜Combo（策略排序 1）" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "暂无法评估" not in message
@@ -309,6 +309,50 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert_mobile_flat_markdown(message)
     _assert_no_internal_leak(message)
     _assert_no_internal_leak(view)
+
+
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown])
+@pytest.mark.parametrize("populated_family", [None, "sell_put", "covered_call", "combo_yield"])
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_fixed_report_always_shows_candidate_families(render, populated_family, with_wheel) -> None:
+    brief = _brief()
+    brief["candidates"] = {
+        family: rows if family == populated_family else []
+        for family, rows in brief["candidates"].items()
+    }
+    if with_wheel:
+        brief["wheel_batches"] = [{
+            "symbol": "3690.HK", "direction": "call", "shares_remaining": 500,
+            "status": "ready", "reason_code": "no_candidate", "recommended_contracts": 0,
+        }]
+
+    message = render(brief, context=_scheduled_context())
+
+    assert message.index("## CSP") < message.index("## CC") < message.index("## Combo")
+    assert message.index("## Combo") < message.index("## 持仓") < message.index("## 资金")
+    if with_wheel:
+        assert message.index("## Combo") < message.index("## Wheel") < message.index("## 持仓")
+    for family, label in (("sell_put", "CSP"), ("covered_call", "CC"), ("combo_yield", "Combo")):
+        assert (f"## {label}\n暂无合适合约" in message) == (family != populated_family)
+    assert "本轮暂无符合条件的候选" not in message
+    assert_mobile_flat_markdown(message)
+
+
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown])
+@pytest.mark.parametrize("reason", [
+    "strategy_step_failed", "opening_candidate_strategy_partial_data",
+    "opening_candidate_snapshot_unavailable", "opening_candidate_snapshot_market_mismatch",
+])
+def test_fixed_report_empty_family_preserves_data_failure(render, reason) -> None:
+    brief = _brief()
+    brief["candidates"] = {}
+    brief["data_gaps"] = [{"scope": "strategy", "strategy_family": "sell_put", "reason": reason}]
+
+    message = render(brief, context=_scheduled_context())
+
+    assert "## CSP\n候选数据不完整，暂无法评估" in message
+    assert "## CC\n暂无合适合约" in message
+    assert "## Combo\n暂无合适合约" in message
 
 
 def test_fixed_report_renders_wheel_after_combo_yield() -> None:
@@ -332,7 +376,7 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
 
     message = render_fixed_report(brief, context=_scheduled_context())
 
-    assert message.index("## 组合增强") < message.index("## Wheel")
+    assert message.index("## Combo") < message.index("## Wheel")
     assert "NVDA｜Wheel Call" in message
     assert "剩余股份｜100 股" in message
     assert "建议｜卖出 1 张 08-21 $110 Call" in message
@@ -731,7 +775,7 @@ def test_strict_close_position_is_independent_from_new_combo_candidates() -> Non
     brief["candidates"]["combo_yield"] = []
     message = render_full_brief(brief)
 
-    assert "TSLA · 组合增强" not in message
+    assert "TSLA · Combo" not in message
     assert "NVDA｜CSP" in message
     assert "PDD" not in message
     assert "combo-pdd-secret" not in message
@@ -1495,7 +1539,7 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     assert "AI｜" not in message
     assert "AI建议" not in message
     assert "### 策略候选" not in message
-    assert "## CC" not in message
+    assert "## CC\n暂无合适合约" in message
     assert "多个 CSP 候选共享同一现金额度" not in message
     assert "## 提醒" not in message
     assert "提醒｜" not in message
@@ -1659,14 +1703,14 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "## CC" in message
     assert "**AAPL｜CC｜08-21 $250 Call（策略排序 1）**" in message
     assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
-    assert "## 组合增强" in message
-    assert "**TSLA｜组合增强（策略排序 1）**" in message
+    assert "## Combo" in message
+    assert "**TSLA｜Combo（策略排序 1）**" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "指标｜门槛年化 15.4% · 预计净收入 $620.00" in message
     assert (
         "\n\n事件｜CSP #1（MSFT）、CSP #2（NVDA）、"
-        "CC #1（AAPL）、组合增强 #1（TSLA）："
+        "CC #1（AAPL）、Combo #1（TSLA）："
         in message
     )
     assert "**1｜NVDA｜CSP｜08-21 $100 Put｜建议平仓**" in message
