@@ -22,6 +22,7 @@ def _action() -> dict:
 
 def _brief(*, run_id: str, actions: list[dict] | None = None) -> dict:
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": "US",
         "market_trading_date": "2026-07-17",
         "account": "lx",

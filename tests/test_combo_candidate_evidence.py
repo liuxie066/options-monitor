@@ -95,6 +95,7 @@ def _brief(
     representative["strategy_group_id"] = row["candidate_pair_id"]
     representative["capacity"] = {"contracts_available": 1}
     return {
+        "schema_version": "daily_decision_brief.v1",
         "account": "lx",
         "market": "US",
         "market_trading_date": "2026-07-17",

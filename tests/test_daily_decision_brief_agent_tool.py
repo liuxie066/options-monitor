@@ -11,6 +11,7 @@ _AFTER_PLANNING_WINDOW = datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc)
 
 def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run-tool") -> dict:
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": "US",
         "market_trading_date": "2026-07-19",
         "account": "lx",

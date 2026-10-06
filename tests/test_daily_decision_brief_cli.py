@@ -9,6 +9,7 @@ from pathlib import Path
 
 def _brief(*, run_id: str) -> dict:
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": "US",
         "market_trading_date": "2026-07-19",
         "account": "lx",

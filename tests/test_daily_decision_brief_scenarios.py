@@ -55,6 +55,7 @@ def _brief(
     valid_until: str = "2026-04-01T20:00:00+00:00",
 ) -> dict:
     return {
+        "schema_version": "daily_decision_brief.v1",
         "market": "US",
         "market_trading_date": "2026-04-01",
         "account": account,

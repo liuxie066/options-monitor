@@ -4576,6 +4576,7 @@ def test_preview_notification_is_canonical_daily_brief_projection(
     lifecycle = persist_daily_decision_brief_success(
         base=tmp_path,
         brief={
+            "schema_version": "daily_decision_brief.v1",
             "market": "US",
             "market_trading_date": "2026-10-05",
             "account": "lx",
