@@ -36,6 +36,13 @@ COMMON_EMPTY_ROW = {
 }
 
 SELL_PUT_EMPTY_FIELDS = {
+    'max_new_contracts': None,
+    'cash_required_native': None,
+    'cash_free_effective_native': None,
+    'cash_available_effective_native': None,
+    'cash_native_currency': None,
+    'cash_capacity_basis': None,
+    'cash_fx_status': None,
     'earnings_evidence_status': '',
     'earnings_has_event': False,
     'earnings_event_dates': '',
@@ -243,6 +250,13 @@ def _build_ranked_row(
 
 def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
     return {
+        'max_new_contracts': _safe_float(top.get('max_new_contracts')),
+        'cash_required_native': _safe_float(top.get('cash_required_native')),
+        'cash_free_effective_native': _safe_float(top.get('cash_free_effective_native')),
+        'cash_available_effective_native': _safe_float(top.get('cash_available_effective_native')),
+        'cash_native_currency': _safe_text(top.get('cash_native_currency')),
+        'cash_capacity_basis': _safe_text(top.get('cash_capacity_basis')),
+        'cash_fx_status': _safe_text(top.get('cash_fx_status')),
         'earnings_evidence_status': _safe_text(top.get('earnings_evidence_status')),
         'earnings_has_event': _safe_bool(top.get('earnings_has_event')),
         'earnings_event_dates': _safe_text(top.get('earnings_event_dates')),

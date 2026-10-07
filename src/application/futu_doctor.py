@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from src.application.opend_utils import normalize_underlier
+from src.application.opend_market_snapshot_fetching import get_underlier_observation_opend
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
 
@@ -30,6 +31,9 @@ class SymbolFieldResult:
     symbol: str
     underlier_code: str | None
     ok: bool
+    option_fields_ok: bool = False
+    scan_prerequisites_ok: bool = False
+    underlier_observation: dict[str, Any] | None = None
     chain_rows: int = 0
     snap_rows: int = 0
     missing_snapshot_cols: list[str] | None = None
@@ -120,31 +124,27 @@ def check_required_option_fields(
 
             snapshot_columns = {key for row in snap for key in row}
             missing = [col for col in REQUIRED_SNAPSHOT_COLS if col not in snapshot_columns]
-            spot = None
-            try:
-                if underlier.market != "US":
-                    spot_rows = _rows(gateway.get_snapshot([underlier.code]))
-                    if spot_rows:
-                        raw_spot = spot_rows[0].get("last_price")
-                        spot = float(raw_spot) if raw_spot is not None else None
-            except Exception:
-                spot = None
-
-            note = None
-            if spot is None and underlier.market != "US":
-                note = "spot missing via OpenD snapshot; consider spot override/fallback"
-            if underlier.market == "US":
-                note = "US spot is not required from OpenD (often no quote right); use spot override/fallback if needed"
+            observation = get_underlier_observation_opend(
+                gateway, underlier.code, market=underlier.market, base_dir=None,
+            )
+            option_fields_ok = not missing
+            scan_prerequisites_ok = option_fields_ok and observation.status == "ready"
+            note = None if scan_prerequisites_ok else (
+                "opening prerequisites unavailable: " + (observation.reason_code or "option_fields_missing")
+            )
 
             results.append(
                 SymbolFieldResult(
                     symbol=sym,
                     underlier_code=underlier.code,
-                    ok=(len(missing) == 0),
+                    ok=scan_prerequisites_ok,
+                    option_fields_ok=option_fields_ok,
+                    scan_prerequisites_ok=scan_prerequisites_ok,
+                    underlier_observation=observation.to_dict(),
                     chain_rows=int(len(chain)),
                     snap_rows=int(len(snap)),
                     missing_snapshot_cols=missing,
-                    spot=spot,
+                    spot=observation.last_price,
                     note=note,
                 )
             )

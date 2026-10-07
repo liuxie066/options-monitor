@@ -1023,3 +1023,12 @@ Position DTE and relative Close Advice expiration filters use each symbol's mark
 from one aware observation time (New York for US, Hong Kong for HK). Unknown market or
 expiration remains unknown and cannot satisfy a relative expiration filter. Timestamp
 storage and accounting/FX date conventions remain unchanged.
+
+Legacy CSP summaries preserve each selected candidate's canonical native cash evidence
+and `max_new_contracts`. Zero, unknown or nonfinite capacity cannot create a high-priority
+opening alert in either HKD or USD; this read path does not recalculate capacity or FX.
+Futu option-field diagnostics expose `option_fields_ok` separately from
+`scan_prerequisites_ok` and the scanner-owned underlier observation. Both markets need
+attested, fresh, normal underlier evidence; unavailable or closed-market observation
+cannot be replaced by an unattested spot override. These checked prerequisites do not
+assert that every option contract or strategy rule is scan-ready.
