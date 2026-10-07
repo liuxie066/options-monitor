@@ -256,7 +256,7 @@ def test_old_runtime_without_artifacts_is_explicitly_unavailable(tmp_path: Path)
     )
 
     assert view["available"] is False
-    assert view["reason"] == "not_found"
+    assert view["reason"] == "state_invalid"
     assert view["query"]["mode"] == "revision"
     assert view["brief"] is None
     assert view["source"]["state_path"].endswith("daily_decision_brief.US.2026-03-31.r0000.json")

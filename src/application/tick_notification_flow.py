@@ -40,6 +40,7 @@ from src.application.daily_decision_brief_repository import (
     classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
     persist_daily_decision_brief_success,
+    persist_daily_decision_brief_failure,
     prepare_daily_decision_brief_delivery,
     list_daily_decision_brief_revisions,
     read_daily_decision_brief,
@@ -1095,6 +1096,7 @@ def _prepare_daily_brief_notification(
                                     started=commit_started,
                                 )
                     else:
+                        brief = persist_daily_decision_brief_failure(base=request.base, brief=brief)
                         failure_source = _write_daily_brief_failure_artifact(
                             request=request,
                             account=account,

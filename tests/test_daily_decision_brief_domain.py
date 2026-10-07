@@ -861,6 +861,8 @@ def test_daily_brief_digest_handles_non_finite_nested_values_deterministically()
     with_none["capacity"]["sell_put"]["cash_free"] = None
 
     assert daily_brief_digest(with_nan) == daily_brief_digest(with_none)
+    assert normalize_daily_decision_brief(with_nan) == normalize_daily_decision_brief(with_none)
+    assert with_nan["capacity"]["sell_put"]["cash_free"] != with_nan["capacity"]["sell_put"]["cash_free"]
 
 
 def test_daily_brief_digest_compatibility_preserves_exact_retired_overlay_shape() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+from decision_history_fixtures import replace_history_payload
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -918,6 +919,7 @@ def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
     historical["ai_decision_advice"] = {"status": "completed"}
     historical["ai_decision_advice_evidence_index"] = {"symbols": []}
     revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    replace_history_payload(tmp_path, historical)
     legacy_digest = daily_brief_compatible_digests(historical)[-1]
 
     delivery_path = retry["path"]
@@ -1016,6 +1018,7 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
     historical["ai_decision_advice"] = {"status": "completed"}
     historical["ai_decision_advice_evidence_index"] = {"symbols": []}
     revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    replace_history_payload(tmp_path, historical)
     delivery = json.loads(lx_retry["path"].read_text(encoding="utf-8"))
     delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
         "source_digest"
@@ -1521,3 +1524,35 @@ def test_phase_logging_failure_does_not_prevent_send_or_confirmation(monkeypatch
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]
     assert state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]["status"] == "confirmed"
     assert bundle.commits == [{"lx": FIXED_TARGET}]
+
+
+@pytest.mark.parametrize("blocked,candidate", [(False, True), (False, False), (True, False)])
+def test_actual_run_is_retained_before_no_send(tmp_path, monkeypatch, blocked, candidate):
+    from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, history_path
+    _patch_assembler(monkeypatch, blocked=blocked, candidate=candidate)
+    context = _request(tmp_path, run_id="history-run", no_send=True, pipeline_ok=not blocked)
+    mod.run_tick_notification_flow(context.request)
+    row = DecisionHistoryStore(history_path(tmp_path)).get(account="lx", market="US", run_id=context.request.run_id)
+    assert row is not None
+    assert bool(row["successful"]) is (not blocked)
+    assert any(action["action_type"] == "open_candidate" for action in row["payload"]["actions"]) is candidate
+
+
+def test_delivery_retry_does_not_create_a_decision(tmp_path, monkeypatch):
+    from src.infrastructure.decision_history_sqlite import history_path
+    context = _request(tmp_path, run_id="history-retry", delivery_only=True, no_send=True)
+    mod.run_tick_notification_flow(context.request)
+    assert not history_path(tmp_path).exists()
+
+
+def test_history_save_error_is_not_a_successful_run(tmp_path, monkeypatch):
+    from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError
+    from src.application.daily_decision_brief_repository import DailyDecisionBriefStateError
+    _patch_assembler(monkeypatch)
+    def fail(*args, **kwargs):
+        raise DecisionHistoryError("disk_failed")
+    monkeypatch.setattr(DecisionHistoryStore, "append", fail)
+    context = _request(tmp_path, run_id="failed-save", no_send=True)
+    with pytest.raises(DailyDecisionBriefStateError, match="disk_failed"):
+        mod.run_tick_notification_flow(context.request)
+    assert context.commits == []
