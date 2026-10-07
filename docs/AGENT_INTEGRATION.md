@@ -256,9 +256,8 @@ tool and not a shell bridge. It performs sender allowlist checks, message
 idempotency, and SQLite audit. Explicit commands and pending-operation replies
 enter deterministic Control; every other message enters the single read-first
 `om_chat` Bot Scene when `assistant.bot.enabled` is true. Bot gets
-canonical pure-read tools; the optional `portfolio` toolset is projected only
-when `assistant.bot.toolsets.portfolio` is also true. This setting does not
-unregister `portfolio_query` from `./om-agent`. Bot may request one validated deterministic Control
+canonical pure-read tools selected by its scene. Portfolio queries follow
+`portfolio_management.enabled`; no extra Bot toolset switch is required. Bot may request one validated deterministic Control
 preview; it cannot confirm, cancel, apply, or receive direct notification,
 config-write, ledger/trade, broker-write, service-control, or upgrade tools.
 

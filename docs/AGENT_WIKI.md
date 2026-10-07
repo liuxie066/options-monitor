@@ -982,7 +982,7 @@ Smallest remaining actions, with blockers called out.
 
 `daily_decision_brief.v1` is the immutable account+market+trading-date successful-scan model. Delivery v2 separately owns fixed-target confirmation, pending/alerted candidate identities, and exact retry envelopes.
 
-- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The deprecated `notifications.daily_brief.enabled` key is accepted with a stable warning during compatibility but its value does not change routing.
+- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The retired `notifications.daily_brief.enabled` key is removed by explicit `om config migrate-switches` preview/apply; `notifications.enabled` owns outbound delivery.
 - Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan. A process failure relies on a later eligible scheduler slot; it does not invent an off-schedule retry scan.
 - Fixed reports: `09:40`, eligible whole hours, and `15:50` prepare a full user report even with no candidates. A fixed failure prepares an explicit failure report and never projects the previous successful current as this round's result.
 - Candidate alerts: eligible half-hour successful scans send immediately only when `current candidate identities - alerted identities` is non-empty. If fixed-report and new-candidate conditions coincide, the single complete fixed report wins.

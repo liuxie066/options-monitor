@@ -246,7 +246,6 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
             "    accounts: [lx, sy]\n"
             "    features:\n"
             "      wheel:\n"
-            "        enabled: true\n"
             "        accounts: [lx]\n"
             "        min_delta: 0.99\n"
             "        call:\n"
@@ -270,7 +269,7 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
         config_path=config_path,
     )
 
-    assert config["wheel"]["enabled"] is True
+    assert "enabled" not in config["wheel"]
     assert config["wheel"]["accounts"] == ["lx"]
     assert config["wheel"]["call"]["min_dte"] == 30
     assert config["wheel"]["call"]["max_dte"] == 45
@@ -611,7 +610,6 @@ def _wheel_yaml(*, put_min_dte: int = 14, generation: int = 2) -> str:
         "    accounts: [lx, sy]\n"
         "    features:\n"
         "      wheel:\n"
-        "        enabled: true\n"
         "        accounts: [lx]\n"
         "        call:\n"
         "          min_dte: 30\n"
@@ -1247,7 +1245,7 @@ inbound:
 
     assert cfg["assistant"]["enabled"] is True
     assert cfg["assistant"]["bot"]["enabled"] is False
-    assert cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
+    assert "toolsets" not in cfg["assistant"]["bot"]
     assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
@@ -1446,8 +1444,6 @@ def test_yaml_assistant_config_omits_retired_bot_keys(tmp_path: Path) -> None:
 
     assert cfg["assistant"]["bot"] == {
         "enabled": True,
-        "tool_loading_mode": "eager",
-        "toolsets": {"portfolio": False},
     }
     assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [
         "retired assistant.bot keys omitted: channel_scenes, human_review"
@@ -1502,7 +1498,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
     assert payload["assistant"]["enabled"] is False
     assert payload["assistant"]["bot"]["enabled"] is False
-    assert payload["assistant"]["bot"]["toolsets"]["portfolio"] is False
+    assert "toolsets" not in payload["assistant"]["bot"]
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
@@ -1525,7 +1521,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert us_cfg["runtime"] == hk_cfg["runtime"]
     assert assistant_cfg["assistant"]["enabled"] is False
     assert assistant_cfg["assistant"]["bot"]["enabled"] is False
-    assert assistant_cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
+    assert "toolsets" not in assistant_cfg["assistant"]["bot"]
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]
     assert "active_model" not in assistant_cfg["assistant"]
@@ -1889,7 +1885,6 @@ def test_yaml_config_accepts_account_scoped_combo_reconciliation(tmp_path: Path)
         + """\
 trade_intake:
   combo_reconciliation:
-    default_mode: off
     accounts:
       lx: auto
 markets:
@@ -1906,7 +1901,7 @@ markets:
     )
 
     assert cfg["trade_intake"]["combo_reconciliation"] == {
-        "default_mode": "off",
+
         "accounts": {"lx": "auto"},
     }
 
@@ -1916,14 +1911,14 @@ markets:
     [
         (
             "default_mode: observe\n    accounts: {}",
-            "default_mode must remain off",
+            "is not supported",
         ),
         (
-            "default_mode: off\n    accounts:\n      LX: confirm",
+            "accounts:\n      LX: confirm",
             "account labels must be lowercase",
         ),
         (
-            "default_mode: off\n    accounts:\n      unknown: confirm",
+            "accounts:\n      unknown: confirm",
             "is not a configured account",
         ),
     ],

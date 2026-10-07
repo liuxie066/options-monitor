@@ -96,7 +96,7 @@ def _wechat_config_path(tmp_path: Path) -> Path:
     """Write the channel config that targets ``wechat:ops``."""
     config_path = tmp_path / "config.us.json"
     config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
+        json.dumps({"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
         encoding="utf-8",
     )
     return config_path

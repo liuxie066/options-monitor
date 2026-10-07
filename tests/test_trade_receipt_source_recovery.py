@@ -26,7 +26,7 @@ def _callback(tmp_path, repo, monkeypatch, sender, *, receipt_config=None):
         receipt.send_trade_intake_receipt, send_fn=sender, normalize_fn=lambda send_result: send_result))
     return auto_intake._build_receipt_callback(
         base=tmp_path, repo=repo, receipt_config=receipt_config or {"enabled": True},
-        cfg={"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}})
+        cfg={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test"}})
 
 
 def _run(tmp_path, monkeypatch, repo, source, callback, stop):

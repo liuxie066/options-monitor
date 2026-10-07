@@ -1215,7 +1215,7 @@ S3 同请求恢复，S4 保留隔离和业务规则。不新增表、开关、�
 - SQLite activation windows 唯一拥有启停时间、generation、request identity 和历史区间。
   YAML 拥有策略参数和窗口 descriptor 副本，runtime JSON 由既有配置构建链生成。
   静态 config build 仍不查询数据库、不创建窗口。
-- `wheel.enabled` 仅保留解析兼容，不获得新的运行时作用。操作文档使用既有 activation 命令，
+- `wheel.enabled` 已移除；旧配置通过 `om config migrate-switches` 预览后迁移，不据此创建激活窗口。操作文档使用既有 activation 命令，
   实际状态由目标账户 readiness 表示。
 - 沿用 CLI `wheel activation enable|disable|status` 和 Agent `wheel_activation`。
   保留 action、market、account、request ID、actor、expected current generation 及现有 preview/confirm/apply。

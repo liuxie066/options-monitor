@@ -14,7 +14,7 @@ from src.application.bot.host_store import BotHostStore
 from src.application.bot.model_config import (
     ModelSettings,
     _resolve_model_api_key,
-    load_assistant_bot_settings,
+    assistant_bot_config_error,
     load_assistant_llm_config,
 )
 from src.application.llm_provider_registry import provider_requires_api_key
@@ -110,7 +110,7 @@ def run_prepared_contract(
     if implicit_model_turn:
         settings_error = None
     else:
-        _unused_toolsets, _unused_mode, settings_error = load_assistant_bot_settings(
+        settings_error = assistant_bot_config_error(
             config_path=assistant_config_path,
             require_config=bool(str(assistant_config_path or "").strip()),
         )

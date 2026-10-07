@@ -25,7 +25,6 @@ def _assistant_config(
             "default_market_scope": "us",
             "bot": {
                 "enabled": enabled,
-                "toolsets": {"portfolio": portfolio_enabled},
             },
             "llm": llm_cfg,
         },
@@ -80,7 +79,7 @@ def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
-    assert out["summary"]["assistant_bot_portfolio_enabled"] is False
+    assert "assistant_bot_portfolio_enabled" not in out["summary"]
     assert out["llm"]["enabled"] is False
     assert "runtime_status" in out["capabilities"]["pure_read_tools"]
     assert "portfolio_query" in out["capabilities"]["pure_read_tools"]
@@ -107,7 +106,7 @@ def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
         ),
     )
 
-    assert out["summary"]["assistant_bot_portfolio_enabled"] is True
+    assert "assistant_bot_portfolio_enabled" not in out["summary"]
 
 
 def test_ollama_model_config_does_not_require_api_key() -> None:

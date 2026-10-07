@@ -23,6 +23,13 @@ from src.interfaces.cli.setup_ops import add_symbol_policy_arguments, symbol_pol
 def add_config_commands(subparsers: Any) -> None:
     config = subparsers.add_parser("config", help="config operations")
     config_sub = config.add_subparsers(dest="config_command", required=True)
+    migrate = config_sub.add_parser("migrate-switches", help="preview retirement of inert switches and preserve legacy notification intent")
+    migrate.add_argument("--config-yaml", default=None)
+    migrate.add_argument("--runtime-root", default=None)
+    migrate.add_argument("--apply", action="store_true")
+    migrate.add_argument("--confirm", action="store_true")
+    migrate.add_argument("--expected-source-sha256", default=None)
+    migrate.add_argument("--expected-preview-sha256", default=None)
     init_config = config_sub.add_parser("init", help="generate starter config.yaml and runtime configs")
     init_config.add_argument("--output", default=None, help="config.yaml path; defaults to repo-local config.yaml")
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
@@ -210,6 +217,12 @@ def handle_config_command(
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
     set_yaml_symbol_config_fn: Callable[..., dict[str, Any]] = set_yaml_symbol_config,
 ) -> dict[str, Any]:
+    if args.config_command == "migrate-switches":
+        from src.application.config_switch_migration import migrate_yaml_switches
+        return migrate_yaml_switches(repo_root=repo_base_fn(), config_path=args.config_yaml,
+                                    runtime_root=args.runtime_root, apply=args.apply, confirm=args.confirm,
+                                    expected_source_sha256=args.expected_source_sha256,
+                                    expected_preview_sha256=args.expected_preview_sha256)
     if args.config_command == "validate":
         source = _normalize_config_source(args, allowed=("runtime", "yaml"))
         if source == "yaml":

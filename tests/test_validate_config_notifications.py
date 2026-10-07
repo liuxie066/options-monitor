@@ -118,31 +118,10 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     )
 
 
-def test_validate_config_accepts_known_boolean_bot_toolsets() -> None:
-    for enabled in (True, False):
-        mod.validate_config(
-            _config(
-                assistant={
-                    "enabled": True,
-                    "bot": {"enabled": True, "toolsets": {"portfolio": enabled}},
-                }
-            )
-        )
-
-
-def test_validate_config_rejects_invalid_bot_toolsets() -> None:
-    cases = (
-        ({"portfolio": "yes"}, "assistant.bot.toolsets.portfolio must be a boolean"),
-        ({"portfolio": None}, "assistant.bot.toolsets.portfolio must be a boolean"),
-        ({"unknown": True}, "assistant.bot.toolsets contains unsupported keys: unknown"),
-    )
-    for toolsets, expected in cases:
-        _reject_config(expected, assistant={"bot": {"enabled": True, "toolsets": toolsets}})
-
-    _reject_config(
-        "assistant.bot.toolsets must be an object",
-        assistant={"bot": {"enabled": True, "toolsets": ["portfolio"]}},
-    )
+def test_validate_config_rejects_retired_bot_choices() -> None:
+    for value in (True, False, "yes", None):
+        _reject_config("retired switches", assistant={"bot": {"toolsets": {"portfolio": value}}})
+    _reject_config("retired switches", assistant={"bot": {"tool_loading_mode": "directory"}})
     _reject_config(
         "assistant.llm.base_url must be a string",
         assistant={"llm": {"base_url": ["https://llm.example/v1"]}},
@@ -430,7 +409,6 @@ def test_validate_config_accepts_default_off_daily_brief() -> None:
         _config(
             notifications={
                 "daily_brief": {
-                    "enabled": False,
                     "max_actions_per_priority": 5,
                     "max_candidates_per_strategy": 3,
                     "max_rejection_reasons": 5,
@@ -443,7 +421,7 @@ def test_validate_config_accepts_default_off_daily_brief() -> None:
 def test_validate_config_rejects_invalid_daily_brief_contract() -> None:
     for daily_brief, expected in (
         (True, "notifications.daily_brief must be an object"),
-        ({"enabled": "yes"}, "notifications.daily_brief.enabled must be a boolean"),
+        ({"enabled": "yes"}, "notifications.daily_brief.enabled is retired"),
         ({"max_actions_per_priority": 0}, "must be between 1 and 20"),
         ({"max_candidates_per_strategy": 21}, "must be between 1 and 20"),
         ({"max_rejection_reasons": 1.5}, "must be an integer"),
@@ -463,22 +441,11 @@ def test_daily_brief_defaults_and_examples_remove_deprecated_enabled_switch() ->
     assert "enabled" not in system["defaults"]["notifications"]["daily_brief"]
 
 
-def test_deprecated_notification_renderer_keys_warn_but_do_not_fail(capsys) -> None:
+def test_retired_daily_brief_switch_is_rejected_but_style_still_warns(capsys) -> None:
     for enabled in (True, False):
-        mod.validate_config(
-            _config(
-                notifications={
-                    "daily_brief": {"enabled": enabled},
-                    "render_style": "legacy",
-                }
-            )
-        )
-
-    stderr = capsys.readouterr().err
-    assert stderr.count("NOTIFICATIONS_DAILY_BRIEF_ENABLED_DEPRECATED") == 2
-    assert stderr.count("NOTIFICATIONS_RENDER_STYLE_DEPRECATED") == 2
-    assert stderr.count("notifications.daily_brief.enabled is deprecated and ignored") == 2
-    assert stderr.count("notifications.render_style=legacy is deprecated and ignored") == 2
+        _reject_config("run om config migrate-switches", notifications={"daily_brief": {"enabled": enabled}})
+    mod.validate_config(_config(notifications={"render_style": "legacy"}))
+    assert "NOTIFICATIONS_RENDER_STYLE_DEPRECATED" in capsys.readouterr().err
 
 
 def test_notification_render_style_rejects_unknown_or_wrong_type() -> None:

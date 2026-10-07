@@ -102,7 +102,7 @@ def test_actual_maintenance_filter_survives_send_persistence_and_retry(runtime, 
     data = root / "data.json"
     data.write_text(json.dumps({"option_positions": {"sqlite_path": str(repo.db_path)}}))
     cfg = {**cfg, "portfolio": {"data_config": str(data), "broker": "富途"},
-           "notifications": {"provider": "wechat_clawbot", "target": "fixture"},
+           "notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "fixture"},
            "option_positions": {"auto_close": {"receipt": {"notify_noop": True}}}}
     sent = []
     def send(**kwargs):

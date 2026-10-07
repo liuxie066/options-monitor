@@ -47,12 +47,6 @@ def check_assistant_llm(
 
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
-    checks.append({
-        "name": "assistant_bot_tool_loading_mode",
-        "status": "ok",
-        "message": f"assistant Bot tool loading mode is {runtime_settings.bot.tool_loading_mode}",
-        "mode": runtime_settings.bot.tool_loading_mode,
-    })
     checks.extend(_config_checks(settings, secret_provider=provider))
     live_probe = _live_probe_check(
         live=bool(live),
@@ -83,9 +77,6 @@ def check_assistant_llm(
             "ok": ok,
             "status": status,
             "enabled": bool(settings.enabled),
-            "assistant_bot_portfolio_enabled": (
-                "portfolio" in runtime_settings.enabled_bot_toolsets
-            ),
             "live_checked": bool(live),
             "error_count": sum(1 for item in checks if item.get("status") == "error"),
             "warning_count": sum(1 for item in checks if item.get("status") == "warn"),

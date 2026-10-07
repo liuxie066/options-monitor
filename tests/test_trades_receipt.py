@@ -201,12 +201,12 @@ def test_lifecycle_batch_route_mismatch_fails_before_send(
     result = send_trade_lifecycle_outbox_payload(
         base=tmp_path,
         config={
-            "notifications": {
+            "notifications": {"enabled": True,
                 "provider": "wechat_clawbot",
                 "target": "wechat:new",
             }
         },
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         payload=payload,
         send_fn=lambda **kwargs: calls.append(dict(kwargs)),
         normalize_fn=lambda send_result: send_result,
@@ -243,12 +243,12 @@ def test_lifecycle_batch_sender_reuses_batch_idempotency_key(
         result = send_trade_lifecycle_outbox_payload(
             base=tmp_path,
             config={
-                "notifications": {
+                "notifications": {"enabled": True,
                     "provider": "wechat_clawbot",
                     "target": "wechat:ops",
                 }
             },
-            receipt_config={},
+            receipt_config={"notifications": {"enabled": True}},
             payload=payload,
             send_fn=_send,
             normalize_fn=lambda send_result: send_result,
@@ -461,7 +461,7 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
     first = _send_receipt(
         tmp_path,
         config={
-            "notifications": {
+            "notifications": {"enabled": True,
                 "provider": "wechat_clawbot",
                 "target": "wechat:ops",
             }
@@ -482,7 +482,7 @@ def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
     duplicate = _send_receipt(
         tmp_path,
         config={
-            "notifications": {
+            "notifications": {"enabled": True,
                 "provider": "wechat_clawbot",
                 "target": "wechat:ops",
             }
@@ -520,8 +520,8 @@ def test_receipt_decision_skips_non_option_deal() -> None:
 def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path, capsys) -> None:
     out = send_trade_intake_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "wechat_clawbot"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "wechat_clawbot"}},
+        receipt_config={"notifications": {"enabled": True}},
         apply_changes=True,
         state={},
         deal=None,
@@ -539,7 +539,7 @@ def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path, capsys) -
 def test_receipt_channel_meta_signal_only_on_availability_changes(tmp_path: Path, capsys) -> None:
     payload = {"deal_id": "deal-1", "internal_account": "lx", "instrument_ref": {"market": "us"}}
     result = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"}
-    config = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}
+    config = {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}}
     outcomes = iter((False, False, True, True))
 
     def send(**_kwargs):
@@ -581,7 +581,7 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
 
     out = _send_receipt(
         tmp_path,
-        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
+        config={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}},
         deal=deal,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx", "action": "open"},
         payload={},
@@ -611,7 +611,7 @@ def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path:
 
     out = _send_receipt(
         tmp_path,
-        config={"notifications": {"provider": "feishu_app"}},
+        config={"notifications": {"enabled": True, "provider": "feishu_app"}},
         deal=None,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx", "action": "open"},
         payload={"deal_id": "deal-1"},
@@ -620,7 +620,7 @@ def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path:
 
     assert out["status"] == "sent"
     assert calls[0]["target"] == "ou_bot"
-    assert calls[0]["notifications"] == {"provider": "feishu_app"}
+    assert calls[0]["notifications"] == {"enabled": True, "provider": "feishu_app"}
 
 
 def test_trade_receipt_key_reuses_deal_revision_and_duplicate_is_skipped(tmp_path: Path) -> None:
@@ -631,7 +631,7 @@ def test_trade_receipt_key_reuses_deal_revision_and_duplicate_is_skipped(tmp_pat
         return {"command_ok": len(calls) > 1, "delivery_confirmed": len(calls) > 1,
                 "message_id": "fixture-message" if len(calls) > 1 else None}
 
-    fields = dict(config={"notifications": {"provider": "wechat_clawbot", "target": "fixture"}},
+    fields = dict(config={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "fixture"}},
                   deal=None, payload={"deal_id": "deal-1"}, send_fn=_send)
     revision = {"status": "applied", "reason": "applied_open", "deal_id": "deal-1",
                 "account": "lx", "action": "open", "receipt_result_key": "recorded"}
@@ -813,7 +813,7 @@ def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_p
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
     out = _send_receipt(
         tmp_path,
-        config={"notifications": {"provider": "feishu_app"}},
+        config={"notifications": {"enabled": True, "provider": "feishu_app"}},
         deal=None,
         result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"},
         payload={"deal_id": "deal-1"},

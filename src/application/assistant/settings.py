@@ -13,24 +13,15 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_OUTPUT_TOKENS = None
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
-CONFIGURABLE_BOT_TOOLSETS = frozenset({"portfolio"})
-BOT_TOOL_LOADING_MODES = frozenset({"eager", "directory"})
 
 
 @dataclass(frozen=True)
 class BotSettings:
     enabled: bool = False
-    toolsets: frozenset[str] = frozenset()
-    tool_loading_mode: str = "eager"
 
     def public_payload(self) -> dict[str, Any]:
         return {
             "enabled": bool(self.enabled),
-            "toolsets": {
-                name: name in self.toolsets
-                for name in sorted(CONFIGURABLE_BOT_TOOLSETS)
-            },
-            "tool_loading_mode": self.tool_loading_mode,
         }
 
 
@@ -78,15 +69,8 @@ class AssistantSettings:
             raise ValueError("assistant.copilot is retired; run ./om bot migrate --dry-run")
         enabled = _assistant_enabled(assistant_cfg)
         bot_cfg = _dict(assistant_cfg.get("bot"))
-        bot_toolsets = _dict(bot_cfg.get("toolsets"))
         configured_bot = BotSettings(
             enabled=_bool(bot_cfg.get("enabled"), default=False),
-            toolsets=frozenset(
-                name
-                for name in CONFIGURABLE_BOT_TOOLSETS
-                if _bool(bot_toolsets.get(name), default=False)
-            ),
-            tool_loading_mode=_tool_loading_mode(bot_cfg.get("tool_loading_mode")),
         )
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
@@ -111,11 +95,6 @@ class AssistantSettings:
             "llm": self.llm.public_payload(),
         }
 
-    @property
-    def enabled_bot_toolsets(self) -> frozenset[str]:
-        if not self.enabled or not self.bot.enabled:
-            return frozenset()
-        return self.bot.toolsets
 
 
 def _bool(value: Any, *, default: bool) -> bool:
@@ -137,11 +116,6 @@ def _market_scope(value: Any) -> str:
     if text in {"us", "hk", "all"}:
         return text
     return DEFAULT_MARKET_SCOPE
-
-
-def _tool_loading_mode(value: Any) -> str:
-    mode = str(value or "eager").strip().lower()
-    return mode if mode in BOT_TOOL_LOADING_MODES else "eager"
 
 
 def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSettings:

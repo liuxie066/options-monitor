@@ -141,20 +141,6 @@ def load_assistant_llm_config(
     return dict(llm_cfg), None
 
 
-def load_assistant_bot_toolsets(
-    *,
-    config_path: str | Path | None = None,
-    repo_root: str | Path | None = None,
-    require_config: bool = False,
-) -> tuple[frozenset[str] | None, str | None]:
-    toolsets, _mode, error = load_assistant_bot_settings(
-        config_path=config_path,
-        repo_root=repo_root,
-        require_config=require_config,
-    )
-    return toolsets, error
-
-
 def load_bot_read_scope(*, config_path: str | Path, primary_market: str) -> tuple[frozenset[str], str]:
     """Validated channel grant and config generation; never sourced from a model turn."""
     if primary_market not in {"us", "hk"}:
@@ -186,28 +172,15 @@ def load_bot_read_scope(*, config_path: str | Path, primary_market: str) -> tupl
     return markets, generation
 
 
-def load_assistant_bot_settings(
+def assistant_bot_config_error(
     *, config_path: str | Path | None = None, repo_root: str | Path | None = None,
     require_config: bool = False,
-) -> tuple[frozenset[str] | None, str, str | None]:
-    """Load the validated Bot settings once at the Host boundary."""
-    payload, load_error = _load_assistant_config(
+) -> str | None:
+    """Validate the Bot configuration at the Host boundary."""
+    _payload, error = _load_assistant_config(
         config_path=config_path, repo_root=repo_root, require_config=require_config,
     )
-    if load_error:
-        return None, "eager", load_error
-    assistant = (payload or {}).get("assistant")
-    assistant_cfg = assistant if isinstance(assistant, dict) else {}
-    bot = assistant_cfg.get("bot")
-    bot_cfg = bot if isinstance(bot, dict) else {}
-    mode = str(bot_cfg.get("tool_loading_mode") or "eager").strip().lower()
-    if mode not in {"eager", "directory"}:
-        return None, "eager", "invalid_assistant_config"
-    if assistant_cfg.get("enabled") is False or bot_cfg.get("enabled") is not True:
-        return frozenset(), mode, None
-    toolsets = bot_cfg.get("toolsets")
-    toolset_cfg = toolsets if isinstance(toolsets, dict) else {}
-    return frozenset(), "eager", None
+    return error
 
 
 def _load_assistant_config(

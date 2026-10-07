@@ -71,7 +71,6 @@ SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOV
 LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
 LEGACY_SELL_PUT_OTM_FIELDS = ('min_otm_pct',)
 WHEEL_ALLOWED_FIELDS = {
-    'enabled',
     'accounts',
     'min_delta',
     'call',
@@ -164,7 +163,6 @@ NOTIFICATION_CONFIG_KEYS = {
     'wechat_clawbot_state_dir',
 }
 NOTIFICATION_DAILY_BRIEF_KEYS = {
-    'enabled',
     'max_actions_per_priority',
     'max_candidates_per_strategy',
     'max_rejection_reasons',
@@ -186,8 +184,7 @@ ASSISTANT_CONFIG_KEYS = {
     'llm',
     'models',
 }
-BOT_TOOLSET_KEYS = {'portfolio'}
-BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode', 'read_markets'}
+BOT_CONFIG_KEYS = {'enabled', 'read_markets'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -422,10 +419,9 @@ def _validate_wheel_activation_by_account(
 def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
     if not isinstance(raw, dict):
         die(f'{path} must be an object')
+    if 'enabled' in raw:
+        die(f'{path}.enabled is retired; run om config migrate-switches, then use om wheel activation')
     _reject_unknown_keys(raw, WHEEL_ALLOWED_FIELDS, path)
-    enabled = raw.get('enabled', False)
-    if not isinstance(enabled, bool):
-        die(f'{path}.enabled must be a boolean')
     accounts = raw.get('accounts', [])
     if not isinstance(accounts, list):
         die(f'{path}.accounts must be a list')
@@ -437,8 +433,6 @@ def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
     unknown = sorted(set(normalized) - set(market_accounts))
     if unknown:
         die(f'{path}.accounts contains accounts outside the current market: {", ".join(unknown)}')
-    if enabled and not normalized:
-        die(f'{path}.accounts must not be empty when enabled')
     if 'min_delta' in raw:
         value = _finite_number(raw.get('min_delta'), f'{path}.min_delta')
         if value <= 0 or value > 1:
@@ -582,32 +576,19 @@ def _validate_assistant_config(cfg: dict) -> None:
         bot = {}
     if not isinstance(bot, dict):
         die('assistant.bot must be an object')
+    if {'toolsets', 'tool_loading_mode'} & bot.keys():
+        die('assistant.bot contains retired switches; run om config migrate-switches')
     unsupported_bot = sorted(str(key) for key in bot if key not in BOT_CONFIG_KEYS)
     if unsupported_bot:
         die(f'assistant.bot contains unsupported keys: {", ".join(unsupported_bot)}')
     if 'enabled' in bot and bot.get('enabled') is not None and not isinstance(bot.get('enabled'), bool):
         die('assistant.bot.enabled must be a boolean')
-    if 'tool_loading_mode' in bot:
-        mode = str(bot.get('tool_loading_mode') or '').strip().lower()
-        if mode not in {'eager', 'directory'}:
-            die('assistant.bot.tool_loading_mode must be one of: eager, directory')
     if 'read_markets' in bot:
         markets = bot['read_markets']
         if (not isinstance(markets, list) or not markets
                 or any(not isinstance(market, str) or market not in {'us', 'hk'} for market in markets)
                 or len(markets) != len(set(markets))):
             die('assistant.bot.read_markets must be a non-empty list of unique us/hk markets')
-    toolsets = bot.get('toolsets')
-    if toolsets is None:
-        toolsets = {}
-    if not isinstance(toolsets, dict):
-        die('assistant.bot.toolsets must be an object')
-    unsupported_toolsets = sorted(str(key) for key in toolsets if key not in BOT_TOOLSET_KEYS)
-    if unsupported_toolsets:
-        die(f'assistant.bot.toolsets contains unsupported keys: {", ".join(unsupported_toolsets)}')
-    for name, value in toolsets.items():
-        if not isinstance(value, bool):
-            die(f'assistant.bot.toolsets.{name} must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
@@ -1283,6 +1264,8 @@ def validate_config(cfg: dict):
         if daily_brief is not None:
             if not isinstance(daily_brief, dict):
                 die('notifications.daily_brief must be an object')
+            if 'enabled' in daily_brief:
+                die('notifications.daily_brief.enabled is retired; run om config migrate-switches')
             unknown_daily_brief_keys = sorted(
                 str(key)
                 for key in daily_brief
@@ -1292,14 +1275,6 @@ def validate_config(cfg: dict):
                 die(
                     'notifications.daily_brief contains unsupported keys: '
                     + ', '.join(unknown_daily_brief_keys)
-                )
-            if 'enabled' in daily_brief and not isinstance(daily_brief.get('enabled'), bool):
-                die('notifications.daily_brief.enabled must be a boolean')
-            if 'enabled' in daily_brief:
-                warn(
-                    'NOTIFICATIONS_DAILY_BRIEF_ENABLED_DEPRECATED: '
-                    'notifications.daily_brief.enabled is deprecated and ignored; '
-                    'scheduled ordinary notifications always use daily_brief'
                 )
             for key in ('max_actions_per_priority', 'max_candidates_per_strategy', 'max_rejection_reasons'):
                 if key not in daily_brief:

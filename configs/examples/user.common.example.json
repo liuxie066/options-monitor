@@ -8,12 +8,12 @@
   "alert_policy": {
     "change_annual_threshold": 0.02,
     "sell_put": {
-      "high_annual": 0.20,
-      "high_spread_max": 0.20,
+      "high_annual": 0.2,
+      "high_spread_max": 0.2,
       "medium_annual": 0.12
     },
     "sell_call": {
-      "high_annual": 0.10,
+      "high_annual": 0.1,
       "high_total": 0.15,
       "medium_annual": 0.06
     }
@@ -26,6 +26,7 @@
       "max_actions_per_priority": 5,
       "max_candidates_per_strategy": 3,
       "max_rejection_reasons": 5
-    }
+    },
+    "enabled": false
   }
 }

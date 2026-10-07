@@ -899,7 +899,6 @@ duplicate。重处理由原 resolver/writer 执行，成功后更新原 state/In
 ```yaml
 trade_intake:
   combo_reconciliation:
-    default_mode: off
     accounts:
       sy: auto
 ```

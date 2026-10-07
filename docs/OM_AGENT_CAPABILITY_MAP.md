@@ -77,14 +77,11 @@ assistant:
   enabled: true
   bot:
     enabled: true
-    toolsets:
-      portfolio: false
   active_model: deepseek-default
 ```
 
-Set `assistant.bot.toolsets.portfolio: true` to expose the portfolio toolset to
-Bot. Effective access requires the assistant, Bot, and portfolio toolset
-flags to all be true. Missing toolset configuration is fail-closed.
+The scene selects canonical read tools; portfolio queries require the existing
+`portfolio_management.enabled` integration. No additional Bot toolset flag is needed.
 
 `assistant.models` and `assistant.active_model` resolve the provider used by
 Bot. `assistant.planner`, `assistant.agent_loop`, and per-scene channel

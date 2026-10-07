@@ -409,3 +409,21 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 8. assistant 配置变化时已 rebuild assistant JSON；
 9. `healthcheck` 没有新增阻断项；
 10. 首次真实运行先 `--no-send`，并理解它仍会写本地 artifact。
+
+## 配置开关迁移
+
+新配置的 `notifications.enabled` 默认 `false`，只有显式开启才允许主动通知。
+旧配置升级前先运行 `om config migrate-switches --config-yaml <path> --runtime-root <root>`。
+预览会删除无效的 `assistant.bot.toolsets`、`assistant.bot.tool_loading_mode`、
+`notifications.daily_brief.enabled`、`features.wheel.enabled` 和
+`trade_intake.combo_reconciliation.default_mode`，保留账户级组合归因模式和 Wheel 激活历史。
+旧通知总开关缺省时，预览会明确补为 `true` 以保留原意；市场级显式关闭仍然关闭。
+
+核对 `changes`、目标路径及两个哈希后，使用同一命令加上 `--apply --confirm`、
+`--expected-source-sha256 <before_sha256>` 和 `--expected-preview-sha256 <preview_sha256>`。
+发布使用现有配置事务，备份 YAML、重建所有已配置市场及 Assistant，并读回校验。
+发生冲突时不会猜测 `holdings_account` 的账户映射，也不会代替 `om bot migrate` 迁移旧存储。
+重复使用旧预览会因源内容变化被拒绝；需重新预览。新建配置无需运行迁移。
+
+Wheel 使用 `om wheel activation` 管理账户窗口；配置字段删除不会开启或关闭账本窗口。
+组合归因未列出的账户固定为 `off`，仅配置实际需要的账户模式。

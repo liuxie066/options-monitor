@@ -321,7 +321,7 @@ def test_listener_main_owns_exactly_one_lifecycle_batch_dispatcher(
         "receipt": {"enabled": True},
         "backfill": {"enabled": False},
         "combo_reconciliation": {
-            "default_mode": "off",
+
             "accounts": {},
         },
         "account_mapping": {

@@ -22,7 +22,7 @@ def _adapter(send_fn):
 
 def _cfg(**overrides) -> dict:
     """Notification config with the clawbot provider/target these tests share."""
-    return {"notifications": {"provider": "wechat_clawbot", "target": "test_target", **overrides}}
+    return {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "test_target", **overrides}}
 
 
 def test_watchdog_error_code_mapping() -> None:
@@ -108,7 +108,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch,
     monkeypatch.setattr(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00")
 
     base = Path(tmp_path)
-    cfg = {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test", "opend_alert_after_consecutive_failures": 1}}
+    cfg = {"notifications": {"enabled": True, "channel": "wechat_clawbot", "target": "clawbot:test", "opend_alert_after_consecutive_failures": 1}}
     ok = opend_guard.send_opend_alert(
         base,
         cfg,
@@ -283,7 +283,7 @@ def test_opend_recovery_notice_after_unconfigured_failure_uses_system_state(monk
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", _adapter(
         lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True},
     ))
-    unconfigured = {"notifications": {"opend_alert_after_consecutive_failures": 1}}
+    unconfigured = {"notifications": {"enabled": True, "opend_alert_after_consecutive_failures": 1}}
     assert not opend_guard.send_opend_alert(
         tmp_path, unconfigured, error_code="OPEND_RATE_LIMIT", message_text="rate limited",
     )

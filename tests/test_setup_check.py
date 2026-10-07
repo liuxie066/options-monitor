@@ -45,7 +45,7 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
             {
                 "assistant": {
                     "enabled": True,
-                    "bot": {"enabled": True, "toolsets": {}},
+                    "bot": {"enabled": True},
                     "llm": {
                         "provider": "ollama",
                         "base_url": "http://127.0.0.1:11434/v1",

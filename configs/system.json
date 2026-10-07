@@ -72,12 +72,11 @@
       }
     },
     "wheel": {
-      "enabled": false,
       "accounts": [],
       "min_dte": 30,
       "max_dte": 45,
       "min_annualized_net_premium_return": 0.1,
-      "min_net_premium_cny": 50,
+      "min_net_premium_cny": 50.0,
       "max_spread_ratio": 0.4,
       "min_iv_rv_ratio": 1.0,
       "min_iv_minus_rv": 0.0
@@ -117,26 +116,23 @@
       "portfolio_context_ttl_sec": 900
     },
     "notifications": {
-      "opend_alert_cooldown_sec": 600,
-      "opend_alert_burst_window_sec": 900,
-      "opend_alert_burst_max": 3,
-      "opend_alert_after_consecutive_failures": 3,
-      "opend_alert_send_recovery_notice": true,
+      "enabled": false,
       "daily_brief": {
         "max_actions_per_priority": 5,
         "max_candidates_per_strategy": 3,
         "max_rejection_reasons": 5
-      }
+      },
+      "opend_alert_cooldown_sec": 600,
+      "opend_alert_burst_window_sec": 900,
+      "opend_alert_burst_max": 3,
+      "opend_alert_after_consecutive_failures": 3,
+      "opend_alert_send_recovery_notice": true
     },
     "assistant": {
       "enabled": true,
       "context_window_messages": 8,
       "bot": {
-        "enabled": false,
-        "tool_loading_mode": "eager",
-        "toolsets": {
-          "portfolio": false
-        }
+        "enabled": false
       },
       "llm": {
         "provider": "",

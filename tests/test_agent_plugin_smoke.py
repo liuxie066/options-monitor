@@ -2151,7 +2151,6 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
                 "assistant": {
                     "bot": {
                         "enabled": True,
-                        "toolsets": {"portfolio": True},
                     },
                     "context_window_messages": 6,
                     "default_market_scope": "us",
@@ -2201,7 +2200,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
 
     assert data["assistant_runtime"]["config"]["enabled"] is True
     assert data["assistant_runtime"]["config"]["bot"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["bot"]["toolsets"]["portfolio"] is True
+    assert "toolsets" not in data["assistant_runtime"]["config"]["bot"]
     assert data["assistant_runtime"]["llm"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
     assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
@@ -2209,7 +2208,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
     assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
     assert data["summary"]["assistant_enabled"] is True
-    assert data["summary"]["assistant_bot_portfolio_enabled"] is True
+    assert "assistant_bot_portfolio_enabled" not in data["summary"]
     assert data["summary"]["assistant_latest_route"] == "agent_loop"
 
 

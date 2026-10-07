@@ -142,7 +142,7 @@ def test_run_tick_cron_reports_timeout(tmp_path, capsys) -> None:
 
     assert rc == 124
     stderr = capsys.readouterr().err
-    assert "<3>SYSTEM_ALERT_UNCONFIRMED TICK_TIMEOUT" in stderr
+    assert "<3>SYSTEM_ALERT_UNCONFIRMED TICK_TIMEOUT" not in stderr
     assert stderr.strip().endswith("<3>EXEC_TIMEOUT_RC_124")
     events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
     assert len(events) == 1
@@ -210,7 +210,7 @@ def test_run_tick_cron_reports_process_failure_distinct_from_lock(tmp_path, caps
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out == ""
-    assert "<3>SYSTEM_ALERT_UNCONFIRMED TICK_EXEC_FAILED" in captured.err
+    assert "<3>SYSTEM_ALERT_UNCONFIRMED TICK_EXEC_FAILED" not in captured.err
     assert captured.err.strip().endswith("<3>EXEC_FAILED_RC_1")
     events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
     assert len(events) == 1

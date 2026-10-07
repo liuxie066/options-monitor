@@ -38,7 +38,7 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
         cfg_path=tmp_path / "config.us.json",
         state_path=tmp_path / "state.json",
         scheduler_schedule_key="us",
-        base_cfg={"notifications": {"provider": "feishu_app", "target": "https://example.invalid/webhook/token"}},
+        base_cfg={"notifications": {"enabled": True, "provider": "feishu_app", "target": "https://example.invalid/webhook/token"}},
         run_id="run_no_account",
         runlog=SimpleNamespace(safe_event=lambda *_args, **_kwargs: None),
         results=[],

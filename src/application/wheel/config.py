@@ -66,7 +66,6 @@ WHEEL_PUT_DEFAULTS: dict[str, Any] = {
 }
 
 WHEEL_DEFAULTS: dict[str, Any] = {
-    "enabled": False,
     "accounts": [],
     **{
         key: value
@@ -211,7 +210,6 @@ def materialize_wheel_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     accounts = normalize_wheel_accounts(source.get("accounts", []))
     return {
         **dict(source),
-        "enabled": source.get("enabled", False),
         "accounts": accounts,
         "call": policy["call"],
         "put": policy["put"],

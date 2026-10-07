@@ -77,7 +77,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             }
         },
         "wheel": {
-            "enabled": False,
             "accounts": [],
             "min_dte": 30,
             "max_dte": 45,
@@ -120,6 +119,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "portfolio_context_ttl_sec": 900,
         },
         "notifications": {
+            "enabled": False,
             "daily_brief": {
                 "max_actions_per_priority": 5,
                 "max_candidates_per_strategy": 3,
@@ -136,10 +136,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "context_window_messages": 8,
             "bot": {
                 "enabled": False,
-                "tool_loading_mode": "eager",
-                "toolsets": {
-                    "portfolio": False,
-                },
             },
             "llm": {
                 "provider": "",

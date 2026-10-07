@@ -621,7 +621,7 @@ def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -
         captured.update(kwargs)
         return AppResult(status="answered", user_response="Pi runtime ready.")
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", unexpected_load)
+    monkeypatch.setattr(local_harness, "assistant_bot_config_error", unexpected_load)
     monkeypatch.setattr(local_harness, "run_contract", fake_run)
 
     result = _run_prepared(prepared)
@@ -636,9 +636,9 @@ def test_ordinary_run_still_rejects_invalid_implicit_assistant_toolsets(monkeypa
     def invalid_load(**_kwargs):
         nonlocal calls
         calls += 1
-        return None, "eager", "invalid_assistant_config"
+        return "invalid_assistant_config"
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", invalid_load)
+    monkeypatch.setattr(local_harness, "assistant_bot_config_error", invalid_load)
     result = _run_prepared(
         _contract("检查入口"), model_turn_json=None, model_config_json=_model_config()
     )
@@ -654,9 +654,9 @@ def test_eval_model_turn_with_explicit_assistant_config_fails_closed(monkeypatch
     def valid_load(*, config_path, require_config):
         calls.append(config_path)
         assert require_config is True
-        return frozenset(), "eager", None
+        return None
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", valid_load)
+    monkeypatch.setattr(local_harness, "assistant_bot_config_error", valid_load)
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 
@@ -673,7 +673,7 @@ def test_eval_model_turn_with_model_config_still_fails_closed(monkeypatch) -> No
     def unexpected_load(**_kwargs):
         raise AssertionError("implicit Assistant config must not be read")
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", unexpected_load)
+    monkeypatch.setattr(local_harness, "assistant_bot_config_error", unexpected_load)
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 

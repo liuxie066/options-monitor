@@ -10,7 +10,7 @@ import pytest
 
 
 def _config() -> dict:
-    return {"notifications": {"provider": "wechat_clawbot", "target": "fixture-target"}}
+    return {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "fixture-target"}}
 
 
 def test_system_alert_is_deduped_and_recovers_once(monkeypatch, tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_unconfirmed_alert_and_unconfigured_route_reserve_attempts(monkeypatch, 
     fields = dict(base=tmp_path, unit="test.service", market="us", account="sy",
                   failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
                   first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
-    assert system_alerts.report_system_failure(config={}, **fields) == "unconfigured"
+    assert system_alerts.report_system_failure(config={"notifications": {"enabled": True}}, **fields) == "unconfigured"
     assert not sends
     assert system_alerts.report_system_failure(config=_config(), **fields) == "suppressed"
     path = tmp_path / "output_shared" / "state" / "system_alerts.json"
@@ -181,7 +181,7 @@ def test_missing_primary_route_uses_independent_feishu_credentials_and_stable_fa
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
                         lambda provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append((provider, kwargs)) or {"delivery_confirmed": True},
                                                          normalize_fn=lambda **_: {}))
-    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+    fields = dict(base=tmp_path, config={"notifications": {"enabled": True}}, unit="test.service", market="hk", account="lx",
                   failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
                   first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
     (tmp_path / "output_runs" / "run-1").mkdir(parents=True)
@@ -215,7 +215,7 @@ def test_missing_route_without_fallback_stays_local_and_degraded(monkeypatch, tm
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
                         lambda _provider: (_ for _ in ()).throw(AssertionError("must not send")))
-    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+    fields = dict(base=tmp_path, config={"notifications": {"enabled": True}}, unit="test.service", market="hk", account="lx",
                   failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
                   first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
     assert system_alerts.report_system_failure(**fields) == "unconfigured"
@@ -262,7 +262,7 @@ def test_fallback_failure_does_not_cascade_and_meta_signal_is_single_attempt(mon
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
                         lambda provider: SimpleNamespace(send_fn=lambda **kwargs: fail_send(provider, **kwargs),
                                                          normalize_fn=lambda **_: {}))
-    fields = dict(base=tmp_path, config={}, unit="test.service", market="hk", account="lx",
+    fields = dict(base=tmp_path, config={"notifications": {"enabled": True}}, unit="test.service", market="hk", account="lx",
                   failure_code="NOTIFICATION_DELIVERY_UNCONFIRMED", stage="delivery", run_id="run-1", degraded=True,
                   reason="route_missing", external=True)
     assert system_alerts.report_system_meta_signal(**fields) == "signaled"
@@ -285,7 +285,7 @@ def test_missing_feishu_route_uses_single_independent_wechat_binding(monkeypatch
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter",
                         lambda provider: SimpleNamespace(send_fn=lambda **kwargs: sends.append((provider, kwargs)) or {"delivery_confirmed": True},
                                                          normalize_fn=lambda **_: {}))
-    fields = dict(base=tmp_path, config={"notifications": {"provider": "feishu_app"}},
+    fields = dict(base=tmp_path, config={"notifications": {"enabled": True, "provider": "feishu_app"}},
                   unit="test.service", market="hk", account="lx", failure_code="TICK_TIMEOUT",
                   stage="timeout", run_id="run-1", rc=124,
                   first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
@@ -315,7 +315,7 @@ def test_recovery_fallback_retries_after_600s_with_same_key_and_current_evidence
         **fields, config=_config(), run_id="run-1", rc=124,
         first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown",
     ) == "confirmed"
-    assert system_alerts.report_system_recovery(**fields, config={}) == "unconfirmed"
+    assert system_alerts.report_system_recovery(**fields, config={"notifications": {"enabled": True}}) == "unconfirmed"
     state_path = tmp_path / "output_shared/state/system_alerts.json"
     state = json.loads(state_path.read_text())
     incident = state[system_alerts._fingerprint("test.service", "hk", "lx", "TICK_TIMEOUT", "timeout")]
@@ -323,10 +323,10 @@ def test_recovery_fallback_retries_after_600s_with_same_key_and_current_evidence
     assert incident["failure_provider"] == "wechat_clawbot"
     incident["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
     state_path.write_text(json.dumps(state))
-    assert system_alerts.report_system_recovery(**fields, config={}) == "suppressed"
+    assert system_alerts.report_system_recovery(**fields, config={"notifications": {"enabled": True}}) == "suppressed"
     incident["recovery_last_attempt_at"] = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
     state_path.write_text(json.dumps(state))
-    assert system_alerts.report_system_recovery(**fields, config={}) == "confirmed"
+    assert system_alerts.report_system_recovery(**fields, config={"notifications": {"enabled": True}}) == "confirmed"
     assert sends[1][1]["idempotency_key"] == sends[2][1]["idempotency_key"]
     state = json.loads(state_path.read_text())
     recovered = state[system_alerts._fingerprint("test.service", "hk", "lx", "TICK_TIMEOUT", "timeout")]

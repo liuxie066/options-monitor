@@ -2811,16 +2811,6 @@ def private_runtime_status_tool(
         else {}
     )
     data["summary"]["assistant_bot_enabled"] = bool(assistant_bot.get("enabled"))
-    assistant_bot_toolsets = (
-        assistant_bot.get("toolsets")
-        if isinstance(assistant_bot.get("toolsets"), dict)
-        else {}
-    )
-    data["summary"]["assistant_bot_portfolio_enabled"] = bool(
-        assistant_config_summary.get("enabled")
-        and assistant_bot.get("enabled")
-        and assistant_bot_toolsets.get("portfolio")
-    )
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")
@@ -3391,7 +3381,6 @@ def _status_safe_assistant_runtime(value: Any) -> dict[str, Any]:
             **_pick(config, {"loaded", "enabled", "context_window_messages", "default_market_scope"}),
             "bot": {
                 **_pick(config.get("bot"), {"enabled"}),
-                "toolsets": _pick(_dict(config.get("bot")).get("toolsets"), {"portfolio"}),
             },
         },
         "llm": _pick(

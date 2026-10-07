@@ -102,7 +102,6 @@ COMBO_YIELD_AUTHORING_FIELDS = {
     key for key in COMBO_YIELD_ALLOWED_FIELDS if not key.startswith("_")
 }
 WHEEL_AUTHORING_FIELDS = {
-    "enabled",
     "accounts",
     "min_delta",
     "call",
@@ -610,14 +609,8 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
             )
         _reject_unknown_keys(
             combo_reconciliation,
-            allowed={"accounts", "default_mode"},
+            allowed={"accounts"},
             path=f"{path}.combo_reconciliation",
-        )
-        default_raw = combo_reconciliation.get("default_mode", "off")
-        default_mode = (
-            "off"
-            if default_raw is False
-            else str(default_raw or "off").strip().lower()
         )
         accounts_raw = combo_reconciliation.get("accounts") or {}
         if not isinstance(accounts_raw, dict):
@@ -634,7 +627,6 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
             for account, mode in accounts_raw.items()
         }
         out["combo_reconciliation"] = {
-            "default_mode": default_mode,
             "accounts": account_modes,
         }
     return out
@@ -1071,9 +1063,6 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
         "context_window_messages": 8,
         "bot": {
             "enabled": False,
-            "toolsets": {
-                "portfolio": False,
-            },
         },
         "llm": {
             "provider": "",

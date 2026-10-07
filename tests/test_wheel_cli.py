@@ -33,7 +33,6 @@ def _activation_environment(
                 "accounts": ["lx", "sy"],
                 "features": {
                     "wheel": {
-                        "enabled": False,
                         "accounts": ["sy"],
                         "call": {"min_dte": 21},
                     }

@@ -323,7 +323,7 @@ def test_combo_confirmation_resolves_only_config_path(
                 "accounts": ["lx"],
                 "trade_intake": {
                     "combo_reconciliation": {
-                        "default_mode": "off",
+
                         "accounts": {},
                     }
                 },
@@ -2033,6 +2033,7 @@ def _lifecycle_receipt_cli_context(
     runtime_config.write_text(
         json.dumps(
             {
+                "notifications": {"enabled": True},
                 "accounts": ["lx", "sy"],
                 "account_settings": {
                     "lx": {
@@ -2053,7 +2054,7 @@ def _lifecycle_receipt_cli_context(
                         },
                     },
                 },
-                "notifications": {
+                "notifications": {"enabled": True, 
                     "provider": "wechat_clawbot",
                     "target": "wechat:ops",
                 },

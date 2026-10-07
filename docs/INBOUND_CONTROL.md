@@ -46,9 +46,8 @@ contracts with `/confirm trade <operation_id>`.
 
 Messages that are not explicit Control protocol enter Bot when both
 `assistant.enabled` and `assistant.bot.enabled` are true.
-Portfolio-management access is a separate fail-closed projection: `portfolio_query`
-is available to Bot only when `assistant.bot.toolsets.portfolio` is also
-true. Missing values mean disabled.
+The Bot scene selects canonical read tools. Portfolio queries follow the
+`portfolio_management.enabled` integration gate; there is no extra Bot toolset switch.
 Bot reads the channel market by default. A validated
 `assistant.bot.read_markets: [us, hk]` grant can add the other market for
 authenticated senders. The Host resolves each requested market to a fresh

@@ -1149,7 +1149,7 @@ def test_explicit_open_recovers_after_commit_with_one_receipt(tmp_path: Path, mo
         receipt.send_trade_intake_receipt, send_fn=sender, normalize_fn=lambda **kwargs: kwargs,
     ))
     callback = auto_intake._build_receipt_callback(
-        base=tmp_path, cfg={"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}},
+        base=tmp_path, cfg={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test"}},
         receipt_config={"enabled": True}, repo=repo,
     )
 
@@ -1550,7 +1550,7 @@ def test_converged_recorded_receipt_projects_success_and_known_auxiliary_failure
         receipt.send_trade_intake_receipt, send_fn=sender, normalize_fn=lambda send_result: send_result))
     callback = auto_intake._build_receipt_callback(
         base=tmp_path, repo=repo, receipt_config={"enabled": True},
-        cfg={"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}})
+        cfg={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test"}})
     resolver = auto_intake.resolve_trade_deal
     def commit_then_raise(*args, **kwargs):
         resolver(*args, **kwargs)
