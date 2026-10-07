@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from src.application.runtime_paths import resolve_runtime_root
+from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
+
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -154,10 +157,11 @@ def query_sell_put_cash(
     if write_cache:
         out_dir_path.mkdir(parents=True, exist_ok=True)
 
+    fx_cache_path = shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root)
     exchange_rate_payload: dict[str, Any] = {}
     if not no_exchange_rates:
         candidate = get_exchange_rates_or_fetch_latest(
-            cache_path=(out_dir_path / "rate_cache.json").resolve(),
+            cache_path=fx_cache_path,
             max_age_hours=24,
             write_cache=write_cache,
         )
@@ -173,7 +177,7 @@ def query_sell_put_cash(
         portfolio_source=None,
         fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
         exchange_rate_observation=exchange_rate_payload,
-        exchange_rate_cache_path=out_dir_path / "rate_cache.json",
+        exchange_rate_cache_path=fx_cache_path,
         load_json_fn=load_json,
         write_cache=write_cache,
     )

@@ -16,7 +16,7 @@ from src.application.opend_market_snapshot_fetching import SNAPSHOT_KEEP_COLUMNS
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
 
-NOW_MS = 1_768_000_000_000
+NOW_MS = int(datetime.fromisoformat("2026-07-17T03:00:00+00:00").timestamp() * 1000)
 
 
 def _position(
@@ -367,7 +367,8 @@ def test_external_snapshot_raw_is_json_safe_and_report_provenance_is_compact() -
     mark = result.valuation_marks[0]
     assert mark.raw["provider_time"] == "2026-07-17T03:00:00+00:00"
     assert mark.raw["provider_nan"] is None
-    assert result.fx_rates[0].raw["provider_nan"] is None
+    assert "provider_nan" not in result.fx_rates[0].raw
+    assert result.fx_rates[0].quality["source_timestamp_verified"] is True
     payload = result.to_dict()
     assert payload["valuation_mark_fact_ids"] == [mark.fact_id]
     assert "evidence" not in payload

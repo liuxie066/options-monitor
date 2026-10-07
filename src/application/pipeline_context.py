@@ -15,6 +15,7 @@ Design constraints:
 from pathlib import Path
 from typing import Mapping
 
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.account_config import accounts_from_config, build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
@@ -47,6 +48,7 @@ from src.application.prepared_option_positions_context import (
 )
 from src.application.current_fx_run import load_run_fx_snapshot
 from src.infrastructure.exchange_rates import (
+    shared_exchange_rate_cache_path,
     exchange_rate_observation_status,
     get_exchange_rates_or_fetch_latest,
     project_exchange_rate_snapshot,
@@ -118,7 +120,7 @@ def load_portfolio_context(
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
-            exchange_rate_cache_path=(shared_state_dir or state_dir) / "rate_cache.json",
+            exchange_rate_cache_path=(shared_state_dir / "rate_cache.json" if shared_state_dir else shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root)),
             **({"exchange_rate_observation": exchange_rate_observation} if exchange_rate_observation is not _PORTFOLIO_FX_NOT_PROVIDED else {}),
             load_json_fn=load_cached_json,
         )
@@ -320,7 +322,7 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
         return get_exchange_rates_or_fetch_latest(
-            cache_path=(state_dir / 'rate_cache.json').resolve(),
+            cache_path=shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root),
             max_age_hours=24,
         )
     except Exception as exc:
@@ -349,11 +351,13 @@ def load_exchange_rates(
     try:
         rates_obj = exchange_rate_observation if exchange_rate_observation is not None else get_exchange_rates_or_fetch_latest(
             cache_path=(
-                (shared_state_dir or state_dir) / "rate_cache.json"
+                (shared_state_dir / "rate_cache.json" if shared_state_dir else shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root))
             ).resolve(),
             max_age_hours=24,
             log=log,
         )
+        if exchange_rate_observation is not None:
+            rates_obj = project_exchange_rate_snapshot(exchange_rate_observation, purpose="capacity")
         rates_map = rates_obj.get('rates') if isinstance(rates_obj, dict) and isinstance(rates_obj.get('rates'), dict) else rates_obj
         if isinstance(rates_map, dict):
             try:
@@ -428,7 +432,7 @@ def build_pipeline_context(
     if prepared_portfolio_context_manifest is None and prepared_option_positions_context_manifest is None:
         try:
             direct_fx = get_exchange_rates_or_fetch_latest(
-                cache_path=((shared_state_dir or state_dir) / "rate_cache.json").resolve(),
+                cache_path=((shared_state_dir / "rate_cache.json" if shared_state_dir else shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root))).resolve(),
                 max_age_hours=24,
                 log=log,
             ) or {}

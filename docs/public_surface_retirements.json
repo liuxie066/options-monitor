@@ -375,6 +375,11 @@
       "module": "src/application/combo_yield_config.py",
       "name": "COMBO_YIELD_POLICY_OVERRIDES",
       "reason": "Retired the conflicting policy-only long Call delta defaults. Both long legs now use COMBO_LONG_MIN_DELTA/COMBO_LONG_MAX_DELTA through COMBO_YIELD_DEFAULTS, with explicit per-leg configuration overrides preserved."
+    },
+    {
+      "module": "domain/domain/performance/cash_conversion.py",
+      "name": "cash_fx_daily_facts",
+      "reason": "Retired synthetic daily FX anchors for new cash conversions. Callers now pass original FX facts to select_cash_fx_rate, which applies the shared quote-session policy at the cash event time. Existing daily conversion snapshots remain readable and explicit correction workflows retain their provenance."
     }
   ]
 }

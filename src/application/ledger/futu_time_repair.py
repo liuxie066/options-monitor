@@ -13,7 +13,6 @@ import sqlite3
 from typing import Any, Callable
 
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
-from domain.domain.performance.cash_conversion import cash_fx_daily_facts
 from domain.domain.trade_execution import (
     execution_instant_milliseconds, futu_execution_time, canonical_trade_execution_content,
     structured_deal_keys_from_ledger_event, ledger_execution_event_set_is_complete,
@@ -171,7 +170,7 @@ def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any], plan_
     voided = {valid_void_target_event_id(p) for p in payloads.values()}
     # Same connection is essential for a coherent read set and the EXCLUSIVE apply transaction.
     fx = PerformanceEvidenceSQLiteRepository(repo.db_path).read_fx_rates(conn=conn).fx_rates
-    rates = cash_fx_daily_facts(fx)
+    rates = tuple(fx)
     changes = []
     proposed = deepcopy(payloads)
     for target in sorted(request["targets"], key=lambda x: x["event_id"]):
@@ -393,7 +392,7 @@ def apply_futu_time_repair(repo: Any, *, request: dict[str, Any], expected_input
             _ensure_opend_trade_time_correction_guard(conn)
             conn.execute("INSERT INTO futu_trade_time_repair_audit VALUES (?,?,?,?,?,?)",
                          (request["batch_id"], _json(request), expected_input_hash, _json(plan), _json(receipt), applied_at_ms))
-            PerformanceEvidenceSQLiteRepository(repo.db_path).freeze_cash_fx_daily_rates(migrated_at_ms=request["prepared_at_ms"], conn=conn)
+            PerformanceEvidenceSQLiteRepository(repo.db_path).persist_cash_fx_observations(migrated_at_ms=request["prepared_at_ms"], conn=conn)
             for change in plan["events"]:
                 if not repo.compare_and_swap_trade_event_time(event_id=change["event_id"], expected_event_json=change["before_json"],
                         expected_trade_time_ms=change["before_trade_time_ms"], replacement_event_json=change["after_json"],

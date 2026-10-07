@@ -104,7 +104,7 @@ def test_cache_reuse_binds_current_fx_without_mutating_source(tmp_path):
     for provided in (fx, {}, None):
         result = load(tmp_path, lambda **_: pytest.fail("fresh source reused"), exchange_rate_observation=provided)
         assert result["context_source"] == "account_cache"
-        assert result["exchange_rates"] == provided
+        assert result["exchange_rates"] is None if provided is None else result["exchange_rates"]["rates"] == {}
         assert result["cash_by_currency"] == ctx["cash_by_currency"]
         assert cash_snapshot_is_usable(result)
         assert path.read_bytes() == before
@@ -112,7 +112,8 @@ def test_cache_reuse_binds_current_fx_without_mutating_source(tmp_path):
 
 
 @pytest.mark.parametrize("old", [cash_context(NOW-timedelta(seconds=901)), cash_context(cash_source_observed_at=None)])
-def test_stale_or_legacy_cache_refreshes_once_even_when_mtime_new(tmp_path, old):
+def test_stale_or_legacy_cache_refreshes_once_even_when_mtime_new(tmp_path, old, monkeypatch):
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
     (tmp_path / "portfolio_context.json").write_text(json.dumps(old))
     calls = []
     def fetch(**kwargs):
@@ -121,7 +122,7 @@ def test_stale_or_legacy_cache_refreshes_once_even_when_mtime_new(tmp_path, old)
     result = load(tmp_path, fetch)
     assert len(calls) == 1
     assert calls[0]["write_cache"] is False
-    assert calls[0]["exchange_rate_cache_path"] == tmp_path / "rate_cache.json"
+    assert calls[0]["exchange_rate_cache_path"] == tmp_path / "output_shared" / "state" / "rate_cache.json"
     assert cash_snapshot_is_usable(result)
     assert result["context_source"] == "futu_direct"
 

@@ -10,7 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from src.application.runtime_paths import resolve_runtime_root
 from src.infrastructure.exchange_rates import (
+    current_exchange_rate_snapshot,
+    shared_exchange_rate_cache_path,
     CurrencyConverter,
     ExchangeRates,
     get_exchange_rates_or_fetch_latest,
@@ -42,5 +45,12 @@ def fetch_opend_exchange_rate_observation(
 
     del configs
     return get_exchange_rates_or_fetch_latest(
-        cache_path=Path(__file__).resolve().parents[2] / "output_shared" / "state" / "rate_cache.json",
+        cache_path=shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
+    )
+
+
+def load_current_exchange_rate_snapshot(*, runtime_root: Path, write_cache: bool = False) -> dict[str, Any]:
+    """Current facts for explicitly bound instance consumers, including Wheel."""
+    return current_exchange_rate_snapshot(
+        cache_path=shared_exchange_rate_cache_path(runtime_root), write_cache=write_cache,
     )

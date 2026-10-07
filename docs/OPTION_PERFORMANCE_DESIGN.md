@@ -85,8 +85,17 @@ contracts without reopening those completed boundaries:
   redacted, size-bounded model observation.
 - Root `option_net_cashflow.cny_total` reuses persisted event-time `cash_conversion.v1` facts. It is
   partial/null when any required conversion is absent or invalid; no report read fetches current FX.
+- New market-FX cash conversions use `event_time_market_fx`: the latest verified quote at or before
+  the cash event, evaluated by `domain.domain.fx_quote_policy`, the same session/holiday policy used
+  for current capacity. A verified continuous closure permits carry until the next session opens;
+  a session gap, missing source time, or unknown calendar leaves CNY pending. Capture time never
+  replaces quote time. Both evidence capture paths preserve identical original pair facts.
+  The old first-observation-per-Shanghai-day policy is read-only compatibility for existing snapshots.
+  Explicit official/correction evidence retains its existing controlled selection contract.
+  Ordinary backfill only fills missing/invalid conversions; it does not replace valid snapshots.
 - Fee enrichment reuses an existing cash conversion only after validating it against the preceding
-  fee cash fact. A valid historical business-day carry-forward keeps the canonical seven-day window;
+  fee cash fact. It retains all original quote/calendar provenance; a legacy official business-day
+  carry-forward keeps the canonical seven-day window;
   corrupt or unverifiable evidence is replaced by pending evidence rather than re-signed.
 - The Python Host reports the actual terminal error with a public `run_id`, without exposing
   private provider or tool diagnostics.

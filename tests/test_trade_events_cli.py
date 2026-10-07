@@ -500,6 +500,7 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
     event_time = 1774419413873
     fx = {"source": "tencent_quote", "rates": {"HKDCNY": 0.88092, "USDCNY": 6.9},
           "timestamp": "2026-03-25T06:16:53+00:00",
+          "observed_at": "2026-03-25T06:16:53+00:00",
           "quote_timestamps": {pair: "2026-03-25T06:16:53+00:00" for pair in ("HKDCNY", "USDCNY")}}
     monkeypatch.setattr(writer_trade_events, "load_cash_fx_payload", lambda *a, **k: fx)
     event = TradeEvent(
@@ -520,7 +521,7 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
     )
     persist_trade_event_object(repo, event)
     if with_fx:
-        PerformanceEvidenceSQLiteRepository(repo.db_path).freeze_cash_fx_daily_rates(
+        PerformanceEvidenceSQLiteRepository(repo.db_path).persist_cash_fx_observations(
             cash_fx_observation_facts(fx, observed_at_ms=event_time),
             migrated_at_ms=event_time,
         )
