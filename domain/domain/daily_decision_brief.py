@@ -408,7 +408,8 @@ def _normalize_daily_decision_brief(
         out["wheel_batches"] = _mapping_list(
             src.get("wheel_batches"), field="wheel_batches"
         )
-    return out
+    # Match the canonical digest contract: non-finite evidence is missing, not a JSON number.
+    return _json_safe(out)
 
 
 def reconcile_daily_decision_brief_evidence(

@@ -77,3 +77,13 @@ def test_read_only_missing_and_bad_schema_never_repairs(tmp_path):
     with pytest.raises(DecisionHistoryError, match="history_schema_invalid"):
         DecisionHistoryStore(path).get(account="lx", market="US")
     assert path.read_bytes() == before
+
+
+def test_nonfinite_evidence_is_missing_and_replay_is_stable(tmp_path):
+    source = _brief(run_id="nonfinite")
+    source["candidates"] = {"csp": [{"symbol": "NVDA", "quote": float("nan"), "metrics": {"iv": float("inf")}}]}
+    first = persist_daily_decision_brief_success(base=tmp_path, brief=source)
+    stored = DecisionHistoryStore(history_path(tmp_path)).get(account="lx", market="US", run_id="nonfinite")
+    assert stored["input"]["candidates"]["csp"][0]["quote"] is None
+    assert stored["payload"]["candidates"]["csp"][0]["metrics"]["iv"] is None
+    assert persist_daily_decision_brief_success(base=tmp_path, brief=source) == first
