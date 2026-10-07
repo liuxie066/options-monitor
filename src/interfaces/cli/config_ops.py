@@ -8,7 +8,7 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.config_edit import get_runtime_config_value
 from src.application.config_yaml import (
-    build_yaml_assistant_config_file,
+    build_yaml_bot_config_file,
     build_yaml_runtime_config_file,
     explain_yaml_config_key,
     validate_yaml_runtime_config,
@@ -23,6 +23,13 @@ from src.interfaces.cli.setup_ops import add_symbol_policy_arguments, symbol_pol
 def add_config_commands(subparsers: Any) -> None:
     config = subparsers.add_parser("config", help="config operations")
     config_sub = config.add_subparsers(dest="config_command", required=True)
+    migrate = config_sub.add_parser("migrate-switches", help="preview retirement of inert switches and preserve legacy notification intent")
+    migrate.add_argument("--config-yaml", default=None)
+    migrate.add_argument("--runtime-root", default=None)
+    migrate.add_argument("--apply", action="store_true")
+    migrate.add_argument("--confirm", action="store_true")
+    migrate.add_argument("--expected-source-sha256", default=None)
+    migrate.add_argument("--expected-preview-sha256", default=None)
     init_config = config_sub.add_parser("init", help="generate starter config.yaml and runtime configs")
     init_config.add_argument("--output", default=None, help="config.yaml path; defaults to repo-local config.yaml")
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
@@ -64,12 +71,12 @@ def add_config_commands(subparsers: Any) -> None:
     build.add_argument("--system-config", default=None)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
-    build_assistant = config_sub.add_parser("build-assistant", help="build assistant config from config.yaml")
-    build_assistant.add_argument("--source", default="yaml", choices=("yaml",))
-    build_assistant.add_argument("--config-yaml", default=None)
-    build_assistant.add_argument("--system-config", default=None)
-    build_assistant.add_argument("--output", default=None)
-    build_assistant.add_argument("--dry-run", action="store_true")
+    build_bot = config_sub.add_parser("build-bot", help="build Bot config from config.yaml")
+    build_bot.add_argument("--source", default="yaml", choices=("yaml",))
+    build_bot.add_argument("--config-yaml", default=None)
+    build_bot.add_argument("--system-config", default=None)
+    build_bot.add_argument("--output", default=None)
+    build_bot.add_argument("--dry-run", action="store_true")
     explain = config_sub.add_parser("explain", help="explain a config.yaml key")
     explain.add_argument("--source", default="yaml", metavar="{yaml}", help="authoring source; defaults to yaml")
     explain.add_argument("--config-yaml", default=None)
@@ -101,6 +108,7 @@ def add_config_commands(subparsers: Any) -> None:
     holdings_set.add_argument("--enabled", required=True, type=_parse_bool_value)
     holdings_set.add_argument("--config-yaml", default=None)
     holdings_set.add_argument("--runtime-root", default=None)
+    holdings_set.add_argument("--enable-pm", action="store_true", help="enable PM in the same generation as Holdings")
     holdings_set.add_argument("--apply", action="store_true")
     holdings_set.add_argument("--confirm", action="store_true")
     holdings_set.add_argument("--expected-source-sha256", default=None)
@@ -204,12 +212,18 @@ def handle_config_command(
     validate_runtime_config_fn: Callable[..., dict[str, Any]] = _validate_runtime_config,
     validate_yaml_runtime_config_fn: Callable[..., dict[str, Any]] = validate_yaml_runtime_config,
     build_yaml_runtime_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_runtime_config_file,
-    build_yaml_assistant_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_assistant_config_file,
+    build_yaml_bot_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_bot_config_file,
     explain_yaml_config_key_fn: Callable[..., dict[str, Any]] = explain_yaml_config_key,
     init_yaml_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
     set_yaml_symbol_config_fn: Callable[..., dict[str, Any]] = set_yaml_symbol_config,
 ) -> dict[str, Any]:
+    if args.config_command == "migrate-switches":
+        from src.application.config_switch_migration import migrate_yaml_switches
+        return migrate_yaml_switches(repo_root=repo_base_fn(), config_path=args.config_yaml,
+                                    runtime_root=args.runtime_root, apply=args.apply, confirm=args.confirm,
+                                    expected_source_sha256=args.expected_source_sha256,
+                                    expected_preview_sha256=args.expected_preview_sha256)
     if args.config_command == "validate":
         source = _normalize_config_source(args, allowed=("runtime", "yaml"))
         if source == "yaml":
@@ -272,8 +286,8 @@ def handle_config_command(
             dry_run=bool(args.dry_run),
         )
 
-    if args.config_command == "build-assistant":
-        return build_yaml_assistant_config_file_fn(
+    if args.config_command == "build-bot":
+        return build_yaml_bot_config_file_fn(
             repo_root=repo_base_fn(),
             config_path=args.config_yaml,
             system_config_path=args.system_config,
@@ -346,6 +360,7 @@ def handle_config_command(
         return set_yaml_holdings_inclusion(
             repo_root=repo_base_fn(),
             enabled=args.enabled,
+            enable_pm=args.enable_pm,
             config_path=args.config_yaml,
             runtime_root=args.runtime_root,
             apply=bool(args.apply),

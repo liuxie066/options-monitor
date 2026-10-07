@@ -53,7 +53,7 @@ def _receipt_callback(root, repo, monkeypatch, calls, *, before_send=None, notif
         return actual(**kwargs)
     monkeypatch.setattr(auto_intake, "send_trade_intake_receipt", send)
     return auto_intake._build_receipt_callback(
-        base=root, cfg={"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}},
+        base=root, cfg={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test"}},
         receipt_config={"enabled": True, "notify_unresolved": notify_unresolved, "notify_failed": notify_failed}, repo=repo,
     )
 

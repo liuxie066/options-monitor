@@ -1,6 +1,6 @@
 # Inbound Control
 
-`./om assistant handle` is the common application entry for local, Feishu, and
+`./om bot handle` is the common application entry for local, Feishu, and
 WeChat messages. It has two mutually exclusive paths:
 
 ```text
@@ -44,19 +44,20 @@ contracts with `/confirm trade <operation_id>`.
 
 ## Bot Boundary
 
-Messages that are not explicit Control protocol enter Bot when both
-`assistant.enabled` and `assistant.bot.enabled` are true.
-Portfolio-management access is a separate fail-closed projection: `portfolio_query`
-is available to Bot only when `assistant.bot.toolsets.portfolio` is also
-true. Missing values mean disabled.
+`bot.enabled` is the single activation switch for new inbound Control commands and
+model conversations. Non-Control messages enter the model path only when enabled.
+Authenticated cancellation of an already admitted Feishu analysis remains available
+so disabling Bot does not strand active work; replacement work still requires Bot enabled.
+The Bot scene selects canonical read tools. Portfolio queries follow the
+`portfolio_management.enabled` integration gate; there is no extra Bot toolset switch.
 Bot reads the channel market by default. A validated
-`assistant.bot.read_markets: [us, hk]` grant can add the other market for
+`bot.read_markets: [us, hk]` grant can add the other market for
 authenticated senders. The Host resolves each requested market to a fresh
 runtime config in the same runtime root and checks the account in that market;
 the model cannot supply a config path or expand this grant. Dual-market reads
 without a market or recognizable symbol require clarification. Revoking or
 changing the grant stops an active answer before it is persisted.
-Each controlled rebuild of `config.assistant.json`, including a version upgrade,
+Each controlled rebuild of `config.bot.json`, including a version upgrade,
 creates a new read generation even if `read_markets` is unchanged. Channel
 sessions and personal memory start in that new generation; old records remain
 stored but are not automatically carried into it.
@@ -91,7 +92,7 @@ chat history, remains authoritative for confirmation and cancellation.
 
 ## Reply Contract
 
-Channel adapters render the returned `AssistantTurnResult.response_text`.
+Channel adapters render the returned `BotTurnResult.response_text`.
 
 - Control replies may include deterministic results, preview requests, or
   permission errors.
@@ -105,30 +106,28 @@ Bot internals directly.
 ## Configuration
 
 ```yaml
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
-    toolsets:
-      portfolio: false
   active_model: deepseek-default
 ```
 
-Change `portfolio` to `true` to share the portfolio-management pure-read toolset
-with Bot. This does not start the portfolio-management API service and does
-not change the external `./om-agent` Tool Gateway contract.
+Bot loads tools by scene; there is no portfolio toolset switch. PM-backed reads
+use the canonical `portfolio_management.enabled` integration boundary.
+`om bot configure` changes `bot.enabled`. The default is false. Disabling Bot
+stops inbound processing and real model execution; local configuration, status,
+and diagnostic commands remain available. Saving configuration does not start a service.
 
-`assistant.models` defines model profiles. Generated
-`resolved/config.assistant.json` must be rebuilt after authoring changes.
+`bot.models` defines model profiles. Generated
+`resolved/config.bot.json` must be rebuilt after authoring changes.
 Planner flags, task profiles, per-business Scene allowlists, and
 `assistant.agent_loop` are not supported runtime controls.
 
 ## Diagnostics
 
 ```bash
-./om assistant commands --format text
-./om assistant capabilities
-./om assistant llm-check
+./om bot commands --format text
+./om bot capabilities
+./om bot llm-check
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
 

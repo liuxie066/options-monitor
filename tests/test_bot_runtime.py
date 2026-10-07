@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from src.application.agent_tool_contracts import build_response
+from src.application.bot.control.contracts import BotInboundRequest
+from src.application.bot.control.runtime import handle_bot_turn
+from src.application.bot.control.renderer import render_canonical_tool_result
+from src.application.bot.control.settings import BotSettings
+from src.application.bot.contracts import AppResult
+
+
+def _request(tmp_path: Path, text: str, *, message_id: str = "m_runtime") -> BotInboundRequest:
+    return BotInboundRequest(
+        text=text,
+        sender_id="u_runtime",
+        channel="test",
+        conversation_id="c_runtime",
+        message_id=message_id,
+        audit_db=str(tmp_path / "bot_audit.db"),
+        config_key="us",
+        bot_config_path=str(tmp_path / "config.bot.json"),
+    )
+
+
+def test_bot_settings_expose_only_the_real_enabled_choice() -> None:
+    assert BotSettings.from_runtime_config({}).enabled is False
+    assert BotSettings.from_runtime_config(
+        {"bot": {'enabled': True}}
+    ).enabled is True
+
+
+def test_freeform_turn_goes_directly_to_bot(monkeypatch, tmp_path: Path) -> None:
+    from src.application.bot.control import inbound_service
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_bot(**kwargs: Any) -> AppResult:
+        captured.append(dict(kwargs))
+        return AppResult(status="answered", user_response="7 月收益主要来自权利金。")
+
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
+    result = handle_bot_turn(
+        _request(tmp_path, "7月收益"),
+        allowed_senders="u_runtime",
+        settings=BotSettings(enabled=True),
+    )
+
+    assert result.ok is True
+    assert result.response_text == "7 月收益主要来自权利金。"
+    assert result.trace["route"] == "bot"
+    assert result.meta["bot"]["route"] == "bot"
+    assert captured[0]["conversation_id"] == "c_runtime"
+
+
+def test_followup_text_is_not_reparsed_as_a_business_intent(monkeypatch, tmp_path: Path) -> None:
+    from src.application.bot.control import inbound_service
+
+    captured: list[str] = []
+
+    def fake_bot(**kwargs: Any) -> AppResult:
+        captured.append(str(kwargs["user_message"]))
+        return AppResult(status="answered", user_response="结论是收益集中于两个标的。")
+
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
+    result = handle_bot_turn(
+        _request(tmp_path, "结论呢", message_id="m_followup"),
+        allowed_senders="u_runtime",
+        settings=BotSettings(enabled=True),
+    )
+
+    assert captured == ["结论呢"]
+    assert result.response_text == "结论是收益集中于两个标的。"
+
+
+def test_slash_command_keeps_deterministic_control_path(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def execute_tool(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, dict(payload)))
+        return build_response(tool_name=name, ok=True, data={"status": "ok"})
+
+    result = handle_bot_turn(
+        _request(tmp_path, "/status", message_id="m_status"),
+        execute_tool_fn=execute_tool,
+        allowed_senders="u_runtime",
+        settings=BotSettings(enabled=True),
+    )
+
+    assert result.ok is True
+    assert result.trace["route"] != "bot"
+    assert calls
+
+
+def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_path: Path) -> None:
+    from src.application.bot.control import inbound_service
+
+    calls = 0
+
+    def fake_bot(**_kwargs: Any) -> AppResult:
+        nonlocal calls
+        calls += 1
+        return AppResult(status="answered", user_response="第一次回答。")
+
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
+    request = _request(tmp_path, "最近有哪些风险？", message_id="m_duplicate")
+    settings = BotSettings(enabled=True)
+    first = handle_bot_turn(request, allowed_senders="u_runtime", settings=settings)
+    second = handle_bot_turn(request, allowed_senders="u_runtime", settings=settings)
+
+    assert calls == 1
+    assert first.response_text == second.response_text
+    assert second.meta["idempotent_replay"] is True
+
+
+def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="option_performance",
+        tool_result={"ok": True},
+        data={
+            "period": {
+                "kind": "mtd",
+                "start_date": "2026-07-01",
+                "as_of_date": "2026-07-23",
+            },
+            "scope": {"accounts": ["lx", "sy"], "brokers": ["futu"]},
+            "option_net_cashflow": {
+                "by_currency": {
+                    "USD": {
+                        "total": {"amount": 799.65, "status": "observed", "missing": []},
+                        "open": {"amount": 500, "status": "observed", "missing": []},
+                        "terminated": {"amount": 299.65, "status": "observed", "missing": []},
+                    }
+                },
+                "cny_total": {
+                    "currency": "CNY",
+                    "amount": 5757.48,
+                    "status": "observed",
+                    "missing": [],
+                },
+            },
+            "sell_option_win_rate": {
+                "winning_contracts": 3,
+                "eligible_contracts": 4,
+                "rate": 0.75,
+                "status": "observed",
+            },
+            "buy_option_win_rate": {
+                "winning_contracts": 0,
+                "eligible_contracts": 0,
+                "rate": None,
+                "status": "not_applicable",
+            },
+            "option_return": {
+                "by_currency": {
+                    "USD": {
+                        "rate": 0.12,
+                        "annualized_rate": 0.24,
+                        "status": "observed",
+                        "missing": [],
+                    }
+                }
+            },
+            "quality": {
+                "status": "partial",
+                "missing": ["terminal_evidence_missing"],
+            },
+        },
+    )
+
+    assert text.startswith("期权收益统计完成（lx、sy；broker futu，MTD，2026-07-01 至 2026-07-23）")
+    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
+    assert "卖方胜率：75.00%（3/4 张）" in text
+    assert "买方胜率：-（0/0 张）（不适用）" in text
+    assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
+    assert "terminal_evidence_missing" in text
+    assert "不提供 option PnL" in text
+    assert "权利金" not in text
+
+
+def test_position_exit_renderer_uses_only_current_close_contract() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="position_exit_analysis",
+        tool_result={"ok": True},
+        data={
+            "query": {"account": "lx", "symbol": "NVDA"},
+            "source": {"run_id": "run-strict"},
+            "matched_count": 1,
+            "rows": [
+                {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "side": "short",
+                    "option_type": "put",
+                    "expiration": "2026-09-18",
+                    "strike": 100,
+                    "currency": "USD",
+                    "policy_version": "remaining_yield_capture.v3",
+                    "recommendation_state": "close",
+                    "evaluation_status": "priced",
+                    "reason": "all_strict_close_gates_passed",
+                    "net_capture_ratio": 0.95,
+                    "opening_net_credit": 170,
+                    "all_in_close_cost": 8.5,
+                    "capital_basis": 10000,
+                    "remaining_max_annualized_return": 0.08,
+                    "spread_ratio": 0.1333,
+                    "dte": 39,
+                    "is_otm": True,
+                    # Retired v2 fields must never alter or leak into the public answer.
+                    "close_action": "close_put_keep_call",
+                    "optional_combo_action": "close_both_optional",
+                    "tier_label": "P0",
+                    "iv_rv_ratio": 2.5,
+                    "abs_delta": 0.2,
+                }
+            ],
+        },
+    )
+
+    assert "结论：建议平仓" in text
+    assert "净捕获 95.00%" in text
+    assert "全成本买回 USD 8.5" in text
+    assert "剩余最高年化 8.00%" in text
+    assert "Put 担保资金代理 USD 10,000" in text
+    assert "DTE 39" in text
+    assert "价外 是" in text
+    assert "可选：" not in text
+    assert "Put腿" not in text
+    assert "IV/RV" not in text
+    assert "delta" not in text

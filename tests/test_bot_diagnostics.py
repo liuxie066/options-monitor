@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.bot.control.diagnostics import check_bot_llm
+from src.application.bot.model_config import model_api_key_configured
+
+
+def _bot_config(
+    *,
+    llm: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    llm_cfg = dict(llm or {"enabled": False})
+    enabled = bool(llm_cfg.pop("enabled", False))
+    return {
+        "bot": {'enabled': True and enabled, 'context_window_messages': 8, 'default_market_scope': 'us', 'llm': llm_cfg},
+    }
+
+
+def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
+    path = tmp_path / "config.bot.json"
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _write_env(tmp_path: Path, line: str) -> Path:
+    path = tmp_path / "options-monitor.env"
+    path.write_text(line, encoding="utf-8")
+    return path
+
+
+def _llm(**overrides: Any) -> dict[str, Any]:
+    """The enabled openai-compatible LLM block; call sites spell out only what differs."""
+    base: dict[str, Any] = {
+        "enabled": True,
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "api_key_env": "OM_LLM_API_KEY",
+        "confidence_min": 0.75,
+        "timeout_seconds": 9,
+        "context_window_tokens": 24_000,
+        "max_output_tokens": 777,
+    }
+    base.update(overrides)
+    return base
+
+
+def _check_llm(
+    tmp_path: Path,
+    cfg: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Write ``cfg`` (default: bot disabled) and check readiness with the local env ignored."""
+    cfg_path = _write_config(tmp_path, _bot_config() if cfg is None else cfg)
+    return check_bot_llm(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        include_local_env_file=False,
+        **overrides,
+    )
+
+
+def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
+    out = _check_llm(tmp_path)
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "disabled"
+    assert "bot_bot_portfolio_enabled" not in out["summary"]
+    assert out["llm"]["enabled"] is False
+    assert "runtime_status" in out["capabilities"]["pure_read_tools"]
+    assert "portfolio_query" in out["capabilities"]["pure_read_tools"]
+    assert "manual_trade_open" not in out["capabilities"]["pure_read_tools"]
+    assert out["llm"]["api_key_configured"] is False
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["enabled"]["status"] == "warn"
+    assert checks["provider"]["status"] == "skipped"
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_ollama_model_config_does_not_require_api_key() -> None:
+    assert model_api_key_configured(
+        {
+            "provider": "ollama",
+            "model": "gpt-oss:20b",
+            "context_window_tokens": 24_000,
+            "max_output_tokens": 2048,
+        },
+        environ={},
+    ) == (True, None)
+
+
+def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(
+            llm={
+                "enabled": True,
+                "provider": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "gpt-oss:20b",
+                "api_key_env": "",
+                "context_window_tokens": 24_000,
+                "max_output_tokens": 2048,
+            }
+        ),
+    )
+
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["api_key_configured"] is True
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["credential_name"]["message"] == "provider does not require a credential"
+    assert checks["api_key"]["status"] == "ok"
+    assert checks["api_key"]["message"] == "provider does not require an API key"
+
+
+def test_llm_check_rejects_missing_explicit_bot_config(tmp_path: Path) -> None:
+    with pytest.raises(AgentToolError) as exc:
+        check_bot_llm(
+            repo_root=tmp_path,
+            config_path=tmp_path / "missing.assistant.json",
+            include_local_env_file=False,
+        )
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "Bot config not found" in exc.value.message
+
+
+def test_llm_check_rejects_invalid_bot_config(tmp_path: Path) -> None:
+    with pytest.raises(AgentToolError) as exc:
+        _check_llm(tmp_path, {"bot": {'enabled': False, 'mode': 'unknown'}})
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "Bot config validation failed" in exc.value.message
+    assert exc.value.details["error"] == "bot has unsupported keys: mode"
+
+
+def test_llm_check_rejects_business_runtime_config_as_bot_config(tmp_path: Path) -> None:
+    with pytest.raises(AgentToolError) as exc:
+        _check_llm(tmp_path, {"accounts": ["sy"], "symbols": [{"symbol": "NVDA"}], "bot": {'enabled': False}})
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "use config.bot.json, not config.<market>.json" in exc.value.details["error"]
+
+
+def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(llm=_llm(base_url="https://llm.example/v1")),
+        env_file=_write_env(tmp_path, "OM_LLM_API_KEY=sk-test\n"),
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["env"]["env_file_loaded"] is True
+    assert out["llm"]["endpoint_url"] == "https://llm.example/v1/responses"
+    assert out["llm"]["responses_url"] == "https://llm.example/v1/responses"
+    assert out["llm"]["chat_completions_url"] is None
+    assert out["llm"]["api_key_configured"] is True
+    assert out["llm"]["api_key_source"] == "environment_compatibility"
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["api_key"]["value"]["configured"] is True
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(
+            llm=_llm(
+                provider="deepseek",
+                base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash",
+                api_key_env="DEEPSEEK_API_KEY",
+            )
+        ),
+        env_file=_write_env(tmp_path, "DEEPSEEK_API_KEY=sk-test\n"),
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
+    assert out["llm"]["responses_url"] is None
+    assert out["llm"]["chat_completions_url"] == "https://api.deepseek.com/chat/completions"
+    assert out["llm"]["api_key_configured"] is True
+    assert out["llm"]["api_key_source"] == "environment_compatibility"
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["provider"]["value"] == "deepseek"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(
+            llm=_llm(
+                provider="kimi",
+                base_url="https://api.moonshot.ai/v1",
+                model="kimi-k2.7-code",
+                api_key_env="MOONSHOT_API_KEY",
+            )
+        ),
+        env_file=_write_env(tmp_path, "MOONSHOT_API_KEY=sk-test\n"),
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["endpoint_url"] == "https://api.moonshot.ai/v1/chat/completions"
+    assert out["llm"]["responses_url"] is None
+    assert out["llm"]["chat_completions_url"] == "https://api.moonshot.ai/v1/chat/completions"
+    assert out["llm"]["api_key_configured"] is True
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["provider"]["value"] == "kimi"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.moonshot.ai/v1/chat/completions"
+
+
+def test_llm_check_reports_ready_kimi_code_endpoint(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(
+            llm=_llm(
+                provider="kimi-code",
+                base_url="https://api.kimi.com/coding/v1",
+                model="kimi-for-coding",
+                api_key_env="KIMI_API_KEY",
+            )
+        ),
+        env_file=_write_env(tmp_path, "KIMI_API_KEY=sk-test\n"),
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["endpoint_url"] == "https://api.kimi.com/coding/v1/chat/completions"
+    assert out["llm"]["responses_url"] is None
+    assert out["llm"]["chat_completions_url"] == "https://api.kimi.com/coding/v1/chat/completions"
+    assert out["llm"]["api_key_configured"] is True
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["provider"]["value"] == "kimi-code"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.kimi.com/coding/v1/chat/completions"
+
+
+def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> None:
+    out = _check_llm(
+        tmp_path,
+        _bot_config(llm=_llm(max_output_tokens=2048)),
+        env_file=_write_env(tmp_path, "OM_LLM_API_KEY=sk-test\n"),
+        live=True,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["live_requested"] is True
+    assert out["summary"]["live_checked"] is False
+    checks = {item["name"]: item for item in out["checks"]}
+    live_probe = checks["live_probe"]
+    assert live_probe["status"] == "skipped"
+    assert live_probe["message"] == (
+        "provider diagnostics are configuration-only; use Bot execution for an end-to-end model probe"
+    )
+    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "bot_runtime": True}

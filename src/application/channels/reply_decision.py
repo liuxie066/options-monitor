@@ -93,7 +93,7 @@ def permission_denied_should_stay_silent(inbound_result: dict[str, Any]) -> bool
     reason = str(details.get("reason") or "").strip()
     message = str(error.get("message") or "").strip()
     return reason in {"sender_not_allowed", "missing_sender"} or message in {
-        "sender is not allowed to use assistant control",
+        "sender is not allowed to use Bot control",
         "sender is not allowed to use inbound control",
     }
 
@@ -119,7 +119,7 @@ def public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
     result_data = _dict(result.get("data"))
     control = _dict(result_data.get("control"))
     decision = _dict(result_data.get("decision"))
-    assistant = _dict(_dict(result.get("meta")).get("assistant"))
+    bot_config = _dict(_dict(result.get("meta")).get("bot", _dict(result.get("meta")).get("assistant")))
     return {
         key: value
         for key, value in {
@@ -128,7 +128,7 @@ def public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
             "status": data.get("status") or result.get("status"),
             "intent_name": result.get("intent_name") or control.get("intent_name"),
             "tool_name": result.get("tool_name") or control.get("tool_name"),
-            "route": result.get("render_route") or assistant.get("route"),
+            "route": result.get("render_route") or bot_config.get("route"),
             "decision_reason": decision.get("reason"),
             "error_code": error.get("code"),
         }.items()

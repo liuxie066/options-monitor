@@ -36,7 +36,7 @@
       "authority": "host_only_tool_scope"
     },
     {
-      "name": "assistant_config_path",
+      "name": "bot_config_path",
       "authority": "host_only_tool_scope"
     },
     {

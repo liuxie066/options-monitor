@@ -46,6 +46,7 @@ htmlcov/
 config.us.json
 config.hk.json
 config.assistant.json
+config.bot.json
 configs/user.*.json
 config.market_us.json
 config.market_hk.json

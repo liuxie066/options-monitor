@@ -6,7 +6,7 @@ from domain.domain.expiration_dates import expiration_market_date
 from src.application.ledger.read_model import build_position_lot_view, list_position_rows
 from src.application.positions.context_builder import build_context
 from src.application.agent_tools import close_advice_read_impl as close_read
-from src.application.assistant.position_query import PositionQuery, PositionExpirationQuery
+from src.application.bot.control.position_query import PositionQuery, PositionExpirationQuery
 
 ANCHOR = datetime(2026, 10, 9, 17, tzinfo=timezone.utc)
 

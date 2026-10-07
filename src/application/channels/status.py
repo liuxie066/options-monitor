@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import build_response, mask_path as default_mask_path
-from src.application.assistant.audit import default_audit_db_path
+from src.application.bot.control.audit import default_audit_db_path
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV,
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
@@ -124,8 +124,8 @@ def _feishu_channel_health(
 ) -> dict[str, Any]:
     del runtime_root
     profile = _dict(payload.get("feishu_ws"))
-    assistant_config_path, _assistant_config_explicit = _assistant_config_path_from_payload(payload)
-    cfg, config_error = _load_assistant_config(assistant_config_path, base=base)
+    bot_config_path, _bot_config_explicit = _bot_config_path_from_payload(payload)
+    cfg, config_error = _load_bot_config(bot_config_path, base=base)
     inbound = _dict(_dict(cfg.get("inbound")).get("feishu_ws"))
     app_id_configured = bool(_first_text(environ.get(DEFAULT_FEISHU_BOT_APP_ID_ENV)))
     user_open_id = _first_text(environ.get(DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV))
@@ -174,8 +174,8 @@ def _feishu_channel_health(
         "service": service.get("service"),
         "service_active": service.get("active"),
         "service_enabled": service.get("enabled"),
-        "assistant_config_path": mask_path(assistant_config_path) if assistant_config_path is not None else None,
-        "assistant_config_loaded": bool(cfg),
+        "bot_config_path": mask_path(bot_config_path) if bot_config_path is not None else None,
+        "bot_config_loaded": bool(cfg),
         "audit_db": mask_path(audit_path),
         "audit_db_exists": audit_path.exists(),
         "credentials_configured": credentials_ready,
@@ -204,8 +204,8 @@ def _wechat_clawbot_channel_health(
     service_status_error: str | None,
 ) -> dict[str, Any]:
     profile = _dict(payload.get("wechat_clawbot"))
-    assistant_config_path, _assistant_config_explicit = _assistant_config_path_from_payload(payload)
-    cfg, config_error = _load_assistant_config(assistant_config_path, base=base)
+    bot_config_path, _bot_config_explicit = _bot_config_path_from_payload(payload)
+    cfg, config_error = _load_bot_config(bot_config_path, base=base)
     inbound = _dict(_dict(cfg.get("inbound")).get("wechat_clawbot"))
     label = _first_text(profile.get("label"), inbound.get("label")) or "default"
     state_dir_raw = _first_text(profile.get("state_dir"), inbound.get("state_dir"))
@@ -249,8 +249,8 @@ def _wechat_clawbot_channel_health(
         "base_url_configured": bool(str(state_payload.get("base_url") or "").strip()),
         "cursor_configured": bool(cursor),
         "cursor_length": len(cursor),
-        "assistant_config_path": mask_path(assistant_config_path) if assistant_config_path is not None else None,
-        "assistant_config_loaded": bool(cfg),
+        "bot_config_path": mask_path(bot_config_path) if bot_config_path is not None else None,
+        "bot_config_loaded": bool(cfg),
         "allowed_senders_configured": allowed_senders_configured,
         "allowed_senders_source": _first_text(profile.get("allowed_senders_source")),
         "reply_enabled": _config_bool_or_default(inbound.get("reply_enabled"), default=True),
@@ -328,13 +328,13 @@ def _command_status_ok(value: Any) -> bool | None:
     return str(value.get("status") or "").strip().lower() == "ok"
 
 
-def _load_assistant_config(path: Path | None, *, base: Path) -> tuple[dict[str, Any], str | None]:
+def _load_bot_config(path: Path | None, *, base: Path) -> tuple[dict[str, Any], str | None]:
     if path is None:
         return {}, None
     try:
-        from src.application.assistant.config_loader import load_assistant_config
+        from src.application.bot.control.config_loader import load_bot_config
 
-        _path, loaded = load_assistant_config(config_path=path, repo_root=base, missing_ok=True)
+        _path, loaded = load_bot_config(config_path=path, repo_root=base, missing_ok=True)
         return (loaded if isinstance(loaded, dict) else {}), None
     except Exception as exc:
         return {}, f"{type(exc).__name__}: {exc}"
@@ -441,7 +441,7 @@ def _merge_service_profile_payload(
         "runtime_root",
         "services",
         "env_file",
-        "assistant_config_path",
+        "bot_config_path",
         "feishu_ws",
         "wechat_clawbot",
     ):
@@ -469,13 +469,13 @@ def _runtime_root(payload: dict[str, Any], *, base: Path, runtime_root: Path | N
     return base
 
 
-def _assistant_config_path_from_payload(payload: dict[str, Any]) -> tuple[Path | None, bool]:
+def _bot_config_path_from_payload(payload: dict[str, Any]) -> tuple[Path | None, bool]:
     for source in (
         payload,
         _dict(payload.get("feishu_ws")),
         _dict(payload.get("wechat_clawbot")),
     ):
-        raw = str(source.get("assistant_config_path") or "").strip()
+        raw = str(source.get("bot_config_path") or "").strip()
         if raw:
             return Path(raw).expanduser(), True
     return None, False

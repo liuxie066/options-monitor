@@ -126,7 +126,7 @@ def _stage_journal(
         source_bytes=after_bytes,
         runtime_root=root,
         markets=["us", "hk"],
-        include_assistant=False,
+        include_bot=False,
     )
     journal_targets = list(targets or prepared["target_payloads"])
     if targets is None:

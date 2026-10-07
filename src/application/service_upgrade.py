@@ -885,9 +885,9 @@ def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> lis
         config_path = str(config_paths.get(key) or "").strip()
         if config_path:
             command.extend(["--config-path", config_path])
-    assistant_config_path = _assistant_config_path_from_profile(profile=profile)
-    if assistant_config_path:
-        command.extend(["--assistant-config", assistant_config_path])
+    bot_config_path = _bot_config_path_from_profile(profile=profile)
+    if bot_config_path:
+        command.extend(["--bot-config", bot_config_path])
     env_file = str(profile.get("env_file") or "").strip()
     if env_file:
         command.extend(["--env-file", str(Path(env_file).expanduser())])
@@ -926,9 +926,9 @@ def _wechat_clawbot_check_command(*, profile: dict[str, Any], repo_root: Path) -
         config_path = str(config_paths.get(config_key) or "").strip()
         if config_path:
             command.extend(["--config-path", config_path])
-    assistant_config_path = str(payload.get("assistant_config_path") or "").strip()
-    if assistant_config_path:
-        command.extend(["--assistant-config", assistant_config_path])
+    bot_config_path = str(payload.get("bot_config_path") or "").strip()
+    if bot_config_path:
+        command.extend(["--bot-config", bot_config_path])
     audit_db = str(payload.get("audit_db") or "").strip()
     if audit_db:
         command.extend(["--audit-db", audit_db])
@@ -954,13 +954,13 @@ def _feishu_ws_check_needs_sudo_for_env_file(profile: dict[str, Any]) -> bool:
         return True
 
 
-def _assistant_config_path_from_profile(*, profile: dict[str, Any], runtime_root: Path | None = None) -> str:
-    raw = str(profile.get("assistant_config_path") or "").strip()
+def _bot_config_path_from_profile(*, profile: dict[str, Any], runtime_root: Path | None = None) -> str:
+    raw = str(profile.get("bot_config_path") or "").strip()
     if raw:
         return raw
     feishu_ws = profile.get("feishu_ws")
     if isinstance(feishu_ws, dict):
-        raw = str(feishu_ws.get("assistant_config_path") or "").strip()
+        raw = str(feishu_ws.get("bot_config_path") or "").strip()
         if raw:
             return raw
     authoring = profile.get("config_authoring")
@@ -969,7 +969,7 @@ def _assistant_config_path_from_profile(*, profile: dict[str, Any], runtime_root
         if root is None and str(profile.get("runtime_root") or "").strip():
             root = Path(str(profile["runtime_root"])).expanduser()
         if root is not None:
-            return str(root / "resolved" / "config.assistant.json")
+            return str(root / "resolved" / "config.bot.json")
     return ""
 
 
@@ -1266,7 +1266,7 @@ def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, s
     return targets
 
 
-def _profile_assistant_config_target(profile: dict[str, Any], *, runtime_root: Path) -> dict[str, str] | None:
+def _profile_bot_config_target(profile: dict[str, Any], *, runtime_root: Path) -> dict[str, str] | None:
     raw_authoring = profile.get("config_authoring")
     authoring = raw_authoring if isinstance(raw_authoring, dict) else {}
     if str(authoring.get("source") or "").strip().lower() != "yaml":
@@ -1274,13 +1274,13 @@ def _profile_assistant_config_target(profile: dict[str, Any], *, runtime_root: P
     config_yaml = str(authoring.get("config_yaml") or "").strip()
     if not config_yaml:
         return None
-    assistant_config_path = _assistant_config_path_from_profile(profile=profile, runtime_root=runtime_root)
-    if not assistant_config_path:
-        assistant_config_path = str(runtime_root / "resolved" / "config.assistant.json")
+    bot_config_path = _bot_config_path_from_profile(profile=profile, runtime_root=runtime_root)
+    if not bot_config_path:
+        bot_config_path = str(runtime_root / "resolved" / "config.bot.json")
     return {
         "source": "yaml",
         "config_yaml": config_yaml,
-        "config_path": assistant_config_path,
+        "config_path": bot_config_path,
     }
 
 
@@ -1352,7 +1352,7 @@ def _rebuild_and_validate_runtime_configs(
     return rebuilt
 
 
-def _rebuild_assistant_config(
+def _rebuild_bot_config(
     *,
     target: dict[str, str] | None,
     cwd: Path,
@@ -1366,7 +1366,7 @@ def _rebuild_assistant_config(
     config_path = str(target.get("config_path") or "").strip()
     if not config_yaml or not config_path:
         raise RuntimeConfigPrepareError(
-            "missing YAML authoring source for assistant config target",
+            "missing YAML authoring source for Bot config target",
             remediation=["rerender_service_profile: ./om service render ... --config-yaml <path>"],
         )
     try:
@@ -1374,7 +1374,7 @@ def _rebuild_assistant_config(
             [
                 "./om",
                 "config",
-                "build-assistant",
+                "build-bot",
                 "--source",
                 "yaml",
                 "--config-yaml",
@@ -1389,9 +1389,9 @@ def _rebuild_assistant_config(
         )
     except RuntimeError as exc:
         raise RuntimeConfigPrepareError(
-            f"failed to {phase} rebuild assistant config: {config_path}",
+            f"failed to {phase} rebuild Bot config: {config_path}",
             remediation=[
-                f"manual_rebuild: cd {cwd} && ./om config build-assistant --source yaml --config-yaml {config_yaml} --output {config_path}",
+                f"manual_rebuild: cd {cwd} && ./om config build-bot --source yaml --config-yaml {config_yaml} --output {config_path}",
                 f"inspect_last_operation: {exc}",
             ],
         ) from exc
@@ -1409,8 +1409,8 @@ def _prepare_runtime_configs_for_release(
 ) -> dict[str, Any]:
     profile = _load_service_profile(runtime_root)
     targets = _profile_runtime_config_targets(profile)
-    assistant_target = _profile_assistant_config_target(profile, runtime_root=runtime_root)
-    if not targets and assistant_target is None:
+    bot_target = _profile_bot_config_target(profile, runtime_root=runtime_root)
+    if not targets and bot_target is None:
         return {"status": "skipped", "reason": "service profile has no runtime config targets"}
 
     staging_root = runtime_root / "upgrade_staging" / f"{previous_dir.name}-to-{target_dir.name}"
@@ -1432,16 +1432,16 @@ def _prepare_runtime_configs_for_release(
                 "staged_path": str(staged_path),
             }
         )
-    staged_assistant_target: dict[str, str] | None = None
-    if assistant_target is not None:
-        assistant_live_path = Path(assistant_target["config_path"]).expanduser()
-        assistant_staged_path = staged_root / f"assistant-{assistant_live_path.name}"
-        staged_assistant_target = {**assistant_target, "config_path": str(assistant_staged_path)}
+    staged_bot_target: dict[str, str] | None = None
+    if bot_target is not None:
+        bot_live_path = Path(bot_target["config_path"]).expanduser()
+        bot_staged_path = staged_root / f"assistant-{bot_live_path.name}"
+        staged_bot_target = {**bot_target, "config_path": str(bot_staged_path)}
         artifacts.append(
             {
-                "kind": "assistant_config",
-                "live_path": str(assistant_live_path),
-                "staged_path": str(assistant_staged_path),
+                "kind": "bot_config",
+                "live_path": str(bot_live_path),
+                "staged_path": str(bot_staged_path),
             }
         )
 
@@ -1452,8 +1452,8 @@ def _prepare_runtime_configs_for_release(
         operations=operations,
         phase="pre_switch",
     )
-    assistant_rebuilt = _rebuild_assistant_config(
-        target=staged_assistant_target,
+    bot_rebuilt = _rebuild_bot_config(
+        target=staged_bot_target,
         cwd=target_dir,
         run_cmd=run_cmd,
         operations=operations,
@@ -1480,14 +1480,14 @@ def _prepare_runtime_configs_for_release(
     return {
         "status": "prepared",
         "targets": targets,
-        "assistant_target": assistant_target,
+        "bot_target": bot_target,
         "staging_root": str(staging_root),
         "manifest_path": str(manifest_path),
         "artifacts": artifacts,
         "overlays": [],
         "preserved_hotfixes": [],
         "rebuilt": rebuilt,
-        "assistant_rebuilt": assistant_rebuilt,
+        "bot_rebuilt": bot_rebuilt,
     }
 
 
@@ -1662,22 +1662,22 @@ def _validate_committed_runtime_configs(
                 remediation=[f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}"],
             ) from exc
         validated.append({"market": market, "config_path": config_path, "phase": "post_switch"})
-    assistant = prepared.get("assistant_target")
-    if isinstance(assistant, dict) and assistant.get("config_path"):
-        path = Path(str(assistant["config_path"]))
+    bot_config = prepared.get("bot_target")
+    if isinstance(bot_config, dict) and bot_config.get("config_path"):
+        path = Path(str(bot_config["config_path"]))
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise RuntimeConfigPrepareError(
-                f"committed assistant config is invalid: {path}",
-                remediation=[f"manual_rebuild: cd {cwd} && ./om config build-assistant --source yaml --output {path}"],
+                f"committed Bot config is invalid: {path}",
+                remediation=[f"manual_rebuild: cd {cwd} && ./om config build-bot --source yaml --output {path}"],
             ) from exc
         if not isinstance(payload, dict):
             raise RuntimeConfigPrepareError(
-                f"committed assistant config must be an object: {path}",
-                remediation=[f"inspect_assistant_config: {path}"],
+                f"committed Bot config must be an object: {path}",
+                remediation=[f"inspect_bot_config: {path}"],
             )
-        operations.append({"operation": "validate_assistant_config", "path": str(path), "ok": True})
+        operations.append({"operation": "validate_bot_config", "path": str(path), "ok": True})
     return validated
 
 

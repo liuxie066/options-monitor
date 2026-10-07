@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.bot.control.operation_signature import require_operation_hmac_key
+from src.application.settings import build_effective_env
+from src.application.settings.effective import resolve_write_gates
+from src.application.payload_helpers import positive_int_or as _positive_int
+
+
+DEFAULT_CONFIRM_TTL_SECONDS = 600
+
+
+@dataclass(frozen=True)
+class InboundOperationPolicy:
+    operations_enabled: bool
+    trade_write_enabled: bool
+    symbol_write_enabled: bool
+    upgrade_write_enabled: bool
+    model_write_enabled: bool
+    monitor_run_enabled: bool
+    admin_senders: tuple[str, ...]
+    confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
+
+
+def load_operation_policy_from_env() -> InboundOperationPolicy:
+    env = build_effective_env().values
+    gates = resolve_write_gates(env)
+    return InboundOperationPolicy(
+        operations_enabled=gates["operations_enabled"],
+        trade_write_enabled=gates["trade_write_enabled"],
+        symbol_write_enabled=gates["symbol_write_enabled"],
+        upgrade_write_enabled=gates["upgrade_write_enabled"],
+        model_write_enabled=gates["model_write_enabled"],
+        monitor_run_enabled=gates["monitor_run_enabled"],
+        admin_senders=_parse_sender_entries(env.get("OM_INBOUND_ADMIN_OPEN_IDS")),
+        confirm_ttl_seconds=_positive_int(
+            env.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
+            default=DEFAULT_CONFIRM_TTL_SECONDS,
+        ),
+    )
+
+
+def enforce_trade_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="trade_write_enabled",
+        message="inbound trade recording is disabled",
+        hint="Set OM_INBOUND_TRADE_WRITE_ENABLED=1 for manual trade recording.",
+    )
+
+
+def enforce_symbol_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="symbol_write_enabled",
+        message="inbound monitored symbol writes are disabled",
+        hint="Set OM_INBOUND_SYMBOL_WRITE_ENABLED=1 for monitored symbol config writes.",
+    )
+
+
+def enforce_upgrade_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="upgrade_write_enabled",
+        message="inbound immediate upgrade is disabled",
+        hint="Set OM_INBOUND_UPGRADE_WRITE_ENABLED=1 for inbound upgrade operations.",
+    )
+
+
+def enforce_model_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="model_write_enabled",
+        message="inbound Bot model switching is disabled",
+        hint="Set OM_INBOUND_MODEL_WRITE_ENABLED=1 for inbound Bot model switch operations.",
+    )
+
+
+def enforce_monitor_run_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="monitor_run_enabled",
+        message="inbound monitor run is disabled",
+        hint="Set OM_INBOUND_MONITOR_RUN_ENABLED=1 for inbound monitor tick previews.",
+    )
+
+
+def _enforce_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None,
+    enabled_field: str,
+    message: str,
+    hint: str,
+) -> InboundOperationPolicy:
+    effective = _enforce_base_write_allowed(channel=channel, sender_id=sender_id, policy=policy)
+    if not bool(getattr(effective, enabled_field)):
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message=message,
+            hint=hint,
+        )
+    return effective
+
+
+def _enforce_base_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    effective = policy or load_operation_policy_from_env()
+    if not effective.operations_enabled:
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="inbound write operations are disabled",
+            hint="Set OM_INBOUND_OPERATIONS_ENABLED=1 before enabling write commands.",
+        )
+    if not effective.admin_senders:
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="no inbound operation admin sender is configured",
+            hint="Set OM_INBOUND_ADMIN_OPEN_IDS to the current bot app open_id.",
+        )
+    if any(_sender_entry_has_wildcard(entry) for entry in effective.admin_senders):
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message="wildcard inbound operation admins are not allowed",
+            hint="Set OM_INBOUND_ADMIN_OPEN_IDS to explicit sender IDs such as feishu:ou_xxx.",
+        )
+    require_operation_hmac_key()
+    if not _sender_matches(channel=channel, sender_id=sender_id, entries=effective.admin_senders):
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="sender is not allowed to write operations",
+            hint="Add this sender to OM_INBOUND_ADMIN_OPEN_IDS.",
+        )
+    return effective
+
+
+
+def _parse_sender_entries(value: str | None) -> tuple[str, ...]:
+    entries: list[str] = []
+    for raw in str(value or "").replace("\n", ",").replace(";", ",").split(","):
+        item = raw.strip()
+        if item and item not in entries:
+            entries.append(item)
+    return tuple(entries)
+
+
+def _sender_matches(*, channel: str, sender_id: str, entries: tuple[str, ...]) -> bool:
+    normalized_channel = str(channel or "").strip().lower() or "local"
+    normalized_sender = str(sender_id or "").strip()
+    for entry in entries:
+        if ":" in entry:
+            entry_channel, entry_sender = entry.split(":", 1)
+        else:
+            entry_channel, entry_sender = "*", entry
+        channel_ok = entry_channel.strip().lower() in {"*", normalized_channel}
+        sender_ok = entry_sender.strip() in {"*", normalized_sender}
+        if channel_ok and sender_ok:
+            return True
+    return False
+
+
+def _sender_entry_has_wildcard(entry: str) -> bool:
+    if ":" in entry:
+        entry_channel, entry_sender = entry.split(":", 1)
+    else:
+        entry_channel, entry_sender = "*", entry
+    return entry_channel.strip() == "*" or entry_sender.strip() == "*"

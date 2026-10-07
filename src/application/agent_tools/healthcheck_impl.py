@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.agent_tool_config import repo_base
-from src.application.assistant.audit import default_audit_db_path
+from src.application.bot.control.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
 from src.application.secret_store.contracts import SecretError

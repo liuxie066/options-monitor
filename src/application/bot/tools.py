@@ -154,7 +154,7 @@ def _route_read_market(tool_name: str, explicit: dict[str, Any], fixed: dict[str
     primary = str(fixed.get("config_key") or "").lower()
     try:
         markets, generation = load_bot_read_scope(
-            config_path=str(fixed.get("assistant_config_path") or ""), primary_market=primary)
+            config_path=str(fixed.get("bot_config_path") or ""), primary_market=primary)
     except Exception:
         return fixed, "trusted Bot read authorization is unavailable"
     if generation != fixed.get("read_generation") or sorted(markets) != fixed.get("read_markets"):

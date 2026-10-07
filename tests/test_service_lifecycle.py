@@ -371,8 +371,8 @@ def test_feature_binding_keeps_selected_enabled_llm_and_explicit_operations_gate
     from src.application.service_deploy import render_service_bundle
     path = instance / 'config.yaml'
     document = yaml.safe_load(path.read_text())
-    document['assistant']['enabled'] = True
-    document['assistant']['bot']['enabled'] = True
+    document['bot']['enabled'] = True
+    document['bot']['enabled'] = True
     path.write_text(yaml.safe_dump(document))
     env = instance / 'options-monitor.env'
     env.write_text('OM_INBOUND_OPERATIONS_ENABLED=true\n')
@@ -430,20 +430,20 @@ def test_preview_hides_existing_env_values_and_live_probe_environment(instance, 
     assert env.read_text() == 'DEEPSEEK_API_KEY=' + sentinel + '\n'
 
 
-def test_inbound_install_requires_current_selected_assistant_snapshot(instance, tmp_path):
-    from src.application.config_yaml import build_yaml_assistant_config_file
+def test_inbound_install_requires_current_selected_bot_snapshot(instance, tmp_path):
+    from src.application.config_yaml import build_yaml_bot_config_file
     ctx, manager = context(instance, tmp_path, 'systemd')
     ctx['include_feishu_ws'] = True
     with pytest.raises(AgentToolError, match='SERVICE_CONFIG_MISSING'):
         service_lifecycle('install', **ctx)
     assert not manager.calls and not ctx['unit_root'].exists()
-    assistant_path = instance / 'resolved/config.assistant.json'
-    build_yaml_assistant_config_file(repo_root=REPO, config_path=instance / 'config.yaml', output_config_path=assistant_path)
+    bot_path = instance / 'resolved/config.bot.json'
+    build_yaml_bot_config_file(repo_root=REPO, config_path=instance / 'config.yaml', output_config_path=bot_path)
     preview = service_lifecycle('install', **ctx)
-    assert any(row['path'] == str(assistant_path) for row in preview['input_files'])
-    data = json.loads(assistant_path.read_text())
-    data['assistant']['enabled'] = True
-    assistant_path.write_text(json.dumps(data))
+    assert any(row['path'] == str(bot_path) for row in preview['input_files'])
+    data = json.loads(bot_path.read_text())
+    data['bot']['enabled'] = True
+    bot_path.write_text(json.dumps(data))
     with pytest.raises(AgentToolError, match='SERVICE_CONFIG_STALE'):
         service_lifecycle('install', **ctx)
 

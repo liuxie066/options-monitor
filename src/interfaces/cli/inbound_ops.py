@@ -32,7 +32,7 @@ def add_inbound_commands(subparsers: Any) -> None:
 
 
 def register_feishu_transport_commands(inbound_sub: Any, *, event_name: str = "feishu", serve_name: str = "feishu-ws") -> None:
-    inbound_feishu = inbound_sub.add_parser(event_name, help="handle one Feishu event payload through assistant control")
+    inbound_feishu = inbound_sub.add_parser(event_name, help="handle one Feishu event payload through Bot control")
     inbound_feishu.set_defaults(inbound_command="feishu")
     feishu_input = inbound_feishu.add_mutually_exclusive_group(required=True)
     feishu_input.add_argument("--input-json", default=None)
@@ -40,7 +40,7 @@ def register_feishu_transport_commands(inbound_sub: Any, *, event_name: str = "f
     feishu_input.add_argument("--stdin", action="store_true")
     inbound_feishu.add_argument("--config-key", default=None, choices=("us", "hk"))
     inbound_feishu.add_argument("--config-path", default=None)
-    inbound_feishu.add_argument("--assistant-config", default=None)
+    inbound_feishu.add_argument("--bot-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
     inbound_feishu.add_argument("--env-file", default=None)
     inbound_feishu.add_argument("--no-local-env-file", action="store_true")
@@ -49,7 +49,7 @@ def register_feishu_transport_commands(inbound_sub: Any, *, event_name: str = "f
     inbound_ws.set_defaults(inbound_command="feishu-ws")
     inbound_ws.add_argument("--config-key", default=None, choices=("us", "hk"))
     inbound_ws.add_argument("--config-path", default=None)
-    inbound_ws.add_argument("--assistant-config", default=None)
+    inbound_ws.add_argument("--bot-config", default=None)
     inbound_ws.add_argument("--audit-db", default=None)
     inbound_ws.add_argument("--env-file", default=None)
     inbound_ws.add_argument(
@@ -111,7 +111,7 @@ def handle_inbound_command(
             config_key=args.config_key,
             config_path=args.config_path,
             audit_db=args.audit_db,
-            assistant_config_path=args.assistant_config,
+            bot_config_path=args.bot_config,
         )
         if args.format == "text":
             data_raw = out.get("data")
@@ -130,7 +130,7 @@ def handle_inbound_command(
         settings = build_feishu_ws_settings_fn(
             config_key=args.config_key,
             config_path=args.config_path,
-            assistant_config_path=args.assistant_config,
+            bot_config_path=args.bot_config,
             audit_db=args.audit_db,
             reply_enabled=False if bool(args.no_reply) else None,
             reply_in_thread=args.reply_in_thread,

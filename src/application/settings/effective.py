@@ -12,9 +12,9 @@ from src.application.secret_store.registry import legacy_secret_env_names
 DEFAULT_LOCAL_ENV_FILE = Path(".env/options-monitor.env")
 ENV_FILE_POINTER = "OM_ENV_FILE"
 DEPRECATED_ENV_SETTINGS: dict[str, str] = {
-    "OM_FEISHU_ACK_REACTION": "Use assistant config inbound.feishu_ws.ack_reaction.",
-    "OM_FEISHU_REPLY_MAX_CHARS": "Use assistant config inbound.feishu_ws.max_reply_chars.",
-    "OM_FEISHU_WS_QUEUE_SIZE": "Use assistant config inbound.feishu_ws.queue_size.",
+    "OM_FEISHU_ACK_REACTION": "Use Bot config inbound.feishu_ws.ack_reaction.",
+    "OM_FEISHU_REPLY_MAX_CHARS": "Use Bot config inbound.feishu_ws.max_reply_chars.",
+    "OM_FEISHU_WS_QUEUE_SIZE": "Use Bot config inbound.feishu_ws.queue_size.",
 }
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -40,6 +40,7 @@ _PUBLIC_LITERAL_ENV_NAMES = frozenset(
         "OM_INBOUND_SYMBOL_WRITE_ENABLED",
         "OM_INBOUND_TRADE_WRITE_ENABLED",
         "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+        "OM_INBOUND_MODEL_WRITE_ENABLED",
     }
 )
 _PUBLIC_ENV_FILE = "<configured-env-file>"
@@ -258,6 +259,7 @@ def inspect_effective_settings(
         "OM_INBOUND_TRADE_WRITE_ENABLED",
         "OM_INBOUND_SYMBOL_WRITE_ENABLED",
         "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+        "OM_INBOUND_MODEL_WRITE_ENABLED",
         "OM_INBOUND_MONITOR_RUN_ENABLED",
         "OM_INBOUND_ADMIN_OPEN_IDS",
         "OM_INBOUND_CONFIRM_TTL_SECONDS",
@@ -435,14 +437,7 @@ def diagnose_effective_settings(
         _redacted_value("OM_RUNTIME_ROOT", runtime_root) if runtime_root else None,
     )
 
-    write_gates = {
-        "operations_enabled": _truthy(effective.get("OM_INBOUND_OPERATIONS_ENABLED")),
-        "trade_write_enabled": _truthy(effective.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
-        "symbol_write_enabled": _truthy(effective.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
-        "upgrade_write_enabled": _truthy(effective.get("OM_INBOUND_UPGRADE_WRITE_ENABLED")),
-        "monitor_run_enabled": _truthy(effective.get("OM_INBOUND_MONITOR_RUN_ENABLED")),
-        "agent_write_tools_enabled": _truthy(effective.get("OM_AGENT_ENABLE_WRITE_TOOLS")),
-    }
+    write_gates = resolve_write_gates(effective.values)
     add("write_gates", "info", "write gates are explicit settings and default to disabled", write_gates)
     missing_trade_write = [
         name
@@ -657,11 +652,12 @@ def _setting_key_to_env_name(key: str) -> str:
         "inbound.trade_write_enabled": "OM_INBOUND_TRADE_WRITE_ENABLED",
         "inbound.symbol_write_enabled": "OM_INBOUND_SYMBOL_WRITE_ENABLED",
         "inbound.upgrade_write_enabled": "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+        "inbound.model_write_enabled": "OM_INBOUND_MODEL_WRITE_ENABLED",
         "inbound.monitor_run_enabled": "OM_INBOUND_MONITOR_RUN_ENABLED",
         "inbound.admin_open_ids": "OM_INBOUND_ADMIN_OPEN_IDS",
         "inbound.confirm_ttl_seconds": "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "agent.write_tools_enabled": "OM_AGENT_ENABLE_WRITE_TOOLS",
-        "assistant.llm.api_key": "OM_LLM_API_KEY",
+        "bot.llm.api_key": "OM_LLM_API_KEY",
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -677,6 +673,24 @@ def _split_csv(value: str) -> list[str]:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def resolve_write_gates(env: Mapping[str, str]) -> dict[str, bool]:
+    """Canonical interpretation shared by execution and settings diagnostics.
+
+    Preserve the inbound parser's historical 'y' spelling; agent-tool writes
+    continue to accept only their existing explicit spellings.
+    """
+    inbound = {"1", "true", "yes", "y", "on"}
+    return {
+        "operations_enabled": str(env.get("OM_INBOUND_OPERATIONS_ENABLED", "")).strip().lower() in inbound,
+        "trade_write_enabled": str(env.get("OM_INBOUND_TRADE_WRITE_ENABLED", "")).strip().lower() in inbound,
+        "symbol_write_enabled": str(env.get("OM_INBOUND_SYMBOL_WRITE_ENABLED", "")).strip().lower() in inbound,
+        "upgrade_write_enabled": str(env.get("OM_INBOUND_UPGRADE_WRITE_ENABLED", "")).strip().lower() in inbound,
+        "model_write_enabled": str(env.get("OM_INBOUND_MODEL_WRITE_ENABLED", "")).strip().lower() in inbound,
+        "monitor_run_enabled": str(env.get("OM_INBOUND_MONITOR_RUN_ENABLED", "")).strip().lower() in inbound,
+        "agent_write_tools_enabled": _truthy(env.get("OM_AGENT_ENABLE_WRITE_TOOLS", "")),
+    }
 
 
 def _truthy(value: str) -> bool:

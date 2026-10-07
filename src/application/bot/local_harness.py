@@ -14,8 +14,8 @@ from src.application.bot.host_store import BotHostStore
 from src.application.bot.model_config import (
     ModelSettings,
     _resolve_model_api_key,
-    load_assistant_bot_settings,
-    load_assistant_llm_config,
+    bot_config_error,
+    load_bot_llm_config,
 )
 from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.bot.service import prepare_contract
@@ -55,7 +55,7 @@ def run_local_request(
     *,
     reference_year: int,
     model_config_json: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     model_turn_json: str | None = None,
     host_store: BotHostStore | None = None,
     session_key: str | None = None,
@@ -83,7 +83,7 @@ def run_local_request(
     return run_prepared_contract(
         prepared,
         model_config_json=model_config_json,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         model_turn_json=model_turn_json,
         host_store=host_store,
         session_key=session_key,
@@ -94,7 +94,7 @@ def run_prepared_contract(
     prepared: ExecutionContract,
     *,
     model_config_json: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     model_turn_json: str | None = None,
     host_store: BotHostStore | None = None,
     session_key: str | None = None,
@@ -106,19 +106,23 @@ def run_prepared_contract(
     prepared = replace(prepared, received_monotonic=received, deadline_monotonic=deadline)
     if time.monotonic() >= deadline:
         return _budget_exhausted(prepared.request_id)
-    implicit_model_turn = model_turn_json is not None and not str(assistant_config_path or "").strip()
+    implicit_model_turn = model_turn_json is not None and not str(bot_config_path or "").strip()
     if implicit_model_turn:
         settings_error = None
     else:
-        _unused_toolsets, _unused_mode, settings_error = load_assistant_bot_settings(
-            config_path=assistant_config_path,
-            require_config=bool(str(assistant_config_path or "").strip()),
+        settings_error = bot_config_error(
+            config_path=bot_config_path,
+            require_config=True,
         )
+    if settings_error == "bot_disabled":
+        return AppResult(status="disabled", user_response="Bot 已关闭。",
+                         error={"code": settings_error.upper(), "reason": settings_error},
+                         request_id=prepared.request_id, contract_id=prepared.contract_id, ok=False)
     if settings_error:
-        return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
+        return _invalid_model_config_result(prepared, settings_error or "invalid_bot_config")
     model_settings, debug, model_error = _resolve_model(
         model_config_json=model_config_json,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         model_turn_json=model_turn_json,
         execution_environment=prepared.execution_environment,
     )
@@ -139,8 +143,8 @@ def run_prepared_contract(
         and not api_key
     ):
         reason = (
-            "assistant_model_api_key_missing"
-            if str(assistant_config_path or "").strip()
+            "bot_model_api_key_missing"
+            if str(bot_config_path or "").strip()
             else "model_api_key_missing"
         )
         return _invalid_model_config_result(prepared, reason)
@@ -175,11 +179,11 @@ def _budget_exhausted(request_id: str) -> AppResult:
 def _resolve_model(
     *,
     model_config_json: str | None,
-    assistant_config_path: str | None,
+    bot_config_path: str | None,
     model_turn_json: str | None,
     execution_environment: str,
 ) -> tuple[ModelSettings | None, dict[str, Any] | None, str | None]:
-    configured_sources = sum(bool(str(item or "").strip()) for item in (model_config_json, assistant_config_path))
+    configured_sources = sum(bool(str(item or "").strip()) for item in (model_config_json, bot_config_path))
     if configured_sources > 1:
         return None, None, "ambiguous_model_source"
     if model_turn_json is not None:
@@ -189,7 +193,7 @@ def _resolve_model(
     if model_config_json:
         settings, error = _model_from_json(model_config_json)
         return settings, None, error
-    settings, error = _model_from_assistant_config(assistant_config_path)
+    settings, error = _model_from_bot_config(bot_config_path)
     return settings, None, error
 
 
@@ -242,11 +246,11 @@ def _model_from_json(model_config_json: str) -> tuple[ModelSettings | None, str 
         return None, "invalid_model_config"
 
 
-def _model_from_assistant_config(path: str | None) -> tuple[ModelSettings | None, str | None]:
+def _model_from_bot_config(path: str | None) -> tuple[ModelSettings | None, str | None]:
     require_config = bool(str(path or "").strip())
     if not require_config:
         return None, None
-    raw, load_error = load_assistant_llm_config(config_path=path, require_config=True)
+    raw, load_error = load_bot_llm_config(config_path=path, require_config=True)
     if load_error:
         return None, load_error
     if not raw:
@@ -272,9 +276,9 @@ def _invalid_model_config_result(contract: ExecutionContract, reason: str) -> Ap
 def _model_error_text(reason: str) -> str:
     return {
         "ambiguous_model_source": "模型来源不唯一",
-        "assistant_config_not_found": "assistant 配置文件不存在",
-        "assistant_model_api_key_missing": "模型 API key 环境变量未配置",
-        "invalid_assistant_config": "assistant 配置无效",
+        "bot_config_not_found": "Bot 配置文件不存在",
+        "bot_model_api_key_missing": "模型 API key 环境变量未配置",
+        "invalid_bot_config": "Bot 配置无效",
         "invalid_model_config": "模型配置无效",
         "invalid_model_turn": "评估模型轮次无效",
         "model_api_key_missing": "模型 API key 环境变量未配置",

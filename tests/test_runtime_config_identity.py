@@ -172,21 +172,21 @@ def test_old_runtime_with_retired_output_mode_requires_rebuild(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("market,symbol", [("us", "NVDA"), ("hk", "0700.HK")])
-def test_readiness_accepts_assistant_only_edit_without_writes(
+def test_readiness_accepts_bot_only_edit_without_writes(
     tmp_path: Path, market: str, symbol: str,
 ) -> None:
     source = tmp_path / "config.yaml"
     doc = {
         "accounts": {"lx": {"type": "futu", "futu_account_id": "12345678"}},
         "markets": {market: {"accounts": ["lx"], "symbols": [symbol]}},
-        "assistant": {"enabled": True, "context_window_messages": 6},
+        "bot": {'enabled': False, 'context_window_messages': 6},
     }
     source.write_text(yaml.safe_dump(doc), encoding="utf-8")
     runtime = tmp_path / f"config.{market}.json"
     build_yaml_runtime_config_file(
         repo_root=REPO_ROOT, market=market, config_path=source, output_config_path=runtime,
     )
-    doc["assistant"] = {"enabled": False, "context_window_messages": 8}
+    doc["bot"] = {"enabled": False, "context_window_messages": 8}
     source.write_text(yaml.safe_dump(doc), encoding="utf-8")
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
 

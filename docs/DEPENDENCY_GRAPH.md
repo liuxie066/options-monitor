@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1139 (`src`: 554, `domain`: 90, `scripts`: 14, `tests`: 481)
-- Internal import edges: 8642 total, 3636 production/script edges excluding tests
+- Python files scanned: 1142 (`src`: 555, `domain`: 90, `scripts`: 14, `tests`: 483)
+- Internal import edges: 8698 total, 3647 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -39,14 +39,14 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|193| application
+  interfaces -->|195| application
   interfaces -->|2| domain
   interfaces -->|6| infrastructure
   scripts -->|39| application
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3787| application
+  tests -->|3826| application
   tests -->|497| domain
   tests -->|2| domain_services
   tests -->|255| infrastructure
@@ -60,7 +60,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 601 |
-| interfaces | application | 193 |
+| interfaces | application | 195 |
 | application | infrastructure | 180 |
 | application | storage | 57 |
 | scripts | application | 39 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3787 |
+| tests | application | 3826 |
 | tests | domain | 497 |
 | tests | interfaces | 300 |
 | tests | infrastructure | 255 |
@@ -94,7 +94,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 252 |
-| src.interfaces | src.application | 155 |
+| src.interfaces | src.application | 157 |
 | src.application.ledger | domain.domain | 134 |
 | src.application | src.infrastructure | 128 |
 | src.application.ledger | domain.domain.ledger | 70 |
@@ -111,7 +111,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application | 26 |
 | src.application.multi_tick | src.application | 23 |
 | domain.domain | domain.domain.ledger | 23 |
-| src.application | src.application.settings | 20 |
+| src.application | src.application.settings | 22 |
 | src.application.ledger | src.application | 18 |
 | src.application | domain.domain.ledger | 17 |
 | src.application | src.application.trades | 17 |
@@ -179,7 +179,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 119 |
+| src.application.agent_tool_contracts | 120 |
 | src.application.payload_helpers | 96 |
 | src.application.ledger.api | 83 |
 | domain.domain.symbol_identity | 82 |

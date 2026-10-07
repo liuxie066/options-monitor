@@ -11,7 +11,7 @@ from src.application.account_config import normalize_account_label, parse_lossle
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml, normalize_trd_env
 from src.application.config_primitives import resolve_config_path as _resolve_path
-from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
+from src.application.config_yaml import build_yaml_bot_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
 from src.application.config_yaml_symbols import symbol_strategy_override
 from src.application.config_authoring_transaction import _prepare_generation
 from src.application.runtime_paths import read_runtime_root_record
@@ -156,28 +156,7 @@ def _starter_yaml_payload(
         "markets": markets,
         "symbol_defaults": {"fetch": {"host": futu_host, "port": futu_port}},
         "notifications": {"enabled": False},
-        "assistant": {
-            "enabled": False,
-            "context_window_messages": 8,
-            "bot": {
-                "enabled": False,
-                "toolsets": {
-                    "portfolio": False,
-                },
-            },
-            "active_model": "deepseek-default",
-            "models": {
-                "deepseek-default": {
-                    "provider": "deepseek",
-                    "base_url": "https://api.deepseek.com",
-                    "model": "deepseek-v4-pro",
-                    "api_key_env": "DEEPSEEK_API_KEY",
-                    "confidence_min": 0.75,
-                    "timeout_seconds": 90,
-                    "context_window_tokens": 1_000_000,
-                },
-            },
-        },
+        "bot": {'enabled': False, 'context_window_messages': 8, 'active_model': 'deepseek-default', 'models': {'deepseek-default': {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-v4-pro', 'api_key_env': 'DEEPSEEK_API_KEY', 'confidence_min': 0.75, 'timeout_seconds': 90, 'context_window_tokens': 1000000}}},
         "inbound": {
             "feishu_ws": {
                 "ack_reaction": "THUMBSUP",
@@ -188,18 +167,18 @@ def _starter_yaml_payload(
 
 def _build_commands(*, config_path: Path, outputs: dict[str, Path], markets: list[str]) -> list[str]:
     commands: list[str] = []
-    assistant_output = outputs.get("assistant")
-    if assistant_output is not None:
+    bot_output = outputs.get("bot")
+    if bot_output is not None:
         command = [
             "om",
             "config",
-            "build-assistant",
+            "build-bot",
             "--source",
             "yaml",
             "--config-yaml",
             str(config_path),
             "--output",
-            str(assistant_output),
+            str(bot_output),
         ]
         commands.append(" ".join(shlex.quote(part) for part in command))
     for market in markets:
@@ -225,7 +204,7 @@ def init_yaml_config(
     repo_root: Path,
     output_config_yaml_path: str | Path | None = None,
     runtime_output_dir: str | Path | None = None,
-    assistant_output_config_path: str | Path | None = None,
+    bot_output_config_path: str | Path | None = None,
     markets: list[str] | tuple[str, ...] | None = None,
     futu_acc_id: str | None = None,
     futu_host: str = "127.0.0.1",
@@ -258,11 +237,11 @@ def init_yaml_config(
         market: (output_dir / f"config.{market}.json").resolve()
         for market in selected_markets
     }
-    assistant_output = _resolve_path(
-        assistant_output_config_path,
-        default=output_dir / "config.assistant.json",
+    bot_output = _resolve_path(
+        bot_output_config_path,
+        default=output_dir / "config.bot.json",
     )
-    all_outputs = {"assistant": assistant_output, **runtime_outputs}
+    all_outputs = {"bot": bot_output, **runtime_outputs}
 
     if not force:
         existing = [output_path, *(all_outputs.values() if build else [])]
@@ -310,10 +289,10 @@ def init_yaml_config(
                     dry_run=True,
                 )
         if build:
-            build_yaml_assistant_config_file(
+            build_yaml_bot_config_file(
                 repo_root=repo_root,
                 config_path=staged_yaml,
-                output_config_path=Path(temp_name) / "config.assistant.json",
+                output_config_path=Path(temp_name) / "config.bot.json",
                 dry_run=True,
             )
 
@@ -336,11 +315,11 @@ def init_yaml_config(
                 market=market,
                 config_path=output_path,
             )
-            if build and "assistant" not in build_results:
-                build_results["assistant"] = build_yaml_assistant_config_file(
+            if build and "bot" not in build_results:
+                build_results["bot"] = build_yaml_bot_config_file(
                     repo_root=repo_root,
                     config_path=output_path,
-                    output_config_path=assistant_output,
+                    output_config_path=bot_output,
                     dry_run=False,
                 )
             if build:
@@ -365,7 +344,7 @@ def init_yaml_config(
         "futu_account_id_placeholder": futu_id == DEFAULT_FUTU_ACCOUNT_ID,
         "runtime_output_dir": str(output_dir),
         "runtime_config_paths": {market: str(path) for market, path in runtime_outputs.items()},
-        "assistant_config_path": str(assistant_output),
+        "bot_config_path": str(bot_output),
         "validation": validation,
         "build": build_results,
         "build_enabled": bool(build),
@@ -388,7 +367,7 @@ def create_starter_config(*, record_path: Path, **options: Any) -> dict[str, Any
     preview = init_yaml_config(**options, dry_run=True)
     source = Path(preview["config_yaml_path"])
     runtime = Path(preview["runtime_output_dir"])
-    targets = [source, Path(preview["assistant_config_path"]),
+    targets = [source, Path(preview["bot_config_path"]),
                *(Path(preview["runtime_config_paths"][m]) for m in preview["markets"])]
     record_exists = record_path.exists() or record_path.is_symlink()
     if record_exists and read_runtime_root_record(record_path, require_config=False) != runtime:
@@ -403,7 +382,7 @@ def create_starter_config(*, record_path: Path, **options: Any) -> dict[str, Any
     source_bytes = preview["yaml"].encode("utf-8")
     prepared = _prepare_generation(
         repo_root=Path(options["repo_root"]), source_path=source, source_bytes=source_bytes,
-        runtime_root=runtime, markets=preview["markets"], include_assistant=True,
+        runtime_root=runtime, markets=preview["markets"], include_bot=True,
     )
     payloads = [(Path(item["path"]), item["payload"]) for item in prepared["target_payloads"]]
     payloads.append((source, source_bytes))

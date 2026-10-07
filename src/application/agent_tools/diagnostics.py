@@ -295,7 +295,7 @@ def _scheduled_tasks_tool(
 def _operation_timeline_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.assistant.operation_diagnostics import collect_operation_timeline, format_operation_timeline
+    from src.application.bot.control.operation_diagnostics import collect_operation_timeline, format_operation_timeline
 
     channel, sender_id, conversation_id = _diagnostic_identity_scope(payload)
 
@@ -558,7 +558,7 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
         "timelines without mutating ledger, channel, or tick state."
     ),
     requires=("inbound_audit_db",),
-    capabilities=("operation_timeline", "assistant_diagnostics", "read_only"),
+    capabilities=("operation_timeline", "bot_diagnostics", "read_only"),
     input_schema={
         "audit_db": "optional inbound audit SQLite path",
         "inbound_audit_db": "optional alias for audit_db",

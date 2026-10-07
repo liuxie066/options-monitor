@@ -955,7 +955,7 @@ def test_manual_assignment_runtime_boolean_does_not_authorize_wheel_lifecycle(
         dry_run=False,
         as_of_ms=2_000,
         request_id="configured-assignment-1",
-        runtime_config={"wheel": {"enabled": True, "accounts": ["lx"]}},
+        runtime_config={"wheel": {"accounts": ["lx"]}},
     )
 
     assert build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"] == []

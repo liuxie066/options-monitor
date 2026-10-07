@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from src.application.assistant.audit import InboundAuditStore
+from src.application.bot.control.audit import InboundAuditStore
 from src.application.bot import channel_facade
 from src.application.bot.host_store import BotHostStore
 from src.application.inbound import feishu_ws
@@ -17,6 +17,10 @@ from tests.test_inbound_feishu_ws import _message_payload
 
 
 def _settings(tmp_path, config_path, **kwargs):
+    if "bot_config_path" not in kwargs:
+        bot_path = tmp_path / "test-bot.json"
+        bot_path.write_text(json.dumps({"bot": {"enabled": True}}), encoding="utf-8")
+        kwargs["bot_config_path"] = str(bot_path)
     return feishu_ws.FeishuWsSettings(config_path=str(config_path), audit_db=str(tmp_path / "inbound.sqlite3"),
         allowed_senders="feishu:ou_1,feishu:ou_2", app_id="test", app_secret="test", **kwargs)
 
@@ -24,7 +28,7 @@ def _settings(tmp_path, config_path, **kwargs):
 def _preflight(payload, settings):
     return prepare_feishu_analysis_control(payload, allowed_senders=settings.allowed_senders,
         config_key=settings.config_key, config_path=settings.config_path, audit_db=settings.audit_db,
-        received_monotonic=time.monotonic(), assistant_config_path=settings.assistant_config_path)
+        received_monotonic=time.monotonic(), bot_config_path=settings.bot_config_path)
 
 
 def _contract(settings, *, sender="ou_1", conversation=None):
@@ -48,30 +52,32 @@ def _open_run(tmp_path, config_path, run_id="active", **settings_kwargs):
     return settings, contract, session, store
 
 
-@pytest.mark.parametrize("assistant_state", ["same", "changed", "unavailable"])
-def test_cancel_targets_active_read_generation_after_assistant_change(tmp_path, monkeypatch, assistant_state):
+@pytest.mark.parametrize("bot_state", ["same", "changed", "disabled", "unavailable"])
+def test_cancel_targets_active_read_generation_after_bot_change(tmp_path, monkeypatch, bot_state):
     from tests.test_bot_cross_market_read import _scope
     from src.application.bot.service import prepare_contract
 
     configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
-    settings = _settings(tmp_path, configs["us"][0], assistant_config_path=fixed["assistant_config_path"])
+    settings = _settings(tmp_path, configs["us"][0], bot_config_path=fixed["bot_config_path"])
     key, path, authority = channel_facade.resolve_trusted_config_scope(config_key=None, config_path=settings.config_path)
     request = channel_facade._channel_request(user_message="调查运行状态", config_key=key, config_path=path,
         request_id="original", context_messages=(), channel="feishu", sender_id="ou_1",
         authenticated_sender_id="ou_1", conversation_id=None, authority_scope=authority,
         read_markets=frozenset(fixed["read_markets"]), read_generation=fixed["read_generation"],
-        assistant_config_path=fixed["assistant_config_path"])
+        bot_config_path=fixed["bot_config_path"])
     contract = prepare_contract(request)
     session = channel_facade._channel_session_key(channel="feishu", sender_id="ou_1", conversation_id=None,
         authority_scope=channel_facade._session_authority(authority, fixed["read_generation"]))
     store = BotHostStore(settings.audit_db)
     store.start_run("active", contract=contract, session_key=session)
-    assistant = tmp_path / "config.assistant.json"
-    if assistant_state == "changed":
-        assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
-    elif assistant_state == "unavailable":
+    assistant = tmp_path / "config.bot.json"
+    if bot_state == "changed":
+        assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
+    elif bot_state == "disabled":
+        assistant.write_text(json.dumps({"bot": {"enabled": False}}))
+    elif bot_state == "unavailable":
         assistant.unlink()
-    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-" + assistant_state), settings)
+    outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-" + bot_state), settings)
     assert outcome["status"] == "cancelled" and outcome["target_run_id"] == "active"
     assert store.is_cancel_requested("active")
 
@@ -281,7 +287,7 @@ def test_queue_full_still_cancels_without_claiming_replacement_was_queued(monkey
 
 
 def test_commit_winner_reply_is_deterministic_and_never_retracted(monkeypatch, tmp_path, example_config_path):
-    from src.application.assistant.inbound_service import handle_assistant_request
+    from src.application.bot.control.inbound_service import handle_bot_request
     from src.application.inbound.feishu import feishu_payload_to_inbound_request
 
     settings, contract, session, store = _open_run(tmp_path, example_config_path, "committed")
@@ -292,9 +298,9 @@ def test_commit_winner_reply_is_deterministic_and_never_retracted(monkeypatch, t
     def unexpected(*args, **kwargs):
         raise AssertionError("pure cancellation must not invoke a model")
 
-    monkeypatch.setattr("src.application.assistant.inbound_service._run_bot", unexpected)
-    request = feishu_payload_to_inbound_request(event, config_path=settings.config_path, audit_db=settings.audit_db)
-    response = handle_assistant_request(request, allowed_senders=settings.allowed_senders)
+    monkeypatch.setattr("src.application.bot.control.inbound_service._run_bot", unexpected)
+    request = feishu_payload_to_inbound_request(event, config_path=settings.config_path, audit_db=settings.audit_db, bot_config_path=settings.bot_config_path)
+    response = handle_bot_request(request, allowed_senders=settings.allowed_senders)
     assert response["ok"], response
     assert "已完成" in response["data"]["response_text"]
     assert "不会撤回" in response["data"]["response_text"]
@@ -432,7 +438,7 @@ def test_analysis_control_deadline_rolls_back_before_commit(
     from types import SimpleNamespace
 
     from src.application.agent_tool_contracts import AgentToolError
-    from src.application.assistant import audit as audit_module
+    from src.application.bot.control import audit as audit_module
 
     settings, contract, session, store = _open_run(tmp_path, example_config_path)
     clock = [time.monotonic()]

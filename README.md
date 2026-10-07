@@ -21,8 +21,8 @@ config.yaml
 │  └─ config.us.json / config.hk.json
 │     └─ om run tick | om run tick-cron
 │        └─ output_runs + output_shared + output_accounts
-└─ om config build-assistant
-   └─ resolved/config.assistant.json
+└─ om config build-bot
+   └─ resolved/config.bot.json
 ```
 
 期权持仓只有一套事实链：
@@ -122,7 +122,7 @@ om setup check --format text
 
 脚本化初始化使用 `om setup init --help` 中的完整参数；写入需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
 
-之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Assistant 的运行快照：
+之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Bot 的运行快照：
 
 ```bash
 om symbols list --market us
@@ -285,8 +285,8 @@ om-agent run --tool portfolio_assignment_scenario \
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
 - 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
-Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Bot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
-渠道 Bot 默认只读本渠道市场；只有显式配置 `assistant.bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
+Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。Bot 按场景加载该工具；需要 PM 补充时显式开启 PM 集成和 Holdings，并保持 portfolio-management API 仅在同机 loopback 提供服务。
+渠道 Bot 默认只读本渠道市场；只有显式配置 `bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
 
 ### Close Advice
 
@@ -372,7 +372,7 @@ om-agent run --tool healthcheck \
 |---|---|
 | 人工配置 | `config.yaml` |
 | US/HK 运行快照 | `config.us.json` / `config.hk.json` |
-| Bot 运行快照 | `om setup init` 默认生成 `<runtime_root>/resolved/config.assistant.json`；高级命令可显式指定输出位置 |
+| Bot 运行快照 | `om setup init` 默认生成 `<runtime_root>/resolved/config.bot.json`；高级命令可显式指定输出位置 |
 | 普通设置 / 写入开关 | `options-monitor.env` 或显式选择的 env-file |
 | Secrets | macOS Keychain / Linux systemd 加密凭证，使用 `om secrets` 管理，见 [密钥存储](docs/SECRET_STORAGE.md) |
 | 期权事实 | `<runtime_root>/output_shared/state/option_positions.sqlite3` |
@@ -460,3 +460,6 @@ Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-
 ## 风险提示
 
 本项目只做监控、筛选、报告、提醒和人工复盘，不构成投资建议。任何下单前都应自行复核价格、流动性、费用、保证金、仓位暴露、事件风险和数据新鲜度。
+
+旧配置升级前请阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，运行
+`om config migrate-switches` 预览，核对通知意图及已退休字段后再显式应用。

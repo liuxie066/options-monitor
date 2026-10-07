@@ -172,16 +172,16 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
     ),
     TestRule(
-        name="assistant_runtime",
+        name="bot_runtime",
         patterns=(
             "docs/BOT_DESIGN.md",
             "docs/INBOUND_CONTROL.md",
-            "src/application/assistant/**",
+            "src/application/bot/control/**",
             "src/application/agent_tools/**",
             "tests/test_architecture_guards.py",
-            "tests/test_assistant_diagnostics.py",
-            "tests/test_assistant_permission_request.py",
-            "tests/test_assistant_runtime.py",
+            "tests/test_bot_diagnostics.py",
+            "tests/test_bot_permission_request.py",
+            "tests/test_bot_runtime.py",
             "tests/test_cli_operator_commands.py",
             "tests/test_inbound_control.py",
             "tests/test_agent_plugin_contract.py",
@@ -190,9 +190,9 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="Assistant runtime, tool contract, or read surface files changed",
         commands=(
-            "./.venv/bin/python -m pytest tests/test_assistant_runtime.py tests/test_inbound_control.py "
-            "tests/test_assistant_permission_request.py tests/test_cli_operator_commands.py "
-            "tests/test_assistant_diagnostics.py tests/test_architecture_guards.py",
+            "./.venv/bin/python -m pytest tests/test_bot_runtime.py tests/test_inbound_control.py "
+            "tests/test_bot_permission_request.py tests/test_cli_operator_commands.py "
+            "tests/test_bot_diagnostics.py tests/test_architecture_guards.py",
             "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
             "tests/test_candidate_filter_trace.py",
         ),

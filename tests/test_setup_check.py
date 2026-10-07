@@ -40,20 +40,10 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
     (root / "VERSION").write_text("9.9.9\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
     (runtime / "resolved").mkdir(parents=True)
-    (runtime / "resolved" / "config.assistant.json").write_text(
+    (runtime / "resolved" / "config.bot.json").write_text(
         json.dumps(
             {
-                "assistant": {
-                    "enabled": True,
-                    "bot": {"enabled": True, "toolsets": {}},
-                    "llm": {
-                        "provider": "ollama",
-                        "base_url": "http://127.0.0.1:11434/v1",
-                        "model": "local-test",
-                        "context_window_tokens": context_window_tokens,
-                        "max_output_tokens": 2048,
-                    },
-                }
+                "bot": {'enabled': True, 'llm': {'provider': 'ollama', 'base_url': 'http://127.0.0.1:11434/v1', 'model': 'local-test', 'context_window_tokens': context_window_tokens, 'max_output_tokens': 2048}}
             }
         ),
         encoding="utf-8",
@@ -94,7 +84,7 @@ def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch
         repo_root=repo,
         output_config_yaml_path=tmp_path / "config.yaml",
         runtime_output_dir=tmp_path,
-        assistant_output_config_path=tmp_path / "resolved" / "config.assistant.json",
+        bot_output_config_path=tmp_path / "resolved" / "config.bot.json",
         markets=["us"],
         us_symbols=["AAPL"],
     )
@@ -124,7 +114,7 @@ def test_first_run_account_repair_and_symbol_add_keep_one_market_ready(monkeypat
     source = tmp_path / "config.yaml"
     init_yaml_config(
         repo_root=repo, output_config_yaml_path=source, runtime_output_dir=tmp_path,
-        assistant_output_config_path=tmp_path / "resolved" / "config.assistant.json",
+        bot_output_config_path=tmp_path / "resolved" / "config.bot.json",
         markets=["us"], us_symbols=["AAPL"],
     )
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
@@ -241,9 +231,9 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
 
 def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) -> None:
     root, node, npm = _prepare_pi_setup_root(tmp_path, context_window_tokens=4_096)
-    config_path = tmp_path / "runtime" / "resolved" / "config.assistant.json"
+    config_path = tmp_path / "runtime" / "resolved" / "config.bot.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["assistant"]["llm"]["max_output_tokens"] = 4_096
+    config["bot"]["llm"]["max_output_tokens"] = 4_096
     config_path.write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     _stub_toolchain(monkeypatch, node, npm)
@@ -252,7 +242,7 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     checks = {item["name"]: item for item in out["checks"]}
 
     assert checks["bot.model_context"]["status"] == "warn"
-    assert checks["bot.model_context"]["value"]["error"] == "invalid_assistant_config"
+    assert checks["bot.model_context"]["value"]["error"] == "invalid_bot_config"
 
 
 def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch, tmp_path: Path) -> None:

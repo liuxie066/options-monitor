@@ -22,7 +22,7 @@ from src.application.bot.contracts import (
 from src.application.bot.host import host_lane_slot, session_run_slot
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.local_harness import _budget_exhausted, run_prepared_contract
-from src.application.bot.model_config import load_assistant_llm_config, load_bot_read_scope, model_api_key_configured
+from src.application.bot.model_config import load_bot_llm_config, load_bot_read_scope, model_api_key_configured
 from src.application.bot.service import prepare_contract
 from src.application.bot.session import derive_session_id
 
@@ -46,7 +46,7 @@ def cancel_channel_analysis(*, request: Any, audit_store: Any) -> dict[str, Any]
     except BotConfigScopeError as exc:
         raise AgentToolError(code="CHANNEL_NOT_READY", message=config_scope_error_message(exc.reason)) from exc
     try:
-        _markets, generation = _channel_read_scope(request.assistant_config_path, primary_market)
+        _markets, generation = _channel_read_scope(request.bot_config_path, primary_market)
     except (OSError, RuntimeError, ValueError, AgentToolError):
         generation = ""  # Exact trusted identity below can still cancel one older active run.
     conversation = (None if request.conversation_id == f"{request.channel}:{request.sender_id}"
@@ -71,7 +71,7 @@ def run_channel_request(
     config_path: str | None = None,
     request_id: str | None = None,
     reference_year: int | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     channel: str | None = None,
     sender_id: str | None = None,
     conversation_id: str | None = None,
@@ -93,7 +93,7 @@ def run_channel_request(
             config_key=config_key,
             config_path=config_path,
         )
-        read_markets, read_generation = _channel_read_scope(assistant_config_path, resolved_key)
+        read_markets, read_generation = _channel_read_scope(bot_config_path, resolved_key)
         session_key = _channel_session_key(
             channel=channel,
             sender_id=sender_id,
@@ -112,12 +112,12 @@ def run_channel_request(
             reason="channel_identity_or_scope_invalid",
             message="渠道身份或数据作用域不可用",
         )
-    model_gate = _channel_model_gate(assistant_config_path)
+    model_gate = _channel_model_gate(bot_config_path)
     if model_gate:
         return _request_not_ready(
             effective_request_id,
             reason=model_gate,
-            message="渠道 Bot 需要显式可用的 assistant 模型配置",
+            message="渠道 Bot 需要显式可用的 Bot 模型配置",
         )
     if time.monotonic() >= deadline:
         return _budget_exhausted(effective_request_id)
@@ -146,7 +146,7 @@ def run_channel_request(
             authority_scope=authority_scope,
             read_markets=read_markets,
             read_generation=read_generation,
-            assistant_config_path=assistant_config_path,
+            bot_config_path=bot_config_path,
         )
         try:
             prepared = prepare_contract(
@@ -172,7 +172,7 @@ def run_channel_request(
             try:
                 result = run_prepared_contract(
                     prepared,
-                    assistant_config_path=assistant_config_path,
+                    bot_config_path=bot_config_path,
                     host_store=host_store,
                     session_key=session_key,
                     control_preview_specs=control_preview_specs,
@@ -200,10 +200,10 @@ def _context_messages(
     )
 
 
-def _channel_model_gate(assistant_config_path: str | None) -> str | None:
-    if not str(assistant_config_path or "").strip():
+def _channel_model_gate(bot_config_path: str | None) -> str | None:
+    if not str(bot_config_path or "").strip():
         return "channel_model_config_missing"
-    raw, load_error = load_assistant_llm_config(config_path=assistant_config_path, require_config=True)
+    raw, load_error = load_bot_llm_config(config_path=bot_config_path, require_config=True)
     if load_error:
         return load_error
     if not raw:
@@ -260,7 +260,7 @@ def _channel_request(
     authority_scope: str,
     read_markets: frozenset[str] = frozenset(),
     read_generation: str = "",
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     received_monotonic: float | None = None,
     deadline_monotonic: float | None = None,
     authenticated_sender_id: str | None = None,
@@ -284,7 +284,7 @@ def _channel_request(
             "authority_scope": authority_scope,
             "read_markets": sorted(read_markets),
             "read_generation": read_generation,
-            "assistant_config_path": str(assistant_config_path or ""),
+            "bot_config_path": str(bot_config_path or ""),
         },
     )
 

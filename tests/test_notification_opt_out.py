@@ -15,10 +15,10 @@ def forbidden(*args, **kwargs):
     pytest.fail("disabled notification must not attempt delivery or resolve credentials")
 
 
-def test_legacy_omission_enabled_and_disabled_route_avoids_credentials(monkeypatch):
+def test_omission_and_explicit_disable_avoid_credentials(monkeypatch):
     import src.application.notification_delivery_route as mod
-    assert notifications_enabled({})
-    assert notifications_enabled({"notifications": {"provider": "feishu_app"}})
+    assert not notifications_enabled({})
+    assert not notifications_enabled({"notifications": {"provider": "feishu_app"}})
     monkeypatch.setattr(mod, "resolve_feishu_bot_send_target", forbidden)
     route = resolve_notification_delivery_route(config=DISABLED, route_resolver=forbidden)
     assert route["enabled"] is False and route["disabled_reason"] == "notifications_disabled"
@@ -85,7 +85,7 @@ def test_disabling_unknown_recovery_retires_delivery_meta_without_resending(tmp_
         calls.append(args)
         return {"delivery_confirmed": False, "provider": "fixture", "fallback_used": False, "attempted": True}
     monkeypatch.setattr(mod, "_send", send)
-    fields = dict(base=tmp_path, config={}, unit="fixture.service", market="us", account="lx",
+    fields = dict(base=tmp_path, config={"notifications": {"enabled": True}}, unit="fixture.service", market="us", account="lx",
                   failure_code="FIXTURE_FAILURE", stage="heartbeat")
     mod.report_system_failure(**fields, run_id="fixture", rc=1, first_error_at="fixture", opend_login_state="unknown")
     assert mod.report_system_recovery(**fields) == "unconfirmed"

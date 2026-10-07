@@ -62,13 +62,13 @@ def test_release_test_plan_requires_full_pytest_for_ledger_changes() -> None:
     assert plan["commands"][-1] == "./.venv/bin/python -m pytest"
 
 
-def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> None:
+def test_release_test_plan_maps_bot_changes_to_minimal_runtime_gate() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
     plan = build_release_test_plan(
         changed_files=[
             "docs/BOT_DESIGN.md",
-            "src/application/assistant/runtime.py",
+            "src/application/bot/control/runtime.py",
             "src/application/agent_tool_registry.py",
         ],
         mode="standard",
@@ -77,20 +77,20 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
 
     assert plan["risk"] == "standard"
     assert plan["requires_full_pytest"] is False
-    assert {rule["name"] for rule in plan["matched_rules"]} >= {"assistant_runtime", "dependency_graph"}
+    assert {rule["name"] for rule in plan["matched_rules"]} >= {"bot_runtime", "dependency_graph"}
     assert (
-        "./.venv/bin/python -m pytest tests/test_assistant_runtime.py tests/test_inbound_control.py "
-        "tests/test_assistant_permission_request.py tests/test_cli_operator_commands.py "
-        "tests/test_assistant_diagnostics.py tests/test_architecture_guards.py"
+        "./.venv/bin/python -m pytest tests/test_bot_runtime.py tests/test_inbound_control.py "
+        "tests/test_bot_permission_request.py tests/test_cli_operator_commands.py "
+        "tests/test_bot_diagnostics.py tests/test_architecture_guards.py"
     ) in plan["commands"]
     assert (
         "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
         "tests/test_candidate_filter_trace.py"
     ) in plan["commands"]
-    assert all("test_assistant_agent_eval.py" not in command for command in plan["commands"])
-    assert all("test_assistant_evidence_session.py" not in command for command in plan["commands"])
-    assert all("test_assistant_context_projection.py" not in command for command in plan["commands"])
-    assert all("test_assistant_context_validation.py" not in command for command in plan["commands"])
+    assert all("test_bot_agent_eval.py" not in command for command in plan["commands"])
+    assert all("test_bot_evidence_session.py" not in command for command in plan["commands"])
+    assert all("test_bot_context_projection.py" not in command for command in plan["commands"])
+    assert all("test_bot_context_validation.py" not in command for command in plan["commands"])
 
 
 @pytest.mark.parametrize(
@@ -191,7 +191,7 @@ def test_release_test_plan_maps_current_bot_design_doc() -> None:
         mode="standard",
     )
 
-    assert {rule["name"] for rule in plan["matched_rules"]} == {"assistant_runtime"}
+    assert {rule["name"] for rule in plan["matched_rules"]} == {"bot_runtime"}
 
 
 def test_release_test_plan_maps_config_validator_changes_to_config_gate() -> None:

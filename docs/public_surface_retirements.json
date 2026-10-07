@@ -377,9 +377,234 @@
       "reason": "Retired the conflicting policy-only long Call delta defaults. Both long legs now use COMBO_LONG_MIN_DELTA/COMBO_LONG_MAX_DELTA through COMBO_YIELD_DEFAULTS, with explicit per-leg configuration overrides preserved."
     },
     {
+      "module": "src/application/assistant/settings.py",
+      "name": "BOT_TOOL_LOADING_MODES",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/assistant/settings.py",
+      "name": "CONFIGURABLE_BOT_TOOLSETS",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/bot/model_config.py",
+      "name": "load_assistant_bot_settings",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/bot/model_config.py",
+      "name": "load_assistant_bot_toolsets",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/config_validator.py",
+      "name": "BOT_TOOLSET_KEYS",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
       "module": "domain/domain/performance/cash_conversion.py",
       "name": "cash_fx_daily_facts",
       "reason": "Retired synthetic daily FX anchors for new cash conversions. Callers now pass original FX facts to select_cash_fx_rate, which applies the shared quote-session policy at the cash event time. Existing daily conversion snapshots remain readable and explicit correction workflows retain their provenance."
+    },
+    {
+      "module": "src/application/assistant/attribution_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/audit.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/capability_catalog.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/command_parser.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/config_loader.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/contracts.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/diagnostics.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/inbound_control.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/inbound_service.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/llm_model_profiles.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/manual_trade_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/manual_trade_parser.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/model_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/monitor_run_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_diagnostics.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_lifecycle.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_policy.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_signature.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_status_text.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/operation_store.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/permission_request.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/permission_response.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/policy.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/position_query.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/renderer.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/runtime.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/settings.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/symbol_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/tool_bindings.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/turn_result.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/assistant/upgrade_operations.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
+    },
+    {
+      "module": "src/application/bot/model_config.py",
+      "name": "load_assistant_llm_config",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/channels/wechat_clawbot/inbound.py",
+      "name": "wechat_clawbot_message_to_assistant_request",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/config_validator.py",
+      "name": "ASSISTANT_CONFIG_KEYS",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/config_validator.py",
+      "name": "validate_assistant_config",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/config_yaml.py",
+      "name": "build_yaml_assistant_config_file",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/config_yaml.py",
+      "name": "default_yaml_assistant_config_path",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/config_yaml.py",
+      "name": "resolve_yaml_assistant_config",
+      "reason": "Bot naming replaces the old Assistant name at this owner; consumers now use the canonical bot configuration, snapshot and public facade. "
+    },
+    {
+      "module": "src/application/multi_tick/assistant_perception_event.py",
+      "name": "*",
+      "reason": "Module moved to multi_tick.bot_perception_event; historical assistant_perception event identity remains unchanged for persisted records."
+    },
+    {
+      "module": "src/interfaces/cli/assistant_ops.py",
+      "name": "*",
+      "reason": "Assistant implementation consolidated into src.application.bot.control with Bot-named contracts; no separate Assistant runtime or activation remains. Historical command spelling is parsed by the Bot CLI. "
     }
   ]
 }

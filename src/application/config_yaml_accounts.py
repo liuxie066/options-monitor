@@ -101,7 +101,7 @@ def mutate_yaml_account_config(
         config_doc=after_doc,
         runtime_root=runtime_root,
         markets=configured_markets(after_doc),
-        include_assistant=True,
+        include_bot=True,
         apply=bool(apply),
         backup=bool(backup),
         expected_source_sha256=expected_source_sha256 or loaded_source_sha,

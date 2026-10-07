@@ -38,7 +38,7 @@ def add_channel_commands(subparsers: Any) -> None:
     status = channel_sub.add_parser("status", help="inspect first-class message channel health")
     status.add_argument("--runtime-root", default=None)
     status.add_argument("--profile-path", default=None)
-    status.add_argument("--assistant-config", default=None)
+    status.add_argument("--bot-config", default=None)
     status.add_argument("--env-file", default=None)
     status.add_argument("--include-service-status", action="store_true")
 
@@ -86,7 +86,7 @@ def add_channel_commands(subparsers: Any) -> None:
     _add_common(poll_once)
     poll_once.add_argument("--config-key", default=None, choices=("us", "hk"))
     poll_once.add_argument("--config-path", default=None)
-    poll_once.add_argument("--assistant-config", default=None)
+    poll_once.add_argument("--bot-config", default=None)
     poll_once.add_argument("--audit-db", default=None)
     poll_once.add_argument("--allowed-senders", default=None)
     poll_once.add_argument("--no-reply", action="store_true")
@@ -97,7 +97,7 @@ def add_channel_commands(subparsers: Any) -> None:
     _add_common(serve)
     serve.add_argument("--config-key", default=None, choices=("us", "hk"))
     serve.add_argument("--config-path", default=None)
-    serve.add_argument("--assistant-config", default=None)
+    serve.add_argument("--bot-config", default=None)
     serve.add_argument("--audit-db", default=None)
     serve.add_argument("--allowed-senders", default=None)
     serve.add_argument("--no-reply", action="store_true")
@@ -148,7 +148,7 @@ def handle_channel_command(
             for key, value in {
                 "runtime_root": getattr(args, "runtime_root", None),
                 "profile_path": getattr(args, "profile_path", None),
-                "assistant_config_path": getattr(args, "assistant_config", None),
+                "bot_config_path": getattr(args, "bot_config", None),
             }.items()
             if value
         }
@@ -220,7 +220,7 @@ def handle_channel_command(
             state_dir=state_dir,
             config_key=args.config_key,
             config_path=args.config_path,
-            assistant_config_path=args.assistant_config,
+            bot_config_path=args.bot_config,
             audit_db=args.audit_db,
             allowed_senders=args.allowed_senders,
             reply_enabled=not bool(args.no_reply),
@@ -234,7 +234,7 @@ def handle_channel_command(
             state_dir=state_dir,
             config_key=args.config_key,
             config_path=args.config_path,
-            assistant_config_path=args.assistant_config,
+            bot_config_path=args.bot_config,
             audit_db=args.audit_db,
             allowed_senders=args.allowed_senders,
             reply_enabled=False if bool(args.no_reply) else None,

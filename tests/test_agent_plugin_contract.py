@@ -75,7 +75,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "portfolio_query" in tool_names
     assert "portfolio_assignment_scenario" in tool_names
     assert "portfolio_capital_bridge" not in tool_names
-    assert "assistant_trace" not in tool_names
+    assert "bot_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
@@ -506,7 +506,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "portfolio_query" in PURE_READ_TOOLS
     assert "portfolio_assignment_scenario" in PURE_READ_TOOLS
     assert "portfolio_capital_bridge" not in PURE_READ_TOOLS
-    assert "assistant_trace" not in PURE_READ_TOOLS
+    assert "bot_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
     assert "research" not in PURE_READ_TOOLS

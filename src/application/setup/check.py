@@ -16,7 +16,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
 from src.application.config_yaml import load_yaml_config_file
 from src.application.platform_profile import PlatformProfile, current_platform_profile
-from src.application.bot.model_config import ModelSettings, load_assistant_llm_config
+from src.application.bot.model_config import ModelSettings, load_bot_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
@@ -118,15 +118,15 @@ def run_setup_check(
     configured_markets = _configured_markets(runtime.runtime_root)
     selected_markets = _normalize_markets(markets) if markets is not None else configured_markets or ["us", "hk"]
 
-    repo_assistant_config = root / "config.assistant.json"
-    resolved_assistant_config = runtime.runtime_root / "resolved" / "config.assistant.json"
-    assistant_config = (
-        repo_assistant_config
-        if runtime.source == "repo_default" and repo_assistant_config.exists()
-        else resolved_assistant_config
+    repo_bot_config = root / "config.bot.json"
+    resolved_bot_config = runtime.runtime_root / "resolved" / "config.bot.json"
+    bot_config = (
+        repo_bot_config
+        if runtime.source == "repo_default" and repo_bot_config.exists()
+        else resolved_bot_config
     )
-    model_raw, model_error = load_assistant_llm_config(
-        config_path=assistant_config,
+    model_raw, model_error = load_bot_llm_config(
+        config_path=bot_config,
         require_config=False,
     )
     model_settings: ModelSettings | None = None
@@ -141,12 +141,12 @@ def run_setup_check(
         "ok" if model_context_ok else "warn",
         "active Bot model context is valid" if model_context_ok else "active Bot model context is missing or invalid",
         {
-            "config_path": str(assistant_config),
+            "config_path": str(bot_config),
             "context_window_tokens": model_settings.context_window_tokens if model_settings else None,
             "max_output_tokens": model_settings.max_output_tokens if model_settings else None,
             "error": model_error or (None if model_settings else "model_context_missing"),
         },
-        hint=None if model_context_ok else "Build or fix the resolved assistant config with a valid context_window_tokens value.",
+        hint=None if model_context_ok else "Build or fix the resolved Bot config with a valid context_window_tokens value.",
     )
 
     audit_raw = str(effective_env.values.get("OM_INBOUND_AUDIT_DB") or "").strip()

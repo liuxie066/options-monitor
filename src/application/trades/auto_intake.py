@@ -2640,8 +2640,8 @@ def _run_listener_source_loop(
             status_state["receipt_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
         if not stop.is_set():
             try:
-                from src.application.assistant.attribution_operations import recover_attribution_operations
-                from src.application.assistant.operation_store import InboundOperationStore
+                from src.application.bot.control.attribution_operations import recover_attribution_operations
+                from src.application.bot.control.operation_store import InboundOperationStore
                 recovered = recover_attribution_operations(
                     config_key=None, config_path=str(cfg_path), store=InboundOperationStore(),
                     stop_event=stop, cursor=attribution_operation_cursor)
