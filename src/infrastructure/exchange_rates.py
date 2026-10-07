@@ -12,7 +12,7 @@ This module is intentionally minimal; expand only as needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import math
@@ -21,6 +21,8 @@ import sys
 from typing import Any, Callable, Mapping
 from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
+
+from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality, quote_session_start
 
 from src.infrastructure.io_utils import atomic_write_json
 
@@ -31,19 +33,6 @@ SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
 
 _REQUIRED_RATES = ("USDCNY", "HKDCNY")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
-_MARKET_HOURS_SOURCE = "https://www.chinamoney.com.cn/chinese/mgwhcphjy/"
-_HOLIDAY_SOURCE_2026 = "https://big5.www.gov.cn/gate/big5/www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm"
-# CFETS RMB spot is closed on weekends and the State Council's 2026 holiday dates.
-# Make-up Saturdays/Sundays remain closed under CFETS's explicit weekend rule.
-_HOLIDAYS_2026 = (
-    (date(2026, 1, 1), date(2026, 1, 3)),
-    (date(2026, 2, 15), date(2026, 2, 23)),
-    (date(2026, 4, 4), date(2026, 4, 6)),
-    (date(2026, 5, 1), date(2026, 5, 5)),
-    (date(2026, 6, 19), date(2026, 6, 21)),
-    (date(2026, 9, 25), date(2026, 9, 27)),
-    (date(2026, 10, 1), date(2026, 10, 7)),
-)
 
 
 def _valid_rate(raw: Any) -> float | None:
@@ -319,35 +308,6 @@ def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | No
     }
 
 
-def _market_day(day: date) -> bool | None:
-    if day.year != 2026:
-        return None
-    return day.weekday() < 5 and not any(start <= day <= end for start, end in _HOLIDAYS_2026)
-
-
-def _session_start(at: datetime) -> datetime | None:
-    local = at.astimezone(_SHANGHAI)
-    for day in (local.date(), local.date() - timedelta(days=1)):
-        if _market_day(day) is not True:
-            continue
-        start = datetime.combine(day, time(9, 30), _SHANGHAI)
-        if start <= local < start + timedelta(hours=17, minutes=30):
-            return start
-    return None
-
-
-def _last_session_start(at: datetime) -> datetime | None:
-    local = at.astimezone(_SHANGHAI)
-    day = local.date()
-    while day.year == 2026:
-        if _market_day(day):
-            start = datetime.combine(day, time(9, 30), _SHANGHAI)
-            if start <= local:
-                return start
-        day -= timedelta(days=1)
-    return None
-
-
 def _strict_timestamp(raw: Any) -> datetime | None:
     if not isinstance(raw, str):
         return None
@@ -368,7 +328,7 @@ def _verified_pair(row: Any, *, now: datetime) -> dict[str, Any] | None:
     if (
         source not in {TENCENT_EXCHANGE_RATE_SOURCE, SINA_EXCHANGE_RATE_SOURCE}
         or rate is None or quoted is None or observed is None
-        or quoted > observed or observed > now or _session_start(quoted) is None
+        or quoted > observed or observed > now or quote_session_start(quoted) is None
     ):
         return None
     return {
@@ -419,26 +379,16 @@ def _newer_pair(existing: dict[str, Any] | None, candidate: dict[str, Any]) -> d
 def _pair_quality(row: dict[str, Any] | None, *, now: datetime) -> tuple[str, str]:
     if row is None:
         return "unavailable", "missing_verified_quote"
-    quoted = _strict_timestamp(row["quote_at_utc"])
-    if quoted is None or quoted > now or now.astimezone(_SHANGHAI).year != 2026:
-        return "unavailable", "calendar_or_timestamp_unknown"
-    quote_session = _session_start(quoted)
-    latest_session = _last_session_start(now)
-    if quote_session is None or latest_session is None or quote_session != latest_session:
-        return "unavailable", "trading_session_gap"
-    if _session_start(now) == latest_session:
-        return ("fresh", "ok") if now - quoted <= timedelta(hours=24) else ("unavailable", "stale_quote")
-    day = (latest_session + timedelta(days=1)).date()
-    has_full_closure = False
-    while day <= now.astimezone(_SHANGHAI).date():
-        market_day = _market_day(day)
-        if market_day is None:
-            return "unavailable", "calendar_unknown"
-        has_full_closure |= not market_day
-        day += timedelta(days=1)
-    if has_full_closure:
-        return "holiday_carried", "verified_market_closure"
-    return ("fresh", "ok") if now - quoted <= timedelta(hours=24) else ("unavailable", "stale_quote")
+    return quote_quality(_strict_timestamp(row["quote_at_utc"]), at=now)
+
+
+def shared_exchange_rate_cache_path(runtime_root: Path) -> Path:
+    return Path(runtime_root).resolve() / "output_shared" / "state" / "rate_cache.json"
+
+
+def verified_exchange_rate_pairs(payload: Any, *, observed_at: datetime) -> dict[str, dict[str, Any]]:
+    """Original provider evidence, independent of its eligibility today."""
+    return _verified_pairs(payload, now=observed_at)
 
 
 def current_exchange_rate_snapshot(
@@ -477,10 +427,7 @@ def current_exchange_rate_snapshot(
     return {
         "schema_version": 2,
         "evaluated_at_utc": evaluated.isoformat(),
-        "calendar": {
-            "year": 2026, "market_hours_source": _MARKET_HOURS_SOURCE,
-            "holiday_source": _HOLIDAY_SOURCE_2026,
-        },
+        "calendar": dict(CALENDAR_EVIDENCE),
         "pairs": pairs,
         "rates": {pair: row["rate"] for pair, row in pairs.items() if row["display_eligible"]},
     }
@@ -585,8 +532,9 @@ def load_exchange_rate_info(
     fetch_latest_on_miss: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> dict | None:
-    del fetch_latest_on_miss, log
-    return get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
+    del fetch_latest_on_miss, log, max_age_hours
+    cached = get_cached_exchange_rates(cache_path=cache_path)
+    return project_exchange_rate_snapshot(cached, purpose="display") if cached else None
 
 
 def _extract_usdcny_from_rates(obj: dict | None) -> float | None:
@@ -622,13 +570,13 @@ def get_usd_per_cny_exchange_rate(base_dir: Path) -> float | None:
 
     rate_cache stores USDCNY (CNY per 1 USD). We invert it.
 
-    NOTE: This function keeps the existing call signature and reads only a
-    fresh OpenD observation from the repo-local cache.
+    The argument binds the runtime root; quote eligibility is owned by the
+    shared market-rate snapshot, including verified holiday carry.
     """
     try:
         base_dir = Path(base_dir).resolve()
         obj = get_exchange_rates_or_fetch_latest(
-            cache_path=(base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+            cache_path=shared_exchange_rate_cache_path(base_dir),
             max_age_hours=24,
         )
         usdcny = _extract_usdcny_from_rates(obj)

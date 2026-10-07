@@ -17,7 +17,6 @@ from domain.domain.performance.models import (
     validate_evidence_facts,
 )
 from src.infrastructure.private_storage import connect_private_sqlite, private_path, secure_sqlite_artifacts
-from domain.domain.performance.cash_conversion import DAILY_CASH_FX_POLICY, cash_fx_daily_facts
 
 _SCHEMA_COMPONENT = "option_performance_evidence"
 _SCHEMA_VERSION = 1
@@ -197,19 +196,19 @@ class PerformanceEvidenceSQLiteRepository:
         except (sqlite3.DatabaseError, ValueError, json.JSONDecodeError) as exc:
             return EvidenceReadBundle(schema_state="unsupported_schema", message=str(exc))
 
-    def freeze_cash_fx_daily_rates(
+    def persist_cash_fx_observations(
         self,
         candidates: Iterable[FXRateFact] = (),
         *,
         migrated_at_ms: int,
         conn: sqlite3.Connection | None = None,
     ) -> tuple[FXRateFact, ...]:
-        """The existing FX primary key chooses one first observation per day/pair."""
+        """Persist original quotes atomically; existing historical snapshots stay intact."""
         if conn is None:
             active = connect_private_sqlite(self.db_path, isolation_level=None)
             try:
                 active.execute("BEGIN IMMEDIATE")
-                result = self.freeze_cash_fx_daily_rates(candidates, migrated_at_ms=migrated_at_ms, conn=active)
+                result = self.persist_cash_fx_observations(candidates, migrated_at_ms=migrated_at_ms, conn=active)
                 active.commit()
                 return result
             except Exception:
@@ -220,9 +219,11 @@ class PerformanceEvidenceSQLiteRepository:
                 secure_sqlite_artifacts(self.db_path)
         migrate_evidence_schema(conn, migrated_at_ms=int(migrated_at_ms))
         existing = self._read_fx_rates_conn(conn)
+        candidates = tuple(candidates)
+        validate_evidence_facts((), candidates, existing_rates=existing)
         fact_ids = {fact.fact_id for fact in existing}
-        for fact in cash_fx_daily_facts((*existing, *tuple(candidates))):
-            if fact.quality.get("cash_fx_policy") == DAILY_CASH_FX_POLICY and fact.fact_id not in fact_ids:
+        for fact in candidates:
+            if fact.fact_id not in fact_ids:
                 _insert_rate(conn, fact)
                 fact_ids.add(fact.fact_id)
         return self._read_fx_rates_conn(conn)

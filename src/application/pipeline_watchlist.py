@@ -14,6 +14,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from src.application.runtime_paths import resolve_runtime_root
+from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
 import signal
 from threading import Lock, current_thread, main_thread
 import time
@@ -1434,7 +1436,7 @@ def run_watchlist_pipeline_default(
             base=base,
         )
         rate_cache_path = (
-            Path(shared_state_dir or state_dir) / "rate_cache.json"
+            Path(shared_state_dir) / "rate_cache.json" if shared_state_dir else shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root)
         ).resolve()
         fx_dependency = (
             dependency_from_file(kind="fx", path=rate_cache_path, base=base)

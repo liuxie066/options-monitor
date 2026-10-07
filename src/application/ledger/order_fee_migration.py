@@ -20,9 +20,8 @@ from domain.domain.money import canonical_decimal_text, quantize_money, to_decim
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.trade_contract_identity import stock_settlement_unit_issues
 from domain.domain.performance.cash_conversion import (
-    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
-    MAX_BOOKING_RATE_DISTANCE_MS,
-    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    cash_conversion_id,
+    cash_conversion_identity,
     validate_observed_cash_conversion,
 )
 from src.application.cash_conversion import build_cash_conversion, load_cash_fx_payload
@@ -1059,31 +1058,20 @@ def _conversion_for_amount(
             prior = {}
     else:
         prior = {}
-    fx_rate = prior.get("fx_rate")
-    timestamp = prior.get("rate_timestamp")
-    fx_payload = None
-    if fx_rate not in (None, "") and timestamp not in (None, ""):
-        fx_payload = {
-            "rates": {f"{currency}CNY": fx_rate},
-            "timestamp": timestamp,
-        }
+    if prior.get("fx_rate") is not None and amount != 0:
+        # Validation above binds the old amount and every policy/provenance field.
+        # Retain that evidence when the fee amount changes, including holiday carry.
+        native = quantize_money(amount)
+        rate = to_decimal(prior["fx_rate"], field_name="fx_rate")
+        identity = cash_conversion_identity(
+            cash_fact_id=fact_id, native_amount=native, native_currency=currency,
+            fx_rate=rate, amount_cny=quantize_money(native * rate),
+            rate_source_id=prior["rate_source_id"], effective_at_ms=effective_at_ms,
+        )
+        return {**prior, **identity, "conversion_id": cash_conversion_id(identity)}
     return build_cash_conversion(
-        cash_fact_id=fact_id,
-        amount=amount,
-        currency=currency,
-        fx_payload=fx_payload,
-        effective_at_ms=effective_at_ms,
-        observed_at_ms=int(prior.get("observed_at_ms") or applied_at_ms),
-        rate_source=prior.get("rate_source"),
-        rate_source_id=prior.get("rate_source_id"),
-        rate_evidence_fact_id=prior.get("rate_evidence_fact_id"),
-        method=prior.get("method"),
-        max_rate_distance_ms=(
-            MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
-            if prior.get("method")
-            == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
-            else MAX_BOOKING_RATE_DISTANCE_MS
-        ),
+        cash_fact_id=fact_id, amount=amount, currency=currency, fx_payload=None,
+        effective_at_ms=effective_at_ms, observed_at_ms=applied_at_ms,
     )
 
 

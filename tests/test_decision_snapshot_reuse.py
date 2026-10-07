@@ -60,12 +60,19 @@ def test_shared_global_reduction_preserves_complete_snapshots_and_hashes(tmp_pat
         monkeypatch.setattr(mod, name, counted)
     actual = _many(rows)
     assert actual == expected
-    # Complete serialized snapshot hashes captured from immutable base
-    # 1ad79764ec997251dd4d8f00bc56202538eb4df8 with this deterministic fixture.
+    # Complete serialized snapshot hashes for the event-time cash FX policy.
+    # Compared with the prior daily-policy fixture, only conversion policy
+    # metadata and its derived fingerprints change; economic fields stay intact.
+    for snapshot in actual.values():
+        for event in snapshot["trade_events"]:
+            for conversion in event["raw_payload"]["cash_conversions"].values():
+                assert conversion["status"] == "pending"
+                assert conversion["method"] == "event_time_market_fx"
+                assert "fx_policy" not in conversion and "cash_fx_date" not in conversion
     from domain.domain.decision_state_fingerprint import canonical_sha256
     assert {account: canonical_sha256(value) for account, value in actual.items()} == {
-        "lx": "bc43afb2cda185284a1e68445c402bd4738be55b2c3605aff484e9caea524f47",
-        "sy": "4b61c563d24ab33a8d297bba1097047fdf2c49824417e54a7b3c28c3b1d08520",
+        "lx": "90bc665c6a5142da777c4f9e8c76206fd42b543c2b85789e4fb48b25e83288ef",
+        "sy": "513d55afc2ab1633e58aba5653b82372b1d56a9c13a710595f854b045e88c28d",
     }
     assert calls == {"project": 1, "compare": 1, "hash": 3, "account_hash": 2}
     assert rows == frozen
