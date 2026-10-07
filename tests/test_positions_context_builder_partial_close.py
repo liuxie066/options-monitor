@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 
-from domain.domain.expiration_dates import expiration_business_today
+from domain.domain.expiration_dates import expiration_market_date
 from src.application.ledger.api import RiskPositionView, position_lot_risk_view, position_lot_snapshot
 from src.application.ledger.read_model import (
     list_open_short_assignment_rows,
@@ -133,7 +133,7 @@ def test_position_lot_risk_view_is_typed_context_read_model() -> None:
     assert snapshot.lot_id == "rec_1"
     assert isinstance(view, RiskPositionView)
     assert view.as_shadow_record() == {"lot_id": "rec_1", "fields": snapshot.fields}
-    assert view.as_open_position_min(as_of_date=expiration_business_today())["symbol"] == "0700.HK"
+    assert view.as_open_position_min(as_of_date=datetime(2026, 5, 1).date())["symbol"] == "0700.HK"
 
 
 def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
@@ -259,11 +259,12 @@ def test_build_context_reads_premium_from_its_key_and_not_from_the_note() -> Non
 
 def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
     expiration_ms = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp() * 1000)
-    as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - expiration_business_today()).days
+    observed_at = datetime(2026, 5, 1, 17, tzinfo=timezone.utc)
+    as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - expiration_market_date(observed_at, "US")).days
     records = [_lot(cash_secured_amount=1000, currency="USD", strike=120.0, multiplier=100, expiration=expiration_ms,
                     opened_at=1, premium=1.0)]
 
-    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2}, observed_at=observed_at)
 
     row = ctx["open_positions_min"][0]
     # §7.2: the ms ``expiration`` is no longer a read-model field; the legacy ms

@@ -35,7 +35,7 @@ def _add_latest_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_day_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--account", required=True, help="account label such as lx")
-    parser.add_argument("--market", choices=("US", "HK", "us", "hk"), default="US")
+    parser.add_argument("--market", choices=("US", "HK", "us", "hk"), required=True, help="explicit market for historical queries")
     parser.add_argument("--json", action="store_true", help="print structured JSON instead of Markdown")
 
 

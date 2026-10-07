@@ -8,9 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.expiration_dates import MARKET_TIMEZONES, expiration_market_date
 from domain.domain.fetch_source import (
     is_futu_fetch_source,
     normalize_fetch_source,
@@ -43,7 +43,6 @@ _required_text = partial(required_text, error=lambda m: CloseAdviceRequiredDataP
 
 CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA = "close_advice_required_data_plan.v2"
 PLAN_FILE_NAME = "close_advice_required_data_plan.json"
-_MARKET_TIMEZONES = {"US": ZoneInfo("America/New_York"), "HK": ZoneInfo("Asia/Hong_Kong")}
 _ACCOUNT_STATUSES = frozenset(
     {"not_applicable", "ready", "partial", "unavailable"}
 )
@@ -55,9 +54,13 @@ class CloseAdviceRequiredDataPlanError(RuntimeError):
 
 
 def close_advice_market_date(value: datetime, market: str) -> date:
-    if value.tzinfo is None or market not in _MARKET_TIMEZONES:
+    try:
+        result = expiration_market_date(value, market)
+    except ValueError as exc:
+        raise CloseAdviceRequiredDataPlanError("market date requires aware UTC time and supported market") from exc
+    if result is None:
         raise CloseAdviceRequiredDataPlanError("market date requires aware UTC time and supported market")
-    return value.astimezone(_MARKET_TIMEZONES[market]).date()
+    return result
 
 
 def _provider_rows(value: Any) -> list[dict[str, Any]]:
@@ -213,7 +216,7 @@ def build_close_advice_required_data_plan(
     run_id_norm = _required_text(run_id, "run_id")
     market_dates = {
         market: close_advice_market_date(run_started_at_utc, market)
-        for market in _MARKET_TIMEZONES
+        for market in MARKET_TIMEZONES
     }
     market_allow = {
         str(value or "").strip().upper()
@@ -616,7 +619,7 @@ def _load_close_advice_required_data_plan_bytes(
             "close-advice required-data plan content hash mismatch"
         )
     market_dates = payload.get("as_of_market_dates")
-    if not isinstance(market_dates, dict) or set(market_dates) != set(_MARKET_TIMEZONES):
+    if not isinstance(market_dates, dict) or set(market_dates) != set(MARKET_TIMEZONES):
         raise CloseAdviceRequiredDataPlanError("close-advice market dates are invalid")
     for raw in market_dates.values():
         try:
@@ -628,7 +631,7 @@ def _load_close_advice_required_data_plan_bytes(
         started = datetime.fromisoformat(str(payload["run_started_at_utc"]).replace("Z", "+00:00"))
         if any(
             close_advice_market_date(started, market).isoformat() != market_dates[market]
-            for market in _MARKET_TIMEZONES
+            for market in MARKET_TIMEZONES
         ):
             raise ValueError
     except (KeyError, ValueError, CloseAdviceRequiredDataPlanError) as exc:

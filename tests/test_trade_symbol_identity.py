@@ -56,5 +56,36 @@ def test_hk_option_root_does_not_become_same_named_us_stock() -> None:
     )
     assert (us.canonical, us.market, us.currency) == ("CNC", "US", "USD")
     assert resolve_symbol_identity("CNC").canonical == "CNC"
-    assert resolve_symbol_identity("US.MET260320C30000").canonical == "MET"
+    assert resolve_symbol_identity("US.MET260320C30000").canonical == "MET.US"
     assert resolve_symbol_identity("HK.ABCD260330C30000") is None
+
+
+def test_explicit_us_alias_collisions_preserve_identity_on_reparse() -> None:
+    from src.application.opend_utils import normalize_underlier
+    for code in ("US.MET", "MET.US", "US.MET260320C30000", "US.TCH", "US.POP"):
+        identity = resolve_symbol_identity(code)
+        assert identity.market == "US"
+        assert identity.currency == "USD"
+        again = resolve_symbol_identity(identity.canonical)
+        assert (again.canonical, again.market, again.currency, again.futu_code) == (
+            identity.canonical, "US", "USD", identity.futu_code,
+        )
+        assert normalize_underlier(identity.canonical).code == identity.futu_code
+    assert normalize_symbol_candidate("MET") == "3690.HK"
+    assert normalize_symbol_candidate("US.NVDA") == "NVDA"
+
+
+def test_explicit_market_rejects_cross_market_alias_and_malformed_hk() -> None:
+    aliases = {"MET": "3690.HK", "00700BAD": "NVDA"}
+    assert resolve_symbol_identity("US.MET", symbol_aliases=aliases).market == "US"
+    for code in ("HK.00700BAD", "HK.BAD00700", "HK.00-700", "HK.ABCD"):
+        assert resolve_symbol_identity(code, symbol_aliases=aliases) is None
+    assert normalize_symbol_candidate("HK.CNC") == "0883.HK"
+    assert normalize_symbol_candidate("HK.TCH") == "0700.HK"
+
+
+def test_explicit_us_alias_key_keeps_matching_market_precedence():
+    aliases = {"US.CNC": "NVDA", "CNC": "0700.HK"}
+    for code in ("US.CNC", "CNC.US", "US.CNC260320C30000"):
+        identity = resolve_symbol_identity(code, symbol_aliases=aliases)
+        assert (identity.canonical, identity.market, identity.futu_code) == ("NVDA", "US", "US.NVDA")

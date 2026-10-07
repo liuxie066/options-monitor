@@ -56,8 +56,11 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     assert revision.revision == 2
     assert revision.json is True
 
-    day_default = parse_args(["daily-brief", "day", "--account", "lx", "--date", "2026-07-19"])
-    assert day_default.market == "US"
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["daily-brief", "day", "--account", "lx", "--date", "2026-07-19"])
+    assert exc.value.code == 2
+    hk = parse_args(["daily-brief", "day", "--account", "lx", "--market", "HK", "--date", "2026-07-19"])
+    assert hk.market == "HK"
 
 def test_daily_brief_cli_outputs_markdown_and_json(monkeypatch, capsys, tmp_path: Path) -> None:
     from src.interfaces.cli import daily_brief_ops

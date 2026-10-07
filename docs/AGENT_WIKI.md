@@ -995,7 +995,7 @@ Smallest remaining actions, with blockers called out.
 - Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
 - Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
 - User projection: fixed report, candidate alert, fixed failure, and query share the Daily Brief human contract. Markdown hides revision, internal IDs, broker codes, raw enums, raw ISO timestamps, paths, and rejection dumps while structured artifacts retain them.
-- Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads remain explicit operator queries requiring an account; market keeps the existing US default when omitted.
+- Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads require an explicit account and market; missing market is an input error.
 - Query safety: query is byte-for-byte read-only with respect to delivery state and does not refresh data, scan, send, confirm, or mutate candidate state.
 - Delivery ambiguity: ambiguous envelopes are frozen. Later attempts either replay the exact message/key/hash under the provider idempotency contract or wait for explicit confirmation.
 - Delivery state cutoff: only `daily_decision_brief_delivery.v2` is accepted. Retired v1 state fails closed; the current release has no converter.
@@ -1006,7 +1006,20 @@ Read surfaces:
 
 ```bash
 ./om daily-brief latest [--account lx] [--market US|HK] [--json]
-./om daily-brief day --account lx [--market US|HK] --date YYYY-MM-DD [--revision N] [--json]
+./om daily-brief day --account lx --market US|HK --date YYYY-MM-DD [--revision N] [--json]
 ./om-agent run --tool daily_decision_brief_read --input-json '{}'
 ./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
 ```
+
+### Market identity and relative expiration
+
+Explicit US inputs override cross-market aliases. If the bare spelling is an HK
+alias, the canonical US identity retains `.US` (for example `US.MET` and its option
+root both become `MET.US`, routing to `US.MET`). Unqualified `MET` retains the supported
+HK alias. HK-prefixed equities accept numeric codes or exact supported HK aliases;
+letters are never removed to obtain a numeric code. Existing records are not rewritten.
+
+Position DTE and relative Close Advice expiration filters use each symbol's market date
+from one aware observation time (New York for US, Hong Kong for HK). Unknown market or
+expiration remains unknown and cannot satisfy a relative expiration filter. Timestamp
+storage and accounting/FX date conventions remain unchanged.
