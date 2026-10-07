@@ -47,6 +47,7 @@ from src.interfaces.cli.config_ops import (
     validate_yaml_runtime_config,
 )
 from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
+from src.interfaces.cli.decision_history_ops import add_decision_history_commands, handle_decision_history_command
 from src.interfaces.cli.daily_brief_ops import add_daily_brief_commands, handle_daily_brief_command
 from src.interfaces.cli.operator_ops import (
     add_operator_commands,
@@ -158,6 +159,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_portfolio_commands(sub)
 
     add_daily_brief_commands(sub)
+    add_decision_history_commands(sub)
     add_quality_commands(sub)
 
     sub.add_parser("symbols", help="manage monitored symbols in config.yaml")
@@ -320,6 +322,8 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "portfolio":
             return handle_portfolio_command(args)
 
+        if args.command == "decision-history":
+            return handle_decision_history_command(args, repo_base_fn=repo_base)
         if args.command == "daily-brief":
             return handle_daily_brief_command(args, repo_base_fn=repo_base)
 

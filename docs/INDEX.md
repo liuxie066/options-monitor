@@ -98,6 +98,8 @@
 
 ## 迁移与历史兼容
 
+- [决策历史](DECISION_HISTORY.md)：SQLite 权威保存、只读查询和校验后历史导入；[产品合同](DECISION_HISTORY_PRD.md)。
+
 - [Option Performance v1 Migration](migrations/OPTION_PERFORMANCE_V1_MIGRATION.md)：旧 monthly-income 输出如何映射到当前 Performance；不是 rollback path。
 - [Trade And Position Ledger Redesign](TRADE_POSITION_LEDGER_REDESIGN.md)：已完成重构的兼容指针；当前合同见 Ledger Architecture。
 

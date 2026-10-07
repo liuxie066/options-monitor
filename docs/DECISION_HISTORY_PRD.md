@@ -1,6 +1,8 @@
 # 决策历史与交易关联查询 PRD
 
-Status: approved product contract; implementation pending. Owner: this document.
+Status: approved product contract; implementation in review. Owner: this document.
+
+操作入口、数据文件和迁移边界见 [决策历史操作说明](DECISION_HISTORY.md)。
 
 ## Goal and authorization
 
@@ -29,6 +31,27 @@ VIX、策略调参/优化、回测、自动下单、人工关联纠正、推测�
 - 运行 → 有建议/正常空/失败/部分结果 → SQLite按运行幂等保存，新运行追加版本；写失败明确报告。
 - 旧JSON → 验证来源身份版本 → 可验证则导入；不可验证列原因；重试不重复。
 - 两入口 → 范围与权限 → 通知引用验证（如适用）→ SQLite固定范围查询 → 空/部分/不可用分别展示 → 打开具体历史 → 明确关联/未关联/冲突 → 持仓状态/已实现结果/证据缺口。
+
+```mermaid
+flowchart TD
+    R[实际决策运行] --> O{运行结果}
+    O -->|有建议 / 正常空 / 部分可用| S[保存原始事实]
+    O -->|失败或数据不足| S
+    S --> I{同一运行已存在}
+    I -->|相同内容| E[返回原版本]
+    I -->|内容冲突| X[明确拒绝]
+    I -->|新运行| V[SQLite追加版本]
+    Q[历史条件或通知原始引用] --> A{身份及范围可验证}
+    A -->|否| U[说明缺口或拒绝]
+    A -->|是| P[固定记录范围只读查询]
+    P --> L{有明确版本及候选关联}
+    L -->|无| N[未建立关联]
+    L -->|冲突| U
+    L -->|有| T{账本交易已结束}
+    T -->|未结束| H[展示状态及数量]
+    T -->|已结束且证据完整| C[展示已实现期权净现金流]
+    T -->|证据不足| U
+```
 
 ## Acceptance contract
 

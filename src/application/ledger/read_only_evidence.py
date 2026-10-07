@@ -69,6 +69,19 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
                 conn=conn,
             )
 
+    def read_decision_history_evidence(self, *, account: str) -> dict[str, Any]:
+        """Read source events for explicit decision links in one SQLite snapshot."""
+        from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+        with closing(self._connect()) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("BEGIN")
+            if not self._tables_exist(conn, "trade_events", "wheel_events"):
+                raise ValueError("decision_link_evidence_missing")
+            repo = SQLiteOptionPositionsRepository(self.path, initialize=False)
+            return {"trade_events": self._read_trade_events(conn, strict=True),
+                    "wheel_events": repo.list_wheel_events(account=account, conn=conn)}
+
     def list_trade_events(self) -> list[dict[str, Any]]:
         return [
             trade_event_application_payload(item)
