@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.2.4 - 2026-10-07
+
 ### Breaking Changes
 - 历史 Daily Brief 日期及修订查询要求显式账户与市场，不再默认美股；最新查询保留跨已启用市场读取。
 

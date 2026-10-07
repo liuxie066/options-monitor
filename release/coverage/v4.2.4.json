@@ -1,0 +1,152 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.4",
+  "base": {
+    "tag": "v4.2.3",
+    "commit": "8fb6c8ad2734a5fa583fa5d7a335d7cc618a57a0"
+  },
+  "reviewed_head": "5a582426a8b3e4c52a5cf0552939391ebf5935bf",
+  "commits": [
+    {
+      "sha": "f782c3451ff35ce39c71942244521c8896740f3e",
+      "subject": "fix(lifecycle): end settlement wait at next trading close and isolate CC holds"
+    },
+    {
+      "sha": "79c4ef132619548c568a6e13b78efe3b96b5eb6c",
+      "subject": "Merge pull request #488 from liuxie066/codex/settlement-next-close-cc-scope"
+    },
+    {
+      "sha": "1c90813ec38540b541da8e9b74839fdf0458c19c",
+      "subject": "chore(gateflow): accept plan for hk-us-consistency"
+    },
+    {
+      "sha": "0aa141e342a0bff40fc45ec7053999d7ce036105",
+      "subject": "fix(markets): preserve explicit identity and market-scoped reads"
+    },
+    {
+      "sha": "8aebcf9fb4e0d0694d23454959cf8ea874d49124",
+      "subject": "fix(diagnostics): preserve capacity and verify underlier prerequisites"
+    },
+    {
+      "sha": "cf5ecfac052fc504d2c40c5802c93d36d5194d3a",
+      "subject": "chore(gateflow): accept deepreview for hk-us-consistency"
+    },
+    {
+      "sha": "3bbfa075ba9aa095e834c707faa23601f8e15d7e",
+      "subject": "fix(alerts): preserve capacity through normalization and previews"
+    },
+    {
+      "sha": "5a582426a8b3e4c52a5cf0552939391ebf5935bf",
+      "subject": "Merge pull request #489 from liuxie066/fix-hk-us-consistency"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "历史 Daily Brief 日期及修订查询要求显式账户与市场，不再默认美股；最新查询保留跨已启用市场读取。",
+      "commits": [
+        "0aa141e342a0bff40fc45ec7053999d7ce036105",
+        "cf5ecfac052fc504d2c40c5802c93d36d5194d3a",
+        "5a582426a8b3e4c52a5cf0552939391ebf5935bf"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "显式美股代码与期权根保留市场身份，避免与港股别名混淆；港股代码拒绝通过剥离字符修复畸形输入。",
+      "commits": [
+        "0aa141e342a0bff40fc45ec7053999d7ce036105",
+        "5a582426a8b3e4c52a5cf0552939391ebf5935bf"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓 DTE 和平仓建议相对到期过滤按各自市场日期判断，避免美股在亚洲跨日时提前过期。",
+      "commits": [
+        "0aa141e342a0bff40fc45ec7053999d7ce036105",
+        "5a582426a8b3e4c52a5cf0552939391ebf5935bf"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "旧 CSP 汇总保留候选原生容量，港币和美元的零或未知容量均不能产生高优先级开仓提醒；富途诊断对两市场统一检查标的行情前提，并分别报告期权字段可用性。",
+      "commits": [
+        "8aebcf9fb4e0d0694d23454959cf8ea874d49124",
+        "cf5ecfac052fc504d2c40c5802c93d36d5194d3a",
+        "3bbfa075ba9aa095e834c707faa23601f8e15d7e",
+        "5a582426a8b3e4c52a5cf0552939391ebf5935bf"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "HK/US 期权到期结算等待统一截止于到期后第一个市场交易日收盘，按各自市场日历和时区处理休市、半日交易及夏令时；同步调整完整结算观察的日历要求，既有冻结期限保留至受控迁移。",
+      "commits": [
+        "f782c3451ff35ce39c71942244521c8896740f3e",
+        "79c4ef132619548c568a6e13b78efe3b96b5eb6c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "单个标的的 CC 容量或证据阻断只形成局部缺口，保留其他标的候选和正常扫描结果；简报区分局部受阻与整个策略不可用。",
+      "commits": [
+        "f782c3451ff35ce39c71942244521c8896740f3e",
+        "79c4ef132619548c568a6e13b78efe3b96b5eb6c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1c90813ec38540b541da8e9b74839fdf0458c19c",
+      "reason": "Empty Gateflow plan acceptance commit; no tracked source, configuration, runtime or user-facing content changes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "f782c3451ff35ce39c71942244521c8896740f3e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/488"
+      ]
+    },
+    {
+      "commit": "79c4ef132619548c568a6e13b78efe3b96b5eb6c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/488"
+      ]
+    },
+    {
+      "commit": "1c90813ec38540b541da8e9b74839fdf0458c19c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    },
+    {
+      "commit": "0aa141e342a0bff40fc45ec7053999d7ce036105",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    },
+    {
+      "commit": "8aebcf9fb4e0d0694d23454959cf8ea874d49124",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    },
+    {
+      "commit": "cf5ecfac052fc504d2c40c5802c93d36d5194d3a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    },
+    {
+      "commit": "3bbfa075ba9aa095e834c707faa23601f8e15d7e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    },
+    {
+      "commit": "5a582426a8b3e4c52a5cf0552939391ebf5935bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/489"
+      ]
+    }
+  ]
+}
