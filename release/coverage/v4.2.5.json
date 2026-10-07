@@ -1,0 +1,89 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.5",
+  "base": {
+    "tag": "v4.2.4",
+    "commit": "ccd816f0e54d7a5b7c545e0fcbb176c209e3f337"
+  },
+  "reviewed_head": "5de0110e2b098f253535db0af6499a737cdb9b93",
+  "commits": [
+    {
+      "sha": "c8d1f89081e0acd70823b26fcf7a4b4403cf5d38",
+      "subject": "chore(gateflow): accept plan for expiry-close-attribution"
+    },
+    {
+      "sha": "4203be0270504d087e935fc687d45cd43a394479",
+      "subject": "fix(trades): restore pending close quantity for expiry attribution"
+    },
+    {
+      "sha": "209f79c782a57f21789e793a27a20dad6a6653fd",
+      "subject": "chore(gateflow): accept deepreview for expiry-close-attribution"
+    },
+    {
+      "sha": "4664aff393d63a9ef419dcd56ff3cfb56b7ba60c",
+      "subject": "fix(trades): reject competing consumption in expiry observations"
+    },
+    {
+      "sha": "5de0110e2b098f253535db0af6499a737cdb9b93",
+      "subject": "Merge pull request #491 from liuxie066/codex/fix-expiry-close-attribution"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "零价期权成交已平仓、原因待定时，归因核验恢复同一成交的完整平仓前数量，避免因剩余持仓为零而误报证据不完整；保留缺证、冲突和投影漂移拦截，并去除平仓回执重复的状态行。",
+      "commits": [
+        "4203be0270504d087e935fc687d45cd43a394479",
+        "4664aff393d63a9ef419dcd56ff3cfb56b7ba60c",
+        "5de0110e2b098f253535db0af6499a737cdb9b93"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c8d1f89081e0acd70823b26fcf7a4b4403cf5d38",
+      "reason": "Empty Gateflow acceptance checkpoint; no code, configuration or runtime behavior change."
+    },
+    {
+      "commit": "209f79c782a57f21789e793a27a20dad6a6653fd",
+      "reason": "Empty Gateflow acceptance checkpoint; no code, configuration or runtime behavior change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "c8d1f89081e0acd70823b26fcf7a4b4403cf5d38",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/491",
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "4203be0270504d087e935fc687d45cd43a394479",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/491",
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "209f79c782a57f21789e793a27a20dad6a6653fd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/491",
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "4664aff393d63a9ef419dcd56ff3cfb56b7ba60c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/491",
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "5de0110e2b098f253535db0af6499a737cdb9b93",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/491",
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    }
+  ]
+}
