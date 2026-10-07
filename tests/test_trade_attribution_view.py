@@ -664,9 +664,12 @@ def test_conflict_remains_durable_when_candidate_reader_and_inbox_are_unavailabl
     assert len([event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_attribution_conflict"]) == 1
 
 
-def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units():
+def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units(monkeypatch):
     from src.application.futu_portfolio_context import build_futu_position_snapshot
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    from src.infrastructure import exchange_rates as fx
+    instant = datetime(2026, 9, 30, 6, tzinfo=timezone.utc)
+    monkeypatch.setattr(fx, "_utc_now", lambda: instant)
+    now = int(instant.timestamp() * 1000)
     observed = datetime.fromtimestamp(now / 1000, timezone.utc).isoformat()
     ref = {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"}
     snapshot = build_futu_position_snapshot(rows=[
@@ -676,12 +679,18 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units():
         markets=["US", "HK"], asset_types=["stock", "option"], observed_at_utc=observed, completeness="complete")
     portfolio = cash_portfolio({"cash_source_observed_at": observed, "capacity_authority": {"status": "available", "logical_account": "lx", "futu_account_id": "1001",
         "trd_env": "REAL", "market": "us"}, "position_snapshot_input": snapshot, "cash_balance_reliable": True,
-        "cash_by_currency": {"USD": 0, "HKD": 20000}, "exchange_rates": {"rates": {"USDCNY": 7, "HKDCNY": 0.9}},
+        "cash_by_currency": {"USD": 0, "HKD": 20000}, "exchange_rates": {"pairs": {
+            pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": observed, "observed_at_utc": observed}
+            for pair, rate in (("USDCNY", 7), ("HKDCNY", 0.9))}},
         "exchange_rate_status": "ready"}, account_id="1001")
     fact = {"account": "lx", "broker_account_ref": ref, "contracts_open": 1, "position_side": "short", "multiplier": 100,
             "currency": "USD", "contract_key": {"underlying_symbol": "NVDA", "option_type": "put", "strike": "25.0", "expiration_ymd": "2026-12-18"}}
     args = dict(config=cash_config(account_id="1001"), fact=fact, facts=[fact], observation={"portfolio": portfolio}, wheel_read_model={"wheel_branches": []}, now_ms=now)
     assert trade_attribution_capacity_check(**args)["status"] == "available"
+    verified_fx = portfolio["exchange_rates"]
+    portfolio["exchange_rates"] = {"rates": {"USDCNY": 7, "HKDCNY": 0.9}}
+    assert "account_cash_capacity_exceeded" in trade_attribution_capacity_check(**args)["reason_codes"]
+    portfolio["exchange_rates"] = verified_fx
     original = deepcopy(portfolio)
     short_policy = {**args["config"], "runtime": {"portfolio_context_ttl_sec": 1}}
     # Position evidence is still fresh; only the cash policy expires at commit.
@@ -715,6 +724,10 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units():
     assert "capacity_basis_unavailable" in trade_attribution_capacity_check(**args)["reason_codes"]
     args["wheel_read_model"]["wheel_branches"] = []
     portfolio["exchange_rate_status"] = "unavailable_stale"
+    # Eligibility comes from the original quote, not a cached status label.
+    assert trade_attribution_capacity_check(**args)["status"] == "available"
+    for pair in portfolio["exchange_rates"]["pairs"].values():
+        pair.update(quote_at_utc="2026-09-28T06:00:00+00:00", observed_at_utc="2026-09-28T06:00:00+00:00")
     assert "account_cash_capacity_exceeded" in trade_attribution_capacity_check(**args)["reason_codes"]
     portfolio["cash_by_currency"]["USD"] = 2500
     assert trade_attribution_capacity_check(**args)["status"] == "available"
