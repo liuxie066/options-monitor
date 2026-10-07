@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
+from domain.domain.option_lifecycle import pending_close_quantities
 from src.application.ledger.api import (
     latest_trade_lifecycle_settlement_evidence,
     lifecycle_case_coherent_facts,
@@ -497,9 +498,28 @@ def collect_broker_settlement_observation(
         allocations,
         void_event_ids=void_event_ids,
     )
-    frozen_remaining = dict(
-        resolution.remaining_contracts_by_lot
+    economic_remaining = dict(resolution.remaining_contracts_by_lot)
+    # The option leg may already be closed while its cause still awaits evidence.
+    # Restore only this complete anchor's pending close for reason validation;
+    # the ledger projection and outstanding reservations remain post-close.
+    anchor_allocations = [
+        item for item in allocations
+        if str(item.get("evidence_id") or "") == str(anchor.get("evidence_id") or "")
+    ]
+    try:
+        pending_close = pending_close_quantities(
+            anchor_allocations, facts.get("trade_events") or [],
+            void_event_ids=void_event_ids,
+        )
+    except ValueError as exc:
+        raise SettlementObservationDataError(str(exc)) from exc
+    pending_close_exact = not pending_close or pending_close == dict(
+        anchor.get("target_contracts_by_lot") or {}
     )
+    frozen_remaining = {
+        lot_id: contracts + (pending_close.get(lot_id, 0) if pending_close_exact else 0)
+        for lot_id, contracts in economic_remaining.items()
+    }
     lot_fields_by_id = dict(
         facts.get("position_lot_fields_by_id") or {}
     )
@@ -519,10 +539,12 @@ def collect_broker_settlement_observation(
     }
     reservation_exclusive = (
         dict(case_resolution.get("effective_reservations_by_lot") or {})
-        == frozen_remaining
+        == {lot_id: contracts for lot_id, contracts in economic_remaining.items() if contracts}
         and bool(case_resolution.get("anchor_facts"))
     )
     extra_incomplete: set[str] = set()
+    if not pending_close_exact:
+        extra_incomplete.add("pending_close_settlement_not_exact")
     extra_incomplete.update(anchor_reason_codes)
     if not contract_code:
         extra_incomplete.add("option_contract_code_missing")
@@ -666,7 +688,7 @@ def collect_broker_settlement_observation(
         calendar_hash=str(timing_policy.get("calendar_hash") or ""),
         broker_option_position_absent=option_position_absent,
         projection_matches_frozen_remaining=(
-            projection_remaining == frozen_remaining
+            projection_remaining == economic_remaining
         ),
         reservation_exclusive=reservation_exclusive,
         competing_effective_consumption=competing_consumption,

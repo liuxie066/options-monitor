@@ -263,7 +263,6 @@ def build_trade_lifecycle_notification_message(
         "resolution_corrected": "✅ 平仓结果已更正",
     }.get(transition, "期权平仓状态更新")
     fields: list[tuple[str, object]] = [
-        ("状态", status_text),
         ("标的", frozen.get("symbol") or "-"),
     ]
     contract = " ".join(
