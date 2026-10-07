@@ -32,6 +32,7 @@ from src.application.portfolio_management import (
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.combo_yield_config import (
+    COMBO_YIELD_DEFAULTS,
     COMBO_YIELD_LEGACY_CALL_BOUND_FIELDS,
     COMBO_YIELD_LEGACY_CALL_OTM_FIELDS,
     COMBO_YIELD_LEGACY_OPTIMIZER_FIELDS,
@@ -223,6 +224,7 @@ OPENING_STRATEGY_ALLOWED_FIELDS = {
     *LEGACY_SELL_CALL_FETCH_FIELDS,
     *LEGACY_SELL_PUT_OTM_FIELDS,
 }
+COMBO_YIELD_PUT_ALLOWED_FIELDS = {"min_delta", "max_delta"}
 COMBO_YIELD_CALL_ALLOWED_FIELDS = {
     'min_delta',
     'max_delta',
@@ -250,6 +252,8 @@ COMBO_YIELD_ALLOWED_FIELDS = {
     'call',
     '_explicit_fields',
     '_explicit_call_fields',
+    'put',
+    '_explicit_put_fields',
     'strategy',
     'strategy_profile',
     *REMOVED_STRATEGY_FILTER_FIELDS,
@@ -863,6 +867,24 @@ def _validate_combo_yield_cfg(cfg: dict, path: str):
     _validate_optional_unit_interval_number(cfg, 'min_net_credit_retention', path)
     _validate_optional_dte_window(cfg, path)
 
+    for leg in ('call', 'put'):
+        if leg not in cfg:
+            continue
+        leg_cfg = cfg[leg]
+        leg_path = f'{path}.{leg}'
+        if not isinstance(leg_cfg, dict):
+            die(f'{leg_path} must be an object')
+        if leg == 'put':
+            _reject_unknown_keys(leg_cfg, COMBO_YIELD_PUT_ALLOWED_FIELDS, leg_path)
+        bounds = dict(COMBO_YIELD_DEFAULTS[leg])
+        for key in ('min_delta', 'max_delta'):
+            if key in leg_cfg:
+                # Explicit null must not disable the long-leg constraint.
+                bounds[key] = _finite_number(leg_cfg[key], f'{leg_path}.{key}')
+            _validate_optional_unit_interval_number(bounds, key, leg_path)
+        if bounds['min_delta'] > bounds['max_delta']:
+            die(f'{leg_path}.min_delta > {leg_path}.max_delta')
+
     call_leg = cfg.get('call')
     if call_leg is not None and not isinstance(call_leg, dict):
         die(f'{path}.call must be an object')
@@ -885,13 +907,6 @@ def _validate_combo_yield_cfg(cfg: dict, path: str):
                 f"{path}.call has removed OTM fields: {', '.join(legacy_call_otm_keys)}; "
                 "use call.min_strike/max_strike and min_delta/max_delta instead"
             )
-        for key in ('min_delta', 'max_delta'):
-            _validate_optional_unit_interval_number(call_leg, key, f'{path}.call')
-        min_delta = call_leg.get('min_delta')
-        max_delta = call_leg.get('max_delta')
-        if (min_delta is not None) and (max_delta is not None):
-            if _finite_number(min_delta, f'{path}.call.min_delta') > _finite_number(max_delta, f'{path}.call.max_delta'):
-                die(f'{path}.call.min_delta > {path}.call.max_delta')
 
 
 def _validate_hhmm(value, path: str) -> None:

@@ -581,7 +581,7 @@ CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp
   与 SP+LC 严格对称，不是保护/保险；
 - CC 腿独立扫描，继承 CC 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
   无持仓上下文 → `not_applicable` 跳过；
-- Long Put 反转腿 delta 区间 0.10~0.25，目标 delta 0.12；
+- Long Put 反转腿默认 `0.15 ≤ |delta| ≤ 0.35`，通过 `combo_yield.put.min_delta/max_delta` 覆盖；排序次键目标仍为 0.12；
 - 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；
 - 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
 - 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；

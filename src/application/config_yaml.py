@@ -31,6 +31,7 @@ from src.application.config_validator import (
     OPENING_STRATEGY_ALLOWED_FIELDS,
     COMBO_YIELD_ALLOWED_FIELDS,
     COMBO_YIELD_CALL_ALLOWED_FIELDS,
+    COMBO_YIELD_PUT_ALLOWED_FIELDS,
     CLOSE_ADVICE_ALLOWED_FIELDS,
     validate_assistant_config,
     validate_config,
@@ -386,14 +387,11 @@ def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
         allowed_keys=COMBO_YIELD_AUTHORING_FIELDS,
     )
     out["_explicit_fields"] = sorted(key for key in out if not str(key).startswith("_"))
-    call_cfg = out.get("call")
-    if isinstance(call_cfg, dict):
-        _reject_unknown_authoring_keys(
-            call_cfg,
-            allowed=COMBO_YIELD_CALL_ALLOWED_FIELDS,
-            path=f"{path}.call",
-        )
-        out["_explicit_call_fields"] = sorted(key for key in call_cfg if not str(key).startswith("_"))
+    for leg, allowed in (("call", COMBO_YIELD_CALL_ALLOWED_FIELDS), ("put", COMBO_YIELD_PUT_ALLOWED_FIELDS)):
+        leg_cfg = out.get(leg)
+        if isinstance(leg_cfg, dict):
+            _reject_unknown_authoring_keys(leg_cfg, allowed=allowed, path=f"{path}.{leg}")
+            out[f"_explicit_{leg}_fields"] = sorted(key for key in leg_cfg if not str(key).startswith("_"))
     return out
 
 

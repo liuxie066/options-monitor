@@ -370,6 +370,11 @@
       "module": "domain/domain/wheel/__init__.py",
       "name": "wheel_called_away_event_from_call_assignment",
       "reason": "The facade no longer exposes a schema-ambiguous Wheel terminal helper; historical Call continuation is available only through build_legacy_wheel_called_away_event_from_call_assignment."
+    },
+    {
+      "module": "src/application/combo_yield_config.py",
+      "name": "COMBO_YIELD_POLICY_OVERRIDES",
+      "reason": "Retired the conflicting policy-only long Call delta defaults. Both long legs now use COMBO_LONG_MIN_DELTA/COMBO_LONG_MAX_DELTA through COMBO_YIELD_DEFAULTS, with explicit per-leg configuration overrides preserved."
     }
   ]
 }

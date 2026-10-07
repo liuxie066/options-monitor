@@ -140,27 +140,27 @@ def test_combo_yield_policy_is_isolated_from_sell_put_strategy() -> None:
     assert income.config["enabled"] is True
     assert income.config["min_net_credit_annualized"] == 0.08
     assert income.config["min_net_credit_retention"] == 0.60
-    assert income.config["call"]["min_delta"] == 0.05
-    assert income.config["call"]["max_delta"] == 0.20
+    assert income.config["call"]["min_delta"] == 0.15
+    assert income.config["call"]["max_delta"] == 0.35
 
     isolated = derive_combo_yield_policy({"enabled": True})
     assert isolated.derived_from_sell_put_strategy == "insurance_underwriting"
     assert isolated.enabled is True
     assert isolated.config["min_net_credit_annualized"] == 0.08
     assert isolated.config["min_net_credit_retention"] == 0.60
-    assert isolated.config["call"]["min_delta"] == 0.05
-    assert isolated.config["call"]["max_delta"] == 0.20
+    assert isolated.config["call"]["min_delta"] == 0.15
+    assert isolated.config["call"]["max_delta"] == 0.35
 
     partial = resolve_combo_yield_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.18}}})
     partial_policy = derive_combo_yield_policy(partial)
     assert partial_policy.config["call"]["min_delta"] == 0.18
-    assert partial_policy.config["call"]["max_delta"] == 0.20
+    assert partial_policy.config["call"]["max_delta"] == 0.35
     assert "max_otm_pct" not in partial_policy.config["call"]
 
     income_partial = resolve_combo_yield_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.10}}})
     income_partial_policy = derive_combo_yield_policy(income_partial)
     assert income_partial_policy.config["call"]["min_delta"] == 0.10
-    assert income_partial_policy.config["call"]["max_delta"] == 0.20
+    assert income_partial_policy.config["call"]["max_delta"] == 0.35
     assert "max_otm_pct" not in income_partial_policy.config["call"]
 
     hk = derive_combo_yield_policy(
@@ -194,7 +194,7 @@ def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> N
                 "open_interest": 75,
                 "implied_volatility": 0.40,
                 "currency": "HKD",
-                "delta": 0.10,
+                "delta": 0.15,
                 "multiplier": 100,
             }
         ]
@@ -640,7 +640,7 @@ def test_combo_yield_policy_accepts_income_upside_pair(tmp_path: Path) -> None:
 def test_combo_yield_aggregates_call_prefilter_rejections(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    _write_single_call(tmp_path, dte=44, delta=0.30)
+    _write_single_call(tmp_path, dte=44, delta=0.40)
     pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
@@ -658,8 +658,8 @@ def test_combo_yield_aggregates_call_prefilter_rejections(tmp_path: Path) -> Non
     call_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "call"].iloc[0]
     assert call_reject["call_contract_symbol"] == "NVDA_C110"
     assert call_reject["reject_reasons"] == "call_delta_above_max"
-    assert float(call_reject["call_delta"]) == 0.30
-    assert float(call_reject["policy_call_max_delta"]) == 0.20
+    assert float(call_reject["call_delta"]) == 0.40
+    assert float(call_reject["policy_call_max_delta"]) == 0.35
     put_join_reject = diagnostics.loc[diagnostics["diagnostic_stage"] == "pair_join"].iloc[0]
     assert put_join_reject["put_contract_symbol"] == "NVDA_P95"
     assert put_join_reject["reject_reasons"] == "call_expiration_unavailable"
@@ -1063,3 +1063,26 @@ def test_combo_yield_rank_uses_retention_then_delta_not_premium_score() -> None:
         [higher_premium_lower_retention, lower_premium_higher_retention]
     )
     assert ranked[0]["net_credit_retention"] == 0.80
+
+
+@pytest.mark.parametrize("delta,accepted", [(0.15, True), (0.35, True), (0.149, False), (0.351, False), (None, False), (float("nan"), False), (float("inf"), False)])
+def test_combo_long_call_default_delta_window(tmp_path: Path, delta, accepted) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+    _write_single_call(tmp_path, dte=44, delta=delta)
+    pairs = find_sell_put_combo_yield_pairs(
+        df_candidates=_single_put_df(dte=44), symbol="NVDA", input_root=tmp_path,
+        combo_yield_cfg={"enabled": True},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
+    )
+    assert (not pairs.empty) is accepted
+
+
+def test_combo_long_call_delta_override_reaches_scan(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+    _write_single_call(tmp_path, dte=44, delta=0.45)
+    pairs = find_sell_put_combo_yield_pairs(
+        df_candidates=_single_put_df(dte=44), symbol="NVDA", input_root=tmp_path,
+        combo_yield_cfg={"enabled": True, "call": {"min_delta": 0.4, "max_delta": 0.5}},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
+    )
+    assert len(pairs) == 1

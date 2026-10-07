@@ -696,7 +696,7 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
 
     _write_combo_calls(
         tmp_path,
-        [_call_candidate(bid=0.9, ask=1.0, mid=0.95, delta=0.30)],
+        [_call_candidate(bid=0.9, ask=1.0, mid=0.95, delta=0.40)],
     )
 
     evidence: list[dict] = []
@@ -711,7 +711,7 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
     call_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "call"].iloc[0]
     assert call_reject["call_contract_symbol"] == "NVDA260821C00120000"
     assert call_reject["reject_reasons"] == "call_delta_above_max"
-    assert float(call_reject["policy_call_max_delta"]) == 0.20
+    assert float(call_reject["policy_call_max_delta"]) == 0.35
     assert int(diagnostics["accepted"].sum()) == 0
 
 

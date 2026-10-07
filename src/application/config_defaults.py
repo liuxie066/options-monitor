@@ -5,6 +5,8 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from domain.domain.engine.combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA
+
 
 DEFAULT_CONFIG_REF = "src.application.config_defaults.DEFAULT_CONFIG"
 
@@ -236,10 +238,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_volume": 5,
                     "max_spread_ratio": 0.35,
                     "max_combo_spread_ratio": 0.5,
-                    "call": {
-                        "min_delta": 0.1,
-                        "max_delta": 0.45,
-                    },
+                    "call": {"min_delta": COMBO_LONG_MIN_DELTA, "max_delta": COMBO_LONG_MAX_DELTA},
+                    "put": {"min_delta": COMBO_LONG_MIN_DELTA, "max_delta": COMBO_LONG_MAX_DELTA},
                 },
                 "sell_call": {"enabled": False, "min_dte": 7, "max_dte": 60},
             },
@@ -285,10 +285,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_volume": 0,
                     "max_spread_ratio": 0.35,
                     "max_combo_spread_ratio": 0.5,
-                    "call": {
-                        "min_delta": 0.1,
-                        "max_delta": 0.45,
-                    },
+                    "call": {"min_delta": COMBO_LONG_MIN_DELTA, "max_delta": COMBO_LONG_MAX_DELTA},
+                    "put": {"min_delta": COMBO_LONG_MIN_DELTA, "max_delta": COMBO_LONG_MAX_DELTA},
                 },
                 "sell_call": {"enabled": False, "min_dte": 7, "max_dte": 90},
             },
