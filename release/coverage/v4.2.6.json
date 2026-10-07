@@ -1,0 +1,53 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.6",
+  "base": {
+    "tag": "v4.2.5",
+    "commit": "a7b5a201407c3f076d5bec01d856297114875ca5"
+  },
+  "reviewed_head": "7598db9adba0a7cac9496e9803e382206a1ad733",
+  "commits": [
+    {
+      "sha": "705a9dee42225e9017235311f79e925e0c5bfea7",
+      "subject": "gateflow(plan): accept bot control market scope plan"
+    },
+    {
+      "sha": "43d993e887348846587de599b6869722455a8f74",
+      "subject": "gateflow(slice): accept bot control market scope S1"
+    },
+    {
+      "sha": "2d35cfe524c01dd45c7af938f59df31388c5bdfd",
+      "subject": "gateflow(slice): accept production config S2"
+    },
+    {
+      "sha": "19d4b8a4c612fcff450d03cad16608bb09bf9625",
+      "subject": "gateflow(review): accept bot scope aggregate deepreview"
+    },
+    {
+      "sha": "7598db9adba0a7cac9496e9803e382206a1ad733",
+      "subject": "Merge pull request #498 from liuxie066/codex/bot-control-market-scope"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 将支持的跨市场配置变更交给 Control 权限校验和预览，避免把读取范围误当成操作权限；关闭组合增强仅修改对应开关，保留 CSP、CC 监控及执行前确认。",
+      "commits": [
+        "43d993e887348846587de599b6869722455a8f74",
+        "7598db9adba0a7cac9496e9803e382206a1ad733"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {"commit": "705a9dee42225e9017235311f79e925e0c5bfea7", "reason": "Empty local plan acceptance checkpoint; no repository content or released behavior change."},
+    {"commit": "2d35cfe524c01dd45c7af938f59df31388c5bdfd", "reason": "Empty operational acceptance checkpoint; separately authorized production configuration is not part of the release payload."},
+    {"commit": "19d4b8a4c612fcff450d03cad16608bb09bf9625", "reason": "Empty aggregate review acceptance checkpoint; no additional repository content or released behavior change."}
+  ],
+  "design_evidence": [
+    {"commit": "705a9dee42225e9017235311f79e925e0c5bfea7", "references": ["https://github.com/liuxie066/options-monitor/pull/498"]},
+    {"commit": "43d993e887348846587de599b6869722455a8f74", "references": ["https://github.com/liuxie066/options-monitor/pull/498", "docs/INBOUND_CONTROL.md"]},
+    {"commit": "2d35cfe524c01dd45c7af938f59df31388c5bdfd", "references": ["https://github.com/liuxie066/options-monitor/pull/498"]},
+    {"commit": "19d4b8a4c612fcff450d03cad16608bb09bf9625", "references": ["https://github.com/liuxie066/options-monitor/pull/498"]},
+    {"commit": "7598db9adba0a7cac9496e9803e382206a1ad733", "references": ["https://github.com/liuxie066/options-monitor/pull/498", "docs/INBOUND_CONTROL.md"]}
+  ]
+}
