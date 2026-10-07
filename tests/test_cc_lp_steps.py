@@ -445,3 +445,23 @@ def test_cc_lp_scan_validates_put_multiplier_before_float(tmp_path, raw):
         assert row["net_credit"] > 0
     else:
         assert result.empty
+
+
+@pytest.mark.parametrize("delta,bounds,accepted", [
+    (-0.15, {}, True), (-0.35, {}, True), (-0.149, {}, False), (-0.351, {}, False),
+    (None, {}, False), (float("nan"), {}, False), (float("inf"), {}, False),
+    (-0.45, {"min_delta": 0.4, "max_delta": 0.5}, True),
+])
+def test_variant_long_put_delta_reaches_scan_and_metrics(tmp_path: Path, delta, bounds, accepted) -> None:
+    required_data = _write_required_data(tmp_path, call_rows=[_call_row()], put_rows=[_put_row(delta=delta)])
+    symbol_cfg = _cc_lp_symbol_cfg()
+    symbol_cfg["combo_yield"]["put"] = bounds
+    summary = run_cc_lp_variant(**_cc_lp_variant_kwargs(
+        symbol_cfg, required_data, portfolio_ctx=_available_cc_lp_context(),
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        run_cc_lp_scan_fn=lambda **kwargs: run_cc_lp_scan(
+            **kwargs, run_sell_call_scan_fn=lambda **kw: pd.DataFrame([_scan_call_row()]),
+        ),
+    ))
+    assert summary is not None
+    assert (summary["status"] == "candidates_found") is accepted

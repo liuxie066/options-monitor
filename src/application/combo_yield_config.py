@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from domain.domain.engine.combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA
+
 from src.application.strategy_policy import (
     INSURANCE_UNDERWRITING_PROFILE,
 )
@@ -52,20 +54,18 @@ COMBO_YIELD_DEFAULTS: dict[str, Any] = {
     "max_spread_ratio": 0.35,
     "max_combo_spread_ratio": 0.50,
     "call": {
-        "min_delta": 0.10,
-        "max_delta": 0.45,
+        "min_delta": COMBO_LONG_MIN_DELTA,
+        "max_delta": COMBO_LONG_MAX_DELTA,
+    },
+    "put": {
+        "min_delta": COMBO_LONG_MIN_DELTA,
+        "max_delta": COMBO_LONG_MAX_DELTA,
     },
 }
 COMBO_YIELD_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
     "hk": {
         "min_open_interest": 50,
         "min_volume": 0,
-    },
-}
-COMBO_YIELD_POLICY_OVERRIDES: dict[str, Any] = {
-    "call": {
-        "min_delta": 0.05,
-        "max_delta": 0.20,
     },
 }
 COMBO_YIELD_CONFIG_KEY = "combo_yield"
@@ -121,14 +121,14 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
         if key in {"strategy", "strategy_profile"} or key.startswith("_"):
             continue
         if key in cfg:
-            if key == "call" and isinstance(cfg.get("call"), dict):
-                nested = cfg.get("_explicit_call_fields")
+            if key in {"call", "put"} and isinstance(cfg.get(key), dict):
+                nested = cfg.get(f"_explicit_{key}_fields")
                 if isinstance(nested, (list, tuple, set)):
-                    call_cfg = _as_dict(cfg.get("call"))
-                    out["call"] = {
-                        str(child): deepcopy(call_cfg[str(child)])
+                    leg_cfg = _as_dict(cfg.get(key))
+                    out[key] = {
+                        str(child): deepcopy(leg_cfg[str(child)])
                         for child in nested
-                        if str(child) in call_cfg
+                        if str(child) in leg_cfg
                     }
                     continue
             out[key] = deepcopy(cfg[key])
@@ -160,8 +160,7 @@ def derive_combo_yield_policy(
     enabled = bool(raw_cfg.get("enabled", False))
     combo_strategy = INSURANCE_UNDERWRITING_PROFILE
 
-    base = combo_yield_defaults_for_market(market)
-    cfg = _deep_merge_dict(base, COMBO_YIELD_POLICY_OVERRIDES)
+    cfg = combo_yield_defaults_for_market(market)
     structure_mode = str(raw_cfg.get("structure_mode") or cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
     cfg["structure_mode"] = structure_mode
@@ -196,20 +195,22 @@ def resolve_combo_yield_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str, Any]
         explicit_fields = tuple(str(key) for key in existing_explicit_fields)
     else:
         explicit_fields = tuple(str(key) for key in top_level.keys() if not str(key).startswith("_"))
-    existing_call_explicit_fields = top_level.get("_explicit_call_fields")
-    if isinstance(existing_call_explicit_fields, (list, tuple, set)):
-        explicit_call_fields = tuple(str(key) for key in existing_call_explicit_fields)
-    else:
-        raw_call_cfg = top_level.get("call")
-        explicit_call_fields = (
-            tuple(str(key) for key in raw_call_cfg.keys() if not str(key).startswith("_"))
-            if isinstance(raw_call_cfg, dict)
+    explicit_leg_fields = {}
+    for leg in ("call", "put"):
+        existing = top_level.get(f"_explicit_{leg}_fields")
+        raw_leg = top_level.get(leg)
+        explicit_leg_fields[leg] = (
+            tuple(str(key) for key in existing)
+            if isinstance(existing, (list, tuple, set))
+            else tuple(str(key) for key in raw_leg if not str(key).startswith("_"))
+            if isinstance(raw_leg, dict)
             else tuple()
         )
     top_level = apply_combo_yield_defaults(top_level)
     top_level["_explicit_fields"] = explicit_fields
-    if explicit_call_fields:
-        top_level["_explicit_call_fields"] = explicit_call_fields
+    for leg, fields in explicit_leg_fields.items():
+        if fields:
+            top_level[f"_explicit_{leg}_fields"] = fields
     if "enabled" in top_level:
         top_level["enabled"] = bool(top_level.get("enabled"))
 

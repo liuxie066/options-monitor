@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- CSP+LC 与 CC+LP 长腿默认限制在 `0.15 ≤ |delta| ≤ 0.35`，支持独立配置并贯穿筛选与指标校验；缺失 delta 拒绝入选，保持短腿、权利金留存和排序规则。
+
 ## 4.2.6 - 2026-10-07
 
 ### Bug Fixes

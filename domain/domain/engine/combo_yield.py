@@ -5,6 +5,10 @@ from math import sqrt
 from typing import Any, Iterable
 
 
+COMBO_LONG_MIN_DELTA = 0.15
+COMBO_LONG_MAX_DELTA = 0.35
+
+
 @dataclass(frozen=True)
 class ComboYieldLeg:
     symbol: str

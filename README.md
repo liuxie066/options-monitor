@@ -80,7 +80,7 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 |---|---|---|
 | `sell_put` | Cash-Secured Put (CSP) | 现金担保认沽（Cash-Secured Put） |
 | `sell_call` | Covered Call (CC) | 备兑看涨（Covered Call） |
-| `combo_yield`（variant `sp_lc`） | Combo Yield SP+LC | 看涨风险反转（Bullish Risk Reversal，现金担保变体） |
+| `combo_yield`（结构 `csp_lc`） | Combo Yield CSP+LC | 看涨风险反转（Bullish Risk Reversal，现金担保变体） |
 | `combo_yield`（variant `cc_lp`） | Combo Yield CC+LP | 领口策略（Collar，净收权利金即 Credit Collar） |
 | `wheel` | 轮转策略 | 轮转策略（Wheel Strategy） |
 

@@ -230,6 +230,8 @@ def run_cc_lp_scan(
                     put_buy_fee=put_buy_fee,
                     covered_notional=covered_notional,
                     dte=min(call_leg.dte, put_leg.dte),
+                    min_put_delta=min_put_delta,
+                    max_put_delta=max_put_delta,
                 )
             except ValueError:
                 continue

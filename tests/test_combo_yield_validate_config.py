@@ -412,3 +412,23 @@ def test_validate_config_accepts_independent_combo_yield_without_false_warning(c
     )
 
     assert "combo_yield is enabled but sell_put is disabled" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("leg", ["call", "put"])
+@pytest.mark.parametrize("bounds", [
+    {"min_delta": None}, {"max_delta": None}, {"min_delta": True},
+    {"min_delta": -0.1}, {"max_delta": 1.1}, {"max_delta": float("nan")},
+    {"max_delta": float("inf")}, {"min_delta": 0.4}, {"max_delta": 0.1},
+    {"min_delta": 0.5, "max_delta": 0.4}, None,
+])
+def test_combo_long_delta_invalid_bounds_rejected(leg, bounds) -> None:
+    from src.application.config_validator import validate_config
+    with pytest.raises(SystemExit, match=f"combo_yield.{leg}"):
+        validate_config(_config([_nvda(combo_yield={"enabled": True, leg: bounds})]))
+
+
+@pytest.mark.parametrize("leg", ["call", "put"])
+@pytest.mark.parametrize("bounds", [{"min_delta": 0.0}, {"max_delta": 1.0}, {"min_delta": 0.4, "max_delta": 0.5}])
+def test_combo_long_delta_valid_overrides(leg, bounds) -> None:
+    from src.application.config_validator import validate_config
+    validate_config(_config([_nvda(combo_yield={"enabled": True, leg: bounds})]))
