@@ -76,6 +76,14 @@ canonical pure-read tools and owns run/session/event lifecycle. The model never
 receives write, confirm, cancel, or apply tools. Its only state-change surface
 is a generic preview request projected from the Control capability catalog.
 
+`read_markets` limits business reads, not Control preview requests. A supported
+change with a clear target goes to deterministic Control, which checks the
+sender's operation permissions and resolves the target independently. For
+example, a US-bound channel can request a preview for disabling
+`3690.HK`'s `combo_yield.enabled`; Control still requires authorization and a
+separate confirmation before applying it. This does not grant HK read access
+or disable the symbol's CSP/CC monitoring.
+
 After Control returns, the inbound service writes a structured receipt to
 Bot session history. Before every later channel turn it injects the current conversation's
 pending-operation summaries from the operation store. The operation store, not

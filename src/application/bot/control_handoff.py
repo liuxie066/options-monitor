@@ -17,6 +17,10 @@ def control_preview_tool_description(specs: tuple[dict[str, Any], ...]) -> dict[
         "description": (
             "Request a deterministic preview for a user-requested state change. "
             "This never applies a write and must not be used for confirm/cancel replies. "
+            "Business read_markets and the channel config_key are not Control permission limits; "
+            "Control independently authorizes the sender and resolves the requested target. "
+            "For a listed change with sufficient information, request its preview even when the target "
+            "is outside the business read scope; do not expand read access or assume write permission. "
             "If required_information is missing, ask the user for it instead of calling this tool. "
             "Available capabilities: "
             + " | ".join(capability_lines)

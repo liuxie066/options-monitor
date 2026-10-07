@@ -194,6 +194,76 @@ def test_bot_write_request_hands_off_to_deterministic_control_preview(
     assert json.loads(audit["control_json"])["result"]["data"]["operation_id"] == "op_test"
 
 
+@pytest.mark.parametrize("write_allowed", [True, False])
+def test_bot_us_read_scope_hands_hk_combo_change_to_control(monkeypatch, tmp_path, write_allowed):
+    from src.application.bot import channel_facade
+    from src.application.bot.host import run_contract
+    from tests.test_bot_python_runtime import MODEL, answer, call, script
+
+    _enable_inbound_symbol_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    if not write_allowed:
+        monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "0")
+    config_yaml, paths = _write_symbol_yaml_config(tmp_path, """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+  hk:
+    accounts: [lx]
+    symbols: [3690.HK]
+    overrides:
+      3690.HK:
+        sell_put:
+          enabled: true
+        covered_call:
+          enabled: true
+        combo_yield:
+          enabled: true
+""", ("us", "hk"))
+    assistant = tmp_path / "config.assistant.json"
+    assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+    before = {path: path.read_bytes() for path in (config_yaml, assistant, *paths.values())}
+    captured = []
+    replies = [call("request_control_preview", {"intent_name": "symbol_edit", "arguments": {
+        "symbol": "3690.HK", "set": {"combo_yield.enabled": False}}}), answer("已请求预览。")]
+
+    def run(prepared, **kwargs):
+        assert prepared.input["read_markets"] == ["us"]
+        return run_contract(prepared, model_settings=MODEL, model_request=script(replies, captured),
+                            host_store=kwargs["host_store"], session_key=kwargs["session_key"],
+                            control_preview_specs=kwargs["control_preview_specs"])
+
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _: None)
+    monkeypatch.setattr(channel_facade, "run_prepared_contract", run)
+    result = _handle("关闭 3690美团的组合增强监控", "msg_hk_combo_from_us",
+                     config_path=str(paths["us"]), assistant_config_path=str(assistant),
+                     audit_db=str(tmp_path / "inbound.sqlite3"))
+
+    # Verify the actual model-facing contract as well as the deterministic handoff.
+    prompt = "\n".join(m["content"] for m in captured[0]["messages"] if m["role"] == "system")
+    assert "use it to request a preview" in prompt
+    assert "read_markets governs business reads, not Control preview authorization" in prompt
+    assert '{"combo_yield.enabled": false}' in prompt
+    description = next(t["description"] for t in captured[0]["tools"]
+                       if t["name"] == "request_control_preview")
+    assert "not Control permission limits" in description
+    assert result["ok"] is write_allowed
+    if write_allowed:
+        assert result["data"]["control"]["requires_confirmation"] is True
+        payload = result["data"]["payload"]
+        assert payload["config"]["market"] == "hk"
+        assert payload["yaml_symbol_mutation"]["set"] == {"combo_yield.enabled": False}
+        assert "markets.hk.overrides.3690.HK.combo_yield.enabled" in result["data"]["response_text"]
+    else:
+        assert result["error"]["code"] == "PERMISSION_DENIED"
+    assert {path: path.read_bytes() for path in before} == before
+
+
 def test_bot_receives_current_conversation_pending_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
