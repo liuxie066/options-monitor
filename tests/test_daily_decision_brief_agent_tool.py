@@ -293,3 +293,13 @@ def test_historical_agent_query_passes_explicit_market(market, monkeypatch, tmp_
     monkeypatch.setattr(mod, "read_daily_brief_view", read)
     mod.DAILY_DECISION_BRIEF_READ_TOOL.call({"account": "lx", "market": market, "date": "2026-07-19"})
     assert calls[0]["market"] == market
+
+
+def test_shared_notification_preview_history_contract_and_examples():
+    from src.application.agent_tools.notifications import PREVIEW_NOTIFICATION_TOOL
+    from src.application.agent_tools.daily_brief import validate_daily_brief_query_input
+    from src.application.agent_tool_contracts import AgentToolError
+    for example in PREVIEW_NOTIFICATION_TOOL.examples:
+        validate_daily_brief_query_input(example["input"])
+    with pytest.raises(AgentToolError, match="market is required"):
+        PREVIEW_NOTIFICATION_TOOL.call({"account": "lx", "date": "2026-07-19", "revision": 0})

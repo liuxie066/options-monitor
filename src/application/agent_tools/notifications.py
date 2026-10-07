@@ -78,7 +78,7 @@ PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
     examples=(
         {"input": {}},
         {"input": {"account": "lx", "market": "US"}},
-        {"input": {"account": "lx", "date": "2026-07-19", "revision": 0}},
+        {"input": {"account": "lx", "market": "US", "date": "2026-07-19", "revision": 0}},
     ),
     output_contract=_PREVIEW_NOTIFICATION_OUTPUT_CONTRACT,
     bot_input_fields=("account", "market", "date", "revision"),
