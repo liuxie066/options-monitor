@@ -104,7 +104,7 @@ def _tool_events(calls: list[tuple[str, dict]]) -> list[AppEvent]:
 
 def _eval(tmp_path, **overrides: object) -> dict:
     base: dict[str, object] = {
-        "assistant_config": "config.yaml",
+        "bot_config": "config.yaml",
         "config_key": "us",
         "host_db": str(tmp_path / "host.sqlite3"),
     }
@@ -151,7 +151,7 @@ def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
 
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr(bot_p1_eval, "run_eval", run_eval)
-    _set_argv(monkeypatch, "--assistant-config", "config.assistant.json",
+    _set_argv(monkeypatch, "--bot-config", "config.bot.json",
               "--runtime-root", str(runtime_root))
 
     assert bot_p1_eval.main() == 0
@@ -169,7 +169,7 @@ def test_p1_eval_main_fails_when_evidence_gate_fails(monkeypatch) -> None:
             "answer_quality_pass": None,
         },
     )
-    _set_argv(monkeypatch, "--assistant-config", "config.assistant.json")
+    _set_argv(monkeypatch, "--bot-config", "config.bot.json")
 
     assert bot_p1_eval.main() == 1
 
@@ -379,10 +379,9 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
 
 
 def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -> None:
-    config = tmp_path / "config.assistant.json"
+    config = tmp_path / "config.bot.json"
     config.write_text(
-        '{"assistant":{"enabled":true,"bot":{"enabled":true},"llm":{"provider":"openai","model":"gpt-test",'
-        '"api_key_env":"TEST_KEY","timeout_seconds":45,"context_window_tokens":24000,"max_output_tokens":2048}}}',
+        '{"bot": {"enabled": true, "llm": {"provider": "openai", "model": "gpt-test", "api_key_env": "TEST_KEY", "timeout_seconds": 45, "context_window_tokens": 24000, "max_output_tokens": 2048}}}',
         encoding="utf-8",
     )
 
@@ -407,7 +406,7 @@ def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -
         return AppResult(status="answered", user_response="结论：测试回答", events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = _eval(tmp_path, assistant_config=str(config), config_key="us", host_db=str(tmp_path / "host.sqlite3"))
+    payload = _eval(tmp_path, bot_config=str(config), config_key="us", host_db=str(tmp_path / "host.sqlite3"))
 
     assert payload["schema_version"] == "om.bot.p1_eval.v4"
     assert payload["runtime_version"]
@@ -429,7 +428,7 @@ def test_p1_eval_applies_complete_human_review_scores(monkeypatch, tmp_path) -> 
     scores = {dimension: 2 for dimension in bot_p1_eval._empty_human_review()}
     reviews = {case.name: dict(scores) for case in bot_p1_eval.CASES}
 
-    payload = _eval(tmp_path, assistant_config="missing.json", human_reviews=reviews)
+    payload = _eval(tmp_path, bot_config="missing.json", human_reviews=reviews)
 
     assert payload["answer_quality_review"] == "reviewed"
     assert payload["answer_quality_pass"] is True

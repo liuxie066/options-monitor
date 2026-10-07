@@ -8,7 +8,7 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.config_edit import get_runtime_config_value
 from src.application.config_yaml import (
-    build_yaml_assistant_config_file,
+    build_yaml_bot_config_file,
     build_yaml_runtime_config_file,
     explain_yaml_config_key,
     validate_yaml_runtime_config,
@@ -71,12 +71,12 @@ def add_config_commands(subparsers: Any) -> None:
     build.add_argument("--system-config", default=None)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
-    build_assistant = config_sub.add_parser("build-assistant", help="build assistant config from config.yaml")
-    build_assistant.add_argument("--source", default="yaml", choices=("yaml",))
-    build_assistant.add_argument("--config-yaml", default=None)
-    build_assistant.add_argument("--system-config", default=None)
-    build_assistant.add_argument("--output", default=None)
-    build_assistant.add_argument("--dry-run", action="store_true")
+    build_bot = config_sub.add_parser("build-bot", help="build Bot config from config.yaml")
+    build_bot.add_argument("--source", default="yaml", choices=("yaml",))
+    build_bot.add_argument("--config-yaml", default=None)
+    build_bot.add_argument("--system-config", default=None)
+    build_bot.add_argument("--output", default=None)
+    build_bot.add_argument("--dry-run", action="store_true")
     explain = config_sub.add_parser("explain", help="explain a config.yaml key")
     explain.add_argument("--source", default="yaml", metavar="{yaml}", help="authoring source; defaults to yaml")
     explain.add_argument("--config-yaml", default=None)
@@ -212,7 +212,7 @@ def handle_config_command(
     validate_runtime_config_fn: Callable[..., dict[str, Any]] = _validate_runtime_config,
     validate_yaml_runtime_config_fn: Callable[..., dict[str, Any]] = validate_yaml_runtime_config,
     build_yaml_runtime_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_runtime_config_file,
-    build_yaml_assistant_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_assistant_config_file,
+    build_yaml_bot_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_bot_config_file,
     explain_yaml_config_key_fn: Callable[..., dict[str, Any]] = explain_yaml_config_key,
     init_yaml_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
@@ -286,8 +286,8 @@ def handle_config_command(
             dry_run=bool(args.dry_run),
         )
 
-    if args.config_command == "build-assistant":
-        return build_yaml_assistant_config_file_fn(
+    if args.config_command == "build-bot":
+        return build_yaml_bot_config_file_fn(
             repo_root=repo_base_fn(),
             config_path=args.config_yaml,
             system_config_path=args.system_config,

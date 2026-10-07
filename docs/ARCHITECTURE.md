@@ -8,7 +8,7 @@ domain rules, external adapters, and local state repositories.
 
 | Layer | Path | Owns |
 |---|---|---|
-| Interfaces | `src/interfaces/` | Human CLI, Tool Gateway, and Inbound Assistant request/response adaptation |
+| Interfaces | `src/interfaces/` | Human CLI, Tool Gateway, and Inbound Bot request/response adaptation |
 | Application | `src/application/` | Use-case orchestration, config assembly, pipeline execution, notification flow |
 | Domain | `domain/domain/` | Deterministic strategy, scheduler, notification, position, and schema decisions |
 | Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, WeChat ClawBot, exchange-rate and subprocess adapters |
@@ -103,7 +103,7 @@ sanitized summary in the inbound audit record.
 ## Research
 
 Research is an independent offline evidence module, not part of the Inbound
-Assistant core, the Tool Gateway manifest, or a remote chat surface.
+Bot core, the Tool Gateway manifest, or a remote chat surface.
 
 ```text
 ./om research collect ...
@@ -134,7 +134,7 @@ remains a shared pure sanitizer used by Bot and support-bundle code.
 ## Inbound Flow
 
 Remote messages intentionally separate channel transport from application
-execution. The current CLI namespace remains `./om assistant ...`:
+execution. The current CLI namespace remains `./om bot ...`:
 
 ```text
 Feishu / future channels
@@ -153,10 +153,10 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
-`AssistantRequest`, the inbound audit row, and the pending-operation store form
+`BotInboundRequest`, the inbound audit row, and the pending-operation store form
 the deterministic Control boundary. Protocol command parsing, bound permission
 responses, sender allowlist checks, previews, confirmations, applies, and
-operation receipts are owned by `src.application.assistant`.
+operation receipts are owned by `src.application.bot.control`.
 
 Every message that is not explicit Control protocol enters the read-first
 Bot path. Bot Service prepares the execution contract, Host owns
@@ -173,14 +173,14 @@ also receives a fresh current-conversation pending snapshot from the operation
 store, so stale or compacted chat history cannot become operation authority.
 
 There is no business intent router, multi-Scene catalog, planner fallback,
-evidence pipeline, or synthetic Assistant Agent session. Missing model
+evidence pipeline, or synthetic Bot Agent session. Missing model
 configuration or unavailable evidence produces an explicit Bot failure; it
 does not fall back to ordinary chat or deterministic business templates.
 
 Model selection is a startup/configuration concern. `config.yaml` may define multiple
-`assistant.models` profiles and an `assistant.active_model`, but
-`config build-assistant` resolves that into one flat `assistant.llm` in
-`config.assistant.json`. Control and tool execution do not choose models per
+`bot.models` profiles and an `bot.active_model`, but
+`config build-bot` resolves that into one flat `bot.llm` in
+`config.bot.json`. Control and tool execution do not choose models per
 message.
 
 Inbound uses one explicit command/permission contract. Slash commands never call
@@ -402,6 +402,6 @@ When adding code:
 - Put pure business decisions in `domain/domain`.
 - Put use-case orchestration in `src/application`.
 - Put external system adapters in `src/infrastructure`.
-- Put CLI, Tool Gateway, and Inbound Assistant argument/response adaptation in `src/interfaces`.
+- Put CLI, Tool Gateway, and Inbound Bot argument/response adaptation in `src/interfaces`.
 - Prefer a small facade-preserving move over changing public command behavior.
 - Add or update boundary tests when moving ownership between layers.

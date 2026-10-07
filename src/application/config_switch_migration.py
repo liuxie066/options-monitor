@@ -33,12 +33,31 @@ def migrate_switch_document(source: dict[str, Any]) -> tuple[dict[str, Any], lis
         del parent[key]
         changes.append({"path": path, "before": value, "action": "remove_inert_field"})
 
-    assistant = section(doc, "assistant", "assistant")
-    if "copilot" in assistant:
-        raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message="assistant.copilot requires om bot migrate --dry-run first; switch migration does not migrate Bot storage")
-    bot = section(assistant, "bot", "assistant.bot")
-    remove(bot, "toolsets", "assistant.bot.toolsets", lambda v: isinstance(v, dict) and set(v) <= {"portfolio"} and all(isinstance(x, bool) for x in v.values()))
-    remove(bot, "tool_loading_mode", "assistant.bot.tool_loading_mode", lambda v: v in ("eager", "directory"))
+    if "assistant" in doc:
+        if "bot" in doc:
+            raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message="both assistant and bot are configured; resolve the duplicate explicitly")
+        assistant = section(doc, "assistant", "assistant")
+        if "copilot" in assistant:
+            raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message="assistant.copilot requires om bot migrate --dry-run first; switch migration does not migrate Bot storage")
+        nested = section(assistant, "bot", "assistant.bot")
+        remove(nested, "toolsets", "assistant.bot.toolsets", lambda v: isinstance(v, dict) and set(v) <= {"portfolio"} and all(isinstance(x, bool) for x in v.values()))
+        remove(nested, "tool_loading_mode", "assistant.bot.tool_loading_mode", lambda v: v in ("eager", "directory"))
+        if set(nested) - {"enabled", "read_markets"}:
+            raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message="assistant.bot contains unsupported legacy fields")
+        for parent, path in ((assistant, "assistant"), (nested, "assistant.bot")):
+            if "enabled" in parent and not isinstance(parent["enabled"], bool):
+                raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message=f"{path}.enabled must be a boolean")
+        if "read_markets" in assistant and "read_markets" in nested:
+            raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message="duplicate legacy read_markets configuration")
+        enabled = assistant.get("enabled", True) and nested.get("enabled", False)
+        unified = {key: value for key, value in assistant.items() if key not in {"enabled", "bot"}}
+        unified.update({key: value for key, value in nested.items() if key != "enabled"})
+        unified["enabled"] = enabled
+        changes.append({"path": "assistant", "action": "unify_bot_config", "after_path": "bot",
+                        "enabled_before": {"assistant": assistant.get("enabled", True), "bot": nested.get("enabled", False)},
+                        "enabled_after": enabled})
+        del doc["assistant"]
+        doc["bot"] = unified
     accounts = section(doc, "accounts", "accounts")
     for account, value in accounts.items():
         if isinstance(value, dict) and "holdings_account" in value:

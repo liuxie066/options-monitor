@@ -175,16 +175,15 @@ WATCHDOG_CONFIG_KEYS = {
     'success_threshold',
 }
 VALID_FUTU_TRD_ENVS = {'REAL', 'SIMULATE'}
-ASSISTANT_CONFIG_KEYS = {
+BOT_CONFIG_KEYS = {
     'active_model',
     'context_window_messages',
-    'bot',
+    'read_markets',
     'default_market_scope',
     'enabled',
     'llm',
     'models',
 }
-BOT_CONFIG_KEYS = {'enabled', 'read_markets'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -558,78 +557,67 @@ def _validate_inbound_config(cfg: dict) -> None:
             _validate_optional_non_negative_number(wechat_clawbot, 'keepalive_interval_sec', 'inbound.wechat_clawbot')
 
 
-def _validate_assistant_config(cfg: dict) -> None:
-    assistant = cfg.get('assistant')
-    if assistant is None:
-        assistant = {}
-    if not isinstance(assistant, dict):
-        die('assistant must be an object')
-    if 'copilot' in assistant:
-        die('assistant.copilot is retired; run ./om bot migrate --dry-run')
-    unsupported_assistant_keys = sorted(str(key) for key in assistant.keys() if str(key) not in ASSISTANT_CONFIG_KEYS)
-    if unsupported_assistant_keys:
-        die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
-    if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
-        die('assistant.enabled must be a boolean')
-    bot = assistant.get('bot')
+def _validate_bot_config(cfg: dict) -> None:
+    if 'assistant' in cfg:
+        die('assistant is retired; run om config migrate-switches')
+    bot = cfg.get('bot')
     if bot is None:
         bot = {}
     if not isinstance(bot, dict):
-        die('assistant.bot must be an object')
-    if {'toolsets', 'tool_loading_mode'} & bot.keys():
-        die('assistant.bot contains retired switches; run om config migrate-switches')
-    unsupported_bot = sorted(str(key) for key in bot if key not in BOT_CONFIG_KEYS)
-    if unsupported_bot:
-        die(f'assistant.bot contains unsupported keys: {", ".join(unsupported_bot)}')
-    if 'enabled' in bot and bot.get('enabled') is not None and not isinstance(bot.get('enabled'), bool):
-        die('assistant.bot.enabled must be a boolean')
+        die('bot must be an object')
+    if 'copilot' in bot:
+        die('bot.copilot is retired; run ./om bot migrate --dry-run')
+    unsupported_bot_keys = sorted(str(key) for key in bot.keys() if str(key) not in BOT_CONFIG_KEYS)
+    if unsupported_bot_keys:
+        die('bot has unsupported keys: ' + ', '.join(unsupported_bot_keys))
+    if 'enabled' in bot and not isinstance(bot.get('enabled'), bool):
+        die('bot.enabled must be a boolean')
     if 'read_markets' in bot:
         markets = bot['read_markets']
         if (not isinstance(markets, list) or not markets
                 or any(not isinstance(market, str) or market not in {'us', 'hk'} for market in markets)
                 or len(markets) != len(set(markets))):
-            die('assistant.bot.read_markets must be a non-empty list of unique us/hk markets')
-    if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
-        validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
-        if int(assistant.get('context_window_messages')) > 20:
-            die('assistant.context_window_messages must be <= 20')
-    if 'default_market_scope' in assistant and assistant.get('default_market_scope') is not None:
-        if str(assistant.get('default_market_scope') or '').strip().lower() not in {'us', 'hk', 'all'}:
-            die('assistant.default_market_scope must be one of: us, hk, all')
-    if 'models' in assistant or 'active_model' in assistant:
-        die('assistant.models and assistant.active_model belong in config.yaml; build config.assistant.json first')
-    llm = assistant.get('llm') or {}
+            die('bot.read_markets must be a non-empty list of unique us/hk markets')
+    if 'context_window_messages' in bot and bot.get('context_window_messages') is not None:
+        validate_non_negative_integer(bot.get('context_window_messages'), 'bot.context_window_messages')
+        if int(bot.get('context_window_messages')) > 20:
+            die('bot.context_window_messages must be <= 20')
+    if 'default_market_scope' in bot and bot.get('default_market_scope') is not None:
+        if str(bot.get('default_market_scope') or '').strip().lower() not in {'us', 'hk', 'all'}:
+            die('bot.default_market_scope must be one of: us, hk, all')
+    if 'models' in bot or 'active_model' in bot:
+        die('bot.models and bot.active_model belong in config.yaml; build config.bot.json first')
+    llm = bot.get('llm') or {}
     if not isinstance(llm, dict):
-        die('assistant.llm must be an object')
+        die('bot.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.bot.enabled')
+        die('bot.llm.enabled is retired; use bot.enabled')
     _validate_llm_config(
         llm,
-        path='assistant.llm',
+        path='bot.llm',
         enabled=bool(
-            assistant.get('enabled') is not False
-            and bot.get('enabled') is True
+            bot.get('enabled') is True
             and str(llm.get('provider') or '').strip()
             and str(llm.get('model') or '').strip()
         ),
-        required_reason='assistant Bot uses LLM',
+        required_reason='Bot uses LLM',
     )
 
     if 'agent' in cfg:
-        die('agent.* config is retired; use assistant.*')
+        die('agent.* config is retired; use bot.*')
 
 
-def validate_assistant_config(cfg: dict) -> None:
-    allowed = {'assistant', 'inbound', '_generated', '_resolved'}
+def validate_bot_config(cfg: dict) -> None:
+    allowed = {'bot', 'inbound', '_generated', '_resolved'}
     unsupported = sorted(str(key) for key in cfg.keys() if str(key) not in allowed)
     if unsupported:
         die(
-            'assistant config has unsupported top-level keys: '
+            'Bot config has unsupported top-level keys: '
             + ', '.join(unsupported)
-            + '; use config.assistant.json, not config.<market>.json'
+            + '; use config.bot.json, not config.<market>.json'
         )
     _validate_inbound_config(cfg)
-    _validate_assistant_config(cfg)
+    _validate_bot_config(cfg)
 
 
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
@@ -1244,7 +1232,7 @@ def validate_config(cfg: dict):
 
     _validate_inbound_config(cfg)
 
-    _validate_assistant_config(cfg)
+    _validate_bot_config(cfg)
 
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):

@@ -676,7 +676,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     assert str(repo / "om") + " inbound feishu-ws" in service
     assert "--config-path " + str(repo / "config.us.json") in service
     assert "--config-key" not in service
-    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
+    assert "--bot-config " + str(runtime / "resolved" / "config.bot.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
@@ -687,8 +687,8 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
         "options-monitor-feishu-ws.service",
     ]
     assert profile["feishu_ws"]["enabled"] is True
-    assert profile["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
-    assert profile["feishu_ws"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
+    assert profile["bot_config_path"] == str(runtime / "resolved" / "config.bot.json")
+    assert profile["feishu_ws"]["bot_config_path"] == str(runtime / "resolved" / "config.bot.json")
     assert profile["feishu_ws"]["lock_path"] == str(runtime / "locks" / "feishu-ws.lock")
     assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
 
@@ -714,7 +714,7 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     assert "--state-dir " + str(runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops") in service
     assert "--config-path " + str(repo / "config.us.json") in service
     assert "--config-key" not in service
-    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
+    assert "--bot-config " + str(runtime / "resolved" / "config.bot.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--allowed-senders wechat:user_1" in service
     assert "--lock-path " + str(runtime / "locks" / "wechat-clawbot.lock") in service
@@ -731,7 +731,7 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     assert profile["wechat_clawbot"]["allowed_senders"] == "wechat:user_1"
     assert profile["wechat_clawbot"]["allowed_senders_configured"] is True
     assert profile["wechat_clawbot"]["allowed_senders_source"] == "render_argument"
-    assert profile["wechat_clawbot"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
+    assert profile["wechat_clawbot"]["bot_config_path"] == str(runtime / "resolved" / "config.bot.json")
     assert profile["wechat_clawbot"]["lock_path"] == str(runtime / "locks" / "wechat-clawbot.lock")
     assert "systemctl enable --now options-monitor-wechat-clawbot.service" in bundle["commands"]["enable"]
 
@@ -767,13 +767,13 @@ inbound:
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "--label ops" in service
-    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
+    assert "--bot-config " + str(runtime / "resolved" / "config.bot.json") in service
     assert "--allowed-senders" not in service
     assert profile["wechat_clawbot"]["label"] == "ops"
     assert profile["wechat_clawbot"]["allowed_senders_configured"] is True
     assert profile["wechat_clawbot"]["allowed_senders_source"] == "config_yaml"
     assert "allowed_senders" not in profile["wechat_clawbot"]
-    assert profile["wechat_clawbot"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
+    assert profile["wechat_clawbot"]["bot_config_path"] == str(runtime / "resolved" / "config.bot.json")
 
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
     releases = tmp_path / "releases"
@@ -1243,7 +1243,7 @@ def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_pa
     repo.mkdir()
     state_dir = tmp_path / "wechat-state"
     audit_db = tmp_path / "inbound.sqlite3"
-    assistant_config = tmp_path / "config.assistant.json"
+    bot_config = tmp_path / "config.bot.json"
     config_path = tmp_path / "config.us.json"
     profile = {
         "service_provider": "systemd",
@@ -1253,7 +1253,7 @@ def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_pa
             "label": "ops",
             "state_dir": str(state_dir),
             "config_key": "us",
-            "assistant_config_path": str(assistant_config),
+            "bot_config_path": str(bot_config),
             "audit_db": str(audit_db),
             "allowed_senders": "wechat:user_1",
         },
@@ -1286,8 +1286,8 @@ def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_pa
                 "us",
                 "--config-path",
                 str(config_path),
-                "--assistant-config",
-                str(assistant_config),
+                "--bot-config",
+                str(bot_config),
                 "--audit-db",
                 str(audit_db),
                 "--allowed-senders",

@@ -71,7 +71,7 @@ def test_enable_disable_reenable_and_response_lost_preserve_identity(tmp_path, m
     with pytest.raises(AgentToolError, match="superseded"):
         _call(root, action="disable", generation=1, request="disable-1")
     assert (root / "config.hk.json").read_bytes() == sibling
-    assert not (root / "resolved/config.assistant.json").exists()
+    assert not (root / "resolved/config.bot.json").exists()
     cfg = json.loads((root / "config.us.json").read_text())
     assert cfg["wheel"]["accounts"] == ["lx"]
     assert "sy" not in cfg["wheel"]["activation_by_account"]

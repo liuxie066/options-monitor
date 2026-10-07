@@ -19,9 +19,9 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.application.agent_tool_registry import pure_read_tool_names
-from src.application.assistant.capability_catalog import preview_operation_capabilities
+from src.application.bot.control.capability_catalog import preview_operation_capabilities
 from src.application.bot.channel_facade import run_channel_request
-from src.application.bot.model_config import load_assistant_llm_config
+from src.application.bot.model_config import load_bot_llm_config
 from src.application.bot.result_admission import output_contract_matches
 from src.application.research.redaction import redact_value
 
@@ -172,7 +172,7 @@ HOST_READ_ACTIONS = frozenset({"__read_observation__"})
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the production-side Bot P1 read-only evaluation.")
-    parser.add_argument("--assistant-config")
+    parser.add_argument("--bot-config")
     parser.add_argument("--config-key", choices=("us", "hk"), default="us")
     parser.add_argument("--runtime-root")
     parser.add_argument("--output")
@@ -186,15 +186,15 @@ def main() -> int:
             parser.error("--review-report requires --review-input")
         payload = apply_human_reviews(_load_report(args.review_report), human_reviews)
     else:
-        if not args.assistant_config:
-            parser.error("--assistant-config is required unless --review-report is used")
+        if not args.bot_config:
+            parser.error("--bot-config is required unless --review-report is used")
         previous_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
         try:
             if args.runtime_root:
                 os.environ["OM_RUNTIME_ROOT"] = args.runtime_root
             with tempfile.TemporaryDirectory(prefix="om-bot-p1-") as temp_dir:
                 payload = run_eval(
-                    assistant_config=args.assistant_config,
+                    bot_config=args.bot_config,
                     config_key=args.config_key,
                     host_db=str(Path(temp_dir) / "host.sqlite3"),
                     human_reviews=human_reviews,
@@ -257,7 +257,7 @@ def apply_human_reviews(
 
 def run_eval(
     *,
-    assistant_config: str,
+    bot_config: str,
     config_key: str,
     host_db: str,
     human_reviews: dict[str, dict[str, int]] | None = None,
@@ -272,7 +272,7 @@ def run_eval(
             result = run_channel_request(
                 user_message=case.question,
                 config_key=config_key,
-                assistant_config_path=assistant_config,
+                bot_config_path=bot_config,
                 channel="bot-p1-eval",
                 sender_id="bot-p1-eval",
                 conversation_id=case.conversation_id,
@@ -418,7 +418,7 @@ def run_eval(
         "elapsed_seconds": round(time.monotonic() - eval_started, 3),
         "config_key": config_key,
         "runtime_version": _runtime_version(),
-        "model": _model_metadata(assistant_config),
+        "model": _model_metadata(bot_config),
         "structural_pass": (
             scene_provenance_consistent
             and all(item["structural_pass"] for item in results)
@@ -543,8 +543,8 @@ def _human_review_score(review: dict[str, int | None]) -> int | None:
     return None if any(value is None for value in values) else sum(int(value) for value in values)
 
 
-def _model_metadata(assistant_config: str) -> dict[str, Any]:
-    raw, error = load_assistant_llm_config(config_path=assistant_config, require_config=True)
+def _model_metadata(bot_config: str) -> dict[str, Any]:
+    raw, error = load_bot_llm_config(config_path=bot_config, require_config=True)
     if raw is None:
         return {"configured": False, "error": error or "model_not_configured"}
     return {

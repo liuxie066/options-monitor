@@ -142,13 +142,13 @@ def test_auto_close_rejects_unconfigured_account_before_run_artifacts(monkeypatc
     assert not (base / "output_runs").exists()
 
 
-def test_assistant_parsers_use_configured_account_labels() -> None:
-    from src.application.assistant.command_parser import parse_assistant_command
-    from src.application.assistant.position_query import PositionQuery, parse_position_query_text
+def test_bot_parsers_use_configured_account_labels() -> None:
+    from src.application.bot.control.command_parser import parse_bot_control_command
+    from src.application.bot.control.position_query import PositionQuery, parse_position_query_text
 
-    positions = parse_assistant_command("/positions christina", now_fn=lambda: TODAY, accounts=["christina"])
-    income = parse_assistant_command("/income christina ytd", now_fn=lambda: TODAY, accounts=["christina"])
-    monitor_run = parse_assistant_command("/monitor-run hk christina", now_fn=lambda: TODAY, accounts=["christina"])
+    positions = parse_bot_control_command("/positions christina", now_fn=lambda: TODAY, accounts=["christina"])
+    income = parse_bot_control_command("/income christina ytd", now_fn=lambda: TODAY, accounts=["christina"])
+    monitor_run = parse_bot_control_command("/monitor-run hk christina", now_fn=lambda: TODAY, accounts=["christina"])
 
     assert positions is not None and positions.arguments["account"] == "christina"
     assert income is not None and income.arguments == {"account": "christina", "period": "ytd"}
@@ -162,12 +162,12 @@ def test_assistant_parsers_use_configured_account_labels() -> None:
 
 def test_inbound_positions_preserves_runtime_config_account(monkeypatch, tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import build_response
-    from src.application.assistant.contracts import AssistantRequest
-    from src.application.assistant.inbound_service import handle_assistant_request
+    from src.application.bot.control.contracts import BotInboundRequest
+    from src.application.bot.control.inbound_service import handle_bot_request
 
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        "src.application.assistant.inbound_service.load_runtime_config",
+        "src.application.bot.control.inbound_service.load_runtime_config",
         lambda **_kwargs: (tmp_path / "config.us.json", {"accounts": ["christina"]}),
     )
 
@@ -175,8 +175,8 @@ def test_inbound_positions_preserves_runtime_config_account(monkeypatch, tmp_pat
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={})
 
-    response = handle_assistant_request(
-        AssistantRequest(
+    response = handle_bot_request(
+        BotInboundRequest(
             text="/positions christina",
             sender_id="local",
             message_id="custom-account-position",
@@ -191,8 +191,8 @@ def test_inbound_positions_preserves_runtime_config_account(monkeypatch, tmp_pat
 
 
 def test_inbound_monitor_run_uses_target_market_accounts(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant.contracts import AssistantRequest
-    from src.application.assistant.inbound_service import handle_assistant_request
+    from src.application.bot.control.contracts import BotInboundRequest
+    from src.application.bot.control.inbound_service import handle_bot_request
 
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_MONITOR_RUN_ENABLED", "1")
@@ -220,8 +220,8 @@ def test_inbound_monitor_run_uses_target_market_accounts(monkeypatch, tmp_path: 
             encoding="utf-8",
         )
 
-    response = handle_assistant_request(
-        AssistantRequest(
+    response = handle_bot_request(
+        BotInboundRequest(
             text="/monitor-run hk christina",
             sender_id="ou_1",
             channel="feishu",

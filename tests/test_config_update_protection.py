@@ -9,7 +9,7 @@ from scripts import guardrails_check
 def test_guardrails_classifies_only_root_runtime_configs() -> None:
     assert guardrails_check.is_root_runtime_config_path(Path("config.us.json"))
     assert guardrails_check.is_root_runtime_config_path(Path("config.hk.json"))
-    assert guardrails_check.is_root_runtime_config_path(Path("config.assistant.json"))
+    assert guardrails_check.is_root_runtime_config_path(Path("config.bot.json"))
     assert guardrails_check.is_root_runtime_config_path(Path("config.json"))
     assert guardrails_check.is_root_runtime_config_path(Path("config.market_us.json"))
     assert guardrails_check.is_root_runtime_config_path(Path("config.local.prod.json"))
@@ -24,7 +24,7 @@ def test_guardrails_rejects_tracked_root_runtime_configs() -> None:
         [
             Path("config.us.json"),
             Path("config.hk.json"),
-            Path("config.assistant.json"),
+            Path("config.bot.json"),
             Path("configs/examples/user.example.us.json"),
         ]
     )
@@ -32,7 +32,7 @@ def test_guardrails_rejects_tracked_root_runtime_configs() -> None:
     assert [issue.path.as_posix() for issue in issues] == [
         "config.us.json",
         "config.hk.json",
-        "config.assistant.json",
+        "config.bot.json",
     ]
     assert all("root runtime config must stay untracked" in issue.reason for issue in issues)
 

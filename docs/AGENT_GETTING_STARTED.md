@@ -49,7 +49,7 @@ python3.12 -m venv .venv
 
 - `config.yaml`
 - 所选市场的快照（上例为 `config.us.json`）
-- `config.assistant.json`
+- `config.bot.json`
 
 默认最小配置下：
 

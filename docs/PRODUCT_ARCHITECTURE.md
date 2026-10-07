@@ -162,7 +162,7 @@ tick
 
 ### 4. 配置与控制面
 
-定义：负责用户意图、系统默认值、runtime 快照、账户/标的管理，以及 CLI / Tool Gateway / Inbound Assistant 入口。
+定义：负责用户意图、系统默认值、runtime 快照、账户/标的管理，以及 CLI / Tool Gateway / Inbound Bot 入口。
 
 包含模块：
 
@@ -205,7 +205,7 @@ Feishu / WeChat / Inbound
 
 边界：
 
-- CLI / Tool Gateway / Inbound Assistant 是入口和控制面，不拥有业务规则。
+- CLI / Tool Gateway / Inbound Bot 是入口和控制面，不拥有业务规则。
 - Tool Gateway 工具默认应优先读现有证据；写路径必须受 preview / confirm / env gate 控制。
 - 配置默认值应集中在配置层，不应散落到策略实现里形成第二套控制面。
 
@@ -217,7 +217,7 @@ Feishu / WeChat / Inbound
 - `src/interfaces/cli/`
 - `src/interfaces/agent/`
 - `src/application/agent_tool_registry.py`
-- `src/application/assistant/`
+- `src/application/bot/control/`
 - `src/application/inbound/`
 
 ### 5. 研究与复盘

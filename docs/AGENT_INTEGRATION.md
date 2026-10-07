@@ -15,7 +15,7 @@ It exposes a stable JSON contract intended for local machine usage:
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
-Capability boundaries, risk classes, Inbound Assistant exposure, and
+Capability boundaries, risk classes, Inbound Bot exposure, and
 verification rules are maintained in
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 This document only describes integration contracts and invocation patterns.
@@ -251,11 +251,11 @@ Use `./om bot handle` when a remote messaging gateway needs to send user text in
 ./om bot handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
+This is a controlled Inbound Bot message entrypoint, not an `./om-agent`
 tool and not a shell bridge. It performs sender allowlist checks, message
 idempotency, and SQLite audit. Explicit commands and pending-operation replies
 enter deterministic Control; every other message enters the single read-first
-`om_chat` Bot Scene when `assistant.bot.enabled` is true. Bot gets
+`om_chat` Bot Scene when `bot.enabled` is true. Bot gets
 canonical pure-read tools selected by its scene. Portfolio queries follow
 `portfolio_management.enabled`; no extra Bot toolset switch is required. Bot may request one validated deterministic Control
 preview; it cannot confirm, cancel, apply, or receive direct notification,

@@ -20,23 +20,12 @@ from tests.bot_http_test_support import _chat_response, _loopback_server
 REPO = Path(__file__).resolve().parents[1]
 
 
-def _assistant_config(tmp_path: Path, provider_url: str) -> Path:
-    path = tmp_path / "config.assistant.json"
+def _bot_config(tmp_path: Path, provider_url: str) -> Path:
+    path = tmp_path / "config.bot.json"
     path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "enabled": True,
-                    "bot": {"enabled": True},
-                    "llm": {
-                        "provider": "ollama",
-                        "model": "om-test",
-                        "base_url": provider_url + "/v1",
-                        "context_window_tokens": 128000,
-                        "max_output_tokens": 2048,
-                        "max_attempts": 1,
-                    },
-                }
+                "bot": {'enabled': True, 'llm': {'provider': 'ollama', 'model': 'om-test', 'base_url': provider_url + '/v1', 'context_window_tokens': 128000, 'max_output_tokens': 2048, 'max_attempts': 1}}
             }
         ),
         encoding="utf-8",
@@ -83,7 +72,7 @@ def _feishu_settings(
     return FeishuWsSettings(
         config_key=config_key,
         config_path=config_path,
-        assistant_config_path=str(_assistant_config(tmp_path, url)),
+        bot_config_path=str(_bot_config(tmp_path, url)),
         allowed_senders="feishu:ou_1",
         app_id="test",
         app_secret="test",

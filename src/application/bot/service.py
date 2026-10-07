@@ -51,7 +51,7 @@ def prepare_contract(
             "authority_scope",
             "read_markets",
             "read_generation",
-            "assistant_config_path",
+            "bot_config_path",
         }
         and value not in (None, "")
     }

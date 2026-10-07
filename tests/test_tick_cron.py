@@ -366,7 +366,7 @@ def test_tick_cron_real_preflight_after_yaml_edit(
     )
     source.write_text(
         "markets: [PRIVATE_CONFIG_VALUE\n" if invalid_yaml
-        else original + "assistant:\n  enabled: false\n  context_window_messages: 8\n",
+        else original + "bot:\n  enabled: false\n  context_window_messages: 8\n",
         encoding="utf-8",
     )
     calls = []

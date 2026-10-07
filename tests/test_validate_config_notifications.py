@@ -80,97 +80,96 @@ def test_validate_config_rejects_openclaw_notification_route() -> None:
 
 def test_validate_config_rejects_retired_agent_config() -> None:
     _reject_config(
-        "agent.* config is retired; use assistant.*",
+        "agent.* config is retired; use bot.*",
         agent={"runtime": {"enabled": "yes"}},
     )
 
 
-def test_validate_config_rejects_invalid_assistant_context_window() -> None:
+def test_validate_config_rejects_invalid_bot_context_window() -> None:
     _reject_config(
-        "assistant.context_window_messages must be an integer",
-        assistant={"context_window_messages": "many"},
+        "bot.context_window_messages must be an integer",
+        bot={"context_window_messages": "many"},
     )
     _reject_config(
-        "assistant.context_window_messages must be <= 20",
-        assistant={"context_window_messages": 21},
+        "bot.context_window_messages must be <= 20",
+        bot={"context_window_messages": 21},
     )
 
 
-def test_validate_config_rejects_assistant_mode() -> None:
+def test_validate_config_rejects_bot_mode() -> None:
     _reject_config(
-        "assistant has unsupported keys: mode",
-        assistant={"mode": "disabled"},
+        "bot has unsupported keys: mode",
+        bot={"mode": "disabled"},
     )
 
 
 def test_validate_config_rejects_non_object_assistant() -> None:
-    _reject_config("assistant must be an object", assistant=False)
+    _reject_config("bot must be an object", bot=False)
 
 
-def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
+def test_validate_config_rejects_invalid_bot_llm_config() -> None:
     _reject_config(
-        "assistant.llm.enabled is retired; use assistant.bot.enabled",
-        assistant={"llm": {"enabled": True}},
+        "bot.llm.enabled is retired; use bot.enabled",
+        bot={"llm": {"enabled": True}},
     )
     _reject_config(
-        "assistant.llm.provider must be a string",
-        assistant={"llm": {"provider": ["openai"]}},
+        "bot.llm.provider must be a string",
+        bot={"llm": {"provider": ["openai"]}},
     )
 
 
 def test_validate_config_rejects_retired_bot_choices() -> None:
     for value in (True, False, "yes", None):
-        _reject_config("retired switches", assistant={"bot": {"toolsets": {"portfolio": value}}})
-    _reject_config("retired switches", assistant={"bot": {"tool_loading_mode": "directory"}})
+        _reject_config("unsupported keys", bot={"bot": {"toolsets": {"portfolio": value}}})
+    _reject_config("unsupported keys", bot={"bot": {"tool_loading_mode": "directory"}})
     _reject_config(
-        "assistant.llm.base_url must be a string",
-        assistant={"llm": {"base_url": ["https://llm.example/v1"]}},
+        "bot.llm.base_url must be a string",
+        bot={"llm": {"base_url": ["https://llm.example/v1"]}},
     )
     _reject_config(
-        "assistant.llm.base_url must start with http:// or https:// when set",
-        assistant={"llm": {"base_url": "llm.example/v1"}},
+        "bot.llm.base_url must start with http:// or https:// when set",
+        bot={"llm": {"base_url": "llm.example/v1"}},
     )
     _reject_config(
-        "assistant.llm.confidence_min must be between 0 and 1",
-        assistant={"llm": {"confidence_min": 1.5}},
+        "bot.llm.confidence_min must be between 0 and 1",
+        bot={"llm": {"confidence_min": 1.5}},
     )
     _reject_config(
-        "assistant.llm.timeout_seconds must be an integer",
-        assistant={"llm": {"timeout_seconds": "slow"}},
+        "bot.llm.timeout_seconds must be an integer",
+        bot={"llm": {"timeout_seconds": "slow"}},
     )
     _reject_config(
-        "assistant.llm.timeout_seconds must be <= 120",
-        assistant={"llm": {"timeout_seconds": 121}},
+        "bot.llm.timeout_seconds must be <= 120",
+        bot={"llm": {"timeout_seconds": 121}},
     )
     _reject_config(
-        "assistant.llm.max_output_tokens must be >= 64",
-        assistant={"llm": {"max_output_tokens": 63}},
+        "bot.llm.max_output_tokens must be >= 64",
+        bot={"llm": {"max_output_tokens": 63}},
     )
-    mod.validate_config(_config(assistant={"llm": {"max_output_tokens": 4097}}))
+    mod.validate_config(_config(bot={"llm": {"max_output_tokens": 4097}}))
     _reject_config(
-        "assistant.llm.provider must be one of: openai, deepseek, kimi",
-        assistant={"llm": {"provider": "anthropic"}},
+        "bot.llm.provider must be one of: openai, deepseek, kimi",
+        bot={"llm": {"provider": "anthropic"}},
     )
 
 
-def test_validate_config_rejects_legacy_assistant_modes_and_accepts_bot_config() -> None:
+def test_validate_config_rejects_legacy_bot_modes_and_accepts_bot_config() -> None:
     _reject_config(
-        "assistant has unsupported keys: mode",
-        assistant={
+        "bot has unsupported keys: mode",
+        bot={
             "mode": "llm_router",
             "llm": {"provider": "", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
         },
     )
-    _reject_config("assistant has unsupported keys: mode", assistant={"mode": "deterministic"})
-    _reject_config("assistant.enabled must be a boolean", assistant={"enabled": "yes"})
-    _reject_config("assistant has unsupported keys: planner", assistant={"planner": "enabled"})
-    _reject_config("assistant has unsupported keys: planner", assistant={"planner": {"enabled": "yes"}})
+    _reject_config("bot has unsupported keys: mode", bot={"mode": "deterministic"})
+    _reject_config("bot.enabled must be a boolean", bot={"enabled": "yes"})
+    _reject_config("bot has unsupported keys: planner", bot={"planner": "enabled"})
+    _reject_config("bot has unsupported keys: planner", bot={"planner": {"enabled": "yes"}})
     mod.validate_config(
         _config(
-            assistant={
+            bot={
                 "enabled": True,
-                "bot": {"enabled": True},
-                "llm": {
+                    "llm": {
                     "provider": "openai",
                     "base_url": "https://llm.example/v1",
                     "model": "gpt-5.2",
@@ -184,10 +183,9 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_bot_config()
     )
     mod.validate_config(
         _config(
-            assistant={
+            bot={
                 "enabled": True,
-                "bot": {"enabled": True},
-                "llm": {
+                    "llm": {
                     "provider": "deepseek",
                     "base_url": "https://api.deepseek.com",
                     "model": "deepseek-v4-flash",
@@ -220,9 +218,8 @@ def test_validate_active_bot_context_window(context_window_tokens, message) -> N
     if context_window_tokens is not None:
         llm["context_window_tokens"] = context_window_tokens
     cfg = _config(
-        assistant={
+        bot={
             "enabled": True,
-            "bot": {"enabled": True},
             "llm": llm,
         }
     )

@@ -20,7 +20,7 @@ from domain.domain.expiration_dates import expiration_market_date
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.position_query import PositionExpirationQuery, PositionQuery
+from src.application.bot.control.position_query import PositionExpirationQuery, PositionQuery
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows

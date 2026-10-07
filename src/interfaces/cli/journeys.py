@@ -164,7 +164,7 @@ def manage_service(run: Run, source: Path, *, input_fn: Input = input, action: s
             argv += ["--deploy-user", user]
     if action == "install":
         document = load_yaml_config_file(source)
-        if (document.get("assistant") or {}).get("enabled", False):
+        if (document.get("bot") or {}).get("enabled", False):
             if _yes("安装 Bot 的消息接入服务（后台收消息并回复）", input_fn):
                 channel = _choose("Bot 接入通道", ("feishu", "wechat-clawbot"), input_fn)
                 argv.append("--include-feishu-ws" if channel == "feishu" else "--include-wechat-clawbot")
@@ -332,9 +332,9 @@ def first_install(
             print("  " + item)
         if source.is_file():
             saved = load_yaml_config_file(source)
-            assistant = saved.get("assistant") or {}
+            bot_config = saved.get("bot") or {}
             states = (("通知", (saved.get("notifications") or {}).get("enabled", True)),
-                      ("Bot", assistant.get("enabled", False) and (assistant.get("bot") or {}).get("enabled", False)))
+                      ("Bot", bot_config.get("enabled", False) and (bot_config.get("bot") or {}).get("enabled", False)))
             for label, enabled in states:
                 print(f"  {label}：{'配置为启用，运行效果未验证' if enabled else '未启用'}")
             close_enabled = (saved.get("close_advice") or {}).get("enabled", True)

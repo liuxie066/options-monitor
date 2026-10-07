@@ -20,9 +20,9 @@ from src.application.bot.local_harness import run_local_request
 def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
     bot = subparsers.add_parser("bot", help="run Bot v2 local read-only tasks")
     bot_sub = bot.add_subparsers(dest="bot_command", required=True)
-    from src.interfaces.cli.assistant_ops import register_assistant_subcommands
+    from src.interfaces.cli.bot_control_ops import register_bot_control_subcommands
     from src.interfaces.cli.feature_ops import add_feature_configure_parser
-    register_assistant_subcommands(bot_sub)
+    register_bot_control_subcommands(bot_sub)
     add_feature_configure_parser(bot_sub, "bot")
 
     run = bot_sub.add_parser("run", help="run one local read-only Bot question")
@@ -40,14 +40,14 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
         "--model-config-json",
         default=None,
         help=(
-            "local model override JSON (requires enabled Assistant/Bot runtime config); sends model-visible "
+            "local model override JSON (requires enabled Bot runtime config); sends model-visible "
             "read-only observations to the configured provider"
         ),
     )
     run_model.add_argument(
-        "--assistant-config",
+        "--bot-config",
         default=None,
-        help="optional assistant runtime config path used to load the local Bot model",
+        help="optional Bot runtime config path used to load the local Bot model",
     )
 
     eval_cmd = bot_sub.add_parser("eval", help="run one deterministic Bot eval fixture")
@@ -64,9 +64,9 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="explicit model config JSON for eval-only fixture synthesis; sends fixture facts to provider",
     )
     eval_model.add_argument(
-        "--assistant-config",
+        "--bot-config",
         default=None,
-        help="optional assistant runtime config path for eval-only fixture synthesis",
+        help="optional Bot runtime config path for eval-only fixture synthesis",
     )
     eval_model.add_argument(
         "--model-turn-json",
@@ -115,9 +115,9 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
 
 
 def handle_bot_command(args: argparse.Namespace) -> dict[str, Any] | int:
-    if getattr(args, "assistant_command", None):
-        from src.interfaces.cli.assistant_ops import handle_assistant_command
-        return handle_assistant_command(args)
+    if getattr(args, "bot_control_command", None):
+        from src.interfaces.cli.bot_control_ops import handle_bot_control_command
+        return handle_bot_control_command(args)
     if args.bot_command == "configure":
         from src.interfaces.cli.feature_ops import run_feature_configure
         return run_feature_configure(args)
@@ -179,7 +179,7 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any] | int:
             _run_local_request(
                 request,
                 model_config_json=args.model_config_json,
-                assistant_config_path=args.assistant_config,
+                bot_config_path=args.bot_config,
                 model_turn_json=None,
                 host_store=host_store,
                 session_key=session_key,
@@ -253,7 +253,7 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any] | int:
             _run_local_request(
                 request,
                 model_config_json=args.model_config_json,
-                assistant_config_path=args.assistant_config,
+                bot_config_path=args.bot_config,
                 model_turn_json=model_turn_json,
             ),
             include_events=bool(args.include_events),
@@ -270,7 +270,7 @@ def _run_local_request(
     request: BotRequest,
     *,
     model_config_json: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     model_turn_json: str | None = None,
     host_store: BotHostStore | None = None,
     session_key: str | None = None,
@@ -279,7 +279,7 @@ def _run_local_request(
         request,
         reference_year=_reference_year(),
         model_config_json=model_config_json,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         model_turn_json=model_turn_json,
         host_store=host_store,
         session_key=session_key,

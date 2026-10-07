@@ -93,7 +93,7 @@ def _preview_sha256(transaction: dict[str, Any], *, enabled: bool) -> str:
         "approved_non_futu_brokers": transaction.get("approved_non_futu_brokers"),
         "service_url": transaction.get("service_url"),
         "markets": {market: item["output_config_path"] for market, item in transaction["markets"].items()},
-        "assistant": transaction["assistant"]["output_config_path"],
+        "bot": transaction["bot"]["output_config_path"],
     }
     return sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -119,9 +119,9 @@ def _readback_generation(transaction: dict[str, Any], *, enabled: bool) -> list[
             runtime = json.loads(require_sha(item["sha256"]).decode("utf-8"))
             if holdings_included(runtime) != enabled or (enabled and runtime["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
                 raise ValueError("Holdings differs in market runtime config after apply")
-        assistant = transaction["assistant"]
-        target = Path(assistant["output_config_path"])
-        json.loads(require_sha(assistant["sha256"]).decode("utf-8"))
+        bot_config = transaction["bot"]
+        target = Path(bot_config["output_config_path"])
+        json.loads(require_sha(bot_config["sha256"]).decode("utf-8"))
     except Exception as exc:
         raise AgentToolError(
             code="CONFIG_READBACK_FAILED",
@@ -210,7 +210,7 @@ def set_yaml_holdings_inclusion(
         config_doc=doc,
         runtime_root=target_root,
         markets=markets,
-        include_assistant=True,
+        include_bot=True,
         apply=False,
         backup=True,
         expected_source_sha256=before_sha,
@@ -234,7 +234,7 @@ def set_yaml_holdings_inclusion(
             config_doc=doc,
             runtime_root=target_root,
             markets=markets,
-            include_assistant=True,
+            include_bot=True,
             apply=True,
             backup=True,
             expected_source_sha256=before_sha,
@@ -261,7 +261,7 @@ def set_yaml_holdings_inclusion(
             "runtime_root": str(target_root),
             "source_revision": transaction["source_revision"],
             "validation": transaction["markets"],
-            "assistant": transaction["assistant"],
+            "bot": transaction["bot"],
             "verified_targets": verified_targets,
         },
         dry_run=not apply,
@@ -271,7 +271,7 @@ def set_yaml_holdings_inclusion(
         generate_audit_id=False,
         rollback_hint=(
             f"先将 {transaction['backup_path']} 恢复到 {source}，再用 om config build 和 "
-            "om config build-assistant 重建 validation/assistant 列出的全部目标并读回。"
+            "om config build-bot 重建 validation/bot 列出的全部目标并读回。"
             if apply
             else None
         ),

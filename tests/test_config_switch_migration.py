@@ -32,9 +32,9 @@ def test_migration_preserves_intent_without_activation_or_account_guessing():
     assert new["markets"]["hk"]["notifications"]["enabled"] is False
     assert "enabled" not in new["markets"]["us"]["features"]["wheel"]
     assert "activation_by_account" not in new["markets"]["us"]["features"]["wheel"]
-    assert new["assistant"]["bot"] == {"enabled": False}
+    assert new["bot"] == {"enabled": False}
     assert new["trade_intake"]["combo_reconciliation"] == {"accounts": {"lx": "observe"}}
-    assert len(changes) == 6
+    assert len(changes) == 7
     assert migrate_switch_document(new) == (new, [])
 
 
@@ -68,6 +68,9 @@ def test_migration_preview_apply_readback_and_stale_retry(tmp_path):
     assert result["write_applied"] and len(result["verified_targets"]) == 4
     assert json.loads((tmp_path / "config.us.json").read_text())["notifications"]["enabled"] is True
     assert json.loads((tmp_path / "config.hk.json").read_text())["notifications"]["enabled"] is False
+    bot_snapshot = json.loads((tmp_path / "resolved" / "config.bot.json").read_text())
+    assert bot_snapshot["bot"]["enabled"] is False
+    assert "assistant" not in bot_snapshot and "bot" not in bot_snapshot["bot"]
     assert Path(result["backup_path"]).read_bytes() == old
     with pytest.raises(AgentToolError, match="STALE_PREVIEW"):
         migrate_yaml_switches(**args)
@@ -121,3 +124,36 @@ def test_failed_generation_publish_restores_legacy_source(tmp_path, monkeypatch)
                               expected_preview_sha256=preview["preview_sha256"])
     assert source.read_bytes() == before
     assert not (tmp_path / "config.us.json").exists()
+
+
+@pytest.mark.parametrize("master", [None, False, True])
+@pytest.mark.parametrize("nested", [None, False, True])
+def test_bot_migration_collapses_old_switches_without_enabling(master, nested):
+    old = {"assistant": {"bot": {"read_markets": ["us", "hk"]},
+                         "active_model": "fixture", "models": {"fixture": {"provider": "ollama", "model": "fixture"}}},
+           "notifications": {"enabled": False}}
+    if master is not None:
+        old["assistant"]["enabled"] = master
+    if nested is not None:
+        old["assistant"]["bot"]["enabled"] = nested
+    migrated, _ = migrate_switch_document(old)
+    assert "assistant" not in migrated
+    assert migrated["bot"]["enabled"] is (master is not False and nested is True)
+    assert migrated["bot"]["read_markets"] == ["us", "hk"]
+    assert migrated["bot"]["models"] == old["assistant"]["models"]
+    assert migrated["bot"]["active_model"] == "fixture"
+    assert "bot" not in migrated["bot"]
+    assert migrate_switch_document(migrated) == (migrated, [])
+
+
+@pytest.mark.parametrize("source", [
+    {"assistant": {}, "bot": {}},
+    {"assistant": {"enabled": "false"}},
+    {"assistant": {"bot": {"enabled": None}}},
+    {"assistant": {"bot": {"unknown": False}}},
+])
+def test_bot_migration_rejects_duplicate_or_ambiguous_configuration(source):
+    before = deepcopy(source)
+    with pytest.raises(AgentToolError, match="CONFIG_MIGRATION_CONFLICT"):
+        migrate_switch_document(source)
+    assert source == before

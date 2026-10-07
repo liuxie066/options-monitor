@@ -623,7 +623,7 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
 
 
 def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = _write_healthcheck_config(tmp_path)
@@ -660,7 +660,7 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
 
 
 def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
 
     for name in (
@@ -723,7 +723,7 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
 
 
 def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = _write_healthcheck_config(tmp_path)
@@ -921,9 +921,9 @@ def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path)
 
     cfg_path = _write_healthcheck_config(tmp_path)
     _patch_healthcheck_dependencies(monkeypatch)
-    assistant_config = tmp_path / "resolved" / "config.assistant.json"
-    assistant_config.parent.mkdir()
-    assistant_config.write_text(
+    bot_config = tmp_path / "resolved" / "config.bot.json"
+    bot_config.parent.mkdir()
+    bot_config.write_text(
         json.dumps(
             {
                 "inbound": {
@@ -965,12 +965,12 @@ def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path)
             {
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
-                "assistant_config_path": str(assistant_config),
+                "bot_config_path": str(bot_config),
                 "wechat_clawbot": {
                     "enabled": True,
                     "label": "ops",
                     "state_dir": str(state_dir),
-                    "assistant_config_path": str(assistant_config),
+                    "bot_config_path": str(bot_config),
                     "allowed_senders_configured": True,
                     "allowed_senders_source": "config_yaml",
                 },
@@ -1658,26 +1658,19 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
 def test_runtime_status_public_projection_omits_private_runtime_payloads(tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import mask_path
     from src.application.agent_tools.runtime_status_impl import runtime_status_tool
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
     cfg["notifications"] = {"channel": "feishu", "target": "ou_A9x7PrivateRecipient"}
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
-    assistant_path = tmp_path / "resolved" / "config.assistant.json"
-    assistant_path.parent.mkdir(parents=True)
-    assistant_path.write_text(
+    bot_path = tmp_path / "resolved" / "config.bot.json"
+    bot_path.parent.mkdir(parents=True)
+    bot_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "llm": {
-                        "provider": "openai",
-                        "model": "private-model-name",
-                        "base_url": "https://private-user:private-password@private.example/v1",
-                        "api_key_env": "PRIVATE_MODEL_API_KEY",
-                    }
-                }
+                "bot": {'enabled': False, 'llm': {'provider': 'openai', 'model': 'private-model-name', 'base_url': 'https://' + 'private-user:private-password@private.example/v1', 'api_key_env': 'PRIVATE_MODEL_API_KEY'}}
             }
         ),
         encoding="utf-8",
@@ -1723,7 +1716,7 @@ def test_runtime_status_public_projection_omits_private_runtime_payloads(tmp_pat
     data, warnings, meta = runtime_status_tool(
         {
             "config_path": str(cfg_path),
-            "assistant_config_path": str(assistant_path),
+            "bot_config_path": str(bot_path),
             "wechat_clawbot": {"audit_db": str(audit_db)},
             "shared_state_dir": str(shared_state),
             "state_dir": str(shared_state),
@@ -2139,30 +2132,16 @@ def test_runtime_status_diagnostics_survive_unavailable_secret_backend(monkeypat
     assert data["environment"]["secret_credentials"]["summary"]["values_exposed"] is False
 
 
-def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
+def test_runtime_status_reports_bot_llm_and_latest_agent_route(monkeypatch, tmp_path: Path) -> None:
+    from src.application.bot.control.audit import InboundAuditStore
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
-    assistant_dir = tmp_path / "resolved"
-    assistant_dir.mkdir()
-    (assistant_dir / "config.assistant.json").write_text(
+    bot_dir = tmp_path / "resolved"
+    bot_dir.mkdir()
+    (bot_dir / "config.bot.json").write_text(
         json.dumps(
             {
-                "assistant": {
-                    "bot": {
-                        "enabled": True,
-                    },
-                    "context_window_messages": 6,
-                    "default_market_scope": "us",
-                    "llm": {
-                        "provider": "deepseek",
-                        "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-flash",
-                        "api_key_env": "DEEPSEEK_API_KEY",
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 2048,
-                    },
-                }
+                "bot": {'enabled': True, 'context_window_messages': 6, 'default_market_scope': 'us', 'llm': {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-v4-flash', 'api_key_env': 'DEEPSEEK_API_KEY', 'context_window_tokens': 24000, 'max_output_tokens': 2048}}
             },
             ensure_ascii=False,
         ),
@@ -2186,11 +2165,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
             "result_ok": True,
             "response": {
                 "meta": {
-                    "assistant": {
-                        "route": "agent_loop",
-                        "llm": {"attempted": True, "reason": "accepted"},
-                        "context": {"provided": True, "recent_count": 1, "pending_count": 0},
-                    }
+                    "bot": {'enabled': False, 'route': 'agent_loop', 'llm': {'attempted': True, 'reason': 'accepted'}, 'context': {'provided': True, 'recent_count': 1, 'pending_count': 0}}
                 }
             },
         }
@@ -2198,18 +2173,18 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["bot"]["enabled"] is True
-    assert "toolsets" not in data["assistant_runtime"]["config"]["bot"]
-    assert data["assistant_runtime"]["llm"]["enabled"] is True
-    assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
-    assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
-    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
-    assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
-    assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
-    assert data["summary"]["assistant_enabled"] is True
-    assert "assistant_bot_portfolio_enabled" not in data["summary"]
-    assert data["summary"]["assistant_latest_route"] == "agent_loop"
+    assert data["bot_runtime"]["config"]["enabled"] is True
+    assert data["bot_runtime"]["config"]["enabled"] is True
+    assert "bot" not in data["bot_runtime"]["config"]
+    assert data["bot_runtime"]["llm"]["enabled"] is True
+    assert data["bot_runtime"]["llm"]["provider"] == "deepseek"
+    assert data["bot_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
+    assert data["bot_runtime"]["llm"]["api_key_configured"] is True
+    assert data["bot_runtime"]["audit"]["latest"]["route"] == "agent_loop"
+    assert data["bot_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
+    assert data["summary"]["bot_enabled"] is True
+    assert "bot_bot_portfolio_enabled" not in data["summary"]
+    assert data["summary"]["bot_latest_route"] == "agent_loop"
 
 
 def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path: Path) -> None:
@@ -2217,29 +2192,22 @@ def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path:
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["llm"]["enabled"] is False
-    assert data["assistant_runtime"]["llm"]["provider"] == ""
-    assert data["assistant_runtime"]["llm"]["endpoint_url"] is None
+    assert data["bot_runtime"]["config"]["enabled"] is False
+    assert data["bot_runtime"]["llm"]["enabled"] is False
+    assert data["bot_runtime"]["llm"]["provider"] == ""
+    assert data["bot_runtime"]["llm"]["endpoint_url"] is None
 
 
-def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
+def test_runtime_status_uses_service_profile_bot_config_and_env_file(tmp_path: Path) -> None:
+    from src.application.bot.control.audit import InboundAuditStore
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
-    assistant_path = tmp_path / "assistant" / "config.assistant.json"
-    assistant_path.parent.mkdir()
-    assistant_path.write_text(
+    bot_path = tmp_path / "assistant" / "config.bot.json"
+    bot_path.parent.mkdir()
+    bot_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "llm": {
-                        "provider": "deepseek",
-                        "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-flash",
-                        "api_key_env": "DEEPSEEK_API_KEY",
-                    },
-                }
+                "bot": {'enabled': False, 'llm': {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-v4-flash', 'api_key_env': 'DEEPSEEK_API_KEY'}}
             },
             ensure_ascii=False,
         ),
@@ -2257,9 +2225,9 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
                 "env_file": str(env_file),
-                "assistant_config_path": str(assistant_path),
+                "bot_config_path": str(bot_path),
                 "feishu_ws": {
-                    "assistant_config_path": str(assistant_path),
+                    "bot_config_path": str(bot_path),
                     "audit_db": str(audit_db),
                 },
                 "services": [{"name": "options-monitor-feishu-ws.service"}],
@@ -2283,10 +2251,7 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
             "result_ok": True,
             "response": {
                 "meta": {
-                    "assistant": {
-                        "route": "agent_loop",
-                        "llm": {"attempted": True, "reason": "accepted"},
-                    }
+                    "bot": {'enabled': False, 'route': 'agent_loop', 'llm': {'attempted': True, 'reason': 'accepted'}}
                 }
             },
         }
@@ -2294,13 +2259,13 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["path"] == str(assistant_path)
-    assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
-    assert data["assistant_runtime"]["llm"]["env_file"] == str(env_file)
-    assert data["assistant_runtime"]["llm"]["env_file_loaded"] is True
-    assert data["assistant_runtime"]["audit"]["path"] == str(audit_db)
-    assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
+    assert data["bot_runtime"]["config"]["path"] == str(bot_path)
+    assert data["bot_runtime"]["config"]["enabled"] is False
+    assert data["bot_runtime"]["llm"]["api_key_configured"] is True
+    assert data["bot_runtime"]["llm"]["env_file"] == str(env_file)
+    assert data["bot_runtime"]["llm"]["env_file_loaded"] is True
+    assert data["bot_runtime"]["audit"]["path"] == str(audit_db)
+    assert data["bot_runtime"]["audit"]["latest"]["route"] == "agent_loop"
     assert data["environment"]["env_file"] == str(env_file)
     assert data["environment"]["env_file_loaded"] is True
     assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["configured"] is True
@@ -2310,19 +2275,12 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
 
 def test_runtime_status_ignores_unreadable_profile_env_file_when_env_is_injected(monkeypatch, tmp_path: Path) -> None:
     fixture = _runtime_status_upgrade_fixture(tmp_path)
-    assistant_path = tmp_path / "assistant" / "config.assistant.json"
-    assistant_path.parent.mkdir()
-    assistant_path.write_text(
+    bot_path = tmp_path / "assistant" / "config.bot.json"
+    bot_path.parent.mkdir()
+    bot_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "llm": {
-                        "provider": "deepseek",
-                        "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-flash",
-                        "api_key_env": "DEEPSEEK_API_KEY",
-                    },
-                }
+                "bot": {'enabled': False, 'llm': {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-v4-flash', 'api_key_env': 'DEEPSEEK_API_KEY'}}
             },
             ensure_ascii=False,
         ),
@@ -2336,7 +2294,7 @@ def test_runtime_status_ignores_unreadable_profile_env_file_when_env_is_injected
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
                 "env_file": str(env_file),
-                "assistant_config_path": str(assistant_path),
+                "bot_config_path": str(bot_path),
                 "services": [{"name": "options-monitor-wechat-clawbot.service"}],
             },
             ensure_ascii=False,
@@ -2362,14 +2320,14 @@ def test_runtime_status_ignores_unreadable_profile_env_file_when_env_is_injected
     assert data["environment"]["env_file_loaded"] is False
     assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["configured"] is True
     assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["source"] == "process_env"
-    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
+    assert data["bot_runtime"]["llm"]["api_key_configured"] is True
 
 
 def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) -> None:
     fixture = _runtime_status_upgrade_fixture(tmp_path)
-    assistant_path = tmp_path / "assistant" / "config.assistant.json"
-    assistant_path.parent.mkdir()
-    assistant_path.write_text(
+    bot_path = tmp_path / "assistant" / "config.bot.json"
+    bot_path.parent.mkdir()
+    bot_path.write_text(
         json.dumps(
             {
                 "inbound": {
@@ -2411,12 +2369,12 @@ def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) ->
             {
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
-                "assistant_config_path": str(assistant_path),
+                "bot_config_path": str(bot_path),
                 "wechat_clawbot": {
                     "enabled": True,
                     "label": "ops",
                     "state_dir": str(state_dir),
-                    "assistant_config_path": str(assistant_path),
+                    "bot_config_path": str(bot_path),
                 },
                 "services": [{"name": "options-monitor-wechat-clawbot.service"}],
             },

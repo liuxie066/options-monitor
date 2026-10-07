@@ -50,7 +50,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     service = _dict(data.get("service_upgrade"))
     service_drift = _dict(data.get("service_drift"))
     environment = _dict(data.get("environment"))
-    assistant = _dict(data.get("assistant_runtime"))
+    bot_config = _dict(data.get("bot_runtime"))
     warnings = _list(envelope.get("warnings"))
     ledger_warnings = _list(ledger.get("warnings"))
 
@@ -75,7 +75,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _service_line(service),
         _service_drift_line(service_drift),
         _environment_line(environment),
-        _assistant_line(assistant),
+        _bot_line(bot_config),
     ]
 
     error = _dict(envelope.get("error"))
@@ -373,13 +373,13 @@ def _environment_line(environment: dict[str, Any]) -> str:
     )
 
 
-def _assistant_line(assistant: dict[str, Any]) -> str:
-    config = _dict(assistant.get("config"))
-    llm = _dict(assistant.get("llm"))
-    audit = _dict(assistant.get("audit"))
+def _bot_line(bot_config: dict[str, Any]) -> str:
+    config = _dict(bot_config.get("config"))
+    llm = _dict(bot_config.get("llm"))
+    audit = _dict(bot_config.get("audit"))
     latest = _dict(audit.get("latest"))
     return (
-        "assistant: "
+        "bot: "
         f"mode={_value(config.get('mode'))} "
         f"llm={_yes_no(llm.get('enabled'))} "
         f"provider={_value(llm.get('provider'))} "

@@ -281,8 +281,8 @@ def test_interactive_setup_default_directory_explicit_identity_and_optouts(tmp_p
     assert not any(prompt.startswith("配置目录") for prompt in prompts)
     document = yaml.safe_load((target / "config.yaml").read_text())
     assert document["notifications"]["enabled"] is False
-    assert document["assistant"]["enabled"] is False
-    assert document["assistant"]["bot"]["enabled"] is False
+    assert document["bot"]["enabled"] is False
+    assert document["bot"]["enabled"] is False
     assert list(document["markets"]) == ["us"]
     assert document["accounts"]["mine"]["futu"]["trd_env"] == environment
     generated = json.loads((target / "config.us.json").read_text())

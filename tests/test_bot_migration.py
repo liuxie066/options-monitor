@@ -125,11 +125,11 @@ def test_crash_after_database_commit_before_progress_marker_resumes(tmp_path, mo
 
 
 def test_conflicts_active_writers_and_old_runtime_config_fail_closed(tmp_path):
-    from src.application.assistant.settings import AssistantSettings
+    from src.application.bot.control.settings import BotSettings
     from src.application.bot.host_store import BotHostStore
     db, configs = _fixture(tmp_path)
     with pytest.raises(ValueError, match="retired"):
-        AssistantSettings.from_runtime_config({"assistant": {"copilot": {}}})
+        BotSettings.from_runtime_config({"assistant": {"copilot": {}}})
     with pytest.raises(ValueError, match="Legacy Copilot"):
         BotHostStore(db).session_memory("old-userless-session")
     with sqlite3.connect(db) as conn:

@@ -6,8 +6,8 @@ import time
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.policy import check_sender_allowed
+from src.application.bot.control.contracts import BotInboundRequest
+from src.application.bot.control.policy import check_sender_allowed
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 
@@ -56,16 +56,16 @@ def prepare_feishu_ack_target(
 def prepare_feishu_analysis_control(
     payload: dict[str, Any], *, allowed_senders: str | None, config_key: str | None,
     config_path: str | None, audit_db: str | None, received_monotonic: float,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any] | None:
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
     from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis
 
     if _extract_event_type(payload) != "im.message.receive_v1":
         return None
     try:
         request = feishu_payload_to_inbound_request(payload, config_key=config_key,
-            config_path=config_path, audit_db=audit_db, assistant_config_path=assistant_config_path,
+            config_path=config_path, audit_db=audit_db, bot_config_path=bot_config_path,
             received_monotonic=received_monotonic)
     except AgentToolError:
         return None
@@ -88,8 +88,8 @@ def handle_feishu_payload(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
-    assistant_settings: Any | None = None,
-    assistant_config_path: str | None = None,
+    bot_settings: Any | None = None,
+    bot_config_path: str | None = None,
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
 ) -> dict[str, Any]:
@@ -111,22 +111,22 @@ def handle_feishu_payload(
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         received_monotonic=received_monotonic,
         bot_reply_options=bot_reply_options,
     )
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    settings = assistant_settings or _assistant_settings(
+    settings = bot_settings or _bot_settings(
         config_key=config_key,
         config_path=config_path,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
     )
-    from src.application.assistant.runtime import handle_assistant_turn
+    from src.application.bot.control.runtime import handle_bot_turn
 
     kwargs["settings"] = settings
-    turn = handle_assistant_turn(request, **kwargs)
+    turn = handle_bot_turn(request, **kwargs)
     inbound_result = turn.public_payload()
     return build_response(
         tool_name="inbound.feishu",
@@ -143,32 +143,29 @@ def handle_feishu_payload(
     )
 
 
-def _assistant_settings(
+def _bot_settings(
     *,
     config_key: str | None,
     config_path: str | None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
 ) -> Any:
-    from src.application.assistant.settings import AssistantSettings
-    from src.application.assistant.config_loader import load_assistant_config
+    from src.application.bot.control.settings import BotSettings
+    from src.application.bot.control.config_loader import load_bot_config
 
     del config_key, config_path
-    assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
-    if not assistant_explicit:
-        return AssistantSettings()
-    assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
-    del assistant_path
-    if assistant_cfg:
-        configured = AssistantSettings.from_runtime_config(assistant_cfg)
-        return AssistantSettings(
+    bot_explicit = bool(bot_config_path is not None and str(bot_config_path).strip())
+    bot_path, bot_cfg = load_bot_config(config_path=bot_config_path, missing_ok=not bot_explicit)
+    del bot_path
+    if bot_cfg:
+        configured = BotSettings.from_runtime_config(bot_cfg)
+        return BotSettings(
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
-            bot=configured.bot,
             llm=configured.llm,
         )
 
-    return AssistantSettings()
+    return BotSettings()
 
 
 def feishu_payload_to_inbound_request(
@@ -177,10 +174,10 @@ def feishu_payload_to_inbound_request(
     config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
-) -> AssistantRequest:
+) -> BotInboundRequest:
     received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     event = _dict(payload.get("event"))
     message = _dict(event.get("message"))
@@ -215,7 +212,7 @@ def feishu_payload_to_inbound_request(
             hint="Only Feishu text messages are supported by the thin inbound adapter.",
         )
 
-    return AssistantRequest(
+    return BotInboundRequest(
         text=text,
         reply_context=dict(bot_reply_options or {}),
         received_monotonic=received_monotonic,
@@ -226,7 +223,7 @@ def feishu_payload_to_inbound_request(
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
     )
 
 

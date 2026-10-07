@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.llm_model_profiles import add_model_profile_to_config, parse_model_profiles, switch_active_model_profile
+from src.application.bot.control.llm_model_profiles import add_model_profile_to_config, parse_model_profiles, switch_active_model_profile
 from src.application.channels.wechat_clawbot.binding import connect_wechat_clawbot_target
 from src.application.config_authoring_transaction import config_source_sha256
 from src.application.config_env import env_source_sha256, feature_env_path, write_feature_env
@@ -143,10 +143,9 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         preview.update(resume_preview)
         preview["requested_setting"] = {"feature": feature, "enabled": enabled}
         if feature == "bot":
-            assistant = after.get("assistant") or {}
-            preview["requested_setting"]["assistant_enabled"] = assistant.get("enabled") is not False
-            profile_name = assistant.get("active_model")
-            profiles = parse_model_profiles(assistant.get("models"))
+            bot_config = after.get("bot") or {}
+            profile_name = bot_config.get("active_model")
+            profiles = parse_model_profiles(bot_config.get("models"))
             preview["requested_setting"]["profile"] = profiles[profile_name].public_payload(active=True) if profile_name in profiles else None
         elif feature == "channel":
             preview["requested_setting"]["route"] = {key: (after.get("notifications") or {}).get(key)
@@ -221,8 +220,8 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         enabled = getattr(args, "enabled", None)
         if enabled is None:
             from src.application.config_yaml_holdings import holdings_included
-            assistant = doc.get("assistant") if isinstance(doc.get("assistant"), dict) else {}
-            bot = assistant.get("bot") if isinstance(assistant.get("bot"), dict) else {}
+            bot_config = doc.get("bot") if isinstance(doc.get("bot"), dict) else {}
+            bot = bot_config
             close = doc.get("close_advice") if isinstance(doc.get("close_advice"), dict) else {}
             current_enabled = {"bot": bot.get("enabled") is True,
                                "channel": notifications_enabled(doc), "holdings": holdings_included(doc),
@@ -232,7 +231,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         extras: dict[str, Any] = {}
         after = feature_document(doc, feature=feature, enabled=enabled) if feature != "holdings" and (feature != "channel" or not enabled) else doc
         if feature == "bot" and enabled:
-            profiles = parse_model_profiles((doc.get("assistant") or {}).get("models"))
+            profiles = parse_model_profiles((doc.get("bot") or {}).get("models"))
             if interactive:
                 output_fn("已有模型: " + (", ".join(profiles) or "无"))
             name = getattr(args, "profile", None) or (ask("模型配置名（已有或新建）") if interactive else "")
@@ -257,11 +256,6 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                     context_window_tokens=context, max_output_tokens=limit,
                     replace=bool(getattr(args, "replace", False)), activate=True)
             extras["model"] = profile.public_payload(active=True)
-            extras["assistant_enabled"] = (after.get("assistant") or {}).get("enabled") is not False
-            if not extras["assistant_enabled"]:
-                extras["next_step"] = "assistant.enabled=false blocks inbound and model execution; explicitly enable the Assistant authoring setting and rebuild when intended"
-                if interactive:
-                    output_fn("Assistant 总入口已关闭；本次只保存 Bot 设置，需显式开启 assistant.enabled 并重新构建后才能使用。")
             result = publish(after, title="保存 Bot 模型并启用？")
             if result["write_applied"] and profile.credential_name:
                 credential = provision(profile.credential_name)

@@ -15,9 +15,9 @@ from typing import Any, Callable, cast
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.policy import check_sender_allowed
+from src.application.bot.control.audit import InboundAuditStore
+from src.application.bot.control.contracts import BotInboundRequest
+from src.application.bot.control.policy import check_sender_allowed
 from src.application.channels.reply_decision import (
     decide_inbound_reply,
     inbound_command_id as _inbound_command_id,
@@ -74,7 +74,7 @@ class WechatClawbotServeSettings:
     state_dir: str | None = None
     config_key: str | None = None
     config_path: str | None = None
-    assistant_config_path: str | None = None
+    bot_config_path: str | None = None
     audit_db: str | None = None
     allowed_senders: str | None = None
     reply_enabled: bool = True
@@ -126,7 +126,7 @@ class WechatClawbotServeSettings:
             "state_dir": mask_path(store.state_dir),
             "config_key": self.config_key,
             "config_path": mask_path(self.config_path),
-            "assistant_config_path": mask_path(self.assistant_config_path),
+            "bot_config_path": mask_path(self.bot_config_path),
             "audit_db": mask_path(self.audit_db),
             "allowed_senders_configured": bool(self.allowed_senders),
             "bot_token_configured": bool(str(state.get("bot_token") or "").strip()),
@@ -147,7 +147,7 @@ def build_wechat_clawbot_serve_settings(
     state_dir: str | None = None,
     config_key: str | None = None,
     config_path: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     audit_db: str | None = None,
     allowed_senders: str | None = None,
     reply_enabled: bool | None = None,
@@ -156,14 +156,14 @@ def build_wechat_clawbot_serve_settings(
     keepalive_interval_sec: float | None = None,
     timeout_sec: int | None = None,
 ) -> WechatClawbotServeSettings:
-    from src.application.assistant.settings import AssistantSettings
+    from src.application.bot.control.settings import BotSettings
 
-    assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
-    behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("wechat_clawbot"))
-    assistant_settings = AssistantSettings.from_runtime_config(assistant_cfg)
+    bot_cfg = _load_bot_behavior_config(config_path=bot_config_path)
+    behavior_cfg = _dict(_dict(bot_cfg.get("inbound")).get("wechat_clawbot"))
+    bot_settings = BotSettings.from_runtime_config(bot_cfg)
     default_config_key = (
-        assistant_settings.default_market_scope
-        if assistant_settings.default_market_scope in {"us", "hk"}
+        bot_settings.default_market_scope
+        if bot_settings.default_market_scope in {"us", "hk"}
         else None
     )
     resolved_config_path = _first_text(config_path)
@@ -173,7 +173,7 @@ def build_wechat_clawbot_serve_settings(
         state_dir=_first_text(state_dir, behavior_cfg.get("state_dir")),
         config_key=_normalize_config_key(_first_text(config_key, None if resolved_config_path else default_config_key)),
         config_path=resolved_config_path,
-        assistant_config_path=_first_text(assistant_config_path),
+        bot_config_path=_first_text(bot_config_path),
         audit_db=_first_text(audit_db),
         allowed_senders=_first_text(allowed_senders, behavior_cfg.get("allowed_senders")),
         reply_enabled=_config_bool(reply_enabled, behavior_cfg.get("reply_enabled"), default=True),
@@ -223,8 +223,8 @@ def handle_wechat_clawbot_message(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
-    assistant_settings: Any | None = None,
-    assistant_config_path: str | None = None,
+    bot_settings: Any | None = None,
+    bot_config_path: str | None = None,
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
 ) -> dict[str, Any]:
@@ -238,7 +238,7 @@ def handle_wechat_clawbot_message(
         )
 
     try:
-        request = wechat_clawbot_message_to_assistant_request(
+        request = wechat_clawbot_message_to_bot_request(
             payload,
             base=base,
             label=label,
@@ -246,7 +246,7 @@ def handle_wechat_clawbot_message(
             config_key=config_key,
             config_path=config_path,
             audit_db=audit_db,
-            assistant_config_path=assistant_config_path,
+            bot_config_path=bot_config_path,
             received_monotonic=received_monotonic,
             bot_reply_options=bot_reply_options,
         )
@@ -260,12 +260,12 @@ def handle_wechat_clawbot_message(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    settings = assistant_settings or _assistant_settings(assistant_config_path=assistant_config_path)
+    settings = bot_settings or _bot_settings(bot_config_path=bot_config_path)
 
-    from src.application.assistant.runtime import handle_assistant_turn
+    from src.application.bot.control.runtime import handle_bot_turn
 
     kwargs["settings"] = settings
-    turn = handle_assistant_turn(request, **kwargs)
+    turn = handle_bot_turn(request, **kwargs)
     inbound_result = turn.public_payload()
     return build_response(
         tool_name="inbound.wechat_clawbot",
@@ -281,7 +281,7 @@ def handle_wechat_clawbot_message(
     )
 
 
-def wechat_clawbot_message_to_assistant_request(
+def wechat_clawbot_message_to_bot_request(
     payload: dict[str, Any],
     *,
     base: Path | None = None,
@@ -290,10 +290,10 @@ def wechat_clawbot_message_to_assistant_request(
     config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
-) -> AssistantRequest:
+) -> BotInboundRequest:
     received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     sender_id = message_user_id(payload)
     if not sender_id:
@@ -317,7 +317,7 @@ def wechat_clawbot_message_to_assistant_request(
         "context_token": context_token,
         "group_id": group_id,
     }
-    return AssistantRequest(
+    return BotInboundRequest(
         text=text,
         received_monotonic=received_monotonic,
         sender_id=sender_id,
@@ -331,7 +331,7 @@ def wechat_clawbot_message_to_assistant_request(
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         reply_context={key: value for key, value in reply_context.items() if value},
     )
 
@@ -343,7 +343,7 @@ def poll_wechat_clawbot_once(
     state_dir: str | None = None,
     config_key: str | None = None,
     config_path: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     audit_db: str | None = None,
     allowed_senders: str | None = None,
     reply_enabled: bool = True,
@@ -385,7 +385,7 @@ def poll_wechat_clawbot_once(
             "config_key": config_key,
             "config_path": config_path,
             "audit_db": audit_db,
-            "assistant_config_path": assistant_config_path,
+            "bot_config_path": bot_config_path,
             "allowed_senders": allowed_senders,
             "received_monotonic": received_monotonic,
         }
@@ -634,7 +634,7 @@ def serve_wechat_clawbot(
                     state_dir=settings.state_dir,
                     config_key=settings.config_key,
                     config_path=settings.config_path,
-                    assistant_config_path=settings.assistant_config_path,
+                    bot_config_path=settings.bot_config_path,
                     audit_db=settings.audit_db,
                     allowed_senders=settings.allowed_senders,
                     reply_enabled=settings.reply_enabled,
@@ -1077,22 +1077,21 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
     return {key: value for key, value in receipt.items() if value is not None}
 
 
-def _assistant_settings(*, assistant_config_path: str | None = None) -> Any:
-    from src.application.assistant.config_loader import load_assistant_config
-    from src.application.assistant.settings import AssistantSettings
+def _bot_settings(*, bot_config_path: str | None = None) -> Any:
+    from src.application.bot.control.config_loader import load_bot_config
+    from src.application.bot.control.settings import BotSettings
 
-    explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
-    _path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not explicit)
-    if assistant_cfg:
-        configured = AssistantSettings.from_runtime_config(assistant_cfg)
-        return AssistantSettings(
+    explicit = bool(bot_config_path is not None and str(bot_config_path).strip())
+    _path, bot_cfg = load_bot_config(config_path=bot_config_path, missing_ok=not explicit)
+    if bot_cfg:
+        configured = BotSettings.from_runtime_config(bot_cfg)
+        return BotSettings(
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
-            bot=configured.bot,
             llm=configured.llm,
         )
-    return AssistantSettings()
+    return BotSettings()
 
 
 def _state_store(*, base: Path, label: str, state_dir: str | None = None) -> WechatClawbotStateStore:
@@ -1116,12 +1115,12 @@ def _normalize_config_key(value: str | None) -> str | None:
     return text
 
 
-def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any]:
-    from src.application.assistant.config_loader import load_assistant_config
+def _load_bot_behavior_config(*, config_path: str | None) -> dict[str, Any]:
+    from src.application.bot.control.config_loader import load_bot_config
 
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     try:
-        _path, cfg = load_assistant_config(config_path=config_path, missing_ok=not explicit_config_path)
+        _path, cfg = load_bot_config(config_path=config_path, missing_ok=not explicit_config_path)
     except AgentToolError:
         if explicit_config_path:
             raise

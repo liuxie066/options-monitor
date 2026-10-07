@@ -1570,7 +1570,7 @@ Daily Brief 透传同一 final candidate 中 `sell_limit`、`price_tick`、`bid`
 `permission_response.py` 已按当前对话的唯一 pending operation 解析“确认”，
 `operation_store.py` 已保存带 TTL、签名和原子确认状态的预览。现有 trade family 是新记 open/close/assignment/expiry，
 不能把它当成已有成交的策略归属。当前未发现统一 `trade_attribution_read` 或归属确认 family。
-检索范围为 `src/application/assistant/`、`bot/`、`agent_tools/`、现有微信 adapter 和上述控制文档；
+检索范围为 `src/application/bot/control/`、`bot/`、`agent_tools/`、现有微信 adapter 和上述控制文档；
 关键词 attribution、preview、confirm、sender、scope、signature、pending、recovery。
 
 | 概念 / 改动 | owner 与复用裁定 |

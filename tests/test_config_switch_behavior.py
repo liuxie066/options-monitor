@@ -9,41 +9,38 @@ from src.application.settings.effective import resolve_write_gates
 from tests.test_cli_feature_configuration import args, run, source
 
 
-@pytest.mark.parametrize("master", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_bot_configure_does_not_change_assistant_master(master, enabled):
-    original = {"assistant": {"enabled": master, "bot": {"enabled": not enabled}}}
+def test_bot_configure_changes_one_switch(enabled):
+    original = {"bot": {"enabled": not enabled, "read_markets": ["us"]}}
     changed = feature_document(original, feature="bot", enabled=enabled)
-    assert changed["assistant"]["enabled"] is master
-    assert changed["assistant"]["bot"]["enabled"] is enabled
-    assert original["assistant"]["bot"]["enabled"] is not enabled
+    assert changed["bot"] == {"enabled": enabled, "read_markets": ["us"]}
+    assert original["bot"]["enabled"] is not enabled
+    assert "assistant" not in changed
 
 
-@pytest.mark.parametrize("master,bot,reason", [(False, True, "assistant_disabled"), (True, False, "bot_disabled")])
 @pytest.mark.parametrize("entry", ["local", "channel"])
-def test_real_model_entry_stops_before_credentials_or_provider(tmp_path, monkeypatch, master, bot, reason, entry):
+def test_real_model_entry_stops_before_credentials_or_provider(tmp_path, monkeypatch, entry):
     from src.application.bot import local_harness, model_config
     from tests.test_bot_phase1 import _request
-    path = tmp_path / "config.assistant.json"
-    path.write_text(json.dumps({"assistant": {"enabled": master, "bot": {"enabled": bot}, "llm": {
-        "provider": "ollama", "model": "fixture", "base_url": "http://127.0.0.1:11434/v1", "context_window_tokens": 24000, "max_output_tokens": 2048}}}))
+    path = tmp_path / "config.bot.json"
+    path.write_text(json.dumps({"bot": {'enabled': False, 'llm': {'provider': 'ollama', 'model': 'fixture', 'base_url': 'http://127.0.0.1:11434/v1', 'context_window_tokens': 24000, 'max_output_tokens': 2048}}}))
     def forbidden(*args, **kwargs):
         pytest.fail("disabled Bot must not resolve credentials or run model")
     monkeypatch.setattr(local_harness, "_resolve_model", forbidden)
     monkeypatch.setattr(local_harness, "_resolve_model_api_key", forbidden)
     monkeypatch.setattr(local_harness, "run_contract", forbidden)
-    assert model_config.load_assistant_llm_config(config_path=path, require_config=True) == (None, None)
-    result = local_harness.run_local_request(_request("inspect", environment=entry), reference_year=2026, assistant_config_path=str(path))
+    assert model_config.load_bot_llm_config(config_path=path, require_config=True) == (None, None)
+    result = local_harness.run_local_request(_request("inspect", environment=entry), reference_year=2026, bot_config_path=str(path))
     assert result.status == "disabled" and not result.ok
-    assert result.error["reason"] == reason
+    assert result.error["reason"] == "bot_disabled"
 
 
-def test_assistant_master_disabled_stops_deterministic_entry_before_audit(tmp_path, monkeypatch):
-    from src.application.assistant import runtime
-    from src.application.assistant.settings import AssistantSettings, BotSettings
-    from tests.test_assistant_runtime import _request
-    monkeypatch.setattr(runtime, "_run_assistant_turn_response", lambda *args, **kwargs: pytest.fail("disabled entry"))
-    result = runtime.handle_assistant_turn(_request(tmp_path, "/help"), settings=AssistantSettings(enabled=False, bot=BotSettings(enabled=True)))
+def test_bot_master_disabled_stops_deterministic_entry_before_audit(tmp_path, monkeypatch):
+    from src.application.bot.control import runtime
+    from src.application.bot.control.settings import BotSettings
+    from tests.test_bot_runtime import _request
+    monkeypatch.setattr(runtime, "_run_bot_turn_response", lambda *args, **kwargs: pytest.fail("disabled entry"))
+    result = runtime.handle_bot_turn(_request(tmp_path, "/help"), settings=BotSettings(enabled=False))
     assert result.status == "disabled"
     assert not list(tmp_path.iterdir())
 
@@ -101,7 +98,7 @@ def test_holdings_publish_failure_rolls_back_both_flags(tmp_path, monkeypatch):
 @pytest.mark.parametrize("literal", ["1", "true", "yes", "y", "on", "false", "0", "", "invalid"])
 def test_permission_execution_and_doctor_use_identical_interpretation(tmp_path, monkeypatch, literal):
     from src.application.settings import diagnose_effective_settings
-    from src.application.assistant.operation_policy import load_operation_policy_from_env, enforce_model_write_allowed
+    from src.application.bot.control.operation_policy import load_operation_policy_from_env, enforce_model_write_allowed
     from src.application.agent_tool_config import write_tools_enabled
     env = {"OM_INBOUND_OPERATIONS_ENABLED": "0", "OM_INBOUND_MODEL_WRITE_ENABLED": literal,
            "OM_INBOUND_TRADE_WRITE_ENABLED": literal, "OM_AGENT_ENABLE_WRITE_TOOLS": literal,
@@ -158,29 +155,29 @@ def test_holdings_yaml_failure_reports_previously_confirmed_connection(tmp_path,
     assert error.value.details["completed_steps"][0]["write_applied"] is True
 
 
-def test_bot_off_keeps_deterministic_status_available(tmp_path, monkeypatch):
-    from src.application.assistant import inbound_service
-    from src.application.assistant.runtime import handle_assistant_turn
-    from src.application.assistant.settings import AssistantSettings, BotSettings
+def test_bot_off_blocks_inbound_deterministic_commands(tmp_path, monkeypatch):
+    from src.application.bot.control import inbound_service
+    from src.application.bot.control.runtime import handle_bot_turn
+    from src.application.bot.control.settings import BotSettings
     from src.application.agent_tool_contracts import build_response
-    from tests.test_assistant_runtime import _request
+    from tests.test_bot_runtime import _request
     calls = []
     monkeypatch.setattr(inbound_service, "run_channel_request", lambda **kwargs: pytest.fail("must not run model"))
     def execute(name, payload):
         calls.append(name)
         return build_response(tool_name=name, ok=True, data={"status": "ok"})
-    result = handle_assistant_turn(_request(tmp_path, "/status"), execute_tool_fn=execute,
-        allowed_senders="u_runtime", settings=AssistantSettings(enabled=True, bot=BotSettings(enabled=False)))
-    assert result.ok and calls and result.trace["route"] != "bot"
+    result = handle_bot_turn(_request(tmp_path, "/status"), execute_tool_fn=execute,
+        allowed_senders="u_runtime", settings=BotSettings(enabled=False))
+    assert not result.ok and result.status == "disabled" and not calls
 
 
-def test_diagnostics_reports_configured_bot_but_disabled_master(tmp_path):
-    from tests.test_assistant_diagnostics import _assistant_config, _check_llm, _llm
-    cfg = _assistant_config(llm=_llm(provider="ollama", model="fixture", base_url="http://127.0.0.1:11434/v1"))
-    cfg["assistant"]["enabled"] = False
+def test_diagnostics_reports_single_disabled_bot(tmp_path):
+    from tests.test_bot_diagnostics import _bot_config, _check_llm, _llm
+    cfg = _bot_config(llm=_llm(provider="ollama", model="fixture", base_url="http://127.0.0.1:11434/v1"))
+    cfg["bot"]["enabled"] = False
     result = _check_llm(tmp_path, cfg)
-    assert result["summary"]["configured_enabled"] is True
-    assert result["summary"]["assistant_enabled"] is False
+    assert result["summary"]["configured_enabled"] is False
+    assert result["summary"]["bot_enabled"] is False
     assert result["summary"]["readiness_scope"] == "configuration"
     assert result["summary"]["activity_observed"] is None
 
@@ -193,15 +190,15 @@ def test_service_credentials_follow_notification_opt_in(enabled):
     if enabled is not None:
         notifications["enabled"] = enabled
     bindings = _systemd_secret_bindings(service_names=["options-monitor-tick-us.service"],
-        assistant_credential_name=None, feature_configs={"us": {"notifications": notifications}})
+        bot_credential_name=None, feature_configs={"us": {"notifications": notifications}})
     assert (FEISHU_BOT_APP_SECRET in bindings.get("options-monitor-tick-us.service", ())) is (enabled is True)
 
 
-def test_inline_model_override_cannot_bypass_missing_assistant_config(tmp_path, monkeypatch):
+def test_inline_model_override_cannot_bypass_missing_bot_config(tmp_path, monkeypatch):
     from src.application.bot import local_harness, model_config
     from tests.test_bot_phase1 import _request
-    monkeypatch.setattr(model_config, "_assistant_config_path", lambda **kwargs: tmp_path / "missing.json")
+    monkeypatch.setattr(model_config, "_bot_config_path", lambda **kwargs: tmp_path / "missing.json")
     monkeypatch.setattr(local_harness, "_resolve_model", lambda **kwargs: pytest.fail("must not load a model"))
     result = local_harness.run_local_request(_request("inspect"), reference_year=2026,
         model_config_json=json.dumps({"provider": "ollama", "model": "fixture"}))
-    assert not result.ok and result.error["reason"] == "assistant_config_not_found"
+    assert not result.ok and result.error["reason"] == "bot_config_not_found"

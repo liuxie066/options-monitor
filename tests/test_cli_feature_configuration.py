@@ -20,7 +20,7 @@ def source(tmp_path):
     path.write_text(yaml.safe_dump({
         "accounts": {"lx": {"type": "futu", "futu_account_id": "12345678"}},
         "markets": {"us": {"accounts": ["lx"], "symbols": ["NVDA"]}},
-        "assistant": {"enabled": False, "bot": {"enabled": False}},
+        "bot": {'enabled': False},
         "notifications": {"enabled": False},
     }))
     return path
@@ -133,12 +133,13 @@ def test_bot_profile_applies_generated_runtime_without_credentials_input(tmp_pat
     namespace.apply = namespace.confirm = True
     namespace.expected_source_sha256 = preview["result"]["source_revision"]["before_sha256"]
     result = run(namespace, secret_runner=lambda _: pytest.fail("Ollama has no secret"))
-    runtime = json.loads(Path(result["result"]["assistant"]["output_config_path"]).read_text())
-    assert runtime["assistant"]["bot"]["enabled"] is True
-    assert runtime["assistant"]["enabled"] is False
-    assert preview["result"]["requested_setting"]["assistant_enabled"] is False
-    assert result["assistant_enabled"] is False and "assistant.enabled=false" in result["next_step"]
-    assert runtime["assistant"]["llm"]["model"] == "fixture-model"
+    runtime = json.loads(Path(result["result"]["bot"]["output_config_path"]).read_text())
+    assert runtime["bot"]["enabled"] is True
+    assert "assistant" not in runtime
+    assert preview["result"]["requested_setting"]["enabled"] is True
+    assert result["enabled"] is True
+    assert "bot_enabled" not in result
+    assert runtime["bot"]["llm"]["model"] == "fixture-model"
     assert result["external_check"] == "not_performed" and not result["service_restarted"]
 
 
@@ -222,7 +223,7 @@ def test_wechat_existing_binding_publishes_selected_runtime_and_inbound_scope(tm
     namespace.expected_source_sha256 = preview["result"]["source_revision"]["before_sha256"]
     namespace.expected_preview_sha256 = preview["result"]["preview_sha256"]
     result = run(namespace)
-    runtime = json.loads(Path(result["result"]["assistant"]["output_config_path"]).read_text())
+    runtime = json.loads(Path(result["result"]["bot"]["output_config_path"]).read_text())
     assert runtime["inbound"]["wechat_clawbot"]["state_dir"] == str(state_dir)
     assert runtime["inbound"]["wechat_clawbot"]["allowed_senders"] == "wechat:fixture-user"
     assert "fixture-only-token" not in json.dumps(result)
@@ -289,8 +290,8 @@ def test_bot_and_feishu_aliases_share_real_parsers():
     from src.interfaces.cli.main import parse_args
     bot = parse_args(["bot", "model", "use", "fixture", "--config-yaml", "/tmp/config.yaml"])
     legacy = parse_args(["assistant", "model", "use", "fixture", "--config-yaml", "/tmp/config.yaml"])
-    assert bot.assistant_command == legacy.assistant_command == "model"
-    assert bot.assistant_model_command == legacy.assistant_model_command == "use"
+    assert bot.bot_control_command == legacy.bot_control_command == "model"
+    assert bot.bot_model_command == legacy.bot_model_command == "use"
     feishu = parse_args(["channel", "feishu", "serve", "--check", "--no-local-env-file", "--env-file", "fixture.env"])
     inbound = parse_args(["inbound", "feishu-ws", "--check", "--no-local-env-file", "--env-file", "fixture.env"])
     assert feishu.inbound_command == inbound.inbound_command == "feishu-ws"
@@ -310,8 +311,8 @@ def test_public_bot_configure_applies_runtime_and_restores_command_env(tmp_path,
     assert main([*argv, "--apply", "--confirm", "--expected-source-sha256",
                  preview["result"]["source_revision"]["before_sha256"]]) == 0
     result = json.loads(capsys.readouterr().out)
-    runtime = json.loads(Path(result["result"]["assistant"]["output_config_path"]).read_text())
-    assert runtime["assistant"]["llm"]["model"] == "fixture"
+    runtime = json.loads(Path(result["result"]["bot"]["output_config_path"]).read_text())
+    assert runtime["bot"]["llm"]["model"] == "fixture"
     import os
     assert os.environ["OM_RUNTIME_ROOT"] == str(tmp_path / "other-instance")
 

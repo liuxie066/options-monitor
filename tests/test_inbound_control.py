@@ -11,24 +11,24 @@ import pytest
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant import inbound_service
-from src.application.assistant.capability_catalog import command_specs, preview_operation_capabilities
-from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.contracts import (
-    AssistantRequest,
-    AssistantTurnResult,
+from src.application.bot.control.audit import InboundAuditStore
+from src.application.bot.control import inbound_service
+from src.application.bot.control.capability_catalog import command_specs, preview_operation_capabilities
+from src.application.bot.control.command_parser import parse_bot_control_command
+from src.application.bot.control.contracts import (
+    BotInboundRequest,
+    BotTurnResult,
     ControlCommand,
 )
-from src.application.assistant.operation_store import InboundOperationStore
+from src.application.bot.control.operation_store import InboundOperationStore
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
-from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
-from src.application.assistant.renderer import render_inbound_text
-from src.application.assistant.inbound_service import handle_assistant_request
+from src.application.bot.control.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
+from src.application.bot.control.renderer import render_inbound_text
+from src.application.bot.control.inbound_service import handle_bot_request
 from src.application.bot.contracts import AppResult
 from src.application.bot.control_handoff import control_preview_tool_description
-from src.application.assistant.runtime import handle_assistant_turn
-from src.application.assistant.settings import AssistantSettings
+from src.application.bot.control.runtime import handle_bot_turn
+from src.application.bot.control.settings import BotSettings
 
 
 def _request(
@@ -38,13 +38,13 @@ def _request(
     sender_id: str = "ou_1",
     channel: str = "feishu",
     **fields: Any,
-) -> AssistantRequest:
-    """Build an inbound AssistantRequest.
+) -> BotInboundRequest:
+    """Build an inbound BotInboundRequest.
 
     ``sender_id``/``channel`` carry the defaults this module's tests overwhelmingly
     use; every other contract field is forwarded unchanged through ``fields``.
     """
-    return AssistantRequest(
+    return BotInboundRequest(
         text=text,
         message_id=message_id,
         sender_id=sender_id,
@@ -63,20 +63,20 @@ def _handle(
     **fields: Any,
 ) -> dict[str, Any]:
     """Build a request with :func:`_request` and run it through one inbound turn."""
-    return handle_assistant_request(
+    return handle_bot_request(
         _request(text, message_id, sender_id=sender_id, channel=channel, **fields),
         allowed_senders=allowed_senders,
     )
 
 
-def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
-    return AssistantTurnResult(
+def _bot_turn_response(response_text: str = "状态查询完成。") -> BotTurnResult:
+    return BotTurnResult(
         response_text=response_text,
         render_route="deterministic_control",
         ok=True,
         status="ok",
         data={"response_text": response_text},
-        meta={"assistant": {"route": "command"}},
+        meta={"bot": {'enabled': False, 'route': 'command'}},
     )
 
 
@@ -147,7 +147,7 @@ def test_bot_write_request_hands_off_to_deterministic_control_preview(
     )
 
     def fake_execute(command: ControlCommand, **_kwargs: Any):
-        from src.application.assistant.inbound_control import ControlExecution
+        from src.application.bot.control.inbound_control import ControlExecution
 
         seen.append(command)
         return ControlExecution(
@@ -225,8 +225,8 @@ markets:
         combo_yield:
           enabled: true
 """, ("us", "hk"))
-    assistant = tmp_path / "config.assistant.json"
-    assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+    assistant = tmp_path / "config.bot.json"
+    assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
     before = {path: path.read_bytes() for path in (config_yaml, assistant, *paths.values())}
     captured = []
     replies = [call("request_control_preview", {"intent_name": "symbol_edit", "arguments": {
@@ -241,7 +241,7 @@ markets:
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _: None)
     monkeypatch.setattr(channel_facade, "run_prepared_contract", run)
     result = _handle("关闭 3690美团的组合增强监控", "msg_hk_combo_from_us",
-                     config_path=str(paths["us"]), assistant_config_path=str(assistant),
+                     config_path=str(paths["us"]), bot_config_path=str(assistant),
                      audit_db=str(tmp_path / "inbound.sqlite3"))
 
     # Verify the actual model-facing contract as well as the deterministic handoff.
@@ -296,7 +296,7 @@ def test_bot_receives_current_conversation_pending_context(
 
     monkeypatch.setattr(InboundOperationStore, "list_pending_operations", fake_list)
     monkeypatch.setattr(inbound_service, "run_channel_request", fake_run_channel_request)
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request(
             "把刚才那个改一下",
             "msg_pending_context",
@@ -341,7 +341,7 @@ def test_bot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.Monke
         raise AssertionError("control executor must not run")
 
     monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request(
             "请直接确认升级",
             "msg_model_confirm_attempt",
@@ -358,8 +358,8 @@ def test_bot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.Monke
     assert executed is False
 
 
-def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    turn = handle_assistant_turn(*args, **kwargs)
+def handle_bot_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    turn = handle_bot_turn(*args, **kwargs)
     return build_response(
         tool_name=turn.tool_name,
         ok=turn.ok,
@@ -550,7 +550,7 @@ def _stub_upgrade_operations(
     target_version: str = "1.2.111",
 ) -> Any:
     """Stub the check/apply/worker-launcher trio the upgrade worker tests drive."""
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     monkeypatch.setattr(
         upgrade_operations,
@@ -612,20 +612,18 @@ def _enable_inbound_monitor_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
-def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
+def _write_bot_model_config(tmp_path: Path) -> tuple[Path, Path]:
     config_yaml = tmp_path / "config.yaml"
-    assistant_config = tmp_path / "resolved" / "config.assistant.json"
-    assistant_config.parent.mkdir(parents=True)
+    bot_config = tmp_path / "resolved" / "config.bot.json"
+    bot_config.parent.mkdir(parents=True)
     config_yaml.write_text(
         """
 accounts:
   lx:
     type: futu
     futu_account_id: "REAL_12345678"
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -650,38 +648,27 @@ markets:
 """.lstrip(),
         encoding="utf-8",
     )
-    assistant_config.write_text(
+    bot_config.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "enabled": True,
-                    "bot": {"enabled": True},
-                    "llm": {
-                        "provider": "openai",
-                        "base_url": "https://api.openai.com/v1",
-                        "model": "gpt-5.2",
-                        "api_key_env": "OM_LLM_API_KEY",
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 2048,
-                    },
-                },
+                "bot": {'enabled': True, 'llm': {'provider': 'openai', 'base_url': 'https://api.openai.com/v1', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'context_window_tokens': 24000, 'max_output_tokens': 2048}},
                 "_resolved": {
                     "source_format": "yaml",
                     "config_yaml_path": str(config_yaml),
-                    "runtime_schema": "assistant-config-json-v1",
+                    "runtime_schema": "bot-config-json-v1",
                 },
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    return config_yaml, assistant_config
+    return config_yaml, bot_config
 
 
 def test_inbound_command_surface_maps_core_read_only_commands() -> None:
-    assert parse_assistant_command("/status").intent_name == "runtime_status"
-    assert parse_assistant_command("/health").intent_name == "healthcheck"
-    assert parse_assistant_command("/pending").intent_name == "pending_operations"
+    assert parse_bot_control_command("/status").intent_name == "runtime_status"
+    assert parse_bot_control_command("/health").intent_name == "healthcheck"
+    assert parse_bot_control_command("/pending").intent_name == "pending_operations"
 
     for text in (
         "待确认",
@@ -693,17 +680,17 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
         "查看监控标的",
         "现在泡泡玛特 sell put的max strike是多少？",
     ):
-        assert parse_assistant_command(text) is None
+        assert parse_bot_control_command(text) is None
 
-    positions = parse_assistant_command("/positions sy")
+    positions = parse_bot_control_command("/positions sy")
     assert positions.intent_name == "position_query"
     assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
 
-    all_positions = parse_assistant_command("/positions")
+    all_positions = parse_bot_control_command("/positions")
     assert all_positions.intent_name == "position_query"
     assert all_positions.arguments == {"status": "open", "limit": 50}
 
-    may_positions = parse_assistant_command("/positions sy 5月", now_fn=lambda: date(2026, 5, 19))
+    may_positions = parse_bot_control_command("/positions sy 5月", now_fn=lambda: date(2026, 5, 19))
     assert may_positions.intent_name == "position_query"
     assert may_positions.arguments == {
         "account": "sy",
@@ -711,7 +698,7 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
         "expiration": {"month": "2026-05"},
         "limit": 50,
     }
-    may_positions_without_account = parse_assistant_command("/positions 5月", now_fn=lambda: date(2026, 5, 19))
+    may_positions_without_account = parse_bot_control_command("/positions 5月", now_fn=lambda: date(2026, 5, 19))
     assert may_positions_without_account.intent_name == "position_query"
     assert may_positions_without_account.arguments == {
         "status": "open",
@@ -719,40 +706,40 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
         "limit": 50,
     }
 
-    income = parse_assistant_command("/income sy 本月", now_fn=lambda: date(2026, 5, 19))
+    income = parse_bot_control_command("/income sy 本月", now_fn=lambda: date(2026, 5, 19))
     assert income.intent_name == "option_performance_report"
     assert income.arguments == {"account": "sy", "period": "mtd"}
 
-    all_income = parse_assistant_command("/income 本月", now_fn=lambda: date(2026, 5, 19))
+    all_income = parse_bot_control_command("/income 本月", now_fn=lambda: date(2026, 5, 19))
     assert all_income.intent_name == "option_performance_report"
     assert all_income.arguments == {"period": "mtd"}
 
-    ytd_income = parse_assistant_command("/income sy ytd", now_fn=lambda: date(2026, 7, 17))
+    ytd_income = parse_bot_control_command("/income sy ytd", now_fn=lambda: date(2026, 7, 17))
     assert ytd_income.arguments == {"account": "sy", "period": "ytd"}
 
-    previous_month = parse_assistant_command("/income 上月", now_fn=lambda: date(2026, 1, 3))
+    previous_month = parse_bot_control_command("/income 上月", now_fn=lambda: date(2026, 1, 3))
     assert previous_month.arguments == {"period": "month", "month": "2025-12"}
-    exact_month = parse_assistant_command("/income sy 2026年5月", now_fn=lambda: date(2026, 7, 17))
+    exact_month = parse_bot_control_command("/income sy 2026年5月", now_fn=lambda: date(2026, 7, 17))
     assert exact_month.arguments == {"account": "sy", "period": "month", "month": "2026-05"}
-    recent_bare_month = parse_assistant_command("/income 12月", now_fn=lambda: date(2026, 7, 17))
+    recent_bare_month = parse_bot_control_command("/income 12月", now_fn=lambda: date(2026, 7, 17))
     assert recent_bare_month.arguments == {"period": "month", "month": "2025-12"}
-    exact_year = parse_assistant_command("/income 2025年", now_fn=lambda: date(2026, 7, 17))
+    exact_year = parse_bot_control_command("/income 2025年", now_fn=lambda: date(2026, 7, 17))
     assert exact_year.arguments == {"period": "year", "year": 2025}
 
-    logs = parse_assistant_command("/logs 20260515T182459Z-474761")
+    logs = parse_bot_control_command("/logs 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
 
 
 def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None:
-    _config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+    _config_yaml, bot_config = _write_bot_model_config(tmp_path)
 
     out = _handle(
         "/model",
         "msg_model_list",
         conversation_id="feishu:oc_1:ou_1",
         audit_db=str(tmp_path / "audit.sqlite3"),
-        assistant_config_path=str(assistant_config),
+        bot_config_path=str(bot_config),
     )
 
     assert out["ok"] is True
@@ -767,7 +754,7 @@ def test_inbound_model_use_requires_preview_and_confirm(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+    config_yaml, bot_config = _write_bot_model_config(tmp_path)
     _enable_inbound_model_write(monkeypatch)
 
     preview = _handle(
@@ -775,7 +762,7 @@ def test_inbound_model_use_requires_preview_and_confirm(
         "msg_model_use",
         conversation_id="feishu:oc_1:ou_1",
         audit_db=str(tmp_path / "audit.sqlite3"),
-        assistant_config_path=str(assistant_config),
+        bot_config_path=str(bot_config),
     )
 
     assert preview["ok"] is True
@@ -789,33 +776,33 @@ def test_inbound_model_use_requires_preview_and_confirm(
         "msg_model_confirm",
         conversation_id="feishu:oc_1:ou_1",
         audit_db=str(tmp_path / "audit.sqlite3"),
-        assistant_config_path=str(assistant_config),
+        bot_config_path=str(bot_config),
     )
 
     assert confirm["ok"] is True
     assert confirm["data"]["status"] == "applied"
     assert confirm["data"]["result"]["active_model"] == "deepseek-default"
     assert "active_model: deepseek-default" in config_yaml.read_text(encoding="utf-8")
-    generated = json.loads(assistant_config.read_text(encoding="utf-8"))
-    assert generated["assistant"]["llm"]["provider"] == "deepseek"
-    assert generated["assistant"]["llm"]["model"] == "deepseek-chat"
+    generated = json.loads(bot_config.read_text(encoding="utf-8"))
+    assert generated["bot"]["llm"]["provider"] == "deepseek"
+    assert generated["bot"]["llm"]["model"] == "deepseek-chat"
 
 
 def test_inbound_model_confirm_rejects_stale_config_source(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+    config_yaml, bot_config = _write_bot_model_config(tmp_path)
     _enable_inbound_model_write(monkeypatch)
     request_kwargs = {
         "sender_id": "ou_1",
         "channel": "feishu",
         "conversation_id": "feishu:oc_1:ou_1",
         "audit_db": str(tmp_path / "audit.sqlite3"),
-        "assistant_config_path": str(assistant_config),
+        "bot_config_path": str(bot_config),
     }
 
-    preview = handle_assistant_request(
+    preview = handle_bot_request(
         _request("/model use deepseek-default", "model_stale_preview", **request_kwargs),
         allowed_senders="feishu:ou_1",
     )
@@ -823,7 +810,7 @@ def test_inbound_model_confirm_rejects_stale_config_source(
     assert preview["data"]["payload"]["config"]["source_sha256"]
     config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
 
-    confirmed = handle_assistant_request(_request("确认模型", "model_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
+    confirmed = handle_bot_request(_request("确认模型", "model_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
 
     assert confirmed["ok"] is False
     assert confirmed["error"]["code"] == "STALE_PREVIEW"
@@ -853,7 +840,7 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request(
             "/status",
             "msg_missing_config_scope",
@@ -880,21 +867,21 @@ def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
 
 
 def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
-    open_intent = parse_assistant_command("/record-open sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+    open_intent = parse_bot_control_command("/record-open sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
     assert open_intent is not None
     assert open_intent.intent_name == "manual_trade_open"
     assert open_intent.arguments == {
         "raw_text": "记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100",
     }
 
-    close_intent = parse_assistant_command("/record-close sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
+    close_intent = parse_bot_control_command("/record-close sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
     assert close_intent is not None
     assert close_intent.intent_name == "manual_trade_close"
     assert close_intent.arguments == {
         "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
     }
 
-    expiry_intent = parse_assistant_command(
+    expiry_intent = parse_bot_control_command(
         "/record-expiry lx 期权到期失效通知: 证券所持有的-1张腾讯 260710 490.00 购期权已到期失效"
     )
     assert expiry_intent is not None
@@ -903,32 +890,32 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "raw_text": "记录到期失效 lx 期权到期失效通知: 证券所持有的-1张腾讯 260710 490.00 购期权已到期失效",
     }
 
-    confirm_intent = parse_assistant_command("/confirm trade in_abc123")
+    confirm_intent = parse_bot_control_command("/confirm trade in_abc123")
     assert confirm_intent is not None
     assert confirm_intent.arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
     }
-    latest_confirm = parse_assistant_command("/confirm trade")
+    latest_confirm = parse_bot_control_command("/confirm trade")
     assert latest_confirm is not None
     assert latest_confirm.arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
-    cancel_intent = parse_assistant_command("/cancel trade in_abc123")
+    cancel_intent = parse_bot_control_command("/cancel trade in_abc123")
     assert cancel_intent is not None
     assert cancel_intent.intent_name == "manual_trade_cancel"
 
-    assert parse_assistant_command("/symbols").intent_name == "symbol_list"
-    symbol_add = parse_assistant_command("/symbol add 700 put")
+    assert parse_bot_control_command("/symbols").intent_name == "symbol_list"
+    symbol_add = parse_bot_control_command("/symbol add 700 put")
     assert symbol_add is not None
     assert symbol_add.intent_name == "symbol_add"
     assert symbol_add.arguments == {"symbol": "700", "sell_put_enabled": True, "sell_call_enabled": False}
-    symbol_edit = parse_assistant_command("/symbol edit HK.00700 sell_put.max_strike=480")
+    symbol_edit = parse_bot_control_command("/symbol edit HK.00700 sell_put.max_strike=480")
     assert symbol_edit is not None
     assert symbol_edit.intent_name == "symbol_edit"
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
-    covered_call_setting = parse_assistant_command("/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base")
+    covered_call_setting = parse_bot_control_command("/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base")
     assert covered_call_setting is not None
     assert covered_call_setting.intent_name == "symbol_edit"
     assert covered_call_setting.arguments == {
@@ -936,23 +923,23 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 85.0},
         "ensure_use": ["call_base"],
     }
-    symbol_remove = parse_assistant_command("/symbol remove 腾讯")
+    symbol_remove = parse_bot_control_command("/symbol remove 腾讯")
     assert symbol_remove is not None
     assert symbol_remove.arguments == {"symbol": "腾讯"}
-    symbol_confirm = parse_assistant_command("/confirm symbol in_abc123")
+    symbol_confirm = parse_bot_control_command("/confirm symbol in_abc123")
     assert symbol_confirm is not None
     assert symbol_confirm.intent_name == "symbol_confirm"
-    symbol_cancel = parse_assistant_command("/cancel symbol in_abc123")
+    symbol_cancel = parse_bot_control_command("/cancel symbol in_abc123")
     assert symbol_cancel is not None
     assert symbol_cancel.intent_name == "symbol_cancel"
-    upgrade = parse_assistant_command("/upgrade v1.2.111")
+    upgrade = parse_bot_control_command("/upgrade v1.2.111")
     assert upgrade is not None
     assert upgrade.intent_name == "upgrade_now"
     assert upgrade.arguments == {"target_version": "1.2.111"}
-    upgrade_confirm = parse_assistant_command("/confirm upgrade in_abc123")
+    upgrade_confirm = parse_bot_control_command("/confirm upgrade in_abc123")
     assert upgrade_confirm is not None
     assert upgrade_confirm.intent_name == "upgrade_confirm"
-    upgrade_cancel = parse_assistant_command("/cancel upgrade")
+    upgrade_cancel = parse_bot_control_command("/cancel upgrade")
     assert upgrade_cancel is not None
     assert upgrade_cancel.intent_name == "upgrade_cancel"
 
@@ -961,7 +948,7 @@ def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
     blocked_parent = tmp_path / "audit-parent-is-file"
     blocked_parent.write_text("not a directory", encoding="utf-8")
 
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request(
             "状态",
             "msg_unwritable_audit",
@@ -1092,7 +1079,7 @@ def test_incomplete_manual_open_does_not_create_pending_operation(
 ) -> None:
     _enable_inbound_trade_write(monkeypatch)
     monkeypatch.setattr(
-        "src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics",
+        "src.application.bot.control.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics",
         lambda **_kwargs: (None, None, {"attempted_sources": []}),
     )
     cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
@@ -1200,7 +1187,7 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     tmp_path: Path,
 ) -> None:
     import src.application.ledger.repository as ledger_repository
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_store import InboundOperationStore
     from src.application.positions.workflows import execute_manual_open
 
     _enable_inbound_trade_write(monkeypatch)
@@ -1305,8 +1292,8 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
 
 
 def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:
-    from src.application.assistant.audit import InboundAuditStore
-    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+    from src.application.bot.control.audit import InboundAuditStore
+    from src.application.bot.control.operation_diagnostics import collect_operation_timeline
 
     audit_db = tmp_path / "audit_only.sqlite3"
     store = InboundAuditStore(audit_db)
@@ -1419,8 +1406,8 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
 
 
 def test_operation_timeline_exposes_upgrade_version_fields(tmp_path: Path) -> None:
-    from src.application.assistant.operation_diagnostics import collect_operation_timeline
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_diagnostics import collect_operation_timeline
+    from src.application.bot.control.operation_store import InboundOperationStore
 
     audit_db = tmp_path / "upgrade_timeline.sqlite3"
     store = InboundOperationStore(audit_db)
@@ -1498,7 +1485,7 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
 
 def test_inbound_write_policy_requires_hmac_and_explicit_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.application.assistant.operation_policy import enforce_trade_write_allowed
+    from src.application.bot.control.operation_policy import enforce_trade_write_allowed
 
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
@@ -1522,7 +1509,7 @@ def test_inbound_write_policy_requires_hmac_and_explicit_admin(monkeypatch: pyte
 
 
 def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_store import InboundOperationStore
 
     store = InboundOperationStore(tmp_path / "inbound.sqlite3")
     store.save_preview(
@@ -1546,7 +1533,7 @@ def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
 
 
 def test_inbound_operation_store_expires_previewed_records(tmp_path: Path) -> None:
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_store import InboundOperationStore
 
     store = InboundOperationStore(tmp_path / "inbound.sqlite3")
     store.save_preview(
@@ -1601,7 +1588,7 @@ def test_inbound_operation_store_expires_previewed_records(tmp_path: Path) -> No
 
 
 def test_inbound_operation_store_fails_stale_confirmed_and_running_records(tmp_path: Path) -> None:
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_store import InboundOperationStore
 
     store = InboundOperationStore(tmp_path / "inbound.sqlite3")
     for operation_id in ("in_stale_confirmed", "in_stale_running", "in_recent_confirmed"):
@@ -1770,7 +1757,7 @@ def test_inbound_upgrade_defaults_forward_activation_preservation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.assistant.upgrade_operations import _upgrade_defaults
+    from src.application.bot.control.upgrade_operations import _upgrade_defaults
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
@@ -1786,7 +1773,7 @@ def test_inbound_upgrade_defaults_forward_activation_preservation(
 
 
 def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -1878,7 +1865,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
 
 def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -1903,10 +1890,10 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
         lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
     )
 
-    preview = handle_assistant_response(
+    preview = handle_bot_response(
         _request("/upgrade", "msg_upgrade_cancel_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
-        settings=AssistantSettings(),
+        settings=BotSettings(enabled=True),
     )
 
     assert preview["ok"] is True
@@ -1914,7 +1901,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
     operation_id = preview["data"]["operation_id"]
 
-    cancelled = handle_assistant_response(
+    cancelled = handle_bot_response(
         _request(
             f"取消升级 {operation_id}",
             "msg_upgrade_cancel",
@@ -1922,7 +1909,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
             audit_db=str(audit_db),
         ),
         allowed_senders="feishu:ou_1",
-        settings=AssistantSettings(),
+        settings=BotSettings(enabled=True),
     )
 
     assert cancelled["ok"] is True
@@ -1949,9 +1936,9 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.assistant import upgrade_operations
-    from src.application.assistant.operation_signature import hash_operation_payload
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control import upgrade_operations
+    from src.application.bot.control.operation_signature import hash_operation_payload
+    from src.application.bot.control.operation_store import InboundOperationStore
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -2054,8 +2041,8 @@ def test_inbound_upgrade_worker_recovers_pending_outbox_without_reapplying_upgra
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.assistant import upgrade_operations
-    from src.application.assistant.operation_signature import hash_operation_payload
+    from src.application.bot.control import upgrade_operations
+    from src.application.bot.control.operation_signature import hash_operation_payload
 
     _enable_inbound_upgrade_write(monkeypatch)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -2218,7 +2205,7 @@ def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
 
 
 def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -2272,7 +2259,7 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
 
 
 def test_inbound_upgrade_rejects_older_target_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -2332,7 +2319,7 @@ def test_inbound_upgrade_rejects_older_target_without_pending_operation(monkeypa
 
 
 def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -2377,7 +2364,7 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
 def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import subprocess
 
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -2418,7 +2405,7 @@ def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch:
 def test_upgrade_worker_launcher_falls_back_to_service_profile_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import subprocess
 
-    from src.application.assistant import upgrade_operations
+    from src.application.bot.control import upgrade_operations
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -2625,7 +2612,7 @@ def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics
     def _fake_resolve(**_kwargs: object) -> tuple[int, str, dict]:
         return 500, "cache", {"attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}]}
 
-    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+    monkeypatch.setattr("src.application.bot.control.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
     preview = _handle(
         "/record-open sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
@@ -2757,7 +2744,7 @@ def test_inbound_symbol_confirm_rejects_stale_config_source(
         "audit_db": str(tmp_path / "inbound.sqlite3"),
     }
 
-    preview = handle_assistant_request(
+    preview = handle_bot_request(
         _request("/symbol edit NVDA sell_put.max_strike=90", "symbol_stale_preview", **request_kwargs),
         allowed_senders="feishu:ou_1",
     )
@@ -2765,7 +2752,7 @@ def test_inbound_symbol_confirm_rejects_stale_config_source(
     assert preview["data"]["payload"]["config"]["source_sha256"]
     config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
 
-    confirmed = handle_assistant_request(_request("确认监控", "symbol_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
+    confirmed = handle_bot_request(_request("确认监控", "symbol_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
 
     assert confirmed["ok"] is False
     assert confirmed["error"]["code"] == "STALE_PREVIEW"
@@ -2984,7 +2971,7 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
         calls.append({"command": command, "cwd": cwd, "timeout_seconds": timeout_seconds})
         return _Proc()
 
-    monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
 
     preview = _handle("/monitor-run hk", "msg_monitor_run_preview", config_path=str(cfg_path), audit_db=str(audit_db))
 
@@ -3045,7 +3032,7 @@ def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.
         calls.append(command)
         raise AssertionError("monitor run runner should not be called on cancel")
 
-    monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
 
     preview = _handle(
         "/monitor-run hk accounts=sy timeout=900",
@@ -3104,8 +3091,8 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
 
     request = _request("/income sy ytd", "msg_1", config_key="us", audit_db=str(audit_db))
 
-    first = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
-    second = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
+    first = handle_bot_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
+    second = handle_bot_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
 
     assert first["ok"] is True
     assert first["data"]["tool_call"] == {
@@ -3148,17 +3135,17 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
-    income = handle_assistant_request(
+    income = handle_bot_request(
         _request("/income ytd", "msg_income", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
-    natural_month_income = handle_assistant_request(
+    natural_month_income = handle_bot_request(
         _request("/income 2026-05", "msg_natural_month_income", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
-    positions = handle_assistant_request(
+    positions = handle_bot_request(
         _request("/positions", "msg_positions", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
@@ -3206,8 +3193,8 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
 
     request = _request("/status", sender_id="local", channel="local", config_key="us", audit_db=str(audit_db))
 
-    first = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
-    second = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
+    first = handle_bot_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
+    second = handle_bot_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
 
     assert first["ok"] is True
     assert second["ok"] is True
@@ -3233,7 +3220,7 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
 def test_inbound_audit_schema_uses_single_control_record(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request("/status", "msg_audit_schema", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={"status": "ok"}),
         allowed_senders="feishu:ou_1",
@@ -3255,7 +3242,7 @@ def test_inbound_audit_schema_uses_single_control_record(tmp_path: Path) -> None
 
 
 def test_inbound_renderer_summarizes_position_rows() -> None:
-    intent = parse_assistant_command("/positions sy")
+    intent = parse_bot_control_command("/positions sy")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3292,7 +3279,7 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
     assert "数据源：OM 本地 SQLite position_lots" in text
 
     all_accounts = render_inbound_text(
-        intent=parse_assistant_command("/positions"),
+        intent=parse_bot_control_command("/positions"),
         tool_result=build_response(
             tool_name="option_positions_read",
             ok=True,
@@ -3317,7 +3304,7 @@ def test_inbound_renderer_does_not_cap_position_rows() -> None:
     ]
 
     text = render_inbound_text(
-        intent=parse_assistant_command("/positions sy"),
+        intent=parse_bot_control_command("/positions sy"),
         tool_result=build_response(
             tool_name="option_positions_read",
             ok=True,
@@ -3332,7 +3319,7 @@ def test_inbound_renderer_does_not_cap_position_rows() -> None:
 
 
 def test_inbound_renderer_explains_empty_positions() -> None:
-    intent = parse_assistant_command("/positions lx")
+    intent = parse_bot_control_command("/positions lx")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3346,7 +3333,7 @@ def test_inbound_renderer_explains_empty_positions() -> None:
 
 
 def test_inbound_renderer_summarizes_runtime_status() -> None:
-    intent = parse_assistant_command("/status")
+    intent = parse_bot_control_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3393,7 +3380,7 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
 
 
 def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> None:
-    intent = parse_assistant_command("/status")
+    intent = parse_bot_control_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3430,7 +3417,7 @@ def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> N
 
 
 def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> None:
-    intent = parse_assistant_command("/status")
+    intent = parse_bot_control_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3464,7 +3451,7 @@ def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> Non
 
 
 def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
-    intent = parse_assistant_command("/status")
+    intent = parse_bot_control_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -3506,7 +3493,7 @@ def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
 
 def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
     health_text = render_inbound_text(
-        intent=parse_assistant_command("/health"),
+        intent=parse_bot_control_command("/health"),
         tool_result=build_response(
             tool_name="healthcheck",
             ok=True,
@@ -3520,7 +3507,7 @@ def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
         ),
     )
     config_text = render_inbound_text(
-        intent=parse_assistant_command("/config"),
+        intent=parse_bot_control_command("/config"),
         tool_result=build_response(
             tool_name="config_validate",
             ok=True,
@@ -3543,7 +3530,7 @@ def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
 
 def test_inbound_renderer_summarizes_runs_and_logs() -> None:
     runs_text = render_inbound_text(
-        intent=parse_assistant_command("/runs"),
+        intent=parse_bot_control_command("/runs"),
         tool_result=build_response(
             tool_name="runtime_runs",
             ok=True,
@@ -3564,7 +3551,7 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
         ),
     )
     logs_text = render_inbound_text(
-        intent=parse_assistant_command("/logs run-1"),
+        intent=parse_bot_control_command("/logs run-1"),
         tool_result=build_response(
             tool_name="runtime_logs",
             ok=True,
@@ -3615,7 +3602,7 @@ def test_inbound_audit_keeps_income_diagnostics(tmp_path: Path) -> None:
             },
         )
 
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request("/income sy mtd", "msg_diag", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
@@ -3637,12 +3624,12 @@ def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_pa
     def _execute_tool(tool_name: str, payload: dict) -> dict:
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
-    first = handle_assistant_request(
+    first = handle_bot_request(
         _request("/income sy", "msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
-    second = handle_assistant_request(
+    second = handle_bot_request(
         _request("/income sy", "msg_1", sender_id="ou_2", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
@@ -3668,7 +3655,7 @@ def test_inbound_handle_denies_unknown_remote_sender_and_audits(tmp_path: Path) 
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={})
 
-    out = handle_assistant_request(
+    out = handle_bot_request(
         _request("/positions sy", "msg_bad", sender_id="ou_bad", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_good",
@@ -3732,29 +3719,14 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "ytd"})]
 
 
-def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_bot_reads_bot_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {
-        "enabled": True,
-        "bot": {"enabled": True},
-        "context_window_messages": 7,
-        "default_market_scope": "us",
-        "llm": {
-            "provider": "openai",
-            "base_url": "https://llm.example/v1",
-            "model": "gpt-5.2",
-            "api_key_env": "OM_LLM_API_KEY",
-            "confidence_min": 0.82,
-            "timeout_seconds": 32,
-            "context_window_tokens": 24_000,
-            "max_output_tokens": 770,
-        },
-    }}, ensure_ascii=False, indent=2), encoding="utf-8")
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(json.dumps({"bot": {'enabled': True, 'context_window_messages': 7, 'default_market_scope': 'us', 'llm': {'provider': 'openai', 'base_url': 'https://llm.example/v1', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'confidence_min': 0.82, 'timeout_seconds': 32, 'context_window_tokens': 24000, 'max_output_tokens': 770}}}, ensure_ascii=False, indent=2), encoding="utf-8")
     payload = {
         "schema": "2.0",
         "header": {"event_id": "evt_agent", "event_type": "im.message.receive_v1"},
@@ -3770,16 +3742,16 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     }
     seen: list[dict] = []
 
-    def _handle_assistant_turn(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
+    def _handle_bot_turn(request: BotInboundRequest, **kwargs) -> BotTurnResult:
         seen.append({"request": request, "kwargs": kwargs})
-        return _assistant_turn_response()
+        return _bot_turn_response()
 
-    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_turn", _handle_assistant_turn)
+    monkeypatch.setattr("src.application.bot.control.runtime.handle_bot_turn", _handle_bot_turn)
 
     out = handle_feishu_payload(
         payload,
         config_path=str(cfg_path),
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
     )
@@ -3789,7 +3761,6 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
-    assert settings.bot.enabled is True
     assert settings.context_window_messages == 7
     assert settings.llm.enabled is True
     assert settings.llm.provider == "openai"
@@ -3800,15 +3771,15 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assert settings.llm.max_output_tokens == 770
 
 
-def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_defaults_to_bot_from_bot_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
+        json.dumps({"bot": {'enabled': False, 'context_window_messages': 5, 'llm': {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     payload = {
@@ -3826,16 +3797,16 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     }
     seen: list[dict] = []
 
-    def _handle_assistant_turn(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
+    def _handle_bot_turn(request: BotInboundRequest, **kwargs) -> BotTurnResult:
         seen.append({"request": request, "kwargs": kwargs})
-        return _assistant_turn_response()
+        return _bot_turn_response()
 
-    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_turn", _handle_assistant_turn)
+    monkeypatch.setattr("src.application.bot.control.runtime.handle_bot_turn", _handle_bot_turn)
 
     out = handle_feishu_payload(
         payload,
         config_path=str(cfg_path),
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
     )
@@ -3843,8 +3814,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     assert out["ok"] is True
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
-    assert settings.enabled is True
-    assert settings.bot.enabled is False
+    assert settings.enabled is False
     assert settings.context_window_messages == 5
 
 
@@ -3862,19 +3832,19 @@ def test_feishu_payload_adapter_ignores_non_message_events() -> None:
     assert out["data"]["reason"] == "unsupported_event_type"
 
 
-def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_bot_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
-    seen: list[AssistantRequest] = []
+    seen: list[BotInboundRequest] = []
 
-    def _handle(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
+    def _handle(request: BotInboundRequest, **kwargs) -> BotTurnResult:
         del kwargs
         seen.append(request)
-        return _assistant_turn_response()
+        return _bot_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_turn", _handle)
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "handle_bot_turn", _handle)
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text("{}", encoding="utf-8")
 
     rc = cli.main(
         [
@@ -3892,8 +3862,8 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
             "feishu:oc_1:ou_1",
             "--config-key",
             "us",
-            "--assistant-config",
-            str(assistant_config_path),
+            "--bot-config",
+            str(bot_config_path),
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
         ]
@@ -3901,7 +3871,7 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.handle"
+    assert payload["tool_name"] == "bot.handle"
     assert seen[0].received_monotonic is not None
     assert seen == [
         _request(
@@ -3911,41 +3881,26 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
             conversation_id="feishu:oc_1:ou_1",
             config_key="us",
             audit_db=str(tmp_path / "audit.sqlite3"),
-            assistant_config_path=str(assistant_config_path),
+            bot_config_path=str(bot_config_path),
         )
     ]
 
 
-def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_bot_cli_handle_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {
-        "enabled": True,
-        "bot": {"enabled": True},
-        "context_window_messages": 6,
-        "default_market_scope": "us",
-        "llm": {
-            "provider": "openai",
-            "base_url": "https://llm.example/v1",
-            "model": "gpt-5.2",
-            "api_key_env": "OM_LLM_API_KEY",
-            "confidence_min": 0.81,
-            "timeout_seconds": 33,
-            "context_window_tokens": 24_000,
-            "max_output_tokens": 771,
-        },
-    }}, ensure_ascii=False, indent=2), encoding="utf-8")
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(json.dumps({"bot": {'enabled': True, 'context_window_messages': 6, 'default_market_scope': 'us', 'llm': {'provider': 'openai', 'base_url': 'https://llm.example/v1', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'confidence_min': 0.81, 'timeout_seconds': 33, 'context_window_tokens': 24000, 'max_output_tokens': 771}}}, ensure_ascii=False, indent=2), encoding="utf-8")
     seen = []
 
-    def _handle_assistant(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
+    def _handle_assistant(request: BotInboundRequest, **kwargs) -> BotTurnResult:
         seen.append({"request": request, "settings": kwargs.get("settings")})
-        return _assistant_turn_response()
+        return _bot_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_turn", _handle_assistant)
+    monkeypatch.setattr(cli, "handle_bot_turn", _handle_assistant)
 
     rc = cli.main(
         [
@@ -3953,8 +3908,8 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
             "handle",
             "--config-path",
             str(cfg_path),
-            "--assistant-config",
-            str(assistant_config_path),
+            "--bot-config",
+            str(bot_config_path),
             "--text",
             "/status",
             "--sender",
@@ -3964,7 +3919,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.handle"
+    assert payload["tool_name"] == "bot.handle"
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
@@ -3978,24 +3933,24 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assert settings.llm.max_output_tokens == 771
 
 
-def test_assistant_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_bot_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
+        json.dumps({"bot": {'enabled': False, 'context_window_messages': 4, 'llm': {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     seen = []
 
-    def _handle_assistant(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
+    def _handle_assistant(request: BotInboundRequest, **kwargs) -> BotTurnResult:
         seen.append({"request": request, "settings": kwargs.get("settings")})
-        return _assistant_turn_response()
+        return _bot_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_turn", _handle_assistant)
+    monkeypatch.setattr(cli, "handle_bot_turn", _handle_assistant)
 
     rc = cli.main(
         [
@@ -4003,8 +3958,8 @@ def test_assistant_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_
             "handle",
             "--config-path",
             str(cfg_path),
-            "--assistant-config",
-            str(assistant_config_path),
+            "--bot-config",
+            str(bot_config_path),
             "--text",
             "/status",
             "--sender",
@@ -4014,15 +3969,14 @@ def test_assistant_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.handle"
+    assert payload["tool_name"] == "bot.handle"
     assert len(seen) == 1
     settings = seen[0]["settings"]
-    assert settings.enabled is True
-    assert settings.bot.enabled is False
+    assert settings.enabled is False
     assert settings.context_window_messages == 4
 
 
-def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
+def test_bot_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     _enable_inbound_trade_write(monkeypatch)
@@ -4166,7 +4120,7 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
                 "config_key": "us",
                 "config_path": None,
                 "audit_db": str(tmp_path / "audit.sqlite3"),
-                "assistant_config_path": None,
+                "bot_config_path": None,
             },
         }
     ]
@@ -4265,7 +4219,7 @@ def test_inbound_cli_feishu_ws_rejects_secret_override_flags(capsys) -> None:
 def test_inbound_database_lock_waits_use_remaining_budget(tmp_path):
     import time
     import sqlite3
-    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.bot.control.operation_store import InboundOperationStore
     path = tmp_path / "bounded_inbound.sqlite3"
     with InboundAuditStore(path)._connect() as conn:
         conn.execute("CREATE TABLE budget_probe (value INTEGER)")
@@ -4365,3 +4319,10 @@ def test_inbound_symbol_add_accepts_strategy_bound_and_confirms_one_publication(
     added = [row for row in rows if row["symbol"] == "TIGR"]
     assert len(added) == 1
     assert added[0][side][bound] == value
+
+
+@pytest.fixture(autouse=True)
+def _enabled_bot_fixture(tmp_path, monkeypatch):
+    path = tmp_path / "test-bot-default.json"
+    path.write_text('{"bot":{"enabled":true}}')
+    monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: path)

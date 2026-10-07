@@ -131,23 +131,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "opend_alert_after_consecutive_failures": 3,
             "opend_alert_send_recovery_notice": True,
         },
-        "assistant": {
-            "enabled": True,
-            "context_window_messages": 8,
-            "bot": {
-                "enabled": False,
-            },
-            "llm": {
-                "provider": "",
-                "base_url": "",
-                "model": "",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 90,
-                "context_window_tokens": 24000,
-                "max_output_tokens": None,
-            },
-        },
+        "bot": {'enabled': False, 'context_window_messages': 8, 'llm': {'provider': '', 'base_url': '', 'model': '', 'api_key_env': 'OM_LLM_API_KEY', 'confidence_min': 0.75, 'timeout_seconds': 90, 'context_window_tokens': 24000, 'max_output_tokens': None}},
         "inbound": {
             "feishu_ws": {
                 "reply_enabled": True,

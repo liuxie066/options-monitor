@@ -164,7 +164,7 @@ def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, caps
     assert applied
     assert (target / "config.yaml").is_file()
     assert (target / "config.us.json").is_file()
-    assert (target / "resolved" / "config.assistant.json").is_file()
+    assert (target / "resolved" / "config.bot.json").is_file()
     assert not (target / "config.hk.json").exists()
     assert "hk:" not in (target / "config.yaml").read_text(encoding="utf-8")
     assert "NVDA" not in (target / "config.yaml").read_text(encoding="utf-8")
@@ -206,7 +206,7 @@ def test_create_starter_success_has_no_unsafe_delete_hint(tmp_path: Path) -> Non
         repo_root=Path(__file__).resolve().parents[1],
         output_config_yaml_path=target / "config.yaml",
         runtime_output_dir=target,
-        assistant_output_config_path=target / "resolved" / "config.assistant.json",
+        bot_output_config_path=target / "resolved" / "config.bot.json",
         markets=["us"],
         us_symbols=["AAPL"],
         record_path=record,
@@ -258,11 +258,11 @@ def test_setup_init_race_preserves_other_file_and_cleans_own_files(monkeypatch, 
     with pytest.raises(AgentToolError, match="failed to create starter config"):
         create_starter_config(repo_root=Path(__file__).resolve().parents[1],
                               output_config_yaml_path=target / "config.yaml", runtime_output_dir=target,
-                              assistant_output_config_path=target / "resolved" / "config.assistant.json",
+                              bot_output_config_path=target / "resolved" / "config.bot.json",
                               markets=["us"], us_symbols=["AAPL"], record_path=record)
     assert (target / "config.yaml").read_text() == "created elsewhere\n"
     assert not (target / "config.us.json").exists()
-    assert not (target / "resolved" / "config.assistant.json").exists()
+    assert not (target / "resolved" / "config.bot.json").exists()
     assert not record.exists()
 
 
@@ -286,7 +286,7 @@ def test_setup_init_failure_preserves_modified_created_file(monkeypatch, tmp_pat
     with pytest.raises(AgentToolError) as captured:
         create_starter_config(repo_root=Path(__file__).resolve().parents[1],
                               output_config_yaml_path=target / "config.yaml", runtime_output_dir=target,
-                              assistant_output_config_path=target / "resolved" / "config.assistant.json",
+                              bot_output_config_path=target / "resolved" / "config.bot.json",
                               markets=["us"], us_symbols=["AAPL"], record_path=record)
     assert captured.value.details["preserved"] == [str(target / "config.us.json")]
     assert (target / "config.us.json").read_text() == "modified after publish\n"

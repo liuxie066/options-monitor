@@ -156,7 +156,7 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
     capabilities=("notification_perception", "audit_tail", "read_only", "runtime_artifacts"),
     input_schema={
         "run_id": "optional output_runs id; omitted reads output_shared/state/audit_events.jsonl",
-        "conversation_id": "optional assistant conversation scope such as wechat:<chat_key>",
+        "conversation_id": "optional Bot conversation scope such as wechat:<chat_key>",
         "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "event_kind": "optional event kind filter",
         "start_utc": "optional ISO-8601 UTC window start; requires end_utc",

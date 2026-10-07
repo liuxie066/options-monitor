@@ -275,43 +275,43 @@ def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) ->
     }]
 
 
-def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
+def test_bot_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[dict] = []
 
-    def _check_assistant_llm(**kwargs):
+    def _check_bot_llm(**kwargs):
         calls.append(kwargs)
         return {"summary": {"ok": True, "status": "ready"}, "checks": []}
 
-    monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
+    monkeypatch.setattr(cli, "check_bot_llm", _check_bot_llm)
 
     rc = cli.main([
-        "assistant", "llm-check", "--assistant-config", "config.assistant.json", "--env-file",
+        "assistant", "llm-check", "--bot-config", "config.bot.json", "--env-file",
         "options-monitor.env", "--no-local-env-file", "--live",
     ])
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.llm_check"
+    assert payload["tool_name"] == "bot.llm_check"
     assert payload["ok"] is True
     assert calls == [{
         "repo_root": cli.repo_base(),
-        "config_path": "config.assistant.json",
+        "config_path": "config.bot.json",
         "env_file": "options-monitor.env",
         "include_local_env_file": False,
         "live": True,
     }]
 
 
-def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> None:
+def test_bot_model_catalog_command_renders_provider_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main(["assistant", "model", "catalog"])
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.model.catalog"
+    assert payload["tool_name"] == "bot.model.catalog"
     providers = {item["provider"]: item for item in payload["data"]["providers"]}
     assert providers["deepseek"]["api_kind"] == "chat_completions"
     assert providers["deepseek"]["default_api_key_env"] == "DEEPSEEK_API_KEY"
@@ -326,7 +326,7 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     assert providers["ollama"]["requires_api_key"] is False
 
 
-def test_assistant_model_list_text_does_not_print_credential_env_name(tmp_path: Path, capsys) -> None:
+def test_bot_model_list_text_does_not_print_credential_env_name(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     config_path = _write_config(tmp_path, """\
@@ -338,10 +338,8 @@ markets:
   us:
     accounts: [lx]
     symbols: [NVDA]
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -363,16 +361,16 @@ assistant:
     assert "api_key_env" not in text
 
 
-def test_assistant_model_check_forwards_live_flag(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_bot_model_check_forwards_live_flag(tmp_path: Path, monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[dict] = []
 
-    def _check_assistant_llm(**kwargs):
+    def _check_bot_llm(**kwargs):
         calls.append(kwargs)
         return {"summary": {"ok": True, "status": "ready"}, "checks": [], "config": {}}
 
-    monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
+    monkeypatch.setattr(cli, "check_bot_llm", _check_bot_llm)
     config_path = _write_config(tmp_path, """\
 accounts:
   lx:
@@ -382,10 +380,8 @@ markets:
   us:
     accounts: [lx]
     symbols: [NVDA]
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -402,11 +398,11 @@ assistant:
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.model.check"
+    assert payload["tool_name"] == "bot.model.check"
     assert calls[-1]["live"] is True
 
 
-def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
+def test_bot_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     config_path = _write_config(tmp_path, """\
@@ -418,10 +414,9 @@ markets:
   us:
     accounts: [lx]
     symbols: [NVDA]
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: false
+  enabled: false
 """)
     before = config_path.read_text(encoding="utf-8")
 
@@ -433,7 +428,7 @@ assistant:
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.model.add"
+    assert payload["tool_name"] == "bot.model.add"
     data = payload["data"]
     assert data["dry_run"] is True
     assert data["write_applied"] is False
@@ -442,7 +437,7 @@ assistant:
     assert config_path.read_text(encoding="utf-8") == before
 
 
-def test_assistant_model_add_requires_context_window_tokens(capsys) -> None:
+def test_bot_model_add_requires_context_window_tokens(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     with pytest.raises(SystemExit) as exc:
@@ -455,16 +450,14 @@ def test_assistant_model_add_requires_context_window_tokens(capsys) -> None:
     assert "--context-window-tokens" in capsys.readouterr().err
 
 
-def test_assistant_model_current_text_displays_authoring_and_runtime_context(
+def test_bot_model_current_text_displays_authoring_and_runtime_context(
     tmp_path: Path, capsys
 ) -> None:
     import src.interfaces.cli.main as cli
 
     config_path = _write_config(tmp_path, """\
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -474,29 +467,18 @@ assistant:
       context_window_tokens: 24000
       max_output_tokens: 2048
 """)
-    runtime_path = tmp_path / "config.assistant.json"
+    runtime_path = tmp_path / "config.bot.json"
     runtime_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "enabled": True,
-                    "bot": {"enabled": True},
-                    "llm": {
-                        "provider": "openai",
-                        "model": "gpt-5.2",
-                        "base_url": "",
-                        "api_key_env": "OM_LLM_API_KEY",
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 2048,
-                    },
-                }
+                "bot": {'enabled': True, 'llm': {'provider': 'openai', 'model': 'gpt-5.2', 'base_url': '', 'api_key_env': 'OM_LLM_API_KEY', 'context_window_tokens': 24000, 'max_output_tokens': 2048}}
             }
         ),
         encoding="utf-8",
     )
 
     rc = cli.main([
-        "assistant", "model", "current", "--config-yaml", str(config_path), "--assistant-config",
+        "assistant", "model", "current", "--config-yaml", str(config_path), "--bot-config",
         str(runtime_path), "--format", "text",
     ])
     text = capsys.readouterr().out
@@ -507,7 +489,7 @@ assistant:
     assert "drift: False" in text
 
 
-def test_assistant_model_use_apply_switches_active_model_and_writes_backup(tmp_path: Path, capsys) -> None:
+def test_bot_model_use_apply_switches_active_model_and_writes_backup(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     config_path = _write_config(tmp_path, """\
@@ -519,10 +501,8 @@ markets:
   us:
     accounts: [lx]
     symbols: [NVDA]
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -545,7 +525,7 @@ assistant:
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "assistant.model.use"
+    assert payload["tool_name"] == "bot.model.use"
     data = payload["data"]
     assert data["dry_run"] is False
     assert data["write_applied"] is True
@@ -565,7 +545,7 @@ def test_no_local_env_file_flag_prevents_process_env_bootstrap(monkeypatch, tmp_
         assert calls == []
 
 
-def test_assistant_commands_command_renders_catalog(capsys) -> None:
+def test_bot_control_commands_command_renders_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main(["assistant", "commands"])
@@ -589,7 +569,7 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert "/confirm attribution|trade|symbol|upgrade|model" in text
 
 
-def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
+def test_bot_capabilities_command_renders_capability_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main(["assistant", "capabilities"])
@@ -625,7 +605,8 @@ def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
     help_text = capsys.readouterr().out
 
     assert exc.value.code == 0
-    assert "assistant" in help_text
+    assert "bot" in help_text
+    assert "assistant" not in help_text
     assert " agent " not in help_text
 
     rc = cli.main(["agent", "commands"])

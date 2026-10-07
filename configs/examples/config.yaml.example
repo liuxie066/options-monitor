@@ -57,11 +57,9 @@ markets:
       - "0700.HK"
       - "9992.HK"
 
-assistant:
+bot:
   enabled: true
   context_window_messages: 8
-  bot:
-    enabled: true
   active_model: deepseek-default
   models:
     deepseek-default:

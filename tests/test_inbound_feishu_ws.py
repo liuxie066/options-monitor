@@ -13,10 +13,13 @@ from typing import Any
 
 @pytest.fixture(autouse=True)
 def isolated_default_audit_path(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.application.assistant.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
+    monkeypatch.setattr("src.application.bot.control.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
+    config = tmp_path / "default-bot.json"
+    config.write_text('{"bot":{"enabled":true}}')
+    monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: config)
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant.audit import InboundAuditStore
+from src.application.bot.control.audit import InboundAuditStore
 from src.application.bot.contracts import AppResult
 import src.application.inbound.feishu_ws as feishu_ws
 from src.application.inbound.feishu import prepare_feishu_ack_target
@@ -237,7 +240,7 @@ def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) ->
                     "request": {"message_id": "msg_1"},
                     "response_text": "channel service reply",
                     "inbound_result": build_response(
-                        tool_name="assistant.handle",
+                        tool_name="bot.handle",
                         ok=True,
                         data={"command_id": "cmd_failed", "response_text": "channel service reply"},
                     ),
@@ -433,7 +436,7 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
                     "request": {"message_id": "msg_1"},
                     "response_text": "channel service reply",
                     "inbound_result": build_response(
-                        tool_name="assistant.handle",
+                        tool_name="bot.handle",
                         ok=True,
                         data={"command_id": "cmd_1", "response_text": "channel service reply"},
                     ),
@@ -462,8 +465,8 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
 
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}}}), encoding="utf-8")
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(json.dumps({"bot": {'enabled': True}}), encoding="utf-8")
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -473,12 +476,12 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
         _message_payload(text="/status"),
         settings=FeishuWsSettings(
             config_path=str(tmp_path / "config.us.json"),
-            assistant_config_path=str(assistant_config_path),
+            bot_config_path=str(bot_config_path),
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
             audit_db=str(tmp_path / "audit.sqlite3"),
-            assistant_enabled=True,
+            bot_enabled=True,
         ),
         reply_fn=lambda **_kwargs: {"code": 0},
         execute_tool_fn=_execute,
@@ -494,21 +497,11 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
 def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, tmp_path: Path) -> None:
     replies: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "enabled": True,
-                    "bot": {"enabled": True},
-                    "llm": {
-                        "provider": "openai",
-                        "model": "gpt-5.2",
-                        "api_key_env": "OM_LLM_API_KEY",
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 2048,
-                    },
-                }
+                "bot": {'enabled': True, 'llm': {'provider': 'openai', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'context_window_tokens': 24000, 'max_output_tokens': 2048}}
             }
         ),
         encoding="utf-8",
@@ -524,7 +517,7 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, t
         bot_calls.append(dict(kwargs))
         return AppResult(status="completed", user_response="结论：6月净现金流来自已实现收益和权利金。")
 
-    monkeypatch.setattr("src.application.assistant.inbound_service.run_channel_request", _run_channel_request)
+    monkeypatch.setattr("src.application.bot.control.inbound_service.run_channel_request", _run_channel_request)
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
@@ -533,7 +526,7 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, t
     out = handle_feishu_ws_event(
         _message_payload(text="分析 lx 6月的净现金流明细"),
         settings=_settings(
-            assistant_config_path=str(assistant_config_path),
+            bot_config_path=str(bot_config_path),
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
         reply_fn=_reply,
@@ -556,20 +549,11 @@ def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
     tmp_path: Path,
 ) -> None:
     replies: list[dict[str, Any]] = []
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
         json.dumps(
             {
-                "assistant": {
-                    "bot": {"enabled": True},
-                    "llm": {
-                        "provider": "openai",
-                        "model": "gpt-5.2",
-                        "api_key_env": "OM_LLM_API_KEY",
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 2048,
-                    },
-                }
+                "bot": {'enabled': True, 'llm': {'provider': 'openai', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'context_window_tokens': 24000, 'max_output_tokens': 2048}}
             }
         ),
         encoding="utf-8",
@@ -581,7 +565,7 @@ def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
     monkeypatch.setattr(InboundAuditStore, "list_recent", _broken_list_recent)
 
     monkeypatch.setattr(
-        "src.application.assistant.inbound_service.run_channel_request",
+        "src.application.bot.control.inbound_service.run_channel_request",
         lambda **_kwargs: AppResult(status="completed", user_response="结论：系统运行正常。"),
     )
 
@@ -603,7 +587,7 @@ def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
     out = handle_feishu_ws_event(
         _message_payload(text="系统健康检查"),
         settings=_settings(
-            assistant_config_path=str(assistant_config_path),
+            bot_config_path=str(bot_config_path),
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
         reply_fn=_reply,
@@ -715,12 +699,12 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
 def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp_path: Path) -> None:
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text("{}", encoding="utf-8")
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text("{}", encoding="utf-8")
 
     settings = build_feishu_ws_settings(
         config_path=str(config_path),
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
@@ -782,9 +766,9 @@ def test_feishu_ws_settings_overlays_explicit_credential_env_file(tmp_path: Path
     assert settings.allowed_senders == "feishu:ou_file"
 
 
-def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
+def test_feishu_ws_settings_reads_behavior_from_bot_config(tmp_path: Path) -> None:
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
         json.dumps(
             {
                 "inbound": {
@@ -796,21 +780,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
                         "queue_size": 25,
                     }
                 },
-                    "assistant": {
-                        "bot": {"enabled": True},
-                        "context_window_messages": 9,
-                    "default_market_scope": "us",
-                    "llm": {
-                        "provider": "openai",
-                        "base_url": "https://llm.example/v1",
-                        "model": "gpt-5.2",
-                        "api_key_env": "OM_LLM_API_KEY",
-                        "confidence_min": 0.8,
-                        "timeout_seconds": 31,
-                        "context_window_tokens": 24_000,
-                        "max_output_tokens": 769,
-                    }
-                }
+                    "bot": {'enabled': True, 'context_window_messages': 9, 'default_market_scope': 'us', 'llm': {'provider': 'openai', 'base_url': 'https://llm.example/v1', 'model': 'gpt-5.2', 'api_key_env': 'OM_LLM_API_KEY', 'confidence_min': 0.8, 'timeout_seconds': 31, 'context_window_tokens': 24000, 'max_output_tokens': 769}}
             }
         ),
         encoding="utf-8",
@@ -818,7 +788,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
 
     settings = build_feishu_ws_settings(
         config_path=str(tmp_path / "config.us.json"),
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         queue_size=5,
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
@@ -831,32 +801,31 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.reply_enabled is False
     assert settings.config_key is None
     assert settings.config_path == str(tmp_path / "config.us.json")
-    assert settings.assistant_config_path == str(assistant_config_path)
+    assert settings.bot_config_path == str(bot_config_path)
     assert settings.reply_in_thread is True
     assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
-    assert settings.assistant_enabled is True
-    assert settings.assistant_bot_enabled is True
-    assert settings.assistant_context_window_messages == 9
-    assert settings.assistant_llm.enabled is True
-    assert settings.assistant_llm.provider == "openai"
-    assert settings.assistant_llm.base_url == "https://llm.example/v1"
-    assert settings.assistant_llm.model == "gpt-5.2"
-    assert settings.assistant_llm.confidence_min == 0.8
-    assert settings.assistant_llm.timeout_seconds == 31
-    assert settings.assistant_llm.max_output_tokens == 769
+    assert settings.bot_enabled is True
+    assert settings.bot_context_window_messages == 9
+    assert settings.bot_llm.enabled is True
+    assert settings.bot_llm.provider == "openai"
+    assert settings.bot_llm.base_url == "https://llm.example/v1"
+    assert settings.bot_llm.model == "gpt-5.2"
+    assert settings.bot_llm.confidence_min == 0.8
+    assert settings.bot_llm.timeout_seconds == 31
+    assert settings.bot_llm.max_output_tokens == 769
 
 
 def test_feishu_ws_settings_preserves_official_mixed_case_reaction(tmp_path: Path) -> None:
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(
         json.dumps({"inbound": {"feishu_ws": {"ack_reaction": "Typing"}}}),
         encoding="utf-8",
     )
 
     settings = build_feishu_ws_settings(
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
@@ -867,12 +836,12 @@ def test_feishu_ws_settings_preserves_official_mixed_case_reaction(tmp_path: Pat
     assert settings.ack_reaction == "Typing"
 
 
-def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -> None:
-    assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"inbound": {"feishu_ws": {}}}), encoding="utf-8")
+def test_feishu_ws_settings_requires_explicit_bot_activation(tmp_path: Path) -> None:
+    bot_config_path = tmp_path / "config.bot.json"
+    bot_config_path.write_text(json.dumps({"inbound": {"feishu_ws": {}}}), encoding="utf-8")
 
     settings = build_feishu_ws_settings(
-        assistant_config_path=str(assistant_config_path),
+        bot_config_path=str(bot_config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
@@ -880,9 +849,8 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
         },
     )
 
-    assert settings.assistant_enabled is True
-    assert settings.assistant_bot_enabled is False
-    assert settings.assistant_llm.enabled is False
+    assert settings.bot_enabled is False
+    assert settings.bot_llm.enabled is False
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:
@@ -1491,13 +1459,13 @@ def test_feishu_ws_client_converts_sdk_event_model() -> None:
 @pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
 @pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
 def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_path, monkeypatch, explicit_db, access, text):
-    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.control.audit import InboundAuditStore
     from src.application.bot.host_store import BotHostStore
     def forbidden(*args, **kwargs):
         raise AssertionError('expired request must not prepare, model, execute, retry or react')
     monkeypatch.setattr(feishu_ws, '_retry_pending_feishu_reply', forbidden)
-    monkeypatch.setattr('src.application.assistant.inbound_service._parse_command', forbidden)
-    monkeypatch.setattr('src.application.assistant.inbound_service._run_bot', forbidden)
+    monkeypatch.setattr('src.application.bot.control.inbound_service._parse_command', forbidden)
+    monkeypatch.setattr('src.application.bot.control.inbound_service._run_bot', forbidden)
     replies = []
     def reply(**kwargs):
         replies.append(kwargs)
@@ -1528,12 +1496,12 @@ def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_pa
 
 def test_feishu_trusted_received_timestamp_is_internal_and_survives_normalization():
     from src.application.inbound.feishu import feishu_payload_to_inbound_request
-    from src.application.assistant.inbound_service import _normalize_request
-    from src.application.assistant.runtime import _request_with_default_market_scope
-    from src.application.assistant.settings import AssistantSettings
+    from src.application.bot.control.inbound_service import _normalize_request
+    from src.application.bot.control.runtime import _request_with_default_market_scope
+    from src.application.bot.control.settings import BotSettings
     payload = _message_payload()
     payload["received_monotonic"] = 999999999999
     request = feishu_payload_to_inbound_request(payload, received_monotonic=123.25)
-    normalized = _request_with_default_market_scope(_normalize_request(request), AssistantSettings(default_market_scope="us"))
+    normalized = _request_with_default_market_scope(_normalize_request(request), BotSettings(default_market_scope="us"))
     assert normalized.received_monotonic == 123.25
     assert "received_monotonic" not in normalized.public_payload()

@@ -143,16 +143,16 @@ def test_config_authoring_compensates_generation_when_source_commit_fails(
     _write_yaml(config_path, before_doc)
     us_path = tmp_path / "config.us.json"
     hk_path = tmp_path / "config.hk.json"
-    assistant_path = tmp_path / "resolved" / "config.assistant.json"
-    assistant_path.parent.mkdir(parents=True)
+    bot_path = tmp_path / "resolved" / "config.bot.json"
+    bot_path.parent.mkdir(parents=True)
     us_path.write_text('{"old":"us"}\n', encoding="utf-8")
     hk_path.write_text('{"old":"hk"}\n', encoding="utf-8")
-    assistant_path.write_text('{"old":"assistant"}\n', encoding="utf-8")
+    bot_path.write_text('{"old":"assistant"}\n', encoding="utf-8")
     before_bytes = {
         config_path: config_path.read_bytes(),
         us_path: us_path.read_bytes(),
         hk_path: hk_path.read_bytes(),
-        assistant_path: assistant_path.read_bytes(),
+        bot_path: bot_path.read_bytes(),
     }
     after_doc = _config_doc()
     after_doc["markets"]["us"]["symbols"].append("FUTU")
@@ -204,7 +204,7 @@ def test_config_authoring_retarget_preserves_effective_fingerprint_for_new_docum
         )
 
     result = _publish(
-        source, changed, tmp_path, markets=["us", "hk"], include_assistant=False, apply=True,
+        source, changed, tmp_path, markets=["us", "hk"], include_bot=False, apply=True,
         expected_source_sha256=before_sha,
     )
 
@@ -228,13 +228,13 @@ def test_config_authoring_retarget_preserves_effective_fingerprint_for_new_docum
         )["ok"] is True
 
 
-def test_config_authoring_assistant_only_edit_still_invalidates_preview_sha(tmp_path: Path) -> None:
+def test_config_authoring_bot_only_edit_still_invalidates_preview_sha(tmp_path: Path) -> None:
     source = tmp_path / "config.yaml"
     original = _config_doc()
     _write_yaml(source, original)
     expected_sha = config_source_sha256(source)
     changed = _config_doc()
-    changed["assistant"] = {"enabled": False}
+    changed["bot"] = {"enabled": False}
     _write_yaml(source, changed)
     before = source.read_bytes()
 
@@ -268,7 +268,7 @@ def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path
     before_state = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
 
     result = _publish(
-        source, before_doc, tmp_path, markets=["us"], include_assistant=False, apply=False,
+        source, before_doc, tmp_path, markets=["us"], include_bot=False, apply=False,
         expected_source_sha256=before_sha,
     )
 
@@ -307,7 +307,7 @@ def test_regular_publisher_recovers_before_rejecting_stale_source(tmp_path: Path
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, before_doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, before_doc, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=before_sha,
         )
 
@@ -371,7 +371,7 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, doc, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -429,7 +429,7 @@ def test_regular_publisher_rejects_unsafe_pending_target_before_recovery(
 
     with pytest.raises(ValueError, match="special config mode|deployment user"):
         _publish(
-            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, doc, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -467,7 +467,7 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
     changed["markets"]["us"]["symbols"].append("FUTU")
 
     result = _publish(
-        source, changed, runtime_root, markets=["us"], include_assistant=False, apply=True, backup=False,
+        source, changed, runtime_root, markets=["us"], include_bot=False, apply=True, backup=False,
         expected_source_sha256=source_sha,
     )
 
@@ -523,7 +523,7 @@ def test_regular_publisher_rejects_missing_existing_target_before_any_journal_re
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, doc, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -613,17 +613,17 @@ def test_held_lock_publish_rejects_released_or_wrong_root(tmp_path: Path) -> Non
     with locked_config_authoring(runtime_root=tmp_path) as lock:
         with pytest.raises(AgentToolError, match="same runtime root"):
             _publish_locked(
-                lock, source, after_doc, tmp_path / "other", markets=["us"], include_assistant=False,
+                lock, source, after_doc, tmp_path / "other", markets=["us"], include_bot=False,
                 expected_source_sha256=before_sha,
             )
         result = _publish_locked(
-            lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False,
+            lock, source, after_doc, tmp_path, markets=["us"], include_bot=False,
             expected_source_sha256=before_sha,
         )
 
     assert result["write_applied"] is True
     with pytest.raises(AgentToolError, match="live config authoring lock"):
-        _publish_locked(lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False)
+        _publish_locked(lock, source, after_doc, tmp_path, markets=["us"], include_bot=False)
 
 
 def test_authoring_lock_is_released_when_recovery_is_interrupted(
@@ -719,7 +719,7 @@ def test_current_publish_cleanup_failure_is_not_hidden_by_cleanup_only_recovery(
         monkeypatch.setattr(transaction_module.shutil, "rmtree", _fail_current_cleanup)
         with pytest.raises(AgentToolError) as exc:
             _publish_locked(
-                lock, source, changed, tmp_path, markets=["us"], include_assistant=False, backup=False,
+                lock, source, changed, tmp_path, markets=["us"], include_bot=False, backup=False,
                 expected_source_sha256=before_sha,
             )
 
@@ -929,7 +929,7 @@ def test_commit_validates_all_journal_payloads_before_first_live_write(
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, after_doc, tmp_path, markets=["us", "hk"], include_assistant=False, apply=True, backup=False,
+            source, after_doc, tmp_path, markets=["us", "hk"], include_bot=False, apply=True, backup=False,
             expected_source_sha256=before_sha,
         )
 
@@ -1105,7 +1105,7 @@ def test_later_publish_error_preserves_prior_lock_recovery_audit(
         )
         with pytest.raises(AgentToolError) as exc:
             _publish_locked(
-                lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False,
+                lock, source, after_doc, tmp_path, markets=["us"], include_bot=False,
                 expected_source_sha256=after_sha,
             )
 
@@ -1144,7 +1144,7 @@ def test_pending_manifest_with_missing_target_path_reports_no_write_audit(
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, _config_doc(), tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, _config_doc(), tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1195,7 +1195,7 @@ def test_backup_success_then_manifest_prepare_failure_reports_durable_audit(
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, changed, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, changed, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1236,7 +1236,7 @@ def test_partial_backup_failure_reports_known_backup_effect(
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, changed, tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, changed, tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1278,7 +1278,7 @@ def test_backup_failure_with_unavailable_path_observation_reports_unknown_effect
 
     with pytest.raises(AgentToolError) as exc:
         _publish(
-            source, _config_doc(), tmp_path, markets=["us"], include_assistant=False, apply=True,
+            source, _config_doc(), tmp_path, markets=["us"], include_bot=False, apply=True,
             expected_source_sha256=source_sha,
         )
 

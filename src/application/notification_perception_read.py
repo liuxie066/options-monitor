@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.multi_tick.assistant_perception_event import (
+from src.application.multi_tick.bot_perception_event import (
     NOTIFICATION_PERCEPTION_EVENT_SCHEMA_VERSION,
     NOTIFICATION_PERCEPTION_EVENT_TYPE,
 )

@@ -9,8 +9,8 @@ and Bot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 | Surface | Entry | Authority |
 |---|---|---|
 | Tool Gateway | `./om-agent` | `src/application/agent_tool_registry.py` |
-| Deterministic Control | `./om assistant handle` | explicit command parser, pending-operation store, and `inbound_control.py` |
-| Bot | free-form text through `./om assistant handle` or `./om bot run` | Bot Service + Host + `om_chat` Agent; channel runs may request Control previews |
+| Deterministic Control | `./om bot handle` | explicit command parser, pending-operation store, and `inbound_control.py` |
+| Bot | free-form text through `./om bot handle` or `./om bot run` | Bot Service + Host + `om_chat` Agent; channel runs may request Control previews |
 
 `./om-agent` exposes structured JSON tools to external Agents. It is not OM's
 autonomous Agent. Internal Bot projects a pure-read subset from the same
@@ -83,7 +83,7 @@ assistant:
 The scene selects canonical read tools; portfolio queries require the existing
 `portfolio_management.enabled` integration. No additional Bot toolset flag is needed.
 
-`assistant.models` and `assistant.active_model` resolve the provider used by
+`bot.models` and `bot.active_model` resolve the provider used by
 Bot. `assistant.planner`, `assistant.agent_loop`, and per-scene channel
 allowlists are not runtime authorities.
 
@@ -91,9 +91,9 @@ allowlists are not runtime authorities.
 
 ```bash
 ./om-agent spec
-./om assistant commands
-./om assistant capabilities
-./om assistant llm-check
+./om bot commands
+./om bot capabilities
+./om bot llm-check
 ./om bot run --text "当前期权风险主要集中在哪里" --config-key us
 ```
 

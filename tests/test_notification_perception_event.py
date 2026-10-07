@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
+from src.application.multi_tick.bot_perception_event import build_notification_perception_event
 
 
 def test_notification_perception_event_is_compressed_and_safe() -> None:

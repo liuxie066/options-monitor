@@ -51,12 +51,12 @@ def scope_from_contract(contract: Any, allowed_accounts: Any = ()) -> MemoryScop
         if declared_authority and declared_authority not in {key_authority, path_authority}:
             raise ValueError("MEMORY_UNAUTHENTICATED")
     generation = str(data.get("read_generation") or "").strip()
-    assistant_path = str(data.get("assistant_config_path") or "").strip()
-    if generation or assistant_path:
+    bot_path = str(data.get("bot_config_path") or "").strip()
+    if generation or bot_path:
         from src.application.bot.model_config import load_bot_read_scope
 
         primary = key or ("hk" if path.lower().endswith("config.hk.json") else "us")
-        markets, expected = load_bot_read_scope(config_path=assistant_path, primary_market=primary)
+        markets, expected = load_bot_read_scope(config_path=bot_path, primary_market=primary)
         if generation != expected or sorted(markets) != data.get("read_markets"):
             raise ValueError("MEMORY_UNAUTHENTICATED")
     owner_parts = [channel, sender, authority, generation] if generation else [channel, sender, authority]

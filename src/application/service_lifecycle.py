@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import configured_markets
-from src.application.config_yaml import load_yaml_config_file, resolve_yaml_assistant_config
+from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.runtime_config_freshness import check_runtime_config_freshness, check_runtime_config_identity
 from src.application.secret_store import credential_spec
 from src.application.service_deploy import load_service_profile, render_service_bundle
@@ -513,17 +513,17 @@ def service_lifecycle(
             freshness = check_runtime_config_freshness(config, repo_root=repo, market=market, runtime_config_path=path)
             if not identity["ok"] or not freshness["ok"]:
                 _error("SERVICE_CONFIG_STALE", "rebuild runtime configuration before installing or starting services", path=str(path), identity=identity, freshness=freshness)
-    assistant_path = profile.get("assistant_config_path")
-    if assistant_path and any((profile.get(channel) or {}).get("enabled") for channel in ("feishu_ws", "wechat_clawbot")):
-        path = Path(assistant_path)
+    bot_path = profile.get("bot_config_path")
+    if bot_path and any((profile.get(channel) or {}).get("enabled") for channel in ("feishu_ws", "wechat_clawbot")):
+        path = Path(bot_path)
         fact = _file_fact(path)
         inputs.append(fact)
         if action != "stop":
             if not fact["exists"]:
                 _error("SERVICE_CONFIG_MISSING", "build the Bot runtime snapshot before installing its inbound service", path=str(path))
             actual = json.loads(path.read_text())
-            expected, _ = resolve_yaml_assistant_config(repo_root=repo, config_path=source)
-            if any(actual.get(key) != expected.get(key) for key in ("assistant", "inbound", "_resolved")):
+            expected, _ = resolve_yaml_bot_config(repo_root=repo, config_path=source)
+            if any(actual.get(key) != expected.get(key) for key in ("bot", "inbound", "_resolved")):
                 _error("SERVICE_CONFIG_STALE", "rebuild the Bot runtime snapshot before installing or starting its inbound service", path=str(path))
     units = _units(files, provider)
     before = {unit["name"]: _query(unit["name"], target=provider, uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd)

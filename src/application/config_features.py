@@ -43,7 +43,7 @@ def publish_feature_document(*, repo_root: Path, config_path: Path, config_doc: 
     transaction = publish_yaml_config_generation(
         repo_root=repo_root, config_yaml_path=config_path, config_doc=config_doc,
         runtime_root=runtime_root or config_path.parent, markets=configured_markets(config_doc),
-        include_assistant=True, apply=apply, backup=True,
+        include_bot=True, apply=apply, backup=True,
         expected_source_sha256=expected_source_sha256,
     )
     verified = []
@@ -51,7 +51,7 @@ def publish_feature_document(*, repo_root: Path, config_path: Path, config_doc: 
         targets = [(config_path, transaction["source_revision"]["after_sha256"])]
         targets.extend((Path(item["output_config_path"]), item["sha256"])
                        for item in transaction["markets"].values())
-        targets.append((Path(transaction["assistant"]["output_config_path"]), transaction["assistant"]["sha256"]))
+        targets.append((Path(transaction["bot"]["output_config_path"]), transaction["bot"]["sha256"]))
         for path, expected in targets:
             try:
                 if sha256(path.read_bytes()).hexdigest() != expected:
@@ -76,8 +76,7 @@ def feature_document(config_doc: dict[str, Any], *, feature: str, enabled: bool,
             raise AgentToolError(code="CONFIG_ERROR", message=f"{key} must be an object")
         return value
     if feature == "bot":
-        assistant = section(out, "assistant")
-        section(assistant, "bot")["enabled"] = enabled
+        section(out, "bot")["enabled"] = enabled
     elif feature == "channel":
         notifications = section(out, "notifications")
         notifications["enabled"] = enabled

@@ -48,7 +48,7 @@ def _activation_environment(
         config_doc=doc,
         runtime_root=tmp_path,
         markets=["us"],
-        include_assistant=False,
+        include_bot=False,
         apply=True,
         backup=False,
     )
@@ -188,7 +188,7 @@ def _stage_activation_journal(
         source_bytes=after_bytes,
         runtime_root=runtime_root,
         markets=["us"],
-        include_assistant=False,
+        include_bot=False,
     )
     targets = [
         *prepared["target_payloads"],
@@ -1122,7 +1122,7 @@ def test_public_wheel_cli_rolls_back_journal_before_stale_preview_rejection(
         config_doc=current_doc,
         runtime_root=tmp_path,
         markets=["us"],
-        include_assistant=False,
+        include_bot=False,
         apply=True,
         backup=False,
     )
