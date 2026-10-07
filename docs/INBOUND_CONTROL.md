@@ -108,14 +108,14 @@ assistant:
   enabled: true
   bot:
     enabled: true
-    toolsets:
-      portfolio: false
   active_model: deepseek-default
 ```
 
-Change `portfolio` to `true` to share the portfolio-management pure-read toolset
-with Bot. This does not start the portfolio-management API service and does
-not change the external `./om-agent` Tool Gateway contract.
+Bot loads tools by scene; there is no portfolio toolset switch. PM-backed reads
+use the canonical `portfolio_management.enabled` integration boundary.
+`om bot configure` changes only `assistant.bot.enabled`; a disabled Assistant
+master remains disabled. Bot off preserves deterministic commands; Assistant
+off stops inbound processing. Neither setting starts a service.
 
 `assistant.models` defines model profiles. Generated
 `resolved/config.assistant.json` must be rebuilt after authoring changes.

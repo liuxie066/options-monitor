@@ -138,15 +138,16 @@ Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景�
 broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。预览将非富途
 broker 原文集合按账户写入待发布配置；apply 重读 PM，集合变化会在写入前拒绝。
 查询遇旧配置缺集合或新 broker 值会暂停整份 PM 补充并标 partial。不把 Holdings 写入
-Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
-`portfolio_management.enabled` 开启。
+Futu 账户资金、持仓或 OM 期权账本。`portfolio_management.enabled` 控制全局 PM 集成，
+`portfolio.holdings.enabled` 只控制此情景补充。PM 尚未开启时，用 `--enable-pm` 将两个设置
+纳入同一次预览、确认和配置发布；预检失败或取消不会先留下已开启的 PM。关闭 Holdings 保留 PM 集成。
 PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
 
 通过 YAML authoring/build 事务预览和写入：
 
 ```bash
-./om config holdings set --enabled true
-./om config holdings set --enabled true --apply --confirm \
+./om config holdings set --enabled true --enable-pm
+./om config holdings set --enabled true --enable-pm --apply --confirm \
   --expected-source-sha256 <预览中的 before_sha256> \
   --expected-preview-sha256 <预览中的 preview_sha256>
 ./om config holdings set --enabled false
@@ -427,3 +428,21 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 
 Wheel 使用 `om wheel activation` 管理账户窗口；配置字段删除不会开启或关闭账本窗口。
 组合归因未列出的账户固定为 `off`，仅配置实际需要的账户模式。
+
+### 配置意图与实际就绪
+
+`assistant.enabled` 是 Inbound Assistant 总入口，`assistant.bot.enabled` 只控制模型对话。
+`om bot configure` 只保存 Bot 设置，不会改变总入口；总入口关闭时预览和结果会说明依赖。
+新建配置保持两者关闭：明确需要入站服务时在 YAML 开启 `assistant.enabled` 并重新构建。
+总入口开启而 Bot 关闭时，确定性命令仍可使用；总入口关闭则所有入站处理停止。
+
+`config explain` 和 runtime status 的配置摘要只证明发布的配置意图。Assistant diagnostics
+区分 `configured_enabled`、总入口与配置就绪；`live_requested` 仅记录请求，当前诊断不执行模型探测，`live_checked=false`；
+不能据此证明服务或模型实际运行。
+`om settings inspect/explain/doctor` 包含 `OM_INBOUND_MODEL_WRITE_ENABLED`，与执行端共用权限解释；
+模型、交易等分项写权限仍受 `OM_INBOUND_OPERATIONS_ENABLED` 总闸约束。
+
+`om holdings configure --interactive` 先预检候选 PM+Holdings 配置，再确认发布。显式输入的
+PM 地址仍通过普通连接设置独立保存；若之后配置发布失败，`completed_steps` 会报告已经
+保存的连接设置，PM 与 Holdings 不会部分启用。高级回执、重试、历史回填开关仍保留在
+高级配置，不加入普通业务菜单。

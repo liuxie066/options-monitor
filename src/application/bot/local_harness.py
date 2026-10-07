@@ -114,6 +114,10 @@ def run_prepared_contract(
             config_path=assistant_config_path,
             require_config=bool(str(assistant_config_path or "").strip()),
         )
+    if settings_error in {"assistant_disabled", "bot_disabled"}:
+        return AppResult(status="disabled", user_response="Bot 已关闭。" if settings_error == "bot_disabled" else "Inbound Assistant 已禁用。",
+                         error={"code": settings_error.upper(), "reason": settings_error},
+                         request_id=prepared.request_id, contract_id=prepared.contract_id, ok=False)
     if settings_error:
         return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
     model_settings, debug, model_error = _resolve_model(

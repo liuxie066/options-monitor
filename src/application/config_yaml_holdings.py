@@ -17,6 +17,7 @@ from src.application.portfolio_assignment_scenario import (
     read_portfolio_valuation_evidence,
 )
 from src.application.write_contract import attach_write_contract
+from src.application.portfolio_management import portfolio_management_enabled
 
 
 def holdings_included(config: dict[str, Any]) -> bool:
@@ -148,6 +149,7 @@ def set_yaml_holdings_inclusion(
     expected_source_sha256: str | None = None,
     expected_preview_sha256: str | None = None,
     service_url: str | None = None,
+    enable_pm: bool = False,
 ) -> dict[str, Any]:
     if service_url is not None:
         from src.infrastructure.portfolio_management_client import PortfolioManagementConfigError, resolve_portfolio_service_origin
@@ -164,6 +166,13 @@ def set_yaml_holdings_inclusion(
         )
     doc = deepcopy(load_yaml_config_file(source))
     current_enabled = holdings_included(doc)
+    pm_before = portfolio_management_enabled(doc)
+    if enabled and enable_pm:
+        pm = doc.setdefault("portfolio_management", {})
+        if not isinstance(pm, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message="portfolio_management must be an object")
+        pm["enabled"] = True
+    pm_after = portfolio_management_enabled(doc)
     portfolio = doc.setdefault("portfolio", {})
     if not isinstance(portfolio, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="portfolio must be an object")
@@ -178,6 +187,8 @@ def set_yaml_holdings_inclusion(
     if enabled:
         current, _meta = resolve_yaml_runtime_config(repo_root=repo_root, market=markets[0], config_path=source)
         current["accounts"] = list(doc.get("accounts") or {})
+        if enabled and enable_pm:
+            current["portfolio_management"] = deepcopy(doc["portfolio_management"])
         try:
             preflight = _probe_holdings(current, service_url=service_url) if service_url is not None else _probe_holdings(current)
             approved = preflight["approved_non_futu_brokers"]
@@ -245,6 +256,7 @@ def set_yaml_holdings_inclusion(
             "preview_sha256": preview_sha,
             "service_url": preview.get("service_url"),
             "preflight": preflight,
+            "pm_dependency": {"configured_before": pm_before, "configured_after": pm_after},
             "config_yaml_path": str(source),
             "runtime_root": str(target_root),
             "source_revision": transaction["source_revision"],

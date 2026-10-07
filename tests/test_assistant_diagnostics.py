@@ -280,7 +280,8 @@ def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> 
     )
 
     assert out["summary"]["ok"] is True
-    assert out["summary"]["live_checked"] is True
+    assert out["summary"]["live_requested"] is True
+    assert out["summary"]["live_checked"] is False
     checks = {item["name"]: item for item in out["checks"]}
     live_probe = checks["live_probe"]
     assert live_probe["status"] == "skipped"

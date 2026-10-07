@@ -132,7 +132,7 @@ def load_assistant_llm_config(
 
     assistant = payload.get("assistant")
     assistant_cfg = assistant if isinstance(assistant, dict) else {}
-    if assistant_cfg.get("enabled") is False:
+    if assistant_cfg.get("enabled") is False or (assistant_cfg.get("bot") or {}).get("enabled") is not True:
         return None, None
     llm = assistant_cfg.get("llm")
     llm_cfg = llm if isinstance(llm, dict) else {}
@@ -177,10 +177,17 @@ def assistant_bot_config_error(
     require_config: bool = False,
 ) -> str | None:
     """Validate the Bot configuration at the Host boundary."""
-    _payload, error = _load_assistant_config(
+    payload, error = _load_assistant_config(
         config_path=config_path, repo_root=repo_root, require_config=require_config,
     )
-    return error
+    if error or payload is None:
+        return error
+    assistant = payload.get("assistant") or {}
+    if assistant.get("enabled") is False:
+        return "assistant_disabled"
+    if (assistant.get("bot") or {}).get("enabled") is not True:
+        return "bot_disabled"
+    return None
 
 
 def _load_assistant_config(

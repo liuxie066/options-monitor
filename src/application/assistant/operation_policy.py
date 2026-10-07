@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.operation_signature import require_operation_hmac_key
 from src.application.settings import build_effective_env
+from src.application.settings.effective import resolve_write_gates
 from src.application.payload_helpers import positive_int_or as _positive_int
 
 
@@ -25,13 +26,14 @@ class InboundOperationPolicy:
 
 def load_operation_policy_from_env() -> InboundOperationPolicy:
     env = build_effective_env().values
+    gates = resolve_write_gates(env)
     return InboundOperationPolicy(
-        operations_enabled=_truthy(env.get("OM_INBOUND_OPERATIONS_ENABLED")),
-        trade_write_enabled=_truthy(env.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
-        symbol_write_enabled=_truthy(env.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
-        upgrade_write_enabled=_truthy(env.get("OM_INBOUND_UPGRADE_WRITE_ENABLED")),
-        model_write_enabled=_truthy(env.get("OM_INBOUND_MODEL_WRITE_ENABLED")),
-        monitor_run_enabled=_truthy(env.get("OM_INBOUND_MONITOR_RUN_ENABLED")),
+        operations_enabled=gates["operations_enabled"],
+        trade_write_enabled=gates["trade_write_enabled"],
+        symbol_write_enabled=gates["symbol_write_enabled"],
+        upgrade_write_enabled=gates["upgrade_write_enabled"],
+        model_write_enabled=gates["model_write_enabled"],
+        monitor_run_enabled=gates["monitor_run_enabled"],
         admin_senders=_parse_sender_entries(env.get("OM_INBOUND_ADMIN_OPEN_IDS")),
         confirm_ttl_seconds=_positive_int(
             env.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
@@ -173,9 +175,6 @@ def _enforce_base_write_allowed(
         )
     return effective
 
-
-def _truthy(value: str | None) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _parse_sender_entries(value: str | None) -> tuple[str, ...]:

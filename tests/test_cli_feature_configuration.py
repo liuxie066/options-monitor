@@ -135,6 +135,9 @@ def test_bot_profile_applies_generated_runtime_without_credentials_input(tmp_pat
     result = run(namespace, secret_runner=lambda _: pytest.fail("Ollama has no secret"))
     runtime = json.loads(Path(result["result"]["assistant"]["output_config_path"]).read_text())
     assert runtime["assistant"]["bot"]["enabled"] is True
+    assert runtime["assistant"]["enabled"] is False
+    assert preview["result"]["requested_setting"]["assistant_enabled"] is False
+    assert result["assistant_enabled"] is False and "assistant.enabled=false" in result["next_step"]
     assert runtime["assistant"]["llm"]["model"] == "fixture-model"
     assert result["external_check"] == "not_performed" and not result["service_restarted"]
 
@@ -251,18 +254,35 @@ def test_linux_secret_permission_is_pending_without_escalation(tmp_path, monkeyp
     assert calls == ["llm.deepseek.api_key"] and result["service_restarted"] is False
 
 
-def test_holdings_separate_pm_dependency_then_repreview(tmp_path):
+def test_holdings_enables_pm_in_one_confirmed_generation(tmp_path, monkeypatch):
+    import src.application.config_yaml_holdings as mod
     path = source(tmp_path)
+    observed = []
+    def probe(config, **kwargs):
+        observed.append(config["portfolio_management"]["enabled"])
+        assert yaml.safe_load(path.read_text()).get("portfolio_management") is None
+        return {"status": "ready_empty", "approved_non_futu_brokers": {"lx": []}}
+    monkeypatch.setattr(mod, "_probe_holdings", probe)
     namespace = args("holdings", path, "--enabled", "true", "--enable-pm")
-    preview = run(namespace, holdings_setter=lambda **_: pytest.fail("must confirm dependency before probe"))
-    assert preview["status"] == "dependency_preview"
+    preview = run(namespace)
+    assert preview["status"] == "preview" and observed == [True]
+    assert preview["result"]["pm_dependency"] == {"configured_before": False, "configured_after": True}
     namespace.apply = namespace.confirm = True
-    namespace.expected_source_sha256 = preview["pm_dependency"]["source_revision"]["before_sha256"]
-    result = run(namespace, holdings_setter=lambda **_: pytest.fail("new inclusion needs new preview"))
-    assert result["status"] == "dependency_configured"
-    updated = yaml.safe_load(path.read_text())
-    assert updated["portfolio_management"]["enabled"] is True
-    assert not updated.get("portfolio", {}).get("holdings", {}).get("enabled", False)
+    namespace.expected_source_sha256 = preview["result"]["source_revision"]["before_sha256"]
+    namespace.expected_preview_sha256 = preview["result"]["preview_sha256"]
+    result = run(namespace)
+    assert result["status"] == "configured"
+    for configured in (yaml.safe_load(path.read_text()), json.loads((tmp_path / "config.us.json").read_text())):
+        assert configured["portfolio_management"]["enabled"] is True
+        assert configured["portfolio"]["holdings"]["enabled"] is True
+    off = args("holdings", path, "--enabled", "false")
+    preview = run(off)
+    off.apply = off.confirm = True
+    off.expected_source_sha256 = preview["result"]["source_revision"]["before_sha256"]
+    off.expected_preview_sha256 = preview["result"]["preview_sha256"]
+    run(off)
+    assert yaml.safe_load(path.read_text())["portfolio_management"]["enabled"] is True
+    assert not yaml.safe_load(path.read_text())["portfolio"]["holdings"]["enabled"]
 
 
 def test_bot_and_feishu_aliases_share_real_parsers():

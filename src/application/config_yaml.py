@@ -1252,6 +1252,8 @@ def explain_yaml_config_key(
         "exists": bool(exists),
         "value": value if exists else None,
         "source": "resolved_yaml" if exists else None,
+        "evidence_scope": "configuration",
+        "runtime_observed": False,
         "runtime_path": runtime_path,
         "trace": [
             {

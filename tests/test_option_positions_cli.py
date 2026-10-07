@@ -2054,7 +2054,7 @@ def _lifecycle_receipt_cli_context(
                         },
                     },
                 },
-                "notifications": {"enabled": True, 
+                "notifications": {"enabled": True,
                     "provider": "wechat_clawbot",
                     "target": "wechat:ops",
                 },

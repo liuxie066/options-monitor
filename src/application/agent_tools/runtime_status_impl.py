@@ -2907,7 +2907,6 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             "service_drift_status",
             "assistant_enabled",
             "assistant_bot_enabled",
-            "assistant_bot_portfolio_enabled",
             "assistant_llm_enabled",
             "assistant_llm_provider",
             "assistant_latest_route",
@@ -3379,6 +3378,7 @@ def _status_safe_assistant_runtime(value: Any) -> dict[str, Any]:
         "error_code": str(source.get("error") or "").split(":", 1)[0] or None,
         "config": {
             **_pick(config, {"loaded", "enabled", "context_window_messages", "default_market_scope"}),
+            "evidence_scope": "configuration",
             "bot": {
                 **_pick(config.get("bot"), {"enabled"}),
             },

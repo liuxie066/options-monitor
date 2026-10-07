@@ -77,7 +77,6 @@ def feature_document(config_doc: dict[str, Any], *, feature: str, enabled: bool,
         return value
     if feature == "bot":
         assistant = section(out, "assistant")
-        assistant["enabled"] = enabled
         section(assistant, "bot")["enabled"] = enabled
     elif feature == "channel":
         notifications = section(out, "notifications")

@@ -21,6 +21,7 @@ from src.application.config_yaml import load_yaml_config_file, resolve_yaml_conf
 from src.application.config_yaml_holdings import set_yaml_holdings_inclusion
 from src.application.llm_provider_registry import provider_catalog_payload
 from src.application.notification_delivery_route import notifications_enabled
+from src.application.portfolio_management import portfolio_management_enabled
 from src.application.settings import build_effective_env
 from src.infrastructure.portfolio_management_client import DEFAULT_SERVICE_URL
 from src.interfaces.cli.secret_ops import run_store_command
@@ -65,7 +66,7 @@ def add_feature_configure_parser(subparsers: Any, feature: str) -> None:
         parser.add_argument("--binding-name", default="ops")
     elif feature == "holdings":
         parser.add_argument("--service-url", default=None)
-        parser.add_argument("--enable-pm", action="store_true", help="preview the separate global PM integration dependency")
+        parser.add_argument("--enable-pm", action="store_true", help="include global PM integration in the same Holdings config publication")
 
 
 def add_holdings_commands(subparsers: Any) -> None:
@@ -143,6 +144,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         preview["requested_setting"] = {"feature": feature, "enabled": enabled}
         if feature == "bot":
             assistant = after.get("assistant") or {}
+            preview["requested_setting"]["assistant_enabled"] = assistant.get("enabled") is not False
             profile_name = assistant.get("active_model")
             profiles = parse_model_profiles(assistant.get("models"))
             preview["requested_setting"]["profile"] = profiles[profile_name].public_payload(active=True) if profile_name in profiles else None
@@ -222,7 +224,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             assistant = doc.get("assistant") if isinstance(doc.get("assistant"), dict) else {}
             bot = assistant.get("bot") if isinstance(assistant.get("bot"), dict) else {}
             close = doc.get("close_advice") if isinstance(doc.get("close_advice"), dict) else {}
-            current_enabled = {"bot": assistant.get("enabled") is not False and bot.get("enabled") is True,
+            current_enabled = {"bot": bot.get("enabled") is True,
                                "channel": notifications_enabled(doc), "holdings": holdings_included(doc),
                                "close-advice": close.get("enabled") is not False}[feature]
             enabled = parse_enabled(ask(f"启用 {feature}（true/false）", str(current_enabled).lower()))
@@ -255,6 +257,11 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                     context_window_tokens=context, max_output_tokens=limit,
                     replace=bool(getattr(args, "replace", False)), activate=True)
             extras["model"] = profile.public_payload(active=True)
+            extras["assistant_enabled"] = (after.get("assistant") or {}).get("enabled") is not False
+            if not extras["assistant_enabled"]:
+                extras["next_step"] = "assistant.enabled=false blocks inbound and model execution; explicitly enable the Assistant authoring setting and rebuild when intended"
+                if interactive:
+                    output_fn("Assistant 总入口已关闭；本次只保存 Bot 设置，需显式开启 assistant.enabled 并重新构建后才能使用。")
             result = publish(after, title="保存 Bot 模型并启用？")
             if result["write_applied"] and profile.credential_name:
                 credential = provision(profile.credential_name)
@@ -323,28 +330,29 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             service_url = getattr(args, "service_url", None)
             if enabled and interactive:
                 service_url = service_url or ask("同机 PM 服务地址", ordinary.get("PORTFOLIO_SERVICE_URL", DEFAULT_SERVICE_URL))
-            if enabled and service_url:
-                extras["env"] = save_env({"PORTFOLIO_SERVICE_URL": service_url})
-                if interactive and not extras["env"]["write_applied"]:
-                    return {"ok": True, "status": "cancelled", "completed_steps": completed, **extras}
-            if enabled and (doc.get("portfolio_management") or {}).get("enabled") is not True:
-                output_fn("PM 集成是全局依赖，也影响其他 PM 查询和持仓刷新。") if interactive else None
-                if not interactive and not getattr(args, "enable_pm", False):
-                    raise AgentToolError(code="CONFIG_ERROR", message="PM integration is disabled; preview with --enable-pm or use interactive configure")
-                pm = publish(feature_document(doc, feature="portfolio-management", enabled=True), title="单独启用全局 PM 集成？")
-                extras["pm_dependency"] = pm
-                if not pm["write_applied"]:
-                    return {"ok": True, "status": "dependency_preview", "completed_steps": completed, **extras,
-                            "next_step": "Confirm PM dependency first, then run holdings configure again for its evidence preview"}
-                if not interactive:
-                    return {"ok": True, "status": "dependency_configured", "completed_steps": completed, **extras,
-                            "next_step": "Preview Holdings with the new source revision before applying inclusion"}
-            kwargs = dict(repo_root=repo_base_fn(), config_path=source, runtime_root=root, enabled=enabled)
+            enable_pm = bool(enabled and not portfolio_management_enabled(doc))
+            if enable_pm and not interactive and not getattr(args, "enable_pm", False):
+                raise AgentToolError(code="CONFIG_ERROR", message="PM integration is disabled; preview with --enable-pm or use interactive configure")
+            kwargs = dict(repo_root=repo_base_fn(), config_path=source, runtime_root=root, enabled=enabled, enable_pm=enable_pm)
             if enabled:
                 kwargs["service_url"] = service_url or ordinary.get("PORTFOLIO_SERVICE_URL", DEFAULT_SERVICE_URL)
             preview = holdings_setter(**kwargs)
             extras["preflight"] = preview.get("preflight")
-            if preview_confirm(preview, "将预览中的非富途券商纳入全部指派后分布？" if enabled else "关闭 Holdings 补充？"):
+            if enabled and service_url:
+                extras["env"] = write_feature_env(path=env_path, updates={"PORTFOLIO_SERVICE_URL": service_url},
+                                                  expected_source_sha256=getattr(args, "expected_env_sha256", None) or env_revision)
+                preview["connection"] = extras["env"]
+            if (preview.get("preflight") or {}).get("status") == "failed":
+                return {"ok": False, "status": "preflight_failed", "result": preview, "completed_steps": completed, **extras}
+            if not interactive and getattr(args, "apply", False) and getattr(args, "expected_preview_sha256", None) != preview["preview_sha256"]:
+                raise AgentToolError(code="STALE_PREVIEW", message="Holdings apply differs from confirmed preview")
+            title = ("同时启用全局 PM 集成，并将预览中的非富途券商纳入指派后分布？" if enable_pm
+                     else "将预览中的非富途券商纳入指派后分布？" if enabled else "关闭 Holdings 补充？")
+            if preview_confirm(preview, title):
+                if enabled and service_url:
+                    extras["env"] = save_env({"PORTFOLIO_SERVICE_URL": service_url})
+                    if not extras["env"]["write_applied"]:
+                        return {"ok": True, "status": "cancelled", "completed_steps": completed, **extras}
                 try:
                     result = holdings_setter(**kwargs, apply=True, confirm=True, expected_source_sha256=revision,
                                              expected_preview_sha256=(preview["preview_sha256"] if interactive else getattr(args, "expected_preview_sha256", None)))

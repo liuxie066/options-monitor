@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1139 (`src`: 555, `domain`: 89, `scripts`: 14, `tests`: 481)
-- Internal import edges: 8622 total, 3629 production/script edges excluding tests
+- Python files scanned: 1140 (`src`: 555, `domain`: 89, `scripts`: 14, `tests`: 482)
+- Internal import edges: 8659 total, 3633 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -39,14 +39,14 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|194| application
+  interfaces -->|195| application
   interfaces -->|2| domain
   interfaces -->|6| infrastructure
   scripts -->|39| application
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3783| application
+  tests -->|3811| application
   tests -->|495| domain
   tests -->|2| domain_services
   tests -->|248| infrastructure
@@ -60,7 +60,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 601 |
-| interfaces | application | 194 |
+| interfaces | application | 195 |
 | application | infrastructure | 177 |
 | application | storage | 57 |
 | scripts | application | 39 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3783 |
+| tests | application | 3811 |
 | tests | domain | 495 |
 | tests | interfaces | 300 |
 | tests | infrastructure | 248 |
@@ -94,7 +94,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 251 |
-| src.interfaces | src.application | 156 |
+| src.interfaces | src.application | 157 |
 | src.application.ledger | domain.domain | 135 |
 | src.application | src.infrastructure | 126 |
 | src.application.ledger | domain.domain.ledger | 70 |
@@ -111,7 +111,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application | 25 |
 | src.application.multi_tick | src.application | 23 |
 | domain.domain | domain.domain.ledger | 23 |
-| src.application | src.application.settings | 20 |
+| src.application | src.application.settings | 22 |
 | src.application.ledger | src.application | 18 |
 | src.application | domain.domain.ledger | 17 |
 | src.application | src.application.trades | 17 |

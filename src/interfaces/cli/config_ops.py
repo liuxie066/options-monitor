@@ -108,6 +108,7 @@ def add_config_commands(subparsers: Any) -> None:
     holdings_set.add_argument("--enabled", required=True, type=_parse_bool_value)
     holdings_set.add_argument("--config-yaml", default=None)
     holdings_set.add_argument("--runtime-root", default=None)
+    holdings_set.add_argument("--enable-pm", action="store_true", help="enable PM in the same generation as Holdings")
     holdings_set.add_argument("--apply", action="store_true")
     holdings_set.add_argument("--confirm", action="store_true")
     holdings_set.add_argument("--expected-source-sha256", default=None)
@@ -359,6 +360,7 @@ def handle_config_command(
         return set_yaml_holdings_inclusion(
             repo_root=repo_base_fn(),
             enabled=args.enabled,
+            enable_pm=args.enable_pm,
             config_path=args.config_yaml,
             runtime_root=args.runtime_root,
             apply=bool(args.apply),
