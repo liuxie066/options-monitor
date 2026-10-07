@@ -31,7 +31,7 @@ from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
 from src.application.wheel.candidate_snapshot import current_wheel_candidate_policy_hash
-from src.application.cash_conversion import load_cash_fx_payload
+from src.application.exchange_rate_loader import load_current_exchange_rate_snapshot
 from src.application.performance.service import build_option_period_performance
 from src.application.wheel import (
     build_wheel_read_model,
@@ -594,7 +594,7 @@ def _wheel_cash_capacity(
         account=str(payload.get("account") or ""),
         broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=instant,
-        fx_snapshot=load_cash_fx_payload(repo, persist=False) or {},
+        fx_snapshot=load_current_exchange_rate_snapshot(runtime_root=Path(str(payload["runtime_root"])).resolve()),
     )
 
 

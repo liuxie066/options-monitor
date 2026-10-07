@@ -11,7 +11,6 @@ from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
-    cash_fx_daily_facts,
     validate_observed_cash_conversion,
 )
 from domain.domain.performance.models import (
@@ -182,7 +181,7 @@ def _migrate_cash_conversions(
         raise ValueError(
             "performance evidence schema must be initialized before cash conversion backfill"
         )
-    fx_rates = cash_fx_daily_facts(tuple(evidence.fx_rates))
+    fx_rates = tuple(evidence.fx_rates)
     scope = {
         "account": str(account or "").strip().lower() or None,
         "broker": str(broker or "").strip() or None,
@@ -216,7 +215,7 @@ def _migrate_cash_conversions(
         nonlocal batch_id
         if conn is None or not isinstance(sqlite_repo, SQLiteOptionPositionsRepository):
             raise TypeError("cash conversion backfill requires a transactional SQLite ledger")
-        fixed_rates = PerformanceEvidenceSQLiteRepository(sqlite_repo.db_path).freeze_cash_fx_daily_rates(
+        fixed_rates = PerformanceEvidenceSQLiteRepository(sqlite_repo.db_path).persist_cash_fx_observations(
             evidence.fx_rates,
             migrated_at_ms=int(migrated_at_ms),
             conn=conn,

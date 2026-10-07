@@ -16,7 +16,7 @@ from src.application.agent_tool_contracts import (
 )
 from src.application.agent_tool_config import load_runtime_config
 from src.application.wheel.candidate_snapshot import current_wheel_candidate_policy_hash
-from src.application.cash_conversion import load_cash_fx_payload
+from src.application.exchange_rate_loader import load_current_exchange_rate_snapshot
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
     recover_wheel_assignment,
@@ -338,7 +338,7 @@ def _cash_capacity(
         account=account,
         broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=as_of_ms,
-        fx_snapshot=load_cash_fx_payload(repo, persist=False) or {},
+        fx_snapshot=load_current_exchange_rate_snapshot(runtime_root=runtime_root),
     )
 
 

@@ -143,7 +143,7 @@ def test_read_all_validates_persisted_corrections_independent_of_fact_id_order(t
     assert bundle.schema_state == "initialized_v1"
     assert {fact.fact_id for fact in bundle.fx_rates} == {"fx_z_parent", "fx_a_child"}
     assert repo.read_fx_rates().fx_rates == bundle.fx_rates
-    assert repo.freeze_cash_fx_daily_rates(migrated_at_ms=NOW_MS) == bundle.fx_rates
+    assert repo.persist_cash_fx_observations(migrated_at_ms=NOW_MS) == bundle.fx_rates
 
 
 def test_fx_reads_skip_invalid_valuation_records_and_preview_has_no_writes(tmp_path, monkeypatch):
@@ -178,7 +178,7 @@ def test_fx_reads_skip_invalid_valuation_records_and_preview_has_no_writes(tmp_p
     with sqlite3.connect(repo.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.set_trace_callback(statements.append)
-        assert repo.freeze_cash_fx_daily_rates(migrated_at_ms=NOW_MS, conn=conn) == expected
+        assert repo.persist_cash_fx_observations(migrated_at_ms=NOW_MS, conn=conn) == expected
         assert conn.in_transaction
         conn.rollback()
     assert not any("FROM performance_valuation_marks" in sql for sql in statements)

@@ -25,7 +25,7 @@ from src.application.portfolio_context_service import (
 from src.application.ledger.api import decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock
 from src.application.positions.context_builder import build_context
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
-from src.infrastructure.exchange_rates import rates_for_purpose, current_exchange_rate_snapshot, project_exchange_rate_snapshot
+from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates, rates_for_purpose, current_exchange_rate_snapshot, project_exchange_rate_snapshot
 
 
 WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA = "wheel_put_cash_capacity_fact.v1"
@@ -211,13 +211,9 @@ def trade_attribution_capacity_check(
             secured = {currency: float(amount) for currency, amount in put_claims.items()}
             secured[native] = float(put_claims[native] - required)
             fx_payload = portfolio.get("exchange_rates")
-            if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("pairs"), Mapping):
-                fx_for_capacity = {"rates": rates_for_purpose(fx_payload, purpose="capacity")}
-            else:
-                fx_for_capacity = fx_payload if portfolio.get("exchange_rate_status") == "ready" else {}
             available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
                 cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
-                convert_currency=_frozen_fx_converter(fx_for_capacity or {}),
+                convert_currency=_frozen_fx_converter(fx_payload or {}),
                 fx_status=portfolio.get("exchange_rate_status"))
             if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
                 reasons.add("account_cash_capacity_exceeded")
@@ -450,70 +446,15 @@ def _ordinary_put_cash_claims(
 
 
 def _frozen_fx_converter(fx_snapshot: Mapping[str, Any]) -> Any:
-    raw_rates = fx_snapshot.get("rates")
-    rates = raw_rates if isinstance(raw_rates, Mapping) else fx_snapshot
-    fact_rates: dict[tuple[str, str], tuple[tuple[int, int, int, str], float]] = {}
-    raw_facts = fx_snapshot.get("fx_rate_facts")
-    if isinstance(raw_facts, (list, tuple)):
-        for raw in raw_facts:
-            row = raw if isinstance(raw, Mapping) else {}
-            base = str(row.get("base_currency") or "").strip().upper()
-            quote = str(row.get("quote_currency") or "").strip().upper()
-            try:
-                rate_value = float(row.get("rate"))
-                order = (
-                    int(row.get("effective_at_ms") or 0),
-                    int(row.get("revision") or 1),
-                    int(row.get("observed_at_ms") or 0),
-                    str(row.get("fact_id") or ""),
-                )
-            except (TypeError, ValueError):
-                continue
-            if not base or not quote or rate_value <= 0:
-                continue
-            current = fact_rates.get((base, quote))
-            if current is None or order > current[0]:
-                fact_rates[(base, quote)] = (order, rate_value)
-
+    """Recheck the sealed quote on use; historical facts cannot fund new trades."""
     def convert(amount: float, source: str, target: str) -> float | None:
-        source_value = str(source or "").strip().upper()
-        target_value = str(target or "").strip().upper()
-        if source_value == target_value:
-            return float(amount)
-        fact_rate = fact_rates.get((source_value, target_value))
-        reverse_fact_rate = fact_rates.get((target_value, source_value))
-        if fact_rate is not None:
-            return float(amount) * fact_rate[1]
-        if reverse_fact_rate is not None:
-            return float(amount) / reverse_fact_rate[1]
-        direct_keys = (
-            f"{source_value}{target_value}",
-            f"{source_value}/{target_value}",
-            f"{source_value}-{target_value}",
-        )
-        reverse_keys = (
-            f"{target_value}{source_value}",
-            f"{target_value}/{source_value}",
-            f"{target_value}-{source_value}",
-        )
-        rate = next((rates.get(key) for key in direct_keys if key in rates), None)
-        reverse = next((rates.get(key) for key in reverse_keys if key in rates), None)
-        if isinstance(rate, Mapping):
-            rate = rate.get("rate")
-        if isinstance(reverse, Mapping):
-            reverse = reverse.get("rate")
-        try:
-            if rate is not None and float(rate) > 0:
-                return float(amount) * float(rate)
-            if reverse is not None and float(reverse) > 0:
-                return float(amount) / float(reverse)
-        except (TypeError, ValueError):
-            return None
-        if source_value != "CNY" and target_value != "CNY":
-            cny = convert(amount, source_value, "CNY")
-            return convert(cny, "CNY", target_value) if cny is not None else None
-        return None
-
+        rates = rates_for_purpose(fx_snapshot, purpose="capacity")
+        usdcny = rates.get("USDCNY")
+        converter = CurrencyConverter(ExchangeRates(
+            usd_per_cny=1 / usdcny if usdcny else None,
+            cny_per_hkd=rates.get("HKDCNY"),
+        ))
+        return converter.convert(amount, from_ccy=source, to_ccy=target)
     return convert
 
 
@@ -522,6 +463,8 @@ def _convert_currency_fn(
     *,
     fx_snapshot: Mapping[str, Any] | None = None,
 ) -> Any:
+    if isinstance(fx_snapshot, Mapping):
+        return _frozen_fx_converter(fx_snapshot)
     if callable(exchange_rate_converter):
         return exchange_rate_converter
     converter = getattr(exchange_rate_converter, "convert", None)
@@ -531,8 +474,6 @@ def _convert_currency_fn(
             from_ccy=source,
             to_ccy=target,
         )
-    if isinstance(fx_snapshot, Mapping):
-        return _frozen_fx_converter(fx_snapshot)
     raise TypeError("Wheel Put capacity requires exchange_rate_converter")
 
 

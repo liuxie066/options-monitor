@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from src.application.runtime_paths import resolve_runtime_root
+from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
+
 from concurrent.futures import CancelledError
 
 import hashlib
@@ -360,7 +363,7 @@ def _fetch_market_exchange_rate_observation(
     *, cache_path: Path | None = None, write_cache: bool = True,
 ) -> dict[str, Any] | None:
     return get_exchange_rates_or_fetch_latest(
-        cache_path=cache_path or Path(__file__).resolve().parents[2] / "output_shared" / "state" / "rate_cache.json",
+        cache_path=cache_path or shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
         write_cache=write_cache,
     )
 

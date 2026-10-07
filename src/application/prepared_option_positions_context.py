@@ -187,11 +187,6 @@ def _persist_fx_evidence(
                     apply=True,
                     migrated_at_ms=int(migrated_at_ms),
                 )
-            if any(fact.quality.get("source_timestamp_verified") for fact in repo_envelope.fx_rates):
-                evidence_repo.freeze_cash_fx_daily_rates(
-                    repo_envelope.fx_rates,
-                    migrated_at_ms=int(migrated_at_ms),
-                )
             inserted += int(result.inserted_count)
             idempotent += int(result.idempotent_count)
         except Exception as exc:

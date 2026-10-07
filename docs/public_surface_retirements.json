@@ -400,6 +400,11 @@
       "module": "src/application/config_validator.py",
       "name": "BOT_TOOLSET_KEYS",
       "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "domain/domain/performance/cash_conversion.py",
+      "name": "cash_fx_daily_facts",
+      "reason": "Retired synthetic daily FX anchors for new cash conversions. Callers now pass original FX facts to select_cash_fx_rate, which applies the shared quote-session policy at the cash event time. Existing daily conversion snapshots remain readable and explicit correction workflows retain their provenance."
     }
   ]
 }

@@ -31,7 +31,6 @@ from domain.domain.strategy_vocab import (
     strategy_action_label,
     strategy_section_label,
 )
-from src.infrastructure.exchange_rates import load_exchange_rate_info
 from domain.domain.alert_rules import (
     SELL_CALL_NOTIFICATION_MEDIUM,
     SELL_PUT_NOTIFICATION_HIGH,
@@ -990,30 +989,9 @@ def main():
     alerts_text = read_text(alerts_path)
     account_label = _infer_account_label(output_path, alerts_path)
 
-    exchange_rate_info = None
-    try:
-        if args.state_dir:
-            sd = Path(args.state_dir)
-            if not sd.is_absolute():
-                sd = (base / sd).resolve()
-            rate_path = (sd / 'rate_cache.json').resolve()
-        else:
-            rate_path = (base / 'output_shared' / 'state' / 'rate_cache.json').resolve()
-        data = load_exchange_rate_info(
-            cache_path=rate_path,
-            max_age_hours=24,
-            fetch_latest_on_miss=False,
-        )
-        rates = (data.get('rates') or {}) if isinstance(data, dict) else {}
-        if rates:
-            exchange_rate_info = {'USDCNY': rates.get('USDCNY'), 'timestamp': data.get('timestamp')}
-    except Exception:
-        exchange_rate_info = None
-
     notification = build_notification(
         '',
         alerts_text,
-        exchange_rate_info=exchange_rate_info,
         account_label=account_label,
     )
     output_path.write_text(notification, encoding='utf-8')

@@ -12,10 +12,11 @@ from domain.domain.position_snapshot import (
     normalize_persisted_position_snapshot_input,
     position_snapshot_scope_errors,
 )
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
 from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
-from src.infrastructure.exchange_rates import exchange_rate_observation_status
+from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot, shared_exchange_rate_cache_path
 from src.infrastructure.io_utils import atomic_write_json
 
 _FX_NOT_PROVIDED = object()
@@ -177,11 +178,9 @@ def load_account_portfolio_context(
             result, config=config, account=account,
             evaluated_at=now_utc or datetime.now(timezone.utc),
         )
-        if exchange_rate_observation is not _FX_NOT_PROVIDED:
-            result["exchange_rates"] = deepcopy(dict(exchange_rate_observation)) if isinstance(exchange_rate_observation, Mapping) else None
-            result["exchange_rate_status"] = exchange_rate_observation_status(
-                result["exchange_rates"], max_age_hours=24,
-            )
+        fx = exchange_rate_observation if exchange_rate_observation is not _FX_NOT_PROVIDED else result.get("exchange_rates")
+        result["exchange_rates"] = project_exchange_rate_snapshot(fx, purpose="capacity", now=now_utc) if isinstance(fx, Mapping) else None
+        result["exchange_rate_status"] = exchange_rate_observation_status(result["exchange_rates"])
         return result
 
     if ttl is None:
@@ -222,7 +221,7 @@ def load_account_portfolio_context(
     kwargs: dict[str, Any] = {
         "cfg": config, "account": account, "market": str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
         "write_cache": write_cache,
-        "exchange_rate_cache_path": exchange_rate_cache_path or state_dir / "rate_cache.json",
+        "exchange_rate_cache_path": exchange_rate_cache_path or shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
     }
     if include_options:
         kwargs["include_options"] = True

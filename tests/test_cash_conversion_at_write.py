@@ -321,11 +321,11 @@ def _sale_fx_fixture(tmp_path: Path, monkeypatch, *, initialized: bool = True):
 
 
 def _write_sale_fx_cache(path: Path, rate: str) -> None:
-    quote = "2026-07-23T02:00:00+00:00"
+    quote = "2026-07-23T02:30:00+00:00" if rate == "7.8" else "2026-07-23T02:00:00+00:00"
     path.write_text(json.dumps({
         "source": "tencent_quote", "rates": {"USDCNY": rate, "HKDCNY": "0.92"},
         "timestamp": quote, "quote_timestamps": {"USDCNY": quote, "HKDCNY": quote},
-        "observed_at": "2026-07-23T02:00:01+00:00",
+        "observed_at": quote,
     }))
 
 
@@ -407,8 +407,9 @@ def test_stock_sale_apply_fixes_daily_fx_in_transaction_and_returns_stored_winne
     assert preview["sale_event"]["cash_conversions"]["assigned_stock_sale_cash_gross"]["fx_rate"] == "7.3"
     assert _ledger_dump(repo) == before
     second = _sale_request(repo, lot_id, broker=broker, dry_run=False, identity="sale-2")
-    assert second["sale_event"]["cash_conversions"]["assigned_stock_sale_cash_gross"]["fx_rate"] == "7.3"
-    assert evidence.read_all().fx_rates == first_rates
+    assert second["sale_event"]["cash_conversions"]["assigned_stock_sale_cash_gross"]["fx_rate"] == "7.8"
+    assert len(evidence.read_all().fx_rates) == 4
+    assert repo.list_assigned_stock_events()[0] == stored
 
 
 @pytest.mark.parametrize("broker", [False, True], ids=["manual", "broker"])

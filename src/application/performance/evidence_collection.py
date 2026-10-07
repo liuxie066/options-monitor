@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.cash_conversion import cash_fx_observation_facts
+
 import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -179,47 +181,16 @@ def collect_current_performance_evidence(
         if not isinstance(fx_payload, Mapping):
             diagnostics.append(_diag("fx_payload_missing"))
         else:
-            rates_map = fx_payload.get("rates") if isinstance(fx_payload.get("rates"), Mapping) else fx_payload
-            pairs = fx_payload.get("pairs") if isinstance(fx_payload.get("pairs"), Mapping) else {}
-            timestamps = fx_payload.get("quote_timestamps") if isinstance(fx_payload.get("quote_timestamps"), Mapping) else {}
+            try:
+                captured = cash_fx_observation_facts(fx_payload, observed_at_ms=instant)
+            except ValueError:
+                captured = ()
             for currency in currencies:
-                pair = f"{currency}CNY"
-                row = pairs.get(pair) if isinstance(pairs.get(pair), Mapping) else {}
-                raw_rate = row.get("rate") if pairs else rates_map.get(pair) if isinstance(rates_map, Mapping) else None
-                rate = _positive_decimal(raw_rate)
-                if rate is None:
-                    diagnostics.append(_diag("fx_rate_missing", base_currency=currency, quote_currency="CNY"))
-                    continue
-                effective_at_ms, timestamp_fallback = _snapshot_timestamp_ms(
-                    {"timestamp": row.get("quote_at_utc") if pairs else timestamps.get(pair)}, fallback_ms=instant,
-                )
-                observed_at_ms, observation_fallback = _snapshot_timestamp_ms(
-                    {"timestamp": row.get("observed_at_utc") if pairs else fx_payload.get("observed_at")}, fallback_ms=instant,
-                )
-                provider = row.get("source") if pairs else fx_payload.get("source")
-                if not provider or timestamp_fallback or observation_fallback or effective_at_ms > observed_at_ms or observed_at_ms > instant:
+                matching = [fact for fact in captured if fact.base_currency == currency]
+                if matching:
+                    rates.extend(matching)
+                else:
                     diagnostics.append(_diag("fx_timestamp_missing_or_invalid", base_currency=currency, quote_currency="CNY"))
-                    continue
-                age_ms = max(0, instant - effective_at_ms)
-                source = "cache_snapshot" if age_ms > 24 * 3_600_000 else "realtime_snapshot"
-                quality = {"persistence": "live_unpersisted", "provider_source": provider}
-                if source == "cache_snapshot":
-                    quality["stale_cache_fallback"] = True
-                rates.append(
-                    FXRateFact(
-                        fact_id=None,
-                        base_currency=currency,
-                        quote_currency="CNY",
-                        rate=rate,
-                        rate_kind="spot",
-                        effective_at_ms=effective_at_ms,
-                        observed_at_ms=observed_at_ms,
-                        source=source,
-                        source_id=f"{currency}CNY:{effective_at_ms}",
-                        quality=quality,
-                        raw=_json_safe(dict(fx_payload)),
-                    )
-                )
 
     status = "collected" if marks or rates else "source_unavailable"
     return CurrentEvidenceCollection(
@@ -344,10 +315,11 @@ def _default_stock_price(
 
 
 def _default_fx_payload(*, cfg: Mapping[str, Any], base_dir: str | Path | None) -> Mapping[str, Any] | None:
-    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+    from src.application.runtime_paths import resolve_runtime_root
+    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest, shared_exchange_rate_cache_path
 
     root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
-    cache_path = Path(cfg.get("exchange_rate_cache_path") or root / "output_shared" / "state" / "rate_cache.json")
+    cache_path = shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=root).runtime_root)
     return get_exchange_rates_or_fetch_latest(
         cache_path=cache_path,
         max_age_hours=24,

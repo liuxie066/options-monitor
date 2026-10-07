@@ -259,7 +259,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     run_id = "run-coherent-options"
     configs, authorities, config_path, data_config = _prepare_env(tmp_path, run_id)
     fx_observation = {
-        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        "timestamp": NOW.isoformat(),
         "source": "tencent_quote",
         "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
     }
@@ -530,7 +530,7 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
 
     db_path = tmp_path / "option_positions.sqlite3"
     evidence = PerformanceEvidenceSQLiteRepository(db_path)
-    captured_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    captured_at_ms = int((NOW + timedelta(hours=2)).timestamp() * 1000)
 
     class RacingEvidenceRepository:
         def __init__(self) -> None:
@@ -539,8 +539,8 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
         def read_all(self):
             return evidence.read_all()
 
-        def freeze_cash_fx_daily_rates(self, *args, **kwargs):
-            return evidence.freeze_cash_fx_daily_rates(*args, **kwargs)
+        def persist_cash_fx_observations(self, *args, **kwargs):
+            return evidence.persist_cash_fx_observations(*args, **kwargs)
 
         def import_envelope(self, envelope, *, apply, migrated_at_ms):
             self.import_calls += 1
@@ -603,7 +603,7 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
     }
 
 
-def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
+def test_fx_evidence_keeps_original_quote_independent_of_capture_status(tmp_path: Path) -> None:
     from src.application import prepared_option_positions_context as mod
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -625,9 +625,9 @@ def test_fx_evidence_preserves_stale_cache_provenance(tmp_path: Path) -> None:
 
     assert result["status"] == "persisted"
     rates = PerformanceEvidenceSQLiteRepository(db_path).read_all().fx_rates
-    cached = [item for item in rates if item.source == "cache_snapshot"]
+    cached = [item for item in rates if item.source == "realtime_snapshot"]
     assert len(cached) == 2
-    assert all(item.quality["stale_cache_fallback"] is True for item in cached)
+    assert all(item.quality["source_timestamp_verified"] is True for item in cached)
 
     fresh_db_path = tmp_path / "fresh-option-positions.sqlite3"
     fresh_repo = SQLiteOptionPositionsRepository(fresh_db_path)
