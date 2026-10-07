@@ -489,7 +489,7 @@ DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
     description=(
         "Read the latest successful option-monitor snapshot, a trading day, or an exact revision. "
         "Use for queries such as 期权监控, 最新期权报告, 港股期权, 美股期权, or lx/sy 期权. "
-        "Omitting account and market for latest returns all enabled scopes; historical date/revision requires both. The tool returns structured JSON plus "
+        "Omitting account and market for latest returns all enabled scopes; historical date/revision requires explicit account and market. The tool returns structured JSON plus "
         "readable Chinese Markdown and never scans, sends, or changes delivery state. "
         "Use section for bounded report text or existing structured details, then next_cursor with unchanged filters. "
         "A fragment only covers its body_range; even the last fragment does not prove earlier fragments were read."

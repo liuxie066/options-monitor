@@ -1026,7 +1026,8 @@ storage and accounting/FX date conventions remain unchanged.
 
 Legacy CSP summaries preserve each selected candidate's canonical native cash evidence
 and `max_new_contracts`. Zero, unknown or nonfinite capacity cannot create a high-priority
-opening alert in either HKD or USD; this read path does not recalculate capacity or FX.
+opening alert in either HKD or USD; canonical processor normalization retains the same evidence.
+Legacy and compact previews preserve abnormal CSP capacity comments; this read path does not recalculate capacity or FX.
 Futu option-field diagnostics expose `option_fields_ok` separately from
 `scan_prerequisites_ok` and the scanner-owned underlier observation. Both markets need
 attested, fresh, normal underlier evidence; unavailable or closed-market observation

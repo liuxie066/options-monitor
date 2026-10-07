@@ -64,7 +64,8 @@ def test_summary_to_alert_preserves_canonical_capacity(symbol, currency, capacit
         "cash_required_native": 10000, "cash_free_effective_native": 20000,
         "cash_available_effective_native": 20000, "cash_capacity_basis": "native_cash_first",
         "cash_fx_status": "missing" if capacity is None else ""}
-    summary = summarize_sell_put(pd.DataFrame([candidate]), symbol)
+    from domain.domain import normalize_processor_row
+    summary = normalize_processor_row(summarize_sell_put(pd.DataFrame([candidate]), symbol))
     assert summary["cash_native_currency"] == currency
     assert summary["cash_required_native"] == 10000
     # Prove the public CSV consumer, not just the in-memory summary.
