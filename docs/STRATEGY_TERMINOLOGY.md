@@ -40,7 +40,7 @@ Wheel 以 [WHEEL_STRATEGY_PRD.md](WHEEL_STRATEGY_PRD.md) 为准。
 ## Combo Yield CC+LP — Collar（领口策略）
 
 - OM 内部 key：`combo_yield`，`combo_yield.variant=cc_lp`（当前默认不启用）。
-- 结构：持有正股 + 卖出备兑看涨（Funding Call，高 strike）+ 买入同到期认沽（Reversal Put，低 strike）；`call strike > put strike`，Put 反转腿 delta 0.10–0.25（目标 0.12）。
+- 结构：持有正股 + 卖出备兑看涨（Funding Call，高 strike）+ 买入同到期认沽（Reversal Put，低 strike）；`call strike > put strike`，Put 反转腿默认 `0.15 ≤ |delta| ≤ 0.35`（可配置）；排序次键目标仍为 0.12。
 - 融资关系：Call 权利金覆盖 Put 成本，`net_credit / call_net_credit ≥ 0.20`，不允许净 debit。
 - 收益特征：上行被 Short Call 封顶，下行被 Long Put 保护，中间区间保留净权利金。
 - 专业术语：**Collar（领口策略 / 领式策略）**——"持有股票 + 卖出看涨 + 买入认沽"的经典结构；由于要求净收权利金，可称 **Credit Collar（信用领口）**。

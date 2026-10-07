@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Iterable
 
-from .combo_yield import ComboYieldLeg
+from .combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA, ComboYieldLeg
 from domain.domain.engine.combo_yield import _safe_float
 
 
-CC_LP_DEFAULT_MIN_PUT_DELTA = 0.10
-CC_LP_DEFAULT_MAX_PUT_DELTA = 0.25
+CC_LP_DEFAULT_MIN_PUT_DELTA = COMBO_LONG_MIN_DELTA
+CC_LP_DEFAULT_MAX_PUT_DELTA = COMBO_LONG_MAX_DELTA
 CC_LP_DEFAULT_MIN_RETENTION = 0.20
 CC_LP_DEFAULT_TARGET_PUT_DELTA = 0.12
 
@@ -74,11 +75,14 @@ def validate_cc_lp_pair(
         rejects.append("dte")
     if call_leg.bid <= 0 or put_leg.ask <= 0:
         rejects.append("execution_price")
-    put_delta = abs(_safe_float(put_leg.delta) or 0.0)
-    if put_delta < float(min_put_delta):
-        rejects.append("put_delta_below_min")
-    if put_delta > float(max_put_delta):
-        rejects.append("put_delta_above_max")
+    put_delta = _safe_float(put_leg.delta)
+    if put_delta is None or not isfinite(put_delta):
+        rejects.append("put_delta_missing")
+    else:
+        if abs(put_delta) < float(min_put_delta):
+            rejects.append("put_delta_below_min")
+        if abs(put_delta) > float(max_put_delta):
+            rejects.append("put_delta_above_max")
     return rejects
 
 
@@ -90,6 +94,8 @@ def compute_cc_lp_metrics(
     put_buy_fee: float,
     covered_notional: float,
     dte: int | None = None,
+    min_put_delta: float = CC_LP_DEFAULT_MIN_PUT_DELTA,
+    max_put_delta: float = CC_LP_DEFAULT_MAX_PUT_DELTA,
 ) -> CcLpMetrics:
     """Compute CC+LP combo metrics.
 
@@ -97,7 +103,9 @@ def compute_cc_lp_metrics(
     (spot * shares) and is NOT reduced by net credit.
     """
 
-    rejects = validate_cc_lp_pair(call_leg, put_leg)
+    rejects = validate_cc_lp_pair(
+        call_leg, put_leg, min_put_delta=min_put_delta, max_put_delta=max_put_delta,
+    )
     if rejects:
         raise ValueError(f"invalid cc_lp pair: {', '.join(rejects)}")
     multiplier = float(call_leg.multiplier)

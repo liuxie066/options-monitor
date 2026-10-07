@@ -627,6 +627,8 @@ def run_cc_lp_variant(
             "stock": prepared_stock,
             "global_sell_call_liquidity": global_sell_call_liquidity,
             "strategy_profile": "cc_lp_funding_call",
+            "min_put_delta": policy.config["put"]["min_delta"],
+            "max_put_delta": policy.config["put"]["max_delta"],
             "required_data_frame": required_data_frame,
         }
         if demo_capacity:

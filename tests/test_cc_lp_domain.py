@@ -91,7 +91,7 @@ def test_validate_cc_lp_pair_rejects_delta_outside_window() -> None:
     call = _call_leg()
     shallow = _put_leg(delta=-0.05)
     assert "put_delta_below_min" in validate_cc_lp_pair(call, shallow)
-    deep = _put_leg(delta=-0.35)
+    deep = _put_leg(delta=-0.40)
     assert "put_delta_above_max" in validate_cc_lp_pair(call, deep)
 
 
@@ -160,3 +160,20 @@ def test_rank_cc_lp_retention_primary_delta_secondary() -> None:
 def test_cc_lp_defaults_are_sane() -> None:
     assert CC_LP_DEFAULT_MIN_PUT_DELTA < CC_LP_DEFAULT_MAX_PUT_DELTA
     assert cc_lp_rank_key({})[0] == 0.0
+
+
+@pytest.mark.parametrize("delta", [-0.15, -0.35, 0.15, 0.35])
+def test_long_put_delta_endpoints_are_inclusive(delta) -> None:
+    assert validate_cc_lp_pair(_call_leg(), _put_leg(delta=delta)) == []
+
+
+@pytest.mark.parametrize("delta", [None, float("nan"), float("inf"), -float("inf"), True])
+def test_long_put_missing_delta_never_becomes_zero(delta) -> None:
+    assert "put_delta_missing" in validate_cc_lp_pair(
+        _call_leg(), _put_leg(delta=delta), min_put_delta=0.0, max_put_delta=1.0,
+    )
+
+
+def test_metrics_honors_custom_delta_window() -> None:
+    metrics = _metrics(_call_leg(), _put_leg(delta=-0.45), min_put_delta=0.4, max_put_delta=0.5)
+    assert metrics.net_credit > 0

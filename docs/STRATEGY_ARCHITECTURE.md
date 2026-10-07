@@ -88,6 +88,8 @@ Participation Call：
 - 从 required-data Call universe 独立召回，不要求启用 CC 扫描。
 - 直接复用 Funding Put 到期日（`same_expiry_pair`）。
 - 可配置 `call.min_strike/max_strike` 与 `call.min_delta/max_delta`。
+- CSP+LC 的 Long Call 和 CC+LP 的 Long Put 默认均要求 `0.15 ≤ |delta| ≤ 0.35`，包含端点。分别使用 `combo_yield.call.min_delta/max_delta` 和 `combo_yield.put.min_delta/max_delta` 覆盖；只填一端时另一端取默认值。两端必须是 `[0, 1]` 内的有限数字且下限不高于上限，显式 `null` 无效。Long delta 缺失或非有限时拒绝候选。
+- 该约束可能减少候选数量；已有显式 delta 配置继续优先。Short 筛选、留存门槛和排序规则保持不变，delta 区间不保证反转收益。
 - Call bid/ask、delta、OI、volume、spread 和 multiplier 缺失或不合格时 fail closed。
 
 配对硬约束：

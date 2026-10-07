@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1137 (`src`: 554, `domain`: 89, `scripts`: 14, `tests`: 480)
-- Internal import edges: 8603 total, 3621 production/script edges excluding tests
+- Internal import edges: 8610 total, 3623 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|599| domain
+  application -->|601| domain
   application -->|4| domain_services
   application -->|177| infrastructure
   application -->|57| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3772| application
+  tests -->|3777| application
   tests -->|495| domain
   tests -->|2| domain_services
   tests -->|248| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 599 |
+| application | domain | 601 |
 | interfaces | application | 193 |
 | application | infrastructure | 177 |
 | application | storage | 57 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3772 |
+| tests | application | 3777 |
 | tests | domain | 495 |
 | tests | interfaces | 300 |
 | tests | infrastructure | 248 |
@@ -105,9 +105,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.research | src.application | 32 |
 | src.application.trades | src.application.ledger | 32 |
 | scripts | src.application | 32 |
+| src.application | domain.domain.engine | 27 |
 | src.application.inbound | src.application | 27 |
 | domain.domain.ledger | domain.domain | 27 |
-| src.application | domain.domain.engine | 25 |
 | src.application.positions | src.application | 25 |
 | src.application.multi_tick | src.application | 23 |
 | domain.domain | domain.domain.ledger | 23 |

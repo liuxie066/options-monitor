@@ -843,12 +843,12 @@ markets:
     assert defaulted.explicit_fields == ("enabled",)
     assert "output_mode" not in defaulted.config
     assert defaulted.config["min_net_credit_retention"] == 0.60
-    assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
+    assert defaulted.config["call"] == {"min_delta": 0.15, "max_delta": 0.35}
 
     overridden = policies["FUTU"]
     assert overridden.explicit_fields == ("call", "enabled", "min_net_credit_retention")
     assert overridden.config["min_net_credit_retention"] == 0.70
-    assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
+    assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.35}
     assert "output_mode" not in overridden.config
 
 
@@ -2280,3 +2280,26 @@ def test_yaml_build_metadata_uses_exact_single_read_even_if_source_changes(tmp_p
         yaml_to_market_user_config(yaml.safe_load(source_bytes), market='us'), market='us',
     )
     assert not check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
+
+
+@pytest.mark.parametrize("leg", ["call", "put"])
+def test_yaml_combo_long_delta_partial_override_survives_policy(tmp_path: Path, leg: str) -> None:
+    from src.application.combo_yield_config import derive_combo_yield_policy, resolve_combo_yield_cfg
+    config_path = _write_yaml(tmp_path / "config.yaml", _FUTU_ACCOUNTS_YAML + f"""
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        combo_yield:
+          enabled: true
+          {leg}:
+            min_delta: 0.2
+""")
+    cfg, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+    resolved = resolve_watchlist_item_runtime_config(item=cfg["symbols"][0], profiles=cfg["templates"], apply_profiles_fn=apply_profiles)
+    policy = derive_combo_yield_policy(resolve_combo_yield_cfg(resolved), market="us")
+    assert policy.config[leg] == {"min_delta": 0.2, "max_delta": 0.35}
+    other = "put" if leg == "call" else "call"
+    assert policy.config[other] == {"min_delta": 0.15, "max_delta": 0.35}
