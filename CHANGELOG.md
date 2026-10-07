@@ -2,17 +2,22 @@
 
 ## Unreleased
 
+## 4.2.7 - 2026-10-08
+
 ### Breaking Changes
 - Assistant 配置与实现统一为 Bot，仅保留 `bot.enabled`，运行快照改为 `config.bot.json`；移除无效 Bot toolsets/loading mode、Daily Brief 开关、Wheel enabled 与固定 combo default_mode；用 `om config migrate-switches` 显式预览和发布迁移。新配置通知默认关闭；迁移保留旧配置省略通知开关时的原意及市场覆盖。
 - 决策历史改由 SQLite 保存和读取；旧 JSON 不再作为读取回退。有历史 JSON 的运行环境需先预览并显式导入可验证记录，缺少来源或账户身份的记录逐项报告，不自动迁移。
 
-### Features
+### New Features
 - 保存每次实际决策的成功、正常空、部分可用及失败结果；同运行幂等，新运行追加版本。新增 `decision_history_read` 只读查询和历史通知原始引用校验，翻页固定记录范围。
 - 历史建议仅沿已有明确 Wheel 意图关联展示账本状态与已实现期权净现金流；身份、数量、费用等证据不足时保留缺口，未结束不展示最终收益。
 
 ### Improvements
 - Bot 入站新指令与实际模型执行共用一个启用开关；PM 与 Holdings 可在预检后一次发布，取消或失败不再部分启用 PM。权限诊断与执行共用解释并显示模型写权限。
 - CSP+LC 与 CC+LP 长腿默认限制在 `0.15 ≤ |delta| ≤ 0.35`，支持独立配置并贯穿筛选与指标校验；缺失 delta 拒绝入选，保持短腿、权利金留存和排序规则。
+
+### Bug Fixes
+- 当前资金、Wheel 容量与事件现金折算共用汇率证据和交易时段校验；事件按发生时点选择可验证报价，保留连续休市沿用及缺证不可用语义。独立查询使用运行实例汇率缓存，费用补全保留原始报价来源；既有有效现金折算不自动回写。
 
 ## 4.2.6 - 2026-10-07
 

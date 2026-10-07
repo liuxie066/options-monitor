@@ -1,0 +1,418 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.7",
+  "base": {
+    "tag": "v4.2.6",
+    "commit": "83135c0825ef796c40ef65e572e8d849362cb381"
+  },
+  "reviewed_head": "a22e8264ca1cc3b8d8da88d8518362c1119ecbc8",
+  "commits": [
+    {
+      "sha": "fd20d38214d1c4eaa7aab98445de4ce84c9cd920",
+      "subject": "docs(history): accept SQLite decision history product contract"
+    },
+    {
+      "sha": "4c62265d77baa6e53ed879a591e84845b668a860",
+      "subject": "feat(history): persist immutable decision runs in SQLite"
+    },
+    {
+      "sha": "5703467ed8842430ff148332a31a4079662f553d",
+      "subject": "feat(history): query and import scoped decision history"
+    },
+    {
+      "sha": "46f0eca04d067ea2902d1a67e0ba8b70cd1cc92d",
+      "subject": "chore(history): accept aggregate decision history review"
+    },
+    {
+      "sha": "bdfa9a17fe9563eed6c279fde0b7f80ad87c0838",
+      "subject": "chore(gateflow): accept plan for combo-long-delta"
+    },
+    {
+      "sha": "e34c068ec6265af0e67e3daf9cc27cbf2106b3fb",
+      "subject": "fix(history): normalize missing numeric evidence before persistence"
+    },
+    {
+      "sha": "f9333688eb6cc6fd0dbc757dac795090ac54fe26",
+      "subject": "feat(combo): constrain long-leg delta for csp_lc and cc_lp"
+    },
+    {
+      "sha": "a0affbc694f51587282069077175be1bfb8a2160",
+      "subject": "chore(gateflow): accept deepreview for combo-long-delta"
+    },
+    {
+      "sha": "1f278cfe81b7a5a77ea8d90e20781d66a3357368",
+      "subject": "chore(gateflow): accept PR review for combo-long-delta"
+    },
+    {
+      "sha": "db3a8b4162e5e1c5cd0cb41afe9ea9f4f016a1ef",
+      "subject": "Merge pull request #501 from liuxie066/codex/combo-long-delta"
+    },
+    {
+      "sha": "81aaa5b4e6538d6fcf9e568a7d2abe6cb44f400d",
+      "subject": "chore(history): integrate main before decision history delivery"
+    },
+    {
+      "sha": "510731cf0ff7d7e1572883c96243263bb761181b",
+      "subject": "Merge pull request #500 from liuxie066/codex/decision-history-sqlite"
+    },
+    {
+      "sha": "526953aedd33b81b210dee3ee66749645452f382",
+      "subject": "fix(fx): unify evidence and event-time cash conversion"
+    },
+    {
+      "sha": "b0239d116d741410c9d11bd6b9a4efb84bedf684",
+      "subject": "gateflow(config): accept switch contract plan"
+    },
+    {
+      "sha": "23654d14f0915204b0a61738fb876da0b29ad9c1",
+      "subject": "test(fx): align capacity evidence and snapshot fixtures"
+    },
+    {
+      "sha": "1dbe29068384eb9b1a288bf2285986c5ac63199c",
+      "subject": "docs(fx): refresh dependency graph after fixture update"
+    },
+    {
+      "sha": "a5a9e16feb8da88c80be8b11410ba1bae365471f",
+      "subject": "refactor(config): retire inert switches with explicit migration"
+    },
+    {
+      "sha": "c7c1726f5d63a73882769d01afffc613b4d7f470",
+      "subject": "Merge pull request #502 from liuxie066/codex/unify-fx-consumers"
+    },
+    {
+      "sha": "46a01da89d54daafadf3bb41a4c50287f2b5f87d",
+      "subject": "refactor(config): enforce independent feature and permission gates"
+    },
+    {
+      "sha": "388ce9987e5cdae0301a9bb31f12586a32a0919b",
+      "subject": "fix(config): close switch bypasses and record retired surfaces"
+    },
+    {
+      "sha": "27536edd02ed976064ff5ab9f94f8b082d83153d",
+      "subject": "chore(config): integrate current main before draft review"
+    },
+    {
+      "sha": "3b03c86cf3d48cc01f33e97e81c088faf0985d65",
+      "subject": "gateflow(config): accept switch contract deepreview"
+    },
+    {
+      "sha": "ab53490072052fe1cebedf80bb75b7aecdbb644a",
+      "subject": "gateflow(config): accept single Bot correction plan"
+    },
+    {
+      "sha": "7277100d5d1d3d193cfbd380bbb294ff91b2362e",
+      "subject": "gateflow(config): accept unified Bot correction slice"
+    },
+    {
+      "sha": "cda43af63d68a8ae7f8b3c5b7659a282ebd31b02",
+      "subject": "gateflow(config): accept unified Bot aggregate review"
+    },
+    {
+      "sha": "a22e8264ca1cc3b8d8da88d8518362c1119ecbc8",
+      "subject": "Merge pull request #503 from liuxie066/codex/config-switch-contract"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Assistant 配置与实现统一为 Bot，仅保留 `bot.enabled`，运行快照改为 `config.bot.json`；移除无效 Bot toolsets/loading mode、Daily Brief 开关、Wheel enabled 与固定 combo default_mode；用 `om config migrate-switches` 显式预览和发布迁移。新配置通知默认关闭；迁移保留旧配置省略通知开关时的原意及市场覆盖。",
+      "commits": [
+        "a5a9e16feb8da88c80be8b11410ba1bae365471f",
+        "388ce9987e5cdae0301a9bb31f12586a32a0919b",
+        "7277100d5d1d3d193cfbd380bbb294ff91b2362e",
+        "a22e8264ca1cc3b8d8da88d8518362c1119ecbc8"
+      ]
+    },
+    {
+      "category": "Breaking Changes",
+      "text": "决策历史改由 SQLite 保存和读取；旧 JSON 不再作为读取回退。有历史 JSON 的运行环境需先预览并显式导入可验证记录，缺少来源或账户身份的记录逐项报告，不自动迁移。",
+      "commits": [
+        "4c62265d77baa6e53ed879a591e84845b668a860",
+        "5703467ed8842430ff148332a31a4079662f553d",
+        "510731cf0ff7d7e1572883c96243263bb761181b"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "保存每次实际决策的成功、正常空、部分可用及失败结果；同运行幂等，新运行追加版本。新增 `decision_history_read` 只读查询和历史通知原始引用校验，翻页固定记录范围。",
+      "commits": [
+        "4c62265d77baa6e53ed879a591e84845b668a860",
+        "5703467ed8842430ff148332a31a4079662f553d",
+        "e34c068ec6265af0e67e3daf9cc27cbf2106b3fb",
+        "510731cf0ff7d7e1572883c96243263bb761181b"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "历史建议仅沿已有明确 Wheel 意图关联展示账本状态与已实现期权净现金流；身份、数量、费用等证据不足时保留缺口，未结束不展示最终收益。",
+      "commits": [
+        "5703467ed8842430ff148332a31a4079662f553d",
+        "510731cf0ff7d7e1572883c96243263bb761181b"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Bot 入站新指令与实际模型执行共用一个启用开关；PM 与 Holdings 可在预检后一次发布，取消或失败不再部分启用 PM。权限诊断与执行共用解释并显示模型写权限。",
+      "commits": [
+        "46a01da89d54daafadf3bb41a4c50287f2b5f87d",
+        "388ce9987e5cdae0301a9bb31f12586a32a0919b",
+        "7277100d5d1d3d193cfbd380bbb294ff91b2362e",
+        "a22e8264ca1cc3b8d8da88d8518362c1119ecbc8"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "CSP+LC 与 CC+LP 长腿默认限制在 `0.15 ≤ |delta| ≤ 0.35`，支持独立配置并贯穿筛选与指标校验；缺失 delta 拒绝入选，保持短腿、权利金留存和排序规则。",
+      "commits": [
+        "f9333688eb6cc6fd0dbc757dac795090ac54fe26",
+        "db3a8b4162e5e1c5cd0cb41afe9ea9f4f016a1ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "当前资金、Wheel 容量与事件现金折算共用汇率证据和交易时段校验；事件按发生时点选择可验证报价，保留连续休市沿用及缺证不可用语义。独立查询使用运行实例汇率缓存，费用补全保留原始报价来源；既有有效现金折算不自动回写。",
+      "commits": [
+        "526953aedd33b81b210dee3ee66749645452f382",
+        "c7c1726f5d63a73882769d01afffc613b4d7f470"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fd20d38214d1c4eaa7aab98445de4ce84c9cd920",
+      "reason": "Product contract documentation for the decision history behavior described in this release."
+    },
+    {
+      "commit": "46f0eca04d067ea2902d1a67e0ba8b70cd1cc92d",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "bdfa9a17fe9563eed6c279fde0b7f80ad87c0838",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "a0affbc694f51587282069077175be1bfb8a2160",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "1f278cfe81b7a5a77ea8d90e20781d66a3357368",
+      "reason": "Records retired public surfaces for the combo delta implementation; no separate user-facing behavior."
+    },
+    {
+      "commit": "81aaa5b4e6538d6fcf9e568a7d2abe6cb44f400d",
+      "reason": "Integrates main into the history branch; constituent behavior is covered by the release notes."
+    },
+    {
+      "commit": "b0239d116d741410c9d11bd6b9a4efb84bedf684",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "23654d14f0915204b0a61738fb876da0b29ad9c1",
+      "reason": "Aligns regression fixtures with the FX evidence and snapshot contracts already described."
+    },
+    {
+      "commit": "1dbe29068384eb9b1a288bf2285986c5ac63199c",
+      "reason": "Refreshes generated dependency documentation after the fixture update."
+    },
+    {
+      "commit": "27536edd02ed976064ff5ab9f94f8b082d83153d",
+      "reason": "Integrates main into the configuration branch; constituent behavior is covered by the release notes."
+    },
+    {
+      "commit": "3b03c86cf3d48cc01f33e97e81c088faf0985d65",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "ab53490072052fe1cebedf80bb75b7aecdbb644a",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    },
+    {
+      "commit": "cda43af63d68a8ae7f8b3c5b7659a282ebd31b02",
+      "reason": "Empty review or plan acceptance checkpoint; no repository content or additional released behavior."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "fd20d38214d1c4eaa7aab98445de4ce84c9cd920",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "4c62265d77baa6e53ed879a591e84845b668a860",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "5703467ed8842430ff148332a31a4079662f553d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "46f0eca04d067ea2902d1a67e0ba8b70cd1cc92d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "e34c068ec6265af0e67e3daf9cc27cbf2106b3fb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "81aaa5b4e6538d6fcf9e568a7d2abe6cb44f400d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "510731cf0ff7d7e1572883c96243263bb761181b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/500",
+        "docs/DECISION_HISTORY_PRD.md"
+      ]
+    },
+    {
+      "commit": "bdfa9a17fe9563eed6c279fde0b7f80ad87c0838",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/501",
+        "docs/candidate_strategy.md"
+      ]
+    },
+    {
+      "commit": "f9333688eb6cc6fd0dbc757dac795090ac54fe26",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/501",
+        "docs/candidate_strategy.md"
+      ]
+    },
+    {
+      "commit": "a0affbc694f51587282069077175be1bfb8a2160",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/501",
+        "docs/candidate_strategy.md"
+      ]
+    },
+    {
+      "commit": "1f278cfe81b7a5a77ea8d90e20781d66a3357368",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/501",
+        "docs/candidate_strategy.md"
+      ]
+    },
+    {
+      "commit": "db3a8b4162e5e1c5cd0cb41afe9ea9f4f016a1ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/501",
+        "docs/candidate_strategy.md"
+      ]
+    },
+    {
+      "commit": "526953aedd33b81b210dee3ee66749645452f382",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/502",
+        "docs/EXCHANGE_RATE_FACT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "23654d14f0915204b0a61738fb876da0b29ad9c1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/502",
+        "docs/EXCHANGE_RATE_FACT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "1dbe29068384eb9b1a288bf2285986c5ac63199c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/502",
+        "docs/EXCHANGE_RATE_FACT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "c7c1726f5d63a73882769d01afffc613b4d7f470",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/502",
+        "docs/EXCHANGE_RATE_FACT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "b0239d116d741410c9d11bd6b9a4efb84bedf684",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "a5a9e16feb8da88c80be8b11410ba1bae365471f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "46a01da89d54daafadf3bb41a4c50287f2b5f87d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "388ce9987e5cdae0301a9bb31f12586a32a0919b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "27536edd02ed976064ff5ab9f94f8b082d83153d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "3b03c86cf3d48cc01f33e97e81c088faf0985d65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "ab53490072052fe1cebedf80bb75b7aecdbb644a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "7277100d5d1d3d193cfbd380bbb294ff91b2362e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "cda43af63d68a8ae7f8b3c5b7659a282ebd31b02",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "a22e8264ca1cc3b8d8da88d8518362c1119ecbc8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/503",
+        "docs/BOT_DESIGN.md"
+      ]
+    }
+  ]
+}
