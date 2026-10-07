@@ -89,7 +89,7 @@ def test_read_view_reports_unavailable_and_revision_requires_date(tmp_path: Path
 
     unavailable = read_daily_brief_view(base=tmp_path, account="lx", market="US")
     assert unavailable["available"] is False
-    assert unavailable["reason"] == "not_found"
+    assert unavailable["reason"] == "state_invalid"
     assert unavailable["coverage"]["status"] == "unavailable"
     assert unavailable["freshness"]["effective_actionability"] == "unavailable"
     assert unavailable["source"]["state_path"] == ".../daily_decision_brief.US.current.json"

@@ -750,7 +750,11 @@ def assemble_daily_decision_brief(
         now_ms=int(effective_now.timestamp() * 1000),
         capacity_observation={"portfolio": portfolio_context} if portfolio_context else None,
     )
+    from src.application.account_config import build_account_runtime_plan
+
+    runtime_plan = build_account_runtime_plan(dict(config_map), account=account_norm)
     brief_payload = {
+        "decision_scope": {"futu_account_id": runtime_plan.futu_account_id, "trade_env": runtime_plan.futu_trd_env},
         "schema_version": DAILY_DECISION_BRIEF_SCHEMA_VERSION,
         "attribution_pending": attribution_pending,
         "attribution_read_error": attribution_read_error,
@@ -2384,6 +2388,8 @@ def _append_candidate_earnings_context_gap(
 
 def _source_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "final_candidate_id": _text(row.get("final_candidate_id")),
+        "candidate_snapshot_hash": _text(row.get("candidate_snapshot_hash")),
         "path": _text(row.get("_source_path")),
         "row": int(row.get("_source_row") or 0),
     }

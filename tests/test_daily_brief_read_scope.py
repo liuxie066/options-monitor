@@ -2,6 +2,7 @@ from copy import deepcopy
 import json
 
 import pytest
+from decision_history_fixtures import replace_history_payload, delete_history_revision
 
 import src.application.daily_decision_brief_repository as repo
 from test_daily_decision_brief_repository_v2 import _brief, _persist, _prepare_fixed, MARKET_DATE, TARGET_1000
@@ -79,11 +80,11 @@ def test_scoped_exposures_keep_broken_source_unavailable(tmp_path, damage):
     args = dict(base=tmp_path, account='lx', market='US')
     revision = repo.read_daily_decision_brief(**args, market_trading_date=MARKET_DATE)['path']
     if damage == 'missing':
-        revision.unlink()
+        delete_history_revision(tmp_path)
     else:
         raw = json.loads(revision.read_text())
         raw['strategy_summary'] = 'tampered'
-        revision.write_text(json.dumps(raw))
+        replace_history_payload(tmp_path, raw)
     expected = repo.read_combo_candidate_exposures(**args, market_trading_date=MARKET_DATE)
     actual = repo.read_combo_candidate_exposures(**args, market_trading_date=MARKET_DATE,
         read_scope=repo.DailyBriefReadScope(**args))
@@ -96,14 +97,14 @@ def test_exposure_uses_one_revision_read_after_delivery_observation(tmp_path, mo
     args = dict(base=tmp_path, account='lx', market='US')
     scope = repo.DailyBriefReadScope(**args)
     repo.read_daily_decision_brief_delivery_state(**args, read_scope=scope)
-    original = repo._read_json_strict
+    original = repo._history_raw
     reads = []
-    def counted(path):
-        reads.append(path.name)
-        return original(path)
-    monkeypatch.setattr(repo, '_read_json_strict', counted)
+    def counted(**kwargs):
+        reads.append(kwargs["revision"])
+        return original(**kwargs)
+    monkeypatch.setattr(repo, "_history_raw", counted)
     repo.read_combo_candidate_exposures(**args, market_trading_date=MARKET_DATE, read_scope=scope)
-    assert len(reads) == 1 and '.r0000.json' in reads[0]
+    assert reads == [0]
 
 
 def test_modern_digest_skips_identical_legacy_hash_but_keeps_legacy_fields(monkeypatch):

@@ -32,6 +32,7 @@ from src.application.channels.feishu_notification_renderer import (
 from src.application.file_locks import exclusive_lock as _shared_exclusive_lock
 from src.application.multi_tick_audit import daily_brief_phase
 from src.infrastructure.io_utils import utc_now as _utc_now_iso
+from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, history_path
 
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
@@ -123,54 +124,9 @@ def persist_daily_decision_brief_success(
     lock_path = state_dir / f"daily_decision_brief.{market}.lock"
     with _exclusive_lock(lock_path):
         current_path = _current_path(base_path, account, market)
-        current_raw = _read_json_strict(current_path)
-        previous = None
-        if current_raw is not _MISSING:
-            current = _normalize_persisted_brief(
-                current_raw,
-                path=current_path,
-                account=account,
-                market=market,
-            )
-            _validate_current_revision(base=base_path, current=current, current_path=current_path)
-            if current.get("status") in {"ready", "degraded"}:
-                previous = current
-
-        revisions = _list_revision_numbers(
-            base=base_path,
-            account=account,
-            market=market,
-            market_trading_date=market_date,
-        )
-        revision = revisions[-1] + 1 if revisions else 0
-        candidate = dict(source)
-        candidate.update(
-            {
-                "market": market,
-                "market_trading_date": market_date,
-                "account": account,
-                "revision": revision,
-                "run_id": run_id,
-            }
-        )
-        if (
-            previous is not None
-            and previous.get("market_trading_date") == market_date
-        ):
-            normalized = reconcile_daily_decision_brief_evidence(
-                previous,
-                candidate,
-            )
-        else:
-            normalized = normalize_daily_decision_brief(candidate)
-        if normalized.get("status") not in {"ready", "degraded"}:
-            raise ValueError("only ready or degraded daily briefs may advance successful current")
-        if normalized.get("actionability") == "blocked":
-            raise ValueError("blocked daily brief may not advance successful current")
-
+        normalized, previous = _append_decision(base=base_path, source=source, successful=True)
+        revision = int(normalized["revision"])
         revision_path = _revision_path(base_path, account, market, market_date, revision)
-        if revision_path.exists():
-            raise DailyDecisionBriefStateError(f"daily brief revision already exists: {revision_path}")
         run_brief_path = (
             paths.run_account_state_dir(base_path, run_id, account)
             / f"daily_decision_brief.{market}.json"
@@ -186,20 +142,21 @@ def persist_daily_decision_brief_success(
             / "daily_decision_briefs.current.lock"
         )
         brief_digest = daily_brief_digest(normalized)
+        current_export = _history_raw(base=base_path, account=account, market=market, successful=True)
         with _exclusive_lock(shared_lock_path):
             shared_index = _load_current_index(shared_index_path)
             shared_index["items"][f"{market}/{account}"] = {
                 "market": market,
-                "market_trading_date": market_date,
+                "market_trading_date": current_export["market_trading_date"],
                 "account": account,
-                "revision": revision,
-                "run_id": run_id,
-                "brief_digest": brief_digest,
+                "revision": current_export["revision"],
+                "run_id": current_export["run_id"],
+                "brief_digest": daily_brief_digest(current_export),
                 "path": _relative_path(base_path, current_path),
             }
             shared_index["updated_at_utc"] = normalized.get("generated_at_utc") or _utc_now_iso()
             _persist_json(revision_path, normalized)
-            _persist_json(current_path, normalized)
+            _persist_json(current_path, current_export)
             _persist_json(run_brief_path, normalized)
             _persist_json(shared_index_path, shared_index)
 
@@ -226,6 +183,46 @@ def persist_daily_decision_brief_success(
                 "shared_index": shared_index_path,
             },
         }
+
+
+def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    candidate = dict(source)
+    candidate.update(account=_normalize_account(source.get("account")), market=_normalize_market(source.get("market")),
+                     market_trading_date=_normalize_market_date(source.get("market_trading_date")), revision=0)
+    if not str(candidate.get("run_id") or "").strip():
+        raise ValueError("run_id is required for decision history")
+    original = normalize_daily_decision_brief(candidate)
+    if successful and (original.get("status") not in {"ready", "degraded"} or original.get("actionability") == "blocked"):
+        raise ValueError("only ready or degraded non-blocked daily briefs may advance successful current")
+
+    def build(revision: int, previous: dict[str, Any] | None) -> dict[str, Any]:
+        value = {**original, "revision": revision}
+        if successful and previous and previous.get("market_trading_date") == original["market_trading_date"]:
+            return reconcile_daily_decision_brief_evidence(normalize_persisted_daily_decision_brief(previous), value)
+        return normalize_daily_decision_brief(value)
+
+    legacy = any(paths.account_state_dir(base, original["account"]).glob(f"daily_decision_brief.{original['market']}.*.r*.json"))
+    try:
+        stored, previous = DecisionHistoryStore(history_path(base)).append(original, successful=successful, build=build, legacy_present=legacy)
+        return stored, normalize_persisted_daily_decision_brief(previous) if previous else None
+    except (DecisionHistoryError, OSError) as exc:
+        raise DailyDecisionBriefStateError(str(exc)) from exc
+
+
+def persist_daily_decision_brief_failure(*, base: Path, brief: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain an actual unsuccessful run without changing successful current."""
+    normalized, _previous = _append_decision(base=Path(base).resolve(), source=brief, successful=False)
+    return normalized
+
+
+def _history_raw(*, base: Path, account: str, market: str, market_date: str | None = None,
+                 revision: int | None = None, successful: bool = False) -> Any:
+    try:
+        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, market_date=market_date,
+                                                          revision=revision, successful=successful)
+    except (DecisionHistoryError, OSError) as exc:
+        raise DailyDecisionBriefStateError(str(exc)) from exc
+    return row["payload"] if row else _MISSING
 
 
 def record_daily_decision_brief_candidates(
@@ -1110,7 +1107,7 @@ def read_latest_daily_decision_brief(*, base: Path, account: str, market: str) -
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     path = _current_path(base_path, account_norm, market_norm)
-    result = _read_brief_result(path=path, account=account_norm, market=market_norm)
+    result = _read_brief_result(base=base_path, path=path, account=account_norm, market=market_norm)
     if not result.get("available"):
         return result
     try:
@@ -1150,7 +1147,7 @@ def read_daily_decision_brief(
         revision_norm = _normalize_revision(revision)
     path = _revision_path(base_path, account_norm, market_norm, date_norm, revision_norm)
     return _read_brief_result(
-        path=path,
+        base=base_path, path=path,
         account=account_norm,
         market=market_norm,
         market_trading_date=date_norm,
@@ -1169,12 +1166,15 @@ def list_daily_decision_brief_revisions(
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     date_norm = _normalize_market_date(market_trading_date)
-    revisions = _list_revision_numbers(
-        base=base_path,
-        account=account_norm,
-        market=market_norm,
-        market_trading_date=date_norm,
-    )
+    try:
+        revisions = _list_revision_numbers(
+            base=base_path,
+            account=account_norm,
+            market=market_norm,
+            market_trading_date=date_norm,
+        )
+    except DailyDecisionBriefStateError as exc:
+        return {"available": False, "reason": "state_invalid", "error": str(exc), "revisions": []}
     if not revisions:
         return {
             "available": False,
@@ -1248,7 +1248,7 @@ def read_combo_candidate_exposures(
     for revision in listed["revisions"]:
         source_raw: list[Mapping[str, Any]] = []
         result = _read_brief_result(
-            path=_revision_path(base_path, account_norm, market_norm, date_norm, int(revision)),
+            base=base_path, path=_revision_path(base_path, account_norm, market_norm, date_norm, int(revision)),
             account=account_norm,
             market=market_norm,
             market_trading_date=date_norm,
@@ -1298,6 +1298,7 @@ def read_combo_candidate_exposures(
 
 def _read_brief_result(
     *,
+    base: Path,
     path: Path,
     account: str,
     market: str,
@@ -1306,7 +1307,8 @@ def _read_brief_result(
     source_raw: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
-        raw = _read_json_strict(path)
+        raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date,
+                           revision=revision, successful=market_trading_date is None)
         if raw is _MISSING:
             return {"available": False, "reason": "not_found", "brief": None, "path": path}
         brief = _normalize_persisted_brief(raw, path=path, account=account, market=market)
@@ -1353,14 +1355,10 @@ def _list_revision_numbers(
     market: str,
     market_trading_date: str,
 ) -> list[int]:
-    state_dir = paths.account_state_dir(base, account)
-    prefix = f"daily_decision_brief.{market}.{market_trading_date}.r"
-    revisions: list[int] = []
-    for path in sorted(state_dir.glob(f"{prefix}*.json")):
-        match = _REVISION_RE.search(path.name)
-        if match:
-            revisions.append(int(match.group("revision")))
-    return sorted(set(revisions))
+    try:
+        return DecisionHistoryStore(history_path(base)).revisions(account=account, market=market, market_date=market_trading_date)
+    except (DecisionHistoryError, OSError) as exc:
+        raise DailyDecisionBriefStateError(str(exc)) from exc
 
 
 def _normalize_persisted_brief(raw: Any, *, path: Path, account: str, market: str) -> dict[str, Any]:
@@ -2075,7 +2073,7 @@ def _read_validated_successful_revision_source(
     if successful_sources is not None and key in successful_sources:
         return successful_sources[key]
     revision_path = _revision_path(base, account, market, market_trading_date, revision)
-    raw = _read_json_strict(revision_path)
+    raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date, revision=revision)
     if raw is _MISSING:
         raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
     if not isinstance(raw, Mapping):
@@ -2265,26 +2263,10 @@ def _normalize_optional_utc_iso(value: Any, *, field: str) -> str | None:
 
 @daily_brief_phase("history_validate", operation="validate_current_revision")
 def _validate_current_revision(*, base: Path, current: Mapping[str, Any], current_path: Path) -> None:
-    revision_path = _revision_path(
-        base,
-        str(current["account"]),
-        str(current["market"]),
-        str(current["market_trading_date"]),
-        int(current["revision"]),
-    )
-    raw = _read_json_strict(revision_path)
-    if raw is _MISSING:
-        raise DailyDecisionBriefStateError(
-            f"daily brief current state references a missing revision: {revision_path}"
-        )
-    revision = _normalize_persisted_brief(
-        raw,
-        path=revision_path,
-        account=str(current["account"]),
-        market=str(current["market"]),
-    )
-    if daily_brief_digest(revision) != daily_brief_digest(current):
-        raise DailyDecisionBriefStateError(f"daily brief current state digest mismatch: {current_path}")
+    raw = _history_raw(base=base, account=str(current["account"]), market=str(current["market"]),
+                       market_date=str(current["market_trading_date"]), revision=int(current["revision"]))
+    if raw is _MISSING or daily_brief_digest(raw) != daily_brief_digest(current):
+        raise DailyDecisionBriefStateError("daily brief current state digest mismatch")
 
 
 def _load_current_index(path: Path) -> dict[str, Any]:

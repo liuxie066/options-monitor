@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from decision_history_fixtures import replace_history_payload, delete_history_revision
 
 import pytest
 
@@ -258,6 +259,7 @@ def _install_legacy_combo_revision(tmp_path: Path) -> tuple[dict, str, dict]:
         json.dumps(shared, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    replace_history_payload(tmp_path, legacy)
     return legacy, digest, seeded
 
 
@@ -828,6 +830,7 @@ def test_v2_delivery_accepts_exact_digest_from_retired_ai_overlay_revision(
             "source": "historical-evidence",
         }
         path.write_text(json.dumps(historical), encoding="utf-8")
+    replace_history_payload(tmp_path, historical)
     legacy_digest = daily_brief_compatible_digests(historical)[-1]
     assert legacy_digest != persisted["current_brief_digest"]
 
@@ -969,6 +972,7 @@ def test_retry_payload_classifier_blocks_retired_source_text_and_card(
     historical["ai_decision_advice"] = {"status": "completed"}
     historical["ai_decision_advice_evidence_index"] = {"symbols": []}
     revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    replace_history_payload(tmp_path, historical)
     source_only = {
         **clean,
         "source_digest": daily_brief_compatible_digests(historical)[-1],
@@ -987,17 +991,15 @@ def test_retry_payload_classifier_inspects_the_same_raw_revision_it_validates(
 
     persisted = _persist(tmp_path, actions=[_action()])
     prepared = _prepare_fixed(tmp_path, persisted)
-    revision_path = persisted["paths"]["revision"].resolve()
     revision_reads = 0
-    original_read = repository._read_json_strict
+    original_read = repository._history_raw
 
-    def counted_read(path: Path):
+    def counted_read(**kwargs):
         nonlocal revision_reads
-        if Path(path).resolve() == revision_path:
-            revision_reads += 1
-        return original_read(path)
+        revision_reads += 1
+        return original_read(**kwargs)
 
-    monkeypatch.setattr(repository, "_read_json_strict", counted_read)
+    monkeypatch.setattr(repository, "_history_raw", counted_read)
 
     assert repository.classify_retryable_daily_decision_brief_payload(
         base=tmp_path,
@@ -1430,6 +1432,7 @@ def test_public_revision_read_rejects_tampered_legacy_combo_action(
     else:
         raw["actions"][0]["contract_symbol"] = "NVDA260821P00101000"
     seeded["paths"]["revision"].write_text(json.dumps(raw), encoding="utf-8")
+    replace_history_payload(tmp_path, raw)
 
     inspected = read_daily_decision_brief(
         base=tmp_path,
@@ -1477,6 +1480,7 @@ def test_legacy_combo_pair_or_digest_tamper_cannot_authorize_fixed_recovery(
     raw = json.loads(seeded["paths"]["revision"].read_text(encoding="utf-8"))
     raw["candidate_index"][0]["representative"]["candidate_pair_id"] = "pair-tampered"
     seeded["paths"]["revision"].write_text(json.dumps(raw), encoding="utf-8")
+    replace_history_payload(tmp_path, raw)
     with pytest.raises(DailyDecisionBriefStateError, match="source digest mismatch"):
         read_daily_decision_brief_fixed_recovery(
             base=tmp_path,
@@ -1587,42 +1591,38 @@ def _confirmed_repeated_source(tmp_path: Path) -> tuple[dict, Path]:
 
 
 @pytest.mark.parametrize("mutation", ["delete", "corrupt", "digest", "account", "market"])
-def test_delivery_normalization_reuses_source_but_independent_read_is_fresh(monkeypatch, tmp_path, mutation):
+def test_delivery_normalization_reuses_source_but_independent_read_is_fresh(tmp_path, monkeypatch, mutation):
     import src.application.daily_decision_brief_repository as repository
-
+    from src.infrastructure.decision_history_sqlite import history_path
     persisted, _ = _confirmed_repeated_source(tmp_path)
-    revision_path = persisted["paths"]["revision"]
-    original = repository._read_json_strict
+    original = repository._history_raw
     reads = []
-
-    def counted(path):
-        if path == revision_path:
-            reads.append(path)
-        return original(path)
-
-    monkeypatch.setattr(repository, "_read_json_strict", counted)
+    def counted(**kwargs):
+        reads.append(kwargs["revision"])
+        return original(**kwargs)
+    monkeypatch.setattr(repository, "_history_raw", counted)
     first = _read_state(tmp_path)
     assert len(first["state"]["days"][MARKET_DATE]["alerted_candidates"]) == 2
-    assert reads == [revision_path]  # fixed report and both alerted candidates
+    assert reads == [0]
     if mutation == "delete":
-        revision_path.unlink()
+        delete_history_revision(tmp_path)
         error = "missing revision"
     elif mutation == "corrupt":
-        revision_path.write_text("{invalid")
-        error = "failed to read daily brief state"
+        history_path(tmp_path).write_bytes(b"broken SQLite")
+        error = "history_database_error"
     else:
-        raw = json.loads(revision_path.read_text())
+        raw = dict(persisted["brief"])
         if mutation == "digest":
             raw["strategy_summary"] = "changed facts"
             error = "source digest mismatch"
         else:
             raw[mutation] = "sy" if mutation == "account" else "HK"
-            error = "identity mismatch" if mutation == "account" else "incompatible"
-        revision_path.write_text(json.dumps(raw))
+            error = "history_identity_corrupt"
+        replace_history_payload(tmp_path, raw)
     rejected = _read_state(tmp_path)
     assert rejected["available"] is False and rejected["reason"] == "state_invalid"
     assert rejected["state"] is None and error in rejected["error"]
-    assert reads == [revision_path, revision_path]
+    assert reads == [0, 0]
 
 
 def test_delivery_source_reuse_does_not_hide_different_expected_digest(tmp_path):
