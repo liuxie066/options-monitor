@@ -40,7 +40,7 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
         "--model-config-json",
         default=None,
         help=(
-            "explicit local opt-in model config JSON; sends model-visible "
+            "local model override JSON (requires enabled Assistant/Bot runtime config); sends model-visible "
             "read-only observations to the configured provider"
         ),
     )

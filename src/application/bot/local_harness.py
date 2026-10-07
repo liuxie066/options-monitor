@@ -112,7 +112,7 @@ def run_prepared_contract(
     else:
         settings_error = assistant_bot_config_error(
             config_path=assistant_config_path,
-            require_config=bool(str(assistant_config_path or "").strip()),
+            require_config=True,
         )
     if settings_error in {"assistant_disabled", "bot_disabled"}:
         return AppResult(status="disabled", user_response="Bot 已关闭。" if settings_error == "bot_disabled" else "Inbound Assistant 已禁用。",

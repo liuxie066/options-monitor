@@ -14,7 +14,6 @@ from src.application.bot.model_config import model_api_key_configured
 def _assistant_config(
     *,
     llm: dict[str, Any] | None = None,
-    portfolio_enabled: bool = False,
 ) -> dict[str, Any]:
     llm_cfg = dict(llm or {"enabled": False})
     enabled = bool(llm_cfg.pop("enabled", False))
@@ -89,24 +88,6 @@ def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
     assert checks["enabled"]["status"] == "warn"
     assert checks["provider"]["status"] == "skipped"
     assert checks["live_probe"]["status"] == "skipped"
-
-
-def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
-    out = _check_llm(
-        tmp_path,
-        _assistant_config(
-            portfolio_enabled=True,
-            llm={
-                "enabled": True,
-                "provider": "ollama",
-                "model": "gpt-oss:20b",
-                "context_window_tokens": 24_000,
-                "max_output_tokens": 2048,
-            },
-        ),
-    )
-
-    assert "assistant_bot_portfolio_enabled" not in out["summary"]
 
 
 def test_ollama_model_config_does_not_require_api_key() -> None:

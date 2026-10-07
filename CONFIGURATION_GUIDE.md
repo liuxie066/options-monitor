@@ -435,6 +435,8 @@ Wheel 使用 `om wheel activation` 管理账户窗口；配置字段删除不会
 `om bot configure` 只保存 Bot 设置，不会改变总入口；总入口关闭时预览和结果会说明依赖。
 新建配置保持两者关闭：明确需要入站服务时在 YAML 开启 `assistant.enabled` 并重新构建。
 总入口开启而 Bot 关闭时，确定性命令仍可使用；总入口关闭则所有入站处理停止。
+本地 `bot run --model-config-json` 只覆盖模型选择，也必须存在已开启的 Assistant/Bot 配置；
+无外部调用的显式 eval fixture 不受运行配置依赖影响。
 
 `config explain` 和 runtime status 的配置摘要只证明发布的配置意图。Assistant diagnostics
 区分 `configured_enabled`、总入口与配置就绪；`live_requested` 仅记录请求，当前诊断不执行模型探测，`live_checked=false`；

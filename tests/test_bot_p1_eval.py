@@ -381,7 +381,7 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
 def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -> None:
     config = tmp_path / "config.assistant.json"
     config.write_text(
-        '{"assistant":{"enabled":true,"llm":{"provider":"openai","model":"gpt-test",'
+        '{"assistant":{"enabled":true,"bot":{"enabled":true},"llm":{"provider":"openai","model":"gpt-test",'
         '"api_key_env":"TEST_KEY","timeout_seconds":45,"context_window_tokens":24000,"max_output_tokens":2048}}}',
         encoding="utf-8",
     )

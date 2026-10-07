@@ -183,3 +183,25 @@ def test_diagnostics_reports_configured_bot_but_disabled_master(tmp_path):
     assert result["summary"]["assistant_enabled"] is False
     assert result["summary"]["readiness_scope"] == "configuration"
     assert result["summary"]["activity_observed"] is None
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_service_credentials_follow_notification_opt_in(enabled):
+    from src.application.service_deploy import _systemd_secret_bindings
+    from src.application.secret_store import FEISHU_BOT_APP_SECRET
+    notifications = {"provider": "feishu_app"}
+    if enabled is not None:
+        notifications["enabled"] = enabled
+    bindings = _systemd_secret_bindings(service_names=["options-monitor-tick-us.service"],
+        assistant_credential_name=None, feature_configs={"us": {"notifications": notifications}})
+    assert (FEISHU_BOT_APP_SECRET in bindings.get("options-monitor-tick-us.service", ())) is (enabled is True)
+
+
+def test_inline_model_override_cannot_bypass_missing_assistant_config(tmp_path, monkeypatch):
+    from src.application.bot import local_harness, model_config
+    from tests.test_bot_phase1 import _request
+    monkeypatch.setattr(model_config, "_assistant_config_path", lambda **kwargs: tmp_path / "missing.json")
+    monkeypatch.setattr(local_harness, "_resolve_model", lambda **kwargs: pytest.fail("must not load a model"))
+    result = local_harness.run_local_request(_request("inspect"), reference_year=2026,
+        model_config_json=json.dumps({"provider": "ollama", "model": "fixture"}))
+    assert not result.ok and result.error["reason"] == "assistant_config_not_found"

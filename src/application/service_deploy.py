@@ -614,11 +614,13 @@ def _systemd_secret_bindings(
     if feature_configs is not None:
         # New installations bind only credentials consumed by enabled features.
         # PM Holdings uses the local PM service, not the retired Feishu table.
+        from src.application.notification_delivery_route import notifications_enabled
+
         def feishu_notifications(market: str | None = None) -> bool:
             configs = [feature_configs[market]] if market in feature_configs else feature_configs.values()
             for config in configs:
                 notifications = config.get("notifications") or {}
-                if notifications.get("enabled") is not False and (
+                if notifications_enabled(config) and (
                     notifications.get("provider") or notifications.get("channel")
                 ) == "feishu_app":
                     return True

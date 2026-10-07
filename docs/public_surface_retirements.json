@@ -375,6 +375,31 @@
       "module": "src/application/combo_yield_config.py",
       "name": "COMBO_YIELD_POLICY_OVERRIDES",
       "reason": "Retired the conflicting policy-only long Call delta defaults. Both long legs now use COMBO_LONG_MIN_DELTA/COMBO_LONG_MAX_DELTA through COMBO_YIELD_DEFAULTS, with explicit per-leg configuration overrides preserved."
+    },
+    {
+      "module": "src/application/assistant/settings.py",
+      "name": "BOT_TOOL_LOADING_MODES",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/assistant/settings.py",
+      "name": "CONFIGURABLE_BOT_TOOLSETS",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/bot/model_config.py",
+      "name": "load_assistant_bot_settings",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/bot/model_config.py",
+      "name": "load_assistant_bot_toolsets",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
+    },
+    {
+      "module": "src/application/config_validator.py",
+      "name": "BOT_TOOLSET_KEYS",
+      "reason": "Retired inert Bot toolset/loading switches. Bot uses scene tool selection and assistant_bot_config_error validates the actual enabled gates; migrate old authoring fields with om config migrate-switches."
     }
   ]
 }
