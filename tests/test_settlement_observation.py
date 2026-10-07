@@ -4375,3 +4375,40 @@ def test_projected_pending_close_missing_event_is_case_local_error(tmp_path):
             repo, lifecycle_case=case, read_model=model,
             gateway=_Gateway(), futu_account_id="1001", now_ms=now_ms,
         )
+
+
+def test_projected_pending_close_rejects_other_final_consumption(tmp_path):
+    from domain.domain.lifecycle_allocation import plan_evidence_allocation
+
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"])
+    model = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now_ms)
+    facts = deepcopy(lifecycle_case_coherent_facts(repo, case_id=case["case_id"]))
+    # A distinct lot in the same frozen case was closed for a known reason.
+    # Its zero outstanding reservation must not disguise its effective consumption.
+    case = {**case, "target_contracts_by_lot": {"lot-1": 1, "other-lot": 1}}
+    facts["lifecycle_case"] = case
+    final_plan = plan_evidence_allocation(
+        case_id=case["case_id"], evidence_id="other-final-evidence",
+        terminal_type="close", contracts=1,
+        remaining_contracts_by_lot={"other-lot": 1}, target_lot_id="other-lot",
+    )
+    assert final_plan.status == "planned"
+    facts["case_allocations"].extend(final_plan.allocations)
+    original_close = next(row for row in facts["trade_events"] if row["event_type"] == "close")
+    facts["trade_events"].append({
+        **original_close,
+        "event_id": final_plan.allocations[0]["canonical_terminal_event_id"],
+        "raw_payload": {**original_close["raw_payload"], "close_type": "trade_close",
+                        "target_lot_id": "other-lot", "evidence_id": "other-final-evidence"},
+    })
+    facts["position_lot_fields_by_id"]["other-lot"] = {
+        **facts["position_lot_fields_by_id"]["lot-1"], "contracts_open": 0,
+    }
+    model[SETTLEMENT_OBSERVATION_CONTEXT_KEY] = facts
+    observation = collect_broker_settlement_observation(
+        repo, lifecycle_case=case, read_model=model,
+        gateway=_Gateway(), futu_account_id="1001", now_ms=now_ms,
+    )
+    assert observation["competing_effective_consumption"] is True
+    assert observation["complete"] is False

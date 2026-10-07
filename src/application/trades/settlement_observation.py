@@ -654,6 +654,7 @@ def collect_broker_settlement_observation(
     competing_consumption = (
         resolution.status != "ok"
         or case_resolution.get("status") == "conflict"
+        or resolution.resolved_contracts > sum(pending_close.values())
     )
     latest_settlement = latest_trade_lifecycle_settlement_evidence(
         repo,
