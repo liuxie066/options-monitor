@@ -639,6 +639,10 @@ trade-intake audit 只记录 `portfolio_refresh_hint_accepted` 或
    原子更正后的 terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
    数量冲突或投影漂移进入 `needs_review` 或 `conflict`，不得猜测原因。
 
+归因观察按同一零价成交的完整待归因 allocation 恢复平仓前核验数量；投影与预留
+仍按实际未平仓数量核对。其他成交、已确定原因或已作废的平仓不计入恢复量，
+不完整匹配仍须复核。
+
 平仓事实不会因为原因尚未确认而消失；原因确认也不能再次消费同一 broker
 成交。`resolution_revision` 只随业务结论变化，通知重发只增加
 `delivery_revision`。

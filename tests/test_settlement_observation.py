@@ -4250,3 +4250,165 @@ def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_
     assert len(gateway.history_deal_queries) == 1
     assert repo.list_trade_events() == events
     assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence
+
+
+def _repo_with_projected_pending_close(tmp_path):
+    repo, case, policy, anchor_ms = _repo_with_pending_case(tmp_path, seed_anchor=False)
+    result = resolve_trade_deal(
+        NormalizedTradeDeal(
+            broker="富途", futu_account_id="1001", internal_account="lx",
+            deal_id="option-close-1", order_id="option-order-1", symbol="NVDA",
+            option_type="put", side="buy", position_effect="close",
+            contracts=1, price=0, strike=100, multiplier=100,
+            multiplier_source="cache", expiration_ymd=EXPIRATION_YMD,
+            currency="USD", trade_time_ms=anchor_ms,
+            raw_payload={"deal_id": "option-close-1", "code": OPTION_CODE},
+        ), repo=repo, state={}, apply_changes=True,
+    )
+    assert result.status == "applied"
+    assert repo.get_position_lot_fields("lot-1")["contracts_open"] == 0
+    case = repo.get_trade_lifecycle_case(case["case_id"])
+    assert lifecycle_case_read_model(
+        repo, case_id=case["case_id"], now_ms=anchor_ms,
+    )["reason_state"] == "cause_pending"
+    return repo, case, policy
+
+
+def test_projected_pending_close_automatically_expires_once(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    case_id = case["case_id"]
+    now_ms = int(policy["settlement_deadline_ms"])
+    original_close = next(row for row in repo.list_trade_events() if row["event_type"] == "close")
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case_id, gateway=_Gateway(), now_ms=now_ms,
+    )
+    assert observation["complete"] is True, observation["incomplete_reason_codes"]
+    assert observation["frozen_preterminal_remaining_by_lot"] == {"lot-1": 1}
+    assert observation["projection_matches_frozen_remaining"] is True
+    assert observation["reservation_exclusive"] is True
+    result = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms,
+        observation_collector=lambda *_args: observation, apply_changes=True,
+    )
+    assert result["results"][0]["decision"]["close_reason"] == "expiration_no_settlement"
+    readback = lifecycle_case_read_model(repo, case_id=case_id, now_ms=now_ms)
+    assert readback["reason_state"] == "resolved"
+    assert readback["close_reason"] == "expiration_no_settlement"
+    assert repo.get_position_lot_fields("lot-1")["contracts_open"] == 0
+    events = repo.list_trade_events()
+    voided = {row["target_event_id"] for row in events if row["event_type"] == "void"}
+    assert original_close["event_id"] in voided
+    effective = [row for row in events if row["event_type"] in {"close", "expire_close"}
+                 and row["event_id"] not in voided]
+    assert len(effective) == 1
+    assert effective[0]["contracts"] == 1
+    assert effective[0]["price"] == original_close["price"]
+    assert float(effective[0]["price"]) == 0
+    assert effective[0]["fees"] == original_close["fees"]
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    retry = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms + 1,
+        observation_collector=lambda *_args: pytest.fail("resolved case collected again"),
+        apply_changes=True,
+    )
+    assert retry["results"] == []
+    assert repo.list_trade_events() == events
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence
+
+
+@pytest.mark.parametrize("before_deadline", [True, False])
+def test_projected_pending_close_still_requires_time_and_evidence(tmp_path, before_deadline):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"]) - int(before_deadline)
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case["case_id"], now_ms=now_ms,
+        gateway=_Gateway() if before_deadline else _UntypedFailedReceiptGateway(),
+    )
+    assert observation["complete"] is False
+    before_events = repo.list_trade_events()
+    result = reconcile_lifecycle_close_reason(
+        repo, case_id=case["case_id"], now_ms=now_ms,
+        observation=observation, apply_changes=True,
+    )
+    assert result["decision"]["status"] == ("cause_pending" if before_deadline else "needs_review")
+    assert repo.list_trade_events() == before_events
+
+
+@pytest.mark.parametrize("drift,reason", [
+    ("final_close", "option_anchor_contracts_exceed_frozen_remaining"),
+    ("other_anchor", "competing_effective_consumption"),
+    ("partial_pending", "pending_close_settlement_not_exact"),
+    ("projection", "projection_frozen_remaining_mismatch"),
+])
+def test_projected_pending_close_does_not_restore_unproven_quantity(tmp_path, drift, reason):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"])
+    read_model = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now_ms)
+    facts = deepcopy(lifecycle_case_coherent_facts(repo, case_id=case["case_id"]))
+    close = next(row for row in facts["trade_events"] if row["event_type"] == "close")
+    if drift == "final_close":
+        close["raw_payload"]["close_type"] = "trade_close"
+    elif drift == "other_anchor":
+        facts["case_allocations"][0]["evidence_id"] = "another-anchor"
+    elif drift == "partial_pending":
+        facts["validated_anchors"][0]["target_contracts_by_lot"] = {"lot-1": 2}
+    else:
+        facts["position_lot_fields_by_id"]["lot-1"]["contracts_open"] = 1
+    read_model[SETTLEMENT_OBSERVATION_CONTEXT_KEY] = facts
+    observation = collect_broker_settlement_observation(
+        repo, lifecycle_case=case, read_model=read_model,
+        gateway=_Gateway(), futu_account_id="1001", now_ms=now_ms,
+    )
+    assert observation["complete"] is False
+    assert reason in observation["incomplete_reason_codes"]
+
+
+def test_projected_pending_close_missing_event_is_case_local_error(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"])
+    model = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now_ms)
+    facts = deepcopy(lifecycle_case_coherent_facts(repo, case_id=case["case_id"]))
+    facts["trade_events"] = [row for row in facts["trade_events"] if row["event_type"] != "close"]
+    model[SETTLEMENT_OBSERVATION_CONTEXT_KEY] = facts
+    with pytest.raises(SettlementObservationDataError, match="lifecycle_close_event_missing"):
+        collect_broker_settlement_observation(
+            repo, lifecycle_case=case, read_model=model,
+            gateway=_Gateway(), futu_account_id="1001", now_ms=now_ms,
+        )
+
+
+def test_projected_pending_close_rejects_other_final_consumption(tmp_path):
+    from domain.domain.lifecycle_allocation import plan_evidence_allocation
+
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"])
+    model = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now_ms)
+    facts = deepcopy(lifecycle_case_coherent_facts(repo, case_id=case["case_id"]))
+    # A distinct lot in the same frozen case was closed for a known reason.
+    # Its zero outstanding reservation must not disguise its effective consumption.
+    case = {**case, "target_contracts_by_lot": {"lot-1": 1, "other-lot": 1}}
+    facts["lifecycle_case"] = case
+    final_plan = plan_evidence_allocation(
+        case_id=case["case_id"], evidence_id="other-final-evidence",
+        terminal_type="close", contracts=1,
+        remaining_contracts_by_lot={"other-lot": 1}, target_lot_id="other-lot",
+    )
+    assert final_plan.status == "planned"
+    facts["case_allocations"].extend(final_plan.allocations)
+    original_close = next(row for row in facts["trade_events"] if row["event_type"] == "close")
+    facts["trade_events"].append({
+        **original_close,
+        "event_id": final_plan.allocations[0]["canonical_terminal_event_id"],
+        "raw_payload": {**original_close["raw_payload"], "close_type": "trade_close",
+                        "target_lot_id": "other-lot", "evidence_id": "other-final-evidence"},
+    })
+    facts["position_lot_fields_by_id"]["other-lot"] = {
+        **facts["position_lot_fields_by_id"]["lot-1"], "contracts_open": 0,
+    }
+    model[SETTLEMENT_OBSERVATION_CONTEXT_KEY] = facts
+    observation = collect_broker_settlement_observation(
+        repo, lifecycle_case=case, read_model=model,
+        gateway=_Gateway(), futu_account_id="1001", now_ms=now_ms,
+    )
+    assert observation["competing_effective_consumption"] is True
+    assert observation["complete"] is False
