@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -563,6 +564,14 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
 
     strategy = canonical_strategy_id(strategy)
     if strategy == STRATEGY_SELL_PUT:
+        capacity = _row_float(row.get('max_new_contracts'))
+        if capacity is None or not math.isfinite(capacity):
+            reason = next((text for key in (
+                'cash_secured_unavailable_reason', 'cash_requirement_unavailable_reason', 'cash_fx_status',
+            ) if (text := _clean_row_text(row.get(key)))), '')
+            return 'low', '当前可开仓容量尚无法确认，仅供观察。' + (f' 原因：{reason}' if reason else '')
+        if capacity < 1:
+            return 'low', '当前可开仓容量不足一手，仅供观察。'
         # Defensive guard for standalone summary->alert generation paths.
         # The main pipeline should already filter cash-insufficient candidates
         # upstream, but this public alert entrypoint can also consume replayed or

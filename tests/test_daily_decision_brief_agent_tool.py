@@ -265,7 +265,41 @@ def test_agent_tool_default_query_has_no_required_scope() -> None:
     assert "期权监控" in manifest["description"]
 
 
-def test_agent_tool_day_query_keeps_existing_us_market_default() -> None:
+def test_agent_tool_day_query_requires_explicit_market() -> None:
     import src.application.agent_tools.daily_brief as mod
 
-    mod.validate_daily_brief_query_input({"account": "lx", "date": "2026-07-19"})
+    from src.application.agent_tool_contracts import AgentToolError
+    with pytest.raises(AgentToolError, match="market is required"):
+        mod.validate_daily_brief_query_input({"account": "lx", "date": "2026-07-19"})
+
+
+@pytest.mark.parametrize("extra", [{}, {"revision": 0}])
+def test_historical_agent_query_requires_explicit_market(extra, monkeypatch) -> None:
+    import src.application.agent_tools.daily_brief as mod
+    from src.application.agent_tool_contracts import AgentToolError
+    monkeypatch.setattr(mod, "read_daily_brief_view", lambda **kwargs: pytest.fail("invalid scope must not read"))
+    with pytest.raises(AgentToolError, match="market is required"):
+        mod.DAILY_DECISION_BRIEF_READ_TOOL.call({"account": "lx", "date": "2026-07-19", **extra})
+
+
+@pytest.mark.parametrize("market", ["US", "HK"])
+def test_historical_agent_query_passes_explicit_market(market, monkeypatch, tmp_path) -> None:
+    import src.application.agent_tools.daily_brief as mod
+    calls = []
+    monkeypatch.setattr(mod, "repo_base", lambda: tmp_path)
+    def read(**kwargs):
+        calls.append(kwargs)
+        return {"reason": "ok", "source": {"state_path": "synthetic-state"}}
+    monkeypatch.setattr(mod, "read_daily_brief_view", read)
+    mod.DAILY_DECISION_BRIEF_READ_TOOL.call({"account": "lx", "market": market, "date": "2026-07-19"})
+    assert calls[0]["market"] == market
+
+
+def test_shared_notification_preview_history_contract_and_examples():
+    from src.application.agent_tools.notifications import PREVIEW_NOTIFICATION_TOOL
+    from src.application.agent_tools.daily_brief import validate_daily_brief_query_input
+    from src.application.agent_tool_contracts import AgentToolError
+    for example in PREVIEW_NOTIFICATION_TOOL.examples:
+        validate_daily_brief_query_input(example["input"])
+    with pytest.raises(AgentToolError, match="market is required"):
+        PREVIEW_NOTIFICATION_TOOL.call({"account": "lx", "date": "2026-07-19", "revision": 0})

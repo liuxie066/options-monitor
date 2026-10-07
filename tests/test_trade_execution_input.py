@@ -216,3 +216,18 @@ def test_unresolvable_stock_symbol_keeps_currency_missing() -> None:
     assert deal.currency is None
     assert "missing:currency" in deal.execution_input["errors"]
     assert "missing:instrument_ref.currency" in deal.execution_input["errors"]
+
+
+@pytest.mark.parametrize("code", ["US.MET", "US.MET261016P45000"])
+def test_futu_execution_collision_retains_us_economics(code) -> None:
+    raw = {"broker_account_id": "account-1", "trd_acc_id": "900000000000000001", "trd_env": "REAL",
+           "external_id_namespace": "futu-us-deals", "dealID": "synthetic-met",
+           "external_order_namespace": "futu-orders", "orderID": "synthetic-order",
+           "code": code, "security_type": "OPTION" if "261016" in code else "STOCK",
+           "trd_side": "SELL", "qty": "1", "price": "1", "contract_multiplier": "100",
+           "create_time": "2026-10-06 10:00:00"}
+    content = canonical_trade_execution_content(raw)
+    instrument = content["economic"]["instrument"]
+    assert instrument["symbol"] == "MET.US"
+    assert instrument["market"] == "US"
+    assert instrument["currency"] == "USD"

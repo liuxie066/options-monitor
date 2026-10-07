@@ -60,7 +60,7 @@ om symbols edit YOUR_SYMBOL --set sell_put.max_strike=YOUR_MAX_STRIKE
 om doctor --config-key us
 ```
 
-按实际市场选择 us/hk。`doctor` 会尝试连接 OpenD；`setup check` 是离线检查，两者用途不同。调整映射使用 `om accounts edit`。
+按实际市场选择 us/hk。带标的的富途字段检查对两市场都读取标的快照和交易状态；`option_fields_ok` 仅表示期权字段可用，`scan_prerequisites_ok` 还要求现有扫描行情规则认可的标的观测（身份、价格、时间、证券与市场状态）。闭市或数据缺失时可能为 false，手工价格不能替代该观测。检查通过不代表所有策略筛选条件都通过。`doctor` 会尝试连接 OpenD；`setup check` 是离线检查，两者用途不同。调整映射使用 `om accounts edit`。
 
 ### 通知通道
 

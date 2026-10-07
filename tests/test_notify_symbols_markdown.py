@@ -7,6 +7,7 @@ import warnings
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
@@ -202,7 +203,7 @@ def test_notify_symbols_markdown_put_chain_uses_total_cny_cash_guard_for_alert_e
     out = _render_summary(
         symbol="0700.HK", top_contract="2026-06-29 450P", annualized_return=0.1977,
         net_income=1416.5, dte=60, strike=450.0, delta=-0.35, cash_required_cny=39280.0,
-        cash_free_total_cny=11666.0, mid=14.375, option_ccy="HKD",
+        cash_free_total_cny=11666.0, mid=14.375, option_ccy="HKD", max_new_contracts=1,
     )
 
     assert "备注｜所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in out
@@ -212,7 +213,7 @@ def test_notify_symbols_markdown_put_chain_uses_usd_cash_guard_for_alert_engine(
     out = _render_summary(
         symbol="AAPL", top_contract="2026-06-29 180P", annualized_return=0.18,
         net_income=210.0, dte=60, strike=180.0, delta=-0.21, cash_required_usd=18000.0,
-        cash_free_usd=15000.0, mid=2.15, option_ccy="USD",
+        cash_free_usd=15000.0, mid=2.15, option_ccy="USD", max_new_contracts=1,
     )
 
     assert "备注｜所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in out
@@ -353,11 +354,11 @@ def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
     rows = [
         _summary_row(
             symbol="AAPL", top_contract="2026-06-19 180P", annualized_return=0.22,
-            net_income=120.0, dte=30, strike=180.0,
+            net_income=120.0, dte=30, strike=180.0, max_new_contracts=1,
         ),
         _summary_row(
             symbol="NVDA", top_contract="2026-06-19 150P", annualized_return=0.25,
-            net_income=250.0, dte=30, strike=150.0,
+            net_income=250.0, dte=30, strike=150.0, max_new_contracts=1,
         ),
         _summary_row(
             symbol="MSFT", strategy="sell_call", top_contract="2026-06-19 430C",
@@ -452,3 +453,19 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
     assert "NVDA" in out
     assert "MSFT" in out
     assert out.index("CSP") < out.index("CC")
+
+
+@pytest.mark.parametrize("symbol,currency", [("NVDA", "USD"), ("0700.HK", "HKD")])
+@pytest.mark.parametrize("capacity", [None, 0])
+@pytest.mark.parametrize("style", ["legacy", "compact"])
+def test_capacity_observation_survives_notification_rendering(symbol, currency, capacity, style):
+    from src.application.alert_engine import build_alert_text
+    from src.application.notify_symbols import extract_section
+    summary = _summary_row(symbol=symbol, top_contract="2026-06-19 100P", annualized_return=.25,
+        net_income=250, dte=30, strike=100, max_new_contracts=capacity, option_ccy=currency)
+    alerts = build_alert_text(pd.DataFrame([summary]))
+    assert extract_section(alerts, "## 高优先级") == []
+    out = _render_via_alert_engine(summary, render_style=style)
+    expected = "当前可开仓容量尚无法确认" if capacity is None else "当前可开仓容量不足一手"
+    assert expected in out
+    assert "值得优先看" not in out

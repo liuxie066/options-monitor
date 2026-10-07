@@ -16,6 +16,7 @@ from domain.domain.close_advice import (
     has_complete_close_metrics,
     sort_advice_rows,
 )
+from domain.domain.expiration_dates import expiration_market_date
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
@@ -93,7 +94,8 @@ def close_advice_read_tool(
         used_sources.append(source)
     sources = used_sources
 
-    matched = sort_advice_rows([_public_row(row) for row in rows if _matches(row, query)])
+    observed_at = datetime.now(timezone.utc)
+    matched = sort_advice_rows([_public_row(row) for row in rows if _matches(row, query, now_utc=observed_at)])
     limit = max(1, min(int(query.limit or 50), 500))
     returned = matched[:limit]
 
@@ -689,7 +691,7 @@ def _normalize_market(value: Any) -> str | None:
     return None
 
 
-def _matches(row: dict[str, Any], query: PositionQuery) -> bool:
+def _matches(row: dict[str, Any], query: PositionQuery, *, now_utc: datetime) -> bool:
     if query.status == "close":
         return False
     if query.account and normalize_account(row.get("account")) != query.account:
@@ -702,7 +704,10 @@ def _matches(row: dict[str, Any], query: PositionQuery) -> bool:
         return False
     if query.strike is not None and not _float_equal(row.get("strike"), query.strike):
         return False
-    if not _expiration_matches(_row_expiration(row), query.expiration):
+    if not _expiration_matches(
+        _row_expiration(row), query.expiration,
+        as_of_date=expiration_market_date(now_utc, symbol_market(row.get("symbol"))),
+    ):
         return False
     row_status = _lower(row.get("status"))
     if query.status == "open" and row_status and row_status != "open":
@@ -736,7 +741,7 @@ def _row_expiration(row: dict[str, Any]) -> str:
     return str(row.get("expiration") or row.get("expiration_ymd") or "").strip()
 
 
-def _expiration_matches(value: str, query: PositionExpirationQuery) -> bool:
+def _expiration_matches(value: str, query: PositionExpirationQuery, *, as_of_date: date | None) -> bool:
     if query.exact and value != query.exact:
         return False
     if query.month and not value.startswith(query.month):
@@ -750,8 +755,10 @@ def _expiration_matches(value: str, query: PositionExpirationQuery) -> bool:
         after = _parse_date(query.after)
         if value_date is not None and after is not None and value_date <= after:
             return False
-    if query.within_days is not None and value_date is not None:
-        days = (value_date - date.today()).days
+    if query.within_days is not None:
+        if value_date is None or as_of_date is None:
+            return False
+        days = (value_date - as_of_date).days
         if days < 0 or days > int(query.within_days):
             return False
     return True

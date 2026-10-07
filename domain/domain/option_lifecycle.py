@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.lifecycle_allocation import (
     AllocationResolution,
     normalize_target_manifest,
@@ -25,10 +26,6 @@ PENDING_STATUSES = {
 }
 FINAL_STATUSES = {"ledger_written"}
 
-MARKET_TIMEZONES = {
-    "US": "America/New_York",
-    "HK": "Asia/Hong_Kong",
-}
 SUPPORTED_LAST_TRADE_SOURCES = frozenset({
     "broker_contract_metadata",
     "instrument_policy_registry",

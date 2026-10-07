@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from domain.domain.expiration_dates import (
-    EXPIRATION_DATE_TZ,
+    expiration_market_date,
 )
 from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.lifecycle_allocation import resolve_allocations
@@ -265,7 +265,6 @@ def build_context(
 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[JsonDict] = []
-    as_of_date = observed_at_dt.astimezone(EXPIRATION_DATE_TZ).date()
     lifecycle_by_lot = build_lifecycle_read_models_from_decision_snapshot(
         decision_snapshot,
         now_ms=lifecycle_now_ms,
@@ -314,7 +313,9 @@ def build_context(
 
         symbol = it.canonical_underlying_symbol
 
-        position_row = it.as_open_position_min(as_of_date=as_of_date)
+        position_row = it.as_open_position_min(
+            as_of_date=expiration_market_date(observed_at_dt, symbol_market(symbol))
+        )
         if lifecycle is not None:
             position_row.update(lifecycle)
         open_positions_min.append(position_row)

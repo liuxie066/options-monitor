@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from domain.domain.expiration_dates import (
-    EXPIRATION_DATE_TZ,
+    expiration_market_date,
     expiration_timestamp_to_date,
     expiration_timestamp_to_ymd,
 )
@@ -22,7 +22,7 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
 )
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.wheel import (
     attach_lot_strategy_metadata,
     lot_strategy_metadata_from_trade_events,
@@ -317,6 +317,7 @@ def build_position_lot_view(
     item: dict[str, Any],
     *,
     as_of_date: date | None = None,
+    as_of_utc: datetime | None = None,
 ) -> dict[str, Any]:
     record = canonicalize_position_lot_record(item)
     fields = record.get("fields") or {}
@@ -325,8 +326,13 @@ def build_position_lot_view(
     expiration_date = _parse_filter_date(fields.get("expiration_ymd")) or expiration_timestamp_to_date(
         fields.get("expiration")
     )
-    resolved_as_of_date = as_of_date or datetime.now(EXPIRATION_DATE_TZ).date()
-    days_to_expiration = (expiration_date - resolved_as_of_date).days if expiration_date is not None else None
+    resolved_as_of_date = as_of_date or expiration_market_date(
+        as_of_utc or datetime.now(timezone.utc), symbol_market(fields.get("symbol"))
+    )
+    days_to_expiration = (
+        (expiration_date - resolved_as_of_date).days
+        if expiration_date is not None and resolved_as_of_date is not None else None
+    )
     status = str(fields.get("status") or "").strip().lower()
     expiration_state = "unknown" if days_to_expiration is None else ("expired" if days_to_expiration < 0 else "active")
     state_warning = "expired_position_marked_open" if expiration_state == "expired" and status == "open" else None
@@ -450,13 +456,12 @@ def list_position_rows(
     exact_expiration = _parse_filter_date(expiration_exact)
     before_expiration = _parse_filter_date(expiration_before)
     after_expiration = _parse_filter_date(expiration_after)
-    resolved_as_of_date = (
-        datetime.fromtimestamp(int(as_of_ms) / 1000, tz=EXPIRATION_DATE_TZ).date()
-        if as_of_ms is not None
-        else datetime.now(EXPIRATION_DATE_TZ).date()
+    observed_at = (
+        datetime.fromtimestamp(int(as_of_ms) / 1000, tz=timezone.utc)
+        if as_of_ms is not None else datetime.now(timezone.utc)
     )
     for item in load_canonical_position_lot_records(repo):
-        view = build_position_lot_view(item, as_of_date=resolved_as_of_date)
+        view = build_position_lot_view(item, as_of_utc=observed_at)
         if normalized_broker and view.get("broker") != normalized_broker:
             continue
         if normalized_account and view.get("account") != normalized_account:

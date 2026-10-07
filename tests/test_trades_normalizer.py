@@ -446,3 +446,18 @@ def test_invalid_payload_multiplier_alias_cannot_fall_back(tmp_path, monkeypatch
         {"source": "payload", "status": "invalid"},
     ]
     assert any("source_field:" + key in error for error in deal.execution_input["errors"])
+
+
+@pytest.mark.parametrize("code", ["US.MET", "MET.US", "US.MET261016P45000"])
+def test_explicit_us_collision_survives_trade_normalization(code) -> None:
+    from domain.domain.symbol_identity import symbol_market, symbol_currency, futu_underlier_code
+    payload = {"deal_id": "synthetic-met", "futu_account_id": "REAL_1", "code": code,
+               "asset_type": "option" if "261016" in code else "stock",
+               "trd_side": "SELL_SHORT", "qty": 1, "price": 1,
+               "create_time": "2026-10-06 10:00:00", "multiplier": 100}
+    deal = normalize_trade_deal(payload, futu_account_mapping={"REAL_1": "lx"})
+    assert deal.symbol == "MET.US"
+    assert deal.currency == "USD"
+    assert symbol_market(deal.symbol) == "US"
+    assert symbol_currency(deal.symbol) == "USD"
+    assert futu_underlier_code(deal.symbol) == "US.MET"

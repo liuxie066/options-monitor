@@ -493,6 +493,8 @@ def _build_notification_block_compact(
         out_lines.append(l3)
     if l4:
         out_lines.append(l4)
+    if not is_call and not is_enhancement and note.startswith(("当前", "所需")):
+        out_lines.append(f"备注｜{note}")
 
     return "\n".join(out_lines)
 

@@ -120,9 +120,10 @@ class RiskPositionView:
             return None
         return {"lot_id": self.lot_id, "fields": dict(self.fields)}
 
-    def as_open_position_min(self, *, as_of_date: date) -> dict[str, Any]:
+    def as_open_position_min(self, *, as_of_date: date | None) -> dict[str, Any]:
         days_to_expiration = (
-            (self.expiration_date - as_of_date).days if self.expiration_date is not None else None
+            (self.expiration_date - as_of_date).days
+            if self.expiration_date is not None and as_of_date is not None else None
         )
         return {
             "lot_id": self.lot_id,

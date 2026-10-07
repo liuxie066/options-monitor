@@ -2,10 +2,20 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 EXPIRATION_DATE_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 _MILLISECONDS_THRESHOLD = 10_000_000_000
+MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong"}
+
+
+def expiration_market_date(now: datetime, market: str | None) -> date | None:
+    """Market date for relative expiry; unknown markets remain unavailable."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("market date requires timezone-aware time")
+    zone = MARKET_TIMEZONES.get(str(market or "").strip().upper())
+    return now.astimezone(ZoneInfo(zone)).date() if zone else None
 
 
 def expiration_timestamp_to_date(value: Any) -> date | None:

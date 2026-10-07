@@ -28,17 +28,17 @@ DAILY_BRIEF_SELECTOR_INPUT_SCHEMA: dict[str, Any] = {
     "market": {
         "type": "string",
         "enum": ["US", "HK", "us", "hk"],
-        "description": "Optional market; omitted latest queries all enabled markets and day queries default to US",
+        "description": "Optional for latest (all enabled markets); required for day or revision queries",
     },
     "date": {
         "type": "string",
         "pattern": r"^\d{4}-\d{2}-\d{2}$",
-        "description": "Optional market trading date; requires account; market defaults to US",
+        "description": "Optional market trading date; requires account and market",
     },
     "revision": {
         "type": "integer",
         "minimum": 0,
-        "description": "Optional exact revision; requires date and account; market defaults to US",
+        "description": "Optional exact revision; requires date, account and market",
     },
 }
 _OUTPUT_CONTRACT: dict[str, Any] = {
@@ -426,6 +426,8 @@ def validate_daily_brief_query_input(payload: dict[str, Any]) -> None:
         raise AgentToolError(code="INPUT_ERROR", message="date is required when revision is provided")
     if (has_date or has_revision) and not str(payload.get("account") or "").strip():
         raise AgentToolError(code="INPUT_ERROR", message="account is required for day or revision queries")
+    if (has_date or has_revision) and not str(payload.get("market") or "").strip():
+        raise AgentToolError(code="INPUT_ERROR", message="market is required for day or revision queries")
 
 
 def query_daily_brief_tool_view(
@@ -439,7 +441,7 @@ def query_daily_brief_tool_view(
         raise AgentToolError(code="INPUT_ERROR", message="revision must be an integer")
     revision = None if revision_value is None else revision_value
     date = str(payload.get("date") or "").strip() or None
-    market = str(payload.get("market") or "").strip() or ("US" if date is not None else None)
+    market = str(payload.get("market") or "").strip() or None
     repo_root = repo_base()
     runtime_root = resolve_runtime_root(repo_root=repo_root).runtime_root
     paged = payload.get("section") is not None or bool(payload.get("cursor"))
@@ -487,7 +489,7 @@ DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
     description=(
         "Read the latest successful option-monitor snapshot, a trading day, or an exact revision. "
         "Use for queries such as 期权监控, 最新期权报告, 港股期权, 美股期权, or lx/sy 期权. "
-        "Omitting account and market returns all enabled scopes. The tool returns structured JSON plus "
+        "Omitting account and market for latest returns all enabled scopes; historical date/revision requires explicit account and market. The tool returns structured JSON plus "
         "readable Chinese Markdown and never scans, sends, or changes delivery state. "
         "Use section for bounded report text or existing structured details, then next_cursor with unchanged filters. "
         "A fragment only covers its body_range; even the last fragment does not prove earlier fragments were read."

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Any
 
@@ -167,6 +167,29 @@ def _identity_from_alias(
     return _identity_from_canonical(raw=raw, candidate=str(mapped), source_kind=source_kind)
 
 
+def _explicit_us_identity(
+    raw: str, root: str, symbol_aliases: SymbolAliases, source_kind: str,
+) -> SymbolIdentity | None:
+    identity = _identity_from_alias(
+        raw=raw, candidate=f"US.{root}", symbol_aliases=symbol_aliases, source_kind=source_kind
+    )
+    if identity is None or identity.market != "US":
+        identity = _identity_from_alias(
+            raw=raw, candidate=root, symbol_aliases=symbol_aliases, source_kind=source_kind
+        )
+    if identity is None or identity.market != "US":
+        identity = _identity_from_canonical(raw=raw, candidate=root, source_kind=source_kind)
+    if identity is None or identity.market != "US":
+        return None
+    bare_alias = _identity_from_alias(
+        raw=raw, candidate=identity.canonical, symbol_aliases=symbol_aliases, source_kind=source_kind
+    )
+    if bare_alias and bare_alias.canonical != identity.canonical:
+        # Retain the existing explicit suffix when bare spelling is an HK alias.
+        identity = replace(identity, canonical=f"{identity.canonical}.US")
+    return identity
+
+
 def resolve_symbol_identity(value: Any, *, symbol_aliases: SymbolAliases = None) -> SymbolIdentity | None:
     raw = str(value or "").strip()
     if not raw:
@@ -176,6 +199,8 @@ def resolve_symbol_identity(value: Any, *, symbol_aliases: SymbolAliases = None)
     if option_code_match:
         root = option_code_match.group("root")
         market = option_code_match.group("market")
+        if market == "US":
+            return _explicit_us_identity(raw, root, symbol_aliases, "option_code")
         identity = (
             _identity_from_alias(raw=raw, candidate=f"{market}.{root}", symbol_aliases=symbol_aliases, source_kind="option_code")
             or _identity_from_alias(raw=raw, candidate=root, symbol_aliases=symbol_aliases, source_kind="option_code")
@@ -184,21 +209,17 @@ def resolve_symbol_identity(value: Any, *, symbol_aliases: SymbolAliases = None)
             identity = _identity_from_canonical(raw=raw, candidate=root, source_kind="option_code")
         return identity if identity and identity.market == market else None
     if upper.startswith("US."):
-        return (
-            _identity_from_alias(raw=raw, candidate=upper[3:], symbol_aliases=symbol_aliases, source_kind="futu_code")
-            or _identity_from_canonical(raw=raw, candidate=upper[3:], source_kind="futu_code")
-        )
+        return _explicit_us_identity(raw, upper[3:], symbol_aliases, "futu_code")
     if upper.startswith("HK."):
-        digits = "".join(ch for ch in upper[3:] if ch.isdigit())
-        if digits:
-            return _identity_from_canonical(raw=raw, candidate=f"{int(digits):04d}.HK", source_kind="futu_code")
-        return None
+        identity = _identity_from_alias(
+            raw=raw, candidate=upper, symbol_aliases=symbol_aliases, source_kind="futu_code"
+        ) or _identity_from_alias(
+            raw=raw, candidate=upper[3:], symbol_aliases=symbol_aliases, source_kind="futu_code"
+        ) or _identity_from_canonical(raw=raw, candidate=upper, source_kind="futu_code")
+        return identity if identity and identity.market == "HK" else None
 
     if upper.endswith(".US"):
-        return (
-            _identity_from_alias(raw=raw, candidate=upper[:-3], symbol_aliases=symbol_aliases, source_kind="market_suffix")
-            or _identity_from_canonical(raw=raw, candidate=upper[:-3], source_kind="market_suffix")
-        )
+        return _explicit_us_identity(raw, upper[:-3], symbol_aliases, "market_suffix")
 
     alias = _identity_from_alias(raw=raw, candidate=raw, symbol_aliases=symbol_aliases, source_kind="alias")
     if alias:
