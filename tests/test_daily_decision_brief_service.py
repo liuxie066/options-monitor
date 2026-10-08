@@ -2065,6 +2065,11 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     }
     assert combo_index["AAPL"]["put_sell_reference"] == 4.25
     assert combo_index["AAPL"]["call_buy_reference"] == 0.55
+    assert combos[0]["metrics"]["call_delta"] == 0.10
+    assert combo_index["AAPL"]["metrics"]["call_delta"] == 0.10
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    assert "长 Call Delta 0.10" in render_full_brief(brief)
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
     assert [item["candidate_pair_id"] for item in combo_actions] == [
         "combo_yield:AAPL:AAPL_P180:AAPL_C220",

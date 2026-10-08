@@ -2235,6 +2235,7 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
         "bid",
         "ask",
         "delta",
+        "call_delta",
         "dte",
         "net_income",
         "period_net_return",

@@ -1733,7 +1733,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "**TSLA｜组合增强（策略排序 1）**" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
-    assert "指标｜门槛年化 15.4% · 预计净收入 $620.00" in message
+    assert "指标｜门槛年化 15.4% · 长 Call Delta 暂不可用 · 预计净收入 $620.00" in message
     assert (
         "\n\n事件｜CSP #1（MSFT）、CSP #2（NVDA）、"
         "CC #1（AAPL）、组合增强 #1（TSLA）："
@@ -1750,6 +1750,33 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
+
+@pytest.mark.parametrize("render", [_render_card, render_full_brief])
+@pytest.mark.parametrize(
+    ("call_delta", "expected"),
+    [
+        (0.27, "长 Call Delta 0.27"),
+        (0.0, "长 Call Delta 0.00"),
+        (None, "长 Call Delta 暂不可用"),
+        (float("nan"), "长 Call Delta 暂不可用"),
+        (float("inf"), "长 Call Delta 暂不可用"),
+        (True, "长 Call Delta 暂不可用"),
+    ],
+)
+def test_combo_displays_long_call_delta_without_short_leg_fallback(render, call_delta, expected) -> None:
+    brief = _brief()
+    combo = brief["candidates"]["combo_yield"][0]
+    combo["metrics"].update({"delta": -0.61, "put_delta": -0.61})
+    if call_delta is not None:
+        combo["metrics"]["call_delta"] = call_delta
+
+    message = render(brief)
+
+    assert expected in message
+    assert "Delta -0.61" not in message
+    assert "Delta -0.24" in message  # Standalone CSP still shows its own delta.
+    assert "Delta 0.22" in message  # Standalone CC still shows its own delta.
+
 
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
     brief = _brief()

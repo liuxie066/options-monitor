@@ -1407,9 +1407,15 @@ def _candidate_metric_details(
     annualized = _number(values.get(annualized_key)) if annualized_key else None
     if annualized is not None:
         parts.append(f"门槛年化 {_percent(annualized)}")
-    delta = _number(values.get("delta"))
-    if delta is not None:
-        parts.append(f"Delta {delta:.2f}")
+    if family == "combo_yield":
+        delta = _number(values.get("call_delta"))
+        parts.append(
+            f"长 Call Delta {delta:.2f}" if delta is not None else "长 Call Delta 暂不可用"
+        )
+    else:
+        delta = _number(values.get("delta"))
+        if delta is not None:
+            parts.append(f"Delta {delta:.2f}")
     dte = _number(values.get("dte"))
     if dte is not None:
         parts.append(f"{max(0, int(dte))} 天")
