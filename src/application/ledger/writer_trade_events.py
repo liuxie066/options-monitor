@@ -1722,11 +1722,19 @@ def _events_for_storage(
             if sum(Decimal(str(row["contracts"])) for row in existing) != Decimal(execution["quantity"]):
                 raise ValueError("trade_execution_split_incomplete")
             existing = _enrich_execution_order_identity(repo, existing, execution, conn=conn)
-            target = str(getattr(event, "target_lot_id", None) or "")
+            target = str(getattr(event, "target_lot_id", None) or raw_payload.get("target_lot_id")
+                         or raw_payload.get("record_id") or "")
+            event_type = (event.event_type if isinstance(event, TradeEvent) else
+                          _event_type_from_position_effect(event.position_effect, raw_payload=raw_payload))
+            # A split child identifies one allocation. An unsplit source request
+            # replays the whole homogeneous execution, including FIFO children.
+            child = bool(raw_payload.get("broker_deal_completion"))
             matching = [row for row in existing
-                        if str(row.get("event_id") or "") == str(event.event_id)
-                        and str(row.get("target_lot_id") or "") == target
-                        and row.get("event_type") == getattr(event, "event_type", None)]
+                        if row.get("event_type") == event_type
+                        and (not target or str(row.get("target_lot_id") or "") == target)
+                        and (not child or str(row.get("event_id") or "") == str(event.event_id))]
+            if not child and not target and len(matching) != len(existing):
+                raise ValueError("trade_execution_target_conflict")
             if not matching:
                 raise ValueError("trade_execution_target_conflict")
             return [_canonical_storage_event(row) for row in matching]

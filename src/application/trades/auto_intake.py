@@ -2014,7 +2014,13 @@ def _reconcile_source_completion(
                         }
                         if action["reason"] == "ledger_event_already_recorded":
                             complete = completed_ledger_execution_events(repo.list_trade_events(), deal)
-                            result["operations"] = [op.to_payload() for op in recorded_trade_operations(complete)]
+                            # Reconciliation proof must survive order metadata enrichment.
+                            # Identity/quantity live on the operation; mutable source evidence
+                            # is revalidated above rather than frozen into this retry result.
+                            result["operations"] = [
+                                {key: value for key, value in op.to_payload().items() if key != "result"}
+                                for op in recorded_trade_operations(complete)
+                            ]
                         inbox_updated += int(settle_reconciled_trade_payload(
                             inbox_path, observed=row, result=result,
                         ))

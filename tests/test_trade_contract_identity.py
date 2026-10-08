@@ -325,14 +325,14 @@ def test_standard_split_close_replay_preserves_event_set_and_rejects_partial_voi
 def test_close_outbox_keeps_namespace_and_original_account_scope_on_replay(tmp_path, source_effect):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     closes = []
-    for namespace in ("futu.deal", "verified.partition.deal"):
+    for index, namespace in enumerate(("futu.deal", "verified.partition.deal")):
         opened = resolve_trade_deal(normalize_trade_deal(_execution_input("open-42", namespace=namespace)),
                                     repo=repo, state={}, apply_changes=True)
         assert opened.status == "applied"
         close = normalize_trade_deal({**_execution_input("close-42", namespace=namespace, effect=source_effect),
-                                     "side": "buy", "occurred_at_utc": "2026-09-07T03:30:00Z"})
+                                     "side": "buy", "occurred_at_utc": f"2026-09-07T03:3{index}:00Z"})
         applied = resolve_trade_deal(close, repo=repo, state={}, apply_changes=True)
-        assert applied.status == "applied"
+        assert applied.status == "applied", applied
         closes.append(close)
     before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
     notifications = repo.list_trade_lifecycle_notifications()

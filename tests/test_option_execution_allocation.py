@@ -374,6 +374,7 @@ def test_saved_inbox_cli_preview_uses_current_holdings_without_writes(tmp_path, 
     from tests.test_trades_auto_intake_cli import _listener_source
     from src.interfaces.cli.main import main as public_main
     import json
+    from pathlib import Path
     repo = SQLiteOptionPositionsRepository(tmp_path / 'ledger.sqlite3')
     apply(repo, fill('seed', side='sell', effect='open'))
     deal = fill('cross', quantity=2, time='2026-10-01T14:01:00Z')
@@ -394,10 +395,17 @@ def test_saved_inbox_cli_preview_uses_current_holdings_without_writes(tmp_path, 
     monkeypatch.setattr('src.application.quality.service.check_post_trade_positions', unexpected)
     path = repo.db_path.with_name(repo.db_path.name + '.trade_intake_inbox.sqlite3')
     row = enqueue_trade_payload(path, payload=deal.execution_input, source='push', broker_deal_key=broker_deal_key(deal), repo=repo)
-    before = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
+    # mode=ro may create empty WAL/shared-memory coordination files on Linux.
+    # Check persistent bytes and WAL content, excluding only SQLite read locks.
+    shm = Path(str(repo.db_path) + '-shm')
+    wal = Path(str(repo.db_path) + '-wal')
+    before = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file() and p != shm}
+    before.setdefault(wal, b'')
     assert public_main(['run', 'trade-intake', '--config', str(tmp_path / 'config.json'),
         '--runtime-root', str(tmp_path), '--inbox-id', row]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result['action'] == 'open_close', result
     assert result['status'] == 'dry_run'
-    assert {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()} == before
+    after = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file() and p != shm}
+    after.setdefault(wal, b'')
+    assert after == before
