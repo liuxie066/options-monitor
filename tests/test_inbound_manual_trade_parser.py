@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from src.application.assistant.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
+from src.application.bot.control.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
 from src.application.multiplier_cache import save_cache
 
 
@@ -35,7 +35,7 @@ def _patch_multiplier(
             diagnostics["message"] = f"recognized {kwargs.get('symbol')} but multiplier could not be resolved"
         return value, source if value else None, diagnostics
 
-    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+    monkeypatch.setattr("src.application.bot.control.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
 
 def _draft_kwargs(
@@ -357,7 +357,7 @@ def test_us_assignment_message_without_multiplier_keeps_quantity_unknown(tmp_pat
 
 @pytest.mark.parametrize("raw", [True, "100.00000000000000001", "100.5", float("nan"), float("inf")])
 def test_manual_operation_args_reject_original_multiplier(raw):
-    from src.application.assistant.manual_trade_operations import _manual_open_args
+    from src.application.bot.control.manual_trade_operations import _manual_open_args
     from src.application.agent_tool_contracts import AgentToolError
 
     with pytest.raises(AgentToolError) as exc:

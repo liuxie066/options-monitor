@@ -115,7 +115,7 @@ def _route(**_kwargs: Any) -> dict[str, Any]:
         "provider": "wechat_clawbot",
         "channel": "wechat_clawbot",
         "target": "wechat:ops",
-        "notifications": {"provider": "wechat_clawbot"},
+        "notifications": {"enabled": True, "provider": "wechat_clawbot"},
     }
 
 
@@ -128,7 +128,7 @@ def _call(
     """Call compensation on the fixture rows, overriding only what a case changes."""
     kwargs: dict[str, Any] = {
         "base": tmp_path,
-        "config": {},
+        "config": {"notifications": {"enabled": True}},
         "sources": sources,
         "repo": repo,
         "account": ACCOUNT,
@@ -381,7 +381,7 @@ def _core_compensation_input(tmp_path, monkeypatch, *, namespace="futu.deal", ou
     assert result["status"] == "applied"
     assert len(calls) == int(outcome != "no_route")
     return {
-        "base": tmp_path, "config": {}, "repo": repo, "account": "lx",
+        "base": tmp_path, "config": {"notifications": {"enabled": True}}, "repo": repo, "account": "lx",
         "sources": [{"id": "lx", "account": "lx", "state_path": tmp_path / "state.json",
                      "audit_path": tmp_path / "audit.jsonl", "receipt": {"enabled": True}}],
         "deal_ids": ["futu:lx:123:777"], "reason": SKIPPED_NO_ROUTE_REASON,
@@ -475,7 +475,7 @@ def test_manual_apply_blocks_overlap_with_combined_legacy_send(tmp_path):
     path.parent.mkdir()
     path.write_text(json.dumps({**preview, "status": "send_started"}))
     sources, repo = _fixture(tmp_path)
-    kwargs = dict(base=tmp_path, config={}, sources=sources, repo=repo, account=ACCOUNT,
+    kwargs = dict(base=tmp_path, config={"notifications": {"enabled": True}}, sources=sources, repo=repo, account=ACCOUNT,
                   deal_ids=[DEAL_IDS[0]], route_resolver=_route)
     single = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
     result = compensate_trade_intake_receipts(
@@ -498,7 +498,7 @@ def test_manual_apply_rechecks_inbox_takeover_after_preview_under_shared_lock(tm
     sources, repo = _fixture(tmp_path)
     source = sources[0]
     inbox_path = Path(source["state_path"]).with_name("trade_intake_inbox.sqlite3")
-    kwargs = dict(base=tmp_path, config={}, sources=sources, repo=repo, account=ACCOUNT,
+    kwargs = dict(base=tmp_path, config={"notifications": {"enabled": True}}, sources=sources, repo=repo, account=ACCOUNT,
                   deal_ids=list(DEAL_IDS), route_resolver=_route)
     preview = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
     payload = _payload(DEAL_IDS[0].rsplit(":", 1)[1])

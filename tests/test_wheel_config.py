@@ -18,7 +18,6 @@ def _v2_config() -> dict:
     return {
         "_resolved": {"market": "us"},
         "wheel": {
-            "enabled": True,
             "accounts": ["lx"],
             "call": {"min_dte": 31, "max_dte": 46, "min_abs_delta": 0.27},
             "put": {"min_dte": 14, "max_dte": 35},
@@ -32,7 +31,7 @@ def _v2_config() -> dict:
 def _legacy_config() -> dict:
     return {
         "_resolved": {"market": "us"},
-        "wheel": {"enabled": True, "accounts": ["LX"], "min_dte": 35, "max_dte": 50, "min_delta": 0.90},
+        "wheel": {"accounts": ["LX"], "min_dte": 35, "max_dte": 50, "min_delta": 0.90},
     }
 
 
@@ -52,7 +51,6 @@ def test_resolve_wheel_config_maps_legacy_only_to_call_and_fails_closed_without_
 
 def test_nested_policy_overrides_defaults_and_builds_account_bound_descriptor() -> None:
     config = _v2_config()
-    config["wheel"]["enabled"] = False
     resolved = resolve_wheel_config(config, "LX")
     descriptor = resolve_wheel_activation_descriptor(config, market="us", account="lx")
 

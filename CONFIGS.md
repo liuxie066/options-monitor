@@ -7,7 +7,7 @@
 ```text
 src/application/config_defaults.py::DEFAULT_CONFIG
   + config.yaml
-  -> om config build / build-assistant
+  -> om config build / build-bot
   -> generated runtime snapshots
 
 env-file
@@ -23,12 +23,12 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 | `config.yaml` | accounts、markets、symbols、非 secret override | 是 |
 | env-file | secrets、本机设置、写入开关 | 是，且不提交 |
 | `config.us.json` / `config.hk.json` | 市场运行快照 | 否，由 build 生成 |
-| `resolved/config.assistant.json` | Assistant 运行快照 | 否，由 build-assistant 生成 |
+| `resolved/config.bot.json` | Bot 运行快照 | 否，由 build-bot 生成 |
 | `portfolio.runtime.json` | 少数 external holdings env 名兼容 | 通常不需要 |
 
 生成后的 runtime JSON 是“本次运行读取的快照”，不是另一套 authoring source。不要一边编辑 `config.yaml`，一边手改 JSON。
 
-人工维护监控清单使用 `om symbols list|add|rm|edit --market us|hk`；写命令默认预览，`--apply` 经既有配置事务发布 YAML、已配置市场和 Assistant 的快照。无显式 `--config-yaml` 时，YAML 默认位置跟随当前运行目录（`OM_RUNTIME_ROOT`、用户记录、repo 回退）；显式 `--config-yaml` 可选择另一实例。外部 Agent 使用 `om-agent run --tool manage_symbols`，其输入和写入门禁由 `om-agent spec` 定义。两类入口不直接写生成的 JSON。
+人工维护监控清单使用 `om symbols list|add|rm|edit --market us|hk`；写命令默认预览，`--apply` 经既有配置事务发布 YAML、已配置市场和 Bot 的快照。无显式 `--config-yaml` 时，YAML 默认位置跟随当前运行目录（`OM_RUNTIME_ROOT`、用户记录、repo 回退）；显式 `--config-yaml` 可选择另一实例。外部 Agent 使用 `om-agent run --tool manage_symbols`，其输入和写入门禁由 `om-agent spec` 定义。两类入口不直接写生成的 JSON。
 
 ## `config.yaml`
 
@@ -71,7 +71,7 @@ Close Advice 详细固定规则见
 
 开启前运行 `om config holdings set --enabled true` 预览。预检向 PM 读取完整原始 Holdings 切片的 broker 清单，展示每个账户的 broker 原文、`futu/non_futu/unknown` 分类、行数、纳入/排除数量与读取时间。成功读取且零合格行、无 unknown 和 unsupported 时为 `ready_empty`。预览把各账户确认的非富途 broker 原文集合写入待发布 `portfolio.holdings.approved_non_futu_brokers`，并绑定 `preview_sha256`；apply 再读 PM，集合变化会在写配置前返回 `STALE_PREVIEW`。实值 broker 归属仍须在实际启用预览中核对。
 
-apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事务生成 YAML、所有已配置市场快照和 Assistant 快照、备份并读回。PM 失败、旧版响应、未知 broker 或估值质量不完整时禁止开启；关闭不依赖 PM。旧版 `enabled=true` 而没有批准集合的配置允许加载，但只读查询暂停 PM 补充并标 partial，提示重新预览确认。启用后出现未批准的新非富途 broker 时，整份 PM 补充暂停并标 partial；已批准 broker 的行数变化无需重新批准。配置只允许全局设置，不允许市场覆盖。
+apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事务生成 YAML、所有已配置市场快照和 Bot 快照、备份并读回。PM 失败、旧版响应、未知 broker 或估值质量不完整时禁止开启；关闭不依赖 PM。旧版 `enabled=true` 而没有批准集合的配置允许加载，但只读查询暂停 PM 补充并标 partial，提示重新预览确认。启用后出现未批准的新非富途 broker 时，整份 PM 补充暂停并标 partial；已批准 broker 的行数变化无需重新批准。配置只允许全局设置，不允许市场覆盖。
 
 `portfolio_management.enabled` 仍控制更广的 PM 集成，不能代替此开关。配置切换不执行交易、指派、账本、PM Holdings 或 Feishu 写入；生产配置发布与部署另行授权。
 
@@ -123,9 +123,9 @@ Symbol 扫描在受支持的 `scan-pipeline` 主线程中串行执行，以保�
   --config-yaml config.yaml \
   --output config.us.json
 
-./om config build-assistant --source yaml \
+./om config build-bot --source yaml \
   --config-yaml config.yaml \
-  --output resolved/config.assistant.json
+  --output resolved/config.bot.json
 
 ./om config validate \
   --config-path config.us.json \
@@ -143,25 +143,25 @@ Symbol 扫描在受支持的 `scan-pipeline` 主线程中串行执行，以保�
 
 | 验收 | 必须成立的行为 |
 |---|---|
-| S1 助手独立修改 | 只改 `assistant` 的模型、上下文或开关，当前市场输入不变时 US/HK 快照仍 fresh |
+| S1 助手独立修改 | 只改 `bot` 的模型、上下文或开关，当前市场输入不变时 US/HK 快照仍 fresh |
 | S2 监控变更保护 | 当前市场 symbols、schedule、选用账户或共享监控参数改变时，相应快照仍 stale |
 | S3 异常与兼容 | 来源缺失、无法读取、YAML 解析或市场转换失败、来源身份错误继续阻断；旧快照按旧规则检查，经显式重建迁移 |
 | S4 只读与一致性 | 所有读取入口使用共同判定；检查不写配置、状态或快照，不自动重建；原始 SHA 并发保护保留 |
 
 范围是 YAML 市场快照的生成元数据和公共新鲜度检查，以及既有生成事务、调用入口的必要回归验证。
 不重构助手 CLI 写入流程、不拆分 YAML 文件、不自动重建、不调整调度、策略、权限或通知行为。
-Assistant runtime JSON 的有效性与激活流程保持现有合同；非 YAML 来源和系统默认配置继续使用现有严格指纹规则。
+Bot runtime JSON 的有效性与激活流程保持现有合同；非 YAML 来源和系统默认配置继续使用现有严格指纹规则。
 本设计不授权 commit、push、merge、release、deploy 或生产写入。
 
 #### 当前事实与 owner
 
 本次修复基于 `4ee3b408edeb020483a8906512d438cb131ad0c1`。
-`config_yaml.py::yaml_to_market_user_config` 已负责选取当前市场、相关账户和共享配置，且不将 `assistant` 放入市场输入。
+`config_yaml.py::yaml_to_market_user_config` 已负责选取当前市场、相关账户和共享配置，且不将 `bot` 放入市场输入。
 原实现的 `_build_yaml_generated_metadata` 只记录完整文件 SHA，导致公共 freshness 检查把助手独立变化也判为 `source_changed`。
 现在 `resolve_yaml_runtime_config` 从一次 YAML 读取构建市场输入并记录原始与 effective 两种指纹；公共 checker 按下述协议比较。
 
 `config_authoring_transaction.py::publish_yaml_config_generation` 已支持多市场生成、来源 SHA 冲突检测、备份与失败恢复。
-聊天模型切换经 `assistant/model_operations.py` 调用该事务；CLI 模型 add/use 经 `write_model_config_update` 只写 YAML。
+聊天模型切换经 `bot/control/model_operations.py` 调用该事务；CLI 模型 add/use 经 `write_model_config_update` 只写 YAML。
 补齐 CLI 联动不能覆盖手动编辑 YAML，且仍要求助手操作重建无关市场，因此不作为本次方向。
 
 修复落在现有 config YAML 转换/生成与 freshness owner。tick、tick-cron、runtime readiness/status、升级验证
@@ -343,7 +343,7 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 ## 已退役旧配置
 
 旧 layered JSON authoring 和 `config migrate-yaml` 已删除。现有安装必须直接维护
-`config.yaml`，分别 validate 并重新 build US/HK runtime JSON 与 assistant JSON；当前版本不提供旧字段转换器。
+`config.yaml`，分别 validate 并重新 build US/HK runtime JSON 与 Bot JSON；当前版本不提供旧字段转换器。
 
 ## 数据配置边界
 

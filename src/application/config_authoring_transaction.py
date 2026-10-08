@@ -22,7 +22,7 @@ from src.application.config_primitives import path_for_metadata
 from src.application.config_yaml import (
     GENERATED_KEY,
     RESOLVED_KEY,
-    resolve_yaml_assistant_config,
+    resolve_yaml_bot_config,
     resolve_yaml_runtime_config,
 )
 
@@ -78,7 +78,7 @@ def publish_yaml_config_generation(
     config_doc: dict[str, Any],
     runtime_root: str | Path,
     markets: list[str],
-    include_assistant: bool = True,
+    include_bot: bool = True,
     apply: bool = False,
     backup: bool = True,
     expected_source_sha256: str | None = None,
@@ -91,7 +91,7 @@ def publish_yaml_config_generation(
             config_doc=config_doc,
             runtime_root=target_runtime_root,
             markets=markets,
-            include_assistant=include_assistant,
+            include_bot=include_bot,
             apply=False,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
@@ -106,7 +106,7 @@ def publish_yaml_config_generation(
             config_doc=config_doc,
             runtime_root=target_runtime_root,
             markets=markets,
-            include_assistant=include_assistant,
+            include_bot=include_bot,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
         )
@@ -120,7 +120,7 @@ def publish_yaml_config_generation_locked(
     config_doc: dict[str, Any],
     runtime_root: str | Path,
     markets: list[str],
-    include_assistant: bool = True,
+    include_bot: bool = True,
     backup: bool = True,
     expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
@@ -133,7 +133,7 @@ def publish_yaml_config_generation_locked(
             config_doc=config_doc,
             runtime_root=target_runtime_root,
             markets=markets,
-            include_assistant=include_assistant,
+            include_bot=include_bot,
             apply=True,
             backup=backup,
             expected_source_sha256=expected_source_sha256,
@@ -165,7 +165,7 @@ def _publish_yaml_config_generation(
     config_doc: dict[str, Any],
     runtime_root: Path,
     markets: list[str],
-    include_assistant: bool,
+    include_bot: bool,
     apply: bool,
     backup: bool,
     expected_source_sha256: str | None,
@@ -189,7 +189,7 @@ def _publish_yaml_config_generation(
         source_bytes=source_bytes,
         runtime_root=runtime_root,
         markets=normalized_markets,
-        include_assistant=include_assistant,
+        include_bot=include_bot,
     )
     source_sha_after_prepare = config_source_sha256(source_path)
     if source_sha_after_prepare != expected_source_sha:
@@ -203,7 +203,7 @@ def _publish_yaml_config_generation(
         "config_yaml_path": str(source_path),
         "runtime_root": str(runtime_root),
         "markets": prepared["markets"],
-        "assistant": prepared["assistant"],
+        "bot": prepared["bot"],
         "source_revision": {
             "before_sha256": observed_source_sha,
             "after_sha256": after_source_sha,
@@ -392,12 +392,12 @@ def _prepare_generation(
     source_bytes: bytes,
     runtime_root: Path,
     markets: list[str],
-    include_assistant: bool,
+    include_bot: bool,
 ) -> dict[str, Any]:
     source_sha = _bytes_sha256(source_bytes)
     target_payloads: list[dict[str, Any]] = []
     market_results: dict[str, Any] = {}
-    assistant_result = None
+    bot_result = None
     with tempfile.TemporaryDirectory(prefix="om-config-generation-") as temp_dir:
         staged_source = Path(temp_dir) / "config.yaml"
         staged_source.write_bytes(source_bytes)
@@ -431,13 +431,13 @@ def _prepare_generation(
                 "sha256": _bytes_sha256(payload),
             }
 
-        if include_assistant:
-            output_path = runtime_root / "resolved" / "config.assistant.json"
-            cfg, _meta = resolve_yaml_assistant_config(
+        if include_bot:
+            output_path = runtime_root / "resolved" / "config.bot.json"
+            cfg, _meta = resolve_yaml_bot_config(
                 repo_root=repo_root,
                 config_path=staged_source,
             )
-            _retarget_assistant_metadata(
+            _retarget_bot_metadata(
                 cfg,
                 repo_root=repo_root,
                 source_path=source_path,
@@ -447,20 +447,20 @@ def _prepare_generation(
             payload = _json_bytes(cfg)
             target_payloads.append(
                 {
-                    "role": "assistant",
+                    "role": "bot",
                     "path": output_path,
                     "payload": payload,
                     "source": False,
                 }
             )
-            assistant_result = {
+            bot_result = {
                 "ok": True,
                 "output_config_path": str(output_path),
                 "sha256": _bytes_sha256(payload),
             }
     return {
         "markets": market_results,
-        "assistant": assistant_result,
+        "bot": bot_result,
         "target_payloads": target_payloads,
     }
 
@@ -503,7 +503,7 @@ def _retarget_runtime_metadata(
         resolved["config_yaml_sha256"] = source_sha
 
 
-def _retarget_assistant_metadata(
+def _retarget_bot_metadata(
     cfg: dict[str, Any],
     *,
     repo_root: Path,
@@ -523,7 +523,7 @@ def _retarget_assistant_metadata(
             for part in (
                 "./om",
                 "config",
-                "build-assistant",
+                "build-bot",
                 "--source",
                 "yaml",
                 "--config-yaml",

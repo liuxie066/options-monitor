@@ -146,7 +146,11 @@ def test_direct_pipeline_uses_one_fx_observation_and_rejects_old_secured_total(
     from src.application import pipeline_context as ctx
 
     calls: list[Path] = []
-    observation = {"rates": {"USDCNY": 7.2}}
+    from src.infrastructure import exchange_rates as fx
+    from test_unified_fx_consumers import quote, at
+    observation = quote()
+    observation["rates"] = {"USDCNY": 7.2}
+    monkeypatch.setattr(fx, "_utc_now", lambda: at("2026-10-07T12:00:00"))
 
     def _fetch(*, cache_path, **_kwargs):
         calls.append(Path(cache_path))

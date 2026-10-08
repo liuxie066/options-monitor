@@ -5,12 +5,12 @@ import json
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.diagnostics import check_assistant_llm
-from src.application.assistant.llm_model_profiles import parse_model_profile, resolve_authoring_assistant_config
-from src.application.assistant.settings import AssistantSettings
+from src.application.bot.control.diagnostics import check_bot_llm
+from src.application.bot.control.llm_model_profiles import parse_model_profile, resolve_authoring_bot_config
+from src.application.bot.control.settings import BotSettings
 from src.application.bot.model_config import ModelSettings
 from src.application.config_defaults import default_config
-from src.application.config_validator import validate_assistant_config
+from src.application.config_validator import validate_bot_config
 from src.application.llm_provider_registry import resolve_output_reservation
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.openai_responses import create_response
@@ -25,20 +25,20 @@ def test_output_policy_survives_profile_selection_and_public_readback(tmp_path, 
     raw = model_config(**override)
     expected = override.get("max_output_tokens")
     profile = parse_model_profile("native", raw)
-    assistant, _ = resolve_authoring_assistant_config({
-        "enabled": True, "bot": {"enabled": True}, "active_model": "native", "models": {"native": raw},
+    assistant, _ = resolve_authoring_bot_config({
+        "enabled": True, "active_model": "native", "models": {"native": raw},
     })
-    cfg = {"assistant": assistant}
-    validate_assistant_config(cfg)
+    cfg = {"bot": assistant}
+    validate_bot_config(cfg)
     settings = ModelSettings.from_config(assistant["llm"])
     assert profile.public_payload()["max_output_tokens"] == expected
     assert settings.max_output_tokens == expected
     assert settings.output_reservation_tokens == (384_000 if expected is None else expected)
     assert settings.process_payload()["output_reservation_tokens"] == settings.output_reservation_tokens
-    assert AssistantSettings.from_runtime_config(cfg).public_payload()["llm"]["max_output_tokens"] == expected
-    path = tmp_path / "config.assistant.json"
+    assert BotSettings.from_runtime_config(cfg).public_payload()["llm"]["max_output_tokens"] == expected
+    path = tmp_path / "config.bot.json"
     path.write_text(json.dumps(cfg))
-    result = check_assistant_llm(repo_root=tmp_path, config_path=path, include_local_env_file=False)
+    result = check_bot_llm(repo_root=tmp_path, config_path=path, include_local_env_file=False)
     assert result["llm"]["max_output_tokens"] == expected
     limits = next(check for check in result["checks"] if check["name"] == "limits")
     assert limits["value"]["max_output_tokens"] == expected
@@ -62,7 +62,7 @@ def test_output_policy_rejects_unverified_or_invalid_configuration(changes, mess
     with pytest.raises(AgentToolError, match=message):
         parse_model_profile("test", raw)
     with pytest.raises(SystemExit):
-        validate_assistant_config({"assistant": {"enabled": True, "bot": {"enabled": True}, "llm": raw}})
+        validate_bot_config({"bot": {'enabled': True, 'llm': raw}})
 
 
 def test_explicit_legacy_and_exact_native_capabilities():
@@ -72,7 +72,7 @@ def test_explicit_legacy_and_exact_native_capabilities():
     # Direct construction remains compatible with existing explicit settings fixtures.
     direct = ModelSettings("openai", "openai-responses", "test", "http://127.0.0.1", "KEY", "", 90, 24000, 2048, 1)
     assert direct.process_payload()["output_reservation_tokens"] == 2048
-    assert default_config()["defaults"]["assistant"]["llm"]["max_output_tokens"] is None
+    assert default_config()["defaults"]["bot"]["llm"]["max_output_tokens"] is None
 
 
 @pytest.mark.parametrize("cap", [None, 8192])

@@ -121,8 +121,8 @@ def resolve_output_root(output_dir: str | Path | None = None) -> Path:
 
 
 def write_tools_enabled() -> bool:
-    raw = str(build_effective_env().get("OM_AGENT_ENABLE_WRITE_TOOLS") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    from src.application.settings.effective import resolve_write_gates
+    return resolve_write_gates(build_effective_env().values)["agent_write_tools_enabled"]
 
 
 __all__ = [

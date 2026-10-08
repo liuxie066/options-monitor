@@ -207,7 +207,7 @@ def run_setup_init(
         "repo_root": repo_root,
         "output_config_yaml_path": output_dir / "config.yaml",
         "runtime_output_dir": output_dir,
-        "assistant_output_config_path": output_dir / "resolved" / "config.assistant.json",
+        "bot_output_config_path": output_dir / "resolved" / "config.bot.json",
         "markets": markets,
         "futu_acc_id": futu_acc_id,
         "futu_host": futu_host, "futu_port": futu_port, "trd_env": trd_env or "REAL",
@@ -218,7 +218,7 @@ def run_setup_init(
     }
     preview = init_config_fn(**options, dry_run=True)
     selected = preview["markets"]
-    paths = [preview["config_yaml_path"], preview["assistant_config_path"]]
+    paths = [preview["config_yaml_path"], preview["bot_config_path"]]
     paths.extend(preview["runtime_config_paths"][market] for market in selected)
     record_exists = record.exists() or record.is_symlink()
     if record_exists and read_runtime_root_record(record, require_config=False) != output_dir:

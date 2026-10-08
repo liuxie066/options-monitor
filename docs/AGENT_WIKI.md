@@ -19,7 +19,7 @@ Primary entry points:
 | Need | Entry |
 |---|---|
 | Structured tool call / JSON response | `./om-agent` Tool Gateway |
-| Local or remote message handling | `./om assistant handle` Inbound Assistant |
+| Local or remote message handling | `./om bot handle` Inbound Bot |
 | Human/operator command | `./om` |
 | Runtime tick | `./om run tick ...` |
 | Guarded production tick wrapper | `./om run tick-cron ...` |
@@ -29,16 +29,16 @@ Entrypoint rule:
 
 - Use `./om-agent` for structured local JSON tool calls, manifest checks, and
   read-first diagnostics.
-- Use `./om assistant handle` for local or remote messages. This is the
-  Inbound Assistant surface.
+- Use `./om bot handle` for local or remote messages. This is the
+  Inbound Bot surface.
 - Explicit commands and pending-operation replies use deterministic Control.
   Every other message enters the single read-only `om_chat` Bot Scene when
-  `assistant.bot.enabled` is true. There is no business router, per-Scene
+  `bot.enabled` is true. There is no business router, per-Scene
   channel allowlist, planner fallback, or write-capable model path.
 
 For the canonical entry and layer boundaries, see
 [ARCHITECTURE.md](ARCHITECTURE.md) and [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
-For capability boundaries, risk classes, Inbound Assistant exposure, and
+For capability boundaries, risk classes, Inbound Bot exposure, and
 verification maps, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 
 ## 2. First Five Minutes
@@ -108,7 +108,7 @@ Use the lowest-risk tool that can answer the question.
 
 ## 4. Research Workflow
 
-Research is an independent offline evidence module. It is not Inbound Assistant
+Research is an independent offline evidence module. It is not Inbound Bot
 core, not an `./om-agent` tool, and not an online AI product feature. The
 online/Linux side collects redacted evidence. MacBook Codex reads the handoff and
 helps diagnose quality issues, ledger problems, and candidate behavior.
@@ -755,7 +755,7 @@ notification token around Close Advice.
 - Scheduled business renderer: `src/application/daily_decision_brief_renderer.py`
 - Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
-- Perception audit card: `assistant_perception` events written by
+- Perception audit card: `bot_perception` events written by
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
 
@@ -783,7 +783,7 @@ acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail
 closed as `FEISHU_POST_TOO_LARGE` and are not truncated, fragmented, retried, or
 automatically replayed.
 
-Notification perception events are compressed system evidence for Assistant
+Notification perception events are compressed system evidence for Bot
 follow-ups. They record delivery action/reason, accounts, symbol summaries,
 message lengths and hashes, but not raw notification text or webhook secrets.
 They may enter ClawBot conversation context as `system_event` evidence; they
@@ -982,7 +982,7 @@ Smallest remaining actions, with blockers called out.
 
 `daily_decision_brief.v1` is the immutable account+market+trading-date successful-scan model. Delivery v2 separately owns fixed-target confirmation, pending/alerted candidate identities, and exact retry envelopes.
 
-- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The deprecated `notifications.daily_brief.enabled` key is accepted with a stable warning during compatibility but its value does not change routing.
+- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The retired `notifications.daily_brief.enabled` key is removed by explicit `om config migrate-switches` preview/apply; `notifications.enabled` owns outbound delivery.
 - Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan. A process failure relies on a later eligible scheduler slot; it does not invent an off-schedule retry scan.
 - Fixed reports: `09:40`, eligible whole hours, and `15:50` prepare a full user report even with no candidates. A fixed failure prepares an explicit failure report and never projects the previous successful current as this round's result.
 - Candidate alerts: eligible half-hour successful scans send immediately only when `current candidate identities - alerted identities` is non-empty. If fixed-report and new-candidate conditions coincide, the single complete fixed report wins.

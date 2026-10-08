@@ -1,0 +1,1157 @@
+from __future__ import annotations
+
+from domain.domain.trade_contract_identity import require_option_multiplier
+
+import re
+from dataclasses import asdict, is_dataclass
+from typing import Any, Mapping, cast
+
+from domain.domain.option_position_identity import normalize_currency
+from domain.domain.symbol_identity import canonical_symbol
+from src.application.agent_tool_config import load_runtime_config, repo_base
+from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
+from src.application.bot.control.contracts import BotInboundRequest, ControlCommand
+from src.application.bot.control.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
+from src.application.bot.control.operation_lifecycle import (
+    build_previewed_operation_response,
+    cancel_pending_operation_or_raise,
+    confirm_previewed_operation_or_raise,
+    resolve_pending_operation_or_raise,
+)
+from src.application.bot.control.operation_policy import enforce_trade_write_allowed
+from src.application.bot.control.operation_signature import hash_operation_payload
+from src.application.bot.control.operation_store import InboundOperationStore
+from src.application.bot.control.operation_status_text import operation_candidate_hint, operation_candidate_summary_lines
+from src.application.bot.control.permission_request import build_permission_request
+from src.application.ledger.api import (
+    open_position_ledger_from_runtime_config,
+    preview_lifecycle_expire_close,
+    record_lifecycle_expire_close,
+)
+from src.application.positions.workflows import (
+    ManualCloseMatchError,
+    execute_manual_assignment,
+    execute_manual_close,
+    execute_manual_open,
+)
+from src.application.strategy_policy import resolve_position_strategy
+from src.application.symbol_aliases import symbol_aliases_from_config
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: AgentToolError(code="NEEDS_CLARIFICATION", message=m))
+
+
+PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"})
+CONFIRM_INTENTS = frozenset({"manual_trade_confirm", "manual_trade_cancel"})
+UPDATE_INTENTS = frozenset({"manual_trade_update"})
+MANUAL_TRADE_OPERATION_TYPES = frozenset({"manual_open", "manual_close", "manual_assignment", "manual_expiry"})
+MANUAL_OPEN_UPDATE_FIELDS = frozenset(
+    {
+        "contracts",
+        "strike",
+        "multiplier",
+        "expiration_ymd",
+        "premium_per_share",
+        "underlying_share_locked",
+        "currency",
+        "note",
+    }
+)
+MANUAL_CLOSE_UPDATE_FIELDS = frozenset(
+    {
+        "record_id",
+        "contracts",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "close_price",
+        "close_reason",
+    }
+)
+MANUAL_ASSIGNMENT_MODEL_FIELDS = frozenset(
+    {
+        "record_id",
+        "account",
+        "symbol",
+        "option_type",
+        "position_side",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "stock_side",
+        "stock_qty",
+        "stock_price",
+        "as_of_ms",
+    }
+)
+MANUAL_EXPIRY_MODEL_FIELDS = frozenset(
+    {
+        "account",
+        "symbol",
+        "option_type",
+        "position_side",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "event_time_ms",
+        "close_reason",
+    }
+)
+MANUAL_MODEL_FIELD_ALIASES = {
+    "side": "position_side",
+    "contracts": "contracts_to_close",
+    "qty": "contracts_to_close",
+    "exp": "expiration_ymd",
+    "expiration": "expiration_ymd",
+    "shares": "stock_qty",
+    "event_time": "event_time_ms",
+}
+FIELD_LABELS = {
+    "contracts": "合约数",
+    "contracts_to_close": "平仓数量",
+    "strike": "Strike",
+    "multiplier": "Multiplier",
+    "expiration_ymd": "到期日",
+    "premium_per_share": "Premium",
+    "underlying_share_locked": "Locked",
+    "currency": "币种",
+    "note": "备注",
+    "record_id": "record_id",
+    "close_price": "平仓价",
+    "close_reason": "平仓原因",
+}
+
+
+def _application_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate the tool schema's target key to the application's declaration.
+
+    The assistant's argument schema is a published interface and keeps naming
+    the target ``record_id`` (``MANUAL_*_MODEL_FIELDS``); the application entry
+    points declare that same lot as ``lot_id``.  The two are bridged here
+    rather than by moving the published name.
+    """
+    out = dict(args)
+    if "record_id" in out:
+        out["lot_id"] = out.pop("record_id")
+    return out
+
+
+def handle_manual_trade_operation(
+    intent: ControlCommand,
+    request: BotInboundRequest,
+    *,
+    command_id: str,
+    store: InboundOperationStore,
+) -> dict[str, Any]:
+    policy = enforce_trade_write_allowed(channel=request.channel, sender_id=request.sender_id)
+    if intent.intent_name == "manual_trade_open":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_open",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=True,
+        )
+        payload = _build_operation_payload(
+            "manual_open",
+            _manual_open_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            runtime_config=cfg,
+            diagnostics=draft["diagnostics"],
+        )
+        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+    if intent.intent_name == "manual_trade_close":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_close",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=True,
+        )
+        payload = _build_operation_payload(
+            "manual_close",
+            _manual_close_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
+        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+    if intent.intent_name == "manual_assignment":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_assignment",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=True,
+        )
+        payload = _build_operation_payload(
+            "manual_assignment",
+            _manual_assignment_args(
+                _with_model_trade_fields(
+                    "manual_assignment",
+                    draft["arguments"],
+                    intent.arguments,
+                    runtime_config=cfg,
+                    diagnostics=draft["diagnostics"],
+                )
+            ),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
+        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+    if intent.intent_name == "manual_expiry":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        drafts = build_manual_expiry_drafts(
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=False,
+        )
+        model_args = intent.arguments if len(drafts) == 1 else {}
+        payloads = [
+            _build_operation_payload(
+                "manual_expiry",
+                _manual_expiry_args(
+                    _with_model_trade_fields(
+                        "manual_expiry",
+                        draft["arguments"],
+                        model_args,
+                        runtime_config=cfg,
+                        diagnostics=draft["diagnostics"],
+                    )
+                ),
+                request=request,
+                config_path=config_path,
+                diagnostics=draft["diagnostics"],
+            )
+            for draft in drafts
+        ]
+        if len(payloads) == 1:
+            return _preview_and_save(
+                payloads[0],
+                request=request,
+                command_id=command_id,
+                store=store,
+                ttl_seconds=policy.confirm_ttl_seconds,
+            )
+        return _preview_and_save_expiry_batch(
+            payloads,
+            request=request,
+            command_id=command_id,
+            store=store,
+            ttl_seconds=policy.confirm_ttl_seconds,
+        )
+    if intent.intent_name == "manual_trade_confirm":
+        return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
+    if intent.intent_name == "manual_trade_cancel":
+        return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
+    if intent.intent_name == "manual_trade_update":
+        return _update_operation(
+            operation_id=_optional_text(intent.arguments.get("operation_id")),
+            updates=dict(intent.arguments.get("updates") or {}),
+            request=request,
+            store=store,
+        )
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manual trade operation intent: {intent.intent_name}")
+
+
+def _preview_and_save(
+    payload: dict[str, Any],
+    *,
+    request: BotInboundRequest,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+) -> dict[str, Any]:
+    payload = _payload_with_manual_request_id(payload, command_id)
+    payload, preview = _prepare_operation_preview(payload)
+    return _save_prepared_preview(
+        payload,
+        preview,
+        request=request,
+        operation_id=command_id,
+        command_id=command_id,
+        store=store,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def _payload_with_manual_request_id(
+    payload: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    if payload.get("operation_type") not in {"manual_open", "manual_assignment"}:
+        return payload
+    out = dict(payload)
+    arguments = dict(out.get("arguments") or {})
+    arguments["request_id"] = str(request_id)
+    out["arguments"] = arguments
+    return out
+
+
+def _prepare_operation_preview(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    preview = _preview_operation(payload)
+    payload = _payload_with_preview_locked_values(payload, preview)
+    preview = _preview_operation(payload)
+    return payload, preview
+
+
+def _save_prepared_preview(
+    payload: dict[str, Any],
+    preview: dict[str, Any],
+    *,
+    request: BotInboundRequest,
+    operation_id: str,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+) -> dict[str, Any]:
+    return build_previewed_operation_response(
+        tool_name="inbound.manual_trade",
+        operation_id=operation_id,
+        command_id=command_id,
+        request=request,
+        store=store,
+        payload=payload,
+        preview=preview,
+        ttl_seconds=ttl_seconds,
+        response_text=lambda operation: render_manual_trade_response(
+            "previewed",
+            operation_id,
+            payload,
+            preview=preview,
+            expires_at=str(operation.get("expires_at") or ""),
+        ),
+    )
+
+
+def _preview_and_save_expiry_batch(
+    payloads: list[dict[str, Any]],
+    *,
+    request: BotInboundRequest,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+) -> dict[str, Any]:
+    prepared = [_prepare_operation_preview(payload) for payload in payloads]
+    operations: list[dict[str, Any]] = []
+    for index, (payload, preview) in enumerate(prepared, start=1):
+        operation_id = f"{command_id}:{index}"
+        response = _save_prepared_preview(
+            payload,
+            preview,
+            request=request,
+            operation_id=operation_id,
+            command_id=command_id,
+            store=store,
+            ttl_seconds=ttl_seconds,
+        )
+        operations.append(dict(response.get("data") or {}))
+    operation_ids = [str(item["operation_id"]) for item in operations]
+    return build_response(
+        tool_name="inbound.manual_trade",
+        ok=True,
+        data={
+            "command_id": command_id,
+            "operation_ids": operation_ids,
+            "operation_type": "manual_expiry",
+            "status": "previewed",
+            "preview_count": len(operations),
+            "operations": operations,
+            "response_text": render_manual_expiry_batch_response(operations),
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    batch_operation_ids = _pending_expiry_batch_operation_ids(operation_id=operation_id, request=request, store=store)
+    if batch_operation_ids:
+        results: list[dict[str, Any]] = []
+        for child_operation_id in batch_operation_ids:
+            try:
+                results.append(_confirm_operation(operation_id=child_operation_id, request=request, store=store))
+            except AgentToolError as exc:
+                raise AgentToolError(
+                    code=exc.code,
+                    message=f"批量确认部分完成：已写入 {len(results)}/{len(batch_operation_ids)} 笔；{child_operation_id} 失败：{exc.message}",
+                    hint="请使用 /pending 查看仍待确认的记录。",
+                    details={"command_id": operation_id, "applied_count": len(results), "failed_operation_id": child_operation_id},
+                ) from exc
+        return build_response(
+            tool_name="inbound.manual_trade",
+            ok=True,
+            data={
+                "command_id": operation_id,
+                "operation_ids": batch_operation_ids,
+                "operation_type": "manual_expiry",
+                "status": "applied",
+                "applied_count": len(results),
+                "operations": [dict(result.get("data") or {}) for result in results],
+                "response_text": f"已批量确认 {len(results)} 笔期权到期失效记录，已写入账本。\ncommand_id: {operation_id}",
+            },
+            meta={"audit_db": mask_path(store.path)},
+        )
+    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="确认",
+    )
+    confirmed = confirm_previewed_operation_or_raise(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        subject="交易记录",
+        expired_message="这条交易记录确认已过期，未写入账本。",
+        expired_hint="请重新发送记录交易命令生成新的预览。",
+        hash_mismatch_message="pending operation payload hash mismatch; refusing to write ledger",
+    )
+    operation_id = confirmed.operation_id
+    operation_resolution = confirmed.operation_resolution
+    payload = confirmed.payload
+    try:
+        preview = _preview_operation(payload)
+        result = _apply_operation(payload)
+    except AgentToolError as exc:
+        store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
+        raise
+    except Exception as exc:
+        failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
+        store.mark_failed(operation_id, result=failed)
+        raise AgentToolError(code="INTERNAL_ERROR", message="manual trade operation failed before ledger write could be confirmed", details=failed) from exc
+    store.mark_applied(operation_id, result=result)
+    text = render_manual_trade_response("applied", operation_id, payload, preview=preview, result=result)
+    return build_response(
+        tool_name="inbound.manual_trade",
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            **operation_resolution,
+            "operation_type": payload["operation_type"],
+            "status": "applied",
+            "payload_hash": confirmed.payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "result": result,
+            "response_text": text,
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _pending_expiry_batch_operation_ids(
+    *,
+    operation_id: str | None,
+    request: BotInboundRequest,
+    store: InboundOperationStore,
+) -> list[str]:
+    command_id = str(operation_id or "").strip()
+    if not command_id or store.get(command_id) is not None:
+        return []
+    pending = store.list_pending_operations(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+        operation_types={"manual_expiry"},
+    )
+    return list(
+        reversed(
+            [str(item["operation_id"]) for item in pending if str(item.get("command_id") or "") == command_id]
+        )
+    )
+
+
+def _cancel_operation(*, operation_id: str | None, request: BotInboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    return cancel_pending_operation_or_raise(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        resolve=_resolve_manual_trade_operation,
+        tool_name="inbound.manual_trade",
+        subject="交易记录",
+        cancel_suffix="未写入账本",
+    )
+
+
+def _update_operation(*, operation_id: str | None, updates: dict[str, Any], request: BotInboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="修改",
+    )
+    patch = _normalize_manual_trade_patch(str(operation.get("operation_type") or ""), updates)
+    payload = _apply_manual_trade_patch(dict(operation["payload"]), patch)
+    preview = _preview_operation(payload)
+    payload = _payload_with_preview_locked_values(payload, preview)
+    preview = _preview_operation(payload)
+    payload_hash = hash_operation_payload(payload)
+    updated = store.update_preview(operation_id, payload_hash=payload_hash, payload=payload, preview=preview)
+    text = render_manual_trade_response("updated", operation_id, payload, preview=preview, expires_at=str(updated.get("expires_at") or ""))
+    if patch:
+        text += "\n" + _format_patch_summary(patch)
+    permission_request = build_permission_request(operation=updated, request=request)
+    return build_response(
+        tool_name="inbound.manual_trade",
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            **operation_resolution,
+            "operation_type": payload["operation_type"],
+            "status": "previewed",
+            "updated_fields": sorted(patch.keys()),
+            "patch": patch,
+            "payload_hash": payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "expires_at": updated.get("expires_at"),
+            "permission_request": permission_request,
+            "response_text": text,
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _resolve_manual_trade_operation(
+    *,
+    operation_id: str | None,
+    request: BotInboundRequest,
+    store: InboundOperationStore,
+    allow_expired: bool,
+    action: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    return resolve_pending_operation_or_raise(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        operation_types=MANUAL_TRADE_OPERATION_TYPES,
+        allow_expired=allow_expired,
+        action=action,
+        subject="交易记录",
+        expired_message="这条交易记录确认已过期，未写入账本。",
+        expired_hint="请重新发送记录交易命令生成新的预览。",
+        none_hint="请先发送记录交易命令生成预览。",
+        wrong_family_message="这不是交易记录操作，不能用确认记录/取消记录处理。",
+        not_found_message="找不到待确认的交易记录。",
+        not_found_hint="请检查 operation_id，或重新发送记录交易命令。",
+        candidate_hint=_manual_trade_candidate_hint,
+    )
+
+
+def _normalize_manual_trade_patch(operation_type: str, updates: dict[str, Any]) -> dict[str, Any]:
+    raw_patch = {
+        _manual_trade_patch_target_key(operation_type, str(key).strip()): value
+        for key, value in updates.items()
+        if str(key).strip()
+    }
+    if operation_type == "manual_open":
+        allowed = MANUAL_OPEN_UPDATE_FIELDS
+    elif operation_type == "manual_close":
+        allowed = MANUAL_CLOSE_UPDATE_FIELDS
+    else:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type for update: {operation_type}")
+    disallowed = sorted(key for key in raw_patch if key not in allowed)
+    if disallowed:
+        labels = "、".join(disallowed)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"这条交易记录不能修改字段：{labels}。", hint="请取消后重新记录，或只修改当前预览支持的字段。")
+    patch: dict[str, Any] = {}
+    for key, value in raw_patch.items():
+        patch[key] = _normalize_patch_value(key, value)
+    if not patch:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出要修改的交易字段。", hint="格式：<字段>改成<值>，或 <field>=<value> [operation_id]。")
+    return patch
+
+
+def _with_model_trade_fields(
+    operation_type: str,
+    args: dict[str, Any],
+    model_args: dict[str, Any],
+    *,
+    runtime_config: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    if operation_type == "manual_assignment":
+        allowed = MANUAL_ASSIGNMENT_MODEL_FIELDS
+    elif operation_type == "manual_expiry":
+        allowed = MANUAL_EXPIRY_MODEL_FIELDS
+    else:
+        return args
+    patch: dict[str, Any] = {}
+    for raw_key, value in dict(model_args or {}).items():
+        key = MANUAL_MODEL_FIELD_ALIASES.get(str(raw_key).strip(), str(raw_key).strip())
+        if key not in allowed or key == "raw_text" or value in (None, ""):
+            continue
+        patch[key] = _normalize_model_trade_value(key, value, runtime_config=runtime_config)
+    if operation_type == "manual_assignment":
+        _fill_assignment_model_defaults(patch)
+    if not patch:
+        return args
+    out = dict(args)
+    out.update(patch)
+    diagnostics["model_extracted_fields"] = sorted(patch)
+    diagnostics["missing_fields"] = [
+        key for key in diagnostics.get("missing_fields", []) if out.get(str(key)) in (None, "")
+    ]
+    return out
+
+
+def _fill_assignment_model_defaults(patch: dict[str, Any]) -> None:
+    option_type = str(patch.get("option_type") or "").strip().lower()
+    position_side = str(patch.get("position_side") or "").strip().lower()
+    if not patch.get("stock_side") and position_side == "short":
+        if option_type == "put":
+            patch["stock_side"] = "buy"
+        elif option_type == "call":
+            patch["stock_side"] = "sell"
+    if not patch.get("stock_price") and patch.get("strike") is not None:
+        patch["stock_price"] = patch["strike"]
+
+
+def _normalize_model_trade_value(field_name: str, value: Any, *, runtime_config: dict[str, Any]) -> Any:
+    if field_name in {"contracts_to_close", "stock_qty", "as_of_ms", "event_time_ms"}:
+        return _positive_int(value, field_name)
+    if field_name in {"strike", "stock_price"}:
+        return _positive_float(value, field_name)
+    if field_name in {"expiration_ymd"}:
+        text = _required_text(value, field_name)
+        if not re_match_date(text):
+            raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be YYYY-MM-DD")
+        return text
+    if field_name == "option_type":
+        return _normalize_model_option_type(value)
+    if field_name == "position_side":
+        return _normalize_model_position_side(value)
+    if field_name == "stock_side":
+        return _normalize_model_stock_side(value)
+    if field_name == "symbol":
+        text = _required_text(value, field_name)
+        return canonical_symbol(text, symbol_aliases=symbol_aliases_from_config(runtime_config)) or text
+    return _required_text(value, field_name)
+
+
+def _normalize_model_option_type(value: Any) -> str:
+    text = _required_text(value, "option_type").lower()
+    if text in {"p", "put"} or "沽" in text or "跌" in text:
+        return "put"
+    if text in {"c", "call"} or "购" in text or "涨" in text:
+        return "call"
+    raise AgentToolError(code="INPUT_ERROR", message="option_type must be put or call")
+
+
+def _normalize_model_position_side(value: Any) -> str:
+    text = _required_text(value, "position_side").lower()
+    if text in {"short", "sell"} or "卖" in text or "空" in text:
+        return "short"
+    if text in {"long", "buy"} or "买" in text or "多" in text:
+        return "long"
+    raise AgentToolError(code="INPUT_ERROR", message="position_side must be short or long")
+
+
+def _normalize_model_stock_side(value: Any) -> str:
+    text = _required_text(value, "stock_side").lower()
+    if text in {"buy", "b"} or "买" in text or "接" in text:
+        return "buy"
+    if text in {"sell", "s"} or "卖" in text:
+        return "sell"
+    raise AgentToolError(code="INPUT_ERROR", message="stock_side must be buy or sell")
+
+
+def _manual_trade_patch_target_key(operation_type: str, key: str) -> str:
+    if operation_type == "manual_close" and key == "contracts":
+        return "contracts_to_close"
+    if operation_type == "manual_close" and key == "premium_per_share":
+        return "close_price"
+    return key
+
+
+def _normalize_patch_value(field_name: str, value: Any) -> Any:
+    if field_name in {"contracts", "contracts_to_close", "underlying_share_locked"}:
+        return _positive_int(value, field_name)
+    if field_name in {"strike", "multiplier", "premium_per_share", "close_price"}:
+        return _positive_float(value, field_name)
+    if field_name == "expiration_ymd":
+        text = _required_text(value, field_name)
+        if not re_match_date(text):
+            raise AgentToolError(code="INPUT_ERROR", message="expiration_ymd must be YYYY-MM-DD")
+        return text
+    if field_name == "currency":
+        return _required_text(value, field_name).upper()
+    return _required_text(value, field_name)
+
+
+def _apply_manual_trade_patch(payload: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    args = dict(out.get("arguments") or {})
+    args.update(patch)
+    out["arguments"] = args
+    diagnostics = out.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        out["diagnostics"] = {**diagnostics, "updated_fields": sorted(patch.keys())}
+    else:
+        out["diagnostics"] = {"updated_fields": sorted(patch.keys())}
+    return out
+
+
+def _candidate_hint(prefix: str, candidates: Any) -> str:
+    return operation_candidate_hint(prefix, candidates, heading="候选交易")
+
+
+def _manual_trade_candidate_hint(action: str, candidates: Any) -> str:
+    if action in {"确认", "取消"}:
+        return _candidate_hint("/confirm trade" if action == "确认" else "/cancel trade", candidates)
+    return _update_candidate_hint(candidates)
+
+
+def _update_candidate_hint(candidates: Any) -> str:
+    candidate_lines = operation_candidate_summary_lines(candidates, prefix="")
+    if not candidate_lines:
+        return "请使用 /record-update premium_per_share=2.35 <operation_id>"
+    return "请使用 /record-update premium_per_share=2.35 <operation_id>\n候选交易：\n" + "\n".join(candidate_lines)
+
+
+def _format_patch_summary(patch: dict[str, Any]) -> str:
+    parts = []
+    for key in sorted(patch):
+        label = FIELD_LABELS.get(key, key)
+        parts.append(f"{label}={patch[key]}")
+    return "已修改：" + "，".join(parts)
+
+
+def _manual_trade_raw_text(intent: ControlCommand, request: BotInboundRequest) -> str:
+    return str(intent.arguments.get("raw_text") or request.text or "").strip()
+
+
+def _load_runtime_config_for_request(request: BotInboundRequest) -> tuple[Any, dict[str, Any]]:
+    _require_runtime_config_scope(request)
+    return load_runtime_config(config_key=request.config_key, config_path=request.config_path)
+
+
+def _accounts_from_runtime_config(cfg: dict[str, Any]) -> list[str]:
+    raw = cfg.get("accounts")
+    if isinstance(raw, list):
+        return [str(item).strip().lower() for item in raw if str(item).strip()]
+    if isinstance(raw, tuple):
+        return [str(item).strip().lower() for item in raw if str(item).strip()]
+    return []
+
+
+def _build_operation_payload(
+    operation_type: str,
+    arguments: dict[str, Any],
+    *,
+    request: BotInboundRequest,
+    config_path: Any | None = None,
+    runtime_config: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    operation_args = dict(arguments)
+    if operation_type == "manual_open":
+        operation_args.setdefault(
+            "strategy_snapshot",
+            resolve_position_strategy(position=operation_args, config=runtime_config).to_fields(),
+        )
+    payload = {
+        "schema_version": "1.0",
+        "operation_type": operation_type,
+        "arguments": operation_args,
+        "config": {"config_key": request.config_key, "config_path": str(config_path) if config_path else request.config_path},
+    }
+    if diagnostics:
+        payload["diagnostics"] = dict(diagnostics)
+    return payload
+
+
+def _payload_with_preview_locked_values(payload: dict[str, Any], preview: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("operation_type") != "manual_open":
+        return payload
+    preview_fields = preview.get("fields") or {}
+    opened_at_ms = preview_fields.get("opened_at")
+    if opened_at_ms is None:
+        return payload
+    out = dict(payload)
+    args = dict(out.get("arguments") or {})
+    args["opened_at_ms"] = int(opened_at_ms)
+    out["arguments"] = args
+    return out
+
+
+def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
+    _data_config, repo, cfg = _open_repo_for_payload(payload)
+    args = dict(payload.get("arguments") or {})
+    try:
+        if payload.get("operation_type") == "manual_open":
+            out = execute_manual_open(repo, dry_run=True, **args)
+        elif payload.get("operation_type") == "manual_close":
+            out = execute_manual_close(repo, dry_run=True, **_application_args(args))
+        elif payload.get("operation_type") == "manual_assignment":
+            out = execute_manual_assignment(
+                repo,
+                dry_run=True,
+                runtime_config=cfg,
+                **_application_args(args),
+            )
+        elif payload.get("operation_type") == "manual_expiry":
+            preview_args = dict(args)
+            preview_args.pop("close_reason", None)
+            out = preview_lifecycle_expire_close(repo, **preview_args)
+        else:
+            raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type: {payload.get('operation_type')}")
+    except ManualCloseMatchError as exc:
+        raise _manual_close_error(exc) from exc
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    return _json_safe(out)
+
+
+def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
+    _data_config, repo, cfg = _open_repo_for_payload(payload)
+    args = dict(payload.get("arguments") or {})
+    try:
+        if payload.get("operation_type") == "manual_open":
+            out = execute_manual_open(repo, dry_run=False, **args)
+        elif payload.get("operation_type") == "manual_close":
+            out = execute_manual_close(repo, dry_run=False, **_application_args(args))
+        elif payload.get("operation_type") == "manual_assignment":
+            out = execute_manual_assignment(
+                repo,
+                dry_run=False,
+                runtime_config=cfg,
+                **_application_args(args),
+            )
+        elif payload.get("operation_type") == "manual_expiry":
+            out = record_lifecycle_expire_close(
+                repo,
+                **args,
+                case_id=None,
+                evidence_ids=[],
+            )
+        else:
+            raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type: {payload.get('operation_type')}")
+    except ManualCloseMatchError as exc:
+        raise _manual_close_error(exc) from exc
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    return _json_safe(out)
+
+
+def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
+    raw_config = payload.get("config")
+    config = cast(dict[str, Any], raw_config) if isinstance(raw_config, dict) else {}
+    config_key = str(config.get("config_key") or "").strip().lower() or None
+    config_path, cfg = load_runtime_config(config_key=config_key, config_path=config.get("config_path"))
+    data_config, repo = open_position_ledger_from_runtime_config(
+        base=repo_base(),
+        cfg=cfg,
+        config_path=config_path,
+    )
+    return data_config, repo, cfg
+
+
+def _require_runtime_config_scope(request: BotInboundRequest) -> None:
+    if request.config_path or request.config_key:
+        return
+    raise AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="记录交易前需要先指定市场。",
+        hint="请明确美股或港股，或通过 --config-key us/hk、--config-path、bot.default_market_scope 配置默认市场。",
+        details={"required": "config_key_or_config_path"},
+    )
+
+
+def _manual_open_args(args: dict[str, Any]) -> dict[str, Any]:
+    required = ("account", "symbol", "option_type", "side", "contracts", "strike", "multiplier", "expiration_ymd", "premium_per_share")
+    _require_fields(args, required, action="记录开仓")
+    try:
+        multiplier = require_option_multiplier(args.get("multiplier"))
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    return {
+        "broker": str(args.get("broker") or "富途"),
+        "account": _required_text(args.get("account"), "account"),
+        "symbol": _required_text(args.get("symbol"), "symbol"),
+        "option_type": _required_text(args.get("option_type"), "option_type"),
+        "side": _required_text(args.get("side"), "side"),
+        "contracts": _positive_int(args.get("contracts"), "contracts"),
+        "currency": _optional_text(args.get("currency")),
+        "strike": _positive_float(args.get("strike"), "strike"),
+        "multiplier": multiplier,
+        "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
+        "premium_per_share": _positive_float(args.get("premium_per_share"), "premium_per_share"),
+        "underlying_share_locked": _optional_positive_int(args.get("underlying_share_locked"), "underlying_share_locked"),
+        "note": _optional_text(args.get("note")),
+        "opened_at_ms": _optional_positive_int(args.get("opened_at_ms"), "opened_at_ms"),
+    }
+
+
+def _manual_close_args(args: dict[str, Any]) -> dict[str, Any]:
+    _require_fields(args, ("contracts_to_close", "close_price"), action="记录平仓")
+    if not str(args.get("record_id") or "").strip():
+        _require_fields(args, ("account", "symbol", "option_type", "side", "strike", "expiration_ymd"), action="记录平仓")
+    return {
+        "record_id": _optional_text(args.get("record_id")),
+        "broker": str(args.get("broker") or "富途"),
+        "account": _optional_text(args.get("account")),
+        "symbol": _optional_text(args.get("symbol")),
+        "option_type": _optional_text(args.get("option_type")),
+        "position_side": _optional_text(args.get("side") or args.get("position_side")),
+        "strike": _optional_positive_float(args.get("strike"), "strike"),
+        "expiration_ymd": _optional_text(args.get("expiration_ymd")),
+        "contracts_to_close": _positive_int(args.get("contracts_to_close"), "contracts_to_close"),
+        "close_price": _positive_float(args.get("close_price"), "close_price"),
+        "close_reason": str(args.get("close_reason") or "manual_buy_to_close"),
+        "as_of_ms": _optional_positive_int(args.get("as_of_ms"), "as_of_ms"),
+    }
+
+
+def _manual_assignment_args(args: dict[str, Any]) -> dict[str, Any]:
+    _require_fields(
+        args,
+        (
+            "account",
+            "symbol",
+            "option_type",
+            "position_side",
+            "contracts_to_close",
+            "strike",
+            "expiration_ymd",
+            "stock_side",
+            "stock_qty",
+            "stock_price",
+        ),
+        action="记录期权被指派",
+    )
+    return {
+        "record_id": _optional_text(args.get("record_id")),
+        "broker": str(args.get("broker") or "富途"),
+        "account": _required_text(args.get("account"), "account"),
+        "symbol": _required_text(args.get("symbol"), "symbol"),
+        "option_type": _required_text(args.get("option_type"), "option_type"),
+        "position_side": _required_text(args.get("position_side") or args.get("side"), "position_side"),
+        "strike": _positive_float(args.get("strike"), "strike"),
+        "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
+        "contracts_to_close": _positive_int(args.get("contracts_to_close"), "contracts_to_close"),
+        "stock_side": _required_text(args.get("stock_side"), "stock_side"),
+        "stock_qty": _positive_int(args.get("stock_qty"), "stock_qty"),
+        "stock_price": _positive_float(args.get("stock_price"), "stock_price"),
+        "as_of_ms": _optional_positive_int(args.get("as_of_ms"), "as_of_ms"),
+    }
+
+
+def _manual_expiry_args(args: dict[str, Any]) -> dict[str, Any]:
+    _require_fields(
+        args,
+        ("account", "symbol", "option_type", "position_side", "contracts_to_close", "strike", "expiration_ymd"),
+        action="记录期权到期失效",
+    )
+    return {
+        "broker": str(args.get("broker") or "富途"),
+        "account": _required_text(args.get("account"), "account"),
+        "symbol": _required_text(args.get("symbol"), "symbol"),
+        "option_type": _required_text(args.get("option_type"), "option_type"),
+        "position_side": _required_text(args.get("position_side") or args.get("side"), "position_side"),
+        "strike": _positive_float(args.get("strike"), "strike"),
+        "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
+        "contracts_to_close": _positive_int(args.get("contracts_to_close"), "contracts_to_close"),
+        "event_time_ms": _optional_positive_int(args.get("event_time_ms") or args.get("as_of_ms"), "event_time_ms"),
+        "close_reason": str(args.get("close_reason") or "expired_unassigned"),
+    }
+
+
+def render_manual_expiry_batch_response(operations: list[dict[str, Any]]) -> str:
+    command_id = str(operations[0].get("operation_id") or "").rpartition(":")[0] if operations else ""
+    lines = [f"交易记录预览：到期失效（{len(operations)} 笔）", "当前均未写入账本。", "直接回复“确认”可批量写入。"]
+    if command_id:
+        lines.append(f"命令确认：/confirm trade {command_id}")
+    for index, operation in enumerate(operations, start=1):
+        payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
+        args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        option_type = str(args.get("option_type") or "").lower()
+        option_suffix = "P" if option_type == "put" else "C" if option_type == "call" else option_type
+        strike = args.get("strike")
+        strike_text = f"{float(strike):g}" if isinstance(strike, (int, float)) else str(strike or "-")
+        operation_id = str(operation.get("operation_id") or "")
+        lines.extend(
+            [
+                "",
+                f"{index}. {args.get('account') or '-'} | {args.get('symbol') or '-'} "
+                f"{args.get('expiration_ymd') or '-'} {strike_text}{option_suffix} | "
+                f"{args.get('position_side') or '-'} {args.get('contracts_to_close') or '-'}张",
+                f"   确认：/confirm trade {operation_id}",
+                f"   取消：/cancel trade {operation_id}",
+            ]
+        )
+    lines.extend(["", "也可按 operation_id 逐笔确认。"])
+    return "\n".join(lines)
+
+
+def render_manual_trade_response(
+    status: str,
+    operation_id: str,
+    payload: dict[str, Any],
+    *,
+    preview: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    expires_at: str | None = None,
+) -> str:
+    del result
+    operation_type = str(payload.get("operation_type") or "")
+    if status == "cancelled":
+        return f"交易记录已取消，未写入账本。\ncommand_id: {operation_id}"
+    raw_args = payload.get("arguments")
+    args = cast(dict[str, Any], raw_args) if isinstance(raw_args, dict) else {}
+    preview_map = preview if isinstance(preview, dict) else {}
+    raw_fields = preview_map.get("fields")
+    fields = cast(dict[str, Any], raw_fields) if isinstance(raw_fields, dict) else {}
+    if operation_type == "manual_open":
+        title = "交易记录预览已更新：开仓" if status == "updated" else ("交易记录预览：开仓" if status == "previewed" else "交易已写入 OM 本地账本：开仓")
+        raw_currency = normalize_currency(args.get("currency"))
+        final_currency = str(fields.get("currency") or raw_currency or "-")
+        currency_text = f"币种：{final_currency}"
+        if raw_currency and raw_currency != final_currency:
+            currency_text += f"（原始 {raw_currency}，已按{fields.get('symbol') or args.get('symbol') or '标的'}自动修正）"
+        lines = [
+            title,
+            f"账户：{fields.get('account') or args.get('account') or '-'}",
+            f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
+            f"方向：{fields.get('side') or args.get('side') or '-'} {fields.get('option_type') or args.get('option_type') or '-'}",
+            f"数量：{args.get('contracts') or '-'} 张",
+            currency_text,
+        ]
+    elif operation_type == "manual_close":
+        title = "交易记录预览已更新：平仓" if status == "updated" else ("交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓")
+        raw_match = preview_map.get("match")
+        match = cast(dict[str, Any], raw_match) if isinstance(raw_match, dict) else {}
+        preview_lot_id = preview_map.get("record_id")
+        lot_id = str(match.get("record_id") or args.get("record_id") or preview_lot_id or "")
+        lines = [
+            title,
+            f"record_id：{lot_id or '-'}",
+            f"账户：{fields.get('account') or args.get('account') or '-'}",
+            f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
+            f"平仓数量：{args.get('contracts_to_close') or '-'} 张",
+        ]
+    elif operation_type == "manual_assignment":
+        title = "交易记录预览已更新：被指派" if status == "updated" else ("交易记录预览：被指派" if status == "previewed" else "交易已写入 OM 本地账本：被指派")
+        stock_settlement = cast(dict[str, Any], preview_map.get("stock_settlement") or {})
+        lines = [
+            title,
+            f"账户：{args.get('account') or '-'}",
+            f"合约：{args.get('symbol') or '-'} {args.get('expiration_ymd') or '-'} {args.get('strike') or '-'} {args.get('option_type') or '-'}",
+            f"平仓数量：{args.get('contracts_to_close') or '-'} 张",
+            f"正股结算：{stock_settlement.get('side') or args.get('stock_side') or '-'} {stock_settlement.get('shares') or args.get('stock_qty') or '-'} 股 @ {stock_settlement.get('price') or args.get('stock_price') or '-'}",
+        ]
+    elif operation_type == "manual_expiry":
+        title = "交易记录预览已更新：到期失效" if status == "updated" else ("交易记录预览：到期失效" if status == "previewed" else "交易已写入 OM 本地账本：到期失效")
+        lines = [
+            title,
+            f"账户：{args.get('account') or '-'}",
+            f"合约：{args.get('symbol') or '-'} {args.get('expiration_ymd') or '-'} {args.get('strike') or '-'} {args.get('option_type') or '-'}",
+            f"失效数量：{args.get('contracts_to_close') or '-'} 张",
+        ]
+    else:
+        title = "交易记录预览已更新" if status == "updated" else ("交易记录预览" if status == "previewed" else "交易已写入 OM 本地账本")
+        lines = [title, f"operation_type：{operation_type or '-'}"]
+    if status in {"previewed", "updated"}:
+        lines.extend(
+            [
+                "",
+                "未写入账本。",
+                f"确认写入请回复：/confirm trade {operation_id}",
+                f"取消请回复：/cancel trade {operation_id}",
+                f"operation_id：{operation_id}",
+                "同一对话只有一条待确认交易时，也可以回复：确认记录 / 取消记录",
+            ]
+        )
+        if expires_at:
+            lines.append("有效期：10 分钟。")
+    else:
+        lines.append(f"command_id：{operation_id}")
+    return "\n".join(str(line) for line in lines)
+
+
+def _manual_close_error(exc: ManualCloseMatchError) -> AgentToolError:
+    if exc.code == "multiple_matches":
+        lines = ["找到多条可匹配持仓，请指定 record_id。"]
+        for idx, row in enumerate(exc.candidates[:10], start=1):
+            lines.append(
+                f"{idx}. {row.get('record_id')} | {row.get('account')} | {row.get('symbol')} | {row.get('side')} {row.get('option_type')} | exp {row.get('expiration_ymd') or '-'} | strike {row.get('strike') if row.get('strike') is not None else '-'} | open {row.get('contracts_open')}"
+            )
+        lines.append("请回复：记录平仓 record_id=<上面的 record_id> <张数>张 close <价格>")
+        return AgentToolError(code="NEEDS_CLARIFICATION", message="\n".join(lines), details={"selector": exc.selector, "candidates": exc.candidates, "match_error_code": exc.code})
+    return AgentToolError(code="NEEDS_CLARIFICATION", message=str(exc), details={"selector": exc.selector, "candidates": exc.candidates, "match_error_code": exc.code})
+
+
+def _require_fields(args: dict[str, Any], keys: tuple[str, ...], *, action: str) -> None:
+    missing = [key for key in keys if args.get(key) in (None, "")]
+    if missing:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{action}缺少字段：" + "、".join(missing), hint="示例：记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be an integer") from None
+    if parsed <= 0:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be > 0")
+    return parsed
+
+
+def _optional_positive_int(value: Any, field_name: str) -> int | None:
+    if value in (None, ""):
+        return None
+    return _positive_int(value, field_name)
+
+
+def _positive_float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(str(value).strip())
+    except Exception:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be numeric") from None
+    if parsed <= 0:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be > 0")
+    return float(parsed)
+
+
+def _optional_positive_float(value: Any, field_name: str) -> float | None:
+    if value in (None, ""):
+        return None
+    return _positive_float(value, field_name)
+
+
+def re_match_date(text: str) -> bool:
+    return re.fullmatch(r"20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])", str(text or "").strip()) is not None
+
+
+def _json_safe(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value

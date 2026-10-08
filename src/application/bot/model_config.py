@@ -8,8 +8,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_validator import validate_assistant_config
-from src.application.config_yaml import default_yaml_assistant_config_path
+from src.application.config_validator import validate_bot_config
+from src.application.config_yaml import default_yaml_bot_config_path
 from src.application.llm_provider_registry import (
     provider_requires_api_key,
     require_provider_spec,
@@ -116,13 +116,13 @@ def _strict_int(value: Any, *, path: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def load_assistant_llm_config(
+def load_bot_llm_config(
     *,
     config_path: str | Path | None = None,
     repo_root: str | Path | None = None,
     require_config: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    payload, load_error = _load_assistant_config(
+    payload, load_error = _load_bot_config(
         config_path=config_path,
         repo_root=repo_root,
         require_config=require_config,
@@ -130,54 +130,39 @@ def load_assistant_llm_config(
     if load_error or payload is None:
         return None, load_error
 
-    assistant = payload.get("assistant")
-    assistant_cfg = assistant if isinstance(assistant, dict) else {}
-    if assistant_cfg.get("enabled") is False:
+    bot_config = payload.get("bot")
+    bot_cfg = bot_config if isinstance(bot_config, dict) else {}
+    if bot_cfg.get("enabled") is not True:
         return None, None
-    llm = assistant_cfg.get("llm")
+    llm = bot_cfg.get("llm")
     llm_cfg = llm if isinstance(llm, dict) else {}
     if not str(llm_cfg.get("provider") or "").strip() or not str(llm_cfg.get("model") or "").strip():
         return None, None
     return dict(llm_cfg), None
 
 
-def load_assistant_bot_toolsets(
-    *,
-    config_path: str | Path | None = None,
-    repo_root: str | Path | None = None,
-    require_config: bool = False,
-) -> tuple[frozenset[str] | None, str | None]:
-    toolsets, _mode, error = load_assistant_bot_settings(
-        config_path=config_path,
-        repo_root=repo_root,
-        require_config=require_config,
-    )
-    return toolsets, error
-
-
 def load_bot_read_scope(*, config_path: str | Path, primary_market: str) -> tuple[frozenset[str], str]:
     """Validated channel grant and config generation; never sourced from a model turn."""
     if primary_market not in {"us", "hk"}:
         raise ValueError("invalid primary market")
-    path = _assistant_config_path(config_path=config_path, repo_root=None)
-    payload, error = _load_assistant_config(config_path=config_path, repo_root=None, require_config=True)
+    path = _bot_config_path(config_path=config_path, repo_root=None)
+    payload, error = _load_bot_config(config_path=config_path, repo_root=None, require_config=True)
     if error or payload is None:
         raise AgentToolError(
             code="CONFIG_ERROR",
-            message=f"assistant config validation failed: {path}",
-            details={"error": error or "invalid_assistant_config"},
+            message=f"Bot config validation failed: {path}",
+            details={"error": error or "invalid_bot_config"},
         )
     before = path.stat()
     raw = path.read_bytes()
     after = path.stat()
     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size) or json.loads(raw) != payload:
-        raise ValueError("assistant config changed while reading")
-    assistant = payload.get("assistant") or {}
-    bot = assistant.get("bot") or {}
+        raise ValueError("Bot config changed while reading")
+    bot = payload.get("bot") or {}
     configured = bot.get("read_markets")
     markets = frozenset(configured if configured is not None else (primary_market,))
     if primary_market not in markets:
-        raise ValueError("assistant.bot.read_markets must include the channel market")
+        raise ValueError("bot.read_markets must include the channel market")
     generated = payload.get("_generated") or {}
     generation = hashlib.sha256(json.dumps([
         str(path.resolve()), hashlib.sha256(raw).hexdigest(),
@@ -186,51 +171,43 @@ def load_bot_read_scope(*, config_path: str | Path, primary_market: str) -> tupl
     return markets, generation
 
 
-def load_assistant_bot_settings(
+def bot_config_error(
     *, config_path: str | Path | None = None, repo_root: str | Path | None = None,
     require_config: bool = False,
-) -> tuple[frozenset[str] | None, str, str | None]:
-    """Load the validated Bot settings once at the Host boundary."""
-    payload, load_error = _load_assistant_config(
+) -> str | None:
+    """Validate the Bot configuration at the Host boundary."""
+    payload, error = _load_bot_config(
         config_path=config_path, repo_root=repo_root, require_config=require_config,
     )
-    if load_error:
-        return None, "eager", load_error
-    assistant = (payload or {}).get("assistant")
-    assistant_cfg = assistant if isinstance(assistant, dict) else {}
-    bot = assistant_cfg.get("bot")
-    bot_cfg = bot if isinstance(bot, dict) else {}
-    mode = str(bot_cfg.get("tool_loading_mode") or "eager").strip().lower()
-    if mode not in {"eager", "directory"}:
-        return None, "eager", "invalid_assistant_config"
-    if assistant_cfg.get("enabled") is False or bot_cfg.get("enabled") is not True:
-        return frozenset(), mode, None
-    toolsets = bot_cfg.get("toolsets")
-    toolset_cfg = toolsets if isinstance(toolsets, dict) else {}
-    return frozenset(), "eager", None
+    if error or payload is None:
+        return error
+    bot_config = payload.get("bot") or {}
+    if bot_config.get("enabled") is not True:
+        return "bot_disabled"
+    return None
 
 
-def _load_assistant_config(
+def _load_bot_config(
     *,
     config_path: str | Path | None,
     repo_root: str | Path | None,
     require_config: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    path = _assistant_config_path(config_path=config_path, repo_root=repo_root)
+    path = _bot_config_path(config_path=config_path, repo_root=repo_root)
     if not path.exists():
         if require_config:
-            return None, "assistant_config_not_found"
+            return None, "bot_config_not_found"
         return None, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return None, "invalid_assistant_config"
+        return None, "invalid_bot_config"
     if not isinstance(payload, dict):
-        return None, "invalid_assistant_config"
+        return None, "invalid_bot_config"
     try:
-        validate_assistant_config(payload)
+        validate_bot_config(payload)
     except SystemExit:
-        return None, "invalid_assistant_config"
+        return None, "invalid_bot_config"
     return payload, None
 
 
@@ -273,7 +250,7 @@ def _resolve_model_api_key(
     )
 
 
-def _assistant_config_path(
+def _bot_config_path(
     *,
     config_path: str | Path | None,
     repo_root: str | Path | None,
@@ -282,7 +259,7 @@ def _assistant_config_path(
         path = Path(config_path).expanduser()
         return path if path.is_absolute() else path.resolve()
     root = Path(repo_root).expanduser().resolve() if repo_root is not None else Path(__file__).resolve().parents[3]
-    repo_local = (root / "config.assistant.json").resolve()
+    repo_local = (root / "config.bot.json").resolve()
     if repo_local.exists():
         return repo_local
-    return default_yaml_assistant_config_path(repo_root=root)
+    return default_yaml_bot_config_path(repo_root=root)

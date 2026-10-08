@@ -272,7 +272,7 @@ macOS 与 Linux 使用相同任务、术语和结果判定，底层分别复用�
 - [CLI首页](../src/interfaces/cli/home.py)、[解析与路由](../src/interfaces/cli/main.py)、[首装入口](../src/interfaces/cli/setup_ops.py) → [配置生成与发布](../src/application/config_yaml_init.py) → source/runtime/root record 的写入、验证和失败清理 → 用户结果；对应 [首装测试](../tests/test_setup_init_cli.py)、[首页测试](../tests/test_cli_home.py)。
 - [账户入口](../src/interfaces/cli/account_ops.py)、[标的入口](../src/interfaces/cli/symbols.py)、[旧配置入口](../src/interfaces/cli/config_ops.py) → [标的修改与发布](../src/application/config_yaml_symbols.py)；验证策略必填字段、共享市场范围及已有发布调用。
 - [凭证入口](../src/interfaces/cli/secret_ops.py) → 系统存储 provisioner；确认隐藏输入、TTY要求和取消/删除边界。[settings](../src/interfaces/cli/settings_ops.py) 仅作环境来源诊断。
-- [Bot](../src/interfaces/cli/bot_ops.py)、[assistant](../src/interfaces/cli/assistant_ops.py)、[inbound](../src/interfaces/cli/inbound_ops.py)、[channel](../src/interfaces/cli/channel_ops.py) 的解析和路由；确认读问答、控制和传输不可混为同一语义。
+- [Bot](../src/interfaces/cli/bot_ops.py)、[assistant](../src/interfaces/cli/bot_ops.py)、[inbound](../src/interfaces/cli/inbound_ops.py)、[channel](../src/interfaces/cli/channel_ops.py) 的解析和路由；确认读问答、控制和传输不可混为同一语义。
 - [portfolio](../src/interfaces/cli/portfolio_ops.py) 保留 assignment-scenario；[运行入口](../src/interfaces/cli/run_ops.py) → [体验模式门禁](../src/application/experience_mode.py)；核对 SIMULATE、手动与 no-send。
 - [操作入口](../src/interfaces/cli/operator_ops.py)、[服务入口](../src/interfaces/cli/service_ops.py) 及 Astra 读取的其他领域命令；[version](../src/application/version_check.py) 与 [upgrade check](../src/application/service_upgrade.py) 的版本来源和运行实例处理不同。
 

@@ -716,43 +716,41 @@ def test_wheel_pending_put_branch_remains_visible_without_required_data() -> Non
     assert scan["scope_results"][0]["reason_code"] == "wheel_pending_decision"
 
 
-def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
-    allocation = revalidate_selected_wheel_put_candidate(
-        cash_capacity_fact=cash_portfolio({
-            "account": "lx",
-            "status": "available",
-            "cash_authority": {"status": "available", "logical_account": "lx"},
-            "cash_authority_hash": "authority-1",
-            "cash_by_currency": {"CNY": 70_000},
-            "cash_secured_by_currency": {},
-            "wheel_intent_reservations": [],
-            "fx_snapshot": {
-                "fx_rate_facts": [
-                    {
-                        "fact_id": "fx-usd-cny",
-                        "base_currency": "USD",
-                        "quote_currency": "CNY",
-                        "rate": 7,
-                        "effective_at_ms": 1_000,
-                        "observed_at_ms": 1_001,
-                        "revision": 1,
-                    }
-                ]
+def test_wheel_put_revalidation_rejects_historical_facts_for_current_capacity() -> None:
+    with pytest.raises(ValueError, match="no longer has cash capacity"):
+        revalidate_selected_wheel_put_candidate(
+            cash_capacity_fact=cash_portfolio({
+                "account": "lx",
+                "status": "available",
+                "cash_authority": {"status": "available", "logical_account": "lx"},
+                "cash_authority_hash": "authority-1",
+                "cash_by_currency": {"CNY": 70_000},
+                "cash_secured_by_currency": {},
+                "wheel_intent_reservations": [],
+                "fx_snapshot": {
+                    "fx_rate_facts": [
+                        {
+                            "fact_id": "fx-usd-cny",
+                            "base_currency": "USD",
+                            "quote_currency": "CNY",
+                            "rate": 7,
+                            "effective_at_ms": 1_000,
+                            "observed_at_ms": 1_001,
+                            "revision": 1,
+                        }
+                    ]
+                },
+            }),
+            final_candidate={
+                "claim_id": "wheel:put:branch-a",
+                "wheel_branch_id": "branch-a",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "granted_contracts": 1,
             },
-        }),
-        final_candidate={
-            "claim_id": "wheel:put:branch-a",
-            "wheel_branch_id": "branch-a",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "strike": 100,
-            "multiplier": 100,
-            "granted_contracts": 1,
-        },
-    )
-
-    assert allocation["allocation_status"] == "allocated"
-    assert allocation["cash_reservation_amount"] == 10_000
+        )
 
 
 def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:

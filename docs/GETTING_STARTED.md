@@ -27,7 +27,7 @@ om setup init
 
 新配置的通知与 Bot 默认关闭，未配置不会算作就绪。后续可用 `om channel configure` / `om bot configure` 补齐。再次运行 `om setup init` 保留已保存的配置并继续可选步骤；账户与标的修改走日常管理。确认前取消不写入；已完成的配置、凭证或服务步骤分别保留并报告。
 
-初始化生成 `config.yaml`、所选市场 `config.us.json` / `config.hk.json`、`resolved/config.assistant.json`，并在 `~/.config/options-monitor/runtime-root` 记住目录。显式配置路径及有效 `OM_RUNTIME_ROOT` 优先于记录；记录损坏时会报错，不偷换到另一个实例。创建过程异常中断可能留下文件，需先核对具体冲突；不会自动覆盖或猜测删除归属。
+初始化生成 `config.yaml`、所选市场 `config.us.json` / `config.hk.json`、`resolved/config.bot.json`，并在 `~/.config/options-monitor/runtime-root` 记住目录。显式配置路径及有效 `OM_RUNTIME_ROOT` 优先于记录；记录损坏时会报错，不偷换到另一个实例。创建过程异常中断可能留下文件，需先核对具体冲突；不会自动覆盖或猜测删除归属。
 
 脚本化创建使用 `om setup init --help` 中的完整参数：`--account-label`、市场、数字 `--futu-acc-id`、`--trd-env REAL|SIMULATE`、每个用户标的及策略边界。先用 `--dry-run` 预览，再以同样参数改用 `--apply`。高级 `om config init` 也须提供账户标签，可创建尚未填写富途账户 ID 的占位配置，但不会将其判断为就绪，也不建立用户运行目录记录。
 
@@ -48,7 +48,7 @@ om symbols edit YOUR_SYMBOL --set sell_put.max_strike=YOUR_MAX_STRIKE
 
 写入前保留预览给出的 source SHA，确认时追加 `--apply --expected-source-sha256 <SHA>`；账户命令还需 `--confirm`。菜单自动携带 SHA，文件在确认前被其他进程修改时拒绝旧预览。已有直接 `--apply` 脚本保持兼容。
 
-所有这些命令通过同一配置事务发布 YAML 和生成快照。只有手动编辑 YAML 时才需要 `om config build` / `build-assistant`；不要编辑生成的 JSON。完整配置解释见 [CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)。
+所有这些命令通过同一配置事务发布 YAML 和生成快照。只有手动编辑 YAML 时才需要 `om config build` / `build-bot`；不要编辑生成的 JSON。完整配置解释见 [CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)。
 
 ## 3. 完成外部接入
 

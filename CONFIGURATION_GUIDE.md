@@ -11,7 +11,7 @@
 | `config.yaml` | 账户、市场、symbols、策略与非 secret 行为 override |
 | Keychain / systemd credentials | secrets、provider credential；逻辑名和迁移见 `docs/SECRET_STORAGE.md` |
 | env-file | 非秘密本机设置和写入开关；`OM_SECRET_BACKEND=env` 仅为显式兼容 |
-| 生成快照 | `config.us.json`、`config.hk.json`、`resolved/config.assistant.json` |
+| 生成快照 | `config.us.json`、`config.hk.json`、`resolved/config.bot.json` |
 
 期权仓位不需要 Bitable：
 
@@ -63,7 +63,7 @@
 
 - `config.yaml`
 - `config.us.json`
-- `config.assistant.json`
+- `config.bot.json`
 
 已有目标文件时默认拒绝覆盖；先检查差异，不要直接使用 `--force` 覆盖生产文件。首次运行检查用 `om setup check --market us --format text`；占位富途账户 ID 和缺少市场快照阻断离线配置就绪，Bot 就绪单独显示。
 
@@ -139,15 +139,16 @@ Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景�
 broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。预览将非富途
 broker 原文集合按账户写入待发布配置；apply 重读 PM，集合变化会在写入前拒绝。
 查询遇旧配置缺集合或新 broker 值会暂停整份 PM 补充并标 partial。不把 Holdings 写入
-Futu 账户资金、持仓或 OM 期权账本。PM 集成需先由
-`portfolio_management.enabled` 开启。
+Futu 账户资金、持仓或 OM 期权账本。`portfolio_management.enabled` 控制全局 PM 集成，
+`portfolio.holdings.enabled` 只控制此情景补充。PM 尚未开启时，用 `--enable-pm` 将两个设置
+纳入同一次预览、确认和配置发布；预检失败或取消不会先留下已开启的 PM。关闭 Holdings 保留 PM 集成。
 PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
 
 通过 YAML authoring/build 事务预览和写入：
 
 ```bash
-./om config holdings set --enabled true
-./om config holdings set --enabled true --apply --confirm \
+./om config holdings set --enabled true --enable-pm
+./om config holdings set --enabled true --enable-pm --apply --confirm \
   --expected-source-sha256 <预览中的 before_sha256> \
   --expected-preview-sha256 <预览中的 preview_sha256>
 ./om config holdings set --enabled false
@@ -157,10 +158,10 @@ PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 
 ```
 
 预览摘要绑定目标值、配置路径和 runtime root；apply 改动这些目标时需重新预览。
-写入后会核对 `config.yaml`、所有已配置市场 runtime JSON 和 Assistant 快照的摘要；
+写入后会核对 `config.yaml`、所有已配置市场 runtime JSON 和 Bot 快照的摘要；
 如果写入后读回失败，错误会给出已写入状态、审计 ID 与备份路径，须先核对目标再重试。
-如需回滚，恢复 YAML 备份后，还须用 `om config build` 和 `om config build-assistant`
-重建返回结果中列出的市场与 Assistant 目标，并核对读回；只恢复 YAML 不会撤销生成快照。
+如需回滚，恢复 YAML 备份后，还须用 `om config build` 和 `om config build-bot`
+重建返回结果中列出的市场与 Bot 目标，并核对读回；只恢复 YAML 不会撤销生成快照。
 
 ## Symbol 扫描并发
 
@@ -245,20 +246,20 @@ YAML authoring 使用 `covered_call`；生成的 runtime、CSV 或 trace 可能�
   --key markets.us.overrides.NVDA.sell_put
 ```
 
-## Assistant 与入站
+## Bot 与入站
 
-`assistant` / `inbound` 仍写在 `config.yaml`，但运行时由独立快照消费：
+`bot` / `inbound` 仍写在 `config.yaml`，但运行时由独立快照消费：
 
 ```bash
-./om config build-assistant --source yaml \
+./om config build-bot --source yaml \
   --config-yaml config.yaml \
-  --output resolved/config.assistant.json
+  --output resolved/config.bot.json
 ```
 
 模型 API key 只 provision 到固定逻辑凭据；YAML 选择 provider/model 即可。旧 `api_key_env`
 仅在显式 `OM_SECRET_BACKEND=env` 的迁移模式下作为兼容名称使用。
 
-Feishu long-connection、WeChat ClawBot 和本地 Assistant 共享 Control/Bot 安全边界，但渠道 credential、sender allowlist 和 provider readiness 分别验证。详见：
+Feishu long-connection、WeChat ClawBot 和本地 Bot 共享 Control/Bot 安全边界，但渠道 credential、sender allowlist 和 provider readiness 分别验证。详见：
 
 - [Inbound Control](docs/INBOUND_CONTROL.md)
 - [Bot v2](docs/BOT_DESIGN.md)
@@ -345,7 +346,7 @@ HK 同理。生产建议把 YAML 和生成快照放在 release 外：
 /var/lib/options-monitor/config.yaml
 /var/lib/options-monitor/config.us.json
 /var/lib/options-monitor/config.hk.json
-/var/lib/options-monitor/resolved/config.assistant.json
+/var/lib/options-monitor/resolved/config.bot.json
 ```
 
 service profile 应记录这些显式路径。升级时缺少 YAML authoring source 会 fail closed；legacy JSON 不是升级恢复通道。
@@ -407,6 +408,49 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 5. YAML validate 通过；
 6. 对应 runtime JSON 已 rebuild；
 7. runtime fingerprint 新鲜；
-8. assistant 配置变化时已 rebuild assistant JSON；
+8. Bot 配置变化时已 rebuild Bot JSON；
 9. `healthcheck` 没有新增阻断项；
 10. 首次真实运行先 `--no-send`，并理解它仍会写本地 artifact。
+
+## 配置开关迁移
+
+新配置的 `notifications.enabled` 默认 `false`，只有显式开启才允许主动通知。
+旧配置升级前先运行 `om config migrate-switches --config-yaml <path> --runtime-root <root>`。
+预览会删除无效的 `bot.toolsets`、`bot.tool_loading_mode`、
+`notifications.daily_brief.enabled`、`features.wheel.enabled` 和
+`trade_intake.combo_reconciliation.default_mode`，保留账户级组合归因模式和 Wheel 激活历史。
+旧通知总开关缺省时，预览会明确补为 `true` 以保留原意；市场级显式关闭仍然关闭。
+
+核对 `changes`、目标路径及两个哈希后，使用同一命令加上 `--apply --confirm`、
+`--expected-source-sha256 <before_sha256>` 和 `--expected-preview-sha256 <preview_sha256>`。
+发布使用现有配置事务，备份 YAML、重建所有已配置市场及 Bot，并读回校验。
+发生冲突时不会猜测 `holdings_account` 的账户映射，也不会代替 `om bot migrate` 迁移旧存储。
+重复使用旧预览会因源内容变化被拒绝；需重新预览。新建配置无需运行迁移。
+
+Wheel 使用 `om wheel activation` 管理账户窗口；配置字段删除不会开启或关闭账本窗口。
+组合归因未列出的账户固定为 `off`，仅配置实际需要的账户模式。
+
+### 配置意图与实际就绪
+
+`bot.enabled` 是 Bot 唯一启用开关，默认关闭，统一控制新入站命令处理和模型对话。
+已受理分析的可信取消通道保留，关闭 Bot 后仍可停止在途分析；替代分析仍需开启 Bot。
+`om bot configure` 保存该开关；关闭后仍可使用本地配置、状态与诊断命令。保存配置不启动服务。
+本地 `bot run --model-config-json` 只覆盖模型选择，也必须存在已开启的 Bot 配置；
+无外部调用的显式 eval fixture 不受运行配置依赖影响。
+
+旧 `assistant` 配置通过 `om config migrate-switches` 显式迁移为顶层 `bot`；
+旧总开关（缺省 true）与旧 `assistant.bot.enabled`（缺省 false）都开启才迁为开启。
+模型配置、市场读权限一并保留；新旧根同时存在时拒绝迁移。
+先查看预览，再使用预览哈希确认发布；生成 `resolved/config.bot.json`，旧快照不再被加载，
+也不会自动删除。服务路径更新应在另行授权的部署流程中执行。
+
+`config explain` 和 runtime status 的配置摘要只证明发布的配置意图。Bot diagnostics
+区分 `configured_enabled` 与配置就绪；`live_requested` 仅记录请求，当前诊断不执行模型探测，`live_checked=false`；
+不能据此证明服务或模型实际运行。
+`om settings inspect/explain/doctor` 包含 `OM_INBOUND_MODEL_WRITE_ENABLED`，与执行端共用权限解释；
+模型、交易等分项写权限仍受 `OM_INBOUND_OPERATIONS_ENABLED` 总闸约束。
+
+`om holdings configure --interactive` 先预检候选 PM+Holdings 配置，再确认发布。显式输入的
+PM 地址仍通过普通连接设置独立保存；若之后配置发布失败，`completed_steps` 会报告已经
+保存的连接设置，PM 与 Holdings 不会部分启用。高级回执、重试、历史回填开关仍保留在
+高级配置，不加入普通业务菜单。

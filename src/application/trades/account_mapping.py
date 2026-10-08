@@ -120,9 +120,8 @@ def resolve_combo_reconciliation_config(
         section = raw
     else:
         raise ValueError("trade_intake.combo_reconciliation must be an object")
-    default_mode = str(section.get("default_mode") or "off").strip().lower()
-    if default_mode != "off":
-        raise ValueError("trade_intake.combo_reconciliation.default_mode must remain off")
+    if "default_mode" in section:
+        raise ValueError("trade_intake.combo_reconciliation.default_mode is retired; run om config migrate-switches")
     account_modes_raw = section.get("accounts")
     if account_modes_raw is None:
         account_modes_raw = {}
@@ -145,7 +144,6 @@ def resolve_combo_reconciliation_config(
             )
         account_modes[account] = mode
     return {
-        "default_mode": "off",
         "accounts": account_modes,
     }
 
@@ -157,7 +155,7 @@ def combo_reconciliation_mode_for_account(
 ) -> str:
     resolved = resolve_combo_reconciliation_config(config)
     account_value = str(account or "").strip().lower()
-    return str(resolved["accounts"].get(account_value) or resolved["default_mode"])
+    return str(resolved["accounts"].get(account_value) or "off")
 
 
 def resolve_trade_intake_receipt_config(value: Any) -> dict[str, bool]:
@@ -370,7 +368,7 @@ def resolve_trade_intake_sources(
                 "futu_account_ids": [plan.futu_account_id],
                 "combo_reconciliation_mode": str(
                     combo_reconciliation["accounts"].get(account)
-                    or combo_reconciliation["default_mode"]
+                    or "off"
                 ),
             }
         )

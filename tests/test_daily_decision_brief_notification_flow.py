@@ -131,12 +131,12 @@ def _brief(
     }
 
 
-def _config(*, enabled: bool = True, quiet: str | None = None) -> dict:
-    notifications = {
+def _config(*, quiet: str | None = None) -> dict:
+    notifications = {"enabled": True,
         "provider": "wechat_clawbot",
         "channel": "wechat_clawbot",
         "target": "wechat:ops",
-        "daily_brief": {"enabled": enabled},
+        "daily_brief": {},
     }
     if quiet:
         notifications["quiet_hours_beijing"] = quiet
@@ -145,11 +145,11 @@ def _config(*, enabled: bool = True, quiet: str | None = None) -> dict:
 
 def _feishu_config() -> dict:
     return {
-        "notifications": {
+        "notifications": {"enabled": True,
             "provider": "feishu_app",
             "channel": "feishu_app",
             "target": "feishu:bot-user",
-            "daily_brief": {"enabled": True},
+            "daily_brief": {},
         },
         "schedule": {"timezone": "America/New_York"},
     }
@@ -260,18 +260,14 @@ def _patch_sender(
     monkeypatch.setattr(mod, "finalize_multi_tick_run", lambda **kwargs: 1 if kwargs.get("notify_failures") else 0)
 
 
-def test_scheduled_daily_brief_ignores_deprecated_enabled_switch(monkeypatch, tmp_path: Path) -> None:
+def test_scheduled_daily_brief_needs_no_renderer_enable_switch(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
-    enabled = mod._prepare_daily_brief_notification(
-        _request(tmp_path / "enabled", run_id="enabled", config=_config(enabled=True)).request
+    result = mod._prepare_daily_brief_notification(
+        _request(tmp_path, run_id="enabled", config=_config()).request
     )
-    disabled = mod._prepare_daily_brief_notification(
-        _request(tmp_path / "disabled", run_id="disabled", config=_config(enabled=False)).request
-    )
+    assert result.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "fixed_report"
+    assert result.prepared_messages.threshold_met is True
 
-    assert enabled.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "fixed_report"
-    assert disabled.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "fixed_report"
-    assert disabled.prepared_messages.threshold_met is True
 
 
 @pytest.mark.parametrize(
@@ -567,7 +563,7 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
 def test_scheduled_delivery_without_target_records_local_meta_alert(monkeypatch, tmp_path: Path, capsys) -> None:
     _patch_assembler(monkeypatch)
     bundle = _request(tmp_path, run_id="route-missing", config={
-        "notifications": {"provider": "wechat_clawbot", "channel": "wechat_clawbot"},
+        "notifications": {"enabled": True, "provider": "wechat_clawbot", "channel": "wechat_clawbot"},
         "schedule": {"timezone": "America/New_York"},
     })
     with pytest.raises(SystemExit, match="CONFIG_ERROR"):

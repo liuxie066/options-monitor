@@ -701,7 +701,7 @@ def change_wheel_activation(
                                                     window=receipt["expected_config_descriptor"])
         result["config_audit"] = publish_yaml_config_generation_locked(lock=lock, repo_root=repo_root,
             config_yaml_path=source_path, config_doc=candidate, runtime_root=root, markets=markets,
-            include_assistant=False, expected_source_sha256=source_sha)
+            include_bot=False, expected_source_sha256=source_sha)
         result["write_applied"] = bool(result["write_applied"] or result["config_audit"]["write_applied"])
         phase = "readback"
         final = refresh()

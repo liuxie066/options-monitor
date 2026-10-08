@@ -44,17 +44,17 @@ def _sender(calls: list[dict], message_id: str):
 
 def test_auto_close_receipt_decision_defaults_send_applied_and_failed() -> None:
     applied = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
     )
     failed = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 0, "candidates_should_close": 1, "errors": ["boom"]},
     )
     partial = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 2, "errors": ["boom"]},
     )
@@ -66,12 +66,12 @@ def test_auto_close_receipt_decision_defaults_send_applied_and_failed() -> None:
 
 def test_auto_close_receipt_decision_skips_dry_run_and_noop_by_default() -> None:
     dry_run = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=True,
         result={"mode": "dry_run", "applied_closed": 0, "candidates_should_close": 1, "errors": []},
     )
     noop = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 0, "candidates_should_close": 0, "errors": []},
     )
@@ -96,7 +96,7 @@ def test_auto_close_receipt_decision_skips_confirmed_duplicate() -> None:
     )
 
     out = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
         prior_receipt={"status": "sent", "delivery_confirmed": True, "attempt_count": 1},
@@ -108,7 +108,7 @@ def test_auto_close_receipt_decision_skips_confirmed_duplicate() -> None:
 
 def test_auto_close_receipt_decision_retries_unconfirmed_duplicate() -> None:
     out = decide_auto_close_receipt(
-        receipt_config={},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
         prior_receipt={"status": "failed", "delivery_confirmed": False, "attempt_count": 2},
@@ -121,8 +121,8 @@ def test_auto_close_receipt_decision_retries_unconfirmed_duplicate() -> None:
 def test_send_auto_close_receipt_skips_without_route(tmp_path: Path) -> None:
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "wechat_clawbot"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "wechat_clawbot"}},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
     )
@@ -137,8 +137,8 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
 
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result=_receipt_result(
             as_of_utc="2026-05-03T00:00:00+00:00",
@@ -168,8 +168,8 @@ def test_send_auto_close_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: P
 
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "feishu_app"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "feishu_app"}},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result=_minimal_result(),
         send_fn=_send,
@@ -178,7 +178,7 @@ def test_send_auto_close_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: P
 
     assert out["status"] == "sent"
     assert calls[0]["target"] == "ou_bot"
-    assert calls[0]["notifications"] == {"provider": "feishu_app"}
+    assert calls[0]["notifications"] == {"enabled": True, "provider": "feishu_app"}
 
 
 def test_send_auto_close_receipt_increments_retry_attempt_count(tmp_path: Path) -> None:
@@ -187,8 +187,8 @@ def test_send_auto_close_receipt_increments_retry_attempt_count(tmp_path: Path) 
 
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
         prior_receipt={"status": "failed", "delivery_confirmed": False, "attempt_count": 2},
@@ -283,8 +283,8 @@ def test_auto_close_receipt_preserves_normalized_feishu_size_error(monkeypatch, 
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "feishu_app"}},
-        receipt_config={},
+        config={"notifications": {"enabled": True, "provider": "feishu_app"}},
+        receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result=_minimal_result(),
         send_fn=lambda **_kwargs: {

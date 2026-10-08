@@ -161,7 +161,7 @@ def test_executed_fee_readers_do_not_import_fee_formulas() -> None:
     assert offenders == []
 
 
-def test_runtime_config_generation_excludes_assistant_control_plane() -> None:
+def test_runtime_config_generation_excludes_bot_control_plane() -> None:
     from src.application.config_yaml import PASSTHROUGH_KEYS, resolve_yaml_runtime_config
 
     assert "assistant" not in PASSTHROUGH_KEYS
@@ -178,23 +178,23 @@ def test_runtime_config_generation_excludes_assistant_control_plane() -> None:
     assert "inbound" not in cfg
 
 
-def test_assistant_config_rejects_business_runtime_shape() -> None:
-    from src.application.config_validator import validate_assistant_config
+def test_bot_config_rejects_business_runtime_shape() -> None:
+    from src.application.config_validator import validate_bot_config
 
     with pytest.raises(SystemExit) as exc:
-        validate_assistant_config(
+        validate_bot_config(
             {
                 "accounts": ["lx"],
                 "portfolio": {"broker": "富途"},
                 "symbols": [{"symbol": "NVDA"}],
-                "assistant": {"enabled": True, "bot": {"enabled": True}},
+                "bot": {'enabled': True},
             }
         )
 
-    assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
+    assert "use config.bot.json, not config.<market>.json" in str(exc.value)
 
 
-def test_bot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -> None:
+def test_bot_runtime_does_not_import_old_bot_or_shell_tool_gateway() -> None:
     bot_root = ROOT / "src" / "application" / "bot"
     assert bot_root.exists()
 
@@ -212,7 +212,7 @@ def test_bot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -> No
                 for alias in node.names:
                     if alias.name.startswith("src.application.assistant") or alias.name.startswith("scripts"):
                         import_offenders.append(f"{path.relative_to(ROOT)}:{alias.name}")
-        if "./om-agent" in text or "subprocess" in text or "os.system" in text:
+        if not path.is_relative_to(bot_root / "control") and ("./om-agent" in text or "subprocess" in text or "os.system" in text):
             shell_offenders.append(str(path.relative_to(ROOT)))
 
     assert import_offenders == []
@@ -249,8 +249,9 @@ def test_public_tool_gateway_does_not_import_or_expose_bot_runtime() -> None:
     manifest = build_tool_manifest()
     manifest_text = json.dumps(manifest, ensure_ascii=False)
     for forbidden in (
-        "bot",
-        "Bot",
+        "BotRequest",
+        "bot.run",
+        "bot_run",
         "SceneManifest",
         "ExecutionContract",
         "SceneDefinition",
@@ -297,9 +298,9 @@ def test_bot_cli_entry_wires_service_to_host_without_agent_internals() -> None:
     assert "return run_local_request(" in cli_text
     assert "model_turn_json=model_turn_json" in cli_text
     assert "model_config_json" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
-    assert "assistant_config_path" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
+    assert "bot_config_path" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
     assert "model_turn_json" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
-    assert "use_default_assistant_config" not in cli_text
+    assert "use_default_bot_config" not in cli_text
     assert "build_action_model" not in cli_text
     assert "ModelActionDecider" not in cli_text
     assert "run_engine(" not in cli_text
@@ -400,7 +401,7 @@ def test_bot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
             "src.application.bot.engine",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
-            "src.application.assistant",
+            "src.application.bot.control",
         },
         "result_projection.py": {
             "src.application.bot.host",
@@ -464,9 +465,9 @@ def test_tool_contracts_do_not_carry_planner_routing_metadata() -> None:
     from dataclasses import fields
 
     from src.application.agent_tools.base import AgentTool
-    from src.application.assistant.tool_bindings import AssistantToolBinding
+    from src.application.bot.control.tool_bindings import BotToolBinding
 
-    binding_fields = {field.name for field in fields(AssistantToolBinding)}
+    binding_fields = {field.name for field in fields(BotToolBinding)}
     tool_fields = {field.name for field in fields(AgentTool)}
     assert "description" not in binding_fields
     assert "input_schema" not in binding_fields
@@ -519,9 +520,9 @@ def test_retired_ai_advice_handoff_fields_are_absent_from_runtime_contracts() ->
     )
 
 
-def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
+def test_bot_tool_names_are_registry_or_inbound_surfaces() -> None:
     from src.application.agent_tool_registry import tool_names
-    from src.application.assistant.capability_catalog import command_specs
+    from src.application.bot.control.capability_catalog import command_specs
 
     registry_names = set(tool_names())
     inbound_operation_surfaces = {
@@ -559,6 +560,6 @@ def test_feishu_ws_transport_does_not_own_allowlist_policy() -> None:
     assert "OM_FEISHU_BOT_ALLOWED_OPEN_IDS" not in adapter_text
     assert "OM_FEISHU_BOT_USER_OPEN_ID" not in adapter_text
 
-    assert "src.application.assistant.policy" not in ws_imports
-    assert "src.application.assistant.policy.check_sender_allowed" in adapter_imports
+    assert "src.application.bot.control.policy" not in ws_imports
+    assert "src.application.bot.control.policy.check_sender_allowed" in adapter_imports
     assert "check_sender_allowed(" in adapter_text

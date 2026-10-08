@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.performance.cash_conversion import DAILY_CASH_FX_POLICY, validate_observed_cash_conversion
+from domain.domain.performance.cash_conversion import DAILY_CASH_FX_POLICY, DAILY_CASH_FX_METHOD, MARKET_CASH_FX_METHOD, fixed_cash_fx_fact, validate_observed_cash_conversion
 from domain.domain.performance.models import EvidenceEnvelope, select_fx_rate
-from src.application.cash_conversion import cash_fx_observation_facts, load_cash_fx_payload
+from src.application.cash_conversion import cash_fx_observation_facts, load_cash_fx_payload, build_cash_conversion
 from src.application.ledger.api import backfill_cash_conversions, correct_superseded_cash_conversions
 from src.application.ledger.order_fee_migration import enrich_order_fees
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -68,7 +68,7 @@ def event(identity: str, at_ms: int) -> TradeEvent:
     )
 
 
-def test_real_cash_write_fixes_one_day_rate_and_late_arrival_uses_original_day(tmp_path) -> None:
+def test_real_cash_write_selects_event_time_quote_and_preserves_late_arrival(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     cache = tmp_path / "rate_cache.json"
     cache.write_text(json.dumps(observation()))
@@ -78,14 +78,15 @@ def test_real_cash_write_fixes_one_day_rate_and_late_arrival_uses_original_day(t
     cache.write_text(json.dumps(observation("8", quote="2026-09-08T02:00:00+00:00", captured="2026-09-08T02:00:01+00:00")))
     # The cache can contain tomorrow's quote while a delayed trade has yesterday's economic date.
     persist_trade_event_object(repo, event("late", ms("2026-09-07T14:00:00")))
-    rates = []
+    conversions = {row["event_id"]: row["raw_payload"]["cash_conversions"]["option_trade_cash_gross"] for row in repo.list_trade_events()}
+    assert conversions["before-quote"]["status"] == "pending"
+    assert conversions["after-quote"]["fx_rate"] == "7.8"
+    assert conversions["late"]["fx_rate"] == "7.2"
     for row in repo.list_trade_events():
-        conversion = row["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
-        rates.append(conversion["fx_rate"])
-        assert conversion["fx_policy"] == DAILY_CASH_FX_POLICY
-        assert conversion["cash_fx_date"] == "2026-09-07"
-        assert validate_observed_cash_conversion(conversion, cash_fact_id=f"option_trade_cash_gross:{row['event_id']}", native_amount="200", native_currency="USD", effective_at_ms=row["event_time_ms"])[1] is None
-    assert rates == ["7.2", "7.2", "7.2"]
+        conversion = conversions[row["event_id"]]
+        if conversion["status"] == "observed":
+            assert conversion["method"] == MARKET_CASH_FX_METHOD
+            assert validate_observed_cash_conversion(conversion, cash_fact_id=f"option_trade_cash_gross:{row['event_id']}", native_amount="200", native_currency="USD", effective_at_ms=row["event_time_ms"])[1] is None
 
 
 def test_source_quote_date_cannot_be_refreshed_by_capture_and_shanghai_midnight_is_a_boundary(tmp_path) -> None:
@@ -103,16 +104,16 @@ def test_source_quote_date_cannot_be_refreshed_by_capture_and_shanghai_midnight_
     assert repo.list_trade_events()[-1]["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]["status"] == "pending"
 
 
-def test_concurrent_daily_fix_has_one_durable_winner(tmp_path) -> None:
+def test_concurrent_quote_capture_is_idempotent(tmp_path) -> None:
     path = tmp_path / "evidence.sqlite3"
     now = ms("2026-09-07T23:00:00")
     def fix(rate: str):
         repository = PerformanceEvidenceSQLiteRepository(path)
         candidates = cash_fx_observation_facts(observation(rate), observed_at_ms=now)
-        rates = repository.freeze_cash_fx_daily_rates(candidates, migrated_at_ms=now)
+        rates = repository.persist_cash_fx_observations(candidates, migrated_at_ms=now)
         return next(fact.rate for fact in rates if fact.base_currency == "USD")
     with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(fix, ["7.2", "7.3", "7.4", "7.5"]))
+        results = list(executor.map(fix, ["7.2"] * 4))
     assert len(set(results)) == 1
     assert len(PerformanceEvidenceSQLiteRepository(path).read_all().fx_rates) == 2
 
@@ -162,29 +163,100 @@ def test_public_fx_value_failure_keeps_native_cash_but_storage_failure_aborts(tm
         assert stored["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]["status"] == "pending"
 
 
-def test_backfill_uses_same_day_even_before_quote_and_does_not_change_valuation_selector(tmp_path) -> None:
+def test_backfill_rejects_future_quotes_without_writing_conversions(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     before_quote = event("backfill", ms("2026-09-07T08:00:00"))
     repo.upsert_trade_event(before_quote)
     rates = cash_fx_observation_facts(observation(), observed_at_ms=ms("2026-09-07T20:00:00"))
     evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
     evidence.import_envelope(EvidenceEnvelope(fx_rates=rates), apply=True, migrated_at_ms=ms("2026-09-07T20:00:00"))
+    before = repo.list_trade_events()
     assert select_fx_rate(rates, base_currency="USD", at_ms=before_quote.event_time_ms).fact is None
-    preview = backfill_cash_conversions(repo, evidence, apply=False, migrated_at_ms=ms("2026-09-08T12:00:00"))
-    assert preview.preview_conversion_count >= 1
+    for apply in (False, True):
+        result = backfill_cash_conversions(repo, evidence, apply=apply, migrated_at_ms=ms("2026-09-08T12:00:00"))
+        assert result.preview_conversion_count == result.migrated_conversion_count == 0
+        assert result.unresolved
+    assert repo.list_trade_events() == before
     assert len(evidence.read_all().fx_rates) == 2
-    result = backfill_cash_conversions(repo, evidence, apply=True, migrated_at_ms=ms("2026-09-08T12:00:00"))
-    assert result.migrated_conversion_count >= 1
-    converted = repo.list_trade_events()[0]["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
-    assert converted["fx_rate"] == "7.2" and converted["cash_fx_date"] == "2026-09-07"
-    assert len(evidence.read_all().fx_rates) == 4
+
+
+@pytest.mark.parametrize("source,effective", [
+    ("manual_correction", "2026-09-08T10:00:00"),
+    ("realtime_snapshot", "2026-09-08T10:00:00"),
+    ("realtime_snapshot", "2026-09-07T13:00:00"),
+])
+def test_future_correction_preserves_pending_cash_backfill(tmp_path, source, effective) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    row = event("before-correction", ms("2026-09-07T12:00:00"))
+    repo.upsert_trade_event(row)
+    evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
+    now = ms("2026-09-10T12:00:00")
+    original = cash_fx_observation_facts(observation(), observed_at_ms=now)[0]
+    evidence.import_envelope(EvidenceEnvelope(fx_rates=(original,)), apply=True, migrated_at_ms=now)
+    before = repo.list_trade_events()
+    preview = backfill_cash_conversions(repo, evidence, apply=False, migrated_at_ms=now)
+    assert preview.preview_conversion_count == 1
+    correction = replace(
+        original, fact_id="future-correction", source_id="future-correction", source=source,
+        rate=Decimal("7"), effective_at_ms=ms(effective), observed_at_ms=now,
+        supersedes_fact_id=original.fact_id,
+    )
+    evidence.import_envelope(EvidenceEnvelope(fx_rates=(correction,)), apply=True, migrated_at_ms=now)
+    preview = backfill_cash_conversions(repo, evidence, apply=False, migrated_at_ms=now)
+    assert preview.preview_conversion_count == 1
+    assert preview.changes[0].conversion["rate_evidence_fact_id"] == original.fact_id
+    assert repo.list_trade_events() == before
+    applied = backfill_cash_conversions(repo, evidence, apply=True, migrated_at_ms=now)
+    assert applied.migrated_conversion_count == 1
+    stored = repo.list_trade_events()
+    conversion = stored[0]["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
+    assert conversion["rate_evidence_fact_id"] == original.fact_id
+    assert validate_observed_cash_conversion(
+        conversion, cash_fact_id=f"option_trade_cash_gross:{row.event_id}",
+        native_amount="200", native_currency="USD", effective_at_ms=row.event_time_ms,
+    ) == (Decimal("1440"), None)
+    assert backfill_cash_conversions(repo, evidence, apply=True, migrated_at_ms=now + 1).migrated_conversion_count == 0
+    assert repo.list_trade_events() == stored
+
+
+def test_market_correction_chain_applies_only_through_cash_event_time() -> None:
+    now = ms("2026-09-10T12:00:00")
+    original = cash_fx_observation_facts(observation(), observed_at_ms=now)[0]
+    active = replace(
+        original, fact_id="active-correction", source_id="active-correction", rate=Decimal("7"),
+        effective_at_ms=ms("2026-09-07T12:00:00"), observed_at_ms=now,
+        supersedes_fact_id=original.fact_id,
+    )
+    future = replace(
+        active, fact_id="future-correction", source_id="future-correction", rate=Decimal("6"),
+        effective_at_ms=ms("2026-09-07T13:00:00"), supersedes_fact_id=active.fact_id,
+    )
+    for instant, expected in (("2026-09-07T11:59:59", original), ("2026-09-07T12:00:00", active), ("2026-09-07T13:00:00", future)):
+        conversion = build_cash_conversion(
+            cash_fact_id="cash:chain", amount="200", currency="USD",
+            fx_payload={"fx_rate_facts": (original, active, future)},
+            effective_at_ms=ms(instant), observed_at_ms=now,
+        )
+        assert conversion["rate_evidence_fact_id"] == expected.fact_id
+        assert validate_observed_cash_conversion(
+            conversion, cash_fact_id="cash:chain", native_amount="200", native_currency="USD", effective_at_ms=ms(instant),
+        ) == (Decimal(200) * expected.rate, None)
+    # A corrected value for the same quote must still supersede the earlier capture.
+    active = replace(active, effective_at_ms=original.effective_at_ms)
+    conversion = build_cash_conversion(
+        cash_fact_id="cash:same-quote", amount="200", currency="USD",
+        fx_payload={"fx_rate_facts": (original, active, future)},
+        effective_at_ms=original.effective_at_ms, observed_at_ms=now,
+    )
+    assert conversion["rate_evidence_fact_id"] == active.fact_id
+    assert conversion["amount_cny"] == "1400"
 
 
 def test_late_actual_fee_uses_original_day_and_missing_fx_does_not_block_fee(tmp_path) -> None:
     for available in (False, True):
         directory = tmp_path / str(available)
         repo = SQLiteOptionPositionsRepository(directory / "ledger.sqlite3")
-        row = event("order-1", ms("2026-09-07T08:00:00"))
+        row = event("order-1", ms("2026-09-07T12:00:00"))
         repo.upsert_trade_event(row)
         if available:
             (directory / "rate_cache.json").write_text(json.dumps(observation()))
@@ -199,7 +271,7 @@ def test_late_actual_fee_uses_original_day_and_missing_fx_does_not_block_fee(tmp
         conversion = stored["raw_payload"]["cash_conversions"]["option_fee_cash"]
         assert conversion["status"] == ("observed" if available else "pending")
         if available:
-            assert conversion["amount_cny"] == "-8.856" and conversion["cash_fx_date"] == "2026-09-07"
+            assert conversion["amount_cny"] == "-8.856" and conversion["method"] == MARKET_CASH_FX_METHOD
 
 
 def test_fetch_preserves_quote_time_and_falls_back_when_tencent_date_is_old(monkeypatch) -> None:
@@ -227,13 +299,18 @@ def _daily_correction_case(tmp_path, original_event):
     """Freeze one day's rates, run the ordinary backfill, and expose what it produced."""
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
-    repo.upsert_trade_event(original_event)
     now = ms("2026-09-10T12:00:00")
-    evidence.import_envelope(
-        EvidenceEnvelope(fx_rates=cash_fx_observation_facts(observation(), observed_at_ms=now)),
-        apply=True, migrated_at_ms=now,
+    # A pre-upgrade daily snapshot may legitimately use a later quote that day.
+    fixed = fixed_cash_fx_fact(cash_fx_observation_facts(observation(), observed_at_ms=now)[0])
+    evidence.import_envelope(EvidenceEnvelope(fx_rates=(fixed,)), apply=True, migrated_at_ms=now)
+    conversion = build_cash_conversion(
+        cash_fact_id=f"option_trade_cash_gross:{original_event.event_id}", amount="200", currency="USD",
+        fx_payload={"rates": {"USDCNY": str(fixed.rate)}, "timestamp": observation()["timestamp"]},
+        effective_at_ms=original_event.event_time_ms, observed_at_ms=now,
+        rate_source=fixed.source, rate_source_id=fixed.source_id, rate_evidence_fact_id=fixed.fact_id,
+        method=DAILY_CASH_FX_METHOD,
     )
-    backfill_cash_conversions(repo, evidence, apply=True, migrated_at_ms=now)
+    repo.upsert_trade_event(replace(original_event, raw_payload={**original_event.raw_payload, "cash_conversions": {"option_trade_cash_gross": conversion}}))
     original = repo.list_trade_events()[0]
     before = original["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
     fixed = next(fact for fact in evidence.read_all().fx_rates if fact.fact_id == before["rate_evidence_fact_id"])

@@ -147,8 +147,8 @@ def test_first_install_all_optional_skipped_is_saved_not_ready(tmp_path, environ
     assert calls == []
     document = yaml.safe_load((root / "config.yaml").read_text())
     assert document["accounts"]["one"]["futu"]["trd_env"] == environment
-    assert document["assistant"]["enabled"] is False
-    assert document["assistant"]["bot"]["enabled"] is False
+    assert document["bot"]["enabled"] is False
+    assert document["bot"]["enabled"] is False
     assert document["notifications"]["enabled"] is False
     assert "OpenD 连接未验证" in capsys.readouterr().out
 

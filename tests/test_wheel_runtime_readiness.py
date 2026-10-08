@@ -25,7 +25,6 @@ def _wheel_config(
 ) -> dict:
     return {
         "wheel": {
-            "enabled": True,
             "accounts": [account],
             "activation_by_account": {
                 account: {
@@ -236,7 +235,7 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     assert mismatch["reason_code"] == "descriptor_mismatch"
     assert mismatch["accounts"]["lx"]["generation"] == 2
 
-    no_descriptor = _readiness_us({"wheel": {"enabled": True, "accounts": ["lx"]}}, mismatch_path)
+    no_descriptor = _readiness_us({"wheel": {"accounts": ["lx"]}}, mismatch_path)
     assert no_descriptor["monitoring_gate"] == "disabled"
     assert no_descriptor["reason_code"] == "missing_descriptor"
 
@@ -386,14 +385,14 @@ def test_synthesized_refusals_state_policy_drift_is_false(tmp_path: Path) -> Non
     available_path = tmp_path / "available.sqlite3"
     _write_activation_table(available_path, policy_hash="f" * 64)
     unparseable = _readiness_us(
-        {"wheel": {"enabled": True, "accounts": ["lx"], "activation_by_account": "broken"}},
+        {"wheel": {"accounts": ["lx"], "activation_by_account": "broken"}},
         available_path,
     )
     assert unparseable["accounts"]["lx"]["reason_code"] == "descriptor_mismatch"
     assert unparseable["accounts"]["lx"]["policy_drift"] is False
     assert "remediation_command" not in unparseable["accounts"]["lx"]
 
-    no_descriptor = _readiness_us({"wheel": {"enabled": True, "accounts": ["lx"]}}, available_path)
+    no_descriptor = _readiness_us({"wheel": {"accounts": ["lx"]}}, available_path)
     assert no_descriptor["accounts"]["lx"]["reason_code"] == "missing_descriptor"
     assert no_descriptor["accounts"]["lx"]["policy_drift"] is False
     assert "remediation_command" not in no_descriptor["accounts"]["lx"]

@@ -36,7 +36,7 @@ def _bot_run_namespace(**overrides) -> Namespace:
         "host_db": None,
         "session_key": None,
         "model_config_json": None,
-        "assistant_config": None,
+        "bot_config": None,
     }
     base.update(overrides)
     return Namespace(**base)

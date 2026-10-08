@@ -104,7 +104,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         from src.application.bot.model_config import load_bot_read_scope
         try:
             markets, current = load_bot_read_scope(
-                config_path=str(contract.input.get("assistant_config_path") or ""),
+                config_path=str(contract.input.get("bot_config_path") or ""),
                 primary_market=str(contract.input.get("config_key") or ""),
             )
             return current == generation and sorted(markets) == contract.input.get("read_markets")

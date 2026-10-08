@@ -92,8 +92,11 @@ CC 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock 
    assigned-stock sale 把相同结构保存在 sale fact 的
    `cash_conversions[fact_kind]`。
 2. snapshot 必须匹配 `cash_fact_id`、native amount/currency 和
-   `quote_currency=CNY`。非零外币只有在汇率证据距离事件不超过 24 小时时
-   `status=observed`；否则写 `status=pending`、`amount_cny=null`。
+   `quote_currency=CNY`。新的市场报价折算统一使用 `event_time_market_fx`：选择事件时点
+   之前最近的已验证报价，由 `domain.domain.fx_quote_policy` 判断交易时段和连续休市。
+   已核实长假期间可沿用原报价；重新开市缺价、交易时段断档或日历未知时写
+   `status=pending`、`amount_cny=null`。原报价时间、观察时间、来源及日历依据随 snapshot 保存。
+   已有日固定价及官方历史折算仍按原方法验证，不自动重算。
 3. 幂等重试保留第一次写入的 conversion snapshot。读取报告不会用后来的汇率
    重算现金；legacy event 没有 snapshot 时保持 native-only/partial。
 4. activity、PnL 和 valuation 的 CNY 使用

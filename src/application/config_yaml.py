@@ -15,7 +15,7 @@ from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.account_config import normalize_account_label
-from src.application.assistant.llm_model_profiles import resolve_authoring_assistant_config
+from src.application.bot.control.llm_model_profiles import resolve_authoring_bot_config
 from src.application.config_primitives import (
     GENERATED_KEY,
     GENERATED_SCHEMA_VERSION,
@@ -33,7 +33,7 @@ from src.application.config_validator import (
     COMBO_YIELD_CALL_ALLOWED_FIELDS,
     COMBO_YIELD_PUT_ALLOWED_FIELDS,
     CLOSE_ADVICE_ALLOWED_FIELDS,
-    validate_assistant_config,
+    validate_bot_config,
     validate_config,
     warn,
 )
@@ -76,7 +76,7 @@ PASSTHROUGH_KEYS = {
     "templates",
     "watchdog",
 }
-ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
+BOT_AUTHORING_KEYS = {"bot", "inbound"}
 TRADE_INTAKE_AUTHORING_KEYS = {
     "combo_reconciliation",
     "holdings_sync",
@@ -89,7 +89,7 @@ ROOT_KEYS = {
     "portfolio_management",
     "trade_intake",
     *PASSTHROUGH_KEYS,
-    *ASSISTANT_AUTHORING_KEYS,
+    *BOT_AUTHORING_KEYS,
 }
 MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS}
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
@@ -102,7 +102,6 @@ COMBO_YIELD_AUTHORING_FIELDS = {
     key for key in COMBO_YIELD_ALLOWED_FIELDS if not key.startswith("_")
 }
 WHEEL_AUTHORING_FIELDS = {
-    "enabled",
     "accounts",
     "min_delta",
     "call",
@@ -133,9 +132,9 @@ def default_yaml_output_config_path(*, repo_root: Path, market: str, runtime_roo
     return (runtime.runtime_root / f"config.{market}.json").resolve()
 
 
-def default_yaml_assistant_config_path(*, repo_root: Path, runtime_root: str | Path | None = None) -> Path:
+def default_yaml_bot_config_path(*, repo_root: Path, runtime_root: str | Path | None = None) -> Path:
     runtime = resolve_runtime_root(repo_root=repo_root, runtime_root=runtime_root)
-    return (runtime.runtime_root / "resolved" / "config.assistant.json").resolve()
+    return (runtime.runtime_root / "resolved" / "config.bot.json").resolve()
 
 
 def _system_defaults(system_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -610,14 +609,8 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
             )
         _reject_unknown_keys(
             combo_reconciliation,
-            allowed={"accounts", "default_mode"},
+            allowed={"accounts"},
             path=f"{path}.combo_reconciliation",
-        )
-        default_raw = combo_reconciliation.get("default_mode", "off")
-        default_mode = (
-            "off"
-            if default_raw is False
-            else str(default_raw or "off").strip().lower()
         )
         accounts_raw = combo_reconciliation.get("accounts") or {}
         if not isinstance(accounts_raw, dict):
@@ -634,7 +627,6 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
             for account, mode in accounts_raw.items()
         }
         out["combo_reconciliation"] = {
-            "default_mode": default_mode,
             "accounts": account_modes,
         }
     return out
@@ -1062,19 +1054,15 @@ def _wheel_policy_drift_warning(drift: dict[str, Any], *, output_path: Path) -> 
     return "Wheel " + "; ".join(parts) + "."
 
 
-def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
-    assistant = cfg.get("assistant")
-    if isinstance(assistant, dict):
-        return deepcopy(assistant)
+def _bot_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    if "assistant" in cfg:
+        raise AgentToolError(code="CONFIG_ERROR", message="legacy assistant defaults require migration to bot")
+    bot_config = cfg.get("bot")
+    if isinstance(bot_config, dict):
+        return deepcopy(bot_config)
     return {
-        "enabled": True,
+        "enabled": False,
         "context_window_messages": 8,
-        "bot": {
-            "enabled": False,
-            "toolsets": {
-                "portfolio": False,
-            },
-        },
         "llm": {
             "provider": "",
             "base_url": "",
@@ -1088,7 +1076,7 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
     }
 
 
-def resolve_yaml_assistant_config(
+def resolve_yaml_bot_config(
     *,
     repo_root: Path,
     config_path: str | Path | None = None,
@@ -1102,14 +1090,15 @@ def resolve_yaml_assistant_config(
     system_ref = str(system_path) if system_path is not None else DEFAULT_CONFIG_REF
     system_sha256 = _file_sha256(system_path) if system_path is not None else default_config_sha256()
     raw_cfg = load_yaml_config_file(yaml_path)
+    _reject_unknown_keys(raw_cfg, allowed=ROOT_KEYS, path="config.yaml")
 
-    assistant_cfg = _assistant_config_from_runtime_defaults(system_cfg)
-    raw_assistant = raw_cfg.get("assistant")
-    if raw_assistant is not None:
-        if not isinstance(raw_assistant, dict):
-            raise AgentToolError(code="CONFIG_ERROR", message="assistant must be an object")
-        assistant_cfg = _deep_merge(assistant_cfg, raw_assistant)
-    assistant_cfg, assistant_model_meta = resolve_authoring_assistant_config(assistant_cfg)
+    bot_cfg = _bot_config_from_runtime_defaults(system_cfg)
+    raw_bot = raw_cfg.get("bot")
+    if raw_bot is not None:
+        if not isinstance(raw_bot, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message="bot must be an object")
+        bot_cfg = _deep_merge(bot_cfg, raw_bot)
+    bot_cfg, bot_model_meta = resolve_authoring_bot_config(bot_cfg)
 
     inbound_cfg = deepcopy(system_cfg.get("inbound") if isinstance(system_cfg.get("inbound"), dict) else {})
     raw_inbound = raw_cfg.get("inbound")
@@ -1143,7 +1132,7 @@ def resolve_yaml_assistant_config(
         ],
     }
     cfg = {
-        "assistant": assistant_cfg,
+        "bot": bot_cfg,
         "inbound": inbound_cfg,
         GENERATED_KEY: generated,
         RESOLVED_KEY: {
@@ -1152,8 +1141,8 @@ def resolve_yaml_assistant_config(
             "config_yaml_sha256": _file_sha256(yaml_path),
             "default_source": _path_for_metadata(system_path, repo_root=repo_root) if system_path is not None else system_ref,
             "default_sha256": system_sha256,
-            "runtime_schema": "assistant-config-json-v1",
-            "assistant_models": assistant_model_meta,
+            "runtime_schema": "bot-config-json-v1",
+            "bot_models": bot_model_meta,
         },
     }
     meta = {
@@ -1164,11 +1153,11 @@ def resolve_yaml_assistant_config(
         "system_config_ref": system_ref,
         "system_config_sha256": system_sha256,
     }
-    validate_assistant_config(deepcopy(cfg))
+    validate_bot_config(deepcopy(cfg))
     return cfg, meta
 
 
-def build_yaml_assistant_config_file(
+def build_yaml_bot_config_file(
     *,
     repo_root: Path,
     config_path: str | Path | None = None,
@@ -1177,19 +1166,19 @@ def build_yaml_assistant_config_file(
     runtime_root: str | Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    cfg, meta = resolve_yaml_assistant_config(
+    cfg, meta = resolve_yaml_bot_config(
         repo_root=repo_root,
         config_path=config_path,
         system_config_path=system_config_path,
     )
     output_path = _resolve_path(
         output_config_path,
-        default=default_yaml_assistant_config_path(repo_root=repo_root, runtime_root=runtime_root),
+        default=default_yaml_bot_config_path(repo_root=repo_root, runtime_root=runtime_root),
     )
     rebuild_parts = [
         "./om",
         "config",
-        "build-assistant",
+        "build-bot",
         "--source",
         "yaml",
         "--config-yaml",
@@ -1263,6 +1252,8 @@ def explain_yaml_config_key(
         "exists": bool(exists),
         "value": value if exists else None,
         "source": "resolved_yaml" if exists else None,
+        "evidence_scope": "configuration",
+        "runtime_observed": False,
         "runtime_path": runtime_path,
         "trace": [
             {
@@ -1283,15 +1274,15 @@ def explain_yaml_config_key(
 
 __all__ = [
     "RESOLVED_KEY",
-    "build_yaml_assistant_config_file",
+    "build_yaml_bot_config_file",
     "build_yaml_runtime_config_file",
-    "default_yaml_assistant_config_path",
+    "default_yaml_bot_config_path",
     "default_yaml_config_path",
     "default_yaml_output_config_path",
     "explain_yaml_config_key",
     "load_yaml_config_file",
     "market_user_config_fingerprint",
-    "resolve_yaml_assistant_config",
+    "resolve_yaml_bot_config",
     "resolve_yaml_runtime_config",
     "runtime_strategy_keys_to_yaml_authoring",
     "validate_yaml_runtime_config",

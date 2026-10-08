@@ -142,7 +142,7 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     assert str(rendered_helper) in written
     assert rendered_helper.stat().st_mode & 0o777 == 0o755
 
-def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
+def test_deepseek_credential_is_bound_only_to_selected_bot_service(
     tmp_path: Path,
 ) -> None:
     from src.application.service_deploy import render_service_bundle
@@ -155,10 +155,8 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
     config_yaml.write_text(
         "accounts: {}\n"
         "markets: {}\n"
-        "assistant:\n"
+        "bot:\n"
         "  enabled: true\n"
-        "  bot:\n"
-        "    enabled: true\n"
         "  active_model: deepseek-default\n"
         "  models:\n"
         "    deepseek-default:\n"
@@ -1071,10 +1069,8 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         "  hk:\n"
         "    accounts: [lx]\n"
         "    symbols: [0700.HK]\n"
-        "assistant:\n"
+        "bot:\n"
         "  enabled: true\n"
-        "  bot:\n"
-        "    enabled: true\n"
         "  active_model: deepseek-default\n"
         "  models:\n"
         "    deepseek-default:\n"
@@ -2760,7 +2756,7 @@ markets:
                 stdout=f"built {command[6]}\n",
                 stderr="",
             )
-        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
+        if command[:4] == ["./om", "config", "build-bot", "--source"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
@@ -2789,15 +2785,15 @@ markets:
     artifact_by_kind_market = {(item["kind"], item.get("market")): item for item in artifacts}
     assert artifact_by_kind_market[("runtime_config", "hk")]["live_path"] == str(hk_runtime)
     assert artifact_by_kind_market[("runtime_config", "us")]["live_path"] == str(us_runtime)
-    assert artifact_by_kind_market[("assistant_config", None)]["live_path"] == str(
-        runtime / "resolved" / "config.assistant.json"
+    assert artifact_by_kind_market[("bot_config", None)]["live_path"] == str(
+        runtime / "resolved" / "config.bot.json"
     )
     assert hk_runtime.exists()
     assert us_runtime.exists()
     for runtime_config in (hk_runtime, us_runtime):
         payload = json.loads(runtime_config.read_text(encoding="utf-8"))
         assert '"output_mode"' not in json.dumps(payload, sort_keys=True)
-    assert (runtime / "resolved" / "config.assistant.json").exists()
+    assert (runtime / "resolved" / "config.bot.json").exists()
     assert not (releases / "1.0.1" / "configs" / "user.hk.json").exists()
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert refreshed_profile["config_authoring"]["config_yaml"] == str(config_yaml)
@@ -2816,10 +2812,10 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
     config_yaml = runtime / "config.yaml"
     config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
     us_runtime = runtime / "config.us.json"
-    assistant_runtime = runtime / "resolved" / "config.assistant.json"
-    assistant_runtime.parent.mkdir()
+    bot_runtime = runtime / "resolved" / "config.bot.json"
+    bot_runtime.parent.mkdir()
     us_runtime.write_text('{"generation": "old"}\n', encoding="utf-8")
-    assistant_runtime.write_text('{"generation": "old-assistant"}\n', encoding="utf-8")
+    bot_runtime.write_text('{"generation": "old-assistant"}\n', encoding="utf-8")
     (runtime / "service.profile.json").write_text(
         json.dumps(
             {
@@ -2851,8 +2847,8 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
             assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"generation": "old"}
             Path(command[-1]).write_text('{"generation": "new"}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
-            assert json.loads(assistant_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
+        if command[:4] == ["./om", "config", "build-bot", "--source"]:
+            assert json.loads(bot_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
             Path(command[-1]).write_text('{"generation": "new-assistant"}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         if command[:4] == ["./om", "config", "validate", "--config-path"] and command[4] == str(us_runtime):
@@ -2874,7 +2870,7 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
     assert out["changed"] is False
     assert current.resolve() == v100.resolve()
     assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"generation": "old"}
-    assert json.loads(assistant_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
+    assert json.loads(bot_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
 
 def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
@@ -3047,7 +3043,7 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
+        if command[:4] == ["./om", "config", "build-bot", "--source"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         return None
@@ -3297,7 +3293,7 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
             assert current.resolve() == v101.resolve()
             assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"release": "1.0.1"}
             Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
-        elif command[:4] == ["./om", "config", "build-assistant", "--source"]:
+        elif command[:4] == ["./om", "config", "build-bot", "--source"]:
             Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
         elif command[:3] == [str(v100 / "om"), "service", "drift"]:
             drift_commands.append(list(command))

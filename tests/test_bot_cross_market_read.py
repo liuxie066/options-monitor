@@ -37,13 +37,13 @@ def _scope(tmp_path, monkeypatch, markets):
             output_config_path=path,
         )
         configs[market] = (path, json.loads(path.read_text()))
-    assistant = tmp_path / "config.assistant.json"
-    assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": markets}}}))
+    assistant = tmp_path / "config.bot.json"
+    assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': markets}}))
     allowed, generation = load_bot_read_scope(config_path=assistant, primary_market="us")
     return configs, {
         "config_key": "us", "config_path": str(configs["us"][0]),
         "read_markets": sorted(allowed), "read_generation": generation,
-        "assistant_config_path": str(assistant),
+        "bot_config_path": str(assistant),
     }
 
 
@@ -72,12 +72,12 @@ def test_ungranted_or_conflicting_hk_read_never_builds_a_payload(monkeypatch, tm
 
 
 @pytest.mark.parametrize("markets", [[], ["US"], ["us", "us"], ["cn"]])
-def test_invalid_assistant_read_grant_fails_closed(tmp_path, markets):
+def test_invalid_bot_read_grant_fails_closed(tmp_path, markets):
     assistant = tmp_path / "assistant.json"
-    assistant.write_text(json.dumps({"assistant": {"bot": {"read_markets": markets}}}))
-    with pytest.raises(AgentToolError, match="assistant config validation failed"):
+    assistant.write_text(json.dumps({"bot": {'enabled': False, 'read_markets': markets}}))
+    with pytest.raises(AgentToolError, match="Bot config validation failed"):
         load_bot_read_scope(config_path=assistant, primary_market="us")
-    assistant.write_text(json.dumps({"assistant": {"bot": {"read_markets": ["hk"]}}}))
+    assistant.write_text(json.dumps({"bot": {'enabled': False, 'read_markets': ['hk']}}))
     with pytest.raises(ValueError, match="include the channel market"):
         load_bot_read_scope(config_path=assistant, primary_market="us")
 
@@ -88,8 +88,8 @@ def test_dual_market_ambiguous_read_requires_market_and_revocation_stops_it(monk
     payload, error = tools.build_tool_payload(
         "trade_attribution_read", {"account": account}, fixed_input=fixed)
     assert payload is None and "specify the market" in error
-    assistant = tmp_path / "config.assistant.json"
-    assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+    assistant = tmp_path / "config.bot.json"
+    assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
     payload, error = tools.build_tool_payload(
         "trade_attribution_read", {"config_key": "hk", "account": account}, fixed_input=fixed)
     assert payload is None and "changed" in error
@@ -162,10 +162,10 @@ def test_dual_market_memory_uses_market_qualified_account_and_config_generation(
     assert verified_sources_from_run(run | {"events_json": json.dumps([observation])}, scope=scope_a)[
         "evidence:r1:obv_hk"]["account_scope"] == f"us:{account}"
 
-    assistant = tmp_path / "config.assistant.json"
+    assistant = tmp_path / "config.bot.json"
     original = assistant.read_bytes()
     stat = assistant.stat()
-    assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+    assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
     allowed, generation_b = load_bot_read_scope(config_path=assistant, primary_market="us")
     contract_b = _contract({**fixed, "read_markets": sorted(allowed), "read_generation": generation_b})
     scope_b = configured_memory_scope(contract_b)
@@ -183,10 +183,10 @@ def test_dual_market_memory_uses_market_qualified_account_and_config_generation(
 def test_host_rejects_in_flight_revocation_before_tool_read(monkeypatch, tmp_path):
     _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
     contract = _contract(fixed)
-    assistant = tmp_path / "config.assistant.json"
+    assistant = tmp_path / "config.bot.json"
 
     def model_request(**_kwargs):
-        assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+        assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
         return {"message": {"role": "assistant", "content": "", "tool_calls": [{
             "id": "read1", "type": "function", "function": {
                 "name": "trade_attribution_read", "arguments": json.dumps({
@@ -204,7 +204,7 @@ def test_rebuild_with_same_grant_isolates_channel_session_and_memory(monkeypatch
     first = _contract(fixed)
     first_session = session_key_for_contract(first)
     first_owner = configured_memory_scope(first).owner_scope
-    assistant = tmp_path / "config.assistant.json"
+    assistant = tmp_path / "config.bot.json"
     stat = assistant.stat()
     os.utime(assistant, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
     _markets, generation = load_bot_read_scope(config_path=assistant, primary_market="us")
@@ -213,10 +213,10 @@ def test_rebuild_with_same_grant_isolates_channel_session_and_memory(monkeypatch
     assert first_owner != configured_memory_scope(second).owner_scope
 
 
-def test_host_assistant_config_unavailable_before_start_is_not_ready(monkeypatch, tmp_path):
+def test_host_bot_config_unavailable_before_start_is_not_ready(monkeypatch, tmp_path):
     _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
     contract = _contract(fixed)
-    (tmp_path / "config.assistant.json").unlink()
+    (tmp_path / "config.bot.json").unlink()
     store = BotHostStore(tmp_path / "host.sqlite3")
     result = run_contract(contract, model_settings=_TEST_MODEL, host_store=store, session_key="old-session")
     assert result.status == "not_ready" and result.error["code"] == "SCENE_PREPARATION_FAILED"
@@ -226,7 +226,7 @@ def test_host_assistant_config_unavailable_before_start_is_not_ready(monkeypatch
 def test_host_revocation_after_tool_read_blocks_answer_and_outbox(monkeypatch, tmp_path):
     _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
     contract = _contract(fixed)
-    assistant = tmp_path / "config.assistant.json"
+    assistant = tmp_path / "config.bot.json"
     monkeypatch.setattr(tools, "call_read_tool", lambda *_args, **_kwargs: {"ok": True, "data": {"rows": [], "market": "hk", "account": "lx"}})
     turns = iter((
         {"message": {"role": "assistant", "content": "", "tool_calls": [{"id": "read", "type": "function", "function": {
@@ -237,7 +237,7 @@ def test_host_revocation_after_tool_read_blocks_answer_and_outbox(monkeypatch, t
     def model_request(**_kwargs):
         turn = next(turns)
         if turn["finish_reason"] == "stop":
-            assistant.write_text(json.dumps({"assistant": {"bot": {"enabled": True, "read_markets": ["us"]}}}))
+            assistant.write_text(json.dumps({"bot": {'enabled': True, 'read_markets': ['us']}}))
         return turn
     store = BotHostStore(tmp_path / "host.sqlite3")
     result = run_contract(contract, model_settings=_TEST_MODEL, model_request=model_request,

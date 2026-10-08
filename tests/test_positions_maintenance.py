@@ -66,6 +66,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     result = mod.run_expired_position_maintenance_for_account(
         base=tmp_path,
         cfg={
+            "notifications": {"enabled": True},
             "portfolio": {"data_config": str(data_config), "broker": "富途"},
             "option_positions": {"auto_close": {"grace_days": 2}},
         },
@@ -401,7 +402,7 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
 
     result = mod.run_expired_position_maintenance_for_account(
         base=tmp_path,
-        cfg={"portfolio": {"data_config": str(data_config)}},
+        cfg={"notifications": {"enabled": True}, "portfolio": {"data_config": str(data_config)}},
         account="lx",
         report_dir=tmp_path / "reports",
         as_of_ms=1777766400000,

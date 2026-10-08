@@ -286,11 +286,11 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
     finalizations: list[dict] = []
     preparations: list[str] = []
     config = {
-        "notifications": {
+        "notifications": {"enabled": True,
             "provider": "wechat_clawbot",
             "channel": "wechat_clawbot",
             "target": "wechat:ops",
-            "daily_brief": {"enabled": False},
+            "daily_brief": {},
         }
     }
     request = mod.TickNotificationRequest(

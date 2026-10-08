@@ -91,6 +91,7 @@ _NONDETERMINISTIC_PATH_CHARS = frozenset("*?[]{}<>")
 
 ROOT_RUNTIME_CONFIG_EXACT = {
     "config.assistant.json",
+    "config.bot.json",
     "config.json",
     "config.us.json",
     "config.hk.json",

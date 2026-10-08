@@ -12,8 +12,8 @@ import src.application.channels.wechat_clawbot.inbound as inbound
 import src.interfaces.cli.main as cli
 import time
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.contracts import AssistantRequest
+from src.application.bot.control.audit import InboundAuditStore
+from src.application.bot.control.contracts import BotInboundRequest
 from src.application.bot.host_store import BotHostStore
 from src.application.channels.status import build_channel_status
 from src.application.channels.wechat_clawbot.binding import (
@@ -33,7 +33,7 @@ from src.application.channels.wechat_clawbot.inbound import (
     check_wechat_clawbot_serve_settings,
     poll_wechat_clawbot_once,
     serve_wechat_clawbot,
-    wechat_clawbot_message_to_assistant_request,
+    wechat_clawbot_message_to_bot_request,
 )
 from src.application.channels.wechat_clawbot.message import (
     response_code,
@@ -48,7 +48,7 @@ from src.interfaces.cli.channel_ops import handle_channel_command
 
 @pytest.fixture(autouse=True)
 def isolated_default_audit_path(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.application.assistant.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
+    monkeypatch.setattr("src.application.bot.control.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
 
 
 def test_wechat_clawbot_response_parsers_preserve_precedence_and_traversal() -> None:
@@ -69,10 +69,10 @@ def test_wechat_clawbot_response_parsers_preserve_precedence_and_traversal() -> 
     assert response_message_id({"data": {}, "result": {"message_id": "result-id"}}) is None
 
 
-def _write_minimal_assistant_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "config.assistant.json"
+def _write_minimal_bot_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config.bot.json"
     config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "default_market_scope": "us"}}, ensure_ascii=False),
+        json.dumps({"bot": {'enabled': True, 'default_market_scope': 'us'}}, ensure_ascii=False),
         encoding="utf-8",
     )
     return config_path
@@ -96,7 +96,7 @@ def _wechat_config_path(tmp_path: Path) -> Path:
     """Write the channel config that targets ``wechat:ops``."""
     config_path = tmp_path / "config.us.json"
     config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
+        json.dumps({"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
         encoding="utf-8",
     )
     return config_path
@@ -480,8 +480,8 @@ def test_wechat_clawbot_refreshes_notification_binding_from_successful_reply(tmp
     assert bindings["ops"]["reply_message_id"] == "reply_1"
 
 
-def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path) -> None:
-    request = wechat_clawbot_message_to_assistant_request(
+def test_wechat_clawbot_message_adapter_builds_bot_request(tmp_path: Path) -> None:
+    request = wechat_clawbot_message_to_bot_request(
         {
             "from_user_id": "user_1",
             "group_id": "group_1",
@@ -494,7 +494,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
         audit_db=str(tmp_path / "audit.sqlite3"),
     )
 
-    assert request == AssistantRequest(
+    assert request == BotInboundRequest(
         text="状态",
         sender_id="user_1",
         channel="wechat",
@@ -617,7 +617,7 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
         label="ops",
         state_dir=str(state_dir),
         config_path=str(config_path),
-        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         timeout_sec=9,
@@ -701,7 +701,7 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
         label="ops",
         state_dir=str(state_dir),
         config_path=str(config_path),
-        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
@@ -809,7 +809,7 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
         label="ops",
         state_dir=str(state_dir),
         config_key="us",
-        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
@@ -887,7 +887,7 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
         base=tmp_path,
         state_dir=str(state_dir),
         config_path=str(config_path),
-        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
         allowed_senders="wechat:user_2",
         client_factory=FakeClient,
     )
@@ -1123,7 +1123,7 @@ def test_cli_channel_wechat_clawbot_poll_once_routes_to_handler(tmp_path: Path) 
         state_dir=str(tmp_path / "wechat-state"),
         config_key="us",
         config_path=None,
-        assistant_config=str(tmp_path / "config.assistant.json"),
+        bot_config=str(tmp_path / "config.bot.json"),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         no_reply=True,
@@ -1141,7 +1141,7 @@ def test_cli_channel_wechat_clawbot_poll_once_routes_to_handler(tmp_path: Path) 
     assert captured["base"] == tmp_path
     assert captured["state_dir"] == str(tmp_path / "wechat-state")
     assert captured["config_key"] == "us"
-    assert captured["assistant_config_path"] == str(tmp_path / "config.assistant.json")
+    assert captured["bot_config_path"] == str(tmp_path / "config.bot.json")
     assert captured["audit_db"] == str(tmp_path / "audit.sqlite3")
     assert captured["allowed_senders"] == "wechat:user_1"
     assert captured["reply_enabled"] is False
@@ -1208,12 +1208,12 @@ def test_wechat_clawbot_serve_check_suggests_connect_when_bot_token_missing(tmp_
     assert out["data"]["settings"]["connect_command_template"].startswith("./om channel wechat-clawbot connect")
 
 
-def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
-    assistant_config = tmp_path / "config.assistant.json"
-    assistant_config.write_text(
+def test_wechat_clawbot_serve_settings_reads_behavior_from_bot_config(tmp_path: Path) -> None:
+    bot_config = tmp_path / "config.bot.json"
+    bot_config.write_text(
         json.dumps(
             {
-                "assistant": {"default_market_scope": "us"},
+                "bot": {'enabled': False, 'default_market_scope': 'us'},
                 "inbound": {
                     "wechat_clawbot": {
                         "label": "ops",
@@ -1232,7 +1232,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
         encoding="utf-8",
     )
 
-    settings = build_wechat_clawbot_serve_settings(base=tmp_path, assistant_config_path=str(assistant_config))
+    settings = build_wechat_clawbot_serve_settings(base=tmp_path, bot_config_path=str(bot_config))
 
     assert settings.label == "ops"
     assert settings.state_dir == str(tmp_path / "wechat-state")
@@ -1247,7 +1247,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
     path_scoped = build_wechat_clawbot_serve_settings(
         base=tmp_path,
         config_path=str(tmp_path / "config.us.json"),
-        assistant_config_path=str(assistant_config),
+        bot_config_path=str(bot_config),
     )
 
     assert path_scoped.config_key is None
@@ -1256,7 +1256,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
     overridden = build_wechat_clawbot_serve_settings(
         base=tmp_path,
         label="cli",
-        assistant_config_path=str(assistant_config),
+        bot_config_path=str(bot_config),
         allowed_senders="wechat:user_2",
         reply_enabled=True,
         max_reply_chars=88,
@@ -1340,7 +1340,7 @@ def test_cli_channel_wechat_clawbot_serve_routes_to_handler(tmp_path: Path) -> N
         state_dir=str(tmp_path / "wechat-state"),
         config_key="us",
         config_path=None,
-        assistant_config=str(tmp_path / "config.assistant.json"),
+        bot_config=str(tmp_path / "config.bot.json"),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         no_reply=True,
@@ -1364,7 +1364,7 @@ def test_cli_channel_wechat_clawbot_serve_routes_to_handler(tmp_path: Path) -> N
     assert build_kwargs["base"] == tmp_path
     assert build_kwargs["state_dir"] == str(tmp_path / "wechat-state")
     assert build_kwargs["config_key"] == "us"
-    assert build_kwargs["assistant_config_path"] == str(tmp_path / "config.assistant.json")
+    assert build_kwargs["bot_config_path"] == str(tmp_path / "config.bot.json")
     assert build_kwargs["audit_db"] == str(tmp_path / "audit.sqlite3")
     assert build_kwargs["allowed_senders"] == "wechat:user_1"
     assert build_kwargs["reply_enabled"] is False
@@ -1393,11 +1393,11 @@ def test_cli_channel_wechat_clawbot_list_reads_local_state(tmp_path: Path, capsy
 
 def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: Path, capsys) -> None:
     runtime = tmp_path / "runtime"
-    assistant_config = runtime / "resolved" / "config.assistant.json"
+    bot_config = runtime / "resolved" / "config.bot.json"
     state_dir = runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops"
-    assistant_config.parent.mkdir(parents=True)
+    bot_config.parent.mkdir(parents=True)
     state_dir.mkdir(parents=True)
-    assistant_config.write_text(
+    bot_config.write_text(
         json.dumps(
             {
                 "inbound": {
@@ -1431,16 +1431,16 @@ def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: 
             {
                 "service_provider": "systemd",
                 "runtime_root": str(runtime),
-                "assistant_config_path": str(assistant_config),
+                "bot_config_path": str(bot_config),
                 "feishu_ws": {
                     "enabled": True,
-                    "assistant_config_path": str(assistant_config),
+                    "bot_config_path": str(bot_config),
                 },
                 "wechat_clawbot": {
                     "enabled": True,
                     "label": "ops",
                     "state_dir": str(state_dir),
-                    "assistant_config_path": str(assistant_config),
+                    "bot_config_path": str(bot_config),
                     "allowed_senders_configured": True,
                     "allowed_senders_source": "config_yaml",
                 },
@@ -1618,8 +1618,8 @@ def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monk
     monkeypatch.setattr(inbound, 'time', SimpleNamespace(monotonic=lambda: next(clock_values)))
     def forbidden(*args, **kwargs):
         raise AssertionError('expired message must not parse, prepare, execute or invoke a model')
-    monkeypatch.setattr('src.application.assistant.inbound_service._parse_command', forbidden)
-    monkeypatch.setattr('src.application.assistant.inbound_service._run_bot', forbidden)
+    monkeypatch.setattr('src.application.bot.control.inbound_service._parse_command', forbidden)
+    monkeypatch.setattr('src.application.bot.control.inbound_service._run_bot', forbidden)
     replies = []
     class Client:
         def __init__(self, **kwargs):
@@ -1635,7 +1635,7 @@ def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monk
             return {'ret': 0, 'message_id': 'terminal'}
     audit_db = str(tmp_path / 'explicit.sqlite3') if explicit_db else None
     out = inbound.poll_wechat_clawbot_once(base=tmp_path, state_dir=str(state_dir), audit_db=audit_db,
-        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
         allowed_senders='wechat:user_1' if access != 'unauthorized' else 'wechat:other',
         reply_enabled=access != 'disabled', execute_tool_fn=forbidden, client_factory=Client)
     results = out['data']['results']
@@ -1652,3 +1652,10 @@ def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monk
     else:
         assert replies == []
         assert results[0]['reply']['reason'] == ('permission_denied' if access == 'unauthorized' else 'reply_disabled')
+
+
+@pytest.fixture(autouse=True)
+def _enabled_bot_fixture(tmp_path, monkeypatch):
+    path = tmp_path / "test-bot-default.json"
+    path.write_text('{"bot":{"enabled":true}}')
+    monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: path)

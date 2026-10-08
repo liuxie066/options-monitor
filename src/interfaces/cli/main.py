@@ -16,11 +16,10 @@ from src.interfaces.cli.account_ops import (
     handle_account_command,
     remove_account,
 )
-from src.interfaces.cli.assistant_ops import (
-    add_assistant_commands,
-    check_assistant_llm,
-    handle_assistant_command,
-    handle_assistant_turn,
+from src.interfaces.cli.bot_control_ops import (
+    check_bot_llm,
+    handle_bot_control_command,
+    handle_bot_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
 from src.interfaces.cli.command_environment import command_environment
@@ -37,7 +36,7 @@ from src.interfaces.cli.inbound_ops import (
 from src.interfaces.cli.config_ops import (
     _validate_runtime_config,
     add_config_commands,
-    build_yaml_assistant_config_file,
+    build_yaml_bot_config_file,
     build_yaml_runtime_config_file,
     explain_yaml_config_key,
     get_runtime_config_value,
@@ -119,12 +118,18 @@ def _dumps(payload: dict[str, Any]) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    if argv is not None:
+        argv = list(argv)
+        if argv and argv[0] in {"assistant", "agent"}:
+            argv[0] = "bot"
+        if argv[:2] == ["config", "build-assistant"]:
+            argv[1] = "build-bot"
+        argv = ["--bot-config" if arg == "--assistant-config" else arg for arg in argv]
     parser = argparse.ArgumentParser(prog="om", description="options-monitor operator CLI; use `om help` for tasks, `om-agent spec` for structured tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_diagnostic_commands(sub)
 
-    add_assistant_commands(sub.add_parser("assistant", help="inspect optional conversational assistant runtime"))
 
     add_bot_commands(sub)
 
@@ -193,7 +198,7 @@ def _main(argv: list[str] | None = None) -> int:
         except SystemExit as exc:
             return int(exc.code)
     if actual_argv and actual_argv[0] == "agent":
-        actual_argv[0] = "assistant"
+        actual_argv[0] = "bot"
     if actual_argv and actual_argv[0] == "scan-pipeline":
         return int(run_scan_pipeline(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "option-positions":
@@ -212,6 +217,8 @@ def _main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.symbols import main as run_symbols_cli
 
         return int(run_symbols_cli(actual_argv[1:]))
+    if actual_argv and actual_argv[0] == "assistant":
+        actual_argv[0] = "bot"
     args = parse_args(actual_argv)
     try:
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
@@ -230,12 +237,12 @@ def _main(argv: list[str] | None = None) -> int:
                 format_runtime_logs_fn=format_runtime_logs,
             )
 
-        if args.command == "assistant":
-            return handle_assistant_command(
+        if args.command == "bot" and getattr(args, "bot_control_command", None):
+            return handle_bot_control_command(
                 args,
                 repo_base_fn=repo_base,
-                check_assistant_llm_fn=check_assistant_llm,
-                handle_assistant_turn_fn=handle_assistant_turn,
+                check_bot_llm_fn=check_bot_llm,
+                handle_bot_turn_fn=handle_bot_turn,
             )
 
         if args.command == "bot":
@@ -286,7 +293,7 @@ def _main(argv: list[str] | None = None) -> int:
                 validate_runtime_config_fn=_validate_runtime_config,
                 validate_yaml_runtime_config_fn=validate_yaml_runtime_config,
                 build_yaml_runtime_config_file_fn=build_yaml_runtime_config_file,
-                build_yaml_assistant_config_file_fn=build_yaml_assistant_config_file,
+                build_yaml_bot_config_file_fn=build_yaml_bot_config_file,
                 explain_yaml_config_key_fn=explain_yaml_config_key,
                 init_yaml_config_fn=init_yaml_config,
                 get_runtime_config_value_fn=get_runtime_config_value,

@@ -16,10 +16,10 @@ from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     RESOLVED_KEY,
     build_yaml_runtime_config_file,
-    build_yaml_assistant_config_file,
+    build_yaml_bot_config_file,
     explain_yaml_config_key,
     market_user_config_fingerprint,
-    resolve_yaml_assistant_config,
+    resolve_yaml_bot_config,
     resolve_yaml_runtime_config,
     runtime_strategy_keys_to_yaml_authoring,
     yaml_to_market_user_config,
@@ -74,12 +74,10 @@ accounts:
 features:
   close_advice: false
 
-assistant:
+bot:
   enabled: true
   context_window_messages: 6
   default_market_scope: us
-  bot:
-    enabled: true
   llm:
     provider: ""
     base_url: ""
@@ -208,11 +206,9 @@ accounts:
     futu_account_id: "REAL_12345678"
 """
 
-_ASSISTANT_DEFAULTS_YAML = """\
-assistant:
+_BOT_DEFAULTS_YAML = """\
+bot:
   enabled: true
-  bot:
-    enabled: true
 """
 
 
@@ -246,7 +242,6 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
             "    accounts: [lx, sy]\n"
             "    features:\n"
             "      wheel:\n"
-            "        enabled: true\n"
             "        accounts: [lx]\n"
             "        min_delta: 0.99\n"
             "        call:\n"
@@ -270,7 +265,7 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
         config_path=config_path,
     )
 
-    assert config["wheel"]["enabled"] is True
+    assert "enabled" not in config["wheel"]
     assert config["wheel"]["accounts"] == ["lx"]
     assert config["wheel"]["call"]["min_dte"] == 30
     assert config["wheel"]["call"]["max_dte"] == 45
@@ -611,7 +606,6 @@ def _wheel_yaml(*, put_min_dte: int = 14, generation: int = 2) -> str:
         "    accounts: [lx, sy]\n"
         "    features:\n"
         "      wheel:\n"
-        "        enabled: true\n"
         "        accounts: [lx]\n"
         "        call:\n"
         "          min_dte: 30\n"
@@ -1107,7 +1101,7 @@ def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
     assert item["sell_call"]["enabled"] is True
     assert item["sell_call"]["min_strike"] == 85.0
     assert (runtime_root / "config.us.json").exists()
-    assert (runtime_root / "resolved" / "config.assistant.json").exists()
+    assert (runtime_root / "resolved" / "config.bot.json").exists()
 
 
 def test_yaml_account_add_is_preview_only_by_default(tmp_path: Path) -> None:
@@ -1229,7 +1223,7 @@ def test_yaml_symbol_set_rejects_empty_setting(tmp_path: Path) -> None:
         )
 
 
-def test_yaml_assistant_config_merges_system_defaults(tmp_path: Path) -> None:
+def test_yaml_bot_config_merges_system_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD
@@ -1243,12 +1237,11 @@ inbound:
 """,
     )
 
-    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+    cfg, _meta = resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assert cfg["assistant"]["enabled"] is True
-    assert cfg["assistant"]["bot"]["enabled"] is False
-    assert cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
-    assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert cfg["bot"]["enabled"] is False
+    assert "toolsets" not in cfg["bot"]
+    assert cfg["bot"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
     assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
@@ -1260,7 +1253,7 @@ inbound:
     assert cfg["inbound"]["wechat_clawbot"]["keepalive_interval_sec"] == 1800.0
 
 
-def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:
+def test_yaml_bot_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD,
@@ -1270,13 +1263,7 @@ def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) 
         json.dumps(
             {
                 "defaults": {
-                    "assistant": {
-                        "enabled": True,
-                        "bot": {"enabled": True},
-                        "context_window_messages": 3,
-                        "default_market_scope": "hk",
-                        "llm": {"provider": "openai"},
-                    },
+                    "bot": {'enabled': True, 'context_window_messages': 3, 'default_market_scope': 'hk', 'llm': {'provider': 'openai'}},
                     "inbound": {"feishu_ws": {"ack_reaction": "SMILE", "queue_size": 7}},
                 }
             },
@@ -1285,22 +1272,22 @@ def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    cfg, _meta = resolve_yaml_assistant_config(
+    cfg, _meta = resolve_yaml_bot_config(
         repo_root=REPO_ROOT,
         config_path=config_path,
         system_config_path=system_path,
     )
 
-    assert cfg["assistant"]["enabled"] is True
-    assert cfg["assistant"]["bot"]["enabled"] is True
-    assert cfg["assistant"]["context_window_messages"] == 3
-    assert cfg["assistant"]["default_market_scope"] == "hk"
-    assert cfg["assistant"]["llm"]["provider"] == "openai"
+    assert cfg["bot"]["enabled"] is True
+    assert cfg["bot"]["enabled"] is True
+    assert cfg["bot"]["context_window_messages"] == 3
+    assert cfg["bot"]["default_market_scope"] == "hk"
+    assert cfg["bot"]["llm"]["provider"] == "openai"
     assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "SMILE"
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 7
 
-    output_path = tmp_path / "config.assistant.json"
-    build_yaml_assistant_config_file(
+    output_path = tmp_path / "config.bot.json"
+    build_yaml_bot_config_file(
         repo_root=REPO_ROOT,
         config_path=config_path,
         system_config_path=system_path,
@@ -1310,11 +1297,11 @@ def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) 
     assert f"--system-config {system_path}" in generated[GENERATED_KEY]["rebuild_command"]
 
 
-def test_yaml_assistant_config_resolves_active_model_profile(tmp_path: Path) -> None:
+def test_yaml_bot_config_resolves_active_model_profile(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD
-        + _ASSISTANT_DEFAULTS_YAML
+        + _BOT_DEFAULTS_YAML
         + """\
   active_model: deepseek-default
   models:
@@ -1333,9 +1320,9 @@ def test_yaml_assistant_config_resolves_active_model_profile(tmp_path: Path) -> 
 """,
     )
 
-    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+    cfg, _meta = resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assistant = cfg["assistant"]
+    assistant = cfg["bot"]
     assert "models" not in assistant
     assert "active_model" not in assistant
     assert assistant["llm"]["provider"] == "deepseek"
@@ -1344,16 +1331,16 @@ def test_yaml_assistant_config_resolves_active_model_profile(tmp_path: Path) -> 
     assert assistant["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert assistant["llm"]["context_window_tokens"] == 24000
     assert "max_attempts" not in assistant["llm"]
-    resolved = cfg[RESOLVED_KEY]["assistant_models"]
+    resolved = cfg[RESOLVED_KEY]["bot_models"]
     assert resolved["active_model"] == "deepseek-default"
     assert resolved["profile_count"] == 2
     assert resolved["resolved_profile"]["provider"] == "deepseek"
 
 
-def test_yaml_assistant_model_profile_requires_declared_context_window(tmp_path: Path) -> None:
+def test_yaml_bot_model_profile_requires_declared_context_window(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        _ASSISTANT_DEFAULTS_YAML
+        _BOT_DEFAULTS_YAML
         + """\
   active_model: deepseek-default
   models:
@@ -1365,13 +1352,13 @@ def test_yaml_assistant_model_profile_requires_declared_context_window(tmp_path:
     )
 
     with pytest.raises(AgentToolError, match="context_window_tokens must be an integer"):
-        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+        resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
-def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Path) -> None:
+def test_yaml_bot_config_allows_local_ollama_without_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
-        _ASSISTANT_DEFAULTS_YAML
+        _BOT_DEFAULTS_YAML
         + """\
   active_model: local
   models:
@@ -1383,9 +1370,9 @@ def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Pat
 """,
     )
 
-    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+    cfg, _meta = resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assert cfg["assistant"]["llm"] == {
+    assert cfg["bot"]["llm"] == {
         "provider": "ollama",
         "base_url": "http://127.0.0.1:11434/v1",
         "model": "gpt-oss:20b",
@@ -1395,11 +1382,11 @@ def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Pat
     }
 
 
-def test_yaml_assistant_config_rejects_unknown_active_model_profile(tmp_path: Path) -> None:
+def test_yaml_bot_config_rejects_unknown_active_model_profile(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD
-        + _ASSISTANT_DEFAULTS_YAML
+        + _BOT_DEFAULTS_YAML
         + """\
   active_model: missing
   models:
@@ -1413,52 +1400,35 @@ def test_yaml_assistant_config_rejects_unknown_active_model_profile(tmp_path: Pa
     )
 
     with pytest.raises(AgentToolError, match="unknown model profile"):
-        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+        resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
-def test_yaml_assistant_config_rejects_user_configurable_hooks(tmp_path: Path) -> None:
+def test_yaml_bot_config_rejects_user_configurable_hooks(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD
-        + _ASSISTANT_DEFAULTS_YAML
+        + _BOT_DEFAULTS_YAML
         + """\
   hooks:
     pre_tool_use: custom
 """,
     )
 
-    with pytest.raises(SystemExit, match="assistant has unsupported keys: hooks"):
-        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+    with pytest.raises(SystemExit, match="bot has unsupported keys: hooks"):
+        resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
-def test_yaml_assistant_config_omits_retired_bot_keys(tmp_path: Path) -> None:
+def test_yaml_bot_config_rejects_retired_bot_keys(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _US_HOLDINGS_YAML_HEAD + _BOT_DEFAULTS_YAML + "  channel_scenes: [operations_diagnostics]\n  human_review: false\n")
+    with pytest.raises(SystemExit, match="unsupported keys"):
+        resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
+
+
+def test_yaml_bot_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _US_HOLDINGS_YAML_HEAD
-        + _ASSISTANT_DEFAULTS_YAML
-        + """\
-    channel_scenes: [operations_diagnostics]
-    human_review: false
-""",
-    )
-
-    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
-
-    assert cfg["assistant"]["bot"] == {
-        "enabled": True,
-        "tool_loading_mode": "eager",
-        "toolsets": {"portfolio": False},
-    }
-    assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [
-        "retired assistant.bot keys omitted: channel_scenes, human_review"
-    ]
-
-
-def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
-    config_path = _write_yaml(
-        tmp_path / "config.yaml",
-        _US_HOLDINGS_YAML_HEAD
-        + _ASSISTANT_DEFAULTS_YAML
+        + _BOT_DEFAULTS_YAML
         + """\
   active_model: unsafe
   models:
@@ -1470,7 +1440,7 @@ def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> 
     )
 
     with pytest.raises(AgentToolError, match="must not store secret values"):
-        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+        resolve_yaml_bot_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
 def test_default_config_matches_legacy_system_json() -> None:
@@ -1500,22 +1470,22 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["assistant"]["enabled"] is False
-    assert payload["assistant"]["bot"]["enabled"] is False
-    assert payload["assistant"]["bot"]["toolsets"]["portfolio"] is False
-    assert payload["assistant"]["context_window_messages"] == 8
-    assert "default_market_scope" not in payload["assistant"]
-    assert payload["assistant"]["active_model"] == "deepseek-default"
-    assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-v4-pro"
-    assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert set(payload["assistant"]["models"]) == {"deepseek-default"}
-    assert "max_output_tokens" not in payload["assistant"]["models"]["deepseek-default"]
+    assert payload["bot"]["enabled"] is False
+    assert payload["bot"]["enabled"] is False
+    assert "toolsets" not in payload["bot"]
+    assert payload["bot"]["context_window_messages"] == 8
+    assert "default_market_scope" not in payload["bot"]
+    assert payload["bot"]["active_model"] == "deepseek-default"
+    assert payload["bot"]["models"]["deepseek-default"]["model"] == "deepseek-v4-pro"
+    assert payload["bot"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert set(payload["bot"]["models"]) == {"deepseek-default"}
+    assert "max_output_tokens" not in payload["bot"]["models"]["deepseek-default"]
     assert payload["markets"]["us"]["accounts"] == ["lx"]
     assert payload["markets"]["us"]["symbols"] == ["AAPL"]
     assert payload["markets"]["hk"]["symbols"] == ["0005.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
     hk_cfg = json.loads((runtime_dir / "config.hk.json").read_text(encoding="utf-8"))
-    assistant_cfg = json.loads((runtime_dir / "config.assistant.json").read_text(encoding="utf-8"))
+    bot_cfg = json.loads((runtime_dir / "config.bot.json").read_text(encoding="utf-8"))
     assert [item["symbol"] for item in us_cfg["symbols"]] == ["AAPL"]
     assert [item["symbol"] for item in hk_cfg["symbols"]] == ["0005.HK"]
     assert us_cfg[GENERATED_KEY]["source_format"] == "yaml"
@@ -1523,19 +1493,19 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert us_cfg["runtime"] == hk_cfg["runtime"]
-    assert assistant_cfg["assistant"]["enabled"] is False
-    assert assistant_cfg["assistant"]["bot"]["enabled"] is False
-    assert assistant_cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
-    assert assistant_cfg["assistant"]["context_window_messages"] == 8
-    assert "default_market_scope" not in assistant_cfg["assistant"]
-    assert "active_model" not in assistant_cfg["assistant"]
-    assert "models" not in assistant_cfg["assistant"]
-    assert assistant_cfg["assistant"]["llm"]["base_url"] == "https://api.deepseek.com"
-    assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 90
-    assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 1_000_000
-    assert assistant_cfg["assistant"]["llm"].get("max_output_tokens") is None
-    assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+    assert bot_cfg["bot"]["enabled"] is False
+    assert bot_cfg["bot"]["enabled"] is False
+    assert "toolsets" not in bot_cfg["bot"]
+    assert bot_cfg["bot"]["context_window_messages"] == 8
+    assert "default_market_scope" not in bot_cfg["bot"]
+    assert "active_model" not in bot_cfg["bot"]
+    assert "models" not in bot_cfg["bot"]
+    assert bot_cfg["bot"]["llm"]["base_url"] == "https://api.deepseek.com"
+    assert bot_cfg["bot"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert bot_cfg["bot"]["llm"]["timeout_seconds"] == 90
+    assert bot_cfg["bot"]["llm"]["context_window_tokens"] == 1_000_000
+    assert bot_cfg["bot"]["llm"].get("max_output_tokens") is None
+    assert bot_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
 
 
 @pytest.mark.parametrize("market", ["us", "hk"])
@@ -1889,7 +1859,6 @@ def test_yaml_config_accepts_account_scoped_combo_reconciliation(tmp_path: Path)
         + """\
 trade_intake:
   combo_reconciliation:
-    default_mode: off
     accounts:
       lx: auto
 markets:
@@ -1906,7 +1875,7 @@ markets:
     )
 
     assert cfg["trade_intake"]["combo_reconciliation"] == {
-        "default_mode": "off",
+
         "accounts": {"lx": "auto"},
     }
 
@@ -1916,14 +1885,14 @@ markets:
     [
         (
             "default_mode: observe\n    accounts: {}",
-            "default_mode must remain off",
+            "is not supported",
         ),
         (
-            "default_mode: off\n    accounts:\n      LX: confirm",
+            "accounts:\n      LX: confirm",
             "account labels must be lowercase",
         ),
         (
-            "default_mode: off\n    accounts:\n      unknown: confirm",
+            "accounts:\n      unknown: confirm",
             "is not a configured account",
         ),
     ],
@@ -2054,7 +2023,7 @@ def _market_source(config: dict) -> dict:
 
 @pytest.mark.parametrize('market', ['us', 'hk'])
 @pytest.mark.parametrize('change,stale_markets', [
-    ('assistant_model', set()), ('assistant_context', set()), ('assistant_enabled', set()),
+    ('bot_model', set()), ('bot_context', set()), ('bot_enabled', set()),
     ('comments', set()), ('us_symbols', {'us'}), ('hk_symbols', {'hk'}),
     ('us_schedule', {'us'}), ('us_accounts', {'us'}), ('selected_account', {'us', 'hk'}),
     ('shared_runtime', {'us', 'hk'}),
@@ -2064,12 +2033,12 @@ def test_yaml_freshness_tracks_market_inputs(tmp_path: Path, market: str, change
     config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market=market, config_path=path)
     before = deepcopy(config)
     doc = yaml.safe_load(_minimal_yaml())
-    if change == 'assistant_model':
-        doc['assistant']['llm']['model'] = 'another-model'
-    elif change == 'assistant_context':
-        doc['assistant']['context_window_messages'] = 20
-    elif change == 'assistant_enabled':
-        doc['assistant']['enabled'] = False
+    if change == 'bot_model':
+        doc['bot']['llm']['model'] = 'another-model'
+    elif change == 'bot_context':
+        doc['bot']['context_window_messages'] = 20
+    elif change == 'bot_enabled':
+        doc['bot']['enabled'] = False
     elif change == 'us_symbols':
         doc['markets']['us']['symbols'].append('AAPL')
     elif change == 'hk_symbols':

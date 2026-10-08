@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from src.application.runtime_paths import resolve_runtime_root
+from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
+
 from pathlib import Path
 
 import argparse
@@ -791,10 +794,10 @@ def main():
         state_dir = sd
         out_path = (state_dir / 'option_positions_context.json').resolve()
 
-    # Prefer co-locating rate_cache with state_dir
+    # Output location does not select a different FX cache.
 
     rates = get_exchange_rates_or_fetch_latest(
-        cache_path=(state_dir / 'rate_cache.json').resolve(),
+        cache_path=shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root),
         max_age_hours=24,
     )
     broker = normalize_broker(args.broker)

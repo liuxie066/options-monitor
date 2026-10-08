@@ -38,7 +38,7 @@ def _payload(deal_id="opening", *, effect="open"):
 
 
 def _processor(tmp_path, repo, monkeypatch, sender, *, routed=True):
-    cfg = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test" if routed else ""}}
+    cfg = {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test" if routed else ""}}
     monkeypatch.setattr(auto_intake, "send_trade_intake_receipt", partial(
         receipt.send_trade_intake_receipt, send_fn=sender, normalize_fn=lambda **kwargs: kwargs,
     ))
@@ -73,7 +73,7 @@ def _stored(tmp_path, payload):
 
 
 def _recover(tmp_path, repo, monkeypatch, calls, *, sender=None, routed=True):
-    cfg = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test" if routed else ""}}
+    cfg = {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test" if routed else ""}}
     monkeypatch.setattr(auto_intake, "send_trade_intake_receipt", partial(
         receipt.send_trade_intake_receipt, send_fn=sender or _successful_sender(calls), normalize_fn=lambda **kwargs: kwargs))
     callback = auto_intake._build_receipt_callback(base=tmp_path, cfg=cfg, receipt_config={"enabled": True}, repo=repo)
@@ -480,7 +480,7 @@ def test_legacy_source_recovery_uses_current_mapping_and_rejects_remapped_accoun
     repo, calls = _ledger_case(tmp_path)
     payload = _payload("779")
     _processor(tmp_path, repo, monkeypatch, _successful_sender(calls), routed=False)(payload)
-    cfg = {"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}}
+    cfg = {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-test"}}
     callback = auto_intake._build_receipt_callback(base=tmp_path, cfg=cfg, receipt_config={"enabled": True}, repo=repo)
     source = {"state_path": tmp_path / "state.json", "account": None,
               "inbox_path": tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3", "futu_account_ids": ["123"],

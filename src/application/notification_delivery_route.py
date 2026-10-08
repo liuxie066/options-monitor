@@ -10,9 +10,9 @@ NotificationRouteResolver = Callable[..., dict[str, Any]]
 
 
 def notifications_enabled(config: dict[str, Any] | None) -> bool:
-    """Omitted legacy setting remains enabled; only explicit false opts out."""
+    """Outbound delivery requires explicit opt-in; legacy intent is preserved by migration."""
     notifications = (config or {}).get("notifications")
-    return not isinstance(notifications, dict) or notifications.get("enabled") is not False
+    return isinstance(notifications, dict) and notifications.get("enabled") is True
 
 
 def resolve_notification_delivery_route(

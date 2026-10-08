@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
-from src.application.assistant.config_loader import load_assistant_config
-from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, AssistantLlmSettings
+from src.application.bot.control.config_loader import load_bot_config
+from src.application.bot.control.audit import InboundAuditStore
+from src.application.bot.control.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, BotSettings, BotLlmSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
 from src.application.channels.feishu import build_feishu_inbound_channel_service
@@ -79,7 +79,7 @@ LOG = logging.getLogger(__name__)
 class FeishuWsSettings:
     config_key: str | None = None
     config_path: str | None = None
-    assistant_config_path: str | None = None
+    bot_config_path: str | None = None
     audit_db: str | None = None
     allowed_senders: str | None = None
     app_id: str = ""
@@ -89,11 +89,10 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
-    assistant_enabled: bool = True
-    assistant_bot_enabled: bool = False
-    assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
-    assistant_default_market_scope: str = ""
-    assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
+    bot_enabled: bool = False
+    bot_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
+    bot_default_market_scope: str = ""
+    bot_llm: BotLlmSettings = field(default_factory=BotLlmSettings)
     metadata_only: bool = False
 
     def validate_for_serve(self) -> None:
@@ -101,7 +100,7 @@ class FeishuWsSettings:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing inbound runtime config scope for Feishu WebSocket",
-                hint="Pass --config-key us/hk, --config-path, or set assistant.default_market_scope explicitly.",
+                hint="Pass --config-key us/hk, --config-path, or set bot.default_market_scope explicitly.",
             )
         if not self.allowed_senders:
             raise AgentToolError(
@@ -128,7 +127,7 @@ class FeishuWsSettings:
         out: dict[str, Any] = {
             "config_key": self.config_key,
             "config_path": self.config_path,
-            "assistant_config_path": self.assistant_config_path,
+            "bot_config_path": self.bot_config_path,
             "audit_db": mask_path(self.audit_db),
             "allowed_senders_configured": bool(self.allowed_senders),
             "app_id_configured": bool(self.app_id),
@@ -138,11 +137,10 @@ class FeishuWsSettings:
             "max_reply_chars": int(self.max_reply_chars),
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
-            "assistant_enabled": bool(self.assistant_enabled),
-            "assistant_bot_enabled": bool(self.assistant_bot_enabled),
-            "assistant_context_window_messages": int(self.assistant_context_window_messages),
-            "assistant_default_market_scope": self.assistant_default_market_scope,
-            "assistant_llm": self.assistant_llm.public_payload(),
+            "bot_enabled": bool(self.bot_enabled),
+            "bot_context_window_messages": int(self.bot_context_window_messages),
+            "bot_default_market_scope": self.bot_default_market_scope,
+            "bot_llm": self.bot_llm.public_payload(),
         }
         if sdk_available is not None:
             out["sdk_available"] = bool(sdk_available)
@@ -153,7 +151,7 @@ def build_feishu_ws_settings(
     *,
     config_key: str | None = None,
     config_path: str | None = None,
-    assistant_config_path: str | None = None,
+    bot_config_path: str | None = None,
     audit_db: str | None = None,
     reply_enabled: bool | None = None,
     reply_in_thread: bool | None = None,
@@ -171,24 +169,24 @@ def build_feishu_ws_settings(
             env_file=credential_env_file,
         )
     env = effective_env.values
-    bot_cfg = resolve_feishu_bot_config(environ=env, metadata_only=metadata_only)
-    assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
-    behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))
-    assistant_settings = AssistantSettings.from_runtime_config(assistant_cfg)
+    channel_credentials = resolve_feishu_bot_config(environ=env, metadata_only=metadata_only)
+    bot_cfg = _load_bot_behavior_config(config_path=bot_config_path)
+    behavior_cfg = _dict(_dict(bot_cfg.get("inbound")).get("feishu_ws"))
+    bot_settings = BotSettings.from_runtime_config(bot_cfg)
     default_config_key = (
-        assistant_settings.default_market_scope
-        if assistant_settings.default_market_scope in {"us", "hk"}
+        bot_settings.default_market_scope
+        if bot_settings.default_market_scope in {"us", "hk"}
         else None
     )
     resolved_config_path = _first_text(config_path)
     return FeishuWsSettings(
         config_key=str(config_key or (None if resolved_config_path else default_config_key) or "").strip().lower() or None,
         config_path=resolved_config_path,
-        assistant_config_path=_first_text(assistant_config_path),
+        bot_config_path=_first_text(bot_config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
-        allowed_senders=bot_cfg.default_allowed_senders(),
-        app_id=bot_cfg.app_id,
-        app_secret=bot_cfg.app_secret,
+        allowed_senders=channel_credentials.default_allowed_senders(),
+        app_id=channel_credentials.app_id,
+        app_secret=channel_credentials.app_secret,
         reply_enabled=_config_bool(reply_enabled, behavior_cfg.get("reply_enabled"), default=True),
         reply_in_thread=_config_bool(reply_in_thread, behavior_cfg.get("reply_in_thread"), default=False),
         max_reply_chars=_config_positive_int(
@@ -202,11 +200,10 @@ def build_feishu_ws_settings(
             behavior_cfg.get("queue_size"),
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
-        assistant_enabled=bool(assistant_settings.enabled),
-        assistant_bot_enabled=bool(assistant_settings.bot.enabled),
-        assistant_context_window_messages=assistant_settings.context_window_messages,
-        assistant_default_market_scope=assistant_settings.default_market_scope,
-        assistant_llm=assistant_settings.llm,
+        bot_enabled=bool(bot_settings.enabled),
+        bot_context_window_messages=bot_settings.context_window_messages,
+        bot_default_market_scope=bot_settings.default_market_scope,
+        bot_llm=bot_settings.llm,
         metadata_only=metadata_only,
     )
 
@@ -276,7 +273,7 @@ def handle_feishu_ws_event(
         config_key=settings.config_key,
         config_path=settings.config_path,
         audit_db=settings.audit_db,
-        assistant_config_path=settings.assistant_config_path,
+        bot_config_path=settings.bot_config_path,
         **inbound_kwargs,
     )
     inbound_ms = _duration_ms(stage_started, time.monotonic())
@@ -407,7 +404,7 @@ def serve_feishu_ws(
                     prepare_feishu_analysis_control(payload,
                         allowed_senders=settings.allowed_senders, config_key=settings.config_key,
                         config_path=settings.config_path, audit_db=settings.audit_db,
-                        assistant_config_path=settings.assistant_config_path,
+                        bot_config_path=settings.bot_config_path,
                         received_monotonic=received_monotonic)
                 except Exception as exc:
                     analysis_control_failed = True
@@ -1030,8 +1027,8 @@ def _inbound_render_route(inbound_result: dict[str, Any]) -> str | None:
     if direct:
         return direct
     meta = _dict(inbound_result.get("meta"))
-    assistant = _dict(meta.get("assistant"))
-    return _first_text(assistant.get("route"))
+    bot_config = _dict(meta.get("bot", meta.get("assistant")))
+    return _first_text(bot_config.get("route"))
 
 
 def _reply_render_status(
@@ -1223,10 +1220,10 @@ def _opaque_reference(kind: str, value: Any) -> str | None:
     return f"{kind}:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any]:
+def _load_bot_behavior_config(*, config_path: str | None) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     try:
-        _path, cfg = load_assistant_config(config_path=config_path, missing_ok=not explicit_config_path)
+        _path, cfg = load_bot_config(config_path=config_path, missing_ok=not explicit_config_path)
     except AgentToolError:
         if explicit_config_path:
             raise

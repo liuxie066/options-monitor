@@ -1,3 +1,6 @@
+notifications:
+  enabled: false
+
 accounts:
   lx:
     type: futu
@@ -7,7 +10,6 @@ accounts:
 
 trade_intake:
   combo_reconciliation:
-    default_mode: off
     accounts: {}
 
 portfolio:
@@ -25,7 +27,6 @@ markets:
     accounts: [lx]
     features:
       wheel:
-        enabled: false
         accounts: []
         min_dte: 30
         max_dte: 45
@@ -56,14 +57,9 @@ markets:
       - "0700.HK"
       - "9992.HK"
 
-assistant:
+bot:
   enabled: true
   context_window_messages: 8
-  bot:
-    enabled: true
-    tool_loading_mode: eager
-    toolsets:
-      portfolio: false
   active_model: deepseek-default
   models:
     deepseek-default:

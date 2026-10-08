@@ -18,10 +18,10 @@ from src.application.account_config import (
 )
 from src.application.config_yaml import (
     load_yaml_config_file,
-    resolve_yaml_assistant_config,
+    resolve_yaml_bot_config,
     resolve_yaml_runtime_config,
 )
-from src.application.assistant.settings import AssistantSettings
+from src.application.bot.control.settings import BotSettings
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.secret_store import (
     FEISHU_BOT_APP_SECRET,
@@ -240,8 +240,8 @@ def _resolve_wechat_clawbot_config_key(
 def _wechat_clawbot_inbound_config_from_yaml(*, repo_root: Path, config_yaml_path: Path | None) -> dict[str, Any]:
     if config_yaml_path is None:
         return {}
-    assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=repo_root, config_path=config_yaml_path)
-    inbound = assistant_cfg.get("inbound")
+    bot_cfg, _meta = resolve_yaml_bot_config(repo_root=repo_root, config_path=config_yaml_path)
+    inbound = bot_cfg.get("inbound")
     if not isinstance(inbound, dict):
         return {}
     wechat_clawbot = inbound.get("wechat_clawbot")
@@ -558,23 +558,23 @@ def _render_systemd_service_asset(name: str, replacements: dict[str, str]) -> st
     return content
 
 
-def _assistant_credential_name(
+def _bot_credential_name(
     *, repo_root: Path, config_yaml_path: Path | None
 ) -> str | None:
     if config_yaml_path is None:
         return None
-    cfg, _meta = resolve_yaml_assistant_config(
+    cfg, _meta = resolve_yaml_bot_config(
         repo_root=repo_root,
         config_path=config_yaml_path,
     )
-    settings = AssistantSettings.from_runtime_config(cfg)
+    settings = BotSettings.from_runtime_config(cfg)
     return settings.llm.credential_name or None
 
 
 def _systemd_secret_bindings(
     *,
     service_names: list[str],
-    assistant_credential_name: str | None,
+    bot_credential_name: str | None,
     feature_configs: dict[str, dict[str, Any]] | None = None,
     inbound_operations_enabled: bool = False,
 ) -> dict[str, tuple[str, ...]]:
@@ -603,22 +603,24 @@ def _systemd_secret_bindings(
         FEISHU_BOT_APP_SECRET,
         FEISHU_HOLDINGS_APP_SECRET,
         INBOUND_OPERATION_HMAC_KEY,
-        assistant_credential_name,
+        bot_credential_name,
     )
     bind(
         "options-monitor-wechat-clawbot.service",
         FEISHU_HOLDINGS_APP_SECRET,
         INBOUND_OPERATION_HMAC_KEY,
-        assistant_credential_name,
+        bot_credential_name,
     )
     if feature_configs is not None:
         # New installations bind only credentials consumed by enabled features.
         # PM Holdings uses the local PM service, not the retired Feishu table.
+        from src.application.notification_delivery_route import notifications_enabled
+
         def feishu_notifications(market: str | None = None) -> bool:
             configs = [feature_configs[market]] if market in feature_configs else feature_configs.values()
             for config in configs:
                 notifications = config.get("notifications") or {}
-                if notifications.get("enabled") is not False and (
+                if notifications_enabled(config) and (
                     notifications.get("provider") or notifications.get("channel")
                 ) == "feishu_app":
                     return True
@@ -890,7 +892,7 @@ def build_service_profile(
     markets: list[str],
     service_names: list[str],
     config_paths: dict[str, Path],
-    assistant_config_path: Path | None = None,
+    bot_config_path: Path | None = None,
     config_authoring: dict[str, Any] | None = None,
     env_file: Path | None = None,
     deploy_user: str | None = None,
@@ -935,8 +937,8 @@ def build_service_profile(
         "config_paths": {key: str(value) for key, value in config_paths.items()},
         "services": [{"name": name} for name in service_names],
     }
-    if assistant_config_path is not None:
-        profile["assistant_config_path"] = str(assistant_config_path)
+    if bot_config_path is not None:
+        profile["bot_config_path"] = str(bot_config_path)
     if config_authoring is not None:
         profile["config_authoring"] = dict(config_authoring)
     if env_file is not None:
@@ -1105,8 +1107,8 @@ def render_service_bundle(
         if config_yaml_path is not None
         else None
     )
-    assistant_credential_name = (
-        _assistant_credential_name(
+    bot_credential_name = (
+        _bot_credential_name(
             repo_root=repo,
             config_yaml_path=config_yaml_path,
         )
@@ -1136,7 +1138,7 @@ def render_service_bundle(
     log_root = runtime / "logs"
     runtime_data_config = runtime / "portfolio.runtime.json"
     inbound_audit_db = runtime / "output_shared" / "state" / "inbound_control.sqlite3"
-    assistant_config_path = runtime / "resolved" / "config.assistant.json" if config_yaml_path is not None else None
+    bot_config_path = runtime / "resolved" / "config.bot.json" if config_yaml_path is not None else None
     feishu_ws_config_key_value = _resolve_feishu_ws_config_key(
         feishu_ws_config_key,
         markets=market_values,
@@ -1661,8 +1663,8 @@ def render_service_bundle(
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
             ]
-            if assistant_config_path is not None:
-                ws_args.extend(["--assistant-config", str(assistant_config_path)])
+            if bot_config_path is not None:
+                ws_args.extend(["--bot-config", str(bot_config_path)])
             ws_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
@@ -1702,8 +1704,8 @@ def render_service_bundle(
                 "--config-path",
                 str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
             ]
-            if assistant_config_path is not None:
-                wechat_args.extend(["--assistant-config", str(assistant_config_path)])
+            if bot_config_path is not None:
+                wechat_args.extend(["--bot-config", str(bot_config_path)])
             wechat_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
@@ -1742,14 +1744,14 @@ def render_service_bundle(
                     )[0]
                     for market in market_values
                 }
-                assistant_config, _ = resolve_yaml_assistant_config(repo_root=repo, config_path=config_yaml_path)
-                if not AssistantSettings.from_runtime_config(assistant_config).llm.enabled:
-                    assistant_credential_name = None
+                bot_config, _ = resolve_yaml_bot_config(repo_root=repo, config_path=config_yaml_path)
+                if not BotSettings.from_runtime_config(bot_config).llm.enabled:
+                    bot_credential_name = None
                 effective = build_effective_env(environ={}, env_file=env_file_path)
                 inbound_operations_enabled = str(effective.get("OM_INBOUND_OPERATIONS_ENABLED")).lower() in {"1", "true", "yes"}
             secret_credential_bindings = _systemd_secret_bindings(
                 service_names=service_names,
-                assistant_credential_name=assistant_credential_name,
+                bot_credential_name=bot_credential_name,
                 feature_configs=feature_configs,
                 inbound_operations_enabled=inbound_operations_enabled,
             )
@@ -2046,8 +2048,8 @@ def render_service_bundle(
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
             ]
-            if assistant_config_path is not None:
-                ws_args.extend(["--assistant-config", str(assistant_config_path)])
+            if bot_config_path is not None:
+                ws_args.extend(["--bot-config", str(bot_config_path)])
             ws_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
@@ -2085,8 +2087,8 @@ def render_service_bundle(
                 "--config-path",
                 str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
             ]
-            if assistant_config_path is not None:
-                wechat_args.extend(["--assistant-config", str(assistant_config_path)])
+            if bot_config_path is not None:
+                wechat_args.extend(["--bot-config", str(bot_config_path)])
             wechat_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
@@ -2119,7 +2121,7 @@ def render_service_bundle(
         markets=market_values,
         service_names=service_names,
         config_paths=config_by_market,
-        assistant_config_path=assistant_config_path,
+        bot_config_path=bot_config_path,
         config_authoring=config_authoring,
         env_file=env_file_path,
         deploy_user=systemd_user,
@@ -2129,7 +2131,7 @@ def render_service_bundle(
         feishu_ws={
             "enabled": True,
             "config_key": feishu_ws_config_key_value,
-            **({"assistant_config_path": str(assistant_config_path)} if assistant_config_path is not None else {}),
+            **({"bot_config_path": str(bot_config_path)} if bot_config_path is not None else {}),
             "audit_db": str(inbound_audit_db),
             "lock_path": str(lock_root / "feishu-ws.lock"),
         } if include_feishu_ws else None,
@@ -2138,7 +2140,7 @@ def render_service_bundle(
             "label": wechat_clawbot_label_value,
             "config_key": wechat_clawbot_config_key_value,
             "state_dir": str(wechat_clawbot_state_dir),
-            **({"assistant_config_path": str(assistant_config_path)} if assistant_config_path is not None else {}),
+            **({"bot_config_path": str(bot_config_path)} if bot_config_path is not None else {}),
             "audit_db": str(inbound_audit_db),
             "allowed_senders_configured": bool(wechat_clawbot_allowed_senders_value),
             "allowed_senders_source": ("render_argument" if wechat_clawbot_allowed_senders_explicit else "config_yaml"),

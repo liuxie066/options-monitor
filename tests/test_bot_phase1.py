@@ -14,7 +14,7 @@ from src.application.bot.control_handoff import (
     build_control_preview_request,
     control_preview_tool_description,
 )
-from src.application.assistant.capability_catalog import preview_operation_capabilities
+from src.application.bot.control.capability_catalog import preview_operation_capabilities
 from src.application.bot.host_store import BotHostStore
 from src.application.bot import channel_facade
 from src.infrastructure.pi_agent_process import derive_pi_session_id
@@ -115,11 +115,11 @@ def _channel_request(
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
-    (tmp_path / "assistant.json").write_text(json.dumps({"assistant": {"bot": {"enabled": True}}}))
+    (tmp_path / "assistant.json").write_text(json.dumps({"bot": {'enabled': True}}))
     base: dict[str, object] = {
         "user_message": "改成 1.2.400",
         "config_key": "us",
-        "assistant_config_path": str(tmp_path / "assistant.json"),
+        "bot_config_path": str(tmp_path / "assistant.json"),
         "channel": "wechat",
         "sender_id": "ou_1",
         "conversation_id": "conversation-1",
@@ -586,7 +586,7 @@ def test_symbol_inputs_are_structurally_required_without_fake_defaults() -> None
 
 
 def test_option_monitor_query_binding_exposes_plain_language_scenarios() -> None:
-    from src.application.assistant.tool_bindings import binding_for_intent
+    from src.application.bot.control.tool_bindings import binding_for_intent
 
     binding = binding_for_intent("daily_decision_brief_read")
 
@@ -609,7 +609,7 @@ def test_option_period_tool_parameters_explain_valid_combinations() -> None:
     assert "only when period is mtd or ytd" in report_properties["as_of_date"]["description"]
 
 
-def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -> None:
+def test_eval_model_turn_skips_implicit_bot_toolset_loading(monkeypatch) -> None:
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
     captured: dict[str, object] = {}
@@ -621,7 +621,7 @@ def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -
         captured.update(kwargs)
         return AppResult(status="answered", user_response="Pi runtime ready.")
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", unexpected_load)
+    monkeypatch.setattr(local_harness, "bot_config_error", unexpected_load)
     monkeypatch.setattr(local_harness, "run_contract", fake_run)
 
     result = _run_prepared(prepared)
@@ -630,37 +630,37 @@ def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -
     assert "enabled_optional_toolsets" not in captured
 
 
-def test_ordinary_run_still_rejects_invalid_implicit_assistant_toolsets(monkeypatch) -> None:
+def test_ordinary_run_still_rejects_invalid_implicit_bot_toolsets(monkeypatch) -> None:
     calls = 0
 
     def invalid_load(**_kwargs):
         nonlocal calls
         calls += 1
-        return None, "eager", "invalid_assistant_config"
+        return "invalid_bot_config"
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", invalid_load)
+    monkeypatch.setattr(local_harness, "bot_config_error", invalid_load)
     result = _run_prepared(
         _contract("检查入口"), model_turn_json=None, model_config_json=_model_config()
     )
 
     assert calls == 1
-    assert result.error == {"code": "MODEL_CONFIG_ERROR", "reason": "invalid_assistant_config"}
+    assert result.error == {"code": "MODEL_CONFIG_ERROR", "reason": "invalid_bot_config"}
 
 
-def test_eval_model_turn_with_explicit_assistant_config_fails_closed(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "config.assistant.json"
+def test_eval_model_turn_with_explicit_bot_config_fails_closed(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.bot.json"
     calls: list[str | None] = []
 
     def valid_load(*, config_path, require_config):
         calls.append(config_path)
         assert require_config is True
-        return frozenset(), "eager", None
+        return None
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", valid_load)
+    monkeypatch.setattr(local_harness, "bot_config_error", valid_load)
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 
-    result = _run_prepared(prepared, assistant_config_path=str(config_path))
+    result = _run_prepared(prepared, bot_config_path=str(config_path))
 
     assert calls == [str(config_path)]
     assert result.error == {
@@ -673,7 +673,7 @@ def test_eval_model_turn_with_model_config_still_fails_closed(monkeypatch) -> No
     def unexpected_load(**_kwargs):
         raise AssertionError("implicit Assistant config must not be read")
 
-    monkeypatch.setattr(local_harness, "load_assistant_bot_settings", unexpected_load)
+    monkeypatch.setattr(local_harness, "bot_config_error", unexpected_load)
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 

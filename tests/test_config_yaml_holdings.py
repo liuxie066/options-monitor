@@ -116,10 +116,10 @@ def test_holdings_enable_requires_probe_preview_and_readback(monkeypatch, tmp_pa
                   expected_preview_sha256=preview["preview_sha256"])
     assert result["write_applied"] is True
     assert "config build" in result["rollback_hint"]
-    assert "config build-assistant" in result["rollback_hint"]
+    assert "config build-bot" in result["rollback_hint"]
     assert set(result["verified_targets"]) == {
         str(source), str(tmp_path / "config.us.json"),
-        str(tmp_path / "resolved" / "config.assistant.json"),
+        str(tmp_path / "resolved" / "config.bot.json"),
     }
     assert yaml.safe_load(source.read_text())["portfolio"]["holdings"]["enabled"] is True
     assert yaml.safe_load(source.read_text())["portfolio"]["holdings"]["approved_non_futu_brokers"] == {"lx": ["银行"]}
@@ -141,13 +141,13 @@ def test_holdings_post_commit_readback_failure_reports_write_receipt(monkeypatch
     preview = _set(source, True)
     publish = inclusion.publish_yaml_config_generation
 
-    def corrupt_assistant_after_publish(**kwargs):
+    def corrupt_bot_after_publish(**kwargs):
         result = publish(**kwargs)
         if kwargs["apply"]:
-            Path(result["assistant"]["output_config_path"]).write_text("{}", encoding="utf-8")
+            Path(result["bot"]["output_config_path"]).write_text("{}", encoding="utf-8")
         return result
 
-    monkeypatch.setattr(inclusion, "publish_yaml_config_generation", corrupt_assistant_after_publish)
+    monkeypatch.setattr(inclusion, "publish_yaml_config_generation", corrupt_bot_after_publish)
     with pytest.raises(AgentToolError) as caught:
         _set(source, True, apply=True, confirm=True,
              expected_source_sha256=preview["source_revision"]["before_sha256"],
@@ -157,7 +157,7 @@ def test_holdings_post_commit_readback_failure_reports_write_receipt(monkeypatch
     assert error.details["write_applied"] is True
     assert error.details["audit_id"]
     assert error.details["backup_path"]
-    assert error.details["target"] == str(tmp_path / "resolved" / "config.assistant.json")
+    assert error.details["target"] == str(tmp_path / "resolved" / "config.bot.json")
     assert yaml.safe_load(source.read_text())["portfolio"]["holdings"]["enabled"] is True
 
 

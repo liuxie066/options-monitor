@@ -17,6 +17,7 @@ from src.application.portfolio_assignment_scenario import (
     read_portfolio_valuation_evidence,
 )
 from src.application.write_contract import attach_write_contract
+from src.application.portfolio_management import portfolio_management_enabled
 
 
 def holdings_included(config: dict[str, Any]) -> bool:
@@ -92,7 +93,7 @@ def _preview_sha256(transaction: dict[str, Any], *, enabled: bool) -> str:
         "approved_non_futu_brokers": transaction.get("approved_non_futu_brokers"),
         "service_url": transaction.get("service_url"),
         "markets": {market: item["output_config_path"] for market, item in transaction["markets"].items()},
-        "assistant": transaction["assistant"]["output_config_path"],
+        "bot": transaction["bot"]["output_config_path"],
     }
     return sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -118,9 +119,9 @@ def _readback_generation(transaction: dict[str, Any], *, enabled: bool) -> list[
             runtime = json.loads(require_sha(item["sha256"]).decode("utf-8"))
             if holdings_included(runtime) != enabled or (enabled and runtime["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
                 raise ValueError("Holdings differs in market runtime config after apply")
-        assistant = transaction["assistant"]
-        target = Path(assistant["output_config_path"])
-        json.loads(require_sha(assistant["sha256"]).decode("utf-8"))
+        bot_config = transaction["bot"]
+        target = Path(bot_config["output_config_path"])
+        json.loads(require_sha(bot_config["sha256"]).decode("utf-8"))
     except Exception as exc:
         raise AgentToolError(
             code="CONFIG_READBACK_FAILED",
@@ -148,6 +149,7 @@ def set_yaml_holdings_inclusion(
     expected_source_sha256: str | None = None,
     expected_preview_sha256: str | None = None,
     service_url: str | None = None,
+    enable_pm: bool = False,
 ) -> dict[str, Any]:
     if service_url is not None:
         from src.infrastructure.portfolio_management_client import PortfolioManagementConfigError, resolve_portfolio_service_origin
@@ -164,6 +166,13 @@ def set_yaml_holdings_inclusion(
         )
     doc = deepcopy(load_yaml_config_file(source))
     current_enabled = holdings_included(doc)
+    pm_before = portfolio_management_enabled(doc)
+    if enabled and enable_pm:
+        pm = doc.setdefault("portfolio_management", {})
+        if not isinstance(pm, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message="portfolio_management must be an object")
+        pm["enabled"] = True
+    pm_after = portfolio_management_enabled(doc)
     portfolio = doc.setdefault("portfolio", {})
     if not isinstance(portfolio, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="portfolio must be an object")
@@ -178,6 +187,8 @@ def set_yaml_holdings_inclusion(
     if enabled:
         current, _meta = resolve_yaml_runtime_config(repo_root=repo_root, market=markets[0], config_path=source)
         current["accounts"] = list(doc.get("accounts") or {})
+        if enabled and enable_pm:
+            current["portfolio_management"] = deepcopy(doc["portfolio_management"])
         try:
             preflight = _probe_holdings(current, service_url=service_url) if service_url is not None else _probe_holdings(current)
             approved = preflight["approved_non_futu_brokers"]
@@ -199,7 +210,7 @@ def set_yaml_holdings_inclusion(
         config_doc=doc,
         runtime_root=target_root,
         markets=markets,
-        include_assistant=True,
+        include_bot=True,
         apply=False,
         backup=True,
         expected_source_sha256=before_sha,
@@ -223,7 +234,7 @@ def set_yaml_holdings_inclusion(
             config_doc=doc,
             runtime_root=target_root,
             markets=markets,
-            include_assistant=True,
+            include_bot=True,
             apply=True,
             backup=True,
             expected_source_sha256=before_sha,
@@ -245,11 +256,12 @@ def set_yaml_holdings_inclusion(
             "preview_sha256": preview_sha,
             "service_url": preview.get("service_url"),
             "preflight": preflight,
+            "pm_dependency": {"configured_before": pm_before, "configured_after": pm_after},
             "config_yaml_path": str(source),
             "runtime_root": str(target_root),
             "source_revision": transaction["source_revision"],
             "validation": transaction["markets"],
-            "assistant": transaction["assistant"],
+            "bot": transaction["bot"],
             "verified_targets": verified_targets,
         },
         dry_run=not apply,
@@ -259,7 +271,7 @@ def set_yaml_holdings_inclusion(
         generate_audit_id=False,
         rollback_hint=(
             f"先将 {transaction['backup_path']} 恢复到 {source}，再用 om config build 和 "
-            "om config build-assistant 重建 validation/assistant 列出的全部目标并读回。"
+            "om config build-bot 重建 validation/bot 列出的全部目标并读回。"
             if apply
             else None
         ),

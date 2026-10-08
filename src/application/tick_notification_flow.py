@@ -54,7 +54,7 @@ from src.application.daily_decision_brief_repository import (
 )
 from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
-from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
+from src.application.multi_tick.bot_perception_event import build_notification_perception_event
 from src.application.multi_tick_audit import daily_brief_timing_scope, record_tick_latency
 from src.application.multi_tick_finalization import (
     _record_finalize_degraded,

@@ -84,7 +84,7 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
         "lookback_hours": 6.0,
     }
     assert out["combo_reconciliation"] == {
-        "default_mode": "off",
+
         "accounts": {},
     }
     assert out["settlement_observation"] == {"enabled": True}
@@ -203,7 +203,7 @@ def test_resolve_trade_intake_sources_uses_account_opend_settings_for_multiple_a
         },
         "trade_intake": {
             "combo_reconciliation": {
-                "default_mode": "off",
+
                 "accounts": {"lx": "observe", "sy": "confirm"},
             }
         },
