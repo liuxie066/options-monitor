@@ -1,0 +1,220 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.8",
+  "base": {
+    "tag": "v4.2.7",
+    "commit": "5c17222c80b3c1708e406c83843e663aba31a623"
+  },
+  "reviewed_head": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
+  "commits": [
+    {
+      "sha": "bea898d5f4ce84f86c10279fc55c22fe40bbef2f",
+      "subject": "gateflow: accept plan for option-execution-allocation"
+    },
+    {
+      "sha": "8adb2efe2c83856723f8e33bb93f665e6d6e57ca",
+      "subject": "feat(trades): gateflow accept option-execution-allocation S1"
+    },
+    {
+      "sha": "8d79bb2b3f796d33ceddf63357d2da2ecf72ced5",
+      "subject": "fix(ledger): gateflow accept allocation deepreview"
+    },
+    {
+      "sha": "3485298ddcb3e49a87eded7ecb8e6ca3dad18c34",
+      "subject": "chore(gateflow): accept plan for upgrade-preserved-timers"
+    },
+    {
+      "sha": "148958cfc25de8185157a306330c17db7c6e0213",
+      "subject": "fix(setup): require user-provided account labels"
+    },
+    {
+      "sha": "ec99c59fd1ea8f0aa1e16a73ed3a0cdc160f71a4",
+      "subject": "fix(trades): gateflow accept allocation PR review"
+    },
+    {
+      "sha": "9cb9485bb0024311461999c5e5c9e7c663874521",
+      "subject": "chore(setup): integrate current main for account-label validation"
+    },
+    {
+      "sha": "31fc15d4c0aa74c03b0115240626730886d8700e",
+      "subject": "fix(gateflow): accept upgrade-preserved-timers S1"
+    },
+    {
+      "sha": "a08220eef8169bff6bf0c73e42865a04d9ab2046",
+      "subject": "docs(trades): document option allocation fix in Unreleased"
+    },
+    {
+      "sha": "79c1552dbce695c6c20b0e7e1e3b38248158885b",
+      "subject": "chore(gateflow): accept deepreview for upgrade-preserved-timers"
+    },
+    {
+      "sha": "9fe85d494776e822335438d65bd4f19163872bb0",
+      "subject": "Merge pull request #506 from liuxie066/codex/required-account-label"
+    },
+    {
+      "sha": "5377b8a0534ba57c1b9947cb4064bf155dd18de8",
+      "subject": "chore(service): integrate current main for upgrade timer fix"
+    },
+    {
+      "sha": "1be4c0865c02937c62dc48ec9d28873309b95237",
+      "subject": "chore(trades): merge main into option execution allocation"
+    },
+    {
+      "sha": "88684c33786647aeb23b570579eda58938301ce5",
+      "subject": "Merge pull request #507 from liuxie066/codex/fix-upgrade-preserved-timers"
+    },
+    {
+      "sha": "55ec63909b13dedbd001378022324b3372b06374",
+      "subject": "chore(trades): sync latest main before merge"
+    },
+    {
+      "sha": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
+      "subject": "Merge pull request #505 from liuxie066/codex/option-execution-allocation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "首次配置向导和初始化命令不再隐式使用 lx 账户标签；脚本调用必须显式提供 --account-label，已有账户配置不受影响。",
+      "commits": [
+        "148958cfc25de8185157a306330c17db7c6e0213",
+        "9cb9485bb0024311461999c5e5c9e7c663874521",
+        "9fe85d494776e822335438d65bd4f19163872bb0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "升级时正确保留已暂停定时器的状态，不再因此误判失败；失败补偿由恢复后的旧版本校验配置并对账服务，验证失败时保留人工恢复指引。",
+      "commits": [
+        "31fc15d4c0aa74c03b0115240626730886d8700e",
+        "5377b8a0534ba57c1b9947cb4064bf155dd18de8",
+        "88684c33786647aeb23b570579eda58938301ce5"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复期权成交缺少开平方向时无法记账的问题：以 OM 账本按 FIFO 平掉对向持仓，剩余数量开仓；跨零成交整笔校验和原子入账，保留原始成交数量、费用与幂等回执。已保存成交可基于真实账本只读预览，历史顺序不明时保留待核对，成交后 OpenD 检查仅提示差异。",
+      "commits": [
+        "8adb2efe2c83856723f8e33bb93f665e6d6e57ca",
+        "8d79bb2b3f796d33ceddf63357d2da2ecf72ced5",
+        "ec99c59fd1ea8f0aa1e16a73ed3a0cdc160f71a4",
+        "a08220eef8169bff6bf0c73e42865a04d9ab2046",
+        "1be4c0865c02937c62dc48ec9d28873309b95237",
+        "55ec63909b13dedbd001378022324b3372b06374",
+        "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "bea898d5f4ce84f86c10279fc55c22fe40bbef2f",
+      "reason": "Empty workflow acceptance checkpoint; no source, configuration, runtime or user-facing behavior change."
+    },
+    {
+      "commit": "3485298ddcb3e49a87eded7ecb8e6ca3dad18c34",
+      "reason": "Empty workflow acceptance checkpoint; no source, configuration, runtime or user-facing behavior change."
+    },
+    {
+      "commit": "79c1552dbce695c6c20b0e7e1e3b38248158885b",
+      "reason": "Empty workflow acceptance checkpoint; no source, configuration, runtime or user-facing behavior change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bea898d5f4ce84f86c10279fc55c22fe40bbef2f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "8adb2efe2c83856723f8e33bb93f665e6d6e57ca",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "8d79bb2b3f796d33ceddf63357d2da2ecf72ced5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "3485298ddcb3e49a87eded7ecb8e6ca3dad18c34",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/507"
+      ]
+    },
+    {
+      "commit": "148958cfc25de8185157a306330c17db7c6e0213",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/506"
+      ]
+    },
+    {
+      "commit": "ec99c59fd1ea8f0aa1e16a73ed3a0cdc160f71a4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "9cb9485bb0024311461999c5e5c9e7c663874521",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/506"
+      ]
+    },
+    {
+      "commit": "31fc15d4c0aa74c03b0115240626730886d8700e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/507"
+      ]
+    },
+    {
+      "commit": "a08220eef8169bff6bf0c73e42865a04d9ab2046",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "79c1552dbce695c6c20b0e7e1e3b38248158885b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/507"
+      ]
+    },
+    {
+      "commit": "9fe85d494776e822335438d65bd4f19163872bb0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/506"
+      ]
+    },
+    {
+      "commit": "5377b8a0534ba57c1b9947cb4064bf155dd18de8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/507"
+      ]
+    },
+    {
+      "commit": "1be4c0865c02937c62dc48ec9d28873309b95237",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "88684c33786647aeb23b570579eda58938301ce5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/507"
+      ]
+    },
+    {
+      "commit": "55ec63909b13dedbd001378022324b3372b06374",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    }
+  ]
+}
