@@ -402,7 +402,7 @@ aggregate win-rate value and status still follow the table above.
 The public Chinese name remains **期权收益率**. The annualized companion is **年化收益率**.
 
 ```text
-计入占用天数 = max(实际占用毫秒数 / 86,400,000, 1)
+计入占用天数 = max((计时结束时间 − 原始开仓时间) / 86,400,000, 1)
 资本天数 = Σ(每份合约占用资金 × 该份计入占用天数)
 平均占用资金 = 资本天数 / 统计天数
 期权收益率 = 期权净现金流 / 平均占用资金
@@ -411,16 +411,27 @@ The public Chinese name remains **期权收益率**. The annualized companion is
 ```
 
 Each terminated allocation and open residual uses its original opening time: a terminal share ends
-at its terminal time, and an open share ends at `end_exclusive_at_ms`. Each disjoint contract share
-has a minimum of one day (24 hours), including a valid zero-length holding. Longer durations retain
-fractional days: 36 hours count as 1.5 days. Crossing midnight does not add an extra day. Partial
+at its admitted actual terminal time, and an open share ends at the contractual expiry-day end
+(Asia/Shanghai midnight immediately after `expiration_ymd`), rather than the report cutoff.
+A terminal event after the report cutoff is not admitted; that quantity remains open for that report.
+Each disjoint contract share has a minimum of one day (24 hours), including a valid zero-length holding.
+Longer durations retain fractional days: 36 hours count as 1.5 days. Crossing midnight does not add an extra day. Partial
 closes apply this floor separately to the closed quantities and the remaining open quantity; they
 do not repeatedly floor chronological inventory intervals or count the same contracts twice.
 
 The floor applies only after identity, positive-capital and terminal-evidence checks. An end time
 before the opening time or unavailable/conflicting required terminal evidence remains unavailable.
 The reporting period's `statistic_days` is unchanged. Current and historical report reads recompute
-capital-days using this rule without rewriting ledger events or their timestamps.
+capital-days using this rule without rewriting ledger events or their timestamps. Expiry without
+required terminal evidence does not synthesize a closure or a win; the return remains unavailable.
+
+Returns containing open quantities assume holding those quantities through expiry; they are not
+settled performance. A later early close or assignment changes the duration and net cash to actual
+terminal evidence. For an unchanged open fact before expiry, capital-days and annualized return do
+not depend on when the report is read; period return still depends on `statistic_days`.
+`average_occupied_capital` remains capital-days divided by reporting statistic-days. When open
+quantities contribute future duration, this is an equivalent denominator for the reported return,
+not actual average capital used during elapsed reporting time, and can exceed the position principal.
 
 The return numerator is the native currency's `option_net_cashflow.total.amount`; it never substitutes
 the open/terminated split.

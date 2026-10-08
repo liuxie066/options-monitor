@@ -388,6 +388,7 @@ def _render_option_performance(data: dict[str, Any]) -> str:
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
+    lines.append("收益率计时：已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天；未平仓收益率按持有至到期估算。")
     lines.append("口径：仅统计期权净现金流、卖方/买方胜率与按担保资本计算的期权收益率；不提供 option PnL。")
     return "\n".join(lines)
 
