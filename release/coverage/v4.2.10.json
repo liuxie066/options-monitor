@@ -1,0 +1,207 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.10",
+  "base": {
+    "tag": "v4.2.9",
+    "commit": "5b635d293c8aa5f96714cb7ccdb8d30b60d02c4f"
+  },
+  "reviewed_head": "31ac088bf7c8b186b73ef434d84152e305bf365d",
+  "commits": [
+    {
+      "sha": "eb2aec06b0c61508209d1feff7294d2872bd325b",
+      "subject": "docs(gateflow): accept plan for performance holding duration"
+    },
+    {
+      "sha": "701da5917d1ff2d9251a75559663c61cbf709023",
+      "subject": "fix(performance): accept expiry holding duration slice S1"
+    },
+    {
+      "sha": "a5892b7dbc8cf5d8d01b59b1100b4c8265f75a6a",
+      "subject": "chore(gateflow): accept deepreview for performance holding duration"
+    },
+    {
+      "sha": "f9f1a8314732ffcba508ae8c09bc31598db20788",
+      "subject": "docs(gateflow): accept csp_lc naming supplement plan"
+    },
+    {
+      "sha": "e5ccc4080244a6023f600ed85f6456922c005ec3",
+      "subject": "refactor(combo): accept canonical csp_lc metric naming slice S2"
+    },
+    {
+      "sha": "75a85cca8a7bdde9eb561e3fd470006256895504",
+      "subject": "chore(gateflow): accept csp_lc naming S2 review checkpoint"
+    },
+    {
+      "sha": "d3042d815bbd254d9aed8d3dcca260087b816b61",
+      "subject": "docs(combo): record retired generic metric exports"
+    },
+    {
+      "sha": "1b0475d5f2696ee15047c66c688619f16fd4084f",
+      "subject": "chore(gateflow): accept duration and csp_lc aggregate review"
+    },
+    {
+      "sha": "e166f6c7c764ebb43e0cbf629d15b54c2a860a42",
+      "subject": "Merge pull request #516 from liuxie066/codex/performance-holding-duration"
+    },
+    {
+      "sha": "a76e13a3662c38b848b42a15661ab114aea7bc1d",
+      "subject": "gateflow(cash): accept three-currency plan"
+    },
+    {
+      "sha": "3021f75a6f810ca8cae31e9a95430a6202726913",
+      "subject": "fix(cash): normalize Futu currency scope and sizing display"
+    },
+    {
+      "sha": "c929730453d42966ec75275b68d0e5ecebaa715d",
+      "subject": "gateflow(cash): accept aggregate deepreview"
+    },
+    {
+      "sha": "31ac088bf7c8b186b73ef434d84152e305bf365d",
+      "subject": "Merge pull request #517 from liuxie066/codex/futu-three-currency-cash"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "CSP 仓位比例行简化为 Position Sizing，去掉重复的账户与估算口径括注；三个指派情景的计算口径不变。",
+      "commits": [
+        "3021f75a6f810ca8cae31e9a95430a6202726913",
+        "31ac088bf7c8b186b73ef434d84152e305bf365d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "富途现金仅将 CNY、HKD、USD 纳入业务资金计算；其他币种明确为零时保留原始证据但不请求汇率，避免 JPY、SGD 零余额让仓位比例与容量暂不可用。其他币种非零或无效时仍明确阻断，旧当前缓存经共享校验后重新获取。",
+      "commits": [
+        "3021f75a6f810ca8cae31e9a95430a6202726913",
+        "31ac088bf7c8b186b73ef434d84152e305bf365d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "未平仓期权收益率按开仓至到期的预计持有时间计算，避免刚开仓时年化虚高；已终止份额仍按实际终止时间计算，每份至少计一天，历史查询保留截止时间边界。",
+      "commits": [
+        "701da5917d1ff2d9251a75559663c61cbf709023",
+        "e166f6c7c764ebb43e0cbf629d15b54c2a860a42"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "eb2aec06b0c61508209d1feff7294d2872bd325b",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "a5892b7dbc8cf5d8d01b59b1100b4c8265f75a6a",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "f9f1a8314732ffcba508ae8c09bc31598db20788",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "e5ccc4080244a6023f600ed85f6456922c005ec3",
+      "reason": "内部 CSP+LC 计算函数与 Python 导出统一命名，并记录旧名称退役；仓库调用方已同步，用户命令、运行配置和计算公式未变，无独立用户或运营能力变化。"
+    },
+    {
+      "commit": "75a85cca8a7bdde9eb561e3fd470006256895504",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "d3042d815bbd254d9aed8d3dcca260087b816b61",
+      "reason": "内部 CSP+LC 计算函数与 Python 导出统一命名，并记录旧名称退役；仓库调用方已同步，用户命令、运行配置和计算公式未变，无独立用户或运营能力变化。"
+    },
+    {
+      "commit": "1b0475d5f2696ee15047c66c688619f16fd4084f",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "a76e13a3662c38b848b42a15661ab114aea7bc1d",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    },
+    {
+      "commit": "c929730453d42966ec75275b68d0e5ecebaa715d",
+      "reason": "空提交，仅记录方案或评审确认，无源码、配置或运行行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "eb2aec06b0c61508209d1feff7294d2872bd325b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "701da5917d1ff2d9251a75559663c61cbf709023",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "a5892b7dbc8cf5d8d01b59b1100b4c8265f75a6a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "f9f1a8314732ffcba508ae8c09bc31598db20788",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "e5ccc4080244a6023f600ed85f6456922c005ec3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "75a85cca8a7bdde9eb561e3fd470006256895504",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "d3042d815bbd254d9aed8d3dcca260087b816b61",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "1b0475d5f2696ee15047c66c688619f16fd4084f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "e166f6c7c764ebb43e0cbf629d15b54c2a860a42",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/516"
+      ]
+    },
+    {
+      "commit": "a76e13a3662c38b848b42a15661ab114aea7bc1d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/517"
+      ]
+    },
+    {
+      "commit": "3021f75a6f810ca8cae31e9a95430a6202726913",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/517"
+      ]
+    },
+    {
+      "commit": "c929730453d42966ec75275b68d0e5ecebaa715d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/517"
+      ]
+    },
+    {
+      "commit": "31ac088bf7c8b186b73ef434d84152e305bf365d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/517"
+      ]
+    }
+  ]
+}
