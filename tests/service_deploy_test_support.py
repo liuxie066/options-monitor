@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 
 CURRENT_PYTHON = sys.executable
@@ -324,6 +327,35 @@ def _write_cloned_release_with_configs(
     (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
 
 
+def _fake_release_compensation_command(command, *, run_cmd, service_drift_fn=None):
+    """Execute the bounded child sequence against isolated test command fakes.
+
+    Real subprocess ownership/isolation is separately exercised by integration
+    tests; this adapter preserves existing service transition fixture coverage.
+    """
+    from src.application import service_upgrade as upgrade
+
+    if len(command) < 6 or command[1:3] != ["-I", "-c"] or command[3] != upgrade._RESTORED_SERVICE_COMPENSATION:
+        return None
+    stdout = io.StringIO()
+    original_path = sys.path[:]
+    code = 0
+    try:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", ["-c", *command[4:]]))
+            stack.enter_context(patch.object(subprocess, "run", run_cmd))
+            if service_drift_fn is not None:
+                stack.enter_context(patch.object(upgrade, "service_drift", service_drift_fn))
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            try:
+                exec(compile(command[3], "<restored-compensation-fixture>", "exec"), {})
+            except SystemExit as exc:
+                code = exc.code
+    finally:
+        sys.path[:] = original_path
+    return subprocess.CompletedProcess(command, code, stdout=stdout.getvalue(), stderr="")
+
+
 def _fake_release_drift_command(
     command: list[str],
     *,
@@ -342,6 +374,10 @@ def _fake_release_drift_command(
     be answered by the fake that stands in for systemd everywhere else.
     """
 
+    compensation = _fake_release_compensation_command(
+        command, run_cmd=run_cmd, service_drift_fn=service_drift_fn)
+    if compensation is not None:
+        return compensation
     if len(command) < 3 or Path(str(command[0])).name != "om" or command[1:3] != ["service", "drift"]:
         return None
     options: dict[str, str] = {}

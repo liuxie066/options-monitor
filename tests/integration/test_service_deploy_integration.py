@@ -955,8 +955,9 @@ def test_service_drift_repairs_enabled_but_inactive_expected_timer(tmp_path: Pat
     assert out["summary"]["status"] == "ok"
     assert ["systemctl", "enable", "--now", target] in calls
 
+@pytest.mark.parametrize("paused_activation", ["enabled", "disabled", "masked"])
 def test_service_drift_preserves_paused_timer_while_updating_definition(
-    tmp_path: Path,
+    tmp_path: Path, paused_activation: str,
 ) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import (
@@ -993,7 +994,7 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
             ["is-enabled", other_inactive],
         ):
             return subprocess.CompletedProcess(
-                command, 0, stdout="enabled\n", stderr=""
+                command, 0, stdout=f"{paused_activation if command[-1] == target else 'enabled'}\n", stderr=""
             )
         if len(command) >= 2 and command[-2] == "is-active" and command[-1] in active_states:
             state = active_states[command[-1]]
@@ -1019,7 +1020,7 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
 
     out = _drift_at(
         repo, runtime, systemd_root, confirm=True, activation_policy=SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
-        preserved_activation_states={ target: { "activation_state": "enabled", "active_state": "inactive", } },
+        preserved_activation_states={ target: { "activation_state": paused_activation, "active_state": "inactive", } },
         run_cmd=_run_cmd,
     )
 
@@ -1029,9 +1030,12 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
     assert out["before"]["activation_drift_units"] == [other_inactive]
     assert out["before"]["preserved_activation_units"] == [target]
     assert out["active_states"][target] == "inactive"
+    assert out["activation_states"][target] == paused_activation
     assert out["activation_drift_units"] == []
     assert out["preserved_activation_units"] == [target]
-    assert out["summary"]["status"] == "warn"
+    assert out["summary"]["status"] == "ok"
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["warning_count"] == 0
     assert out["applied"]["deferred_restart_units"] == [target]
     assert target_path.read_text(encoding="utf-8") == expected_target_content
     assert ["systemctl", "daemon-reload"] in calls
@@ -1654,7 +1658,7 @@ def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
                 "summary": {"status": "error"},
                 "manual_actions": ["repair service reconcile"],
             }
-        return {"summary": {"status": "ok"}, "manual_actions": []}
+        return {"summary": {"status": "ok", "ok": True}, "manual_actions": []}
 
     monkeypatch.setattr(
         service_upgrade_module,
@@ -2834,6 +2838,9 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
     )
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        child = _fake_release_drift_command(list(command), run_cmd=_run_cmd)
+        if child is not None:
+            return child
         target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
         if target_query is not None:
             return target_query
@@ -2851,7 +2858,7 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
             assert json.loads(bot_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
             Path(command[-1]).write_text('{"generation": "new-assistant"}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
-        if command[:4] == ["./om", "config", "validate", "--config-path"] and command[4] == str(us_runtime):
+        if command[:4] == ["./om", "config", "validate", "--config-path"] and command[4] == str(us_runtime) and current.resolve().name == "1.0.1":
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="target validation failed")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -4037,3 +4044,44 @@ def test_deployment_user_check_uses_uid_and_rejects_unknown_user(monkeypatch, tm
     monkeypatch.setattr(pwd, "getpwnam", unknown)
     assert upgrade.service_upgrade(repo_root=repo, runtime_root=tmp_path)["status"] == "deployment_user_check_failed"
     assert (tmp_path / "upgrade_status.json").read_bytes() == before
+
+
+def test_preserved_drift_returns_success_through_public_cli(monkeypatch, capsys, tmp_path):
+    from functools import partial
+    from src.interfaces.cli import main as cli
+    from src.application import service_upgrade as upgrade
+    from src.application.service_drift import service_drift
+
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["hk"])
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    (runtime / "service.profile.json").write_text(files["service.profile.json"]["content"])
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    target = "options-monitor-tick-hk.timer"
+    commands = []
+
+    def run_cmd(command, **_kwargs):
+        commands.append(list(command))
+        if "is-active" in command:
+            state = "inactive" if command[-1] == target else "active"
+            return subprocess.CompletedProcess(command, 3 if state == "inactive" else 0, stdout=state, stderr="")
+        if "is-enabled" in command:
+            state = "disabled" if command[-1] == target else "enabled"
+            return subprocess.CompletedProcess(command, 1 if state == "disabled" else 0, stdout=state, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="success", stderr="")
+
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
+    monkeypatch.setattr(cli, "service_drift", partial(service_drift, run_cmd=run_cmd))
+    monkeypatch.setattr(cli, "capture_preserved_timer_activation_states",
+                        partial(upgrade.capture_preserved_timer_activation_states, run_cmd=run_cmd))
+    # Snapshot capture also reaches the real owner, with only system commands faked.
+    monkeypatch.setattr(upgrade, "service_drift", partial(service_drift, run_cmd=run_cmd))
+    assert cli.main(["service", "drift", "--repo-root", str(repo), "--runtime-root", str(runtime),
+                     "--preserve-activation-state", "--confirm"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tool_name"] == "service.drift" and payload["ok"] is True
+    assert payload["data"]["summary"]["warning_count"] == 0
+    assert payload["data"]["summary"]["preserved_activation_count"] == 1
+    assert payload["data"]["activation_states"][target] == "disabled"
+    assert not any(target in cmd and any(action in cmd for action in ("enable", "start", "restart", "unmask"))
+                   for cmd in commands)

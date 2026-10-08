@@ -2007,7 +2007,6 @@ def _drift_summary(
             mismatched_managed_files,
             mode_mismatched_managed_files,
             activation_drift_units,
-            preserved_activation_units,
             execution_drift_units,
         )
         if values
