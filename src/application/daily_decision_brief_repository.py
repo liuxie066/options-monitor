@@ -2438,6 +2438,7 @@ __all__ = [
     "reconcile_daily_decision_brief_delivery_resolution",
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery_state",
+    "read_confirmed_attribution_render_context",
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",

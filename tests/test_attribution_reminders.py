@@ -155,3 +155,58 @@ def test_latest_confirmed_success_not_latest_supported_context(monkeypatch, tmp_
                            "2026-07-22": {"candidate_delivery_history": [latest],
                                           "fixed_reports": {"failure": failure}}}}})
     assert repo.read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
+
+
+def test_confirmed_baseline_crosses_dates_but_not_accounts_with_real_repository(tmp_path):
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success, prepare_daily_decision_brief_delivery,
+        confirm_daily_decision_brief_delivery_v2,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    brief = _reminder_brief([_pending()])
+    saved = persist_daily_decision_brief_success(base=tmp_path, brief=brief)
+    context = build_attribution_reminder_context(saved["brief"])
+    envelope = prepare_daily_decision_brief_delivery(
+        base=tmp_path, account="lx", market="US", market_trading_date="2026-07-21",
+        run_id=brief["run_id"], delivery_kind="fixed_report", source_kind="successful_brief",
+        revision=saved["current_revision"], source_digest=saved["current_brief_digest"],
+        scheduled_target_market="2026-07-21T10:00:00-04:00",
+        rendered_message=render_fixed_report(saved["brief"], context=context), render_context=context,
+    )["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date="2026-07-21",
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+        confirmed_at_utc="2026-07-21T14:01:00Z",
+    )
+    next_day = {**brief, "market_trading_date": "2026-07-22"}
+    previous = read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US")
+    assert "1 笔未变化" in render_fixed_report(next_day, context=build_attribution_reminder_context(
+        next_day, previous_context=previous))
+    sy = {**next_day, "account": "sy"}
+    assert "TCOM0 2026" in render_fixed_report(
+        sy, context=build_attribution_reminder_context(sy, previous_context=previous))
+
+
+def test_candidate_alert_uses_same_attribution_summary(tmp_path, monkeypatch):
+    import src.application.tick_notification_flow as flow
+    import test_daily_decision_brief_notification_flow as fixture
+    from src.application.daily_decision_brief_renderer import (
+        render_candidate_alert, render_candidate_alert_card_markdown,
+    )
+    def assemble(*, base, run_id, account, markets_to_run, **kwargs):
+        return {market: {**fixture._brief(base=base, run_id=run_id, account=account, market=market),
+                         "attribution_pending": [_pending()]} for market in markets_to_run}
+    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    request = fixture._request(tmp_path, run_id="candidate", fixed=False).request
+    prepared = flow._prepare_daily_brief_notification(request)
+    envelope = prepared.lifecycles_by_account["lx"]["envelope"]
+    assert envelope["delivery_kind"] == "candidate_alert"
+    assert "TCOM0 2026" in envelope["rendered_message"]
+    saved = flow.read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    repeated = build_attribution_reminder_context(saved, previous_context=envelope["render_context"])
+    for render in (render_candidate_alert, render_candidate_alert_card_markdown):
+        message = render(saved, envelope["candidate_identities"], context=repeated)
+        assert "1 笔未变化" in message and "TCOM0 2026" not in message

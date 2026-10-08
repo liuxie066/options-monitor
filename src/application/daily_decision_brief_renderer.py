@@ -2772,6 +2772,7 @@ def _bounded_markdown(lines: list[str]) -> str:
 
 
 __all__ = [
+    "build_attribution_reminder_context",
     "build_daily_brief_user_view",
     "resolve_daily_brief_render_limits",
     "render_blocked_brief",
