@@ -1420,3 +1420,36 @@ __all__ = [
     "default_quality_artifact_path",
     "default_quality_control_path",
 ]
+
+
+def check_post_trade_positions(*, repo: Any, cfg: dict[str, Any], account: str,
+                               market: str, adapter: Any = None) -> dict[str, Any]:
+    """Informational, fresh OpenD comparison; never repairs or gates a booked fill."""
+    from src.application.ledger.api import verify_trade_receipt_projection
+    try:
+        path = getattr(getattr(repo, "primary_repo", repo), "db_path", None)
+        if not path:
+            raise ValueError("ledger_snapshot_unavailable")
+        reader = open_trade_reconciliation_evidence_repo(path)
+        before = reader.read_trade_receipt_evidence()
+        verify_trade_receipt_projection(before)
+        snapshot = (adapter or OpenDOptionPositionAdapter()).fetch(cfg=cfg, account=account, market=market)
+        after = reader.read_trade_receipt_evidence()
+        from domain.domain.symbol_identity import symbol_market
+        def in_scope(row: dict[str, Any]) -> bool:
+            fields = row.get("fields") or row
+            contract = fields.get("contract_key") or fields
+            symbol = contract.get("underlying_symbol") or contract.get("symbol")
+            return contract.get("account") == account and str(symbol_market(symbol) or "").lower() == market.lower()
+        if any([row for row in before[name] if in_scope(row)] != [row for row in after[name] if in_scope(row)]
+               for name in ("trade_events", "position_lots")):
+            return {"status": "unknown", "reason": "ledger_changed_during_opend_check"}
+        now = datetime.now(timezone.utc)
+        dataset, _ = build_position_dataset(snapshot=snapshot, local_lots=after["position_lots"],
+            account=account, market=market, observed_at_utc=utc_iso(now), now=now,
+            control_state={}, lifecycle_coherent_read_available=False)
+        return {"status": dataset["status"], "reason_codes": dataset.get("reason_codes", []),
+                "checks": dataset.get("checks", []), "source_snapshots": dataset.get("source_snapshots", [])}
+    except Exception as exc:
+        return {"status": "unknown", "reason": "post_trade_position_check_unavailable",
+                "error": f"{type(exc).__name__}: {exc}"}

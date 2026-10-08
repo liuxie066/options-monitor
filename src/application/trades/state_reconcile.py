@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.trade_execution import execution_event_action
+
 import json
 import shutil
 from datetime import datetime, timezone
@@ -13,6 +15,7 @@ from domain.domain.trade_execution import (
     execution_source_identity_conflicts,
 )
 from src.application.ledger.api import (
+    lot_id_for_open_event,
     build_source_consumption_claim,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
@@ -263,7 +266,7 @@ def reconcile_trade_intake_state(
                 deal_id=deal_id,
                 from_bucket=bucket,
                 state_item=item,
-                ledger_event=ledger_events[-1],
+                ledger_events=ledger_events,
             )
             actions.append(
                 {
@@ -274,6 +277,8 @@ def reconcile_trade_intake_state(
                     "reason": "ledger_event_already_recorded",
                     "ledger_event_id": payload["diagnostics"]["reconciled_ledger_event_id"],
                     "ledger_event_type": payload["diagnostics"]["reconciled_ledger_event_type"],
+                    "execution_action": payload["action"],
+                    "terminal_event_ids": [row["event_id"] for row in ledger_events],
                     "write_state": True,
                 }
             )
@@ -816,24 +821,25 @@ def _processed_payload_from_ledger(
     deal_id: str,
     from_bucket: str,
     state_item: dict[str, Any],
-    ledger_event: dict[str, Any],
+    ledger_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    raw = ledger_event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    lot_id = str(ledger_event.get("target_lot_id") or raw_payload.get("record_id") or "").strip()
+    ledger_event = ledger_events[-1]
+    lot_ids = [lot_id_for_open_event(event) if event.get("event_type") == "open"
+               else event.get("target_lot_id") or event.get("lot_id") for event in ledger_events]
     event_type = str(ledger_event.get("event_type") or "").strip()
-    action = str(state_item.get("action") or "").strip() or _action_from_event_type(event_type)
+    action = execution_event_action(ledger_events) or _action_from_event_type(event_type)
     return {
         **state_item,
         "status": "reconciled",
         "action": action or None,
         "account": state_item.get("account") or ledger_event.get("account"),
-        "applied_record_ids": [lot_id] if lot_id else [],
+        "applied_record_ids": list(dict.fromkeys(lot_id for lot_id in lot_ids if lot_id)),
         "reason": "ledger_event_already_recorded",
         "diagnostics": {
             **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_ledger_event_id": ledger_event.get("event_id"),
+            "reconciled_ledger_event_ids": [row["event_id"] for row in ledger_events],
             "reconciled_ledger_event_type": event_type,
             "reconciled_source_deal_id": deal_id,
             "previous_status": state_item.get("status"),

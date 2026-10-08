@@ -530,3 +530,38 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
 
 
 __all__ = ["open_trade_reconciliation_evidence_repo"]
+
+
+def open_option_execution_preview_repo(sqlite_path: str | Path) -> Any:
+    """Freeze events and lots together; missing evidence is never an empty ledger."""
+    reader = open_trade_reconciliation_evidence_repo(sqlite_path)
+    return _OptionExecutionPreviewRepository(reader.db_path, reader.read_trade_receipt_evidence())
+
+
+class _OptionExecutionPreviewRepository:
+    def __init__(self, path: Path, evidence: dict[str, Any]) -> None:
+        self.db_path = path
+        self.evidence = evidence
+
+    def list_trade_events(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        return self.evidence["trade_events"]
+
+    def list_position_lots(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        return self.evidence["position_lots"]
+
+    def list_records(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        return self.list_position_lots()
+
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+        return next(row["fields"] for row in self.list_position_lots() if row["lot_id"] == lot_id)
+
+
+def verify_trade_receipt_projection(evidence: dict[str, Any]) -> None:
+    """Compare a receipt snapshot against the canonical full event projection."""
+    from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+    from src.application.ledger.projection_verify import compare_projection_lots, _blocking_count
+    projected = project_stored_trade_events_to_position_lots(evidence["trade_events"])
+    comparison = compare_projection_lots(projected_lots=projected.lots,
+        current_lots=evidence["position_lots"], diagnostics=projected.diagnostics)
+    if _blocking_count(comparison["summary"]):
+        raise ValueError("recorded execution projection unavailable")

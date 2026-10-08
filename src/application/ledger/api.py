@@ -565,3 +565,9 @@ __all__ = [
     "settlement_evidence_id",
     "settlement_observation_semantic",
 ]
+
+from .option_allocation import allocate_broker_option_execution
+__all__ += ["allocate_broker_option_execution"]
+
+from src.application.ledger.read_only_evidence import open_option_execution_preview_repo, verify_trade_receipt_projection
+__all__ += ["open_option_execution_preview_repo", "verify_trade_receipt_projection"]

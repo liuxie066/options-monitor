@@ -250,7 +250,7 @@ def _attach_projection_check_fields(out: dict[str, Any]) -> None:
     verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
     checks_raw = verification.get("checks")
     checks = checks_raw if isinstance(checks_raw, list) else []
-    first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
+    first_check = cast(dict[str, Any], checks[0]) if len(checks) == 1 and out.get("action") != "open_close" and isinstance(checks[0], dict) else {}
     if "projection_diagnostic_count" in verification:
         out["projection_diagnostic_count"] = verification.get("projection_diagnostic_count")
     else:

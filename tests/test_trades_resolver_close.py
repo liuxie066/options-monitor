@@ -2307,7 +2307,7 @@ def test_unknown_effect_cannot_close_a_lot_opened_after_the_fill():
     row = _record("future-lot", opened_at=9999999999999, contracts_open=1)
     result = resolve_trade_deal(_deal(position_effect=None, contracts=1), repo=FakeRepo([row]), state={}, apply_changes=False)
     assert result.status == "unresolved"
-    assert result.reason == "unknown_position_effect:close_history_unproven"
+    assert result.reason == "unknown_position_effect:later_or_same_time_ledger_event"
     assert result.operations == []
 
 @pytest.mark.parametrize("first_leg", ["stock", "option"])

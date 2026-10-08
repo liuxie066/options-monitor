@@ -548,7 +548,7 @@ def _prepare_fee_evidence_for_storage(
         fee_order_group_id = str(
             payload.get("source_deal_id") or payload.get("fee_order_group_id") or ""
         ).strip()
-        if fee_order_group_id and event.event_type == "close":
+        if fee_order_group_id and (event.event_type == "close" or (event.event_type == "open" and payload.get("broker_deal_completion"))):
             grouped.setdefault(fee_order_group_id, []).append(index)
     handled: set[int] = set()
     for indexes in grouped.values():
@@ -686,7 +686,7 @@ def _freeze_formula_fee_group(
             first.price,
             contracts=total_contracts,
             multiplier=int(first.multiplier),
-            is_sell=first.position_side == "long",
+            is_sell=option_fee_input_identity(first)[-1] == "sell",
         )
     except (TypeError, ValueError):
         return [
@@ -1269,6 +1269,17 @@ def persist_trade_event_objects_atomically(
         if len(set(event_ids)) != len(event_ids):
             raise ValueError("atomic trade persistence contains duplicate event_id")
 
+        allocation_groups: dict[str, list[dict[str, Any]]] = {}
+        for item in storage_events:
+            raw = item.raw_payload or {}
+            if raw.get("broker_deal_completion"):
+                key = execution_identity_from_input(raw.get("execution_input")) or str(raw.get("source_deal_id") or "")
+                allocation_groups.setdefault(key, []).append(item.to_dict())
+        for group in allocation_groups.values():
+            if (any(execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) for row in group)
+                    and not ledger_execution_event_set_is_complete(group)):
+                raise ValueError("trade_execution_split_incomplete")
+
         existing_by_id = _trade_events_by_id(
             sqlite_repo,
             event_ids,
@@ -1648,11 +1659,26 @@ def reconcile_normalized_execution_order_identity(repo: Any, deal: Any) -> list[
             if len(rows) != 1 or Decimal(str(rows[0].get("shares"))) != Decimal(execution["quantity"]):
                 raise ValueError("trade_execution_split_incomplete")
             return _enrich_execution_order_identity(sqlite_repo, rows, execution, conn=conn, assigned_stock=True)
-        if not any(execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id
-                   for row in sqlite_repo.list_trade_events(conn=conn)):
+        ledger_rows = sqlite_repo.list_trade_events(conn=conn)
+        rows = [row for row in ledger_rows
+                if execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id]
+        if not rows:
             return []
-        rows = _events_for_storage(sqlite_repo, _trade_event_from_normalized_deal(deal), conn=conn)
-        return [trade_event_application_payload(encode_trade_event_for_storage(row).payload) for row in rows]
+        for row in rows:
+            stored = (row.get("raw_payload") or {}).get("execution_input")
+            if execution_source_identity_conflicts(row.get("raw_payload") or {}, stored):
+                raise ValueError("trade_execution_identity_conflict")
+            require_same_execution(stored, execution)
+        if applied_execution_association_conflicts(
+            None, execution_id, execution_economic_content(execution), applied_events=rows,
+        ):
+            raise ValueError("trade_execution_applied_association_conflict")
+        voided = {valid_void_target_event_id(row) for row in ledger_rows}
+        if (not ledger_execution_event_set_is_complete(rows)
+                or any(row["event_id"] in voided for row in rows)
+                or sum(Decimal(str(row["contracts"])) for row in rows) != Decimal(execution["quantity"])):
+            raise ValueError("trade_execution_split_incomplete")
+        return _enrich_execution_order_identity(sqlite_repo, rows, execution, conn=conn)
 
     return with_sqlite_repo_transaction(repo, _run, require_projection_publication=True)
 
@@ -1697,7 +1723,10 @@ def _events_for_storage(
                 raise ValueError("trade_execution_split_incomplete")
             existing = _enrich_execution_order_identity(repo, existing, execution, conn=conn)
             target = str(getattr(event, "target_lot_id", None) or "")
-            matching = [row for row in existing if not target or str(row.get("target_lot_id") or "") == target]
+            matching = [row for row in existing
+                        if str(row.get("event_id") or "") == str(event.event_id)
+                        and str(row.get("target_lot_id") or "") == target
+                        and row.get("event_type") == getattr(event, "event_type", None)]
             if not matching:
                 raise ValueError("trade_execution_target_conflict")
             return [_canonical_storage_event(row) for row in matching]

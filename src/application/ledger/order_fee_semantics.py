@@ -13,7 +13,7 @@ def option_contract_identity(event: TradeEvent) -> tuple[Any, ...]:
         key.account,
         key.underlying_symbol,
         key.option_type,
-        event.position_side,
+        execution_trade_side(event),
         key.strike,
         key.expiration_ymd,
         event.currency,
@@ -57,9 +57,15 @@ def zero_option_fee_lifecycle_reason(event: TradeEvent) -> str | None:
     return None
 
 
+def execution_trade_side(event: TradeEvent) -> str | None:
+    from domain.domain.trade_contract_identity import derive_trade_side
+    effect = "open" if event.event_type == "open" else "close"
+    return derive_trade_side(effect, event.position_side)
+
+
 def option_fee_input_identity(event: TradeEvent) -> tuple[Any, ...]:
     """Economic inputs shared by source-deal fee allocation and estimation."""
-    return (event.currency, event.price, event.multiplier, event.position_side)
+    return (event.currency, event.price, event.multiplier, execution_trade_side(event))
 
 
 def order_fee_currency_matches(currencies: Iterable[str], expected: str | None = None) -> bool:

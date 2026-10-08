@@ -194,13 +194,13 @@ def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
     assert "strategy_group_id" not in fields
 
 
-def test_unknown_buy_call_without_history_does_not_create_open(tmp_path: Path) -> None:
+def test_unknown_buy_call_without_history_creates_open(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     result = resolve_trade_deal(_long_call_deal(), repo=repo, state={}, apply_changes=True)
-    assert result.status == "unresolved"
-    assert result.reason == "unknown_position_effect"
-    assert result.operations == []
-    assert repo.list_trade_events() == []
+    assert result.status == "applied"
+    assert result.reason == "applied_open"
+    assert len(result.operations) == 1
+    assert len(repo.list_trade_events()) == 1
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
