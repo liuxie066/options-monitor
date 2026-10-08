@@ -10,8 +10,12 @@ from typing import Any
 
 from domain.domain.daily_decision_brief import normalize_persisted_daily_decision_brief
 from domain.storage import paths
-from src.application.account_config import build_account_runtime_plan, normalize_account_label
-from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError, load_candidate_snapshot_bundle
+from src.application.account_config import resolve_account_futu_settings, normalize_account_label, parse_lossless_integer
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError, CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA, CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
+)
+from src.application.candidate_evidence_history import load_candidate_snapshot_bundle_for_inspection
 from src.application.tick_run_workspace import AccountRunConfigError, account_run_config_path, load_published_account_run_config, read_account_run_state_bytes_safely
 from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, content_hash, history_path
 
@@ -42,16 +46,26 @@ def _verified_source(base: Path, path: Path, account: str, market: str) -> dict[
     run_bytes = read_account_run_state_bytes_safely(base=base, run_id=run_id, account=account, name=f"daily_decision_brief.{market}.json")
     if content_hash(json.loads(run_bytes)) != content_hash(raw):
         raise ValueError("run_copy_mismatch")
-    bundle = load_candidate_snapshot_bundle(base=base, run_id=run_id, account=account)
+    bundle = load_candidate_snapshot_bundle_for_inspection(base=base, run_id=run_id, account=account)
     manifest = bundle["manifest"]
+    if manifest["schema_version"] not in {
+        CANDIDATE_SNAPSHOT_MANIFEST_V1_SCHEMA, CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
+        CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
+    } or manifest.get("scan_mode") == "experience" or manifest.get("executable") is False:
+        raise ValueError("historical_formal_evidence_required")
     cfg = load_published_account_run_config(base=base, run_id=run_id, account=account,
         state_path=account_run_config_path(base=base, run_id=run_id, account=account),
         account_config_sha256=manifest["account_config_sha256"])
     from src.application.futu_quote_routing import runtime_config_market
     if runtime_config_market(cfg) != market:
         raise ValueError("source_market_mismatch")
-    binding = build_account_runtime_plan(cfg, account=account)
-    scope = {"futu_account_id": binding.futu_account_id, "trade_env": binding.futu_trd_env}
+    binding = resolve_account_futu_settings(cfg, account=account)
+    account_id = binding.get("account_id")
+    account_id = parse_lossless_integer(account_id)
+    if account_id is None or account_id <= 0:
+        raise ValueError("historical_scope_unproven")
+    scope = {"futu_account_id": str(account_id),
+             "trade_env": str(binding.get("trd_env") or "").strip()}
     if not scope["futu_account_id"] or scope["trade_env"] not in {"REAL", "SIMULATE"}:
         raise ValueError("historical_scope_unproven")
     if raw.get("decision_scope") and raw["decision_scope"] != scope:
@@ -60,12 +74,21 @@ def _verified_source(base: Path, path: Path, account: str, market: str) -> dict[
             "binding_hash": content_hash(manifest)}
 
 
-def preview_history_import(*, base: Path, account: str, market: str) -> dict[str, Any]:
-    report, _ = _preview(base=Path(base), account=normalize_account_label(account), market=market.upper())
+def _selected_dates(market_dates: tuple[str, ...] | list[str]) -> list[str]:
+    if any(not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)
+           for day in market_dates):
+        raise ValueError("market_dates must use YYYY-MM-DD")
+    return sorted({date.fromisoformat(day).isoformat() for day in market_dates})
+
+
+def preview_history_import(*, base: Path, account: str, market: str,
+                           market_dates: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
+    report, _ = _preview(base=Path(base), account=normalize_account_label(account), market=market.upper(),
+                         market_dates=_selected_dates(market_dates))
     return report
 
 
-def _preview(*, base: Path, account: str, market: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _preview(*, base: Path, account: str, market: str, market_dates: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if market not in {"US", "HK"}:
         raise ValueError("market must be US or HK")
     store = DecisionHistoryStore(history_path(base))
@@ -74,6 +97,8 @@ def _preview(*, base: Path, account: str, market: str) -> tuple[dict[str, Any], 
     for path in sorted(paths.account_state_dir(base, account).glob(f"daily_decision_brief.{market}.*.r*.json")):
         item = {"source": str(path.relative_to(base)), "status": "rejected"}
         match = re.fullmatch(r"daily_decision_brief\.[A-Z]+\.(\d{4}-\d{2}-\d{2})\.r(\d+)\.json", path.name)
+        if market_dates and (not match or match[1] not in market_dates):
+            continue
         if match:
             try:
                 day = date.fromisoformat(match[1]).isoformat()
@@ -102,19 +127,27 @@ def _preview(*, base: Path, account: str, market: str) -> tuple[dict[str, Any], 
         rows.append(item)
     report = {"account": account, "market": market, "target_state": before, "rows": rows,
               "ready_count": len(accepted), "reserved_revisions": reserved, "coverage": "verified_retained_sources_only"}
+    if market_dates:
+        report["market_dates"] = market_dates
     report["preview_hash"] = content_hash(report)
     return report, accepted
 
 
-def apply_history_import(*, base: Path, account: str, market: str, preview_hash: str) -> dict[str, Any]:
+def apply_history_import(*, base: Path, account: str, market: str, preview_hash: str,
+                         market_dates: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
     base = Path(base)
     account, market = normalize_account_label(account), market.upper()
+    selected = _selected_dates(market_dates)
+    if market not in {"US", "HK"}:
+        raise ValueError("market must be US or HK")
     store = DecisionHistoryStore(history_path(base))
     if store.path.exists():
         with store.connect() as conn:
             prior = next((report for report in store.import_reports(conn, account=account, market=market)
                           if report["preview_hash"] == preview_hash), None)
         if prior is not None:
+            if prior.get("market_dates", []) != selected:
+                raise DecisionHistoryError("history_import_preview_scope_changed")
             for item in prior["rows"]:
                 if item["status"] not in {"ready", "already_imported"}:
                     continue
@@ -122,7 +155,7 @@ def apply_history_import(*, base: Path, account: str, market: str, preview_hash:
                 if not saved or saved["payload_hash"] != item["payload_hash"] or saved["scope"] != item["scope"]:
                     raise DecisionHistoryError("history_import_readback_failed")
             return {**prior, "applied_count": 0, "readback": "passed", "already_applied": True}
-    report, accepted = _preview(base=base, account=normalize_account_label(account), market=market.upper())
+    report, accepted = _preview(base=base, account=account, market=market, market_dates=selected)
     if report["preview_hash"] != preview_hash:
         raise DecisionHistoryError("history_import_preview_changed")
     store = DecisionHistoryStore(history_path(base))

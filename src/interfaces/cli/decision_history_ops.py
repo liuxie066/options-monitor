@@ -11,6 +11,8 @@ def add_decision_history_commands(subparsers):
     parser = commands.add_parser("import", help="preview verified legacy JSON import; writes only with --apply and --preview-hash")
     parser.add_argument("--account", required=True)
     parser.add_argument("--market", required=True, choices=("US", "HK", "us", "hk"))
+    parser.add_argument("--market-date", action="append", default=[], dest="market_dates",
+                        help="restrict retained sources to this YYYY-MM-DD date; repeat for multiple dates")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--preview-hash")
 
@@ -22,11 +24,13 @@ def handle_decision_history_command(args, *, repo_base_fn):
         if args.apply:
             if not args.preview_hash:
                 raise ValueError("--apply requires --preview-hash from a reviewed preview")
-            result = apply_history_import(base=base, account=args.account, market=args.market, preview_hash=args.preview_hash)
+            result = apply_history_import(base=base, account=args.account, market=args.market, preview_hash=args.preview_hash,
+                                          market_dates=args.market_dates)
         else:
             if args.preview_hash:
                 raise ValueError("--preview-hash requires --apply")
-            result = preview_history_import(base=base, account=args.account, market=args.market)
+            result = preview_history_import(base=base, account=args.account, market=args.market,
+                                            market_dates=args.market_dates)
     except (ValueError, OSError) as exc:
         raise AgentToolError(code="HISTORY_IMPORT_ERROR", message=str(exc)) from exc
     print(json.dumps(result, ensure_ascii=False, indent=2))
