@@ -98,6 +98,8 @@ def enrich_and_filter_sell_put_underwriting(
             "existing_stock_value_cny_symbol",
             "existing_short_put_assignment_cny_symbol",
             "existing_short_put_assignment_cny_total",
+            "symbol_concentration_current",
+            "symbol_concentration_after_existing_puts",
             "single_trade_concentration",
             "symbol_concentration_after",
             "total_short_put_concentration_after",

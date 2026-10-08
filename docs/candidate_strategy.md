@@ -388,6 +388,17 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 ## 10. 组合口径与消费边界
 
+### Position Sizing（单账户 CSP 展示）
+
+CSP 候选展示三个标的仓位比例：`symbol_concentration_current`（当前正股价值 / 本账户组合基数）、
+`symbol_concentration_after_existing_puts`（当前正股价值 + 已有 Put 接货金额，再除以同一基数），
+以及现有 `symbol_concentration_after`（再加该候选一张 Put 的接货金额）。
+组合基数沿用本账户现金与正股价值之和；接货金额沿用行权价、实际合约乘数和既有汇率转换口径。
+这是接货资金暴露展示，不模拟指派时股价或未来净值。已有估值降级会标为估算；缺失显示暂不可用，
+可信零值显示 0%，超过 100% 的结果保持原值。前两项不要求候选接货金额可用。
+计算由 `domain/domain/short_vol_assessment.py` 持有，摘要、快照和 Brief 仅透传。
+新增两项仅用于展示，不新增集中度硬门槛，也不改变现有排序或现金容量规则。
+
 - CSP 的接货后 concentration 和 CC 的被叫走后剩余 concentration
   继续使用当前组合 NAV 计算口径；资产按当前市值计量，货币基金计入 NAV。
 - concentration 只在跨 symbol 且收益接近时参与选择，不变成硬风险门槛。
