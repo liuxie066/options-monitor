@@ -5,7 +5,7 @@
     "tag": "v4.2.7",
     "commit": "5c17222c80b3c1708e406c83843e663aba31a623"
   },
-  "reviewed_head": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
+  "reviewed_head": "0517a8eb2f856deef17c7d535870e228205fa401",
   "commits": [
     {
       "sha": "bea898d5f4ce84f86c10279fc55c22fe40bbef2f",
@@ -70,6 +70,14 @@
     {
       "sha": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
       "subject": "Merge pull request #505 from liuxie066/codex/option-execution-allocation"
+    },
+    {
+      "sha": "934578450e94ece9842827dfe67b8187564a1da1",
+      "subject": "chore(release): release 4.2.8"
+    },
+    {
+      "sha": "0517a8eb2f856deef17c7d535870e228205fa401",
+      "subject": "Merge pull request #508 from liuxie066/codex/release-option-allocation"
     }
   ],
   "release_notes": [
@@ -117,6 +125,14 @@
     {
       "commit": "79c1552dbce695c6c20b0e7e1e3b38248158885b",
       "reason": "Empty workflow acceptance checkpoint; no source, configuration, runtime or user-facing behavior change."
+    },
+    {
+      "commit": "934578450e94ece9842827dfe67b8187564a1da1",
+      "reason": "Metadata-only first attempt to publish the same 4.2.8 release and protected-main merge; no additional source or runtime behavior. Publication was blocked by exact release commit title validation."
+    },
+    {
+      "commit": "0517a8eb2f856deef17c7d535870e228205fa401",
+      "reason": "Metadata-only first attempt to publish the same 4.2.8 release and protected-main merge; no additional source or runtime behavior. Publication was blocked by exact release commit title validation."
     }
   ],
   "design_evidence": [
@@ -214,6 +230,18 @@
       "commit": "cac7c1b616f89bba9ecd4c3c936c9a9ff4ae8fd7",
       "references": [
         "https://github.com/liuxie066/options-monitor/pull/505"
+      ]
+    },
+    {
+      "commit": "934578450e94ece9842827dfe67b8187564a1da1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/508"
+      ]
+    },
+    {
+      "commit": "0517a8eb2f856deef17c7d535870e228205fa401",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/508"
       ]
     }
   ]
