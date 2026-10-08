@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.application.multi_tick_audit import daily_brief_phase
+from src.application.report_formatting import attribution_pending_text
 from src.application.payload_helpers import parse_utc as _parse_datetime
 
 _DEFAULT_MAX_ACTIONS = 5
@@ -503,15 +504,11 @@ def render_daily_brief_lifecycle(
 def _attribution_review_lines(view: Mapping[str, Any]) -> list[str]:
     rows = [row for row in view.get("attribution_pending") or [] if isinstance(row, Mapping)]
     out = []
-    if len(rows) == 1:
-        row = rows[0]
-        out.append(f"待确认归属｜1 笔 · {row.get('symbol')} {row.get('expiration')} "
-                   f"{row.get('strike')} {str(row.get('option_type') or '').upper()}；OM Bot 确认")
-    elif rows:
-        out.append(f"待确认归属｜{len(rows)} 笔 · OM Bot 确认")
+    if rows:
+        out.append(f"归属待办｜{len(rows)} 笔")
         for row in rows[:5]:
             out.append(f"归属待办｜{row.get('symbol')} {row.get('expiration')} {row.get('strike')} "
-                       f"{str(row.get('option_type') or '').upper()}")
+                       f"{str(row.get('option_type') or '').upper()} · {attribution_pending_text(row)}")
         if len(rows) > 5:
             out.append(f"归属待办｜另有 {len(rows) - 5} 笔，请在 OM Bot 查看。")
     if view.get("attribution_read_error"):

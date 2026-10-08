@@ -99,8 +99,9 @@ def trade_attribution_capacity_check(
     wheel_read_model: Mapping[str, Any], observation: Mapping[str, Any], now_ms: int,
     config: Mapping[str, Any],
     consumed_reservation: Mapping[str, Any] | None = None,
+    check_account_capacity: bool = True,
 ) -> dict[str, Any]:
-    """Check post-fill occupancy; the already booked target is never added again."""
+    """Verify booked positions; Wheel additionally requires account coverage."""
     from collections import defaultdict
     from datetime import datetime, timezone
     from decimal import Decimal
@@ -122,7 +123,7 @@ def trade_attribution_capacity_check(
     call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
     markets = {"us", "hk"} if pooled_cash else {market}
     for required_market in markets:
-        for asset in ("stock", "option"):
+        for asset in (("stock", "option") if check_account_capacity else ("option",)):
             reasons.update(position_snapshot_scope_errors(snapshot, account_label=fact["account"],
                 environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
                 external_account_id=ref.get("external_account_id"),
@@ -135,21 +136,24 @@ def trade_attribution_capacity_check(
 
     try:
         actual, recorded = defaultdict(int), defaultdict(int)
-        shares, call_claims, put_claims = defaultdict(int), defaultdict(int), defaultdict(Decimal)
+        shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
         for row in snapshot.get("rows") or []:
             instrument = row["instrument_ref"]
+            if not check_account_capacity and instrument["asset_type"] == "stock":
+                continue
             if not pooled_cash and (str(instrument.get("market") or "").lower() != market
                     or instrument.get("symbol") != call_symbol):
                 continue
             quantity = Decimal(str(row["quantity"]))
-            if not quantity.is_finite() or quantity != quantity.to_integral_value() or quantity < 0:
+            if (not quantity.is_finite() or quantity < 0
+                    or instrument["asset_type"] == "option" and quantity != quantity.to_integral_value()):
                 raise ValueError("capacity_quantity_invalid")
             if instrument["asset_type"] == "option":
                 actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
             elif row["position_side"] == "long":
                 # Total observed inventory is the basis for existing obligations;
                 # can_sell_qty is not reduced by those obligations a second time.
-                shares[instrument["symbol"]] += int(quantity)
+                shares[instrument["symbol"]] += quantity
         for item in facts:
             if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
                 continue
@@ -166,6 +170,9 @@ def trade_attribution_capacity_check(
                     put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
         if dict(actual) != dict(recorded):
             reasons.add("broker_ledger_positions_mismatch")
+        if not check_account_capacity:
+            # Combo membership records existing fills, not permission to open more risk.
+            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
         for branch in wheel_read_model.get("wheel_branches") or []:
             if branch.get("lifecycle_status") != "active":
                 continue

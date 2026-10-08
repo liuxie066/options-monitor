@@ -1344,8 +1344,9 @@ def test_pending_attribution_reminder_keeps_contract_but_hides_execution_id() ->
 
     message = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "待确认归属｜1 笔 · 3690.HK 2026-11-27 80 CALL；OM Bot 确认" in message
-    assert "归属待办｜" not in message
+    assert "归属待办｜1 笔" in message
+    assert "3690.HK 2026-11-27 80 CALL · 归属待核对" in message
+    assert "OM Bot 确认" not in message
     assert "execution:v1:" not in message
 
 

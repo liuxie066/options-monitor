@@ -40,7 +40,7 @@ def _response(operation_id: str, status: str, result: dict[str, Any]) -> dict[st
     if len(members) > 1:
         target = f"{len(members)} 笔成交"
     text = {"applied": f"已确认归属：{target}；成交金额和数量不变。", "cancelled": "已取消本次预览，未改变成交归属。",
-            "failed": "本次归属未执行，请重新查询并预览。", "expired": "预览已过期，请重新预览。"}.get(status, "归属结果待核实。")
+            "failed": "归属未完成，请查看失败原因后再处理。", "expired": "预览已过期，请重新预览。"}.get(status, "归属结果待核实。")
     return build_response(tool_name="inbound.attribution", ok=status in {"applied", "cancelled"},
                           data={"operation_id": operation_id, "operation_type": "trade_attribution",
                                 "status": status, "result": result, "response_text": text})
