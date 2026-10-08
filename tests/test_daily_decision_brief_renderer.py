@@ -2055,3 +2055,28 @@ def test_unscoped_call_unavailability_still_blocks_empty_family(reason):
     brief["candidates"] = {}
     brief["data_gaps"] = [{"scope": "strategy", "strategy_family": "covered_call", "reason": reason}]
     assert "## CC\n候选数据不完整，暂无法评估" in render_fixed_report(brief)
+
+
+@pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
+def test_csp_position_sizing_in_shared_report_views(render) -> None:
+    brief = _brief()
+    for candidate in brief["candidates"]["sell_put"]:
+        candidate["metrics"].update(symbol_concentration_current=0.08, symbol_concentration_after_existing_puts=0.2, symbol_concentration_after=0.23)
+    message = render(brief)
+    assert "Position Sizing（本账户，接货金额口径）" in message
+    assert "当前 8.0% · 已有 Put 全指派 20.0% · 再卖 1 张后全指派 23.0%" in message
+
+
+def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
+    brief = _brief()
+    candidate = brief["candidates"]["sell_put"][0]
+    candidate["metrics"].update(symbol_concentration_current=0.0, symbol_concentration_after_existing_puts=1.2, symbol_concentration_after=float("inf"), portfolio_risk_warnings="stock_value_estimated_from_avg_cost:AAPL")
+    identity = build_daily_brief_candidate_identity(account="lx", market="US", symbol=candidate["symbol"], strategy_family="sell_put")
+    brief["candidate_index"] = [{"identity": identity, "symbol": candidate["symbol"], "strategy_family": "sell_put", "representative": candidate, "contract_count": 1}]
+    for render in (render_candidate_alert, render_candidate_alert_card_markdown):
+        message = render(brief, [identity])
+        assert "Position Sizing（本账户，接货金额口径，估算）" in message
+        assert "当前 0.0% · 已有 Put 全指派 120.0% · 再卖 1 张后全指派 暂不可用" in message
+        assert "stock_value_estimated_from_avg_cost" not in message
+    legacy = render_full_brief(_brief())
+    assert "当前 暂不可用 · 已有 Put 全指派 暂不可用 · 再卖 1 张后全指派 暂不可用" in legacy

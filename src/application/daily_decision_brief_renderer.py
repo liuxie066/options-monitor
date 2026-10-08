@@ -1424,7 +1424,20 @@ def _candidate_metric_details(
         parts.append(
             f"最多 {contracts} 手" if contracts is not None else "最多手数暂不可用"
         )
-    return [" · ".join(parts)] if parts else []
+    details = [" · ".join(parts)] if parts else []
+    if family == "sell_put":
+        sizing = []
+        for label, key in (
+            ("当前", "symbol_concentration_current"),
+            ("已有 Put 全指派", "symbol_concentration_after_existing_puts"),
+            ("再卖 1 张后全指派", "symbol_concentration_after"),
+        ):
+            value = _number(values.get(key))
+            sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
+        estimated = "stock_value_estimated_from_avg_cost:" in str(values.get("portfolio_risk_warnings") or "")
+        basis = "本账户，接货金额口径，估算" if estimated else "本账户，接货金额口径"
+        details.append(f"Position Sizing（{basis}）：" + " · ".join(sizing))
+    return details
 
 
 def _regular_candidate_card_fields(
