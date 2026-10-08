@@ -16,7 +16,7 @@ from domain.domain.engine import (
     ComboYieldFundingDecision,
     ComboYieldLeg,
     compute_combo_yield_funding_decision,
-    compute_combo_yield_metrics,
+    compute_csp_lc_metrics,
     rank_combo_yield_call_lottery_rows,
     rank_combo_yield_calls_for_put,
     rank_combo_yield_rows,
@@ -287,7 +287,7 @@ def _build_pair_row(
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
     call_buy_fee = calc_futu_option_fee(call_leg.currency, call_leg.ask, contracts=1, multiplier=multiplier, is_sell=False)
-    metrics = compute_combo_yield_metrics(
+    metrics = compute_csp_lc_metrics(
         put_leg=put_leg,
         call_leg=call_leg,
         put_sell_fee=put_sell_fee,

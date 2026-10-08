@@ -354,7 +354,7 @@ def test_service_rejects_control_target_identity_and_time_errors(mismatch):
 
 
 @pytest.mark.parametrize("current", [False, True])
-def test_report_uses_one_day_floor_for_each_account_without_mutating_ledger(current):
+def test_report_uses_expiry_or_actual_close_for_each_account_without_mutating_ledger(current):
     from copy import deepcopy
 
     first = _event("floor-lx", "open", "2026-09-01T10:00:00")
@@ -375,15 +375,16 @@ def test_report_uses_one_day_floor_for_each_account_without_mutating_ledger(curr
     )
     report = _build_report(repo, period=period, configured_accounts=("lx", "sy"), include_rows=True)
     returns = report["option_return"]["by_currency"]["USD"]
-    assert [row["capital_days"] for row in report["rows"]] == [10000.0, 10000.0]
-    assert returns["capital_days"] == 20000.0
-    assert returns["average_occupied_capital"] == (40000.0 if current else 20000.0)
-    assert returns["rate"] == 0.01
-    assert returns["annualized_rate"] == (7.3 if current else 3.65)
+    expected_rows = [295833.3333333333, 295416.6666666667] if current else [10000.0, 10000.0]
+    assert [row["capital_days"] for row in report["rows"]] == expected_rows
+    assert returns["capital_days"] == (591250.0 if current else 20000.0)
+    assert returns["average_occupied_capital"] == (1182500.0 if current else 20000.0)
+    assert returns["rate"] == (0.000338266385 if current else 0.01)
+    assert returns["annualized_rate"] == (0.246934460888 if current else 3.65)
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == (400.0 if current else 200.0)
     assert {item["key"] for item in report["breakdowns"]["accounts"]} == {"lx", "sy"}
-    for item in report["breakdowns"]["accounts"]:
-        assert item["option_return"]["by_currency"]["USD"]["capital_days"] == 10000.0
+    for item, expected in zip(report["breakdowns"]["accounts"], expected_rows, strict=True):
+        assert item["option_return"]["by_currency"]["USD"]["capital_days"] == expected
     again = _build_report(repo, period=period, configured_accounts=("lx", "sy"), include_rows=True)
     assert again == report
     assert repo.rows == before
