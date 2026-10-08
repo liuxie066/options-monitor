@@ -99,7 +99,7 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
         market="HK", now_ms=_ms("2026-10-01T00:00:00Z"))
     assert read_error is None and len(pending) == 1
     assert pending[0]["execution_key"] == result["attribution_result"]["execution_key"]
-    assert "归属待办｜1 笔" in _attribution_review_lines({"attribution_pending": pending})[0]
+    assert "归属证据核对｜1 笔" in _attribution_review_lines({"attribution_pending": pending})[0]
     missing_config = {**config, "account_settings": {}}
     unavailable = build_trade_attribution_view(rows, config=missing_config, account="lx", market="hk",
         now_ms=_ms("2026-10-01T00:00:00Z"), combo_evidence=evidence)

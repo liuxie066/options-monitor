@@ -27,6 +27,7 @@ from domain.domain.engine import (
 from domain.storage.repositories import state_repo
 from src.application.cron_runtime import apply_notify_results_to_tick_metrics, build_notify_summary
 from src.application.daily_decision_brief_renderer import (
+    build_attribution_reminder_context,
     render_candidate_alert,
     render_candidate_alert_card_markdown,
     render_fixed_failure,
@@ -45,6 +46,7 @@ from src.application.daily_decision_brief_repository import (
     list_daily_decision_brief_revisions,
     read_daily_decision_brief,
     read_daily_decision_brief_delivery_state,
+    read_confirmed_attribution_render_context,
     read_daily_decision_brief_fixed_recovery,
     read_latest_daily_decision_brief,
     read_retryable_daily_decision_brief_delivery,
@@ -1158,6 +1160,12 @@ def _prepare_daily_brief_notification(
                             )
                         else:
                             assert persisted is not None
+                            render_context.update(build_attribution_reminder_context(
+                                persisted["brief"],
+                                previous_context=read_confirmed_attribution_render_context(
+                                    base=request.base, account=account, market=market, read_scope=read_scope,
+                                ),
+                            ))
                             identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
                             rendered_combo_rows = select_rendered_combo_candidate_rows(
                                 persisted["brief"],
@@ -1417,6 +1425,12 @@ def _rebuild_daily_brief_delivery(
         return {"envelope": None, "reason": "no_delivery_due"}
     identities = list(latest.get("candidate_identities") or []) if action == "fixed_report" else pending
     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+    render_context.update(build_attribution_reminder_context(
+        brief,
+        previous_context=read_confirmed_attribution_render_context(
+            base=request.base, account=account, market=market, read_scope=read_scope,
+        ),
+    ))
     diff: dict[str, Any] = {}
     if action == "fixed_report":
         revision_result = list_daily_decision_brief_revisions(

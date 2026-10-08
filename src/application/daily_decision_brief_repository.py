@@ -737,6 +737,28 @@ def read_daily_decision_brief_delivery_state(
     return {"available": True, "reason": "ok", "state": state, "path": path}
 
 
+def read_confirmed_attribution_render_context(
+    *, base: Path, account: str, market: str,
+    read_scope: DailyBriefReadScope | None = None,
+) -> dict[str, Any]:
+    """Return the latest successful confirmed envelope's frozen render context."""
+    result = read_daily_decision_brief_delivery_state(
+        base=base, account=account, market=market, read_scope=read_scope,
+    )
+    confirmed = []
+    for day in (result.get("state") or {}).get("days", {}).values():
+        envelopes = [*(day.get("fixed_reports") or {}).values(),
+                     *(day.get("candidate_delivery_history") or [])]
+        if day.get("candidate_delivery"):
+            envelopes.append(day["candidate_delivery"])
+        confirmed.extend(item for item in envelopes
+                         if item["status"] == "confirmed" and item["source_kind"] == "successful_brief")
+    if not confirmed:
+        return {}
+    latest = max(confirmed, key=lambda item: (item["confirmed_at_utc"], item["delivery_key"]))
+    return dict(latest.get("render_context") or {})
+
+
 def read_retryable_daily_decision_brief_delivery(
     *,
     base: Path,

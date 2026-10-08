@@ -258,6 +258,10 @@ def build_daily_brief_user_view(
         "fixed_report_reminders": fixed_report_reminders,
         "attribution_pending": list(brief.get("attribution_pending") or []),
         "attribution_read_error": brief.get("attribution_read_error"),
+        "attribution_reminders": (
+            _attribution_context(brief, ctx)
+            if delivery_kind in {"fixed_report", "candidate_alert"} else None
+        ),
     }
     return view
 
@@ -501,18 +505,89 @@ def render_daily_brief_lifecycle(
     return _render_user_view(view)
 
 
+def _attribution_signature(row: Mapping[str, Any]) -> dict[str, Any]:
+    fields = ("execution_key", "symbol", "option_type", "strike", "expiration",
+              "status", "rules_enabled", "selected_candidate_id")
+    return {**{key: row.get(key) for key in fields},
+            "reason_codes": sorted(set(row.get("reason_codes") or []))}
+
+
+def _attribution_context(brief: Mapping[str, Any], context: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    value = context.get("attribution_reminders")
+    if not isinstance(value, Mapping) or (
+        value.get("schema_version") != "attribution_reminders.v1"
+        or value.get("account") != brief.get("account")
+        or value.get("market") != brief.get("market")
+    ):
+        return None
+    for key in ("seen_rows", "detail_rows"):
+        rows = value.get(key)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("execution_key"), (str, type(None)))
+            or not isinstance(row.get("reason_codes"), list)
+            or any(not isinstance(reason, str) for reason in row["reason_codes"])
+            or row != _attribution_signature(row) for row in rows
+        ):
+            return None
+    if len(value["detail_rows"]) > 5 or any(not row["execution_key"] for row in value["seen_rows"]):
+        return None
+    if len({row["execution_key"] for row in value["seen_rows"]}) != len(value["seen_rows"]):
+        return None
+    return value
+
+
+def build_attribution_reminder_context(
+    brief: Mapping[str, Any], *, previous_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Remember only contract details shown in a confirmed successful delivery."""
+    previous = _attribution_context(brief, previous_context or {})
+    seen = {row["execution_key"]: row for row in previous["seen_rows"]} if previous else {}
+    rows = [_attribution_signature(row) for row in brief.get("attribution_pending") or []
+            if isinstance(row, Mapping)]
+    details = [row for row in rows if not row["execution_key"]
+               or seen.get(row["execution_key"]) != row][:5]
+    current_seen = [row for row in rows if row["execution_key"]
+                    and (seen.get(row["execution_key"]) == row or row in details)]
+    if brief.get("attribution_read_error"):
+        current_seen = list(seen.values())
+    return {"attribution_reminders": {
+        "schema_version": "attribution_reminders.v1",
+        "account": brief.get("account"), "market": brief.get("market"),
+        "detail_rows": details, "seen_rows": current_seen,
+    }}
+
+
 def _attribution_review_lines(view: Mapping[str, Any]) -> list[str]:
     rows = [row for row in view.get("attribution_pending") or [] if isinstance(row, Mapping)]
+    context = view.get("attribution_reminders")
+    details = ([row for row in rows if _attribution_signature(row) in context["detail_rows"]]
+               if context else rows)[:5]
+    labels = {
+        "归属证据不足，需核对": "归属证据核对",
+        "归属冲突，需核对": "归属冲突",
+        "系统归属处理中": "归属处理中",
+        "归属待确认，OM Bot 查看": "归属待确认",
+    }
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        label = labels.get(attribution_pending_text(row), "归属待核对")
+        groups.setdefault(label, []).append(row)
     out = []
-    if rows:
-        out.append(f"归属待办｜{len(rows)} 笔")
-        for row in rows[:5]:
-            out.append(f"归属待办｜{row.get('symbol')} {row.get('expiration')} {row.get('strike')} "
+    for label, group in groups.items():
+        shown = [row for row in details if row in group]
+        unchanged = sum(_attribution_signature(row) in context["seen_rows"]
+                        and row not in shown for row in group) if context else 0
+        suffix = f"（{unchanged} 笔未变化）" if unchanged else ""
+        out.append(f"{label}｜{len(group)} 笔{suffix}")
+        for row in shown:
+            out.append(f"{label}｜{row.get('symbol')} {row.get('expiration')} {row.get('strike')} "
                        f"{str(row.get('option_type') or '').upper()} · {attribution_pending_text(row)}")
-        if len(rows) > 5:
-            out.append(f"归属待办｜另有 {len(rows) - 5} 笔，请在 OM Bot 查看。")
+        remaining = len(group) - len(shown) - unchanged
+        if remaining:
+            out.append(f"{label}｜另有 {remaining} 笔，请在 OM Bot 查看。")
     if view.get("attribution_read_error"):
-        out.append("归属待办｜账本读取失败，待办情况未知")
+        out.append("归属待核对｜账本读取失败，待办情况未知")
     return out
 
 
