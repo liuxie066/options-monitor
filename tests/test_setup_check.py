@@ -81,7 +81,7 @@ def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch
 
     repo = Path(__file__).resolve().parents[1]
     init_yaml_config(
-        repo_root=repo,
+        account_label="lx", repo_root=repo,
         output_config_yaml_path=tmp_path / "config.yaml",
         runtime_output_dir=tmp_path,
         bot_output_config_path=tmp_path / "resolved" / "config.bot.json",
@@ -113,7 +113,7 @@ def test_first_run_account_repair_and_symbol_add_keep_one_market_ready(monkeypat
     repo = Path(__file__).resolve().parents[1]
     source = tmp_path / "config.yaml"
     init_yaml_config(
-        repo_root=repo, output_config_yaml_path=source, runtime_output_dir=tmp_path,
+        account_label="lx", repo_root=repo, output_config_yaml_path=source, runtime_output_dir=tmp_path,
         bot_output_config_path=tmp_path / "resolved" / "config.bot.json",
         markets=["us"], us_symbols=["AAPL"],
     )
@@ -141,7 +141,7 @@ def test_setup_check_rebuilds_missing_snapshot_from_existing_yaml(monkeypatch, t
 
     repo = Path(__file__).resolve().parents[1]
     init_yaml_config(
-        repo_root=repo, output_config_yaml_path=tmp_path / "config.yaml",
+        account_label="lx", repo_root=repo, output_config_yaml_path=tmp_path / "config.yaml",
         runtime_output_dir=tmp_path, markets=["us"], us_symbols=["AAPL"],
     )
     (tmp_path / "config.us.json").unlink()

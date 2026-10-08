@@ -40,8 +40,10 @@ def _normalize_markets(raw: list[str] | tuple[str, ...] | None) -> list[str]:
 
 
 def _normalize_account_label(raw: str | None) -> str:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise AgentToolError(code="INPUT_ERROR", message="account label is required; pass --account-label")
     try:
-        return normalize_account_label(raw if raw is not None else "lx")
+        return normalize_account_label(raw)
     except ValueError as exc:
         raise AgentToolError(
             code="INPUT_ERROR",
