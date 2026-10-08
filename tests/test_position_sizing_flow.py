@@ -32,7 +32,15 @@ SIZING_KEYS = ("symbol_concentration_current", "symbol_concentration_after_exist
 
 def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path)
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
     context = _account_nvda_context()
+    source = build_futu_portfolio_context(
+        balance_rows=[{"cn_cash": 800000, "jp_cash": 0, "sg_cash": 0, "au_cash": 0, "ca_cash": 0, "my_cash": 0}],
+        position_rows=[], account="lx",
+    )
+    context["cash_by_currency"] = source["cash_by_currency"]
+    assert context["cash_by_currency"] == {"CNY": 800000}
     (account_dir / "state" / "portfolio_context.json").write_text(json.dumps(context))
     open_position_ledger(resolve_position_data_config_path(base=tmp_path), runtime_root=tmp_path)
     row = _candidate(
@@ -47,7 +55,7 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -
         df_labeled=pd.DataFrame([row]),
         symbol="NVDA",
         sell_put_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=_account_nvda_context(),
+        portfolio_ctx=context,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         decision_sink_fn=decisions.extend,
     )
@@ -94,6 +102,7 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -
     assert brief["account"] == "lx"
     candidate = brief["candidates"]["sell_put"][0]
     assert [candidate["metrics"][key] for key in SIZING_KEYS] == expected
+    assert "Position Sizing（" not in render_full_brief(brief)
     assert "当前 5.9% · 已有 Put 全指派 11.8% · 再卖 1 张后全指派 20.0%" in render_full_brief(brief)
     # Display-only changes must not create a new candidate notification.
     updated = deepcopy(brief)

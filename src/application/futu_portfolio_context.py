@@ -26,6 +26,7 @@ from domain.domain.position_snapshot import (
     normalize_position_snapshot_input,
     position_snapshot_scope_errors,
 )
+from domain.domain.risk_capacity import SUPPORTED_CASH_CURRENCIES
 from domain.domain.source_evidence import build_source_evidence
 from domain.domain.symbol_identity import (
     canonical_symbol,
@@ -443,6 +444,10 @@ def _extract_cash_components(
             elif value != selected[1]:
                 unavailable[field] = "alias_balance_conflict"
         if selected is not None:
+            if currency not in SUPPORTED_CASH_CURRENCIES:
+                if selected[1] == 0:
+                    return
+                unavailable[selected[0]] = "unsupported_cash_currency_nonzero"
             # Canonical alias makes equivalent SDK representations one component.
             components.append((currency, source_fields[0], selected[1]))
 
