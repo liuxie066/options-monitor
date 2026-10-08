@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1085,9 +1086,8 @@ def _reconcile_services_from_current_release(
     run from the new release by hand. Handing this step to `<target_dir>/om` keeps
     the desired state in step with whatever `current` now points at.
 
-    Both forward upgrade and explicit rollback delegate to the release now
-    current. Failure compensation restores the release already running this
-    process, so it can reconcile in process.
+    Forward upgrade, explicit rollback and failure compensation must use the
+    release now current. A standalone controller need not be that release.
     """
     command = [
         str(target_dir / "om"),
@@ -2609,6 +2609,123 @@ def _pi_storage_has_published_receipt(readiness: dict[str, Any]) -> bool:
     )
 
 
+# The public drift CLI recaptures timer state; compensation needs the original
+# snapshot. Execute only this bounded sequence with the restored release's owners.
+_RESTORED_SERVICE_COMPENSATION = """
+import json
+import subprocess
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from src.application import service_upgrade as upgrade
+request = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+profile = request["profile"]
+root = Path(request["repo_root"])
+result = {"ok": False, "config_validate": [], "service_reconcile": {},
+          "restarted_services": [], "service_health": {}, "operations": [],
+          "errors": [], "remediation": []}
+phase = "validate restored config"
+try:
+    targets = upgrade._profile_runtime_config_targets(profile)
+    for target in targets:
+        if target.get("source") == "yaml" and target.get("config_yaml"):
+            upgrade._run_required(
+                [str(root / "om"), "config", "validate", "--source", "yaml",
+                 "--config-yaml", target["config_yaml"], "--market", target["market"]],
+                cwd=root, run_cmd=subprocess.run, operations=result["operations"], timeout=120)
+    result["config_validate"] = upgrade._validate_committed_runtime_configs(
+        prepared={"targets": targets}, cwd=root, run_cmd=subprocess.run,
+        operations=result["operations"])
+    phase = "restore services"
+    result["service_reconcile"] = upgrade.service_drift(
+        repo_root=root, runtime_root=Path(request["runtime_root"]),
+        profile_path=Path(request["runtime_root"]) / "service.profile.json",
+        profile=profile, confirm=True, activation_policy=request["activation_policy"],
+        preserved_activation_states=request["preserved_activation_states"],
+        run_cmd=subprocess.run)
+    reconcile = result["service_reconcile"]
+    if reconcile.get("summary", {}).get("ok") is not True or reconcile.get("apply_errors"):
+        result["remediation"].extend(upgrade._service_reconcile_remediation(reconcile))
+        raise RuntimeError("restored service reconciliation did not succeed")
+    if request["restart_services"]:
+        phase = "restore restart"
+        result["restarted_services"] = upgrade._restart_services_from_loaded_profile(
+            profile=profile, run_cmd=subprocess.run, operations=result["operations"])
+        phase = "restore health"
+        result["service_health"] = upgrade._post_upgrade_service_health(
+            profile=profile, repo_root=root, run_cmd=subprocess.run,
+            operations=result["operations"])
+        if result["service_health"].get("ok") is not True:
+            result["remediation"].extend(result["service_health"].get("remediation") or [])
+            raise RuntimeError("restored service health did not succeed")
+    result["ok"] = True
+except Exception as exc:
+    result["errors"].append(f"{phase}: {type(exc).__name__}: {exc}")
+    result["remediation"].extend(getattr(exc, "remediation", []) or [])
+    if phase == "restore restart":
+        result["restarted_services"] = getattr(exc, "restarted_services", [])
+print(json.dumps(result))
+sys.exit(0 if result["ok"] else 1)
+"""
+
+
+def _restore_services_from_release(
+    *, previous_dir: Path, repo_link: Path, runtime_root: Path,
+    previous_profile: dict[str, Any], restart_services: bool,
+    activation_policy: str, preserved_activation_states: dict[str, dict[str, str]],
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    request = {
+        "profile": previous_profile, "repo_root": str(repo_link),
+        "runtime_root": str(runtime_root), "restart_services": restart_services,
+        "activation_policy": activation_policy,
+        "preserved_activation_states": preserved_activation_states,
+    }
+    # Private input is never printed or embedded in the logged command. -I stops
+    # inherited PYTHONPATH/site settings from importing the newer controller.
+    with tempfile.TemporaryDirectory(prefix="om-compensation-") as directory:
+        path = Path(directory) / "request.json"
+        with path.open("x", encoding="utf-8") as handle:
+            os.chmod(path, 0o600)
+            json.dump(request, handle)
+        services = _restart_service_names(previous_profile) if restart_services else []
+        timeout = 300 + 240 * len(_profile_runtime_config_targets(previous_profile))
+        timeout += 120 * len(services) + 700 * sum("opend" in name for name in services)
+        command = [str(_release_python(previous_dir)), "-I", "-c",
+                   _RESTORED_SERVICE_COMPENSATION, str(previous_dir), str(path)]
+        process = _run_command(command, cwd=previous_dir, run_cmd=run_cmd,
+                               timeout=timeout, stdout_limit=None)
+    try:
+        result = json.loads(process.get("stdout") or "")
+    except (TypeError, ValueError):
+        result = None
+    valid = (isinstance(result, dict) and isinstance(result.get("ok"), bool)
+             and isinstance(result.get("config_validate"), list)
+             and isinstance(result.get("service_reconcile"), dict)
+             and isinstance(result.get("restarted_services"), list)
+             and isinstance(result.get("service_health"), dict)
+             and isinstance(result.get("operations"), list)
+             and isinstance(result.get("errors"), list)
+             and isinstance(result.get("remediation"), list))
+    process["operation"] = "restore_services_from_release"
+    process["stdout"] = _clip_command_output(str(process.get("stdout") or ""), 4000)
+    operations.append(process)
+    if not valid:
+        return {"ok": False, "errors": ["restored release returned no valid compensation result"],
+                "remediation": ["inspect restored release compensation stderr/exit status"]}
+    operations.extend(result.pop("operations"))
+    if process.get("ok") is not True or process.get("returncode") != 0:
+        result["ok"] = False
+        result["errors"].append("restored release compensation command failed")
+    if result["ok"] and (result["errors"] or
+                         result["service_reconcile"].get("summary", {}).get("ok") is not True or
+                         result["service_reconcile"].get("apply_errors") or
+                         (restart_services and result["service_health"].get("ok") is not True)):
+        result["ok"] = False
+        result["errors"].append("restored release compensation result is inconsistent")
+    return result
+
+
 def _compensate_service_transition(
     *,
     repo_link: Path,
@@ -2663,65 +2780,40 @@ def _compensate_service_transition(
         )
         config_restore = _restore_committed_runtime_configs(commit=config_commit, operations=operations)
     if not config_restore.get("ok", True):
-        errors.extend(f"restore config: {item}" for item in config_restore.get("errors") or [])
+        errors.extend(f"restore config: {item}" for item in config_restore.get("errors") or ["restoration failed without details"])
 
-    service_reconcile: dict[str, Any] = {}
-    if symlink_restored and previous_profile:
+    restored: dict[str, Any] = {}
+    if symlink_restored and not errors and previous_profile:
         try:
-            # Stays in process on purpose: this branch just pointed `current` back at
-            # the previous release, which is the code this process is already running,
-            # so its renderer IS the restored release's. Delegating to a child would
-            # add a new failure mode to the path that exists to clean up after one.
-            service_reconcile = service_drift(
-                repo_root=repo_link,
-                runtime_root=runtime_root,
-                profile_path=runtime_root / "service.profile.json",
-                profile=previous_profile,
-                confirm=True,
+            restored = _restore_services_from_release(
+                previous_dir=previous_dir, repo_link=repo_link, runtime_root=runtime_root,
+                previous_profile=previous_profile, restart_services=restart_services,
                 activation_policy=activation_policy,
                 preserved_activation_states=preserved_activation_states,
-                run_cmd=run_cmd,
+                run_cmd=run_cmd, operations=operations,
             )
         except Exception as exc:
             errors.append(f"restore services: {type(exc).__name__}: {exc}")
         else:
-            if _service_reconcile_failed(service_reconcile):
-                errors.extend(f"restore services: {item}" for item in _service_reconcile_remediation(service_reconcile))
-
-    restarted: list[str] = []
-    service_health: dict[str, Any] = {}
-    if symlink_restored and restart_services:
-        try:
-            restarted = _restart_services_from_loaded_profile(
-                profile=previous_profile,
-                run_cmd=run_cmd,
-                operations=operations,
-            )
-        except ServiceRestartError as exc:
-            restarted = exc.restarted_services
-            errors.append(f"restore restart: {exc}")
-            errors.extend(f"restore restart: {item}" for item in exc.remediation)
-        try:
-            service_health = _post_upgrade_service_health(
-                profile=previous_profile,
-                repo_root=repo_link,
-                run_cmd=run_cmd,
-                operations=operations,
-            )
-        except Exception as exc:
-            errors.append(f"restore health: {type(exc).__name__}: {exc}")
-        else:
-            if not bool(service_health.get("ok", True)):
-                errors.extend(f"restore health: {item}" for item in service_health.get("remediation") or [])
-
+            if restored.get("ok") is not True:
+                errors.extend(str(item) for item in restored.get("errors") or ["restored services failed"])
+    remediation = list(restored.get("remediation") or [])
+    if errors:
+        remediation.extend([
+            "compensation incomplete: do not restart until the restored release validates its configuration",
+            "restore compatible authoring YAML and generated configs from an operator backup; independent migrations were not reverted",
+            f"validate and reconcile with restored release: {previous_dir / 'om'} service drift --repo-root {repo_link} --runtime-root {runtime_root}",
+        ])
     return {
         "ok": not errors,
         "symlink_restored": symlink_restored,
         "config_restore": config_restore,
-        "service_reconcile": service_reconcile,
-        "restarted_services": restarted,
-        "service_health": service_health,
+        "config_validate": restored.get("config_validate", []),
+        "service_reconcile": restored.get("service_reconcile", {}),
+        "restarted_services": restored.get("restarted_services", []),
+        "service_health": restored.get("service_health", {}),
         "pi_storage_readiness": pi_storage_readiness,
+        "remediation": remediation,
         "errors": errors,
     }
 
@@ -3098,6 +3190,7 @@ def service_upgrade(
                 operations=operations,
             )
         compensated = bool(compensation.get("ok")) if symlink_switched else False
+        remediation = [*exc.remediation, *compensation.get("remediation", [])]
         out = {
             **status_base,
             "ok": False,
@@ -3119,8 +3212,8 @@ def service_upgrade(
             "pi_storage_readiness": pi_storage_readiness,
             "restarted_services": exc.restarted_services,
             "restart_failed_services": exc.failed_services,
-            "manual_remediation": exc.remediation,
-            "remediation": exc.remediation,
+            "manual_remediation": remediation,
+            "remediation": remediation,
             "compensation": compensation,
             "error": f"{type(exc).__name__}: {exc}",
             "operations": operations,

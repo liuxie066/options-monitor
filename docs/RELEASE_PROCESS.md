@@ -393,7 +393,11 @@ git branch -d <exact-local-branch>
 ```
 
 该参数会在任何写入前读取 profile 并快照已管理 timer；状态未知时 fail closed。未传参数时，
-`service drift` 继续使用严格的 `ensure-active` 默认策略。
+`service drift` 继续使用严格的 `ensure-active` 默认策略。正确保留的暂停状态会记录在 `preserved_activation_count` 中，本身不构成告警；只有真实漂移、保留冲突或应用错误才会阻止成功。
+
+升级或回滚失败补偿会先恢复 symlink 和升级前备份的运行时配置，再由恢复后的 release 校验 YAML 作者配置及运行时 JSON、对账服务定义，并按请求重启和执行即时健康检查。独立安装的新版本控制入口也遵循这条路径；补偿复用切换前的 timer 快照。配置恢复、旧版本校验或服务对账失败时，停止后续重启，返回 `compensation.ok=false` 和恢复指引，不能据此宣称已完整回滚。旧 release 缺少必要接口或仍将保留状态判为告警时也会明确失败，不降级跳过检查。
+
+升级快照只恢复这次升级覆盖的生成配置，不会撤销之前独立执行的 YAML 或数据库迁移。如果快照已经与旧 release 不兼容，需要操作者从兼容备份恢复作者配置和生成配置，用旧 release 校验，再通过受控流程对账和恢复服务。`--no-restart-services` 只跳过重启及其健康检查，补偿前的配置校验仍须通过。
 
 ### Pi Session 不兼容版本的首次切换
 
