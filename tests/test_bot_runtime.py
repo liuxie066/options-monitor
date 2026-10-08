@@ -176,6 +176,8 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
     assert "terminal_evidence_missing" in text
     assert "不提供 option PnL" in text
+    assert "已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天" in text
+    assert "未平仓收益率按持有至到期估算" in text
     assert "权利金" not in text
 
 

@@ -917,9 +917,14 @@ def test_currency_conflict_fails_only_the_affected_scoped_allocation() -> None:
 ])
 @pytest.mark.parametrize("terminated", [False, True])
 def test_occupied_time_floor_at_report_boundaries(side, option_type, principal, elapsed_ms, days, terminated):
-    opened = datetime.fromisoformat("2026-09-01T23:00:00")
-    ended = opened + timedelta(milliseconds=elapsed_ms)
-    key = _key(side=side, option_type=option_type)
+    if terminated:
+        opened = datetime.fromisoformat("2026-09-01T23:00:00")
+        ended = opened + timedelta(milliseconds=elapsed_ms)
+        key = _key(side=side, option_type=option_type)
+    else:
+        ended = datetime.fromisoformat("2026-09-03T00:00:00")
+        opened = ended - timedelta(milliseconds=max(elapsed_ms, 2))
+        key = _key(side=side, option_type=option_type, expiration="2026-09-02")
     events = [_event("floor-open", "open", opened.isoformat(), key=key,
                      lot_id="floor-lot", contracts=2, price=2, fee=1)]
     if terminated:
@@ -928,8 +933,8 @@ def test_occupied_time_floor_at_report_boundaries(side, option_type, principal, 
             close_type="buy_to_close" if side == "short" else "sell_to_close"))
         period = _period(now="2026-09-04T00:00:00")
     else:
-        # The current period includes report_now itself (exclusive end = now + 1ms).
-        period = _period(now=(ended - timedelta(milliseconds=1)).isoformat())
+        # Read just before expiry; expiry itself determines the open holding duration.
+        period = _period(now=(ended - timedelta(milliseconds=2)).isoformat())
     reduction = reduce_option_performance(project_trade_events(events), period=period)
     fact, = reduction.facts
     expected_capital_days = Decimal(principal) * Decimal(days)
@@ -958,9 +963,9 @@ def test_occupied_time_floor_counts_disjoint_partial_close_shares():
     facts = {fact.terminal_event_id: fact for fact in reduction.facts}
     assert facts["split-early"].capital_days == Decimal("10000")
     assert facts["split-late"].capital_days == Decimal("15000")
-    assert facts[None].capital_days == Decimal("20000")
+    assert facts[None].capital_days == Decimal("295833.333333333333")
     assert sum(fact.contracts for fact in facts.values()) == 3
-    assert reduction.bundle["option_return"]["by_currency"]["USD"]["capital_days"] == Decimal("45000")
+    assert reduction.bundle["option_return"]["by_currency"]["USD"]["capital_days"] == Decimal("320833.333333333333")
     assert reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == Decimal("400")
 
 
@@ -986,3 +991,31 @@ def test_occupied_time_floor_preserves_invalid_and_unresolved_guards(elapsed_ms,
     else:
         assert occupied == capital_days == Decimal("10000")
         assert missing == set()
+
+
+@pytest.mark.parametrize("currency", ["USD", "HKD"])
+@pytest.mark.parametrize("now,as_of,capital_days,cash,state,annualized", [
+    ("2026-09-01T12:00:00", None, "3000000", "1000", "open", "0.121666666667"),
+    ("2026-09-08T12:00:00", None, "3000000", "1000", "open", "0.121666666667"),
+    ("2026-09-17T12:00:00", "2026-09-08", "3000000", "1000", "open", "0.121666666667"),
+    ("2026-09-17T12:00:00", None, "1500000", "900", "terminated", "0.219000000000"),
+])
+def test_open_expiry_duration_is_stable_until_actual_close(currency, now, as_of, capital_days, cash, state, annualized):
+    key = _key(strike=1000)
+    events = [
+        _event("duration-open", "open", "2026-09-01T00:00:00", key=key,
+               lot_id="duration-lot", price=10, currency=currency),
+        _event("duration-close", "close", "2026-09-16T00:00:00", key=key,
+               target_lot_id="duration-lot", price=1, currency=currency, close_type="buy_to_close"),
+    ]
+    period = _period(now=now, as_of=as_of)
+    reduction = reduce_option_performance(project_trade_events(events), period=period)
+    fact, = reduction.facts
+    assert fact.occupied_capital == Decimal("100000")
+    assert fact.capital_days == Decimal(capital_days)
+    assert fact.option_net_cashflow == Decimal(cash)
+    assert fact.state == state
+    assert fact.win_eligible == (state == "terminated")
+    result = reduction.bundle["option_return"]["by_currency"][currency]
+    assert result["annualized_rate"] == Decimal(annualized)
+    assert result["rate"] == (Decimal(cash) * period.statistic_days / Decimal(capital_days)).quantize(Decimal("0.000000000001"))

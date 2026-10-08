@@ -521,9 +521,9 @@ def _residual_fact(
             raise PerformanceScopeError("opening fee allocations do not conserve")
         net_cash = quantize_money(opening_cash - opening_actual_fee)
 
-    unresolved = _expiration_end_ms(lot.contract_key.expiration_ymd) <= (period.effective_end_exclusive_at_ms)
+    capital_end = _expiration_end_ms(lot.contract_key.expiration_ymd)
+    unresolved = capital_end <= period.effective_end_exclusive_at_ms
     state = "unresolved_after_expiry" if unresolved else "open"
-    capital_end = period.effective_end_exclusive_at_ms
     occupied_capital, capital_days, capital_missing = _capital(
         lot,
         contracts=remaining,
