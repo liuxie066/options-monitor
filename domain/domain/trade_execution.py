@@ -800,6 +800,22 @@ def legacy_open_execution_input_from_event(event: Mapping[str, Any]) -> dict[str
     return execution
 
 
+def execution_event_action(rows: Iterable[Mapping[str, Any]]) -> str | None:
+    """Describe an already validated execution group, not an upstream association."""
+    effects = {"close" if row.get("event_type") in {"close", "expire_close", "assignment", "exercise"}
+               else row.get("event_type") for row in rows}
+    if effects == {"open", "close"}:
+        return "open_close"
+    return next(iter(effects)) if len(effects) == 1 and effects <= {"open", "close"} else None
+
+
+def option_execution_allocation(quantity: int, opposite_quantity: int) -> tuple[int, int]:
+    if quantity <= 0 or opposite_quantity < 0:
+        raise ValueError("invalid option execution quantity")
+    closing = min(quantity, opposite_quantity)
+    return closing, quantity - closing
+
+
 def ledger_execution_event_set_is_complete(rows: list[dict[str, Any]]) -> bool:
     """Prove one active execution's complete allocation, source and target evidence."""
     if not rows:
@@ -825,7 +841,7 @@ def ledger_execution_event_set_is_complete(rows: list[dict[str, Any]]) -> bool:
         and _split_events_are_coherent(rows)
         and (
             not any("close_target_resolution" in (row.get("raw_payload") or {}) for row in rows)
-            or _legacy_split_set_is_complete(rows)
+            or _allocation_close_resolution_is_complete(rows)
         )
         and all(_positive_int(value) == expected_contracts for row in rows for value in _declared_execution_quantities(row))
         and len(rows) == expected_split_count
@@ -841,7 +857,15 @@ def _deal_completion_payload(event: dict[str, Any]) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else ({} if "broker_deal_completion" in raw_payload else None)
 
 
-def _legacy_split_set_is_complete(rows: list[dict[str, Any]]) -> bool:
+def _allocation_close_resolution_is_complete(rows: list[dict[str, Any]]) -> bool:
+    if {row.get("event_type") for row in rows} != {"open", "close"}:
+        return _legacy_split_set_is_complete(rows)
+    closes = [row for row in rows if row.get("event_type") == "close"]
+    # Parent economics describe the WHOLE fill; the FIFO selector only its close part.
+    return _legacy_split_set_is_complete(closes, check_source_quantity=False)
+
+
+def _legacy_split_set_is_complete(rows: list[dict[str, Any]], *, check_source_quantity: bool = True) -> bool:
     resolutions: list[dict[str, Any]] = []
     target_lot_ids: set[str] = set()
     for event in rows:
@@ -891,7 +915,7 @@ def _legacy_split_set_is_complete(rows: list[dict[str, Any]]) -> bool:
         and all(_positive_int(event.get("contracts")) is not None for event in rows)
         and sum(_positive_int(event.get("contracts")) for event in rows) == expected_contracts
         and all(
-            _positive_int(value) == expected_contracts
+            not check_source_quantity or _positive_int(value) == expected_contracts
             for row in rows
             for value in _declared_execution_quantities(row)
         )
@@ -1072,6 +1096,24 @@ def _split_events_are_coherent(rows: list[dict[str, Any]]) -> bool:
             return False
     if len(rows) == 1:
         return True
+    if {row.get("event_type") for row in rows} == {"open", "close"}:
+        opens = [row for row in rows if row.get("event_type") == "open"]
+        closes = [row for row in rows if row.get("event_type") == "close"]
+        ids = [str(row.get("event_id") or "") for row in rows]
+        targets = [str(row.get("target_lot_id") or (row.get("raw_payload") or {}).get("target_lot_id") or "")
+                   for row in closes]
+        if (len(opens) != 1 or opens[0].get("target_lot_id") or not all(ids)
+                or len(set(ids)) != len(ids) or not all(targets) or len(set(targets)) != len(targets)):
+            return False
+        executions = [execution_economic_content((row.get("raw_payload") or {}).get("execution_input") or {})
+                      for row in rows]
+        if any(item["errors"] or item["economic"] != executions[0]["economic"]
+               or conflicting_execution_associations(item, executions[0]) for item in executions):
+            return False
+        # Effect and position side differ across zero; instrument/price/currency must not.
+        fingerprints = {tuple(value for index, value in enumerate(ledger_event_economic_fingerprint(row))
+                              if index not in {0, 5}) for row in rows}
+        return len(fingerprints) == 1 and all(value not in (None, "") for value in next(iter(fingerprints)))
     fingerprints = {ledger_event_economic_fingerprint(row) for row in rows}
     if len(fingerprints) != 1 or any(value in (None, "") for value in next(iter(fingerprints))):
         return False

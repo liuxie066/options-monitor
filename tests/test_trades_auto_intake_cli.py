@@ -231,7 +231,8 @@ def _write_open_deal_payload(path: Path) -> Path:
 def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config(tmp_path: Path) -> None:
     config_path = _write_runtime_config(tmp_path)
     deal_path = _write_open_deal_payload(tmp_path / "auto_trade_intake.open.json")
-    result = _run_auto_intake("--config", str(config_path), "--mode", "dry-run", "--deal-json", str(deal_path))
+    _initialize_preview_ledger(tmp_path, config_path)
+    result = _run_auto_intake("--config", str(config_path), "--runtime-root", str(tmp_path), "--mode", "dry-run", "--deal-json", str(deal_path))
 
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout)
@@ -1420,7 +1421,8 @@ def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fie
                 f,
                 ensure_ascii=False,
             )
-        result = _run_auto_intake("--config", str(config_path), "--mode", "dry-run", "--deal-json", payload_path)
+        _initialize_preview_ledger(tmp_path, config_path)
+        result = _run_auto_intake("--config", str(config_path), "--runtime-root", str(tmp_path), "--mode", "dry-run", "--deal-json", payload_path)
     finally:
         if payload_path:
             Path(payload_path).unlink(missing_ok=True)
@@ -1451,6 +1453,8 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
     monkeypatch.setattr(auto_intake, "resolve_trade_intake_config",
                         lambda *_, **kwargs: {**cfg, "mode": kwargs.get("mode_override") or "apply"})
     ledger_path = tmp_path / "ledger.sqlite3"
+    SQLiteOptionPositionsRepository(ledger_path)
+    preview_bytes = ledger_path.read_bytes()
     opened = []
     def open_repo(**_):
         opened.append(True)
@@ -1474,10 +1478,10 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
     assert run([*common, "--execution-file", str(path)]) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["dry_run"] is True
-    assert opened == [] and not ledger_path.exists()
+    assert opened == [] and ledger_path.read_bytes() == preview_bytes
     assert run([*common, "--execution-file", str(path), "--mode", "apply"]) == 2
     assert "use --confirm or --yes" in capsys.readouterr().out
-    assert opened == [] and not ledger_path.exists()
+    assert opened == [] and ledger_path.read_bytes() == preview_bytes
     assert run([*common, "--execution-file", str(path), "--inbox-id", "unused"]) == 2
     assert "mutually exclusive" in capsys.readouterr().out
     assert run([*common, "--execution-file", str(path), "--mode", "apply", "--confirm"]) == 0
@@ -1488,6 +1492,14 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
     assert item["status"] == ("unresolved" if wrong_label else "applied")
     assert repo.list_trade_lifecycle_notifications() == []
     before = ledger_path.read_bytes()
+    if wrong_label:
+        assert run([*common, "--inbox-id", item["inbox_id"]]) == 2
+        assert "account conflicts" in capsys.readouterr().out
+        assert ledger_path.read_bytes() == before
+        assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"]) == 2
+        capsys.readouterr()
+        assert repo.list_trade_events() == []
+        return
     assert run([*common, "--inbox-id", item["inbox_id"]]) == 0
     saved = json.loads(capsys.readouterr().out)
     assert saved["inbox_id"] == item["inbox_id"]
@@ -1576,9 +1588,9 @@ def test_om_trade_intake_public_process_accepts_saved_input_flags(tmp_path, entr
     preview = subprocess.run(command, cwd=BASE, env=env, capture_output=True, text=True,
                              check=False, timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC)
     assert "unrecognized arguments" not in preview.stderr
-    assert preview.returncode == (0 if entry == "execution-file" else 2), preview.stderr or preview.stdout
+    assert preview.returncode == 2, preview.stderr or preview.stdout
     if entry == "execution-file":
-        assert json.loads(preview.stdout)["dry_run"] is True
+        assert json.loads(preview.stdout)["reason"] == "ledger_preview_unavailable"
     else:
         assert "saved Inbox entry must resolve" in preview.stdout
     apply = subprocess.run([*command, "--mode", "apply"], cwd=BASE, env=env, capture_output=True,
@@ -1881,7 +1893,10 @@ def _manual_failure_config(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_intake, "load_config", lambda **_: {})
     monkeypatch.setattr(auto_intake, "resolve_trade_intake_config",
                         lambda *_, **kwargs: {**cfg, "mode": kwargs.get("mode_override") or "apply"})
-    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", lambda **_: (None, object()))
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", lambda **_: (None, repo))
+    monkeypatch.setattr(auto_intake, "resolve_position_ledger_sqlite_path", lambda **_: repo.db_path)
     monkeypatch.setattr(auto_intake, "_build_receipt_callback", lambda **_: lambda _: {})
     return cfg, ["--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path)]
 
@@ -2108,3 +2123,10 @@ def test_source_loop_carries_listening_status_across_iterations(
     assert rc == 0
     assert observed, "the loop never reached its work phase"
     assert observed == ["listening"] * len(observed)
+
+
+def _initialize_preview_ledger(root, config_path):
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    path = auto_intake.resolve_position_ledger_sqlite_path(base=root,
+        cfg=json.loads(config_path.read_text()), data_config=None)
+    return SQLiteOptionPositionsRepository(path)

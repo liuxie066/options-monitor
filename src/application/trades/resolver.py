@@ -4,9 +4,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from domain.domain.trade_contract_identity import contract_key, require_option_multiplier
+from domain.domain.trade_execution import execution_event_action
 
 from src.application.ledger.api import (
-    lot_id_for_open_event,
+    allocate_broker_option_execution,
     BrokerTradeOperation,
     CloseTargetResolution,
     execution_identity_from_input,
@@ -32,6 +33,7 @@ from src.application.trades.workflows import (
     execute_broker_assigned_stock_sale,
     preview_trade_close,
     preview_trade_open,
+    recorded_trade_operations,
 )
 
 
@@ -308,7 +310,14 @@ def match_close_targets(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal
         raise ValueError(str(exc)) from exc
 
 
-def resolve_trade_deal(
+def resolve_trade_deal(deal: NormalizedTradeDeal, *, repo: OptionPositionsRepoLike, **kwargs: Any) -> IntakeResolution:
+    from contextlib import nullcontext
+    from src.application.ledger.api import with_sqlite_repo_writer_lock
+    with with_sqlite_repo_writer_lock(repo) if kwargs.get("apply_changes") else nullcontext():
+        return _resolve_trade_deal(deal, repo=repo, **kwargs)
+
+
+def _resolve_trade_deal(
     deal: NormalizedTradeDeal,
     *,
     repo: OptionPositionsRepoLike,
@@ -365,16 +374,10 @@ def resolve_trade_deal(
             return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
                             diagnostics={"retryable": False, "errors": [str(exc)]})
         if recorded:
-            effective_actions = {
-                "close" if event.get("event_type") in {"close", "expire_close", "assignment", "exercise"}
-                else event.get("event_type")
-                for event in recorded
-            }
-            if len(effective_actions) != 1 or None in effective_actions:
+            effective_action = execution_event_action(recorded)
+            if effective_action is None:
                 return _failure(status="unresolved", action=None, reason="trade_execution_applied_action_conflict",
-                                deal=deal, diagnostics={"retryable": False,
-                                                       "errors": ["trade_execution_applied_action_conflict"]})
-            effective_action = effective_actions.pop()
+                                deal=deal, diagnostics={"retryable": False})
             if execution.get("external_order_id") and execution.get("external_order_namespace"):
                 legacy_rows = [row for row in recorded if not execution_identity_from_input(
                     (row.get("raw_payload") or {}).get("execution_input"),
@@ -420,14 +423,8 @@ def resolve_trade_deal(
                              if effective_action == "close" and callable(notifications_fn) else [])
             return _failure(
                 status="skipped", action=effective_action, reason="ledger_recorded", deal=deal,
-                operations=[BrokerTradeOperation(
-                    action=str(event.get("event_type") or deal.position_effect or "recorded"),
-                    event_id=event.get("event_id"),
-                    lot_id=(lot_id_for_open_event(event) if event.get("event_type") == "open"
-                            else event.get("target_lot_id") or event.get("lot_id")),
-                    result={"event": dict(event), "replayed": True,
-                            **({"notification_outbox_id": notifications[0]["outbox_id"]} if notifications else {})},
-                ) for event in recorded],
+                operations=recorded_trade_operations(recorded,
+                    notification_outbox_id=notifications[0]["outbox_id"] if notifications else None),
             )
     state_entry = _deal_state_entry(state, deal)
     economic_hash = lifecycle_deal_economic_hash(deal)
@@ -463,7 +460,10 @@ def resolve_trade_deal(
                 },
             )
     can_retry_existing_deal = _state_entry_is_retryable_unresolved(state_entry) or (
-        retry_failed_deal and _state_entry_is_failed(state_entry)
+        retry_failed_deal and (_state_entry_is_failed(state_entry) or (
+            state_entry is not None and state_entry[0] == "unresolved_deal_ids"
+            and str(state_entry[1].get("reason") or "").startswith("unknown_position_effect")
+        ))
     ) or (
         retry_skipped_deal
         and state_entry is not None
@@ -577,6 +577,36 @@ def resolve_trade_deal(
     if not deal.symbol or not deal.option_type:
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     position_effect_diagnostics: dict[str, Any] = {}
+    if (deal.position_effect not in ("open", "close") and deal.side in {"buy", "sell"}
+            and deal.price is not None and deal.price > 0):
+        missing = _required_open_missing(deal)
+        invalid = _required_open_invalid(deal)
+        if missing or invalid:
+            return _failure(status="unresolved", action=None, reason="missing_required_fields:" + ",".join(missing)
+                            if missing else "invalid_required_fields:" + ",".join(invalid), deal=deal,
+                            diagnostics={"retryable": False, "missing_fields": missing, "invalid_fields": invalid})
+        problem = _inference_order_problem(repo, deal)
+        if problem:
+            return _failure(status="unresolved", action=None, reason=f"unknown_position_effect:{problem}",
+                            deal=deal, diagnostics={"retryable": False})
+        try:
+            operations = allocate_broker_option_execution(repo, deal, apply_changes=apply_changes)
+        except (LotCloseResolutionError, ValueError) as exc:
+            return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
+                            diagnostics={"retryable": False})
+        effects = {"close" if op.contracts_to_close is not None else "open" for op in operations}
+        action = "open_close" if len(effects) == 2 else next(iter(effects))
+        diagnostics = {"position_effect_inference": {"source": "ledger_context", "decision": action}}
+        closes = [op for op in operations if op.contracts_to_close is not None]
+        if apply_changes and closes:
+            verification = _verify_applied_close_projection(repo=repo, operations=closes)
+            diagnostics["post_write_projection_verification"] = verification
+            if not verification["ok"]:
+                return _failure(status="failed", action=action, reason="projection_verification_failed",
+                                deal=deal, operations=operations, diagnostics=diagnostics)
+        return IntakeResolution(status="applied" if apply_changes else "dry_run", action=action,
+            reason=("applied_" if apply_changes else "preview_") + action,
+            deal_id=deal.deal_id, account=deal.internal_account, operations=operations, diagnostics=diagnostics)
     if deal.position_effect not in ("open", "close"):
         inference = _infer_missing_position_effect(deal, repo=repo)
         if inference.deal is None:
@@ -975,3 +1005,67 @@ def _contracts_open(fields: dict[str, Any]) -> int:
     if fields.get("contracts_open") not in (None, ""):
         return _safe_int(fields.get("contracts_open"))
     return _safe_int(fields.get("contracts"))
+
+def _inference_order_problem(repo: Any, deal: Any) -> str | None:
+    """Known chronology gaps cannot be resolved using current holdings."""
+    import json
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    from datetime import datetime
+    from domain.domain.trade_contract_identity import contract_key
+    from domain.domain.trade_execution import canonical_trade_execution_content
+    from src.application.trades.deal_identity import broker_deal_key, broker_deal_key_from_payload, structured_deal_keys_from_ledger_event
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+
+    key = contract_key(deal.symbol, deal.option_type, deal.expiration_ymd, deal.strike)
+    events = list(repo.list_trade_events())
+    for event in events:
+        fields = event.get("contract_key") or event
+        if str(fields.get("account") or "").lower() != deal.internal_account:
+            continue
+        if contract_key(fields.get("underlying_symbol") or fields.get("symbol"), fields.get("option_type"),
+                        fields.get("expiration_ymd"), fields.get("strike")) != key:
+            continue
+        if int(event.get("event_time_ms") or event.get("trade_time_ms") or 0) >= deal.trade_time_ms:
+            return "later_or_same_time_ledger_event"
+    candidate = getattr(repo, "primary_repo", repo)
+    rows = [{"broker_deal_key": broker_deal_key_from_payload(payload, account_mapping=None),
+             "payload_json": json.dumps(payload)}
+            for payload in getattr(repo, "inference_pending_payloads", [])]
+    if getattr(candidate, "db_path", None):
+        path = resolve_execution_inbox_path(repo, Path(candidate.db_path).with_name(Path(candidate.db_path).name + ".trade_intake_inbox.sqlite3"))
+        if Path(path).exists():
+            with closing(sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)) as conn:
+                conn.row_factory = sqlite3.Row
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='trade_inbox'").fetchone():
+                    rows.extend(conn.execute("SELECT broker_deal_key, payload_json FROM trade_inbox").fetchall())
+    for row in rows:
+        if row["broker_deal_key"] == broker_deal_key(deal):
+            continue
+        payload = json.loads(row["payload_json"])
+        content = canonical_trade_execution_content(payload)
+        economic = content["economic"]
+        account = economic["account"]
+        source_account = (deal.execution_input or {}).get("broker_account_ref") or {}
+        if any(str(account.get(field) or "") != str(source_account.get(field) or "")
+               for field in ("broker_id", "external_account_id", "environment")):
+            continue
+        instrument = economic["instrument"]
+        if contract_key(instrument.get("symbol"), instrument.get("option_type"), instrument.get("expiration_ymd"), instrument.get("strike")) != key:
+            continue
+        occurred = economic.get("occurred_at_utc")
+        try:
+            stamp = int(datetime.fromisoformat(str(occurred).replace("Z", "+00:00")).timestamp() * 1000)
+        except (ValueError, TypeError):
+            return "pending_trade_time_unavailable"
+        if stamp > deal.trade_time_ms:
+            continue
+        # Durable group proof, not Inbox's handled flag, decides whether a predecessor is booked.
+        related = [event for event in events if row["broker_deal_key"] in structured_deal_keys_from_ledger_event(event)]
+        from domain.domain.trade_execution import ledger_execution_event_set_is_complete
+        from src.application.ledger.api import valid_void_target_event_id
+        voided = {valid_void_target_event_id(event) for event in events}
+        if not related or not ledger_execution_event_set_is_complete(related) or any(event["event_id"] in voided for event in related):
+            return "earlier_or_same_time_pending_execution"
+    return None

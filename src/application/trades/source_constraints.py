@@ -172,3 +172,13 @@ def read_account_trade_source_constraints(
         "inbox_ids": sorted(inbox_ids),
         "source_rows": sorted(source_rows.values(), key=lambda item: item["inbox_id"]),
     }
+
+
+def execution_chronology_key(payload: dict[str, Any]) -> float:
+    from datetime import datetime
+    from domain.domain.trade_execution import canonical_trade_execution_content
+    occurred = canonical_trade_execution_content(payload)["economic"].get("occurred_at_utc")
+    try:
+        return datetime.fromisoformat(str(occurred).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return float("-inf")

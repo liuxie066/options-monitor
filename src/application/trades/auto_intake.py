@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from domain.domain.trade_execution import execution_event_action
+from src.application.trades.workflows import recorded_trade_operations
+from src.application.ledger.api import open_option_execution_preview_repo, verify_trade_receipt_projection
+
 import argparse
 from collections import Counter
 import contextlib
@@ -388,7 +392,7 @@ def _attach_combo_reconciliation_after_open(
         not apply_changes
         or mode_value == "off"
         or str(result.get("status") or "").strip().lower() != "applied"
-        or str(result.get("action") or "").strip().lower() != "open"
+        or str(result.get("action") or "").strip().lower() not in {"open", "open_close"}
     ):
         return result
     try:
@@ -439,26 +443,17 @@ def _readback_trade_receipt_result(*, repo: Any, deal: Any,
         events = evidence["trade_events"]
         complete = completed_ledger_execution_events(events, deal)
         if complete:
-            if getattr(deal, "position_effect", None) != "open":
-                # Lifecycle closes retain their own durable receipt owner.
+            action = execution_event_action(complete)
+            if action == "close" and (getattr(deal, "position_effect", None) == "close"
+                                      or diagnostics.get("notification_authority") == "lifecycle_outbox"):
+                # Pure lifecycle closes retain their durable receipt owner.
                 raise ValueError("lifecycle result requires lifecycle readback")
-            # ``source_event_id`` converged onto ``open_event_id``
-            # (``write-side-definition.md`` §2); a legacy row keeps the old
-            # spelling readable.
-            projected = {
-                str(
-                    row["fields"].get("open_event_id")
-                    or row["fields"].get("source_event_id")
-                    or ""
-                )
-                for row in evidence["position_lots"]
-            }
-            if not all(str(event["event_id"]) in projected for event in complete):
-                raise ValueError("recorded execution projection unavailable")
+            verify_trade_receipt_projection(evidence)
             diagnostics.update(retryable=False, verification_pending=False, recovered_from_ledger=True)
-            return {**result, "status": "applied", "action": "open", "reason": "applied_open",
+            return {**result, "status": "applied", "action": action, "reason": f"applied_{action}",
                     "account": deal.internal_account, "deal_id": deal.deal_id,
                     "receipt_kind": "recorded", "diagnostics": diagnostics,
+                    "operations": [op.to_payload() for op in recorded_trade_operations(complete)],
                     "_receipt_payload": _receipt_deal_snapshot(deal)}
         keys = {broker_deal_key_from_payload(deal.execution_input, account_mapping=None),
                 broker_external_event_key(deal)} - {""}
@@ -638,7 +633,7 @@ def _process_payload(
             "recovery_mode"
         ) != "skipped_stock":
             raise ValueError("recovery claim is not the original skipped stock source")
-        retry_failed_deal = retry_failed_deal or (
+        retry_failed_deal = retry_failed_deal or str(claim.get("last_error") or "").startswith("resumed_by:") or (
             str(claim.get("result_status") or "").strip().lower() == "failed"
             and str(claim.get("result_reason") or "").startswith("exception:")
         )
@@ -706,8 +701,8 @@ def _process_payload(
         with scope:
             resolved = resolve_trade_deal(deal, **resolve_kwargs)
             if (claim is not None and claim.get("receipt_recovery_allowed")
-                    and resolved.reason == "ledger_recorded" and resolved.action == "open"):
-                resolved = replace(resolved, status="applied", reason="applied_open",
+                    and resolved.reason == "ledger_recorded" and resolved.action in {"open", "close", "open_close"}):
+                resolved = replace(resolved, status="applied", reason=f"applied_{resolved.action}",
                                    diagnostics={**resolved.diagnostics, "recovered_from_ledger": True})
             return resolved
 
@@ -721,7 +716,16 @@ def _process_payload(
             current = _readback_trade_receipt_result(repo=repo, deal=normalized_deal, result=current)
         if before_receipt_fn is not None:
             current = before_receipt_fn(current) or current
-        if isinstance(config, dict) and runtime_root is not None and current.get("action") == "open":
+        if (apply_changes and allow_external_lookup and isinstance(config, dict)
+                and current.get("status") == "applied" and normalized_deal is not None
+                and getattr(normalized_deal, "asset_type", None) == "option"
+                and (claim is None or claim.get("delivery_purpose") == "live")):
+            from domain.domain.symbol_identity import symbol_market
+            from src.application.quality.service import check_post_trade_positions
+            current = {**current, "position_quality_check": check_post_trade_positions(
+                repo=repo, cfg=config, account=normalized_deal.internal_account,
+                market=str(symbol_market(normalized_deal.symbol) or "").lower())}
+        if isinstance(config, dict) and runtime_root is not None and current.get("action") in {"open", "open_close"}:
             from src.application.trades.attribution import (
                 read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload,
                 attribution_focus_open_event_id)
@@ -811,7 +815,7 @@ def _process_payload(
         load_trade_intake_state_fn=load_trade_intake_state,
         write_trade_intake_state_fn=_write_state,
         upsert_deal_state_fn=upsert_deal_state,
-        append_trade_intake_audit_fn=append_trade_intake_audit,
+        append_trade_intake_audit_fn=append_trade_intake_audit if apply_changes else lambda *_a, **_k: None,
         enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
@@ -915,18 +919,6 @@ def _bind_push_payload_to_source(
         "received_at_utc": str(received_at_utc),
     }
     return out
-
-
-class _ReplayRepo:
-    def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
-        return []
-
-    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
-        raise KeyError(lot_id)
-
-    def create_record(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return {"record": {"record_id": "dry_run_replay"}}
-
 
 
 def _coordinate_listener_sources(
@@ -1241,20 +1233,25 @@ def main(argv: list[str] | None = None) -> int:
         if apply_changes:
             _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
         else:
-            repo = _ReplayRepo()
+            try:
+                repo = open_option_execution_preview_repo(resolve_position_ledger_sqlite_path(
+                    base=runtime_root, cfg=cfg, data_config=args.data_config))
+            except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+                print(json.dumps({"status": "unresolved", "reason": "ledger_preview_unavailable",
+                                  "error": str(exc)}, ensure_ascii=False))
+                return 2
         bindings = [
             {"broker_id": "futu", "external_account_id": physical, "environment": "REAL",
              "broker_account_id": f"futu:REAL:{physical}", "account_label": label}
             for physical, label in intake_cfg["account_mapping"].items()
         ]
+        file_sources: dict[int, dict[str, Any]] = {}
+        file_errors: dict[int, str] = {}
         def process_file_row(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            try:
-                selected = (sources[0] if payload.get("_trade_intake_file_errors") else
-                            _select_source_for_payload(sources, payload=payload,
-                                                       account_mapping=intake_cfg["account_mapping"],
-                                                       require_match=bool(apply_changes)))
-            except ValueError as exc:
-                return {"status": "rejected", "reason": str(exc)}
+            index = payload["_trade_intake_file_evidence"]["line_number"]
+            if index in file_errors:
+                return {"status": "rejected", "reason": file_errors[index]}
+            selected = file_sources[index]
             return _process_payload(
                 payload, repo=repo, state_path=Path(selected["state_path"]),
                 inbox_path=Path(selected["inbox_path"]), audit_path=Path(selected["audit_path"]),
@@ -1263,9 +1260,29 @@ def main(argv: list[str] | None = None) -> int:
                 host=str(selected.get("host") or "127.0.0.1"), port=int(selected.get("port") or 11111),
                 config=cfg, config_path=cfg_path, runtime_root=runtime_root, **kwargs,
             )
+        def prepare_file_rows(payloads: list[dict[str, Any]]) -> None:
+            if not apply_changes:
+                repo.inference_pending_payloads = payloads
+            for payload in payloads:
+                index = payload["_trade_intake_file_evidence"]["line_number"]
+                try:
+                    selected = (sources[0] if payload.get("_trade_intake_file_errors") else
+                        _select_source_for_payload(sources, payload=payload,
+                            account_mapping=intake_cfg["account_mapping"], require_match=bool(apply_changes)))
+                except ValueError as exc:
+                    file_errors[index] = str(exc)
+                    continue
+                file_sources[index] = selected
+                if not apply_changes:
+                    continue
+                key = "" if payload.get("_trade_intake_file_identity_unbound") else broker_deal_key_from_payload(
+                    payload, account_mapping=intake_cfg["account_mapping"])
+                enqueue_trade_payload(resolve_execution_inbox_path(repo, Path(selected["inbox_path"])),
+                    payload=payload, source="file", broker_deal_key=key, repo=repo,
+                    adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["file"])
         try:
             result = run_execution_file(args.execution_file, process_payload_fn=process_file_row,
-                                        configured_accounts=bindings, dry_run=not apply_changes)
+                prepare_payloads_fn=prepare_file_rows, configured_accounts=bindings, dry_run=not apply_changes)
         except ValueError as exc:
             print(json.dumps({"status": "rejected", "reason": str(exc)}, ensure_ascii=False))
             return 2
@@ -1307,13 +1324,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(json.dumps({"ok": True, **preview}, ensure_ascii=False, indent=2))
             return 0
-        if not apply_changes:
+        saved_execution = saved_inbox["payload"].get("execution_input") or saved_inbox["payload"]
+        if not apply_changes and (saved_execution.get("instrument_ref") or {}).get("asset_type") == "stock":
             from src.application.notification_delivery_adapter import notification_target_reference
             preview = dict(saved_inbox)
             receipt = dict(preview.get("receipt") or {})
             if isinstance(receipt.get("route"), dict):
-                receipt["route"] = dict(receipt["route"])
-                receipt["route"]["target"] = notification_target_reference(receipt["route"].get("target"))
+                receipt["route"] = {**receipt["route"], "target": notification_target_reference(receipt["route"].get("target"))}
             preview["receipt"] = receipt
             print(json.dumps(preview, ensure_ascii=False, indent=2))
             return 0
@@ -1339,7 +1356,13 @@ def main(argv: list[str] | None = None) -> int:
         if apply_changes:
             _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
         else:
-            repo = _ReplayRepo()
+            try:
+                repo = open_option_execution_preview_repo(resolve_position_ledger_sqlite_path(
+                    base=runtime_root, cfg=cfg, data_config=args.data_config))
+            except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+                print(json.dumps({"status": "unresolved", "reason": "ledger_preview_unavailable",
+                                  "error": str(exc)}, ensure_ascii=False))
+                return 2
         with contextlib.redirect_stdout(sys.stderr), (
             with_sqlite_repo_writer_lock(repo) if args.recover_skipped and apply_changes
             else contextlib.nullcontext()
@@ -1417,6 +1440,8 @@ def main(argv: list[str] | None = None) -> int:
                     config=cfg,
                     audit_path=manual_audit_path,
                 )
+        if saved_inbox and not apply_changes:
+            result.update(inbox_id=saved_inbox["inbox_id"], delivery_purpose=saved_inbox["delivery_purpose"])
         if apply_changes:
             _write_listener_status(
                 manual_status_path,
@@ -1980,13 +2005,22 @@ def _reconcile_source_completion(
                         result = {
                             "status": "applied", "reason": action["reason"],
                             "account": deal.internal_account, "deal_id": deal.deal_id,
-                            "action": action.get("lifecycle_decision_type") or action.get("ledger_event_type") or "assigned_stock_sale",
+                            "action": action.get("execution_action") or action.get("lifecycle_decision_type") or action.get("ledger_event_type") or "assigned_stock_sale",
                             "diagnostics": {"reconciled_source_key": broker_deal_key(deal), **{
                                 name: action[name] for name in ("lifecycle_case_id", "terminal_event_ids", "lifecycle_terminal_types",
                                     "source_payload_hash", "ledger_event_id", "assigned_stock_event_id")
                                 if name in action
                             }},
                         }
+                        if action["reason"] == "ledger_event_already_recorded":
+                            complete = completed_ledger_execution_events(repo.list_trade_events(), deal)
+                            # Reconciliation proof must survive order metadata enrichment.
+                            # Identity/quantity live on the operation; mutable source evidence
+                            # is revalidated above rather than frozen into this retry result.
+                            result["operations"] = [
+                                {key: value for key, value in op.to_payload().items() if key != "result"}
+                                for op in recorded_trade_operations(complete)
+                            ]
                         inbox_updated += int(settle_reconciled_trade_payload(
                             inbox_path, observed=row, result=result,
                         ))

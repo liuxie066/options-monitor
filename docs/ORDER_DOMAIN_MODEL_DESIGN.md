@@ -98,6 +98,11 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 > **`ExecutionInput` 的管辖边界**：它只覆盖「券商 deal 入账」这一条事实源。账本里另有一条 schema 同构的第二事实源——`assignment`/`exercise`/`expire_close`/`repair`/`verification` 等生命周期事件不经 `ExecutionInput`（无 `external_execution_id`），由 `commands`/`lifecycle` 直接构造 `TradeEvent` 入库。二者共用 `TradeEvent` 形状，只有 deal 走 `data_type=execution`（§10.1）。
 > **`position_side`（long/short）是派生投影字段，不存储**：由单一 `derive_position_side(position_effect, side)` 生成（`open+buy→long`、`open+sell→short`、`close+buy→short`、`close+sell→long`）；`void`/`adjust` 不改变目标 lot 方向（记 null 或随父 lot）。旧事件兼容读从 `contract_key.position_side` 缺省推导（§9.2）。
 
+普通期权成交缺少开平方向时，应用层可基于同账户、同合约的 OM 持仓分配：先平反向持仓，再开剩余数量。
+跨零成交仍是一个 `ExecutionInput`，原始数量和经济事实不变；账本事件组含多个 close 和至多一个 open，
+复用 `broker_deal_completion` 证明完整分配。整组预检、事务写入、费用分摊和恢复共用已有所有者，
+不新增持久化订单、成交组表或审批状态。`open_close` 仅为处理结果动作，不是原始输入开平值。
+
 ### 4.2 Order（入口归组层，**非持久化实体**）
 
 > 订单不作为账本实体持久化。它只以两种形态存在：

@@ -274,6 +274,7 @@ def run_history_backfill(
         phase="backfill_lifecycle_discovery_before",
     )
     lock_context = process_lock if process_lock is not None else contextlib.nullcontext()
+    queued: list[tuple[dict[str, Any], str | None]] = []
     for payload in payloads:
         if not isinstance(payload, dict):
             durable_queue_complete = False
@@ -294,7 +295,6 @@ def run_history_backfill(
             account_mapping=account_mapping,
         )
         inbox_id: str | None = None
-        claimed_intent: dict[str, str] | None = None
         if apply_changes:
             try:
                 inbox_id = enqueue_trade_payload(
@@ -327,6 +327,12 @@ def run_history_backfill(
                     },
                 )
                 continue
+        queued.append((payload, inbox_id))
+    from src.application.trades.source_constraints import execution_chronology_key
+    for payload, inbox_id in sorted(queued, key=lambda row: execution_chronology_key(row[0])):
+        deal_id = payload_deal_id(payload)
+        deal_key = broker_deal_key_from_payload(payload, account_mapping=account_mapping)
+        claimed_intent: dict[str, str] | None = None
         if inbox_id:
             inbox_row = read_trade_payload(inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
                                           inbox_id=inbox_id)

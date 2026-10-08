@@ -22,6 +22,7 @@ def run_execution_file(
     process_payload_fn: Callable[..., dict[str, Any]],
     configured_accounts: Iterable[Mapping[str, Any]],
     dry_run: bool = True,
+    prepare_payloads_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     max_bytes: int = MAX_EXECUTION_FILE_BYTES,
     max_rows: int = MAX_EXECUTION_FILE_ROWS,
 ) -> dict[str, Any]:
@@ -64,7 +65,7 @@ def run_execution_file(
         bindings[key] = binding
 
     file_sha256 = hashlib.sha256(raw).hexdigest()
-    results: list[dict[str, Any]] = []
+    prepared: list[tuple[int, dict[str, Any]]] = []
     for line_number, (payload, raw_line) in enumerate(zip(rows, lines), 1):
         validation_payload, errors = _bounded_decimal_payload(payload)
         execution = normalize_execution_input(validation_payload)
@@ -98,10 +99,17 @@ def run_execution_file(
         }
         incoming["_trade_intake_file_errors"] = sorted(set(errors))
         incoming["_trade_intake_file_identity_unbound"] = identity_unbound
+        prepared.append((line_number, incoming))
+    if prepare_payloads_fn is not None:
+        prepare_payloads_fn([payload for _, payload in prepared])
+    from src.application.trades.source_constraints import execution_chronology_key
+    results: list[dict[str, Any]] = []
+    for line_number, incoming in sorted(prepared, key=lambda row: execution_chronology_key(row[1])):
         result = process_payload_fn(
             incoming, source="file", allow_external_lookup=False, apply_changes=not dry_run,
         )
         results.append({**result, "line_number": line_number})
+    results.sort(key=lambda row: row["line_number"])
     counts = Counter(str(result.get("status") or "unknown") for result in results)
     return {"status": "previewed" if dry_run else "completed", "dry_run": dry_run,
             "file_sha256": file_sha256, "row_count": len(rows),

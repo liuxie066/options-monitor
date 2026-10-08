@@ -492,7 +492,7 @@ def test_order_enrichment_preserves_interrupted_reconciliation_proof(
     assert len(events) == len(lots) == 1
     assert events[0]["raw_payload"]["execution_input"]["external_order_id"] == "added-order"
     preview = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=False)
-    assert preview["planned_count"] == 1 and preview["applied_count"] == 0
+    assert preview["planned_count"] == 1 and preview["applied_count"] == 0, preview
     assert load_trade_intake_state(path) == state
     applied = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
     assert applied["applied_count"] == 1 and applied["inbox_updated_count"] == 0
@@ -1584,17 +1584,22 @@ def test_converged_recorded_receipt_projects_success_and_known_auxiliary_failure
 
 
 @pytest.mark.parametrize("source", ["push", "history_backfill"])
-def test_unknown_buy_call_entry_point_preserves_evidence_without_open(tmp_path, source):
+def test_unknown_buy_call_entry_point_infers_open_and_preserves_source_evidence(tmp_path, source):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     payload = {**_execution(), "position_effect": None, "side": "buy"}
     payload["instrument_ref"] = {**payload["instrument_ref"], "option_type": "call"}
     result = _process(repo, tmp_path, source, payload, source=source)
-    assert result["status"] == "unresolved"
-    assert repo.list_trade_events() == []
-    assert repo.list_position_lots() == []
+    assert (result["status"], result["action"]) == ("applied", "open")
+    events, lots = repo.list_trade_events(), repo.list_position_lots()
+    assert len(events) == len(lots) == 1
+    assert events[0]["raw_payload"]["execution_input"]["position_effect"] is None
+    assert lots[0]["fields"]["position_side"] == "long"
     inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
     stored = read_trade_payload(inbox, inbox_id=result["inbox_id"], read_only=True)
-    assert stored["result"]["reason"] == "unknown_position_effect"
+    assert stored["result"]["action"] == "open"
+    replay = _process(repo, tmp_path, source, payload, source=source)
+    assert replay["reason"] == "duplicate"
+    assert (repo.list_trade_events(), repo.list_position_lots()) == (events, lots)
 
 
 @pytest.mark.parametrize("failure", ["normalize", "proof"])

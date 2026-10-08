@@ -298,7 +298,14 @@ def test_unresolved_execution_new_evidence_recovers_once_across_retry_and_state_
     unknown = {**_execution(), "position_effect": None, "new_associations": True}
     calls = []
     callback = _receipt_callback(tmp_path, repo, monkeypatch, calls, notify_unresolved=False)
+    # Seed the durable result produced before ledger-based inference was introduced.
+    from src.application.trades.resolver import IntakeResolution
+    original_resolve = auto_intake.resolve_trade_deal
+    monkeypatch.setattr(auto_intake, "resolve_trade_deal", lambda deal, **_: IntakeResolution(
+        status="unresolved", action=None, reason="unknown_position_effect", deal_id=deal.deal_id,
+        account=deal.internal_account, operations=[], diagnostics={"retryable": False}))
     first = _process(repo, tmp_path, "initial", unknown, callback)
+    monkeypatch.setattr(auto_intake, "resolve_trade_deal", original_resolve)
     assert first["reason"] == "unknown_position_effect"
     assert calls == repo.list_trade_events() == []
     path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")

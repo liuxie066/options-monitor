@@ -840,7 +840,7 @@ def build_trade_intake_receipt_message(
     verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
     checks_raw = verification.get("checks")
     checks = checks_raw if isinstance(checks_raw, list) else []
-    first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
+    first_check = cast(dict[str, Any], checks[0]) if len(checks) == 1 and result.get("action") != "open_close" and isinstance(checks[0], dict) else {}
 
     fields: list[tuple[str, object]] = [("动作", action), ("标的", symbol)]
     contract_parts = [part for part in (expiration, strike, _option_type_text(option_type)) if part not in (None, "")]
@@ -848,6 +848,11 @@ def build_trade_intake_receipt_message(
         fields.append(("合约", " ".join(str(part) for part in contract_parts)))
     if contracts not in (None, ""):
         fields.append(("数量", f"{contracts} 张"))
+    if result.get("action") == "open_close":
+        operations = result.get("operations") or []
+        closing = sum(int(item.get("contracts_to_close") or 0) for item in operations)
+        if closing and contracts:
+            fields.append(("分配", f"平仓 {closing} 张 · 开仓 {int(contracts) - closing} 张"))
     if price not in (None, ""):
         fields.append(("成交", price))
     funds = _premium_cashflow_text(deal, result, payload)
@@ -867,6 +872,12 @@ def build_trade_intake_receipt_message(
         )
     if ledger_store and not kind:
         fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
+    quality = result.get("position_quality_check") or {}
+    if quality and quality.get("status") not in {"trusted"}:
+        checks = quality.get("checks") or []
+        mismatch = any(check.get("status") in {"warn", "fail"}
+                       or (check.get("observed") or {}).get("observed_mismatch_count", 0) > 0 for check in checks)
+        fields.append(("持仓核对", "OM 与 OpenD 持仓存在差异，需核对" if mismatch else "OpenD 对照尚未完成，成交已记录"))
     attribution = result.get("attribution_result") or {}
     if attribution.get("status"):
         status = attribution["status"]
@@ -899,7 +910,7 @@ def build_trade_intake_receipt_message(
                 fields.append(("分支剩余", f"{coverage['available_shares']} 股；可开数量以账户容量检查为准"))
     elif (result.get("combo_reconciliation") or {}).get("ok") is False:
         fields.append(("组合", "组合核对未完成；请检查组合核对服务。"))
-    elif applied and result.get("action") == "open":
+    elif applied and result.get("action") in {"open", "open_close"}:
         fields.append(("策略", "归属尚未核实；已记录成交不代表已关联 Wheel/Combo。"))
     if kind:
         cause = {
@@ -1038,7 +1049,7 @@ def _value(name: str, deal: Any, result: dict[str, Any], payload: dict[str, Any]
 def _action_text(deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) -> str:
     effect = _optional_str(result.get("action")) or _optional_str(getattr(deal, "position_effect", None)) or _optional_str((payload or {}).get("position_effect"))
     side = _optional_str(getattr(deal, "side", None)) or _optional_str((payload or {}).get("side")) or _optional_str((payload or {}).get("trd_side"))
-    effect_text = {"open": "开仓", "close": "平仓"}.get(str(effect or "").lower(), str(effect or "-"))
+    effect_text = {"open": "开仓", "close": "平仓", "open_close": "先平仓后开仓"}.get(str(effect or "").lower(), str(effect or "-"))
     side_text = {"sell": "卖出", "buy": "买入"}.get(str(side or "").lower(), str(side or ""))
     return " / ".join(part for part in (effect_text, side_text) if part)
 

@@ -218,6 +218,12 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
 
     assert full_calls == Counter(
         {
+            # Receipt readback and preview verify a coherent read-only snapshot.
+            (
+                "src/application/ledger/read_only_evidence.py",
+                "verify_trade_receipt_projection",
+                "project_stored_trade_events_to_position_lots",
+            ): 1,
             # Repair preview compares both full projections; apply checks the
             # existing stored projection before publishing through the runtime.
             (

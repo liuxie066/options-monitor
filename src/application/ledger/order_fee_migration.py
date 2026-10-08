@@ -828,10 +828,7 @@ def _estimated_option_changes(
         return [], "unsupported_broker_fee_schedule"
     first = ordered[0]
     comparable = {
-        (
-            option_fee_input_identity(item),
-            item.event_type,
-        )
+        option_fee_input_identity(item)
         for item in ordered
     }
     if len(comparable) != 1:
@@ -842,11 +839,7 @@ def _estimated_option_changes(
             first.price,
             contracts=sum(item.contracts for item in ordered),
             multiplier=int(first.multiplier),
-            is_sell=(
-                first.position_side == "short"
-                if first.event_type == "open"
-                else first.position_side == "long"
-            ),
+            is_sell=option_fee_input_identity(first)[-1] == "sell",
         )
     except (TypeError, ValueError):
         return [], "option_fee_estimate_failed"
@@ -1548,7 +1541,7 @@ def _formula_option_groups(
         ).strip()
         key = (
             f"deal:{source_deal_id}"
-            if event.event_type == "close" and source_deal_id
+            if source_deal_id and (event.event_type == "close" or raw_payload.get("broker_deal_completion"))
             else f"event:{event.event_id}"
         )
         grouped.setdefault(key, []).append(event)

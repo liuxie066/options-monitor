@@ -387,7 +387,7 @@ def test_process_payload_assignment_invalidates_context_cache(tmp_path: Path) ->
     assert not shared_ctx.exists()
 
 
-def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeypatch, tmp_path: Path) -> None:
+def test_process_payload_preview_does_not_append_enrichment_audit(monkeypatch, tmp_path: Path) -> None:
     import src.application.trades.auto_intake as intake
 
     events: list[dict] = []
@@ -437,8 +437,7 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
         port=11111,
     )
 
-    assert any(event.get("phase") == "enriched" and event.get("payload", {}).get("futu_account_id") == "123" for event in events)
-    assert any(event.get("phase") == "enrichment_lookup" and event.get("enrichment", {}).get("matched_via") == "deal_lookup_by_acc_id" for event in events)
+    assert events == []
 
 
 def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> None:
