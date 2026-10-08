@@ -1,0 +1,185 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.9",
+  "base": {
+    "tag": "v4.2.8",
+    "commit": "d7a5c407a9d9ebceaf7efd3c8c64221d6a265a85"
+  },
+  "reviewed_head": "e50ead3f179dbdd95559ecb4699cbf50bf960fd7",
+  "commits": [
+    {
+      "sha": "511b557b112d4973e2a1027cd67fdbdb05996717",
+      "subject": "chore(gateflow): accept plan for position-sizing-display"
+    },
+    {
+      "sha": "3baa1acfca838042db57ff9c3b0eee391b571357",
+      "subject": "feat(csp): display single-account position sizing"
+    },
+    {
+      "sha": "369136a1382185174934ff8cffb5b0cf00c225f4",
+      "subject": "chore(gateflow): accept deepreview for position-sizing-display"
+    },
+    {
+      "sha": "87e43d8aa50893816ff0c4b7db519fac5ca7886c",
+      "subject": "gateflow: accept plan for attribution-business-boundary"
+    },
+    {
+      "sha": "7e753801c1e52ec64aaa250f85bc7776edb0a064",
+      "subject": "Merge pull request #511 from liuxie066/feat/position-sizing-display"
+    },
+    {
+      "sha": "55810c75cd4ff0dcb5a122a2ba7c392f43bf32c5",
+      "subject": "fix(attribution): accept attribution-business-boundary S1"
+    },
+    {
+      "sha": "076ae0f9c0d80491f425c73b4f2d51a3bd659bc0",
+      "subject": "chore(sync): integrate main for attribution review"
+    },
+    {
+      "sha": "127bf67620cb6836be1bc0d9ea39ad2489f3dd98",
+      "subject": "chore(gateflow): accept deepreview for attribution-business-boundary"
+    },
+    {
+      "sha": "f78bf0695a4c1dc97659c552c1944b726a117e56",
+      "subject": "Merge pull request #513 from liuxie066/codex/fix-attribution-business-boundary"
+    },
+    {
+      "sha": "a5161d339d9eff484210d6fa2c3c031034804e8b",
+      "subject": "fix(brief): show long call delta in combo metrics"
+    },
+    {
+      "sha": "beab81f610fe5991f72962ddc09a4919300d8ef2",
+      "subject": "chore(brief): merge main for delta display"
+    },
+    {
+      "sha": "e50ead3f179dbdd95559ecb4699cbf50bf960fd7",
+      "subject": "Merge pull request #514 from liuxie066/codex/combo-long-delta-display"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "CSP 候选展示本账户当前仓位、已有 Put 全指派及再卖一张后全指派的比例，沿用现有接货金额与估算口径；不改变筛选、排序、容量或通知触发规则。",
+      "commits": [
+        "3baa1acfca838042db57ff9c3b0eee391b571357",
+        "7e753801c1e52ec64aaa250f85bc7776edb0a064"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "组合增强（CSP+LC）回执展示长 Call Delta，缺失或无效时明确标注暂不可用，不再以短 Put Delta 代替。",
+      "commits": [
+        "a5161d339d9eff484210d6fa2c3c031034804e8b",
+        "e50ead3f179dbdd95559ecb4699cbf50bf960fd7"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复已成交 Combo 归属被无关正股碎股、当前现金或汇率变化阻塞的问题，保留期权持仓核对与 Wheel 占用约束；归属待办和回执区分系统处理、人工选择与证据阻塞。",
+      "commits": [
+        "55810c75cd4ff0dcb5a122a2ba7c392f43bf32c5",
+        "f78bf0695a4c1dc97659c552c1944b726a117e56"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "511b557b112d4973e2a1027cd67fdbdb05996717",
+      "reason": "空提交，仅记录方案确认，无源码或运行行为变化。"
+    },
+    {
+      "commit": "369136a1382185174934ff8cffb5b0cf00c225f4",
+      "reason": "空提交，仅记录审查通过，无源码或运行行为变化。"
+    },
+    {
+      "commit": "87e43d8aa50893816ff0c4b7db519fac5ca7886c",
+      "reason": "空提交，仅记录方案确认，无源码或运行行为变化。"
+    },
+    {
+      "commit": "076ae0f9c0d80491f425c73b4f2d51a3bd659bc0",
+      "reason": "合入已覆盖的 main 变更用于联合验证，无额外独立用户行为变化。"
+    },
+    {
+      "commit": "127bf67620cb6836be1bc0d9ea39ad2489f3dd98",
+      "reason": "空提交，仅记录审查通过，无源码或运行行为变化。"
+    },
+    {
+      "commit": "beab81f610fe5991f72962ddc09a4919300d8ef2",
+      "reason": "同步已覆盖的 main 变更并重新生成依赖图，无额外独立用户行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "511b557b112d4973e2a1027cd67fdbdb05996717",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/511"
+      ]
+    },
+    {
+      "commit": "3baa1acfca838042db57ff9c3b0eee391b571357",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/511"
+      ]
+    },
+    {
+      "commit": "369136a1382185174934ff8cffb5b0cf00c225f4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/511"
+      ]
+    },
+    {
+      "commit": "87e43d8aa50893816ff0c4b7db519fac5ca7886c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/513"
+      ]
+    },
+    {
+      "commit": "7e753801c1e52ec64aaa250f85bc7776edb0a064",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/511"
+      ]
+    },
+    {
+      "commit": "55810c75cd4ff0dcb5a122a2ba7c392f43bf32c5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/513"
+      ]
+    },
+    {
+      "commit": "076ae0f9c0d80491f425c73b4f2d51a3bd659bc0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/513"
+      ]
+    },
+    {
+      "commit": "127bf67620cb6836be1bc0d9ea39ad2489f3dd98",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/513"
+      ]
+    },
+    {
+      "commit": "f78bf0695a4c1dc97659c552c1944b726a117e56",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/513"
+      ]
+    },
+    {
+      "commit": "a5161d339d9eff484210d6fa2c3c031034804e8b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/514"
+      ]
+    },
+    {
+      "commit": "beab81f610fe5991f72962ddc09a4919300d8ef2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/514"
+      ]
+    },
+    {
+      "commit": "e50ead3f179dbdd95559ecb4699cbf50bf960fd7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/514"
+      ]
+    }
+  ]
+}
