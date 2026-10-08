@@ -149,7 +149,7 @@ def validate_combo_yield_pair(
     return rejects
 
 
-def compute_combo_yield_metrics(
+def compute_csp_lc_metrics(
     *,
     put_leg: ComboYieldLeg,
     call_leg: ComboYieldLeg,

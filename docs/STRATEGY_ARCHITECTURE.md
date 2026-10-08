@@ -53,7 +53,14 @@ CC 的核心目标是：在愿意以合适价格卖出正股、但不主动追�
 
 ## Combo Yield
 
-Combo Yield 是与 CSP、CC 平行的开仓策略，不是 CSP 或 CC 的 overlay。当前 runtime key、模块、类型和函数统一使用 `combo_yield` / `ComboYield`。
+Combo Yield 是与 CSP、CC 平行的开仓策略，不是 CSP 或 CC 的 overlay。策略家族使用 `combo_yield` / `ComboYield`，组合收益计算按变体明确命名：
+
+| 业务变体 | 现有 `combo_yield.variant` 配置值 | 领域计算入口 |
+|---|---|---|
+| `csp_lc`（现金担保 Put + Long Call） | `sp_lc` | `domain/domain/engine/combo_yield.py::compute_csp_lc_metrics` |
+| `cc_lp`（Covered Call + Long Put 看跌反转腿） | `cc_lp` | `domain/domain/engine/cc_lp.py::compute_cc_lp_metrics` |
+
+两个变体共用 Combo 策略入口，分别保留其本金、配对校验和收益指标。现有配置值 `sp_lc` 保持兼容，不随业务名称或 Python 函数改名迁移。
 
 运行所有权同样独立：per-symbol pipeline 分别调用 CSP step 与 Combo Yield step。`sell_put.enabled=false`、CSP 扫描失败或 CSP 无候选都不会隐式禁用 Combo Yield；Combo Yield 只由自身 `enabled` 和共享 required-data 是否可用决定。它可以复用 CSP 配置作为 funding-put 的期限、价格边界和 underwriting 输入，但不复用 CSP step 的候选结果或成功状态。共享 required-data 获取仍是 symbol 级前置边界。
 
