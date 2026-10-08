@@ -225,7 +225,8 @@ def build_trade_attribution_view(
             reasons.append("combo_member_unavailable")
         if members[0] in by_lot:
             reasons.extend(trade_attribution_capacity_check(config=config, fact=by_lot[members[0]], facts=account_facts,
-                wheel_read_model=capacity_model, observation=capacity_observation or {}, now_ms=now_ms)["reason_codes"])
+                wheel_read_model=capacity_model, observation=capacity_observation or {}, now_ms=now_ms,
+                check_account_capacity=False)["reason_codes"])
         for lot in members:
             if lot in candidates:
                 candidates[lot].append({"candidate_id": "combo:" + pair["strategy_group_id"], "strategy": "combo_yield",
@@ -401,8 +402,18 @@ def build_trade_attribution_view(
             and row["environment"] == ref.get("environment") and row["account"] == account and row["market"] == market
             and row["policy_version"] == ATTRIBUTION_POLICY_VERSION and row["effective_from_ms"] <= fact["event_time_ms"]
             for row in rows.get("attribution_policy_enablings") or [])
+        capacity_evidence = capacity_semantic
+        if not any(proposal["strategy"] == "wheel" for proposal in proposals):
+            # Only position evidence can change an existing Combo membership decision.
+            capacity_evidence = {key: capacity_semantic[key] for key in (
+                "authority", "scope", "completeness", "errors")}
+            capacity_evidence["positions"] = [row for row in capacity_semantic["positions"]
+                if (row.get("instrument_ref") or {}).get("asset_type") == "option"]
+            capacity_evidence["scope"] = {**(snapshot.get("scope") or {}),
+                "asset_types": [asset for asset in (snapshot.get("scope") or {}).get("asset_types", [])
+                                if asset == "option"]}
         semantic = {"fact_hash": fact["input_hash"], "candidates": proposals, "policy": wheel_config.get("policy_hash"),
-                    "complete": complete, "enabled": enabled, "capacity": capacity_semantic,
+                    "complete": complete, "enabled": enabled, "capacity": capacity_evidence,
                     "account_facts": sorted((item["open_event_id"], item["input_hash"]) for item in account_facts),
                     "combo_inferences": sorted(({key: pair.get(key) for key in (
                         "inference_id", "status", "input_snapshot_hash", "put_lot_snapshot", "call_lot_snapshot",
@@ -645,7 +656,8 @@ def apply_trade_attribution(
         for plan in plans:
             if plan["action"] != "ordinary" and plan["fact"]["position_side"] == "short":
                 check = trade_attribution_capacity_check(config=config, fact=plan["fact"], facts=after_facts, wheel_read_model=after_model,
-                    observation=capacity_observation, now_ms=int(time.time() * 1000))
+                    observation=capacity_observation, now_ms=int(time.time() * 1000),
+                    check_account_capacity=plan["action"] == "wheel")
                 if check["status"] != "available":
                     raise ValueError("attribution capacity changed before commit")
         if stop_event is not None and stop_event.is_set():

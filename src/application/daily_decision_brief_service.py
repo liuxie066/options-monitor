@@ -116,7 +116,8 @@ def _pending_attribution_for_brief(*, base: Path, config: Mapping[str, Any],
         pending.sort(key=lambda row: (row["event_time_ms"], row["open_event_id"]))
         return [{"execution_key": row["execution_key"], "symbol": row["contract_key"]["underlying_symbol"],
                  "option_type": row["contract_key"]["option_type"], "strike": row["contract_key"]["strike"],
-                 "expiration": row["contract_key"]["expiration_ymd"], "status": row["status"]}
+                 "expiration": row["contract_key"]["expiration_ymd"], "status": row["status"],
+                 **{key: row.get(key) for key in ("reason_codes", "rules_enabled", "selected_candidate_id")}}
                 for row in pending], None
     except Exception as exc:
         return [], type(exc).__name__

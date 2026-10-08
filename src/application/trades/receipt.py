@@ -15,6 +15,7 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_shells import render_receipt
+from src.application.report_formatting import attribution_pending_text
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.ledger.api import canonical_payload_hash
@@ -884,8 +885,8 @@ def build_trade_intake_receipt_message(
         origin = {"rule": "按规则", "intent": "按已登记意图", "manual": "经人工确认", "inherited": "沿用已记录关系"}.get(attribution.get("origin"), "已记录")
         text = {"linked": f"{origin}关联 {str(attribution.get('strategy') or '策略').title()}",
                 "ordinary": "普通单腿" + ("（经人工确认）" if attribution.get("origin") == "manual" else "；当前没有策略匹配"),
-                "pending": "成交已入账，归属待人工确认；请在 OM Bot 查看待确认归属并预览目标",
-                "conflict": "成交已入账，归属冲突；暂停相关 Wheel 新增建议，请在 OM Bot 查看待确认归属", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
+                "pending": "成交已入账，" + attribution_pending_text(attribution),
+                "conflict": "成交已入账，" + attribution_pending_text(attribution) + "；暂停相关 Wheel 新增建议", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
         fields.append(("策略", text))
         if status in {"pending", "conflict"}:
             candidates = list(attribution.get("candidate_ids") or [])
@@ -897,7 +898,7 @@ def build_trade_intake_receipt_message(
             if attribution.get("reason_codes"):
                 fields.append(("待核对", "、".join(str(item) for item in attribution["reason_codes"][:5])))
             if attribution.get("execution_key"):
-                fields.append(("确认入口", f"OM Bot：查看待确认归属，成交 `{attribution['execution_key']}`"))
+                fields.append(("查询入口", f"OM Bot：查看成交归属，成交 `{attribution['execution_key']}`"))
         coverage = attribution.get("coverage") or {}
         if coverage:
             put = attribution.get("direction") == "put"
