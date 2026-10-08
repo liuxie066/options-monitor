@@ -839,7 +839,7 @@ def test_receipt_distinguishes_recording_attribution_and_coverage():
     assert "200 股；可开数量以账户容量检查为准" in message
     result["attribution_result"]={"status":"pending"}
     message=build_trade_intake_receipt_message(deal=None,result=result,payload={})
-    assert "OM Bot" in message and "按规则关联" not in message and "状态｜✅ 已完成" in message
+    assert "归属待核对" in message and "按规则关联" not in message and "状态｜✅ 已完成" in message
 
 
 def test_lifecycle_receipt_renders_status_once():
