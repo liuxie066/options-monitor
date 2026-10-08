@@ -1542,13 +1542,13 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
 def test_config_init_requires_explicit_symbols_without_writing(tmp_path: Path, market: str) -> None:
     output_path = tmp_path / "config.yaml"
     with pytest.raises(AgentToolError, match=f"{market} symbols are required"):
-        init_yaml_config(repo_root=REPO_ROOT, output_config_yaml_path=output_path,
+        init_yaml_config(account_label="lx", repo_root=REPO_ROOT, output_config_yaml_path=output_path,
                          markets=[market], dry_run=False)
     assert not output_path.exists()
 
 
 def test_config_init_hk_only_has_no_us_market_or_sample_symbols(tmp_path: Path) -> None:
-    out = init_yaml_config(repo_root=REPO_ROOT, output_config_yaml_path=tmp_path / "config.yaml",
+    out = init_yaml_config(account_label="lx", repo_root=REPO_ROOT, output_config_yaml_path=tmp_path / "config.yaml",
                            markets=["hk"], hk_symbols=["0005.HK"], dry_run=True)
     payload = yaml.safe_load(out["yaml"])
     assert list(payload["markets"]) == ["hk"]
@@ -1596,7 +1596,7 @@ def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
 
     rc = main([
         "config",
-        "init",
+        "init", "--account-label", "lx",
         "--output",
         str(output_path),
         "--runtime-output-dir",

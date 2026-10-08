@@ -25,7 +25,7 @@ def test_setup_selected_endpoint_reaches_quote_route_and_future_symbols(tmp_path
     from src.application.futu_quote_routing import resolve_futu_quote_route
 
     root = tmp_path / "runtime"
-    args = parse_args(["setup", "init", "--output-dir", str(root), "--market", market,
+    args = parse_args(["setup", "init", "--account-label", "lx", "--output-dir", str(root), "--market", market,
                        f"--{market}-symbol", symbol, "--symbol-strategy", f"{symbol}=csp",
                        "--csp-max-strike", f"{symbol}=100", "--futu-acc-id", "12345",
                        "--futu-host", "127.0.0.2", "--futu-port", "22222", "--trd-env", environment, "--apply"])
@@ -47,7 +47,7 @@ def test_setup_selected_endpoint_reaches_quote_route_and_future_symbols(tmp_path
 @pytest.mark.parametrize("raw,canonical", [("700", "0700.HK"), ("HK.00700", "0700.HK"), ("POP", "9992.HK")])
 def test_setup_alias_policy_remains_manageable_through_daily_symbol_commands(tmp_path, raw, canonical):
     root = tmp_path / "runtime"
-    args = parse_args(["setup", "init", "--output-dir", str(root), "--market", "hk",
+    args = parse_args(["setup", "init", "--account-label", "lx", "--output-dir", str(root), "--market", "hk",
                        "--hk-symbol", raw, "--hk-symbol", "0005.HK",
                        "--symbol-strategy", f"{canonical}=csp", "--csp-max-strike", f"{raw}=100",
                        "--symbol-strategy", "0005.HK=cc", "--cc-min-strike", "0005.HK=50",
@@ -74,7 +74,7 @@ def test_setup_alias_policy_remains_manageable_through_daily_symbol_commands(tmp
 ])
 def test_starter_rejects_wrong_market_or_conflicting_alias_policies_before_write(tmp_path, symbols, policies, error):
     with pytest.raises(AgentToolError, match=error):
-        init_yaml_config(repo_root=REPO, output_config_yaml_path=tmp_path / "config.yaml", markets=["hk"],
+        init_yaml_config(account_label="lx", repo_root=REPO, output_config_yaml_path=tmp_path / "config.yaml", markets=["hk"],
                          hk_symbols=symbols, symbol_policies=policies, futu_acc_id="12345")
     assert not list(tmp_path.iterdir())
 
@@ -96,7 +96,7 @@ def test_new_market_account_canonicalizes_initial_symbols_and_policies(tmp_path)
 
 def _source(tmp_path: Path) -> Path:
     source = tmp_path / "config.yaml"
-    init_yaml_config(repo_root=REPO, output_config_yaml_path=source, runtime_output_dir=tmp_path,
+    init_yaml_config(account_label="lx", repo_root=REPO, output_config_yaml_path=source, runtime_output_dir=tmp_path,
                      markets=["us"], futu_acc_id="12345", futu_host="127.0.0.2", futu_port=11112,
                      trd_env="SIMULATE", us_symbols=["NVDA"],
                      symbol_policies={"NVDA": {"strategy": "both", "csp_max_strike": 100, "cc_min_strike": 150}})
@@ -289,8 +289,8 @@ def test_interactive_setup_default_directory_explicit_identity_and_optouts(tmp_p
     assert generated["account_settings"]["mine"]["futu"]["trd_env"] == environment
 
 
-@pytest.mark.parametrize("answers,error", [(["us", "", "", "", "", "12345"], "requires REAL or SIMULATE"),
-                                          (["us", "", "", "REAL", "", ""], "requires a Futu account ID")])
+@pytest.mark.parametrize("answers,error", [(["us", "", "", "", "mine", "12345"], "requires REAL or SIMULATE"),
+                                          (["us", "", "", "REAL", "mine", ""], "requires a Futu account ID")])
 def test_interactive_setup_does_not_accept_missing_identity(tmp_path: Path, answers: list[str], error: str) -> None:
     target = tmp_path / "runtime"
     values = iter(answers)

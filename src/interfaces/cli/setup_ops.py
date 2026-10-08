@@ -117,7 +117,7 @@ def add_setup_commands(subparsers: Any) -> None:
     setup_init = setup_sub.add_parser("init", help="preview and confirm first-run configuration")
     setup_init.add_argument("--output-dir", default=None, help="config and runtime output directory")
     setup_init.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
-    setup_init.add_argument("--account-label", default=None)
+    setup_init.add_argument("--account-label", default=None, help="required user-chosen account label; no default")
     setup_init.add_argument("--futu-acc-id", default=None)
     setup_init.add_argument("--futu-host", default="127.0.0.1")
     setup_init.add_argument("--futu-port", type=int, default=11111)
@@ -178,7 +178,9 @@ def run_setup_init(
                 except ValueError as exc:
                     raise AgentToolError(code="INPUT_ERROR", message="OpenD port must be an integer") from exc
             trd_env = input_fn(f"账户环境 REAL（真实）/SIMULATE（测试）[{trd_env or '必填'}]: ").strip().upper() or trd_env
-            account_label = input_fn(f"账户标签 [{account_label or 'lx'}]: ").strip() or account_label
+            account_label = input_fn(f"账户标签（自定义，必填）[{account_label or '无默认值'}]: ").strip() or account_label
+            if not account_label or not account_label.strip():
+                raise AgentToolError(code="INPUT_ERROR", message="账户标签必填，请填写自己的账户标签（--account-label）")
             futu_acc_id = input_fn("富途账户 ID（数字，必填）: ").strip() or futu_acc_id
             if not futu_acc_id:
                 raise AgentToolError(code="INPUT_ERROR", message="interactive setup requires a Futu account ID")

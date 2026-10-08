@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup init
 ```
 
-引导显示平台默认目录，依次填写市场、OpenD 地址、REAL/SIMULATE 环境、账户标签、富途账户 ID 和监控标的。首次完成一个账户，之后在日常管理中添加账户；同市场账户共享标的。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。账户 ID 和标的不能为空，也不会填入示例标的。预览实际选择，输入 `yes` 后才保存 YAML、运行快照及 `~/.config/options-monitor/runtime-root` 目录记录。
+引导显示平台默认目录，依次填写市场、OpenD 地址、REAL/SIMULATE 环境、账户标签、富途账户 ID 和监控标的。首次完成一个账户，之后在日常管理中添加账户；同市场账户共享标的。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。账户标签由用户填写，无默认值；账户标签、账户 ID 和标的不能为空，也不会填入示例标的。预览实际选择，输入 `yes` 后才保存 YAML、运行快照及 `~/.config/options-monitor/runtime-root` 目录记录。
 
 通知通道、Bot LLM 和常驻服务逐项询问，可以跳过；新配置的通知与 Bot 默认关闭。密钥在终端隐藏输入。服务安装、启动分别预览确认；首次手动运行默认不发通知。重新运行 `om setup init` 可以继续可选步骤，已保存的配置保留。然后检查：
 
@@ -120,7 +120,7 @@ om setup init
 om setup check --format text
 ```
 
-脚本化初始化使用 `om setup init --help` 中的完整参数；写入需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
+脚本化初始化使用 `om setup init --help` 中的完整参数；账户标签须通过 `--account-label` 提供，写入还需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，同样须提供账户标签，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
 
 之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Assistant 的运行快照：
 

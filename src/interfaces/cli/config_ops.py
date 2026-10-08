@@ -31,7 +31,8 @@ def add_config_commands(subparsers: Any) -> None:
     init_config.add_argument("--futu-host", default="127.0.0.1")
     init_config.add_argument("--futu-port", type=int, default=11111)
     init_config.add_argument("--trd-env", choices=("REAL", "SIMULATE"), default="REAL")
-    init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
+    init_config.add_argument("--account-label", "--account", dest="account_label", default=None,
+                            help="required user-chosen account label; no default")
     init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None,
                              help="required for US; repeat for each monitored symbol")
     init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None,

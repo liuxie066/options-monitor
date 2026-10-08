@@ -48,6 +48,7 @@
 
 ```bash
 ./om config init \
+  --account-label YOUR_ACCOUNT_LABEL \
   --market us \
   --us-symbol AAPL \
   --symbol-strategy AAPL=csp \
@@ -56,7 +57,7 @@
   --runtime-output-dir .
 ```
 
-把 `AAPL` 和 `100` 换成自己的标的与最高行权价；多个标的重复标的、策略与必要边界参数。若选择港股则使用 `--market hk --hk-symbol`；CC 使用 `--symbol-strategy SYMBOL=cc --cc-min-strike SYMBOL=PRICE`。安装后的全局命令可去掉 `./`。
+把 `YOUR_ACCOUNT_LABEL` 换成自定义账户标签，把 `AAPL` 和 `100` 换成自己的标的与最高行权价。账户标签必填且无默认值；多个标的重复标的、策略与必要边界参数。若选择港股则使用 `--market hk --hk-symbol`；CC 使用 `--symbol-strategy SYMBOL=cc --cc-min-strike SYMBOL=PRICE`。安装后的全局命令可去掉 `./`。
 
 上例生成：
 
