@@ -142,12 +142,12 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 
 ### Futu 资金字段与局部失败（P1、P2、P5）
 
-资金行在 source owner 严格解析；身份过滤前先拒绝非映射坏行，不能静默丢弃后声称响应完整。每个选中账户资金行至少有一个明确、有限的受支持组成；存在空组成行、非法组成或 provider 明确部分失败，整个现金结果不可用。保持原支持资产范围，不要求八个币种字段全部返回。
+资金行在 source owner 严格解析；身份过滤前先拒绝非映射坏行，不能静默丢弃后声称响应完整。每个选中账户资金行至少有一个明确、有限的受支持组成；存在空组成行、非法组成或 provider 明确部分失败，整个现金结果不可用。业务现金范围固定为 CNY/HKD/USD，不要求八个币种字段全部返回。
 
 | 字段/输入 | 本地合同 |
 | --- | --- |
-| hk_cash/us_cash/cn_cash/jp_cash/sg_cash/au_cash/ca_cash/my_cash | 对应 HKD/USD/CNY/JPY/SGD/AUD/CAD/MYR；有限数值（含数字字符串）按原币计入，显式 0 必须保留键，负值保留 |
-| fund_assets/mmf_assets/money_fund_assets | 同一基金组成的别名，沿用现有行币种解析；只计一次。多个明确返回的别名必须数值一致，否则视为冲突，不重复相加 |
+| hk_cash/us_cash/cn_cash/jp_cash/sg_cash/au_cash/ca_cash/my_cash | 保留全部字段解析及原始证据；HKD/USD/CNY 的有限值（含数字字符串、显式 0、负值）按原币计入。JPY/SGD/AUD/CAD/MYR 明确为 0 时排除业务现金组成，不查 FX、不警告；非零（正或负）保留原币诊断并以 unsupported_cash_currency_nonzero 标记整笔现金不可用 |
+| fund_assets/mmf_assets/money_fund_assets | 同一基金组成的别名，沿用现有行币种解析；只计一次。多个明确返回的别名必须数值一致，否则视为冲突，不重复相加；应用同一币种范围规则，逐组成检查非零，禁止以异号相加掩盖异常 |
 | 字段不存在、None、空串、-、N/A | SDK 未返回该可选组成；跳过该组成且保留原始缺值证据，不推断为零或该币种不适用。至少一个明确组成且无其他错误才满足现有资金行合同 |
 | bool、NaN、Inf、非数值字符串 | 非法值，不能作为未返回跳过；该行及现金结果不可用 |
 | cash、net_cash_power | 不作为上述组成的回退；net_cash_power 保持独立展示 |
@@ -161,7 +161,7 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 
 ### 读取、缓存与封存
 
-共享读取顺序：有效配置和期望身份 → 读取指定目录现有 portfolio_context.json → 共享评价 → fresh 且包含本次所需数据则复用 → 否则最多一次 Futu 刷新 → 对刷新结果运行同一评价 → 返回完整 context 和现金结论。缓存 JSON 损坏等视为未命中；刷新失败不退回过期余额，错误统一映射为不可用，保留原本的日志与故障通道。取消/超时不再补发请求。
+共享读取顺序：有效配置和期望身份 → 读取指定目录现有 portfolio_context.json → 共享评价 → fresh 且包含本次所需数据则复用 → 否则最多一次 Futu 刷新 → 对刷新结果运行同一评价 → 返回完整 context 和现金结论。共享现金结论只接受归一化后的 CNY/HKD/USD 键；其他币种键返回 CASH_CURRENCY_UNSUPPORTED。含其他币种键的旧当前缓存（包括零余额）视为未命中，沿既有流程刷新一次，成功后使用 source owner 的三币种结果；不改写旧封存历史。缓存 JSON 损坏等视为未命中；刷新失败不退回过期余额，错误统一映射为不可用，保留原本的日志与故障通道。取消/超时不再补发请求。
 
 state_dir、runtime root、run_id、account 继续由既有入口绑定；共享 loader 不搜索其他根目录或其他 run 的缓存。不同目录使用相同读取规则，本轮不建立全局现金缓存仓库，也不承诺不同观测时刻读取同一快照。只读入口继续 write_cache=False；prepared 继续通过现有封存写入路径产出，不修改已封存 payload。允许写缓存的入口使用既有 atomic_write_json，避免并发半文件；缓存读取失败可以刷新，但写入失败不得悄悄伪报已缓存。
 

@@ -9,6 +9,9 @@ from domain.domain.trade_contract_identity import contract_share_quantity, requi
 from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
+SUPPORTED_CASH_CURRENCIES = frozenset({"CNY", "HKD", "USD"})
+
+
 @dataclass(frozen=True)
 class SellPutCashCapacity:
     accepted: bool
@@ -1063,6 +1066,8 @@ def evaluate_cash_snapshot(
                     or not currency.isascii() or not currency.isalpha() or currency != currency.upper()
                     or value is None or not math.isfinite(value)):
                 reasons.add("CASH_AMOUNT_INVALID")
+            elif currency not in SUPPORTED_CASH_CURRENCIES:
+                reasons.add("CASH_CURRENCY_UNSUPPORTED")
     errors = context.get("cash_balance_unavailable_by_row")
     if context.get("cash_balance_reliable") is not True or not isinstance(errors, Mapping) or errors:
         reasons.add("CASH_BALANCE_UNRELIABLE")

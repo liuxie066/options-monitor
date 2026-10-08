@@ -2091,7 +2091,8 @@ def test_csp_position_sizing_in_shared_report_views(render) -> None:
     for candidate in brief["candidates"]["sell_put"]:
         candidate["metrics"].update(symbol_concentration_current=0.08, symbol_concentration_after_existing_puts=0.2, symbol_concentration_after=0.23)
     message = render(brief)
-    assert "Position Sizing（本账户，接货金额口径）" in message
+    assert "Position Sizing：" in message
+    assert "Position Sizing（" not in message
     assert "当前 8.0% · 已有 Put 全指派 20.0% · 再卖 1 张后全指派 23.0%" in message
 
 
@@ -2103,7 +2104,8 @@ def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
     brief["candidate_index"] = [{"identity": identity, "symbol": candidate["symbol"], "strategy_family": "sell_put", "representative": candidate, "contract_count": 1}]
     for render in (render_candidate_alert, render_candidate_alert_card_markdown):
         message = render(brief, [identity])
-        assert "Position Sizing（本账户，接货金额口径，估算）" in message
+        assert "Position Sizing：" in message
+        assert "Position Sizing（" not in message
         assert "当前 0.0% · 已有 Put 全指派 120.0% · 再卖 1 张后全指派 暂不可用" in message
         assert "stock_value_estimated_from_avg_cost" not in message
     legacy = render_full_brief(_brief())

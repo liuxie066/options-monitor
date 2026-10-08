@@ -1437,9 +1437,7 @@ def _candidate_metric_details(
         ):
             value = _number(values.get(key))
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
-        estimated = "stock_value_estimated_from_avg_cost:" in str(values.get("portfolio_risk_warnings") or "")
-        basis = "本账户，接货金额口径，估算" if estimated else "本账户，接货金额口径"
-        details.append(f"Position Sizing（{basis}）：" + " · ".join(sizing))
+        details.append("Position Sizing：" + " · ".join(sizing))
     return details
 
 

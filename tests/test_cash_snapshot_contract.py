@@ -22,9 +22,9 @@ CONFIG = {
 }
 
 
-def cash_context(observed=NOW, **changes):
+def cash_context(observed=NOW, *, balance_rows=None, **changes):
     result = build_futu_portfolio_context(
-        balance_rows=[{"us_cash": 0, "cn_cash": -5}], position_rows=[], account="lx",
+        balance_rows=balance_rows if balance_rows is not None else [{"us_cash": 0, "cn_cash": -5}], position_rows=[], account="lx",
         source_observed_at=NOW.isoformat(), cash_source_observed_at=observed.isoformat(),
         broker_account_identifiers={"123"}, futu_account_id="123", trd_env="REAL", capacity_market="us",
     )
@@ -353,16 +353,25 @@ def test_invalid_provider_number_remains_sealable_as_diagnostic(raw):
     assert json.loads(readable_json_bytes(context))["cash_by_currency"] == {}
 
 
-@pytest.mark.parametrize("change", [{}, {"cash_source_observation_status": "stale"}, {"cash_balance_reliable": False}, {"cash_source_observed_at": None}])
+@pytest.mark.parametrize("change", [
+    {}, {"cash_source_observation_status": "stale"}, {"cash_balance_reliable": False}, {"cash_source_observed_at": None},
+    *({"_balance_row": {"cn_cash": 10000, field: amount}}
+      for field in ("jp_cash", "sg_cash", "au_cash", "ca_cash", "my_cash") for amount in (0, 5, -5)),
+])
 def test_consumers_share_sealed_cash_verdict(change):
     from cash_evidence_helpers import cash_portfolio
     from src.application.sell_put_cash import sell_put_opening_capacity_inputs
     from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.application.daily_decision_brief_service import _build_funds
-    from src.application.portfolio_assignment_scenario import _futu_context_error
+    from src.application.portfolio_assignment_scenario import _futu_context_error, _futu_holdings
     from src.application.wheel.capacity import build_shared_cash_capacity_fact
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
+    change = deepcopy(change)
+    balance_row = change.pop("_balance_row", None)
+    if balance_row is not None:
+        source = cash_context(balance_rows=[balance_row])
+        change.update({key: source[key] for key in ("cash_by_currency", "cash_balance_reliable", "cash_balance_unavailable_by_row")})
     context = cash_portfolio({"cash_by_currency": {"CNY": 10000}, "source_observed_at": NOW.isoformat(), **change}, evaluated_at=NOW)
     option = {"as_of_utc": NOW.isoformat(), "decision_snapshot_status": "trusted",
               "cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_by_ccy": {}, "cash_secured_unavailable_by_symbol": {}}
@@ -381,6 +390,13 @@ def test_consumers_share_sealed_cash_verdict(change):
     assert (fact["status"] == "available") is usable
     assert fact["cash_snapshot"] == context["cash_snapshot"]
     assert (_futu_context_error("lx", context) is None) is usable
+    if usable:
+        holdings, warnings = _futu_holdings("lx", context, {})
+        assert warnings == []
+        assert [row["code"] for row in holdings] == ["CNY-CASH"]
+    else:
+        with pytest.raises(ValueError, match="Futu cash snapshot is incomplete"):
+            _futu_holdings("lx", context, {})
 
 
 def test_cash_fact_hash_ignores_evaluation_clock_but_binds_evidence_and_ttl():
@@ -527,3 +543,91 @@ def test_malformed_cached_authority_refreshes_once(tmp_path, authority, position
     result = load(tmp_path, fetch, **positions)
     assert cash_snapshot_is_usable(result)
     assert len(calls) == 1
+
+
+FOREIGN_CASH_FIELDS = (("JPY", "jp_cash"), ("SGD", "sg_cash"), ("AUD", "au_cash"),
+                       ("CAD", "ca_cash"), ("MYR", "my_cash"))
+
+
+@pytest.mark.parametrize("currency,field", FOREIGN_CASH_FIELDS)
+@pytest.mark.parametrize("amount", [0, "0", 12.5, -12.5])
+def test_source_foreign_cash_scope_preserves_evidence(currency, field, amount):
+    ctx = cash_context(balance_rows=[{"cn_cash": 10000, "us_cash": 0, "hk_cash": -5, field: amount}])
+    assert ctx["cash_source_rows"][0][field] == repr(amount)
+    assert ctx["cash_by_currency"]["CNY"] == 10000
+    assert ctx["cash_by_currency"]["USD"] == 0
+    assert ctx["cash_by_currency"]["HKD"] == -5
+    if float(amount) == 0:
+        assert set(ctx["cash_by_currency"]) == {"CNY", "USD", "HKD"}
+        assert currency not in ctx["cash_components_by_currency"]
+        assert currency not in ctx["cash_capacity_by_currency"]
+        assert ctx["cash_balance_reliable"]
+        assert verdict(ctx)["reason_codes"] == []
+    else:
+        assert ctx["cash_by_currency"][currency] == amount
+        assert ctx["cash_balance_unavailable_by_row"][f"balance_row_1.{field}"] == "unsupported_cash_currency_nonzero"
+        assert not ctx["cash_balance_reliable"]
+        assert "CASH_CURRENCY_UNSUPPORTED" in verdict(ctx)["reason_codes"]
+
+
+@pytest.mark.parametrize("raw", [True, False, float("nan"), float("inf"), float("-inf"), "bad"])
+def test_foreign_cash_invalid_is_not_treated_as_zero(raw):
+    ctx = cash_context(balance_rows=[{"cn_cash": 10000, "jp_cash": raw}])
+    assert ctx["cash_balance_unavailable_by_row"]["balance_row_1.jp_cash"] == "value_invalid"
+    assert verdict(ctx)["status"] == "unknown"
+    assert ctx["cash_source_rows"][0]["jp_cash"] == repr(raw)
+
+
+@pytest.mark.parametrize("raw", [None, "", "-", "N/A"])
+def test_foreign_cash_optional_missing_is_not_invented_as_zero(raw):
+    ctx = cash_context(balance_rows=[{"cn_cash": 10000, "jp_cash": raw}])
+    assert ctx["cash_by_currency"] == {"CNY": 10000}
+    assert ctx["cash_source_rows"][0]["jp_cash"] == repr(raw)
+    assert verdict(ctx)["status"] == "fresh"
+
+
+def test_unsupported_components_cannot_cancel_into_usable_zero():
+    ctx = cash_context(balance_rows=[{"cn_cash": 10000, "currency": "JPY", "fund_assets": 5, "jp_cash": -5}])
+    assert ctx["cash_by_currency"]["JPY"] == 0
+    assert set(ctx["cash_balance_unavailable_by_row"].values()) == {"unsupported_cash_currency_nonzero"}
+    assert verdict(ctx)["status"] == "unknown"
+    conflicting = cash_context(balance_rows=[{"cn_cash": 10000, "currency": "JPY", "fund_assets": 0, "mmf_assets": 1}])
+    assert conflicting["cash_balance_unavailable_by_row"]["balance_row_1.mmf_assets"] == "alias_balance_conflict"
+    assert verdict(conflicting)["status"] == "unknown"
+
+
+def test_only_unsupported_zero_cannot_prove_supported_cash_is_zero():
+    ctx = cash_context(balance_rows=[{"jp_cash": 0, "sg_cash": 0}])
+    assert ctx["cash_by_currency"] == {}
+    assert not ctx["cash_balance_reliable"]
+    assert verdict(ctx)["status"] == "unknown"
+
+
+@pytest.mark.parametrize("amount", [0, 10, -10])
+def test_legacy_foreign_cash_cache_refreshes_once_readonly(tmp_path, amount):
+    old = cash_context(cash_by_currency={"CNY": 10000, "JPY": amount})
+    old["cash_snapshot"] = {"status": "fresh"}  # legacy assertion cannot authorize reuse
+    path = tmp_path / "portfolio_context.json"
+    path.write_text(json.dumps(old)); before = path.read_bytes()
+    calls = []
+    def fetch(**kwargs):
+        calls.append(kwargs)
+        return cash_context(balance_rows=[{"cn_cash": 10000, "jp_cash": amount}])
+    result = load(tmp_path, fetch)
+    assert len(calls) == 1
+    assert calls[0]["write_cache"] is False
+    assert result["context_source"] == "futu_direct"
+    assert cash_snapshot_is_usable(result) is (amount == 0)
+    assert path.read_bytes() == before
+
+
+def test_legacy_foreign_cash_refresh_failure_does_not_reuse_zero_cache(tmp_path):
+    old = cash_context(cash_by_currency={"CNY": 10000, "JPY": 0})
+    path = tmp_path / "portfolio_context.json"
+    path.write_text(json.dumps(old)); before = path.read_bytes()
+    def fetch(**kwargs):
+        raise ValueError("offline")
+    result = load(tmp_path, fetch)
+    assert not cash_snapshot_is_usable(result)
+    assert "CASH_PROVIDER_UNAVAILABLE" in result["cash_snapshot"]["reason_codes"]
+    assert path.read_bytes() == before
