@@ -25,7 +25,7 @@ def _answers(*values):
 @pytest.fixture
 def source(tmp_path):
     root = tmp_path / "runtime"
-    init_yaml_config(repo_root=REPO, output_config_yaml_path=root / "config.yaml", runtime_output_dir=root,
+    init_yaml_config(account_label="lx", repo_root=REPO, output_config_yaml_path=root / "config.yaml", runtime_output_dir=root,
                      markets=["us"], us_symbols=["NVDA"], futu_acc_id="12345", trd_env="REAL", dry_run=False,
                      symbol_policies={"NVDA": {"strategy": "csp", "csp_max_strike": 100}})
     return root / "config.yaml"

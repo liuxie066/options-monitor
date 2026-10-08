@@ -193,7 +193,7 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
             [
                 "om",
                 "config",
-                "init",
+                "init", "--account-label", "lx",
                 "--output",
                 str(config_yaml),
                 "--runtime-output-dir",

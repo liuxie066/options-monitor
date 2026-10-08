@@ -17,7 +17,7 @@ om setup init
 引导顺序：
 
 1. 显示平台默认配置与运行目录，无需普通用户选择。高级用户可以传 `--output-dir`。
-2. 选择一个市场，填写 OpenD 地址、端口，明确 REAL 或 SIMULATE，填写账户标签和数字富途账户 ID。OM 不安装或登录 OpenD。
+2. 选择一个市场，填写 OpenD 地址、端口，明确 REAL 或 SIMULATE，填写自定义账户标签和数字富途账户 ID。账户标签必填且无默认值；脚本化初始化也须提供 `--account-label`。OM 不安装或登录 OpenD。
 3. 输入自己的监控标的。每个标的选择 CSP、CC 或 both；CSP 必填 max strike，CC 必填 min strike；另外两个边界可选。边界必须是正数，最小值不能超过最大值。
 4. 检查账户、环境、标的、策略、文件路径预览，输入 `yes` 保存。
 5. 选择是否验证 OpenD 连接；通知通道、Bot LLM、常驻服务分别询问并可跳过。
@@ -29,7 +29,7 @@ om setup init
 
 初始化生成 `config.yaml`、所选市场 `config.us.json` / `config.hk.json`、`resolved/config.bot.json`，并在 `~/.config/options-monitor/runtime-root` 记住目录。显式配置路径及有效 `OM_RUNTIME_ROOT` 优先于记录；记录损坏时会报错，不偷换到另一个实例。创建过程异常中断可能留下文件，需先核对具体冲突；不会自动覆盖或猜测删除归属。
 
-脚本化创建使用 `om setup init --help` 中的完整参数：市场、数字 `--futu-acc-id`、`--trd-env REAL|SIMULATE`、每个用户标的及策略边界。先用 `--dry-run` 预览，再以同样参数改用 `--apply`。高级 `om config init` 可创建尚未填写账户的占位配置，但不会将其判断为就绪，也不建立用户运行目录记录。
+脚本化创建使用 `om setup init --help` 中的完整参数：`--account-label`、市场、数字 `--futu-acc-id`、`--trd-env REAL|SIMULATE`、每个用户标的及策略边界。先用 `--dry-run` 预览，再以同样参数改用 `--apply`。高级 `om config init` 也须提供账户标签，可创建尚未填写富途账户 ID 的占位配置，但不会将其判断为就绪，也不建立用户运行目录记录。
 
 ### 日常维护账户与标的
 

@@ -17,7 +17,7 @@ def test_symbols_cli_previews_then_publishes_yaml_and_runtime(tmp_path: Path, ca
     source = tmp_path / "config.yaml"
     runtime = tmp_path / "config.us.json"
     init_yaml_config(
-        repo_root=REPO_ROOT,
+        account_label="lx", repo_root=REPO_ROOT,
         output_config_yaml_path=source,
         runtime_output_dir=tmp_path,
         markets=["us"],
@@ -73,7 +73,7 @@ def test_symbols_cli_uses_active_runtime_root_and_refuses_last_removal(tmp_path:
     source = tmp_path / "config.yaml"
     runtime = tmp_path / "config.us.json"
     init_yaml_config(
-        repo_root=REPO_ROOT, output_config_yaml_path=source,
+        account_label="lx", repo_root=REPO_ROOT, output_config_yaml_path=source,
         runtime_output_dir=tmp_path, markets=["us"], us_symbols=["NVDA"], dry_run=False,
     )
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
@@ -106,7 +106,7 @@ def test_symbols_cli_uses_active_runtime_root_and_refuses_last_removal(tmp_path:
 def test_symbols_cli_infers_market_from_symbol_and_rejects_mismatch(tmp_path: Path) -> None:
     source = tmp_path / "config.yaml"
     init_yaml_config(
-        repo_root=REPO_ROOT, output_config_yaml_path=source, runtime_output_dir=tmp_path,
+        account_label="lx", repo_root=REPO_ROOT, output_config_yaml_path=source, runtime_output_dir=tmp_path,
         markets=["us", "hk"], us_symbols=["NVDA"], hk_symbols=["0700.HK"], dry_run=False,
     )
 
@@ -148,7 +148,7 @@ def test_explicit_yaml_path_ignores_broken_default_record(tmp_path: Path, monkey
     source = tmp_path / "valid" / "config.yaml"
     source.parent.mkdir()
     init_yaml_config(
-        repo_root=REPO_ROOT, output_config_yaml_path=source,
+        account_label="lx", repo_root=REPO_ROOT, output_config_yaml_path=source,
         runtime_output_dir=source.parent, markets=["us"], us_symbols=["NVDA"], dry_run=False,
     )
     record = tmp_path / "home" / ".config" / "options-monitor" / "runtime-root"
