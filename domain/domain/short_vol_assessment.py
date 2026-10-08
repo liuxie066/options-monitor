@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Literal
 
 from domain.domain.symbol_identity import canonical_symbol
@@ -67,7 +68,34 @@ def portfolio_concentration_fields(
     if symbol_after is not None and total_after is not None:
         concentration_score = max(0.0, 1.0 - max(symbol_after, total_after))
 
+    sizing_fields: dict[str, Any] = {}
+    if mode == "put":
+        # Existing holdings remain meaningful even when this candidate cannot be valued.
+        sizing_evaluable = bool(
+            symbol
+            and nav is not None
+            and isfinite(nav)
+            and nav > 0
+            and isfinite(existing_stock)
+            and existing_stock >= 0
+            and isfinite(existing_short_put)
+            and existing_short_put >= 0
+            and existing_total_short_put is not None
+            and not risk_ctx.unavailable_reasons
+        )
+        current = existing_stock / nav if sizing_evaluable else None
+        existing_assigned = (existing_stock + existing_short_put) / nav if sizing_evaluable else None
+        sizing_fields = {
+            "symbol_concentration_current": _round_optional(current) if current is not None and isfinite(current) else None,
+            "symbol_concentration_after_existing_puts": (
+                _round_optional(existing_assigned)
+                if existing_assigned is not None and isfinite(existing_assigned)
+                else None
+            ),
+        }
+
     return {
+        **sizing_fields,
         "portfolio_nav_cny": _round_optional(nav),
         "assignment_notional_cny": _round_optional(assignment),
         "covered_notional_cny": _round_optional(covered_notional),

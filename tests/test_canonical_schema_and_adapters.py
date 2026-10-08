@@ -211,3 +211,11 @@ def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
         )
     e = _caught.value
     assert "schema_kind must be tool_execution" in str(e)
+
+
+def test_normalize_processor_row_preserves_position_sizing_and_estimates() -> None:
+    sizing = {"symbol_concentration_current": 0.0, "symbol_concentration_after_existing_puts": 1.2, "symbol_concentration_after": 1.5, "portfolio_risk_warnings": "stock_value_estimated_from_avg_cost:NVDA"}
+    out = normalize_processor_row({"symbol": "NVDA", "strategy": "sell_put", **sizing})
+    assert {key: out[key] for key in sizing} == sizing
+    missing = normalize_processor_row({"symbol": "NVDA", "strategy": "sell_put"})
+    assert all(missing[key] is None for key in sizing)
