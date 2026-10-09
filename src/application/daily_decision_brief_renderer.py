@@ -1447,6 +1447,20 @@ def _candidate_metric_details(
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
         basis_label = "非期权净资产，指派费用前" if is_current_basis else "历史口径"
         details.append(f"Position Sizing（{basis_label}）：" + " · ".join(sizing))
+        carried_by_market = {}
+        for warning in str(values.get("portfolio_risk_warnings") or "").split(";"):
+            if not warning.startswith("closed_market_quote:"):
+                continue
+            parts = warning.split(":", 2)
+            if len(parts) != 3:
+                continue
+            _, quote_market, timestamp = parts
+            quoted_at = _parse_datetime(timestamp)
+            if quoted_at is not None and quote_market in _MARKET_TIMEZONES:
+                carried_by_market[quote_market] = min(quoted_at, carried_by_market.get(quote_market, quoted_at))
+        for quote_market, quoted_at in sorted(carried_by_market.items()):
+            local = quoted_at.astimezone(_safe_zoneinfo(_MARKET_TIMEZONES[quote_market]))
+            details.append(f"估值｜{_MARKET_LABELS[quote_market]}休市沿用最近交易时段报价 · 最早报价 {_MARKET_TIME_LABELS[quote_market]} {local:%m-%d %H:%M}")
     return details
 
 

@@ -13,6 +13,7 @@ from domain.domain.wheel import (
 from src.application.ledger.api import (
     project_assigned_stock_lifecycle_from_rows,
     project_position_lots_and_assigned_stock_from_rows,
+    valid_void_target_event_id,
 )
 
 
@@ -109,11 +110,18 @@ def _build_wheel_read_model_base(
     instant = int(as_of_ms)
     if instant <= 0:
         raise ValueError("wheel read model requires as_of_ms > 0")
+    historical_event_ids = {
+        item.get("event_id") for item in rows.get("trade_events") or []
+        if isinstance(item, Mapping) and item.get("event_id")
+        and _event_time_ms(item, "event_time_ms") <= instant
+    }
     trade_events = [
         dict(item)
         for item in rows.get("trade_events") or []
         if isinstance(item, Mapping)
-        and _event_time_ms(item, "event_time_ms") <= instant
+        # Later corrections still void historical facts; future economics stay out.
+        and (_event_time_ms(item, "event_time_ms") <= instant
+             or valid_void_target_event_id(item) in historical_event_ids)
     ]
     wheel_events = [
         dict(item)

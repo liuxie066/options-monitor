@@ -108,3 +108,43 @@ def test_pair_preserves_selection_fallback(monkeypatch):
     pair = model.build_wheel_read_model_with_capacity_from_rows(rows, account='lx', as_of_ms=4000, market=None)
     assert pair == (expected, expected)
     assert calls == [1, 0]
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_historical_wheel_keeps_later_void_of_repaired_terminal(paired):
+    opened = _trade()
+    expired = _trade(event_id="old-expiry", event_type="expire_close", event_time_ms=2000,
+                     price=0, lot_id=None, target_lot_id="lot-put", raw_payload={})
+    assignment = _assign_put(event_time_ms=2500)
+    void = _trade(event_id="void-old-expiry", event_type="void", event_time_ms=5000,
+                  contracts=0, price=0, lot_id=None, target_event_id="old-expiry", raw_payload={})
+    rows = {"trade_events": [item.to_dict() for item in (opened, expired, assignment, void)]}
+    before = deepcopy(rows)
+    read = (model.build_wheel_read_model_with_capacity_from_rows if paired
+            else model.build_wheel_read_model_from_rows)
+    result = read(rows, account="lx", as_of_ms=4000, market="us")
+    views = result if paired else (result,)
+    for view in views:
+        assert [lot["shares_remaining"] for lot in view["assigned_stock_projection"]["assigned_stock_lots"]] == [100]
+    assert rows == before
+
+
+def test_historical_wheel_does_not_include_void_of_future_event():
+    opened = _trade(event_time_ms=6000)
+    void = _trade(event_id="void-future-open", event_type="void", event_time_ms=7000,
+                  contracts=0, price=0, lot_id=None, target_event_id=opened.event_id, raw_payload={})
+    out = model.build_wheel_read_model_from_rows(
+        {"trade_events": [opened.to_dict(), void.to_dict()]}, account="lx", as_of_ms=4000)
+    assert out["assigned_stock_projection"]["assigned_stock_lots"] == []
+
+
+def test_historical_wheel_retained_void_still_checks_account_identity():
+    opened = _trade()
+    assigned = _assign_put()
+    void = _trade(event_id="invalid-void", event_type="void", event_time_ms=5000,
+                  contracts=0, price=0, lot_id=None, target_event_id=assigned.event_id,
+                  contract_key=replace(assigned.contract_key, account="sy"), raw_payload={})
+    with pytest.raises(ValueError, match="target_event_contract_mismatch"):
+        model.build_wheel_read_model_from_rows(
+            {"trade_events": [item.to_dict() for item in (opened, assigned, void)]},
+            account="lx", as_of_ms=4000)

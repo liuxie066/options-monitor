@@ -84,9 +84,10 @@
 ### 富途报价、汇率与质量
 
 - 用所请求账户富途股票及富途短期权底层标的去重形成报价集合，同一请求内对每个标的只取一次 OpenD 行情，同价用于富途现有股和富途期权假设指派新增股。非富途 PM 持仓按 PM scoped 证据估值；非富途期权终局估值不借用富途报价冒充券商完整基线。先用现有 quote route；无 watchlist binding 时取所请求账户已用于持仓读取的富途连接设置；端点冲突或身份不明则报价不可用，不任意挑第一个账户。
-- 估值判定使用原始 last_price、update_time、sec_status、suspension、market_state 与 symbol/currency 一致性；不得仅凭开仓观察的 market_closed status 放行。价格必须有限且大于零，更新时间必须有效且不在未来，证券状态正常且未停牌。连续交易时，300 秒以内可视为 fresh；超过 300 秒但不超过 7 个日历日仅可作为标时的 partial 估值。闭市且最近价格不超过 7 个日历日也仅作 partial 估值；更旧或无效报价不传入领域 quote map，相关市值与分布标记不完整。300 秒用于交易时新鲜度，7 日是保守的失效上限，不新增运行配置；长假可显式不完整。
+- 估值判定使用原始 last_price、update_time、sec_status、suspension、market_state 与 symbol/currency 一致性；不得仅凭开仓观察的 market_closed status 放行。价格必须有限且大于零，更新时间必须有效且不在未来，证券状态正常且未停牌。300 秒以内可视为 fresh；超过 300 秒但不超过 7 个日历日，只有下述休市交易日历校验通过时可作为完整估值，否则仅作标时的 partial 估值。更旧或无效报价不传入领域 quote map，相关市值与分布标记不完整。300 秒用于交易时新鲜度，7 日是保守的失效上限，不新增运行配置；长假可显式不完整。
 - 同次情景由 OM 应用层调用现有 fetch_market_exchange_rates 一次，取得一个腾讯或新浪观察；逐账户富途余额仍各自读取，但 context 接受应用层传入的该观察并跳过内部重复 FX 获取，现金和报价估值都使用同一观察及 source/observed_at。所有账户共享其质量结果；失败时共同标为 FX 缺失，不能从某账户上下文另挑可用汇率。CNY 恒等 1；USD/HKD 等仅在现有 24 小时质量门通过时换算。缺 FX 时不伪造 CNY 金额；非 CNY 现金和股票的相关结果 partial。PM 非富途资产的 CNY 市值、价格及 FX 由 PM scoped 证据负责，不用 OM 汇率重算。
 - 构造 portfolio.valuation_evidence.v1 时，从每个实际来源的完整性、时间和 trust 推导 status/freshness；保留 Futu、PM、quote、FX、账本各自时间和 snapshot identity。完整富途基线与 PM 补充失败并存时，聚合 status=partial，PM 缺失作为单独原因；已纳入富途数据的 freshness/trust 仍按其自身证据判断，不把 PM unavailable 覆盖成聚合 unavailable，也不伪称 PM fresh/trusted。与此相反，富途完整性失败直接 unavailable。不会因为函数成功返回就设置 fresh/trusted；过期 quote 即使有 is_stale 标志也必须使整体 partial，因为领域 _quote_values 不检查该标志。
+- 富途估值报价在市场休市时，只有完整 OpenD 交易日历证明报价不早于最近已开始交易日、且提供方确认非连续交易状态时，才可沿用；保留报价时间和日历回执。开市旧报价、跨交易日缺口、日历读取失败/不完整仍使整体 partial。5 分钟内报价沿用原新鲜度门槛。该规则只用于资产估值，不放宽开仓/平仓实时报价门禁。
 
 ### 失败与状态
 
