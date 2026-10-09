@@ -1,0 +1,217 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.14",
+  "base": {
+    "tag": "v4.2.13",
+    "commit": "95c911af7e26466bb1524d37d0dc53460543e766"
+  },
+  "reviewed_head": "f9217ce5acad8240519b88fbc3b06b0adc8cb4c3",
+  "commits": [
+    {
+      "sha": "9c847b591b5e49c2f7f950e267bdd8db33b734e7",
+      "subject": "chore(gateflow): accept plan for attribution-confirmation-fix"
+    },
+    {
+      "sha": "759ea3568d146274bef07f8d69ae0a8e1644c0da",
+      "subject": "fix(trades): accept attribution recovery S1 across markets"
+    },
+    {
+      "sha": "ccf033f61d28bfc143cd5db3b043c22cb00ea2b3",
+      "subject": "fix(ledger): accept fresh manual confirmation of expired combos S2"
+    },
+    {
+      "sha": "60756e873505c80650abf270204042e8dfbe31d2",
+      "subject": "chore(gateflow): accept deepreview for attribution-confirmation-fix"
+    },
+    {
+      "sha": "513de566959fcc0369e47ce8ee12b908c5359d49",
+      "subject": "Merge pull request #535 from liuxie066/codex/attribution-confirmation-fix"
+    },
+    {
+      "sha": "2e9d53ed114dae9a737fc2e6f68768df17d863d7",
+      "subject": "fix(trades): include confirmed reason in normal close receipts"
+    },
+    {
+      "sha": "135ad43db0fe2f1652d8aba708a4bd7d4373141d",
+      "subject": "chore(trades): integrate main for close receipt fix"
+    },
+    {
+      "sha": "9cea20910931cc63a335c723d3d8fac8a01a76d6",
+      "subject": "fix(trades): resolve pending-close settlement and simplify sizing copy"
+    },
+    {
+      "sha": "e01d7536e94c110fc21d2499a81e15ad4da08ad4",
+      "subject": "chore(merge): integrate main for settlement sizing fix"
+    },
+    {
+      "sha": "db5920e5f492e1e2c68e35ee4ff07277408ed0b9",
+      "subject": "Merge pull request #536 from liuxie066/codex/normal-close-receipt-reason"
+    },
+    {
+      "sha": "ff52fe86fcd3303be06e13d8150dc6290cda3ede",
+      "subject": "test(trades): align sizing flow and preserve projection write owner"
+    },
+    {
+      "sha": "8781b9089e16332f7ee5544b1c7414e031acd9d7",
+      "subject": "chore(merge): integrate close receipt confirmation from main"
+    },
+    {
+      "sha": "1fc252ef0f633517e0ef0a29659fc12b740f7442",
+      "subject": "Merge pull request #537 from liuxie066/codex/settlement-sizing-copy"
+    },
+    {
+      "sha": "f9217ce5acad8240519b88fbc3b06b0adc8cb4c3",
+      "subject": "test(risk): fix FX session in cached stock fixture"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Daily Brief 的 Position Sizing 简化为“当前 · 指派后 · 再卖 1 张指派后”，删除括号说明与休市估值行；底层计算和报价证据不变。",
+      "commits": [
+        "9cea20910931cc63a335c723d3d8fac8a01a76d6",
+        "e01d7536e94c110fc21d2499a81e15ad4da08ad4",
+        "ff52fe86fcd3303be06e13d8150dc6290cda3ede",
+        "8781b9089e16332f7ee5544b1c7414e031acd9d7",
+        "1fc252ef0f633517e0ef0a29659fc12b740f7442"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "普通交易平仓回执补齐已确认的平仓原因，显示“主动交易平仓”，避免已确认结果仍显示“待确认”。",
+      "commits": [
+        "2e9d53ed114dae9a737fc2e6f68768df17d863d7",
+        "db5920e5f492e1e2c68e35ee4ff07277408ed0b9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交归属恢复按账户开放成交加载并校验 US、HK 市场配置，修复以美股配置启动时遗漏已入账港股成交的问题；市场失败、恢复游标和取消仍相互隔离。",
+      "commits": [
+        "759ea3568d146274bef07f8d69ae0a8e1644c0da",
+        "513de566959fcc0369e47ce8ee12b908c5359d49",
+        "135ad43db0fe2f1652d8aba708a4bd7d4373141d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已过期的组合提案可通过人工预览重新核验当前完整两腿及历史候选证据后确认归属；自动恢复仍阻断过期提案，确认保持原子性和幂等性。",
+      "commits": [
+        "ccf033f61d28bfc143cd5db3b043c22cb00ea2b3",
+        "513de566959fcc0369e47ce8ee12b908c5359d49",
+        "135ad43db0fe2f1652d8aba708a4bd7d4373141d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "待确认的零价平仓结算补齐平仓前数量证据，在同一事务内作废原待确认事件并写入终结事件；保留成交身份与经济数据校验，订单重放仅使用有效事件，避免持续占用 CC 开仓容量。",
+      "commits": [
+        "9cea20910931cc63a335c723d3d8fac8a01a76d6",
+        "e01d7536e94c110fc21d2499a81e15ad4da08ad4",
+        "ff52fe86fcd3303be06e13d8150dc6290cda3ede",
+        "8781b9089e16332f7ee5544b1c7414e031acd9d7",
+        "1fc252ef0f633517e0ef0a29659fc12b740f7442"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9c847b591b5e49c2f7f950e267bdd8db33b734e7",
+      "reason": "Empty workflow acceptance commit; no tracked content or runtime, configuration, or operator behavior changed."
+    },
+    {
+      "commit": "60756e873505c80650abf270204042e8dfbe31d2",
+      "reason": "Empty workflow acceptance commit; no tracked content or runtime, configuration, or operator behavior changed."
+    },
+    {
+      "commit": "f9217ce5acad8240519b88fbc3b06b0adc8cb4c3",
+      "reason": "Test-only delivery gate repair: use a verified CFETS quote session instead of wall-clock FX timestamps; generated dependency graph updated. No runtime, configuration, operator behavior, or business logic changed."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9c847b591b5e49c2f7f950e267bdd8db33b734e7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "759ea3568d146274bef07f8d69ae0a8e1644c0da",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "ccf033f61d28bfc143cd5db3b043c22cb00ea2b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "60756e873505c80650abf270204042e8dfbe31d2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "513de566959fcc0369e47ce8ee12b908c5359d49",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "2e9d53ed114dae9a737fc2e6f68768df17d863d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/536"
+      ]
+    },
+    {
+      "commit": "135ad43db0fe2f1652d8aba708a4bd7d4373141d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/535"
+      ]
+    },
+    {
+      "commit": "9cea20910931cc63a335c723d3d8fac8a01a76d6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/537"
+      ]
+    },
+    {
+      "commit": "e01d7536e94c110fc21d2499a81e15ad4da08ad4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/537"
+      ]
+    },
+    {
+      "commit": "db5920e5f492e1e2c68e35ee4ff07277408ed0b9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/536"
+      ]
+    },
+    {
+      "commit": "ff52fe86fcd3303be06e13d8150dc6290cda3ede",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/537"
+      ]
+    },
+    {
+      "commit": "8781b9089e16332f7ee5544b1c7414e031acd9d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/537"
+      ]
+    },
+    {
+      "commit": "1fc252ef0f633517e0ef0a29659fc12b740f7442",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/537"
+      ]
+    },
+    {
+      "commit": "f9217ce5acad8240519b88fbc3b06b0adc8cb4c3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/538"
+      ]
+    }
+  ]
+}
