@@ -818,7 +818,7 @@ def _validate_manifest_symbols(
         entry = dict(raw_entry)
         entry_status = str(entry.get("status") or "").strip().lower()
         if entry_status == "ready":
-            allowed_fields = ready_fields
+            allowed_fields = ready_fields.copy()
             if "reason_code" in entry:
                 allowed_fields |= {"reason_code"}
             if "scan_blob_ref" in entry:
