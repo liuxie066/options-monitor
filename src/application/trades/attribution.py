@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, MutableMapping
 from copy import deepcopy
 import json
 import time
 from pathlib import Path
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from src.application.agent_tool_config import load_runtime_config, repo_base
+from src.application.agent_tool_config import DEFAULT_CONFIGS, load_runtime_config, repo_base
+from src.application.runtime_config_freshness import RUNTIME_MARKETS, ensure_runtime_config_freshness
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
 from src.application.ledger.api import (
@@ -854,6 +855,101 @@ def _reconcile_trade_attribution_batch(
     if len(selected) < 100 and result["checked"] == len(selected):
         result["next_cursor"] = ""
     return result
+
+
+def bind_attribution_market_config(
+    *, config: Mapping[str, Any], repo: Any, account: str, market: str, runtime_root: Path,
+) -> dict[str, Any]:
+    """Bind the fill's market to fresh config for the same account and ledger."""
+    value = str(market or "").strip().lower()
+    source_market = runtime_config_market(config).lower()
+    logical_account = str(account or "").strip().lower()
+    if logical_account not in (config.get("accounts") or []):
+        raise ValueError(f"source runtime config does not configure account {logical_account}")
+    if value == source_market:
+        return dict(config)
+    if value not in RUNTIME_MARKETS:
+        raise ValueError(f"attribution market {value or '<empty>'} has no recoverable runtime config")
+    path, bound = load_runtime_config(config_path=Path(runtime_root) / DEFAULT_CONFIGS[value],
+        expected_market=value)
+    ensure_runtime_config_freshness(bound, repo_root=repo_base(), market=value, runtime_config_path=path)
+    if logical_account not in (bound.get("accounts") or []):
+        raise ValueError(f"{value} runtime config does not configure account {logical_account}")
+    source_physical = resolve_futu_account_ids(config, account=logical_account)
+    source_environment = str(infer_futu_portfolio_settings(config, account=logical_account).get("trd_env") or "").upper()
+    bound_physical = resolve_futu_account_ids(bound, account=logical_account)
+    bound_environment = str(infer_futu_portfolio_settings(bound, account=logical_account).get("trd_env") or "").upper()
+    if len(source_physical) != 1:
+        raise ValueError(f"source physical account for {logical_account} is not exactly one")
+    if bound_physical != source_physical or not bound_environment or bound_environment != source_environment:
+        raise ValueError(f"{value} runtime config physical account or environment differs from the source")
+    data_config = resolve_position_data_config_path(base=repo_base(), cfg=bound, config_path=path)
+    store = resolve_ledger_store(data_config, config_path=path)
+    try:
+        bound_identity = ledger_resource_identity(open_trade_reconciliation_evidence_repo(store.sqlite_path))
+    except OSError as exc:
+        raise ValueError(f"{value} runtime config ledger is unavailable: {type(exc).__name__}") from exc
+    if bound_identity["identity_sha256"] != ledger_resource_identity(repo)["identity_sha256"]:
+        raise ValueError(f"{value} runtime config ledger differs from the source ledger")
+    return bound
+
+
+def _attribution_recoverable_markets(repo: Any, *, account: str, market: str) -> set[str]:
+    """Only supported markets with an open canonical execution have recovery work."""
+    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+    markets: set[str] = set()
+    for fact in trade_attribution_facts_from_events(rows["trade_events"], account=account):
+        if not fact["execution_key"] or fact["contracts_open"] <= 0:
+            continue
+        fact_market = str(symbol_market(fact["contract_key"]["underlying_symbol"]) or "").strip().lower()
+        if fact_market in RUNTIME_MARKETS:
+            markets.add(fact_market)
+    return markets
+
+
+def reconcile_trade_attribution_source(
+    repo: Any, *, config: Mapping[str, Any], accounts: Iterable[str], runtime_root: Path,
+    inbox_path: Path, combo_mode: str, cursors: MutableMapping[str, str], stop_event: Any = None,
+) -> dict[str, Any]:
+    """Reuse account reconciliation per market; failures retain only that market's cursor."""
+    source_market = runtime_config_market(config).lower()
+    recovery: dict[str, dict[str, Any]] = {}
+    for account in sorted({str(item or "").strip().lower() for item in accounts} - {""}):
+        if stop_event is not None and stop_event.is_set():
+            break
+        entry = recovery.setdefault(account, {})
+        try:
+            if account not in (config.get("accounts") or []):
+                raise ValueError(f"source runtime config does not configure account {account}")
+            discovered = _attribution_recoverable_markets(repo, account=account, market=source_market)
+        except Exception as exc:
+            entry["error"] = f"{type(exc).__name__}: {exc}"
+            continue
+        for market in [source_market, *sorted(discovered - {source_market})]:
+            if stop_event is not None and stop_event.is_set():
+                return recovery
+            key = f"{account}:{market}"
+            if market == source_market:
+                bound, mode = dict(config), combo_mode
+            else:
+                try:
+                    bound = bind_attribution_market_config(config=config, repo=repo, account=account,
+                        market=market, runtime_root=runtime_root)
+                except Exception as exc:
+                    entry[market] = {"error": f"{type(exc).__name__}: {exc}"}
+                    continue
+                mode = combo_reconciliation_mode_for_account(bound, account=account)
+            try:
+                result = reconcile_trade_attribution_account(
+                    repo, config=bound, account=account, market=market, runtime_root=runtime_root,
+                    inbox_path=inbox_path, combo_mode=mode,
+                    cursor=str(cursors.get(key) or ""), stop_event=stop_event)
+            except Exception as exc:
+                entry[market] = {"error": f"{type(exc).__name__}: {exc}"}
+                continue
+            cursors[key] = result["next_cursor"]
+            entry[market] = result
+    return recovery
 
 
 def attribution_runtime(*, config_key: str | None, config_path: str | None, account: str):
