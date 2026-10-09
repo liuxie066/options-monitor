@@ -317,6 +317,7 @@ def supersede_post_trade_combo_pair(
 def combo_attribution_candidates_from_rows(
     rows: Mapping[str, Any], *, account: str, runtime_environment: str,
     exposures: list[dict[str, Any]], effective_now_ms: int, include_claimed: bool = False,
+    revalidate_expired: bool = False,
 ) -> dict[str, Any]:
     """Reuse the canonical matcher on the caller's complete ledger snapshot."""
     events = list(rows.get("trade_events") or [])
@@ -341,6 +342,12 @@ def combo_attribution_candidates_from_rows(
         and int(item.get("proposal_expires_at_ms") or 0) >= effective_now_ms
         and str(item.get("inference_id") or "").strip()
     }
+    expired = [item for item in existing if (
+        item.get("status") == "expired_unresolved" and item.get("decision_reason") == "proposal_expired"
+        or item.get("status") in _PENDING_INFERENCE_STATUSES
+        and int(item.get("proposal_expires_at_ms") or 0) < effective_now_ms)]
+    manual_expired_ids = {item["inference_id"] for item in expired
+                          if revalidate_expired and item.get("status") == "expired_unresolved"}
     forbidden_inference_ids = {
         str(item.get("inference_id") or "").strip()
         for item in existing
@@ -350,7 +357,7 @@ def combo_attribution_candidates_from_rows(
             str(item.get("status") or "").strip().lower()
             == "expired_unresolved"
             and str(item.get("inference_id") or "").strip()
-            not in reactivatable_inference_ids
+            not in reactivatable_inference_ids | manual_expired_ids
         )
         or (
             str(item.get("status") or "").strip().lower()
@@ -378,6 +385,16 @@ def combo_attribution_candidates_from_rows(
         exposures=exposures,
         forbidden_inference_ids=forbidden_inference_ids,
     )
+    for pair in matched["inferences"]:
+        if pair["inference_id"] in manual_expired_ids:
+            pair["revalidated_expired"] = True
+    expired_exposures: dict[str, set[str]] = {}
+    by_lot = {item["record_id"]: item for item in lot_facts}
+    for pair in expired:
+        for leg in ("put", "call"):
+            lot_id = pair.get(leg + "_record_id")
+            if lot_id in by_lot and by_lot[lot_id]["open_event_id"] == pair.get(leg + "_open_event_id"):
+                expired_exposures.setdefault(lot_id, set()).update(pair.get("candidate_exposure_ids") or [])
     rejected_exposures: dict[str, set[str]] = {}
     rejected = [item for item in existing if item.get("status") == "user_rejected"]
     if include_claimed and rejected:
@@ -401,7 +418,8 @@ def combo_attribution_candidates_from_rows(
             if counterparts <= rejected_ids:
                 rejected_exposures.setdefault(lot_id, set()).add(exposure)
     return {**matched, "lot_facts": lot_facts, "reactivatable_inference_ids": reactivatable_inference_ids,
-            "rejected_exposure_ids_by_lot": {key: sorted(value) for key, value in rejected_exposures.items()}}
+            "rejected_exposure_ids_by_lot": {key: sorted(value) for key, value in rejected_exposures.items()},
+            "expired_exposure_ids_by_lot": {key: sorted(value) for key, value in expired_exposures.items()}}
 
 
 def _reconcile_with_repo(

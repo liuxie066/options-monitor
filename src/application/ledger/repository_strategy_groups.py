@@ -102,6 +102,7 @@ class StrategyGroupRepositoryMixin:
         inference: dict[str, Any],
         *,
         reactivate_stale: bool = False,
+        reactivate_expired: bool = False,
         conn: sqlite3.Connection | None = None,
     ) -> bool:
         payload = _normalize_combo_pair_inference_payload(inference)
@@ -120,10 +121,9 @@ class StrategyGroupRepositoryMixin:
                 _assert_same_combo_pair_inference_identity(existing, payload)
                 existing_status = str(existing_row["status"] or "").strip().lower()
                 reactivating = (
-                    bool(reactivate_stale)
-                    and existing_status == "expired_unresolved"
-                    and str(existing.get("decision_reason") or "").strip()
-                    == "facts_drifted_or_leg_claimed"
+                    existing_status == "expired_unresolved"
+                    and ((reactivate_stale and existing.get("decision_reason") == "facts_drifted_or_leg_claimed")
+                         or (reactivate_expired and existing.get("decision_reason") == "proposal_expired"))
                 )
                 if (
                     existing_status not in {"proposal_ready", "ambiguous"}
@@ -185,7 +185,8 @@ class StrategyGroupRepositoryMixin:
                     OR (
                       ? = 1
                       AND status = 'expired_unresolved'
-                      AND decision_reason = 'facts_drifted_or_leg_claimed'
+                      AND ((? = 1 AND decision_reason = 'facts_drifted_or_leg_claimed')
+                           OR (? = 1 AND decision_reason = 'proposal_expired'))
                     )
                   )
                 """,
@@ -204,6 +205,8 @@ class StrategyGroupRepositoryMixin:
                     raw_json,
                     inference_id,
                     int(reactivating),
+                    int(reactivate_stale),
+                    int(reactivate_expired),
                 ),
             )
         return False
