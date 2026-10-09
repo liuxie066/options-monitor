@@ -117,7 +117,7 @@ def test_build_pipeline_context_uses_futu_account_source(tmp_path: Path) -> None
             no_context=False,
             want_scan=True,
         )
-        assert portfolio_ctx == {"portfolio_source_name": "auto"}
+        assert portfolio_ctx == {"portfolio_source_name": "auto", "option_ctx": None}
         assert option_ctx is None
         assert usd_per_cny_exchange_rate is None
         assert cny_per_hkd_exchange_rate is None
@@ -174,7 +174,8 @@ def test_build_pipeline_context_keeps_account_context_for_underwriting(
         )
 
         assert portfolio_ctx is not None
-        assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
+        assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}, "option_ctx": option_payload}
+        assert portfolio_ctx["option_ctx"] is option_ctx
         assert option_ctx == option_payload
         assert usd_per_cny_exchange_rate == 0.14
         assert not (root / "shared" / "portfolio_context.global.json").exists()
