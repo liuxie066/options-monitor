@@ -2086,14 +2086,15 @@ def test_unscoped_call_unavailability_still_blocks_empty_family(reason):
 
 
 @pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
-def test_csp_position_sizing_in_shared_report_views(render) -> None:
+@pytest.mark.parametrize("family", ["sell_put", "covered_call"])
+def test_position_sizing_in_shared_report_views(render, family) -> None:
     brief = _brief()
-    for candidate in brief["candidates"]["sell_put"]:
+    for candidate in brief["candidates"][family]:
         candidate["metrics"].update(symbol_concentration_current=0.08, position_sizing_basis="non_option_net_assets_before_assignment_fees.v2", symbol_concentration_after_existing_assignments=0.2, symbol_concentration_after=0.23)
     message = render(brief)
-    assert "Position Sizing（非期权净资产，指派费用前）：" in message
-    assert "非期权净资产，指派费用前" in message
-    assert "当前 8.0% · 已有 Put/Call 全指派后 20.0% · 再卖 1 张并全指派后 23.0%" in message
+    assert "Position Sizing：" in message
+    assert "Position Sizing（" not in message
+    assert "当前 8.0% · 指派后 20.0% · 再卖 1 张指派后 23.0%" in message
 
 
 def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
@@ -2104,24 +2105,37 @@ def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
     brief["candidate_index"] = [{"identity": identity, "symbol": candidate["symbol"], "strategy_family": "sell_put", "representative": candidate, "contract_count": 1}]
     for render in (render_candidate_alert, render_candidate_alert_card_markdown):
         message = render(brief, [identity])
-        assert "Position Sizing（非期权净资产，指派费用前）：" in message
-        assert "非期权净资产，指派费用前" in message
-        assert "当前 0.0% · 已有 Put/Call 全指派后 120.0% · 再卖 1 张并全指派后 暂不可用" in message
+        assert "Position Sizing：" in message
+        assert "Position Sizing（" not in message
+        assert "当前 0.0% · 指派后 120.0% · 再卖 1 张指派后 暂不可用" in message
         assert "stock_value_estimated_from_avg_cost" not in message
     legacy = render_full_brief(_brief())
-    assert "Position Sizing（历史口径）" in legacy
+    assert "Position Sizing：" in legacy
+    assert "Position Sizing（" not in legacy
+    assert "当前 暂不可用 · 指派后 暂不可用 · 再卖 1 张指派后 暂不可用" in legacy
 
 
 
-@pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
-def test_candidate_sizing_discloses_oldest_carried_quote_in_both_markets(render):
+@pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief, render_candidate_alert, render_candidate_alert_card_markdown])
+@pytest.mark.parametrize("family", ["sell_put", "covered_call"])
+def test_candidate_sizing_omits_carried_quote_details(render, family):
     brief = _brief()
-    candidate = brief["candidates"]["sell_put"][0]
+    candidate = brief["candidates"][family][0]
     candidate["metrics"].update(
         position_sizing_basis="non_option_net_assets_before_assignment_fees.v2",
         symbol_concentration_current=0.2,
         portfolio_risk_warnings="closed_market_quote:US:2026-10-09T05:00:21Z;closed_market_quote:US:2026-10-08T23:55:40Z;closed_market_quote:HK:2026-10-08T08:00:00Z;closed_market_quote:;closed_market_quote:US:invalid-time",
     )
-    message = render(brief)
-    assert "估值｜美股休市沿用最近交易时段报价 · 最早报价 美东 10-08 19:55" in message
-    assert "估值｜港股休市沿用最近交易时段报价 · 最早报价 香港 10-08 16:00" in message
+    original_metrics = deepcopy(candidate["metrics"])
+    if render in (render_candidate_alert, render_candidate_alert_card_markdown):
+        identity = build_daily_brief_candidate_identity(account="lx", market="US", symbol=candidate["symbol"], strategy_family=family)
+        brief["candidate_index"] = [{"identity": identity, "symbol": candidate["symbol"], "strategy_family": family, "representative": candidate, "contract_count": 1}]
+        message = render(brief, [identity])
+    else:
+        message = render(brief)
+    assert "Position Sizing：当前 20.0%" in message
+    assert "Position Sizing（" not in message
+    assert "估值｜" not in message
+    assert "休市沿用最近交易时段报价" not in message
+    assert "最早报价" not in message
+    assert candidate["metrics"] == original_metrics

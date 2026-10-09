@@ -116,8 +116,8 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
     assert brief["account"] == "lx"
     candidate = brief["candidates"]["sell_put" if mode == "put" else "covered_call"][0]
     assert [candidate["metrics"][key] for key in SIZING_KEYS] == expected
-    assert "Position Sizing（非期权净资产，指派费用前）" in render_full_brief(brief)
-    assert f"当前 5.9% · 已有 Put/Call 全指派后 11.8% · 再卖 1 张并全指派后 {18.1 if mode == 'put' else 5.7}%" in render_full_brief(brief)
+    assert "Position Sizing：" in render_full_brief(brief)
+    assert f"当前 5.9% · 指派后 11.8% · 再卖 1 张指派后 {18.1 if mode == 'put' else 5.7}%" in render_full_brief(brief)
     # Display-only changes must not create a new candidate notification.
     updated = deepcopy(brief)
     updated["revision"] += 1

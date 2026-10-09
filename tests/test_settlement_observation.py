@@ -51,13 +51,14 @@ from src.application.trades.lifecycle_reconciliation import (
 from src.application.trades.lifecycle import (
     reconcile_polled_stock_settlement_evidence,
 )
-from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.normalizer import NormalizedTradeDeal, normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.settlement_attempts import (
     SETTLEMENT_OBSERVATION_CONTEXT_KEY,
     case_scope_fingerprint,
 )
 from src.application.trades.settlement_observation import (
+    LifecycleObservationGenerationChanged,
     SettlementObservationDataError,
     build_settlement_observation_collector,
     collect_broker_settlement_observation,
@@ -4255,15 +4256,20 @@ def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_
 def _repo_with_projected_pending_close(tmp_path):
     repo, case, policy, anchor_ms = _repo_with_pending_case(tmp_path, seed_anchor=False)
     result = resolve_trade_deal(
-        NormalizedTradeDeal(
-            broker="富途", futu_account_id="1001", internal_account="lx",
-            deal_id="option-close-1", order_id="option-order-1", symbol="NVDA",
-            option_type="put", side="buy", position_effect="close",
-            contracts=1, price=0, strike=100, multiplier=100,
-            multiplier_source="cache", expiration_ymd=EXPIRATION_YMD,
-            currency="USD", trade_time_ms=anchor_ms,
-            raw_payload={"deal_id": "option-close-1", "code": OPTION_CODE},
-        ), repo=repo, state={}, apply_changes=True,
+        normalize_trade_deal({
+            "schema_version": "trade_execution.v1", "status": "OK",
+            "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001",
+                                   "environment": "REAL", "broker_account_id": "futu:REAL:1001",
+                                   "account_label": "lx"},
+            "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
+                               "option_type": "put", "strike": "100", "multiplier": "100",
+                               "expiration_ymd": EXPIRATION_YMD, "currency": "USD"},
+            "external_id_namespace": "futu.deal", "external_execution_id": "option-close-1",
+            "external_order_namespace": "futu.order", "external_order_id": "option-order-1",
+            "side": "buy", "position_effect": "close", "quantity": "1", "price": "0",
+            "currency": "USD", "code": OPTION_CODE,
+            "occurred_at_utc": datetime.fromtimestamp(anchor_ms / 1000, ZoneInfo("UTC")).isoformat(),
+        }), repo=repo, state={}, apply_changes=True,
     )
     assert result.status == "applied"
     assert repo.get_position_lot_fields("lot-1")["contracts_open"] == 0
@@ -4272,6 +4278,158 @@ def _repo_with_projected_pending_close(tmp_path):
         repo, case_id=case["case_id"], now_ms=anchor_ms,
     )["reason_state"] == "cause_pending"
     return repo, case, policy
+
+
+def test_projected_pending_close_resolves_through_batch_runtime_once(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    case_id = case["case_id"]
+    now_ms = int(policy["settlement_deadline_ms"])
+    original = next(row for row in repo.list_trade_events() if row["event_type"] == "close")
+    advance_lifecycle_case_state(
+        repo, case_id=case_id, status="needs_review",
+        derived_summary={"reason_state": "cause_pending"}, public_transition=None,
+    )
+    context = lifecycle_case_read_models_for_account(
+        repo, account="lx", now_ms=now_ms, settlement_context_case_ids=[case_id],
+    )[case_id][SETTLEMENT_OBSERVATION_CONTEXT_KEY]
+    assert context["trade_events"] == [original]
+    gateway = _Gateway()
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001",
+        now_ms_fn=lambda: now_ms, source_id="lx",
+    )
+    source = {"id": "lx", "account": "lx", "futu_account_ids": ["1001"],
+              "inbox_path": tmp_path / "inbox.sqlite3",
+              "settlement_observation": {"enabled": True}}
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
+    seals = []
+    result = reconcile_due_lifecycle_cases_for_source(
+        repo, source=source, now_ms=now_ms, apply_changes=True,
+        settlement_collector=collector, seal_sink=seals.append,
+    )
+    readback = lifecycle_case_read_model(repo, case_id=case_id, now_ms=now_ms)
+    assert readback["reason_state"] == "resolved", result
+    assert readback["close_reason"] == "expiration_no_settlement"
+    events = repo.list_trade_events()
+    voided = {row["target_event_id"] for row in events if row["event_type"] == "void"}
+    effective = [row for row in events if row["event_type"] in {"close", "expire_close"}
+                 and row["event_id"] not in voided]
+    assert original["event_id"] in voided
+    assert len(effective) == 1
+    assert effective[0]["raw_payload"]["execution_id"] == original["raw_payload"]["execution_id"]
+    assert repo.get_position_lot_fields("lot-1")["contracts_open"] == 0
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    now_ms += 60_000
+    retry = reconcile_due_lifecycle_cases_for_source(
+        repo, source=source, now_ms=now_ms, apply_changes=True,
+        settlement_collector=collector, seal_sink=seals.append,
+    )
+    assert retry["provider_attempt_count"] == 0
+    assert len(gateway.history_deal_queries) == 1
+    assert repo.list_trade_events() == events
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence
+
+
+@pytest.mark.parametrize("drift", ["no_void", "case", "lot", "account", "quantity", "price", "fees", "execution"])
+def test_pending_close_execution_replacement_rejects_unproven_changes(tmp_path, drift):
+    repo, _case, _policy = _repo_with_projected_pending_close(tmp_path)
+    before = repo.list_trade_events()
+    original = TradeEvent.from_dict(next(row for row in before if row["event_type"] == "close"))
+    raw = {**original.raw_payload, "close_type": "expire_auto_close",
+           "pending_close_event_id": original.event_id}
+    replacement = replace(original, event_id="replacement", event_type="expire_close", raw_payload=raw)
+    if drift == "case":
+        raw["case_id"] = "another-case"
+    elif drift == "lot":
+        replacement = replace(replacement, target_lot_id="another-lot")
+    elif drift == "account":
+        replacement = replace(replacement, contract_key=replace(original.contract_key, account="sy"))
+    elif drift == "quantity":
+        replacement = replace(replacement, contracts=2)
+    elif drift == "price":
+        replacement = replace(replacement, price=1)
+    elif drift == "fees":
+        replacement = replace(replacement, fees=1)
+    elif drift == "execution":
+        raw.pop("execution_id")
+        raw.pop("execution_input")
+    replacement = replace(replacement, raw_payload=raw)
+    with pytest.raises(ValueError, match="pending_close_execution_replacement_invalid"):
+        with repo._connect() as conn:  # noqa: SLF001 - prove transaction rollback
+            conn.execute("BEGIN IMMEDIATE")
+            if drift != "no_void":
+                repo.upsert_trade_event(replace(
+                    original, event_id="void-original", event_type="void",
+                    target_event_id=original.event_id, raw_payload={},
+                ), conn=conn)
+            repo.upsert_trade_event(
+                replacement, conn=conn, replacing_pending_close_event_id=original.event_id,
+            )
+    assert repo.list_trade_events() == before
+
+
+def test_pending_close_correction_preserves_ordinary_execution_deduplication(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    original = TradeEvent.from_dict(next(row for row in repo.list_trade_events() if row["event_type"] == "close"))
+    with pytest.raises(ValueError, match="trade execution already has an applied event"):
+        repo.upsert_trade_event(replace(original, event_id="duplicate-close"))
+    now_ms = int(policy["settlement_deadline_ms"])
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case["case_id"], gateway=_Gateway(), now_ms=now_ms,
+    )
+    reconcile_lifecycle_close_reason(
+        repo, case_id=case["case_id"], now_ms=now_ms, observation=observation, apply_changes=True,
+    )
+    events = repo.list_trade_events()
+    replacement = TradeEvent.from_dict(next(row for row in events if row["event_type"] == "expire_close"))
+    with pytest.raises(ValueError, match="trade execution already has an applied event"):
+        repo.upsert_trade_event(replace(replacement, event_id="duplicate-expiry"))
+    replay = resolve_trade_deal(
+        normalize_trade_deal(original.raw_payload["execution_input"]),
+        repo=repo, state={}, apply_changes=True,
+    )
+    assert replay.status == "skipped", replay
+    assert replay.reason == "ledger_recorded"
+    assert repo.list_trade_events() == events
+
+
+def test_pending_close_correction_rolls_back_void_replacement_and_projection(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    case_id = case["case_id"]
+    now_ms = int(policy["settlement_deadline_ms"])
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case_id, gateway=_Gateway(), now_ms=now_ms,
+    )
+    before = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    with repo._connect() as conn:  # noqa: SLF001 - injected failure after event/projection writes
+        conn.execute("""
+            CREATE TRIGGER fail_replacement_allocation
+            BEFORE INSERT ON trade_lifecycle_allocations
+            BEGIN SELECT RAISE(ABORT, 'injected replacement allocation failure'); END
+        """)
+    with pytest.raises(sqlite3.IntegrityError, match="injected replacement allocation failure"):
+        reconcile_lifecycle_close_reason(
+            repo, case_id=case_id, now_ms=now_ms, observation=observation, apply_changes=True,
+        )
+    assert lifecycle_case_coherent_facts(repo, case_id=case_id) == before
+    assert repo.get_position_lot_fields("lot-1")["contracts_open"] == 0
+
+
+def test_pending_close_correction_rejects_stale_observation_before_writes(tmp_path):
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    case_id = case["case_id"]
+    now_ms = int(policy["settlement_deadline_ms"])
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=case, case_id=case_id, gateway=_Gateway(), now_ms=now_ms,
+    )
+    before = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    observation["expected_lifecycle_generation_token"] = "stale"
+    with pytest.raises(LifecycleObservationGenerationChanged, match="lifecycle generation changed"):
+        reconcile_lifecycle_close_reason(
+            repo, case_id=case_id, now_ms=now_ms, observation=observation,
+            apply_changes=True,
+        )
+    assert lifecycle_case_coherent_facts(repo, case_id=case_id) == before
 
 
 def test_projected_pending_close_automatically_expires_once(tmp_path):
