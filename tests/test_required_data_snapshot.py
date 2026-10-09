@@ -991,6 +991,115 @@ def test_sealed_snapshot_accepts_positive_success_empty_evidence(
     assert evidence["source_observed_at"] == observed_at
 
 
+@pytest.mark.parametrize("empty_symbol", ["0700.HK", "9898.HK"])
+@pytest.mark.parametrize("rows_use_blob", [False, True])
+@pytest.mark.parametrize("include_failed_symbol", [False, True])
+def test_mixed_ready_outcomes_seal_resolve_and_reseal(
+    tmp_path: Path,
+    empty_symbol: str,
+    rows_use_blob: bool,
+    include_failed_symbol: bool,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    rows_symbol = "9898.HK" if empty_symbol == "0700.HK" else "0700.HK"
+    _publish_empty_quote(root, run_id="run-1", symbol=empty_symbol)
+    _publish_quote(
+        root, run_id="run-1", symbol=rows_symbol, canonical_blob=rows_use_blob,
+    )
+    symbols = [rows_symbol, empty_symbol]
+    if include_failed_symbol:
+        symbols.append("9992.HK")
+    summary = _summary(*symbols, outcomes={empty_symbol: "success_empty"})
+
+    manifest = _seal(root, manifest_path, summary)
+
+    assert manifest["status"] == ("partial" if include_failed_symbol else "complete")
+    assert manifest["summary"] == {
+        "symbols_total": len(symbols),
+        "ready": 2,
+        "failed": int(include_failed_symbol),
+    }
+    batch = _batch(root, manifest_path)
+    for symbol, outcome, reason in (
+        (empty_symbol, "success_empty", "no_expirations"),
+        (rows_symbol, "success_rows", None),
+    ):
+        entry = manifest["symbols"][symbol]
+        evidence, csv_bytes = batch.resolve(symbol)
+        assert entry["status"] == "ready"
+        assert evidence["source_outcome"] == outcome
+        assert evidence["reason_code"] == reason
+        assert evidence["snapshot_id"] == entry["snapshot_id"]
+        assert csv_bytes == (root / entry["required_data_csv_relpath"]).read_bytes()
+    assert ("scan_blob_ref" in manifest["symbols"][rows_symbol]) == rows_use_blob
+    if include_failed_symbol:
+        with pytest.raises(FrozenRequiredDataUnavailable) as failed:
+            batch.resolve("9992.HK")
+        assert failed.value.reason == "quote_receipt_unavailable"
+
+    manifest_bytes = manifest_path.read_bytes()
+    assert _seal(root, manifest_path, summary) == manifest
+    assert manifest_path.read_bytes() == manifest_bytes
+
+
+@pytest.mark.parametrize("optional_field", ["reason_code", "scan_blob_ref"])
+def test_loading_reordered_optional_ready_fields_is_order_independent(
+    tmp_path: Path,
+    optional_field: str,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(
+        root, run_id="run-1", symbol="0700.HK",
+        canonical_blob=(optional_field == "reason_code"),
+    )
+    if optional_field == "reason_code":
+        _publish_empty_quote(root, run_id="run-1", symbol="9898.HK")
+        outcomes = {"9898.HK": "success_empty"}
+    else:
+        _publish_quote(root, run_id="run-1", symbol="9898.HK", canonical_blob=True)
+        outcomes = {}
+    manifest = _seal(root, manifest_path, _summary("0700.HK", "9898.HK", outcomes=outcomes))
+    assert optional_field not in manifest["symbols"]["0700.HK"]
+    assert optional_field in manifest["symbols"]["9898.HK"]
+    manifest["symbols"] = dict(reversed(list(manifest["symbols"].items())))
+    assert manifest["content_sha256"] == canonical_sha256(
+        {key: value for key, value in manifest.items() if key != "content_sha256"}
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    batch = _batch(root, manifest_path)
+
+    assert list(batch.manifest["symbols"]) == ["9898.HK", "0700.HK"]
+    for symbol, entry in manifest["symbols"].items():
+        assert batch.resolve(symbol)[0]["snapshot_id"] == entry["snapshot_id"]
+        assert _resolve(root, manifest_path, symbol=symbol)["snapshot_id"] == entry["snapshot_id"]
+
+
+@pytest.mark.parametrize("invalid_field", ["unexpected_field", "receipt_hash"])
+def test_loading_rejects_invalid_ready_fields_with_valid_content_hash(
+    tmp_path: Path,
+    invalid_field: str,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1")
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
+    entry = manifest["symbols"]["3690.HK"]
+    if invalid_field == "unexpected_field":
+        entry[invalid_field] = "unexpected"
+    else:
+        entry.pop(invalid_field)
+    manifest["content_sha256"] = canonical_sha256(
+        {key: value for key, value in manifest.items() if key != "content_sha256"}
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(FrozenRequiredDataUnavailable) as invalid:
+        _batch(root, manifest_path)
+
+    assert invalid.value.reason == "manifest_invalid"
+    assert "ready manifest entry fields do not match schema" in invalid.value.detail
+
+
 def test_live_batch_rechecks_success_empty_freshness_when_symbol_is_resolved(
     tmp_path: Path,
 ) -> None:
