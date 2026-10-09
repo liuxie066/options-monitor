@@ -711,6 +711,11 @@ def apply_lifecycle_allocation_atomically(
             projection_rows,
             conn=conn,
             mode="forced_full",
+            pending_close_replacements={
+                item.event_id: prior_pending_by_lot[item.target_lot_id]["event_id"]
+                for item in projection_rows
+                if item.event_type != "void" and item.target_lot_id in prior_pending_by_lot
+            },
         )
         if settlement_rows:
             stored_by_id = _trade_events_by_id(

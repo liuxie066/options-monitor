@@ -1660,8 +1660,10 @@ def reconcile_normalized_execution_order_identity(repo: Any, deal: Any) -> list[
                 raise ValueError("trade_execution_split_incomplete")
             return _enrich_execution_order_identity(sqlite_repo, rows, execution, conn=conn, assigned_stock=True)
         ledger_rows = sqlite_repo.list_trade_events(conn=conn)
+        voided = {valid_void_target_event_id(row) for row in ledger_rows}
         rows = [row for row in ledger_rows
-                if execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id]
+                if row["event_id"] not in voided
+                and execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id]
         if not rows:
             return []
         for row in rows:
@@ -1673,9 +1675,7 @@ def reconcile_normalized_execution_order_identity(repo: Any, deal: Any) -> list[
             None, execution_id, execution_economic_content(execution), applied_events=rows,
         ):
             raise ValueError("trade_execution_applied_association_conflict")
-        voided = {valid_void_target_event_id(row) for row in ledger_rows}
         if (not ledger_execution_event_set_is_complete(rows)
-                or any(row["event_id"] in voided for row in rows)
                 or sum(Decimal(str(row["contracts"])) for row in rows) != Decimal(execution["quantity"])):
             raise ValueError("trade_execution_split_incomplete")
         return _enrich_execution_order_identity(sqlite_repo, rows, execution, conn=conn)

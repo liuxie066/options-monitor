@@ -33,7 +33,10 @@ class TradeEventRepositoryMixin:
             row = conn.execute("SELECT COUNT(*) AS cnt FROM trade_events").fetchone()
         return int((row["cnt"] if row is not None else 0) or 0)
 
-    def upsert_trade_event(self, event: Any, *, conn: sqlite3.Connection | None = None) -> bool:
+    def upsert_trade_event(
+        self, event: Any, *, conn: sqlite3.Connection | None = None,
+        replacing_pending_close_event_id: str | None = None,
+    ) -> bool:
         encoded = encode_trade_event_for_storage(event)
         account, market, position_effect = _trade_event_query_projections(
             encoded.event_json
@@ -41,6 +44,35 @@ class TradeEventRepositoryMixin:
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
             incoming_raw = encoded.payload.get("raw_payload", {})
+            if replacing_pending_close_event_id:
+                prior_row = active_conn.execute(
+                    "SELECT event_json FROM trade_events WHERE event_id = ?",
+                    (replacing_pending_close_event_id,),
+                ).fetchone()
+                prior = json.loads(str(prior_row["event_json"])) if prior_row else {}
+                prior_raw = prior.get("raw_payload") or {}
+                if (
+                    conn is None or not conn.in_transaction
+                    or prior.get("event_type") != "close"
+                    or prior_raw.get("close_type") != "cause_pending"
+                    or encoded.payload.get("event_type") not in {"expire_close", "assignment", "exercise"}
+                    or incoming_raw.get("pending_close_event_id") != replacing_pending_close_event_id
+                    or not prior_raw.get("case_id")
+                    or incoming_raw.get("case_id") != prior_raw.get("case_id")
+                    or any(incoming_raw.get(key) != prior_raw.get(key) for key in (
+                        "execution_id", "execution_input", "broker_deal_completion",
+                    ))
+                    or any(prior.get(key) != encoded.payload.get(key) for key in (
+                        "contract_key", "target_lot_id", "contracts", "price", "fees",
+                        "currency", "multiplier", "event_time_ms", "asset_type", "quantity_unit",
+                    ))
+                    or active_conn.execute(
+                        "SELECT 1 FROM trade_events WHERE json_extract(event_json, '$.event_type') = 'void' "
+                        "AND json_extract(event_json, '$.target_event_id') = ?",
+                        (replacing_pending_close_event_id,),
+                    ).fetchone() is None
+                ):
+                    raise ValueError("pending_close_execution_replacement_invalid")
             execution_id = validated_execution_identity_metadata(incoming_raw)
             if execution_id:
                 if incoming_raw.get("execution_id") != execution_id:
@@ -54,6 +86,8 @@ class TradeEventRepositoryMixin:
                     stored = json.loads(str(row["event_json"]))
                     stored_raw = stored.get("raw_payload") or {}
                     require_same_execution(stored_raw.get("execution_input") or {}, incoming_raw["execution_input"])
+                    if stored.get("event_id") == replacing_pending_close_event_id:
+                        continue
                     if applied_execution_association_conflicts(
                         None, execution_id, execution_economic_content(incoming_raw["execution_input"]),
                         applied_events=[stored],

@@ -271,6 +271,11 @@ def _settlement_observation_context(
     lot_fields = dict(
         case_facts.get("position_lot_fields_by_id") or {}
     )
+    terminal_event_ids = {
+        str(item.get("canonical_terminal_event_id") or "")
+        for item in case_facts.get("case_allocations") or []
+        if isinstance(item, Mapping)
+    }
     return {
         "schema_version": "settlement_observation_context.v1",
         "lifecycle_case": lifecycle_case,
@@ -284,6 +289,12 @@ def _settlement_observation_context(
             dict(item)
             for item in case_facts.get("case_allocations") or []
             if isinstance(item, Mapping)
+        ],
+        "trade_events": [
+            dict(item)
+            for item in case_facts.get("trade_events") or []
+            if isinstance(item, Mapping)
+            and str(item.get("event_id") or "") in terminal_event_ids
         ],
         "timing_policy": (
             dict(case_facts["timing_policy"])
@@ -1750,6 +1761,7 @@ def _terminal_event(
         for key in (
             "source_deal_id", "futu_account_id", "order_id", "execution_id",
             "execution_input", "fee_provenance", "multiplier_source",
+            "broker_deal_completion",
         )
         if key in prior_raw
     }

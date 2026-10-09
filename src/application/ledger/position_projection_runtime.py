@@ -193,6 +193,7 @@ def run_position_projection_in_transaction(
     mode: str,
     seed_checkpoint: bool = False,
     failure_hook: Callable[[str], None] | None = None,
+    pending_close_replacements: dict[str, str] | None = None,
 ) -> ProjectionRuntimeResult:
     """Write events and publish their projection inside a caller-owned transaction."""
 
@@ -206,6 +207,7 @@ def run_position_projection_in_transaction(
             mode=mode,
             seed_checkpoint=seed_checkpoint,
             failure_hook=failure_hook,
+            pending_close_replacements=pending_close_replacements,
         )
     except Exception as exc:
         _record_runtime_telemetry(
@@ -231,6 +233,7 @@ def _run_position_projection_in_transaction_impl(
     mode: str,
     seed_checkpoint: bool = False,
     failure_hook: Callable[[str], None] | None = None,
+    pending_close_replacements: dict[str, str] | None = None,
 ) -> ProjectionRuntimeResult:
 
     candidate = require_position_projection_publication_repo(repo)
@@ -242,7 +245,11 @@ def _run_position_projection_in_transaction_impl(
         raise ValueError(f"unsupported position projection runtime mode: {mode}")
 
     created_flags = tuple(
-        bool(candidate.upsert_trade_event(event, conn=conn))
+        bool(candidate.upsert_trade_event(
+            event, conn=conn,
+            replacing_pending_close_event_id=pending_close_replacements[event.event_id],
+        )) if pending_close_replacements and event.event_id in pending_close_replacements
+        else bool(candidate.upsert_trade_event(event, conn=conn))
         for event in events
     )
     _fail(failure_hook, "after_event_write")

@@ -1435,32 +1435,17 @@ def _candidate_metric_details(
         is_current_basis = values.get("position_sizing_basis") == POSITION_SIZING_BASIS
         labels = (
             (("当前", "symbol_concentration_current"),
-             ("已有 Put/Call 全指派后", "symbol_concentration_after_existing_assignments"),
-             ("再卖 1 张并全指派后", "symbol_concentration_after"))
+             ("指派后", "symbol_concentration_after_existing_assignments"),
+             ("再卖 1 张指派后", "symbol_concentration_after"))
             if is_current_basis else
             (("当前", "symbol_concentration_current"),
-             ("已有 Put 全指派", "symbol_concentration_after_existing_puts"),
-             ("再卖 1 张后全指派", "symbol_concentration_after"))
+             ("指派后", "symbol_concentration_after_existing_puts"),
+             ("再卖 1 张指派后", "symbol_concentration_after"))
         )
         for label, key in labels:
             value = _number(values.get(key))
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
-        basis_label = "非期权净资产，指派费用前" if is_current_basis else "历史口径"
-        details.append(f"Position Sizing（{basis_label}）：" + " · ".join(sizing))
-        carried_by_market = {}
-        for warning in str(values.get("portfolio_risk_warnings") or "").split(";"):
-            if not warning.startswith("closed_market_quote:"):
-                continue
-            parts = warning.split(":", 2)
-            if len(parts) != 3:
-                continue
-            _, quote_market, timestamp = parts
-            quoted_at = _parse_datetime(timestamp)
-            if quoted_at is not None and quote_market in _MARKET_TIMEZONES:
-                carried_by_market[quote_market] = min(quoted_at, carried_by_market.get(quote_market, quoted_at))
-        for quote_market, quoted_at in sorted(carried_by_market.items()):
-            local = quoted_at.astimezone(_safe_zoneinfo(_MARKET_TIMEZONES[quote_market]))
-            details.append(f"估值｜{_MARKET_LABELS[quote_market]}休市沿用最近交易时段报价 · 最早报价 {_MARKET_TIME_LABELS[quote_market]} {local:%m-%d %H:%M}")
+        details.append("Position Sizing：" + " · ".join(sizing))
     return details
 
 
