@@ -660,6 +660,7 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
             "position_changes",
             "expiration_ladder",
             "distribution",
+            "position_sizing",
             "account_breakdown",
             "fx_facts",
             "warnings",
@@ -667,6 +668,7 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
         "missing_data_fields": [
             "cash_coverage.ending_cash_net_estimated_cny",
             "distribution.net_assets_cny",
+            "position_sizing.net_assets_cny",
         ],
         "notes": [
             "Business status complete|partial|unavailable is independent of the tool envelope ok flag.",

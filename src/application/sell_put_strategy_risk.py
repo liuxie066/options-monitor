@@ -70,8 +70,6 @@ def enrich_and_filter_sell_put_underwriting(
         return df_labeled
 
     cfg = resolve_sell_put_underwriting_config(sell_put_cfg)
-    if not cfg.enabled:
-        return df_labeled
 
     risk_ctx = build_portfolio_risk_context(
         portfolio_ctx=portfolio_ctx,
@@ -93,13 +91,16 @@ def enrich_and_filter_sell_put_underwriting(
         for key in (
             "net_income_cny",
             "option_contract_point_value_cny",
+            "position_sizing_basis",
             "portfolio_nav_cny",
+            "portfolio_nav_after_existing_assignments_cny",
+            "portfolio_nav_after_candidate_assignment_cny",
             "assignment_notional_cny",
             "existing_stock_value_cny_symbol",
             "existing_short_put_assignment_cny_symbol",
             "existing_short_put_assignment_cny_total",
             "symbol_concentration_current",
-            "symbol_concentration_after_existing_puts",
+            "symbol_concentration_after_existing_assignments",
             "single_trade_concentration",
             "symbol_concentration_after",
             "total_short_put_concentration_after",
@@ -110,7 +111,10 @@ def enrich_and_filter_sell_put_underwriting(
         ):
             if key in row_payload:
                 out.loc[idx, key] = row_payload.get(key)
-        decision = evaluate_sell_put_underwriting_row(row_payload, cfg=cfg)
+        decision = (
+            evaluate_sell_put_underwriting_row(row_payload, cfg=cfg) if cfg.enabled else
+            {"accepted": True, "fields": {}, "opening_decision": {"normalized_input": row_payload}}
+        )
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
@@ -129,7 +133,7 @@ def enrich_and_filter_sell_put_underwriting(
         keep_mask.append(False)
 
     filtered = out.loc[keep_mask].copy()
-    if not filtered.empty:
+    if not filtered.empty and cfg.enabled:
         filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="put", cfg=cfg))
     if decision_sink_fn is not None:
         decision_sink_fn(decision_records)

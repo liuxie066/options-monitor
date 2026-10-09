@@ -134,9 +134,17 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
     original_bytes = cache.read_bytes()
     monkeypatch.setattr(pc, "fetch_futu_portfolio_context", lambda **_: pytest.fail("unexpected provider call"))
     monkeypatch.setattr(pc.state_repo, "append_source_snapshot_event", lambda *_a, **_k: {})
+    from test_portfolio_assignment_scenario import _quote
+    from src.application import portfolio_assignment_scenario as sizing_application
+    monkeypatch.setattr(sizing_application, "_read_futu_quotes", lambda *_a, **_k: ([_quote("NVDA", currency="USD", price=100, cny_price=700, fx=7)], []))
     loaded = pc.load_portfolio_context(
         base=tmp_path, data_config="fixture.json", market="富途", account="lx",
         state_dir=tmp_path, shared_state_dir=None, log=lambda _: None, runtime_config=cash_config(),
+        exchange_rate_observation={"schema_version": 2, "pairs": {
+            pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": context["source_observed_at"],
+                   "observed_at_utc": context["source_observed_at"]}
+            for pair, rate in {"USDCNY": 7, "HKDCNY": .9}.items()
+        }},
     )
     assert loaded["context_source"] == "account_cache"
     assert loaded["cash_snapshot"]["status"] == "fresh"
@@ -148,17 +156,7 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
     fields = portfolio_concentration_fields(
         {"symbol": "NVDA", "cash_required_cny": 10000}, mode="put", risk_ctx=risk,
     )
-    if stock_projection in {"missing", "list"}:
-        assert loaded["position_snapshot_input"]["rows"][0]["quantity"] == "100"
-        assert risk.nav_cny is None
-        assert risk.unavailable_reasons == ("broker_positions_unavailable",)
-        assert fields["concentration_evaluable"] is False
-        assert fields["symbol_concentration_after"] is None
-        assert fields["concentration_score"] is None
-    else:
-        assert risk.nav_cny == (170000 if stock_projection == "populated" else 100000)
-        assert not risk.unavailable_reasons
-        assert fields["concentration_evaluable"] is True
-        assert fields["symbol_concentration_after"] == pytest.approx(
-            80000 / 170000 if stock_projection == "populated" else 0.1, abs=1e-6,
-        )
+    # Valuation uses the complete authoritative position snapshot, not the derived stocks map.
+    assert risk.nav_cny == (100000 if stock_projection == "empty" else 170000)
+    assert fields["symbol_concentration_current"] == pytest.approx(0 if stock_projection == "empty" else 70000/170000, abs=1e-6)
+    assert fields["symbol_concentration_after"] is None  # no frozen all-broker option facts or candidate inputs

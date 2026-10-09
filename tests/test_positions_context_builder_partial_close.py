@@ -821,3 +821,13 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
     assert group["call_contracts_open"] == 2
     assert group["summary_classification"] == "active_combo"
     assert group["evidence_scope"] == "option_lots"
+
+
+def test_assignment_context_uses_all_brokers_but_capacity_stays_futu():
+    records = [_lot(record_id="futu"), _lot(record_id="bank", broker="银行", option_type="call"), _lot(record_id="other", account="sy")]
+    ctx = build_context(records, broker="富途", account="lx", decision_snapshot={
+        "snapshot_status":"trusted", "normalized_account":"lx", "account_position_lots":records,
+    })
+    assert {row["broker"] for row in ctx["assignment_positions"]} == {"富途", "银行"}
+    assert {row["account"] for row in ctx["assignment_positions"]} == {"lx"}
+    assert {row["broker"] for row in ctx["open_positions_min"]} == {"富途"}

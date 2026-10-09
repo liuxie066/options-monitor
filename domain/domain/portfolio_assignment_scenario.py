@@ -374,7 +374,7 @@ def _portfolio_evidence_quality(
 POSITION_SIZING_BASIS = "non_option_net_assets_before_assignment_fees.v2"
 
 
-def assignment_asset_movement(*, option_type: str, shares: int, strike: Decimal, spot_cny: Decimal, rate: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+def assignment_asset_movement(*, option_type: str, shares: int, strike: Decimal, spot_cny: Decimal) -> tuple[Decimal, Decimal, Decimal]:
     """Physical delivery changes stock and cash together; fees are separate facts."""
     stock_delta = Decimal(shares if option_type == "put" else -shares)
     cash_delta_native = -strike * stock_delta
@@ -412,6 +412,12 @@ def project_non_option_assignment_assets(
         value = _decimal(holding.get("market_value_cny", holding.get("market_value")))
         if quantity is None:
             reasons.append("holding_quantity_missing")
+        if raw_type == "cash" and explicit_rates:
+            currency = normalize_currency(holding.get("currency"))
+            rate = Decimal(1) if currency == "CNY" else _positive(rates.get(f"{currency}CNY"))
+            value = quantity * rate if quantity is not None and rate is not None else None
+            if value is None:
+                reasons.append("cash_fx_evidence_missing")
         if _asset_category(holding) == "stock" and symbol and quantity is not None:
             currency = normalize_currency(holding.get("currency"))
             native, spot, _, error = _quote_values(quotes.get(symbol), expected_currency=currency)
@@ -460,10 +466,16 @@ def project_non_option_assignment_assets(
             reasons.append(f"{account}/{broker}:terminal_baseline_missing")
         if position.get("state_warning"):
             reasons.append(f"{symbol}:option_state_warning")
+        if position.get("lifecycle_state") == "conflict" or position.get("reason_state") == "conflict":
+            reasons.append(f"{symbol}:option_lifecycle_conflict")
+        for key in ("pending_close_contracts_by_lot", "reserved_contracts_by_lot"):
+            pending = position.get(key)
+            if isinstance(pending, Mapping) and any(_positive(value) is not None for value in pending.values()):
+                reasons.append(f"{symbol}:option_close_settlement_pending")
         if not symbol or not currency or not broker or count is None or multiplier is None or strike is None or spot is None or rate is None or error:
             reasons.append(f"{symbol or 'option'}:assignment_inputs_missing")
             continue
-        delta_shares, delta_cash, delta_value = assignment_asset_movement(option_type=option_type, shares=contract_share_quantity(count, multiplier), strike=strike, spot_cny=spot, rate=rate)
+        delta_shares, delta_cash, delta_value = assignment_asset_movement(option_type=option_type, shares=contract_share_quantity(count, multiplier), strike=strike, spot_cny=spot)
         net += delta_value + delta_cash * rate
         stock_shares[symbol] = stock_shares.get(symbol, _ZERO) + delta_shares
         stock_values[symbol] = stock_values.get(symbol, _ZERO) + delta_value
@@ -727,7 +739,7 @@ def project_assignment_scenario(
         cash_delta_native = -principal_native if option_type == "put" else principal_native
         if spot_cny is not None and exchange_rate is not None:
             stock_delta, cash_delta_native, _ = assignment_asset_movement(
-                option_type=option_type, shares=shares, strike=strike, spot_cny=spot_cny, rate=exchange_rate,
+                option_type=option_type, shares=shares, strike=strike, spot_cny=spot_cny,
             )
         cash_delta_cny = (
             cash_delta_native * exchange_rate if exchange_rate is not None else None

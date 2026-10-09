@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite
 from typing import Any, Literal
 
-from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS, project_non_option_assignment_assets
 
 
 ShortVolMode = Literal["put", "call"]
@@ -18,6 +18,9 @@ class ShortVolPortfolioContext:
     short_put_assignment_total_cny: float | None
     unavailable_reasons: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    account: str | None = None
+    portfolio_evidence: dict[str, Any] | None = None
+    assignment_positions: tuple[dict[str, Any], ...] | None = None
 
 
 def portfolio_concentration_fields(
@@ -29,85 +32,88 @@ def portfolio_concentration_fields(
     """Project candidate concentration facts without imposing an opening gate."""
 
     symbol = canonical_symbol(row.get("symbol"))
-    assignment = _first_float(row, "assignment_notional_cny", "cash_required_cny")
-    covered_notional = _first_float(row, "covered_notional_cny", "underlying_notional_cny")
-    candidate_notional = assignment if mode == "put" else covered_notional
-    nav = risk_ctx.nav_cny
-    existing_stock = risk_ctx.stock_value_cny_by_symbol.get(symbol or "", 0.0)
-    existing_short_put = risk_ctx.short_put_assignment_cny_by_symbol.get(symbol or "", 0.0)
-    existing_total_short_put = risk_ctx.short_put_assignment_total_cny
-
-    concentration_evaluable = bool(
-        nav is not None
-        and nav > 0
-        and candidate_notional is not None
-        and candidate_notional > 0
-        and not risk_ctx.unavailable_reasons
+    account = risk_ctx.account
+    evidence = risk_ctx.portfolio_evidence or {}
+    accounts = [account] if account else []
+    baseline = project_non_option_assignment_assets(accounts=accounts, portfolio_evidence=evidence, option_positions=[])
+    positions = [
+        position
+        for position in risk_ctx.assignment_positions or ()
+        if canonical_symbol(position.get("symbol")) == symbol
+    ]
+    existing = project_non_option_assignment_assets(
+        accounts=accounts, portfolio_evidence=evidence, option_positions=positions
     )
-    if mode == "put":
-        concentration_evaluable = bool(concentration_evaluable and existing_total_short_put is not None)
+    candidate = {
+        "account": account,
+        "broker": row.get("broker") or "富途",
+        "symbol": symbol,
+        "option_type": mode,
+        "side": "short",
+        "status": "open",
+        "contracts_open": 1,
+        "multiplier": row.get("multiplier"),
+        "strike": row.get("strike"),
+        "currency": row.get("currency") or row.get("option_ccy") or symbol_currency(symbol),
+    }
+    after = project_non_option_assignment_assets(
+        accounts=accounts,
+        portfolio_evidence=evidence,
+        option_positions=[*positions, candidate],
+        candidate_net_premium_cny=row.get("net_income_cny"),
+    )
+    options_known = risk_ctx.assignment_positions is not None
 
-    single_trade = (candidate_notional / nav) if concentration_evaluable and nav else None
-    if mode == "put":
-        symbol_after = (
-            ((existing_stock + existing_short_put + (assignment or 0.0)) / nav)
-            if concentration_evaluable and nav
-            else None
-        )
-        total_after = (
-            (((existing_total_short_put or 0.0) + (assignment or 0.0)) / nav)
-            if concentration_evaluable and nav
-            else None
-        )
-    else:
-        symbol_exposure = max(existing_stock, covered_notional or 0.0)
-        symbol_after = (symbol_exposure / nav) if concentration_evaluable and nav else None
-        total_after = ((existing_total_short_put or 0.0) / nav) if concentration_evaluable and nav else None
+    def weight(result: dict[str, Any]) -> float | None:
+        if result.get("unavailable_reasons"):
+            return None
+        # A complete empty symbol position is a trusted zero.
+        return _float(result["weight_of_net_assets_by_symbol"].get(symbol, "0"))
 
-    concentration_score = None
-    if symbol_after is not None and total_after is not None:
-        concentration_score = max(0.0, 1.0 - max(symbol_after, total_after))
-
-    sizing_fields: dict[str, Any] = {}
-    if mode == "put":
-        # Existing holdings remain meaningful even when this candidate cannot be valued.
-        sizing_evaluable = bool(
-            symbol
-            and nav is not None
-            and isfinite(nav)
-            and nav > 0
-            and isfinite(existing_stock)
-            and existing_stock >= 0
-            and isfinite(existing_short_put)
-            and existing_short_put >= 0
-            and existing_total_short_put is not None
-            and not risk_ctx.unavailable_reasons
-        )
-        current = existing_stock / nav if sizing_evaluable else None
-        existing_assigned = (existing_stock + existing_short_put) / nav if sizing_evaluable else None
-        sizing_fields = {
-            "symbol_concentration_current": _round_optional(current) if current is not None and isfinite(current) else None,
-            "symbol_concentration_after_existing_puts": (
-                _round_optional(existing_assigned)
-                if existing_assigned is not None and isfinite(existing_assigned)
-                else None
-            ),
-        }
-
+    current = weight(baseline) if symbol and account else None
+    existing_weight = weight(existing) if options_known and symbol and account else None
+    after_weight = weight(after) if options_known and symbol and account else None
+    reasons = list(after.get("unavailable_reasons") or [])
+    if not options_known:
+        reasons.append("assignment_positions_unavailable")
+    assignment = _first_float(row, "assignment_notional_cny", "cash_required_cny")
+    covered = _first_float(row, "covered_notional_cny", "underlying_notional_cny")
+    nav = _float(baseline.get("net_assets_cny"))
     return {
-        **sizing_fields,
-        "portfolio_nav_cny": _round_optional(nav),
-        "assignment_notional_cny": _round_optional(assignment),
-        "covered_notional_cny": _round_optional(covered_notional),
-        "existing_stock_value_cny_symbol": _round_optional(existing_stock),
-        "existing_short_put_assignment_cny_symbol": _round_optional(existing_short_put),
-        "existing_short_put_assignment_cny_total": _round_optional(existing_total_short_put),
-        "single_trade_concentration": _round_optional(single_trade),
-        "symbol_concentration_after": _round_optional(symbol_after),
-        "total_short_put_concentration_after": _round_optional(total_after),
-        "concentration_score": _round_optional(concentration_score),
-        "concentration_evaluable": concentration_evaluable,
-        "concentration_unavailable_reason": ";".join(risk_ctx.unavailable_reasons) or None,
+        "position_sizing_basis": POSITION_SIZING_BASIS,
+        "symbol_concentration_current": current,
+        "symbol_concentration_after_existing_assignments": existing_weight,
+        "symbol_concentration_after": after_weight,
+        "portfolio_nav_cny": nav,
+        "portfolio_nav_after_existing_assignments_cny": _float(existing.get("net_assets_cny"))
+        if options_known
+        else None,
+        "portfolio_nav_after_candidate_assignment_cny": _float(after.get("net_assets_cny")) if options_known else None,
+        "assignment_notional_cny": assignment,
+        "covered_notional_cny": covered,
+        "existing_stock_value_cny_symbol": _float(baseline.get("stock_value_cny_by_symbol", {}).get(symbol, "0"))
+        if current is not None
+        else None,
+        "existing_short_put_assignment_cny_symbol": risk_ctx.short_put_assignment_cny_by_symbol.get(symbol),
+        "existing_short_put_assignment_cny_total": risk_ctx.short_put_assignment_total_cny,
+        "single_trade_concentration": assignment / nav
+        if assignment is not None and nav is not None and nav > 0
+        else None,
+        "total_short_put_concentration_after": (
+            (
+                (
+                    risk_ctx.short_put_assignment_total_cny + (assignment or 0)
+                    if mode == "put"
+                    else risk_ctx.short_put_assignment_total_cny
+                )
+                / nav
+            )
+            if risk_ctx.short_put_assignment_total_cny is not None and nav is not None and nav > 0
+            else None
+        ),
+        "concentration_score": None,
+        "concentration_evaluable": after_weight is not None,
+        "concentration_unavailable_reason": ";".join(reasons) or None,
         "portfolio_risk_warnings": ";".join(risk_ctx.warnings) or None,
     }
 

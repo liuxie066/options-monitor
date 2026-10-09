@@ -505,11 +505,20 @@ def test_worker_consumes_published_config_bytes_and_hash(
         _load_account_portfolio_context,
     )
 
+    sizing_reads = []
+    def _prepare_sizing(**kwargs):
+        sizing_reads.append(kwargs["account"])
+        return {**kwargs["context"], "position_sizing_evidence": {"snapshot": {"snapshot_id": "frozen-sizing"}}}
+    monkeypatch.setattr(mod, "prepare_position_sizing_evidence", _prepare_sizing)
+
     assert mod.run_worker(request_path) == 0
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["status"] == "ready"
     assert result["account_config_sha256"] == authority.account_config_sha256
+    assert sizing_reads == ["lx"]
+    assert result["portfolio_context"]["position_sizing_evidence"]["snapshot"]["snapshot_id"] == "frozen-sizing"
+    assert result["payload_sha256"] == mod._canonical_payload_sha256(result["portfolio_context"])
     assert observed["runtime"]["marker"] == "exact-published-bytes"
 
 

@@ -19,7 +19,8 @@ from domain.domain.insurance_underwriting import (
 )
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_currency
-from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields
+from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields, build_portfolio_risk_context
+from domain.domain.short_vol_assessment import portfolio_concentration_fields
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
@@ -74,10 +75,8 @@ def enrich_and_filter_covered_call_underwriting(
         return df_labeled
 
     cfg = resolve_covered_call_underwriting_config(sell_call_cfg)
-    if not cfg.enabled:
-        return df_labeled
 
-    _ = portfolio_ctx
+    risk_ctx = build_portfolio_risk_context(portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter)
     out = df_labeled.copy()
     keep_mask: list[bool] = []
     decision_records: list[dict[str, Any]] = []
@@ -105,10 +104,21 @@ def enrich_and_filter_covered_call_underwriting(
                 exchange_rate_converter=exchange_rate_converter,
             )
         )
-        for key in ("covered_notional_cny", "net_income_cny", "option_contract_point_value_cny"):
+        row_payload.update(portfolio_concentration_fields(row_payload, mode="call", risk_ctx=risk_ctx))
+        for key in (
+            "covered_notional_cny", "net_income_cny", "option_contract_point_value_cny",
+            "position_sizing_basis", "symbol_concentration_current",
+            "symbol_concentration_after_existing_assignments", "symbol_concentration_after",
+            "portfolio_nav_cny", "portfolio_nav_after_existing_assignments_cny",
+            "portfolio_nav_after_candidate_assignment_cny", "concentration_unavailable_reason",
+            "concentration_evaluable", "portfolio_risk_warnings",
+        ):
             if key in row_payload:
                 out.loc[idx, key] = row_payload.get(key)
-        decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg)
+        decision = (
+            evaluate_covered_call_underwriting_row(row_payload, cfg=cfg) if cfg.enabled else
+            {"accepted": True, "fields": {}, "opening_decision": {"normalized_input": row_payload}}
+        )
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
@@ -127,7 +137,7 @@ def enrich_and_filter_covered_call_underwriting(
         keep_mask.append(False)
 
     filtered = out.loc[keep_mask].copy()
-    if not filtered.empty:
+    if not filtered.empty and cfg.enabled:
         filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="call", cfg=cfg))
     if decision_sink_fn is not None:
         decision_sink_fn(decision_records)

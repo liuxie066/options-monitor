@@ -1212,15 +1212,10 @@ def _covered_call_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-# Concentration-after field names per mode; the call side prefers its own names
-# and falls back to the field shared with the put side.
+# Both modes rank the same physical-assignment net-asset weight.
 _CONCENTRATION_AFTER_FIELDS: dict[StrategyMode, tuple[str, ...]] = {
     "put": ("symbol_concentration_after",),
-    "call": (
-        "remaining_symbol_concentration_after",
-        "symbol_concentration_after_call",
-        "symbol_concentration_after",
-    ),
+    "call": ("symbol_concentration_after",),
 }
 
 

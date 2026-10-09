@@ -388,20 +388,26 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 ## 10. 组合口径与消费边界
 
-### Position Sizing（单账户 CSP 展示）
+### Position Sizing（单账户 CSP / CC）
 
-CSP 候选展示三个标的仓位比例：`symbol_concentration_current`（当前正股价值 / 本账户组合基数）、
-`symbol_concentration_after_existing_puts`（当前正股价值 + 已有 Put 接货金额，再除以同一基数），
-以及现有 `symbol_concentration_after`（再加该候选一张 Put 的接货金额）。
-组合基数沿用本账户现金与正股价值之和；接货金额沿用行权价、实际合约乘数和既有汇率转换口径。
-这是接货资金暴露展示，不模拟指派时股价或未来净值。已有估值降级证据保留在快照中；展示行使用
-“Position Sizing：当前 · 已有 Put 全指派 · 再卖 1 张后全指派”，不增加括号说明。缺失显示暂不可用，
-可信零值显示 0%，超过 100% 的结果保持原值。前两项不要求候选接货金额可用。
-计算由 `domain/domain/short_vol_assessment.py` 持有，摘要、快照和 Brief 仅透传。
-新增两项仅用于展示，不新增集中度硬门槛，也不改变现有排序或现金容量规则。
+三个比例使用同一逻辑账户的冻结资产证据：当前仓位；该标的已有 Short Put/Call 全部指派后；
+再卖该候选一张并全部指派后。股票按同一现货价格计市值，现金按行权价同时增减，使用实际合约乘数。
+分母为有符号的非期权净资产（现金、MMF 与非期权持仓，包含负现金），每个场景重新计算：
+`N_after = N_before + delta_shares * spot + delta_cash`。
+已有权利金已在现金中，不重复添加；候选只添加一次扣除开仓费用后的净权利金。三个场景统一为指派费用前。
 
-- CSP 的接货后 concentration 和 CC 的被叫走后剩余 concentration
-  继续使用当前组合 NAV 计算口径；资产按当前市值计量，货币基金计入 NAV。
+资产源沿用 `portfolio.holdings.enabled`：富途基线，开启后补充经批准的 PM 非富途资产，排除 PM 富途副本。
+普通股票采用冻结现价和 FX，不以平均成本补值。计算由 `domain/domain/portfolio_assignment_scenario.py` 持有；
+`short_vol_assessment.py` 选择场景，摘要、开仓快照与 Brief 透传，不重新取价。
+字段为 `symbol_concentration_current`、`symbol_concentration_after_existing_assignments`、
+`symbol_concentration_after`，以 `position_sizing_basis` 标明新口径，并保留三个场景的净资产分母。
+已有封存快照不修改，旧 `symbol_concentration_after_existing_puts` 仅按历史口径展示。
+
+展示位置是 CSP / CC 候选指标，事件仍在独立回执区。缺失显示暂不可用，可信零值显示 0%，
+负仓位与超过 100% 的仓位保持原值；净资产非正时比例不可用。期权证据缺失不影响可确认的当前仓位；
+候选净权利金缺失只影响第三项。排序统一消费第三项，保持原方向、优先级与缺失值顺序；
+不新增集中度硬门槛，富途执行资金容量和 CC 实物覆盖仍由原 owner 计算。
+
 - concentration 只在跨 symbol 且收益接近时参与选择，不变成硬风险门槛。
 - 美股和港股使用同一套公式、状态和失败范围；市场配置窗口、费用表、时区和交易日历分别取对应市场事实。
 - opening snapshot 只负责开仓候选和容量事实。它不为已有持仓生成

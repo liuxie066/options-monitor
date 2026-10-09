@@ -793,7 +793,8 @@ def prepare_position_sizing_evidence(
     ]
     evidence = collect_assignment_portfolio_evidence(
         accounts=[account], runtime_config=runtime_config, futu_contexts={account: context},
-        option_positions=[], fx_observation=fx_observation, capacity_fx=fx_observation,
+        option_positions=[], fx_observation=(project_exchange_rate_snapshot(fx_observation, purpose="display") if fx_observation is not None else None),
+        capacity_fx=fx_observation,
         supplemental_codes=[code for code in codes if isinstance(code, str)],
     )
     return {**context, "position_sizing_evidence": evidence}
