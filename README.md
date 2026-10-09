@@ -285,6 +285,10 @@ om-agent run --tool portfolio_assignment_scenario \
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
 - 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
+CSP / CC 候选的 Position Sizing 展示当前、已有 Put/Call 全指派后、再卖一张并全指派后的标的仓位。
+股票与现金同时变化，各场景以非期权净资产为分母，统一为指派费用前；账户查询的 `position_sizing`
+使用同一算法，原有总资产权重与费用明细保留。资产证据缺失时显式不可用，不以成本替代现价。
+
 Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。Bot 按场景加载该工具；需要 PM 补充时显式开启 PM 集成和 Holdings，并保持 portfolio-management API 仅在同机 loopback 提供服务。
 渠道 Bot 默认只读本渠道市场；只有显式配置 `bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
 

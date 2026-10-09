@@ -202,6 +202,10 @@ PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short pu
 输出 `portfolio.assignment_scenario.v1`，主资金口径为 CNY，
 Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 
+结果新增 `position_sizing`：统一以指派费用前的非期权净资产计算 `net_assets_cny` 与
+`weight_of_net_assets_by_symbol`，与 CSP / CC 候选使用同一股数和现金变换。
+原 `distribution` 的总资产权重、费用与负债语义保留；证据缺失或净资产非正时新比例为 null。
+
 ### 查询运行历史
 
 ```bash

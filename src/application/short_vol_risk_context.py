@@ -7,9 +7,10 @@ import pandas as pd
 from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
+from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets
+from src.application.portfolio_context_service import cash_snapshot_is_usable
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.numeric_helpers import float_or_none as _float
 
 
@@ -21,79 +22,50 @@ def build_portfolio_risk_context(
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
 ) -> PortfolioRiskContext:
-    if not isinstance(portfolio_ctx, dict):
-        return PortfolioRiskContext(
-            nav_cny=None,
-            stock_value_cny_by_symbol={},
-            short_put_assignment_cny_by_symbol={},
-            short_put_assignment_total_cny=None,
-            unavailable_reasons=("holdings_context_missing",),
-        )
-
-    option_ctx = portfolio_ctx.get("option_ctx") if isinstance(portfolio_ctx.get("option_ctx"), dict) else {}
-
-    unavailable: list[str] = []
-    warnings: list[str] = []
-    position_snapshot = portfolio_ctx.get("position_snapshot_input")
-    stocks = portfolio_ctx.get("stocks_by_symbol")
-    positions_unavailable = not isinstance(stocks, dict) or not isinstance(position_snapshot, dict) or (
-        position_snapshot.get("completeness") != "complete"
-        or position_snapshot.get("quality", {}).get("status") != "ready"
-        or bool(position_snapshot.get("errors"))
+    context = portfolio_ctx if isinstance(portfolio_ctx, dict) else {}
+    evidence = context.get("position_sizing_evidence")
+    option_ctx = context.get("option_ctx") if isinstance(context.get("option_ctx"), dict) else {}
+    positions = (
+        option_ctx.get("assignment_positions")
+        if (option_ctx.get("context_status") == "available" and option_ctx.get("decision_snapshot_status") == "trusted")
+        else None
     )
-    if positions_unavailable:
-        unavailable.append("broker_positions_unavailable")
-    cash_usable = cash_snapshot_is_usable(portfolio_ctx)
-    if not cash_usable:
-        unavailable.append("broker_cash_snapshot_unavailable")
-    nav_cny = 0.0
-
-    cash_by_currency = portfolio_ctx.get("cash_by_currency")
-    if cash_usable and isinstance(cash_by_currency, dict):
-        for ccy, raw_amount in cash_by_currency.items():
-            amount_cny = amount_to_cny(raw_amount, ccy, exchange_rate_converter=exchange_rate_converter)
-            if amount_cny is None:
-                unavailable.append(f"cash_fx_missing:{normalize_currency(ccy) or ccy}")
-                continue
-            nav_cny += float(amount_cny)
-
-    stock_value_by_symbol: dict[str, float] = {}
-    if isinstance(stocks, dict):
-        for raw_symbol, raw_stock in stocks.items():
-            if not isinstance(raw_stock, dict):
-                continue
-            symbol = canonical_symbol(raw_stock.get("symbol") or raw_symbol)
-            shares = _float(raw_stock.get("shares") or raw_stock.get("quantity"))
-            if not symbol or shares is None or shares <= 0:
-                continue
-            value_cny, basis, reason = _stock_value_cny(
-                symbol=symbol,
-                stock=raw_stock,
-                shares=shares,
-                exchange_rate_converter=exchange_rate_converter,
-            )
-            if value_cny is None:
-                unavailable.append(reason or f"stock_value_missing:{symbol}")
-                continue
-            if basis == "avg_cost":
-                warnings.append(f"stock_value_estimated_from_avg_cost:{symbol}")
-            nav_cny += float(value_cny)
-            stock_value_by_symbol[symbol] = stock_value_by_symbol.get(symbol, 0.0) + float(value_cny)
-
-    short_put_by_symbol, short_put_total, short_put_unavailable = _short_put_assignment_from_option_ctx(
+    if not isinstance(positions, list) or any(not isinstance(row, dict) or not row.get("account") for row in positions):
+        positions = None
+    scope = evidence.get("scope") if isinstance(evidence, dict) else None
+    accounts = scope.get("accounts") if isinstance(scope, dict) else None
+    account = accounts[0] if isinstance(accounts, list) and len(accounts) == 1 else None
+    short_put, total, reasons = _short_put_assignment_from_option_ctx(
         option_ctx,
-        portfolio_ctx=portfolio_ctx,
+        portfolio_ctx=context,
         exchange_rate_converter=exchange_rate_converter,
     )
-    unavailable.extend(short_put_unavailable)
-
+    baseline = project_non_option_assignment_assets(
+        accounts=[account] if account else [], portfolio_evidence=evidence or {}, option_positions=[]
+    )
+    if not isinstance(evidence, dict):
+        reasons.append("position_sizing_evidence_missing")
+        if not cash_snapshot_is_usable(context):
+            reasons.append("broker_cash_snapshot_unavailable")
+        snapshot = context.get("position_snapshot_input")
+        if not isinstance(snapshot, dict) or snapshot.get("completeness") != "complete":
+            reasons.append("broker_positions_unavailable")
+    else:
+        reasons.extend(baseline.get("unavailable_reasons") or [])
     return PortfolioRiskContext(
-        nav_cny=nav_cny if nav_cny > 0 and cash_usable and not positions_unavailable and not any(reason.startswith("cash_fx_missing:") for reason in unavailable) else None,
-        stock_value_cny_by_symbol=stock_value_by_symbol,
-        short_put_assignment_cny_by_symbol=short_put_by_symbol,
-        short_put_assignment_total_cny=short_put_total,
-        unavailable_reasons=tuple(sorted(set(unavailable))),
-        warnings=tuple(sorted(set(warnings))),
+        nav_cny=_float(baseline.get("net_assets_cny")),
+        stock_value_cny_by_symbol={
+            code: _float(value)
+            for code, value in baseline.get("stock_value_cny_by_symbol", {}).items()
+            if _float(value) is not None
+        },
+        short_put_assignment_cny_by_symbol=short_put,
+        short_put_assignment_total_cny=total,
+        unavailable_reasons=tuple(reasons),
+        account=account,
+        portfolio_evidence=evidence if isinstance(evidence, dict) else None,
+        assignment_positions=tuple(positions) if isinstance(positions, list) else None,
+        warnings=tuple(evidence.get("warnings") or []) if isinstance(evidence, dict) else (),
     )
 
 
@@ -133,39 +105,6 @@ def enrich_short_vol_contract_cny_fields(
         if point_value_cny is not None:
             fields["option_contract_point_value_cny"] = point_value_cny
     return fields
-
-
-def _stock_value_cny(
-    *,
-    symbol: str,
-    stock: dict[str, Any],
-    shares: float,
-    exchange_rate_converter: CurrencyConverter,
-) -> tuple[float | None, str | None, str | None]:
-    value_cny = _first_float(stock, "market_value_cny", "market_val_cny", "value_cny")
-    if value_cny is not None and value_cny >= 0:
-        return value_cny, "market_value_cny", None
-
-    ccy = normalize_currency(stock.get("currency")) or symbol_currency(symbol)
-    market_value = _first_float(stock, "market_value", "market_val", "value", "amount")
-    if market_value is not None and market_value >= 0:
-        converted = amount_to_cny(market_value, ccy, exchange_rate_converter=exchange_rate_converter)
-        return converted, "market_value", None if converted is not None else f"stock_value_fx_missing:{symbol}:{ccy}"
-
-    price = _first_float(stock, "market_price", "latest_price", "last_price", "price", "close_price", "spot")
-    if price is not None and price > 0:
-        converted = amount_to_cny(price * shares, ccy, exchange_rate_converter=exchange_rate_converter)
-        return converted, "market_price", None if converted is not None else f"stock_price_fx_missing:{symbol}:{ccy}"
-
-    # ``avg_cost`` is strictly average acquisition cost.  Do not accept
-    # OpenD ``cost_price`` here because securities accounts define it as
-    # diluted cost.
-    avg_cost = _first_float(stock, "avg_cost", "average_cost")
-    if avg_cost is not None and avg_cost > 0:
-        converted = amount_to_cny(avg_cost * shares, ccy, exchange_rate_converter=exchange_rate_converter)
-        return converted, "avg_cost", None if converted is not None else f"stock_avg_cost_fx_missing:{symbol}:{ccy}"
-
-    return None, None, f"stock_value_missing:{symbol}"
 
 
 def _short_put_assignment_from_option_ctx(

@@ -55,18 +55,17 @@ def _candidate(**overrides):
 
 
 def _account_nvda_context() -> dict:
-    return cash_portfolio({
+    from test_portfolio_assignment_scenario import _quote
+    from position_sizing_helpers import with_sizing_evidence
+    context = cash_portfolio({
         "filters": {"account": "lx", "broker": "富途"},
         "cash_by_currency": {"CNY": 800_000.0},
-        "stocks_by_symbol": {
-            "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 50_000.0, "currency": "USD"}
-        },
-        "option_ctx": {
-            "decision_snapshot_status": "trusted",
-            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
-            "cash_secured_total_cny": 50_000.0,
-        },
+        "stocks_by_symbol": {"NVDA": {"symbol": "NVDA", "shares": 100, "market_value_cny": 50_000.0, "currency": "USD"}},
+        "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}}, "cash_secured_total_cny": 50_000.0},
     })
+    quote = _quote("NVDA", currency="USD", price=70, cny_price=500, fx=1/.14)
+    position = {"account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "put", "side": "short", "status": "open", "contracts_open": 1, "multiplier": 100, "strike": 70, "currency": "USD"}
+    return with_sizing_evidence(context, quotes=[quote], positions=[position])
 
 
 def _filter_underwriting(df, *, symbol="NVDA", cfg=None, ctx=None, converter=None):  # type: ignore[no-untyped-def]
@@ -167,7 +166,7 @@ def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() 
     )
 
     assert risk.stock_value_cny_by_symbol == {}
-    assert risk.unavailable_reasons == ("stock_value_missing:0883.HK",)
+    assert "position_sizing_evidence_missing" in risk.unavailable_reasons
     assert risk.warnings == ()
 
 
@@ -305,7 +304,7 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
     assert len(filtered) == 1
     assert filtered.iloc[0]["contract_symbol"] == "NVDA260619P00100000"
     assert not bool(filtered.iloc[0]["concentration_evaluable"])
-    assert filtered.iloc[0]["concentration_unavailable_reason"] == "holdings_context_missing"
+    assert "assignment_positions_unavailable" in filtered.iloc[0]["concentration_unavailable_reason"]
 
 
 def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentration(tmp_path: Path) -> None:
@@ -317,9 +316,9 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
     row = filtered.iloc[0]
     assert row["portfolio_nav_cny"] == 850_000.0
     assert row["assignment_notional_cny"] == 70_000.0
-    assert row["symbol_concentration_after"] == 0.2
-    assert row["total_short_put_concentration_after"] == 0.141176
-    assert row["concentration_score"] == 0.8
+    assert row["symbol_concentration_after"] == round(150000 / (850000 + 50000 - 10000/.14 + 1400), 6)
+    assert row["total_short_put_concentration_after"] == pytest.approx(120000 / 850000)
+    assert row["concentration_score"] is None
     assert bool(row["concentration_evaluable"])
 
 
@@ -339,6 +338,12 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
             "cash_secured_total_cny": 100_000.0,
         },
     })
+    from position_sizing_helpers import with_sizing_evidence
+    from test_portfolio_assignment_scenario import _quote
+    portfolio_ctx = with_sizing_evidence(portfolio_ctx, quotes=[
+        _quote("NVDA", currency="USD", price=5600, cny_price=40000, fx=1/.14),
+        _quote("AAPL", currency="USD", price=700, cny_price=5000, fx=1/.14),
+    ], positions=[])
     rows: list[dict] = []
     for symbol in ("NVDA", "AAPL"):
         quote = _candidate(symbol=symbol, contract_symbol=f"{symbol}_PUT")

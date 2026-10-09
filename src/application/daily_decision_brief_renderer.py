@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -1428,16 +1430,23 @@ def _candidate_metric_details(
             f"最多 {contracts} 手" if contracts is not None else "最多手数暂不可用"
         )
     details = [" · ".join(parts)] if parts else []
-    if family == "sell_put":
+    if family in {"sell_put", "covered_call"}:
         sizing = []
-        for label, key in (
-            ("当前", "symbol_concentration_current"),
-            ("已有 Put 全指派", "symbol_concentration_after_existing_puts"),
-            ("再卖 1 张后全指派", "symbol_concentration_after"),
-        ):
+        is_current_basis = values.get("position_sizing_basis") == POSITION_SIZING_BASIS
+        labels = (
+            (("当前", "symbol_concentration_current"),
+             ("已有 Put/Call 全指派后", "symbol_concentration_after_existing_assignments"),
+             ("再卖 1 张并全指派后", "symbol_concentration_after"))
+            if is_current_basis else
+            (("当前", "symbol_concentration_current"),
+             ("已有 Put 全指派", "symbol_concentration_after_existing_puts"),
+             ("再卖 1 张后全指派", "symbol_concentration_after"))
+        )
+        for label, key in labels:
             value = _number(values.get(key))
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
-        details.append("Position Sizing：" + " · ".join(sizing))
+        basis_label = "非期权净资产，指派费用前" if is_current_basis else "历史口径"
+        details.append(f"Position Sizing（{basis_label}）：" + " · ".join(sizing))
     return details
 
 

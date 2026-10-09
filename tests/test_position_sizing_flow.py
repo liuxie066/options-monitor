@@ -27,10 +27,11 @@ from tests.test_daily_decision_brief_service import (
 from tests.test_sell_put_strategy_risk import _account_nvda_context, _candidate
 
 
-SIZING_KEYS = ("symbol_concentration_current", "symbol_concentration_after_existing_puts", "symbol_concentration_after")
+SIZING_KEYS = ("symbol_concentration_current", "symbol_concentration_after_existing_assignments", "symbol_concentration_after")
 
 
-def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -> None:
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, mode) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path)
     from src.application.futu_portfolio_context import build_futu_portfolio_context
 
@@ -50,20 +51,33 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -
         cash_free_total_cny=800_000.0,
         **_earnings_evidence(),
     )
+    enrich = enrich_and_filter_sell_put_underwriting
+    config_key = "sell_put_cfg"
+    summary_fn = summarize_sell_put
+    if mode == "call":
+        from tests.test_covered_call_strategy_risk import _candidate as call_candidate
+        from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
+        from src.application.report_summaries import summarize_sell_call
+        row = call_candidate(contract_symbol="NVDA260821C00100000", expiration="2026-08-21", strike=100, spot=90, avg_cost=50, net_income_cny=1400, **_earnings_evidence())
+        enrich = enrich_and_filter_covered_call_underwriting
+        config_key = "sell_call_cfg"
+        summary_fn = summarize_sell_call
     decisions = []
-    enriched = enrich_and_filter_sell_put_underwriting(
+    enriched = enrich(
         df_labeled=pd.DataFrame([row]),
         symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting"},
+        **{config_key: {"strategy": "insurance_underwriting"}},
         portfolio_ctx=context,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         decision_sink_fn=decisions.extend,
     )
     assert len(enriched) == 1
-    expected = [round(50_000 / 850_000, 6), round(100_000 / 850_000, 6), 0.2]
+    expected = [round(50_000 / 850_000, 6), round(100_000 / 850_000, 6), round(150000/(850000+50000-10000/.14+1400),6)]
+    if mode == "call":
+        expected[2] = round(50000 / (850000 - 50000 + 10000 / .14 + 1400), 6)
     assert [enriched.iloc[0][key] for key in SIZING_KEYS] == expected
     assert [decisions[0]["normalized_input"][key] for key in SIZING_KEYS] == expected
-    summary = normalize_processor_row(summarize_sell_put(enriched, "NVDA"))
+    summary = normalize_processor_row(summary_fn(enriched, "NVDA"))
     assert [summary[key] for key in SIZING_KEYS] == expected
     seal_opening_candidate_snapshot(
         base=tmp_path,
@@ -84,15 +98,15 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -
         scan_statuses=[
             {
                 "symbol": "NVDA",
-                "strategy_mode": "put",
+                "strategy_mode": mode,
                 "status": "completed",
                 "reason": None,
                 "quote_snapshot_id": None,
                 "quote_receipt_relpath": None,
             }
         ],
-        final_candidates={"put": json.loads(enriched.to_json(orient="records"))},
-        candidate_evaluations={"put": decisions},
+        final_candidates={mode: json.loads(enriched.to_json(orient="records"))},
+        candidate_evaluations={mode: decisions},
         run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
@@ -100,21 +114,21 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path) -
     brief = _assemble(tmp_path)
     assert brief["actionability"] != "blocked", [action.get("metrics") for action in brief["actions"]]
     assert brief["account"] == "lx"
-    candidate = brief["candidates"]["sell_put"][0]
+    candidate = brief["candidates"]["sell_put" if mode == "put" else "covered_call"][0]
     assert [candidate["metrics"][key] for key in SIZING_KEYS] == expected
-    assert "Position Sizing（" not in render_full_brief(brief)
-    assert "当前 5.9% · 已有 Put 全指派 11.8% · 再卖 1 张后全指派 20.0%" in render_full_brief(brief)
+    assert "Position Sizing（非期权净资产，指派费用前）" in render_full_brief(brief)
+    assert f"当前 5.9% · 已有 Put/Call 全指派后 11.8% · 再卖 1 张并全指派后 {18.1 if mode == 'put' else 5.7}%" in render_full_brief(brief)
     # Display-only changes must not create a new candidate notification.
     updated = deepcopy(brief)
     updated["revision"] += 1
-    updated["candidates"]["sell_put"][0]["metrics"][SIZING_KEYS[0]] = 0.3
+    updated["candidates"]["sell_put" if mode == "put" else "covered_call"][0]["metrics"][SIZING_KEYS[0]] = 0.3
     for action in updated["actions"]:
         action["metrics"][SIZING_KEYS[0]] = 0.3
     assert diff_daily_decision_briefs(brief, updated)["material"] is False
 
 
 @pytest.mark.parametrize("cash_required", [None, 0.0])
-def test_existing_sizing_remains_available_without_new_contract_value(cash_required) -> None:
+def test_sizing_uses_contract_delivery_not_cached_cash_requirement(cash_required) -> None:
     row = _candidate(cash_required_cny=cash_required)
     enriched = enrich_and_filter_sell_put_underwriting(
         df_labeled=pd.DataFrame([row]),
@@ -126,7 +140,7 @@ def test_existing_sizing_remains_available_without_new_contract_value(cash_requi
     assert len(enriched) == 1
     assert enriched.iloc[0][SIZING_KEYS[0]] == round(50_000 / 850_000, 6)
     assert enriched.iloc[0][SIZING_KEYS[1]] == round(100_000 / 850_000, 6)
-    assert enriched.iloc[0][SIZING_KEYS[2]] is None
+    assert enriched.iloc[0][SIZING_KEYS[2]] == round(150000/(850000+50000-10000/.14+1400),6)
 
 
 def test_summary_uses_selected_contract_sizing_not_first_row() -> None:
@@ -136,7 +150,7 @@ def test_summary_uses_selected_contract_sizing_not_first_row() -> None:
             contract_symbol="higher",
             annualized_net_return_on_cash_basis=0.3,
             symbol_concentration_current=0.08,
-            symbol_concentration_after_existing_puts=0.2,
+            symbol_concentration_after_existing_assignments=0.2,
             symbol_concentration_after=0.4,
             portfolio_risk_warnings="stock_value_estimated_from_avg_cost:NVDA",
         ),
@@ -153,17 +167,15 @@ def test_summary_uses_selected_contract_sizing_not_first_row() -> None:
 )
 @pytest.mark.parametrize("multiplier", [100, 500, 1000])
 def test_sizing_reuses_cash_owner_fx_and_actual_multiplier(symbol, currency, existing_native, rate, multiplier) -> None:
-    context = cash_portfolio(
-        {
-            "cash_by_currency": {"CNY": 800_000.0},
-            "stocks_by_symbol": {symbol: {"symbol": symbol, "shares": 100, "avg_cost": 500.0, "currency": "CNY"}},
-            "option_ctx": {
-                "decision_snapshot_status": "trusted",
-                "cash_secured_by_symbol_by_ccy": {symbol: {currency: existing_native}},
-                "cash_secured_total_by_ccy": {currency: existing_native},
-            },
-        }
-    )
+    from position_sizing_helpers import with_sizing_evidence
+    from test_portfolio_assignment_scenario import _quote
+    context = cash_portfolio({
+        "cash_by_currency": {"CNY": 800000.0},
+        "stocks_by_symbol": {symbol: {"symbol": symbol, "shares": 100, "avg_cost": 1, "currency": currency}},
+        "option_ctx": {"decision_snapshot_status": "trusted", "cash_secured_by_symbol_by_ccy": {symbol: {currency: existing_native}}, "cash_secured_total_by_ccy": {currency: existing_native}},
+    })
+    existing = {"account": "lx", "broker": "富途", "symbol": symbol, "option_type": "put", "side": "short", "status": "open", "contracts_open": 1, "multiplier": 100, "strike": existing_native/100, "currency": currency}
+    context = with_sizing_evidence(context, quotes=[_quote(symbol,currency=currency,price=500,cny_price=500*rate,fx=rate)], positions=[existing])
     converter = CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.9))
     frame = enrich_sell_put_candidates_with_cash(
         df_labeled=pd.DataFrame(
@@ -192,9 +204,49 @@ def test_sizing_reuses_cash_owner_fx_and_actual_multiplier(symbol, currency, exi
     )
     assert len(enriched) == 1
     row = enriched.iloc[0]
-    assert row[SIZING_KEYS[0]] == round(50_000 / 850_000, 6)
-    assert row[SIZING_KEYS[1]] == round((50_000 + existing_native * rate) / 850_000, 6)
-    assert row[SIZING_KEYS[2]] == round((50_000 + existing_native * rate + 100 * multiplier * rate) / 850_000, 6)
+    baseline_net = 800000 + 100*500*rate
+    existing_net = baseline_net + (100*500-existing_native)*rate
+    candidate_net = existing_net + multiplier*(500-100)*rate + 200*rate
+    assert row[SIZING_KEYS[0]] == round(100*500*rate/baseline_net,6)
+    assert row[SIZING_KEYS[1]] == round(200*500*rate/existing_net,6)
+    assert row[SIZING_KEYS[2]] == round((200+multiplier)*500*rate/candidate_net,6)
     assert row["max_new_contracts"] == frame.iloc[0]["max_new_contracts"]
-    summary = normalize_processor_row(summarize_sell_put(enriched, symbol))
-    assert summary["portfolio_risk_warnings"] == f"stock_value_estimated_from_avg_cost:{symbol}"
+    summary = normalize_processor_row(summarize_sell_put(enriched,symbol))
+    assert not summary["portfolio_risk_warnings"]
+
+
+def test_untrusted_option_snapshot_keeps_current_sizing_but_hides_assignment_scenarios():
+    context = _account_nvda_context()
+    context["option_ctx"]["decision_snapshot_status"] = "snapshot_unavailable"
+    frame = enrich_and_filter_sell_put_underwriting(
+        df_labeled=pd.DataFrame([_candidate()]), symbol="NVDA",
+        sell_put_cfg={"strategy": "insurance_underwriting"}, portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+    )
+    assert frame.iloc[0][SIZING_KEYS[0]] == round(50000/850000, 6)
+    assert pd.isna(frame.iloc[0][SIZING_KEYS[1]])
+    assert pd.isna(frame.iloc[0][SIZING_KEYS[2]])
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_disabled_underwriting_adds_sizing_without_fabricating_policy_decisions(mode):
+    enrich = enrich_and_filter_sell_put_underwriting
+    config_key = "sell_put_cfg"
+    row = _candidate()
+    if mode == "call":
+        from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
+        from tests.test_covered_call_strategy_risk import _candidate as call_candidate
+        enrich = enrich_and_filter_covered_call_underwriting
+        config_key = "sell_call_cfg"
+        row = call_candidate()
+    emissions = []
+    frame = enrich(
+        df_labeled=pd.DataFrame([row]), symbol="NVDA", **{config_key: {}},
+        portfolio_ctx=_account_nvda_context(),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=.14)),
+        decision_sink_fn=emissions.append,
+    )
+    assert len(frame) == 1
+    assert frame.iloc[0][SIZING_KEYS[0]] == round(50000/850000, 6)
+    assert pd.notna(frame.iloc[0][SIZING_KEYS[2]])
+    assert emissions == []

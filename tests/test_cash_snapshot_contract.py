@@ -358,7 +358,13 @@ def test_invalid_provider_number_remains_sealable_as_diagnostic(raw):
     *({"_balance_row": {"cn_cash": 10000, field: amount}}
       for field in ("jp_cash", "sg_cash", "au_cash", "ca_cash", "my_cash") for amount in (0, 5, -5)),
 ])
-def test_consumers_share_sealed_cash_verdict(change):
+def test_consumers_share_sealed_cash_verdict(change, monkeypatch):
+    from src.application import portfolio_assignment_scenario as sizing_application
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+    monkeypatch.setattr(sizing_application, "datetime", Clock)
     from cash_evidence_helpers import cash_portfolio
     from src.application.sell_put_cash import sell_put_opening_capacity_inputs
     from src.application.short_vol_risk_context import build_portfolio_risk_context
@@ -381,7 +387,9 @@ def test_consumers_share_sealed_cash_verdict(change):
     capacity = sell_put_opening_capacity_inputs(symbol="NVDA", strike=10, multiplier=100, currency="CNY",
         portfolio_ctx=context, exchange_rate_converter=converter)
     assert capacity["put_cash_capacity_available"] is usable
-    risk = build_portfolio_risk_context(portfolio_ctx=context, exchange_rate_converter=converter)
+    from position_sizing_helpers import with_sizing_evidence
+    valued_context = with_sizing_evidence(context)
+    risk = build_portfolio_risk_context(portfolio_ctx=valued_context, exchange_rate_converter=converter)
     assert (risk.nav_cny == 10000) is usable
     funds, reliable = _build_funds(portfolio_context=context, option_positions_context=option, data_gaps=[])
     assert reliable is usable and funds["cash_snapshot"] == context["cash_snapshot"]

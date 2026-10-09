@@ -135,3 +135,23 @@
 - R4（跨仓部署 owner，交付阶段）：PM scoped API 必须先于 OM 启用路径部署；未升级时 OM 明示 partial，运行环境变更不由本设计阶段执行。
 - R5（OM 富途适配 owner，Slice A，待证据）：OpenD 若把已计入余额的 MMF 又返回为 FUND 仓位，现有 position_asset_type_unknown 可能使股票快照不完整。先取得隔离的 OpenD 行形态；证实后仅跳过与现金/MMF 明确同一资产的仓位并加回归例，不放松其他未知证券类型错误。
 - R6（PM 数据源 owner，启用前）：实际非富途 broker 值尚未经只读核对。沿用 PM 的自由文本来源合同，不预置无数据依据的代码白名单；futu、moomoo、富途前缀归富途，空值、泛称和 manual 归 unknown。配置预览给出实际 broker 原文、行数和分类，经确认的非富途原文集合由现有配置发布链保存，查询遇新值则整个 PM 补充 partial。单个已批准 broker 被错误标成非富途仍可能误算，来源字段真实性需由目标数据预览与 PM 记录管理保证；本设计不能宣称真实清单已验证。
+
+## Position Sizing v2：统一非期权净资产口径
+
+账户指派查询新增 `position_sizing`，与 CSP / CC 候选共用 domain 指派变换。
+原查询的费用、总资产权重与负债字段维持原语义；新净资产权重显式为指派费用前，不能与旧 gross 权重混用。
+账户查询纳入所选账户全部 open short Put/Call；候选仅纳入本账户目标标的全部已有 short Put/Call，再增加候选一张。
+
+冻结现货价 P 与 FX 后，`Q_after = Q + put_shares - call_shares`，
+`delta_cash = -sum(put_strike * shares) + sum(call_strike * shares) + candidate_net_premium`，
+`N_after = N_before + delta_shares * P + delta_cash`，`weight = Q_after * P / N_after`。
+各金额先按统一 FX 转为 CNY。已有权利金包含在现金；新候选净权利金扣除开仓费用后只加一次。
+指派费用另行呈现，不能因费用未知而声称其为零。
+
+prepared portfolio context 在封存前一次收集报价、资产与来源证据；ledger 的可信账户快照提供全券商已有期权。
+富途基线与 `portfolio.holdings.enabled` 批准的 PM 非富途补充沿用原 owner，PM 富途副本排除。
+普通股票统一按现价重估，不用平均成本。非富途交割必须有对应券商现金基线；缺失资产、报价或 FX 显式不可用。
+负现金和负股数保留；净资产非正不出比例。候选开仓资金与 CC 覆盖仍保留富途执行账户约束。
+
+候选字段 `position_sizing_basis=non_option_net_assets_before_assignment_fees.v2` 标明口径；
+当前、已有指派后、加候选后对应三个浓度与净资产字段。旧封存结果不修改、仅按历史口径展示。

@@ -259,7 +259,8 @@ def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
         prepared_option_positions_context_manifest_sha256="c" * 64,
     )
 
-    assert portfolio == {"cash_by_currency": {"USD": 1000}}
+    assert portfolio == {"cash_by_currency": {"USD": 1000}, "option_ctx": option_context}
+    assert portfolio["option_ctx"] is option
     assert option is option_context
     assert round(usd_per_cny or 0.0, 8) == round(1.0 / 7.25, 8)
     assert cny_per_hkd == 0.93

@@ -427,3 +427,11 @@ def test_fx_purpose_flows_to_cny_premium_gate(holiday, mode, monkeypatch):
     reasons = _reasons(_decide(row, mode=mode))
     assert row["net_income_cny"] == pytest.approx(85.43)
     assert "input_missing" not in reasons and "return_net_premium_cny" not in reasons
+
+
+def test_call_ranking_uses_shared_sizing_instead_of_legacy_aliases():
+    rows = [
+        _policy_row(mode="call", symbol="NVDA", contract_symbol="LOW", symbol_concentration_after=.1, remaining_symbol_concentration_after=.9),
+        _policy_row(mode="call", symbol="AMD", contract_symbol="HIGH", symbol_concentration_after=.8, remaining_symbol_concentration_after=.01),
+    ]
+    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="call")] == ["LOW", "HIGH"]

@@ -2227,6 +2227,12 @@ def _blocked_action(account: str, market: str, blockers: list[str]) -> dict[str,
 def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
     keys = (
         "symbol_concentration_current",
+        "position_sizing_basis",
+        "symbol_concentration_after_existing_assignments",
+        "portfolio_nav_cny",
+        "portfolio_nav_after_existing_assignments_cny",
+        "portfolio_nav_after_candidate_assignment_cny",
+        "concentration_unavailable_reason",
         "symbol_concentration_after_existing_puts",
         "symbol_concentration_after",
         "portfolio_risk_warnings",

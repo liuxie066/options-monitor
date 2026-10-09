@@ -21,6 +21,7 @@ from src.application.account_config import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.portfolio_assignment_scenario import prepare_position_sizing_evidence
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
     portfolio_context_account_mismatch_reason,
@@ -736,6 +737,13 @@ def run_worker(request_path: Path) -> int:
             load_json_fn=load_cached_json,
             write_cache=False,
         )
+        try:
+            context = prepare_position_sizing_evidence(
+                context=context, runtime_config=cfg, account=account,
+                fx_observation=(fx_observation if fx_hash is not None else context.get("exchange_rates")),
+            )
+        except Exception as exc:
+            context = {**context, "position_sizing_evidence": {"status": "unavailable", "warnings": [f"sizing_evidence_read_failed:{type(exc).__name__}"]}}
         if fx_hash is not None:
             context = dict(context)
             context["fx_snapshot_sha256"] = fx_hash
