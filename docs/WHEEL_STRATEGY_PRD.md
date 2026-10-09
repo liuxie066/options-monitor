@@ -828,6 +828,8 @@ child 当前方向的本金锚只来自本次 assignment 的真实 stock settlem
 fact IDs、转换数量、authoritative `occurred_at_ms/event_id` 和 lineage，不持久化可因迟到事实改变的
 per-child 金额，也不复制 canonical cash/PnL。
 
+历史回放按事实发生时间截断经济事件，同时保留当前账本中指向该范围内事件的有效后补 void；更正后的同一事件集合同时用于期权 lot、交割股票和 Wheel 投影。指向未来经济事件的 void 不纳入，账户和合约一致性仍由 canonical ledger 校验。
+
 读模型对同一完整 source fact set 按稳定 `(occurred_at_ms, event_id)` 顺序，以 Decimal 精度计算每个
 child 的未量化比例金额；仅在公开读面或 sealed snapshot 输出边界按 currency quantum 分配，稳定顺序
 中的最后一个 child 吸收量化余数。这样同一事实集合无论正序、逆序或跨事务到达，均得到相同 child
