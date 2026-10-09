@@ -7,6 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_json_bytes as decision_json_bytes
+from tests import test_required_data_snapshot as required_data_fixture
+from src.application.required_data_snapshot import (
+    load_required_data_snapshot_manifest_snapshot,
+    seal_required_data_snapshot,
+)
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from scripts import benchmark_runtime_portfolio_snapshot as benchmark_owner
 import src.application.ledger.api as ledger_api
@@ -33,6 +40,7 @@ from src.application.runtime_portfolio_snapshot import (
     MAX_CANONICAL_BYTES,
     SHADOW_SCHEMA_VERSION,
     RuntimePortfolioSnapshotError,
+    _validate_required_data_reference,
     _build_runtime_portfolio_snapshot,
     assemble_runtime_portfolio_snapshot,
     build_runtime_portfolio_section,
@@ -160,8 +168,12 @@ def _owner_assembly_kwargs() -> dict:
     }
 
 
-def _wheel_v3_assembly_kwargs(base: Path) -> dict:
+def _wheel_v3_assembly_kwargs(
+    base: Path, *, required_data_manifest_bytes: bytes | None = None,
+) -> dict:
     assembly = _owner_assembly_kwargs()
+    if required_data_manifest_bytes is not None:
+        assembly["required_data_manifest_bytes"] = required_data_manifest_bytes
     run_id = assembly["run_id"]
     account = assembly["account"]
     config_hash = sha256_bytes(assembly["account_config_bytes"])
@@ -363,6 +375,132 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
         snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"],
         reference_payloads=references,
     )
+
+
+@pytest.mark.parametrize("rows_use_blob", [False, True])
+@pytest.mark.parametrize("include_failed", [False, True])
+def test_real_sealed_required_data_assembles_publishes_and_replays(
+    tmp_path: Path, rows_use_blob: bool, include_failed: bool,
+) -> None:
+    run_id = benchmark_owner.RUN_ID
+    root, manifest_path = required_data_fixture._workspace(tmp_path, run_id=run_id)
+    required_data_fixture._publish_quote(
+        root, run_id=run_id, symbol="0700.HK", canonical_blob=rows_use_blob,
+    )
+    required_data_fixture._publish_empty_quote(root, run_id=run_id, symbol="9898.HK")
+    symbols = ["0700.HK", "9898.HK", *(["9992.HK"] if include_failed else [])]
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id=run_id,
+        prefetch_summary=required_data_fixture._summary(
+            *symbols, outcomes={"9898.HK": "success_empty"},
+        ),
+    )
+    loaded, loaded_root, manifest_bytes = load_required_data_snapshot_manifest_snapshot(
+        manifest_path=manifest_path, expected_run_id=run_id, expected_required_data_root=root,
+    )
+    assert loaded == manifest and loaded_root == root.resolve()
+    assert manifest["required_data_root_relpath"] == "../required_data"
+    assert manifest["status"] == ("partial" if include_failed else "complete")
+    assert ("scan_blob_ref" in manifest["symbols"]["0700.HK"]) == rows_use_blob
+    assert manifest["symbols"]["9898.HK"]["source_outcome"] == "success_empty"
+    assert manifest["symbols"]["9898.HK"]["reason_code"] == "no_expirations"
+    assert "scan_blob_ref" in manifest["symbols"]["9898.HK"]
+
+    assembly = _wheel_v3_assembly_kwargs(tmp_path, required_data_manifest_bytes=manifest_bytes)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+
+    assert snapshot["status"] == ("data_unavailable" if include_failed else "trusted")
+    required_binding = next(
+        row for row in snapshot["replay_bindings"] if row["role"] == "required_data_snapshot"
+    )
+    assert required_binding["content_sha256"] == manifest["content_sha256"]
+    assert required_binding["sha256"] == sha256_bytes(manifest_bytes)
+    assert references[required_binding["relpath"]] == manifest_bytes
+    receipt = snapshot["sections"]["source_status"]["facts"]["required_data"]
+    assert receipt["owner_status"] == manifest["status"]
+    assert receipt["completeness"]["status"] == manifest["status"]
+    assert snapshot == _verified(
+        snapshot, expected_run_id=run_id, expected_account=assembly["account"],
+        reference_payloads=references,
+    )
+    path = _published(tmp_path, snapshot, references)
+    original_bytes = path.read_bytes()
+    assert _published(tmp_path, snapshot, references) == path
+    assert path.read_bytes() == original_bytes
+    assert load_runtime_portfolio_snapshot(
+        base=tmp_path, run_id=run_id, account=assembly["account"], reference_payloads=references,
+    ) == snapshot
+
+
+@pytest.mark.parametrize(
+    ("fault", "error_suffix"),
+    [
+        ("unknown_ready_field", "FIELD_INVALID"),
+        ("missing_ready_field", "FIELD_INVALID"),
+        ("failed_blob_field", "FIELD_INVALID"),
+        ("empty_blob_ref", "REFERENCE_PAYLOAD_INVALID"),
+        ("non_mapping_blob_ref", "FIELD_INVALID"),
+        ("unsafe_blob_ref", "REFERENCE_PAYLOAD_INVALID"),
+        ("invalid_blob_size", "REFERENCE_PAYLOAD_INVALID"),
+        ("../other", "REFERENCE_PATH_INVALID"),
+        ("../../required_data", "REFERENCE_PATH_INVALID"),
+        ("../required_data/extra", "REFERENCE_PATH_INVALID"),
+        ("/required_data", "REFERENCE_PATH_INVALID"),
+        ("..\\required_data", "REFERENCE_PATH_INVALID"),
+        ("latest/required_data", "REFERENCE_PATH_INVALID"),
+        ("../latest", "REFERENCE_PATH_INVALID"),
+        ("content_hash", "REFERENCE_HASH_INVALID"),
+    ],
+)
+def test_required_data_reference_keeps_strict_failure_boundaries(
+    fault: str, error_suffix: str,
+) -> None:
+    payload = json.loads(_owner_assembly_kwargs()["required_data_manifest_bytes"])
+    row = payload["symbols"]["S0000"]
+    if fault == "unknown_ready_field":
+        row["unexpected"] = True
+    elif fault == "missing_ready_field":
+        del row["receipt_hash"]
+    elif fault == "failed_blob_field":
+        payload["symbols"]["S0000"] = {
+            "status": "failed", "reason": "quote_receipt_unavailable",
+            "error_type": "SourceReceiptError", "scan_blob_ref": {},
+        }
+        payload["status"] = "failed"
+        payload["summary"] = {"symbols_total": 1, "ready": 0, "failed": 1}
+    elif fault in {"empty_blob_ref", "non_mapping_blob_ref", "unsafe_blob_ref", "invalid_blob_size"}:
+        blob_ref = {
+            "schema_version": "required_data_scan_blob_ref.v1",
+            "blob_schema_version": "required_data_scan_blob.v1",
+            "logical_roles": ["raw_json", "required_data_csv"],
+            "codec": "gzip", "codec_version": 1,
+            "blob_sha256": "a" * 64,
+            "uncompressed_size_bytes": 100, "compressed_size_bytes": 50,
+            "blob_relpath": f"output_shared/blobs/sha256/aa/{'a' * 64}.json.gz",
+            "published_at_utc": "2026-08-16T00:00:00Z",
+        }
+        if fault == "unsafe_blob_ref":
+            blob_ref["blob_relpath"] = "../../outside.json.gz"
+        elif fault == "invalid_blob_size":
+            blob_ref["uncompressed_size_bytes"] = 0
+        row["scan_blob_ref"] = (
+            {} if fault == "empty_blob_ref" else "not-a-ref" if fault == "non_mapping_blob_ref" else blob_ref
+        )
+    elif fault != "content_hash":
+        payload["required_data_root_relpath"] = fault
+    payload["content_sha256"] = sha256_bytes(decision_json_bytes(
+        {key: value for key, value in payload.items() if key != "content_sha256"}
+    ))
+    binding = {"content_sha256": payload["content_sha256"]}
+    if fault == "content_hash":
+        payload["content_sha256"] = "0" * 64
+    with pytest.raises(RuntimePortfolioSnapshotError) as rejected:
+        _validate_required_data_reference(
+            payload, binding=binding, expected_run_id=payload["run_id"],
+        )
+    assert rejected.value.code == f"RUNTIME_PORTFOLIO_SNAPSHOT_{error_suffix}"
 
 
 def test_assembler_publishes_and_verifies_directional_wheel_bundle(tmp_path: Path) -> None:
