@@ -423,6 +423,14 @@ def build_context(
         "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),
         "open_positions_min": open_positions_min,
+        "assignment_positions": [
+            {**view.as_open_position_min(as_of_date=expiration_market_date(observed_at_dt, symbol_market(view.canonical_underlying_symbol))),
+             **dict(lifecycle_by_lot.get(view.lot_id) or {})}
+            for raw in records
+            if (view := position_lot_risk_view(raw)).is_open
+            and normalize_account(view.account) == account_norm
+            and view.side == "short" and view.option_type in {"put", "call"}
+        ],
         "combo_yield_groups": build_option_group_inventory(
             [
                 {

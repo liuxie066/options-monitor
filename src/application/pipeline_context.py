@@ -25,6 +25,7 @@ from src.application.positions.context_builder import (
     validate_option_positions_context_account,
 )
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.portfolio_assignment_scenario import prepare_position_sizing_evidence
 from src.infrastructure.io_utils import atomic_write_json, is_fresh, load_cached_json
 from src.application.ledger.api import (
     decision_state_snapshot,
@@ -127,6 +128,14 @@ def load_portfolio_context(
         if isinstance(ctx.get("cash_by_currency"), dict) and isinstance(ctx.get("stocks_by_symbol"), dict):
             snap = adapt_holdings_context(ctx)
             _persist_source_snapshot(base, snap)
+        if account and runtime_config is not None:
+            try:
+                ctx = prepare_position_sizing_evidence(
+                    context=ctx, runtime_config=runtime_config, account=account,
+                    fx_observation=(exchange_rate_observation if isinstance(exchange_rate_observation, Mapping) else ctx.get("exchange_rates")),
+                )
+            except Exception as exc:
+                ctx = {**ctx, "position_sizing_evidence": {"status": "unavailable", "warnings": [f"sizing_evidence_read_failed:{type(exc).__name__}"]}}
         return ctx
     except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
@@ -609,4 +618,6 @@ def build_pipeline_context(
         portfolio_ctx = dict(portfolio_ctx)
         portfolio_ctx["_sell_put_fx_status"] = fx_status
 
+    if isinstance(portfolio_ctx, dict):
+        portfolio_ctx = {**portfolio_ctx, "option_ctx": option_ctx}
     return portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate

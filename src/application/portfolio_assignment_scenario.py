@@ -593,6 +593,36 @@ def query_portfolio_assignment_scenario(
             )
     except Exception as exc:
         futu_error = f"Futu portfolio read failed: {exc}"
+    evidence = collect_assignment_portfolio_evidence(
+        accounts=normalized_accounts, runtime_config=runtime_config, futu_contexts=futu_contexts,
+        option_positions=option_positions, fx_observation=fx_observation, capacity_fx=capacity_fx,
+        fx_snapshot=fx_snapshot, futu_error=futu_error,
+    )
+    snapshot = _snapshot_payload(
+        accounts=normalized_accounts,
+        option_positions=option_positions,
+        portfolio_evidence=evidence,
+        options_observed_at=options_observed_at,
+        runtime_config_name=runtime_config_name,
+    )
+    return project_assignment_scenario(
+        accounts=normalized_accounts,
+        portfolio_evidence=evidence,
+        option_positions=option_positions,
+        snapshot=snapshot,
+    )
+
+
+
+def collect_assignment_portfolio_evidence(
+    *, accounts: Sequence[str], runtime_config: dict[str, Any],
+    futu_contexts: Mapping[str, dict[str, Any]], option_positions: Sequence[Mapping[str, Any]],
+    fx_observation: Mapping[str, Any] | None, capacity_fx: Mapping[str, Any] | None = None,
+    fx_snapshot: Mapping[str, Any] | None = None, supplemental_codes: Sequence[str] = (),
+    futu_error: str | None = None,
+) -> dict[str, Any]:
+    """Collect valuation once at the account preparation boundary, without cache writes."""
+    normalized_accounts = normalize_assignment_accounts(accounts)
     if not futu_error:
         for account, context in futu_contexts.items():
             if issue := _futu_context_error(account, context):
@@ -610,6 +640,7 @@ def query_portfolio_assignment_scenario(
                 for row in snapshot.get("rows") or []:
                     if isinstance(row, Mapping) and isinstance(row.get("instrument_ref"), Mapping):
                         codes.add(canonical_symbol(row["instrument_ref"].get("symbol")))
+    codes.update(canonical_symbol(code) for code in supplemental_codes)
     supplemental_codes = sorted(code for code in codes if code)
     if not futu_error and len(supplemental_codes) > MAX_SUPPLEMENTAL_CODES:
         raise AssignmentScenarioInputError(f"portfolio references more than {MAX_SUPPLEMENTAL_CODES} underlyings")
@@ -646,6 +677,7 @@ def query_portfolio_assignment_scenario(
         pm_counts: Mapping[str, Any] | None = None
         pm_quality: Mapping[str, Any] | None = None
         pm_quote_provenance: list[dict[str, Any]] = []
+        pm_quotes: list[Mapping[str, Any]] = []
         try:
             if include_pm:
                 approved = approved_non_futu_brokers(runtime_config, normalized_accounts)
@@ -668,6 +700,7 @@ def query_portfolio_assignment_scenario(
                 if pm_evidence.get("status") not in {"complete", "partial"}:
                     raise ValueError("PM non-Futu valuation is unavailable")
                 pm_holdings = list(pm_evidence.get("holdings") or [])
+                pm_quotes = list(pm_evidence.get("quotes") or [])
                 evidence["pm_snapshot_id"] = pm_evidence["snapshot"]["snapshot_id"]
                 evidence["pm_observed_at"] = pm_evidence["snapshot"].get("observed_at") or pm_evidence["snapshot"].get(
                     "observed_at_utc"
@@ -692,7 +725,8 @@ def query_portfolio_assignment_scenario(
                 contexts=futu_contexts,
                 fx_observation=fx_observation,
             )
-            evidence["quotes"] = futu_quotes
+            futu_codes = {canonical_symbol(row.get("code")) for row in futu_quotes}
+            evidence["quotes"] = futu_quotes + [dict(row) for row in pm_quotes if canonical_symbol(row.get("code")) not in futu_codes]
             quotes: dict[str, Mapping[str, Any]] = {}
             for row in futu_quotes:
                 if isinstance(row, Mapping) and (code := canonical_symbol(row.get("code") or row.get("symbol"))):
@@ -744,20 +778,25 @@ def query_portfolio_assignment_scenario(
                 }
 
     evidence["cash_snapshots"] = {account: context.get("cash_snapshot") for account, context in futu_contexts.items()}
-    snapshot = _snapshot_payload(
-        accounts=normalized_accounts,
-        option_positions=option_positions,
-        portfolio_evidence=evidence,
-        options_observed_at=options_observed_at,
-        runtime_config_name=runtime_config_name,
-    )
-    return project_assignment_scenario(
-        accounts=normalized_accounts,
-        portfolio_evidence=evidence,
-        option_positions=option_positions,
-        snapshot=snapshot,
-    )
+    return evidence
 
+
+
+def prepare_position_sizing_evidence(
+    *, context: dict[str, Any], runtime_config: dict[str, Any], account: str,
+    fx_observation: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach sealed valuation facts without changing broker capacity authority."""
+    symbols = runtime_config.get("symbols") or {}
+    codes = list(symbols) if isinstance(symbols, Mapping) else [
+        row.get("symbol") if isinstance(row, Mapping) else row for row in symbols
+    ]
+    evidence = collect_assignment_portfolio_evidence(
+        accounts=[account], runtime_config=runtime_config, futu_contexts={account: context},
+        option_positions=[], fx_observation=fx_observation, capacity_fx=fx_observation,
+        supplemental_codes=[code for code in codes if isinstance(code, str)],
+    )
+    return {**context, "position_sizing_evidence": evidence}
 
 def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
     scope = result.get("scope") if isinstance(result.get("scope"), Mapping) else {}
@@ -771,6 +810,7 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         count.get("excluded_futu", 0) + count.get("excluded_unknown_broker", 0)
         for count in pm_counts.values() if isinstance(count, Mapping)
     )
+    sizing = result.get("position_sizing") or {}
     lines = [
         "# 指派后资产分布（不含 Long Option）",
         "",
@@ -813,6 +853,9 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
     if warnings:
         lines.extend(["", "## 告警", ""])
         lines.extend(f"- {item}" for item in warnings)
+    lines.extend(["", "## 仓位（非期权净资产，指派费用前）", f"- 情景后净资产（CNY）：{sizing.get('net_assets_cny') or '暂不可用'}"])
+    for code, weight in (sizing.get("weight_of_net_assets_by_symbol") or {}).items():
+        lines.append(f"- {code}：{float(weight) * 100:.1f}%" if weight is not None else f"- {code}：暂不可用")
     return "\n".join(lines) + "\n"
 
 

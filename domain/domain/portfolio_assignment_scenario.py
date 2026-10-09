@@ -370,6 +370,116 @@ def _portfolio_evidence_quality(
     }
 
 
+
+POSITION_SIZING_BASIS = "non_option_net_assets_before_assignment_fees.v2"
+
+
+def assignment_asset_movement(*, option_type: str, shares: int, strike: Decimal, spot_cny: Decimal, rate: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    """Physical delivery changes stock and cash together; fees are separate facts."""
+    stock_delta = Decimal(shares if option_type == "put" else -shares)
+    cash_delta_native = -strike * stock_delta
+    return stock_delta, cash_delta_native, stock_delta * spot_cny
+
+
+def project_non_option_assignment_assets(
+    *, accounts: Sequence[str], portfolio_evidence: Mapping[str, Any],
+    option_positions: Sequence[Mapping[str, Any]], candidate_net_premium_cny: Any = 0,
+) -> dict[str, Any]:
+    """Signed non-option net assets before assignment fees, with frozen prices."""
+    selected_accounts = {_text(a).lower() for a in accounts}
+    unavailable, partial, warnings, _ = _portfolio_evidence_quality(accounts=accounts, portfolio_evidence=portfolio_evidence)
+    reasons = list(warnings) if unavailable or partial else []
+    quotes = _quote_map(portfolio_evidence.get("quotes") or [])
+    holdings = portfolio_evidence.get("holdings") or []
+    net = _ZERO
+    stock_values: dict[str, Decimal] = {}
+    stock_shares: dict[str, Decimal] = {}
+    cash_brokers: set[tuple[str, str]] = set()
+    rates = portfolio_evidence.get("fx_rates_to_cny")
+    explicit_rates = isinstance(rates, Mapping)
+    for holding in holdings:
+        if not isinstance(holding, Mapping) or _text(holding.get("account")).lower() not in selected_accounts:
+            continue
+        raw_type = _text(holding.get("asset_type") or holding.get("type")).lower()
+        if "option" in raw_type:
+            continue
+        account = _text(holding.get("account")).lower()
+        broker = normalize_broker(holding.get("broker")) or _text(holding.get("broker"))
+        if _asset_category(holding) == "cash":
+            cash_brokers.add((account, broker))
+        symbol = canonical_symbol(holding.get("code"))
+        quantity = _decimal(holding.get("quantity"))
+        value = _decimal(holding.get("market_value_cny", holding.get("market_value")))
+        if quantity is None:
+            reasons.append("holding_quantity_missing")
+        if _asset_category(holding) == "stock" and symbol and quantity is not None:
+            currency = normalize_currency(holding.get("currency"))
+            native, spot, _, error = _quote_values(quotes.get(symbol), expected_currency=currency)
+            if explicit_rates and currency != "CNY":
+                rate = _positive(rates.get(f"{currency}CNY"))
+                spot = native * rate if native is not None and rate is not None else None
+                if spot is None:
+                    error = "fx_evidence_missing"
+            if error:
+                reasons.append(f"{symbol}:{error}")
+                value = None
+            else:
+                value = quantity * spot
+            stock_shares[symbol] = stock_shares.get(symbol, _ZERO) + quantity
+            if value is not None:
+                stock_values[symbol] = stock_values.get(symbol, _ZERO) + value
+        if value is None:
+            reasons.append(f"{symbol or 'holding'}:market_value_missing")
+        else:
+            net += value
+    premium = _decimal(candidate_net_premium_cny)
+    if premium is None:
+        reasons.append("candidate_net_premium_missing")
+    else:
+        net += premium
+    for position in option_positions:
+        if not isinstance(position, Mapping):
+            reasons.append("assignment_row_invalid")
+            continue
+        account = _text(position.get("account")).lower()
+        if account not in selected_accounts or _text(position.get("status")).lower() != "open" or _text(position.get("side")).lower() != "short":
+            continue
+        option_type = _text(position.get("option_type")).lower()
+        if option_type not in {"put", "call"}:
+            continue
+        symbol = canonical_symbol(position.get("symbol"))
+        currency = normalize_currency(position.get("currency"))
+        broker = normalize_broker(position.get("broker")) or _text(position.get("broker"))
+        count, multiplier, strike = _integer(position.get("contracts_open")), _integer(position.get("multiplier")), _positive(position.get("strike"))
+        quote = quotes.get(symbol)
+        native, spot, quoted_rate, error = _quote_values(quote, expected_currency=currency)
+        rate = Decimal(1) if currency == "CNY" else (_positive(rates.get(f"{currency}CNY")) if explicit_rates else quoted_rate)
+        if explicit_rates:
+            spot = native * rate if native is not None and rate is not None else None
+        if broker != "富途" and (account, broker) not in cash_brokers:
+            reasons.append(f"{account}/{broker}:terminal_baseline_missing")
+        if position.get("state_warning"):
+            reasons.append(f"{symbol}:option_state_warning")
+        if not symbol or not currency or not broker or count is None or multiplier is None or strike is None or spot is None or rate is None or error:
+            reasons.append(f"{symbol or 'option'}:assignment_inputs_missing")
+            continue
+        delta_shares, delta_cash, delta_value = assignment_asset_movement(option_type=option_type, shares=contract_share_quantity(count, multiplier), strike=strike, spot_cny=spot, rate=rate)
+        net += delta_value + delta_cash * rate
+        stock_shares[symbol] = stock_shares.get(symbol, _ZERO) + delta_shares
+        stock_values[symbol] = stock_values.get(symbol, _ZERO) + delta_value
+    if unavailable or partial:
+        reasons.append("portfolio_evidence_incomplete")
+    complete = not reasons
+    return {
+        "basis": POSITION_SIZING_BASIS,
+        "net_assets_cny": _money(net) if complete else None,
+        "stock_value_cny_by_symbol": {code: _money(value) if complete else None for code, value in stock_values.items()},
+        "stock_shares_by_symbol": {code: _quantity(value) for code, value in stock_shares.items()},
+        "weight_of_net_assets_by_symbol": {code: _rate(value / net) if complete and net > 0 else None for code, value in stock_values.items()},
+        "unavailable_reasons": _dedupe_warnings(reasons + (["non_positive_net_assets"] if complete and net <= 0 else [])),
+    }
+
+
 def project_assignment_scenario(
     *,
     accounts: Sequence[str],
@@ -615,6 +725,10 @@ def project_assignment_scenario(
         principal_cny = principal_native * exchange_rate if exchange_rate is not None else None
         stock_delta = Decimal(shares if option_type == "put" else -shares)
         cash_delta_native = -principal_native if option_type == "put" else principal_native
+        if spot_cny is not None and exchange_rate is not None:
+            stock_delta, cash_delta_native, _ = assignment_asset_movement(
+                option_type=option_type, shares=shares, strike=strike, spot_cny=spot_cny, rate=exchange_rate,
+            )
         cash_delta_cny = (
             cash_delta_native * exchange_rate if exchange_rate is not None else None
         )
@@ -1167,6 +1281,7 @@ def project_assignment_scenario(
             )
 
     return {
+        "position_sizing": project_non_option_assignment_assets(accounts=normalized_accounts, portfolio_evidence=portfolio_evidence, option_positions=option_positions),
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "scope": {
