@@ -130,17 +130,6 @@ def read_portfolio_valuation_evidence(
         ) from exc
 
 
-def approved_non_futu_brokers(config: Mapping[str, Any], accounts: Sequence[str]) -> dict[str, list[str]] | None:
-    portfolio = config.get("portfolio")
-    holdings = portfolio.get("holdings") if isinstance(portfolio, Mapping) else None
-    approved = holdings.get("approved_non_futu_brokers") if isinstance(holdings, Mapping) else None
-    if not isinstance(approved, Mapping) or not set(accounts).issubset(approved):
-        return None
-    if any(not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values) or len(values) != len(set(values)) for values in approved.values()):
-        return None
-    return {account: list(approved[account]) for account in accounts}
-
-
 def non_futu_broker_inventory(evidence: Mapping[str, Any], accounts: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
     scope = evidence.get("scope")
     inventory = scope.get("broker_inventory") if isinstance(scope, Mapping) else None
@@ -716,9 +705,6 @@ def collect_assignment_portfolio_evidence(
         pm_quotes: list[Mapping[str, Any]] = []
         try:
             if include_pm:
-                approved = approved_non_futu_brokers(runtime_config, normalized_accounts)
-                if approved is None:
-                    raise ValueError("PM non-Futu approved broker set is missing; re-preview and confirm Holdings")
                 pm_evidence = read_portfolio_valuation_evidence(
                     accounts=normalized_accounts,
                     supplemental_codes=[],
@@ -727,12 +713,6 @@ def collect_assignment_portfolio_evidence(
                 )
                 pm_inventory = non_futu_broker_inventory(pm_evidence, normalized_accounts)
                 pm_counts = pm_evidence["scope"]["holding_counts"]
-                new_brokers = {
-                    account: [row["broker"] for row in pm_inventory[account] if row["classification"] == "non_futu" and row["broker"] not in approved[account]]
-                    for account in normalized_accounts
-                }
-                if any(new_brokers.values()):
-                    raise ValueError(f"PM non-Futu broker names changed: {new_brokers}; re-preview and confirm Holdings")
                 if pm_evidence.get("status") not in {"complete", "partial"}:
                     raise ValueError("PM non-Futu valuation is unavailable")
                 pm_holdings = list(pm_evidence.get("holdings") or [])

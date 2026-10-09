@@ -615,6 +615,11 @@
       "module": "domain/domain/engine/__init__.py",
       "name": "compute_combo_yield_metrics",
       "reason": "Renamed to compute_csp_lc_metrics to identify the cash-secured-put plus long-call variant within Combo Yield. The calculation and input/output contract are unchanged; Python callers use the explicit variant name, while the existing sp_lc runtime configuration remains unchanged."
+    },
+    {
+      "module": "src/application/portfolio_assignment_scenario.py",
+      "name": "approved_non_futu_brokers",
+      "reason": "Holdings now includes all account-scoped non-Futu assets automatically; the manual broker approval gate is retired."
     }
   ]
 }

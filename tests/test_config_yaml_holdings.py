@@ -49,7 +49,7 @@ def test_holdings_preview_binds_explicit_pm_origin(monkeypatch, tmp_path: Path) 
     origins = []
     def probe(_config, *, service_url=None):
         origins.append(service_url)
-        return {"status": "ready_empty", "approved_non_futu_brokers": {"lx": []}}
+        return {"status": "ready_empty"}
     monkeypatch.setattr(inclusion, "_probe_holdings", probe)
     preview = _set(source, True, service_url="http://127.0.0.1:8765")
     with pytest.raises(AgentToolError, match="STALE_PREVIEW"):
@@ -76,17 +76,12 @@ def test_holdings_setting_rejects_invalid_shape(tmp_path: Path, setting) -> None
         validate_config(market)
 
 
-def test_holdings_broker_approval_validation_and_legacy_config(tmp_path: Path) -> None:
+def test_holdings_legacy_broker_approvals_are_ignored(tmp_path: Path) -> None:
     source = _source(tmp_path)
     market, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=source)
-    market["portfolio"]["holdings"] = {"enabled": True}
-    validate_config(market)  # Existing enabled config stays loadable until re-preview.
-    market["portfolio"]["holdings"]["approved_non_futu_brokers"] = {"lx": []}
-    validate_config(market)
-    for invalid in ({}, {"lx": ["银行", "银行"]}, {"lx": [" "]}):
-        market["portfolio"]["holdings"]["approved_non_futu_brokers"] = invalid
-        with pytest.raises(SystemExit, match="approved_non_futu_brokers"):
-            validate_config(market)
+    for legacy in ({}, {"lx": ["银行", "银行"]}, {"lx": [" "]}, None):
+        market["portfolio"]["holdings"] = {"enabled": True, "approved_non_futu_brokers": legacy}
+        validate_config(market)
 
 
 def test_holdings_enable_requires_probe_preview_and_readback(monkeypatch, tmp_path: Path) -> None:
@@ -94,7 +89,6 @@ def test_holdings_enable_requires_probe_preview_and_readback(monkeypatch, tmp_pa
     probes = []
     monkeypatch.setattr(inclusion, "_probe_holdings", lambda cfg: probes.append(cfg) or {
         "status": "ready_observed", "scope": "non_futu", "accounts_observed": ["lx"],
-        "approved_non_futu_brokers": {"lx": ["银行"]},
     })
     preview = _set(source, True)
     assert preview["dry_run"] is True
@@ -122,8 +116,8 @@ def test_holdings_enable_requires_probe_preview_and_readback(monkeypatch, tmp_pa
         str(tmp_path / "resolved" / "config.bot.json"),
     }
     assert yaml.safe_load(source.read_text())["portfolio"]["holdings"]["enabled"] is True
-    assert yaml.safe_load(source.read_text())["portfolio"]["holdings"]["approved_non_futu_brokers"] == {"lx": ["银行"]}
-    assert json.loads((tmp_path / "config.us.json").read_text())["portfolio"]["holdings"]["approved_non_futu_brokers"] == {"lx": ["银行"]}
+    assert yaml.safe_load(source.read_text())["portfolio"]["holdings"] == {"enabled": True}
+    assert json.loads((tmp_path / "config.us.json").read_text())["portfolio"]["holdings"] == {"enabled": True}
     assert (tmp_path / "config.us.json").is_file()
 
     monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: (_ for _ in ()).throw(ValueError("PM down")))
@@ -137,7 +131,7 @@ def test_holdings_enable_requires_probe_preview_and_readback(monkeypatch, tmp_pa
 
 def test_holdings_post_commit_readback_failure_reports_write_receipt(monkeypatch, tmp_path: Path) -> None:
     source = _source(tmp_path)
-    monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: {"status": "ready_observed", "approved_non_futu_brokers": {"lx": []}})
+    monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: {"status": "ready_observed"})
     preview = _set(source, True)
     publish = inclusion.publish_yaml_config_generation
 
@@ -178,7 +172,7 @@ def test_holdings_failed_preflight_does_not_write(monkeypatch, tmp_path: Path) -
 def test_holdings_confirmation_binds_target(monkeypatch, tmp_path: Path) -> None:
     source = _source(tmp_path)
     before = source.read_bytes()
-    monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: {"status": "ready_observed", "approved_non_futu_brokers": {"lx": []}})
+    monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: {"status": "ready_observed"})
     preview = _set(source, True)
     with pytest.raises(AgentToolError, match="preview"):
         _set(source, False, apply=True, confirm=True,
@@ -209,12 +203,10 @@ def test_holdings_probe_accepts_zero_eligible_and_displays_broker_inventory(monk
     result = inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
     assert result["status"] == "ready_empty"
     assert result["eligible_rows"] == 0
-    assert result["approved_non_futu_brokers"] == {"lx": []}
     assert result["broker_inventory"]["lx"][0]["broker"] == "Futu"
 
     monkeypatch.setattr(inclusion, "read_portfolio_valuation_evidence", lambda **kwargs: _scoped_probe_evidence(broker="银行", classification="non_futu"))
     result = inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
-    assert result["approved_non_futu_brokers"] == {"lx": ["银行"]}
     assert result["eligible_rows"] == 1
 
 
@@ -225,21 +217,24 @@ def test_holdings_probe_rejects_unknown_or_partial(monkeypatch, classification, 
         inclusion._probe_holdings({"portfolio_management": {"enabled": True}, "accounts": ["lx"]})
 
 
-def test_holdings_confirmation_rejects_changed_broker_names_before_write(monkeypatch, tmp_path: Path) -> None:
+def test_holdings_confirmation_allows_new_sources_and_removes_legacy_approval(monkeypatch, tmp_path: Path) -> None:
     source = _source(tmp_path)
+    doc = yaml.safe_load(source.read_text())
+    doc["portfolio"] = {"holdings": {"enabled": True, "approved_non_futu_brokers": {"lx": ["银行"]}}}
+    source.write_text(yaml.safe_dump(doc, sort_keys=False))
     names = ["银行"]
     monkeypatch.setattr(inclusion, "_probe_holdings", lambda _cfg: {
-        "status": "ready_observed", "approved_non_futu_brokers": {"lx": list(names)},
+        "status": "ready_observed", "broker_inventory": {"lx": list(names)},
     })
     preview = _set(source, True)
     names[:] = ["银行", "券商 B"]
-    with pytest.raises(AgentToolError) as caught:
-        _set(source, True, apply=True, confirm=True,
-             expected_source_sha256=preview["source_revision"]["before_sha256"],
-             expected_preview_sha256=preview["preview_sha256"])
-    assert caught.value.code == "STALE_PREVIEW"
-    assert not (tmp_path / "config.us.json").exists()
-    assert "portfolio" not in yaml.safe_load(source.read_text())
+    result = _set(source, True, apply=True, confirm=True,
+                  expected_source_sha256=preview["source_revision"]["before_sha256"],
+                  expected_preview_sha256=preview["preview_sha256"])
+    assert result["write_applied"] is True
+    assert result["preflight"]["broker_inventory"]["lx"] == names
+    assert yaml.safe_load(source.read_text())["portfolio"]["holdings"] == {"enabled": True}
+    assert json.loads((tmp_path / "config.us.json").read_text())["portfolio"]["holdings"] == {"enabled": True}
 
 
 def test_holdings_switch_cannot_be_overridden_per_market(tmp_path: Path) -> None:

@@ -67,17 +67,12 @@ def _probe_holdings(config: dict[str, Any], *, service_url: str | None = None) -
     ):
         raise ValueError("PM Holdings valuation evidence is incomplete or stale")
     rows = evidence["holdings"]
-    approved = {
-        account: sorted(row["broker"] for row in inventory[account] if row["classification"] == "non_futu")
-        for account in candidate_accounts
-    }
     return {
         "status": "ready_observed" if rows else "ready_empty",
         "scope": "non_futu",
         "accounts_observed": candidate_accounts,
         "broker_inventory": inventory,
         "holding_counts": evidence["scope"]["holding_counts"],
-        "approved_non_futu_brokers": approved,
         "eligible_rows": len(rows),
         "source_observed_at": quality.get("observed_at_utc"),
         "warnings": [],
@@ -90,7 +85,6 @@ def _preview_sha256(transaction: dict[str, Any], *, enabled: bool) -> str:
         "runtime_root": transaction["runtime_root"],
         "source_revision": transaction["source_revision"],
         "enabled": enabled,
-        "approved_non_futu_brokers": transaction.get("approved_non_futu_brokers"),
         "service_url": transaction.get("service_url"),
         "markets": {market: item["output_config_path"] for market, item in transaction["markets"].items()},
         "bot": transaction["bot"]["output_config_path"],
@@ -112,12 +106,12 @@ def _readback_generation(transaction: dict[str, Any], *, enabled: bool) -> list[
     try:
         require_sha(transaction["source_revision"]["after_sha256"])
         authored = load_yaml_config_file(target)
-        if holdings_included(authored) != enabled or (enabled and authored["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
+        if holdings_included(authored) != enabled:
             raise ValueError("Holdings differs in config.yaml after apply")
         for item in transaction["markets"].values():
             target = Path(item["output_config_path"])
             runtime = json.loads(require_sha(item["sha256"]).decode("utf-8"))
-            if holdings_included(runtime) != enabled or (enabled and runtime["portfolio"]["holdings"].get("approved_non_futu_brokers") != transaction.get("approved_non_futu_brokers")):
+            if holdings_included(runtime) != enabled:
                 raise ValueError("Holdings differs in market runtime config after apply")
         bot_config = transaction["bot"]
         target = Path(bot_config["output_config_path"])
@@ -180,6 +174,7 @@ def set_yaml_holdings_inclusion(
     if not isinstance(holdings, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="portfolio.holdings must be an object")
     holdings["enabled"] = enabled
+    holdings.pop("approved_non_futu_brokers", None)
     markets = configured_markets(doc)
     target_root = Path(runtime_root).expanduser().resolve() if runtime_root else source.parent
 
@@ -191,10 +186,6 @@ def set_yaml_holdings_inclusion(
             current["portfolio_management"] = deepcopy(doc["portfolio_management"])
         try:
             preflight = _probe_holdings(current, service_url=service_url) if service_url is not None else _probe_holdings(current)
-            approved = preflight["approved_non_futu_brokers"]
-            if set(approved) != set(current["accounts"]):
-                raise ValueError("PM broker approval does not cover all configured accounts")
-            holdings["approved_non_futu_brokers"] = approved
         except Exception as exc:
             preflight = {"status": "failed", "reason": str(exc)}
             if apply:
@@ -215,7 +206,6 @@ def set_yaml_holdings_inclusion(
         backup=True,
         expected_source_sha256=before_sha,
     )
-    preview["approved_non_futu_brokers"] = holdings.get("approved_non_futu_brokers") if enabled else None
     if service_url is not None:
         preview["service_url"] = service_url
     preview_sha = _preview_sha256(preview, enabled=enabled)
@@ -239,7 +229,6 @@ def set_yaml_holdings_inclusion(
             backup=True,
             expected_source_sha256=before_sha,
         )
-        transaction["approved_non_futu_brokers"] = holdings.get("approved_non_futu_brokers") if enabled else None
         verified_targets = _readback_generation(transaction, enabled=enabled)
     else:
         verified_targets = []

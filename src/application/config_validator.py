@@ -1145,21 +1145,11 @@ def validate_config(cfg: dict):
     if isinstance(portfolio_cfg, dict):
         holdings_cfg = portfolio_cfg.get('holdings')
         if 'holdings' in portfolio_cfg:
+            # Retired broker approvals stay loadable but do not constrain Holdings.
             if not isinstance(holdings_cfg, dict) or set(holdings_cfg) - {'enabled', 'approved_non_futu_brokers'}:
                 die('portfolio.holdings has unsupported keys')
             if not isinstance(holdings_cfg.get('enabled'), bool):
                 die('portfolio.holdings.enabled must be a boolean')
-            if 'approved_non_futu_brokers' in holdings_cfg:
-                approved = holdings_cfg['approved_non_futu_brokers']
-                if not isinstance(approved, dict) or not set(accounts_from_config(cfg)).issubset(approved):
-                    die('portfolio.holdings.approved_non_futu_brokers must cover configured accounts')
-                for account, names in approved.items():
-                    if (
-                        not isinstance(names, list)
-                        or any(not isinstance(name, str) or not name.strip() for name in names)
-                        or len(names) != len(set(names))
-                    ):
-                        die(f'portfolio.holdings.approved_non_futu_brokers.{account} must contain unique non-empty broker names')
         portfolio_futu = portfolio_cfg.get('futu')
         if portfolio_futu is not None and not isinstance(portfolio_futu, dict):
             die('portfolio.futu must be an object')

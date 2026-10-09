@@ -278,7 +278,7 @@ om-agent run --tool portfolio_assignment_scenario \
 
 - 只处理 open short put/call；Long Option 完全不读取、不估值、不保留；
 - 富途账户股票、现金与 MMF 从 OpenD 读取，富途股票现价也以 OpenD 为准；OM SQLite 提供 short option lot；
-- `portfolio.holdings.enabled` 默认关闭；开启后仅补充 PM Holdings 中经预检确认的非富途资产，不重复计入 PM 的富途股票、现金和 MMF 副本；
+- `portfolio.holdings.enabled` 默认关闭；开启后自动补充 PM Holdings 中同账户全部明确为非富途的资产，无需维护券商名单，不重复计入 PM 的富途股票、现金和 MMF 副本；
 - 非富途资产估值使用 PM 报价和显式 FX；PM 证据不可用时保留富途基线并标记 `partial`；
 - MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
 - 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
