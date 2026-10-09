@@ -166,7 +166,7 @@ def _branch_account_ref(branch: Mapping[str, Any], rows: Mapping[str, Any]) -> d
 def build_trade_attribution_view(
     rows: Mapping[str, Any], *, config: Mapping[str, Any], account: str, market: str, now_ms: int,
     combo_evidence: Mapping[str, Any], capacity_observation: Mapping[str, Any] | None = None,
-    combo_mode: str = "confirm",
+    combo_mode: str = "confirm", revalidate_expired: bool = False,
 ) -> dict[str, Any]:
     """Collect every competitor before selecting any execution; this function never writes."""
     if combo_mode not in {"off", "observe", "confirm", "auto"}:
@@ -208,7 +208,7 @@ def build_trade_attribution_view(
         for execution in event["payload"]["execution_keys"]}
     exposures = list(combo_evidence.get("exposures") or [])
     combos = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
-        exposures=exposures, effective_now_ms=now_ms, include_claimed=True)
+        exposures=exposures, effective_now_ms=now_ms, include_claimed=True, revalidate_expired=revalidate_expired)
     combo_lots = {row["record_id"]: row for row in combos["lot_facts"]}
     known_proposals = {row["inference_id"] for row in rows["account_combo_inferences"]
                        if row.get("status") in {"proposal_ready", "ambiguous", "user_confirmed"}}
@@ -221,7 +221,10 @@ def build_trade_attribution_view(
         reasons = []
         if (pair["evidence_grade"] != "exact_delivered_candidate" or pair.get("alternative_inference_ids")
                 or pair["status"] != "proposal_ready"):
-            reasons.append("combo_not_unique_delivered_pair")
+            reasons.append("combo_expired_pair_not_unique" if pair.get("revalidated_expired")
+                           else "combo_not_unique_delivered_pair")
+        if pair.get("revalidated_expired"):
+            reasons.append("combo_confirmation_required")
         if any(lot not in by_lot or by_lot[lot]["reason_codes"] or by_lot[lot].get("origin") == "manual" for lot in members):
             reasons.append("combo_member_unavailable")
         if members[0] in by_lot:
@@ -243,7 +246,9 @@ def build_trade_attribution_view(
         for exposure in delivered_combo_exposures_for_lot(combo_lots.get(lot) or {}, exposures):
             if exposure not in covered_exposures:
                 candidates[lot].append({"candidate_id": "combo-exposure:" + exposure, "strategy": "combo_yield",
-                    "eligible": False, "reason_codes": ["combo_counterpart_missing_or_asymmetric"], "member_lot_ids": [lot]})
+                    "eligible": False, "reason_codes": ["combo_proposal_expired"
+                        if exposure in combos["expired_exposure_ids_by_lot"].get(lot, [])
+                        else "combo_counterpart_missing_or_asymmetric"], "member_lot_ids": [lot]})
         if fact["position_side"] != "short" or fact["contracts_open"] <= 0:
             continue
         contract = fact["contract_key"]
@@ -494,7 +499,8 @@ def apply_trade_attribution(
         if stop_event is not None and stop_event.is_set():
             raise ValueError("attribution cancelled")
         view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
-            combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode)
+            combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode,
+            revalidate_expired=manual)
         current = next(row for row in view["rows"] if row["execution_key"] == execution_key)
         if reference is None and not conflict_event_ids and not member_decisions and current["status"] == "linked" and not by_key[execution_key]["reason_codes"]:
             fact = by_key[execution_key]
@@ -541,7 +547,8 @@ def apply_trade_attribution(
             evaluation_rows = {**rows, "account_wheel_events": [row for row in rows["account_wheel_events"]
                 if row["event_id"] not in selected and (row.get("payload") or {}).get("conflict_event_id") not in selected]}
             view = build_trade_attribution_view(evaluation_rows, config=config, account=account, market=market,
-                now_ms=instant, combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode)
+                now_ms=instant, combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode,
+                revalidate_expired=manual)
         else:
             evaluation_rows = rows
         evaluated = {row["execution_key"]: row for row in view["rows"]}
@@ -1017,7 +1024,8 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
         focus_open_event_id=attribution_focus_open_event_id(snapshot, account=account, execution_key=filters["execution_key"]))
     view = build_trade_attribution_view(snapshot, config=config, account=account, market=market, now_ms=now, combo_evidence=evidence,
         capacity_observation=context["capacity_observation"] if context else None,
-        combo_mode=combo_reconciliation_mode_for_account(config, account=account))
+        combo_mode=combo_reconciliation_mode_for_account(config, account=account),
+        revalidate_expired=prepare_confirmation)
     rows = view["rows"]
     rows = [row for row in rows if (not filters["execution_key"] or row["execution_key"] == filters["execution_key"])
             and (not filters["symbol"] or row["contract_key"]["underlying_symbol"] == filters["symbol"])

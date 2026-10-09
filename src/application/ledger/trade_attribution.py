@@ -402,7 +402,9 @@ def write_trade_attribution_decision(
     runtime = run_position_projection_in_transaction(repo, events, conn=conn, mode="forced_full")
     for inference_id, pair in {plan["inference"]["inference_id"]: plan["inference"]
                                for plan in plans if plan.get("inference")}.items():
-        repo.upsert_combo_pair_inference(pair, conn=conn)
+        pair = dict(pair)
+        revalidated_expired = pair.pop("revalidated_expired", False) is True
+        repo.upsert_combo_pair_inference(pair, conn=conn, reactivate_expired=manual and revalidated_expired)
         identity, _membership = publish_combo_pair_identity(repo, conn=conn, inference=pair)
         existing_pair = repo.get_combo_pair_inference(inference_id, conn=conn)
         if existing_pair["status"] == "user_confirmed":

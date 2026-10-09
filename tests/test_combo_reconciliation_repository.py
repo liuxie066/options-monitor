@@ -118,3 +118,24 @@ def test_inference_repository_rejects_identity_drift(tmp_path) -> None:
         repo.upsert_combo_pair_inference(drifted)
     exc = _caught.value
     assert "identity conflict" in str(exc)
+
+
+@pytest.mark.parametrize('reason,flag,allowed', [
+    ('proposal_expired', 'reactivate_expired', True),
+    ('proposal_expired', 'reactivate_stale', False),
+    ('facts_drifted_or_leg_claimed', 'reactivate_expired', False),
+    ('facts_drifted_or_leg_claimed', 'reactivate_stale', True),
+])
+def test_reactivation_options_do_not_cross_terminal_reasons(tmp_path, reason, flag, allowed):
+    repo = SQLiteOptionPositionsRepository(tmp_path / 'ledger.sqlite3')
+    lots, proposal = _proposal()
+    for lot in lots:
+        repo.upsert_trade_event(_event(lot))
+    repo.upsert_combo_pair_inference(proposal)
+    repo.transition_combo_pair_inference(inference_id=proposal['inference_id'],
+        expected_statuses=['proposal_ready'], new_status='expired_unresolved',
+        expected_input_hash=proposal['input_snapshot_hash'], decision_fields={'decision_reason': reason})
+    repo.upsert_combo_pair_inference(proposal, **{flag: True})
+    stored = repo.get_combo_pair_inference(proposal['inference_id'])
+    assert stored['status'] == ('proposal_ready' if allowed else 'expired_unresolved')
+    assert stored['proposal_expires_at_ms'] == proposal['proposal_expires_at_ms']
