@@ -1,0 +1,77 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.12",
+  "base": {
+    "tag": "v4.2.11",
+    "commit": "beb29356792bdde9faeaa636f67c13723f7731ad"
+  },
+  "reviewed_head": "eafb6d2b20a639b4e5c8e3313f9acf86474e6650",
+  "commits": [
+    {
+      "sha": "7216ea75b8034c64f36351618988f127a68d983d",
+      "subject": "chore(gateflow): accept option scope coverage plan"
+    },
+    {
+      "sha": "1a220bd6dc2165674606b4971adf844183d9a5fa",
+      "subject": "fix(data): accept proven position-expanded option scopes"
+    },
+    {
+      "sha": "fa0d1528659ca0466f4b6698f71ee1c18e84e1ed",
+      "subject": "chore(gateflow): accept option scope coverage deepreview"
+    },
+    {
+      "sha": "eafb6d2b20a639b4e5c8e3313f9acf86474e6650",
+      "subject": "Merge pull request #522 from liuxie066/codex/fix-option-scope-coverage"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复持仓扩展期权抓取范围与开仓行权价窗口不重叠时被误判为行情缺失的问题；完整期权链与快照证明范围内无合约时保留有效空结果，真实缺失、过期数据及持仓必需合约缺失仍拒绝。",
+      "commits": [
+        "1a220bd6dc2165674606b4971adf844183d9a5fa",
+        "eafb6d2b20a639b4e5c8e3313f9acf86474e6650"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "7216ea75b8034c64f36351618988f127a68d983d",
+      "reason": "Gateflow 空审查检查点，无源码或用户行为变更；实现和合并已映射到修复说明。"
+    },
+    {
+      "commit": "fa0d1528659ca0466f4b6698f71ee1c18e84e1ed",
+      "reason": "Gateflow 空审查检查点，无源码或用户行为变更；实现和合并已映射到修复说明。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "7216ea75b8034c64f36351618988f127a68d983d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/522",
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "1a220bd6dc2165674606b4971adf844183d9a5fa",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/522",
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "fa0d1528659ca0466f4b6698f71ee1c18e84e1ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/522",
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "eafb6d2b20a639b4e5c8e3313f9acf86474e6650",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/522",
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md"
+      ]
+    }
+  ]
+}
