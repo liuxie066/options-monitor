@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1149 (`src`: 556, `domain`: 90, `scripts`: 14, `tests`: 489)
-- Internal import edges: 8833 total, 3689 production/script edges excluding tests
+- Internal import edges: 8842 total, 3691 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|618| domain
+  application -->|619| domain
   application -->|4| domain_services
   application -->|180| infrastructure
   application -->|57| storage
@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3896| application
-  tests -->|505| domain
+  tests -->|3899| application
+  tests -->|506| domain
   tests -->|2| domain_services
-  tests -->|256| infrastructure
+  tests -->|259| infrastructure
   tests -->|304| interfaces
   tests -->|28| scripts
   tests -->|39| storage
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 618 |
+| application | domain | 619 |
 | interfaces | application | 195 |
 | application | infrastructure | 180 |
 | application | storage | 57 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3896 |
-| tests | domain | 505 |
+| tests | application | 3899 |
+| tests | domain | 506 |
 | tests | interfaces | 304 |
-| tests | infrastructure | 256 |
+| tests | infrastructure | 259 |
 | tests | storage | 39 |
 | tests | scripts | 28 |
 | tests | domain_services | 2 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 257 |
+| src.application | domain.domain | 258 |
 | src.interfaces | src.application | 157 |
 | src.application.ledger | domain.domain | 137 |
 | src.application | src.infrastructure | 128 |

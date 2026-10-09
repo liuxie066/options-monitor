@@ -65,7 +65,11 @@ def build_portfolio_risk_context(
         account=account,
         portfolio_evidence=evidence if isinstance(evidence, dict) else None,
         assignment_positions=tuple(positions) if isinstance(positions, list) else None,
-        warnings=tuple(evidence.get("warnings") or []) if isinstance(evidence, dict) else (),
+        warnings=tuple(evidence.get("warnings") or []) + tuple(
+            f"closed_market_quote:{quote.get('market')}:{quote.get('observed_at')}"
+            for quote in evidence.get("quotes") or []
+            if isinstance(quote, dict) and quote.get("valuation_quality") == "closed_market_carried"
+        ) if isinstance(evidence, dict) else (),
     )
 
 

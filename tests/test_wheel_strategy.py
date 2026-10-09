@@ -358,7 +358,7 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
         conn.execute("DELETE FROM wheel_events WHERE event_id = ?", (event["event_id"],))
 
 
-def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
+def test_read_model_reprojects_position_lots_from_corrected_as_of_trade_subset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key = ContractKey.from_values(
@@ -440,7 +440,7 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
 
     assert captured == [
         (["put-open"], [("put-lot", "open", 1)]),
-        (["put-open", "put-close"], [("put-lot", "close", 0)]),
+        (["put-open", "put-close", "void-put-close"], [("put-lot", "open", 1)]),
         (
             ["put-open", "put-close", "void-put-close"],
             [("put-lot", "open", 1)],

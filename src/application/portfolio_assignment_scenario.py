@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -16,6 +17,7 @@ from domain.domain.portfolio_assignment_scenario import (
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError
@@ -39,7 +41,7 @@ from src.application.portfolio_context_service import load_account_portfolio_con
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context, infer_futu_portfolio_settings
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, resolve_opend_fetch_limits
-from src.application.opend_market_snapshot_fetching import get_underlier_observations_opend
+from src.application.opend_market_snapshot_fetching import get_underlier_observations_opend, trading_calendar_dates
 from src.application.opend_utils import normalize_underlier
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 from src.infrastructure.exchange_rates import (
@@ -337,6 +339,7 @@ def _read_futu_quotes(
                 rates[currency] = rate
     gateway = None
     observations = {}
+    closed_market_calendars = {}
     try:
         gateway = build_ready_futu_quote_gateway(
             host=str(host), port=int(port), is_option_chain_cache_enabled=False
@@ -353,6 +356,28 @@ def _read_futu_quotes(
                     snapshot_batch_size=DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT,
                 )
             )
+            if any(observed.market == market and observed.status == "market_closed"
+                   and observed.age_seconds is not None and observed.age_seconds > 300
+                   for observed in observations.values()):
+                evaluated_at = datetime.now(timezone.utc)
+                local_now = evaluated_at.astimezone(ZoneInfo(MARKET_TIMEZONES[market]))
+                end = local_now.date()
+                start = end - timedelta(days=7)
+                try:
+                    receipt = gateway.get_trading_days_with_receipt(
+                        market=market, start=start.isoformat(), end=end.isoformat())
+                    dates = trading_calendar_dates(receipt, start=start, end=end)
+                    completed = [day for day in dates if day < end.isoformat()
+                                 or local_now.time() >= time(9, 30)]
+                    if completed:
+                        closed_market_calendars[market] = {
+                            "market": market, "request_start": start.isoformat(), "request_end": end.isoformat(),
+                            "dates": dates, "latest_trading_date": completed[-1],
+                            "evaluated_at_utc": evaluated_at.isoformat(),
+                            "coverage_complete": True, "pagination_complete": True, "page_count": 1,
+                        }
+                except Exception as exc:
+                    warnings.append(f"{market}: Futu valuation calendar unavailable ({type(exc).__name__})")
     except Exception as exc:
         warnings.append(f"Futu quote read failed: {exc}")
     finally:
@@ -383,7 +408,15 @@ def _read_futu_quotes(
         ):
             warnings.append(f"{code}: Futu quote unavailable ({observed.reason_code if observed else 'missing'})")
             continue
-        is_stale = observed.status != "ready" or age > 300
+        calendar = closed_market_calendars.get(underlier.market)
+        quoted_at = _iso_datetime(observed_at)
+        closure_verified = bool(
+            observed.status == "market_closed" and calendar and quoted_at
+            and quoted_at <= _iso_datetime(calendar["evaluated_at_utc"])
+            and quoted_at.astimezone(ZoneInfo(MARKET_TIMEZONES[underlier.market])).date().isoformat()
+                >= calendar["latest_trading_date"]
+        )
+        is_stale = (observed.status not in {"ready", "market_closed"} or age > 300) and not closure_verified
         if is_stale:
             warnings.append(f"{code}: Futu quote is dated ({observed_at})")
         rate = rates.get(underlier.currency)
@@ -399,6 +432,9 @@ def _read_futu_quotes(
                 "source": "futu_opend_market_snapshot",
                 "observed_at": observed_at,
                 "is_stale": is_stale,
+                "market": underlier.market,
+                "valuation_quality": "closed_market_carried" if closure_verified else "stale" if is_stale else "fresh",
+                "trading_calendar": calendar if closure_verified else None,
             }
         )
     return quotes, warnings

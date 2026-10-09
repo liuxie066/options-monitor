@@ -2110,3 +2110,18 @@ def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
         assert "stock_value_estimated_from_avg_cost" not in message
     legacy = render_full_brief(_brief())
     assert "Position Sizing（历史口径）" in legacy
+
+
+
+@pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
+def test_candidate_sizing_discloses_oldest_carried_quote_in_both_markets(render):
+    brief = _brief()
+    candidate = brief["candidates"]["sell_put"][0]
+    candidate["metrics"].update(
+        position_sizing_basis="non_option_net_assets_before_assignment_fees.v2",
+        symbol_concentration_current=0.2,
+        portfolio_risk_warnings="closed_market_quote:US:2026-10-09T05:00:21Z;closed_market_quote:US:2026-10-08T23:55:40Z;closed_market_quote:HK:2026-10-08T08:00:00Z;closed_market_quote:;closed_market_quote:US:invalid-time",
+    )
+    message = render(brief)
+    assert "估值｜美股休市沿用最近交易时段报价 · 最早报价 美东 10-08 19:55" in message
+    assert "估值｜港股休市沿用最近交易时段报价 · 最早报价 香港 10-08 16:00" in message

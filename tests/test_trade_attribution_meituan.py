@@ -446,3 +446,27 @@ def test_ingress_receipt_focuses_known_execution(tmp_path, monkeypatch):
     monkeypatch.setattr(attribution, 'read_attribution_combo_evidence', evidence)
     _repo, _config, receipt = _meituan_repo(tmp_path)
     assert focused == [receipt['attribution_result']['open_event_id']]
+
+
+def test_brief_attribution_keeps_later_void_during_fill_time_replay(tmp_path):
+    from src.application.daily_decision_brief_service import _pending_attribution_for_brief
+    from dataclasses import replace
+    from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
+
+    repo, config, _ = _meituan_repo(tmp_path)
+    payload = next(row for row in repo.list_trade_events() if row["event_type"] == "assignment")
+    assignment, errors = stored_trade_event_to_ledger_event(payload)
+    assert assignment is not None and not errors
+    obsolete = replace(assignment, event_id="obsolete-expiry", event_type="expire_close",
+                       event_time_ms=assignment.event_time_ms - 1000, raw_payload={})
+    void = replace(obsolete, event_id="void-obsolete-expiry", event_type="void",
+                   event_time_ms=_ms("2026-10-02T00:00:00Z"), contracts=0,
+                   target_event_id=obsolete.event_id, target_lot_id=None)
+    persist_trade_event_objects_atomically(repo, [obsolete, void])
+    before = repo.list_trade_events()
+    pending, error = _pending_attribution_for_brief(
+        base=tmp_path, config=config, account="lx", market="HK",
+        now_ms=_ms("2026-10-01T00:00:00Z"))
+    assert error is None
+    assert len(pending) == 1 and pending[0]["symbol"] == "3690.HK"
+    assert repo.list_trade_events() == before

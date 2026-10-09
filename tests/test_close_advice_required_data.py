@@ -200,10 +200,10 @@ def test_plan_uses_market_local_date_and_seals_independent_calendar(tmp_path: Pa
 
 
 def test_calendar_rejects_missing_session_type() -> None:
-    from src.application.close_advice_required_data import _calendar_dates
+    from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 
     with pytest.raises(ValueError, match="calendar row invalid"):
-        _calendar_dates(
+        trading_calendar_dates(
             {"retcode": 0, "coverage_complete": True, "pagination_complete": True,
              "page_count": 1, "rows": [{"time": "2026-07-28"}]},
             start=date(2026, 7, 28), end=date(2026, 8, 28),

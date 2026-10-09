@@ -35,6 +35,7 @@ from src.application.pipeline_watchlist import (
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.payload_helpers import required_text
 from src.application.opend_utils import normalize_underlier
+from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from functools import partial
 
 
@@ -69,29 +70,6 @@ def _provider_rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list) and all(isinstance(row, Mapping) for row in value):
         return [dict(row) for row in value]
     raise ValueError("provider rows invalid")
-
-
-def _calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
-    if not isinstance(receipt, Mapping) or (
-        receipt.get("retcode") != 0
-        or receipt.get("coverage_complete") is not True
-        or receipt.get("pagination_complete") is not True
-        or receipt.get("page_count") != 1
-    ):
-        raise ValueError("calendar receipt incomplete")
-    dates: set[str] = set()
-    for row in _provider_rows(receipt.get("rows")):
-        raw = row.get("time") or row.get("date") or row.get("trade_date")
-        kind = str(row.get("trade_date_type") or "").strip().upper()
-        if not isinstance(raw, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
-            raise ValueError("calendar row invalid")
-        day = date.fromisoformat(raw)
-        if day.isoformat() != raw or not start <= day <= end:
-            raise ValueError("calendar date outside request")
-        dates.add(raw)
-    if not dates:
-        raise ValueError("calendar returned no trading dates")
-    return sorted(dates)
 
 
 def enrich_close_advice_required_data_plan(
@@ -138,7 +116,7 @@ def enrich_close_advice_required_data_plan(
             response = gateway.get_trading_days_with_receipt(
                 market=market, start=start.isoformat(), end=end.isoformat()
             )
-            dates = _calendar_dates(response, start=start, end=end)
+            dates = trading_calendar_dates(response, start=start, end=end)
             calendar.update({
                 "trading_calendar_status": "ok",
                 "trading_calendar_dates": json.dumps(dates, separators=(",", ":")),

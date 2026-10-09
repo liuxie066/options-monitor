@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from src.application.opening_quote_evidence import (
     OpeningUnderlierObservation,
@@ -20,6 +20,34 @@ from src.application.opend_fetch_config import (
 from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
+
+
+def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
+    if not isinstance(receipt, Mapping) or (
+        receipt.get("retcode") != 0
+        or receipt.get("coverage_complete") is not True
+        or receipt.get("pagination_complete") is not True
+        or receipt.get("page_count") != 1
+    ):
+        raise ValueError("calendar receipt incomplete")
+    dates: set[str] = set()
+    rows = receipt.get("rows")
+    if hasattr(rows, "to_dict"):
+        rows = rows.to_dict("records")
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        raise ValueError("provider rows invalid")
+    for row in rows:
+        raw = row.get("time") or row.get("date") or row.get("trade_date")
+        kind = str(row.get("trade_date_type") or "").strip().upper()
+        if not isinstance(raw, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
+            raise ValueError("calendar row invalid")
+        day = date.fromisoformat(raw)
+        if day.isoformat() != raw or not start <= day <= end:
+            raise ValueError("calendar date outside request")
+        dates.add(raw)
+    if not dates:
+        raise ValueError("calendar returned no trading dates")
+    return sorted(dates)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
