@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 repo_base = Path(__file__).resolve().parents[3]
 if str(repo_base) not in sys.path:
@@ -533,6 +533,49 @@ def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
     return counts
 
 
+def _trade_attribution_diagnosis(
+    *,
+    repo: Any,
+    config: dict[str, Any],
+    account: str,
+    symbol: Any,
+    execution: Mapping[str, Any],
+    runtime_root: Path,
+) -> dict[str, Any]:
+    """Best-effort per-fill attribution preview bound to the fill's own market config.
+
+    The fill's market may differ from the listener source's market; the preview is
+    then built from that market's generated runtime config, never from the source
+    config. A missing, stale or mismatched sibling config keeps the existing
+    best-effort receipt contract and surfaces as ``attribution_error``.
+    """
+    try:
+        from domain.domain.symbol_identity import symbol_market
+        from domain.domain.trade_execution import execution_identity_from_input
+        from src.application.ledger.api import read_trade_attribution_snapshot
+        from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
+        from src.application.trades.attribution import (
+            attribution_focus_open_event_id, attribution_result_payload, bind_attribution_market_config,
+            build_trade_attribution_view, read_attribution_combo_evidence)
+
+        market = str(symbol_market(symbol) or "").lower()
+        bound = bind_attribution_market_config(config=config, repo=repo, account=account, market=market,
+            runtime_root=runtime_root)
+        rows = read_trade_attribution_snapshot(repo, account=account, market=market)
+        instant = int(time.time() * 1000)
+        execution_key = execution_identity_from_input(execution)
+        evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant,
+            focus_open_event_id=attribution_focus_open_event_id(rows, account=account, execution_key=execution_key))
+        view = build_trade_attribution_view(rows, config=bound, account=account, market=market, now_ms=instant,
+            combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(bound, account=account))
+        matched = [row for row in view["rows"] if row["execution_key"] == execution_key]
+        if len(matched) != 1:
+            return {}
+        return {"attribution_result": attribution_result_payload(matched[0])}
+    except Exception as exc:
+        return {"attribution_error": type(exc).__name__}
+
+
 def _process_payload(
     payload: dict[str, Any],
     *,
@@ -726,29 +769,12 @@ def _process_payload(
                 repo=repo, cfg=config, account=normalized_deal.internal_account,
                 market=str(symbol_market(normalized_deal.symbol) or "").lower())}
         if isinstance(config, dict) and runtime_root is not None and current.get("action") in {"open", "open_close"}:
-            from src.application.trades.attribution import (
-                read_attribution_combo_evidence, build_trade_attribution_view, attribution_result_payload,
-                attribution_focus_open_event_id)
-            from src.application.ledger.api import read_trade_attribution_snapshot
-            from domain.domain.symbol_identity import symbol_market
-            execution = getattr(normalized_deal, "execution_input", None) or {}
-            account = str(getattr(normalized_deal, "internal_account", "") or "")
-            market = str(symbol_market(getattr(normalized_deal, "symbol", "")) or "").lower()
-            try:
-                rows = read_trade_attribution_snapshot(repo, account=account, market=market)
-                instant = int(time.time() * 1000)
-                from domain.domain.trade_execution import execution_identity_from_input
-                execution_key = execution_identity_from_input(execution)
-                evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=instant,
-                    focus_open_event_id=attribution_focus_open_event_id(rows, account=account, execution_key=execution_key))
-                from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
-                view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=instant,
-                    combo_evidence=evidence, combo_mode=combo_reconciliation_mode_for_account(config, account=account))
-                matched = [row for row in view["rows"] if row["execution_key"] == execution_key]
-                if len(matched) == 1:
-                    current = {**current, "attribution_result": attribution_result_payload(matched[0])}
-            except Exception as exc:
-                current = {**current, "attribution_error": type(exc).__name__}
+            current = {**current, **_trade_attribution_diagnosis(
+                repo=repo, config=config,
+                account=str(getattr(normalized_deal, "internal_account", "") or ""),
+                symbol=getattr(normalized_deal, "symbol", ""),
+                execution=getattr(normalized_deal, "execution_input", None) or {},
+                runtime_root=runtime_root)}
         if _lifecycle_notification_is_outbox_owned({"deal": normalized_deal, "result": current}):
             current = {**current, "receipt_notification_owner": "lifecycle_outbox"}
         if recover_skipped:
@@ -2684,20 +2710,15 @@ def _run_listener_source_loop(
             except Exception as exc:
                 status_state["attribution_operation_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
         if not stop.is_set():
-            from src.application.trades.attribution import reconcile_trade_attribution_account
-            from src.application.futu_quote_routing import runtime_config_market
+            from src.application.trades.attribution import reconcile_trade_attribution_source
             cursors = status_state.setdefault("attribution_cursors", {})
-            for attribution_account in sorted(set(account_mapping.values())):
-                if stop.is_set():
-                    break
-                try:
-                    recovered = reconcile_trade_attribution_account(repo, config=cfg, account=attribution_account,
-                        market=runtime_config_market(cfg).lower(), runtime_root=runtime_root, inbox_path=inbox_path,
-                        combo_mode=combo_mode, cursor=cursors.get(attribution_account, ""), stop_event=stop)
-                    cursors[attribution_account] = recovered["next_cursor"]
-                    status_state.setdefault("attribution_recovery", {})[attribution_account] = recovered
-                except Exception as exc:
-                    status_state.setdefault("attribution_recovery", {})[attribution_account] = {"error": type(exc).__name__}
+            try:
+                status_state["attribution_recovery"] = reconcile_trade_attribution_source(
+                    repo, config=cfg, accounts=sorted(set(account_mapping.values())),
+                    runtime_root=runtime_root, inbox_path=inbox_path, combo_mode=combo_mode,
+                    cursors=cursors, stop_event=stop)
+            except Exception as exc:
+                status_state["attribution_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
         _write_listener_status(status_path, status_state, status=str(status_state.get("status") or "starting"),
                                stage="receipt_recovery")
 
