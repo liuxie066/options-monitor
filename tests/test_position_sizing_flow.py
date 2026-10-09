@@ -226,3 +226,27 @@ def test_untrusted_option_snapshot_keeps_current_sizing_but_hides_assignment_sce
     assert frame.iloc[0][SIZING_KEYS[0]] == round(50000/850000, 6)
     assert pd.isna(frame.iloc[0][SIZING_KEYS[1]])
     assert pd.isna(frame.iloc[0][SIZING_KEYS[2]])
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_disabled_underwriting_adds_sizing_without_fabricating_policy_decisions(mode):
+    enrich = enrich_and_filter_sell_put_underwriting
+    config_key = "sell_put_cfg"
+    row = _candidate()
+    if mode == "call":
+        from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
+        from tests.test_covered_call_strategy_risk import _candidate as call_candidate
+        enrich = enrich_and_filter_covered_call_underwriting
+        config_key = "sell_call_cfg"
+        row = call_candidate()
+    emissions = []
+    frame = enrich(
+        df_labeled=pd.DataFrame([row]), symbol="NVDA", **{config_key: {}},
+        portfolio_ctx=_account_nvda_context(),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=.14)),
+        decision_sink_fn=emissions.append,
+    )
+    assert len(frame) == 1
+    assert frame.iloc[0][SIZING_KEYS[0]] == round(50000/850000, 6)
+    assert pd.notna(frame.iloc[0][SIZING_KEYS[2]])
+    assert emissions == []

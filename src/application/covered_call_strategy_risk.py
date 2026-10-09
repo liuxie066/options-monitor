@@ -115,10 +115,10 @@ def enrich_and_filter_covered_call_underwriting(
         ):
             if key in row_payload:
                 out.loc[idx, key] = row_payload.get(key)
-        decision = (
-            evaluate_covered_call_underwriting_row(row_payload, cfg=cfg) if cfg.enabled else
-            {"accepted": True, "fields": {}, "opening_decision": {"normalized_input": row_payload}}
-        )
+        if not cfg.enabled:
+            keep_mask.append(True)
+            continue
+        decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
@@ -139,7 +139,7 @@ def enrich_and_filter_covered_call_underwriting(
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty and cfg.enabled:
         filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="call", cfg=cfg))
-    if decision_sink_fn is not None:
+    if decision_sink_fn is not None and cfg.enabled:
         decision_sink_fn(decision_records)
     return filtered
 
