@@ -101,13 +101,19 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
     tmp_path, monkeypatch, stock_projection,
 ) -> None:
     import json
+    from datetime import datetime, timezone
 
     from domain.domain.short_vol_assessment import portfolio_concentration_fields
     from src.application import pipeline_context as pc
     from src.application.futu_portfolio_context import build_futu_position_snapshot
     from src.application.short_vol_risk_context import build_portfolio_risk_context
+
+    from src.infrastructure import exchange_rates as fx
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
+    # Keep the FX fixture in a verified CFETS session, including off-hours test runs.
+    fx_at = datetime(2026, 7, 24, 2, tzinfo=timezone.utc)
+    monkeypatch.setattr(fx, "_utc_now", lambda: fx_at)
     context = cash_portfolio({"cash_by_currency": {"CNY": 100000}})
     context["position_snapshot_input"] = build_futu_position_snapshot(
         rows=[] if stock_projection == "empty" else [
@@ -141,8 +147,8 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
         base=tmp_path, data_config="fixture.json", market="富途", account="lx",
         state_dir=tmp_path, shared_state_dir=None, log=lambda _: None, runtime_config=cash_config(),
         exchange_rate_observation={"schema_version": 2, "pairs": {
-            pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": context["source_observed_at"],
-                   "observed_at_utc": context["source_observed_at"]}
+            pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": fx_at.isoformat(),
+                   "observed_at_utc": fx_at.isoformat()}
             for pair, rate in {"USDCNY": 7, "HKDCNY": .9}.items()
         }},
     )
