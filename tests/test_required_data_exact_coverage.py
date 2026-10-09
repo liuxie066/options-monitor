@@ -917,3 +917,63 @@ def test_exact_coverage_accepts_required_finite_positive_rv() -> None:
     plan = _plan(requests=[_request(require_rv=True)])
 
     assert required_data_frame_covers_fetch_plan_debug(_frame(rv=0.24), plan)
+
+
+@pytest.mark.parametrize("option_type", ["put", "call"])
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        (None, None),
+        ("unproven", "invalid_row_identity"),
+        ("unscoped", "invalid_row_identity"),
+        ("chain_error", "provider_incomplete"),
+        ("stale", "stale_data"),
+        ("missing_snapshot", "provider_incomplete"),
+        ("missing_exact", "required_contract_missing"),
+        ("outside_window", "invalid_row_identity"),
+    ],
+)
+def test_expanded_scope_can_prove_empty_base_strategy_window(
+    option_type: str,
+    failure: str | None,
+    expected_reason: str | None,
+) -> None:
+    request = _request(
+        option_type=option_type,
+        minimum=80.0, maximum=144.0,
+        base_minimum=120.0, base_maximum=144.0,
+        exact_strikes_by_expiration={
+            EXPIRATION: [82.5 if failure == "missing_exact" else 80.0]
+        },
+    )
+    frame = pd.DataFrame([
+        _row(option_type=option_type, strike=75.0 if failure == "outside_window" else 80.0)
+    ]).assign(contract_symbol="NVDA-POSITION")
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={(option_type, EXPIRATION): ["NVDA-POSITION"]},
+        statuses={EXPIRATION: "error" if failure == "chain_error" else "stale_cache" if failure == "stale" else "cache"},
+    )
+    if failure == "unscoped":
+        evidence.pop("option_chain_scope_coverage")
+    if failure == "missing_snapshot":
+        evidence.update({
+            "snapshot_complete": False,
+            "snapshot_returned_codes": 0,
+            "snapshot_missing_codes": 1,
+            "snapshot_returned_code_set": [],
+            "snapshot_missing_code_set": ["NVDA-POSITION"],
+        })
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        frame,
+        _plan(requests=[request]),
+        option_chain_evidence=None if failure == "unproven" else evidence,
+    )
+
+    assert result.reason_code == expected_reason
+    assert result.accepted is (expected_reason is None)
+    if result.accepted:
+        assert result.status == "success"
+        assert result.provider_coverage == "complete"
+        assert frame["strike"].max() < 120.0

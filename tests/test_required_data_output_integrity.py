@@ -1747,3 +1747,49 @@ def test_finalizer_keeps_metadata_error_after_first_validation(
             now=COMPLETED_AT,
         )
     assert _receipt_paths(tmp_path) == []
+
+
+def test_finalizer_preserves_put_and_position_call_outside_opening_window(
+    tmp_path: Path,
+) -> None:
+    payload, _unused_contract = _valid_multi_child_candidate()
+    plan = _fetch_plan(request_count=2)
+    call_request = _as_dict(_as_list(plan["merged_requests"])[1])
+    for side in [
+        _as_dict(_as_list(plan["side_plans"])[1]),
+        _as_dict(_as_list(call_request["side_plans"])[0]),
+    ]:
+        _as_dict(side["strike_window"]).update({
+            "min_strike": 120.0, "max_strike": 160.0,
+            "base_min_strike": 140.0, "base_max_strike": 160.0,
+        })
+        side["max_strike"] = 160.0
+    call_request["side_strike_windows"] = {
+        "call": {"min_strike": 120.0, "max_strike": 160.0}
+    }
+    _as_dict(_as_list(_as_dict(payload["meta"])["requests"])[1])[
+        "planned_request_sha256"
+    ] = required_data_request_sha256(call_request)
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA", fetch_plan=plan, source="opend", host=HOST, port=PORT,
+    )
+
+    result = finalize_required_data_quote_candidate(
+        base=tmp_path, producer_root=tmp_path,
+        producer_run_id="run-position-expanded-scope", symbol="NVDA",
+        expected_fetch_contract=contract, fetch_policy=_policy(),
+        mode="fresh", payload=payload, now=COMPLETED_AT,
+    )
+
+    assert result["quote_receipt_path"].is_file()
+    assert json.loads(result["raw_path"].read_text())["rows"] == payload["rows"]
+    frame = pd.read_csv(result["csv_path"])
+    assert set(frame["contract_symbol"]) == {CONTRACT_CODE, CALL_CONTRACT_CODE}
+    calls = frame[frame["option_type"] == "call"]
+    assert calls["strike"].tolist() == [120.0]
+    assert calls[calls["strike"].between(140.0, 160.0)].empty
+    validate_required_data_quote_candidate(
+        producer_root=tmp_path, raw_path=result["raw_path"],
+        csv_path=result["csv_path"], expected_fetch_contract=contract,
+        now=COMPLETED_AT, require_fresh=True,
+    )

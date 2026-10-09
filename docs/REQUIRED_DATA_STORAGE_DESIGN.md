@@ -1014,3 +1014,19 @@ receipt callback does not reread raw JSON; it guards window expiry using the
 stored metadata and a resampled clock. Owner: receipt publisher. Any stronger
 raw-file TOCTOU protection requires a separately scoped design round. No
 product or permission decision remains open within this scope.
+
+
+## Complete option-chain proof and position-expanded strike windows
+
+`required_data_coverage.py` validates each request, option side and expiration
+against its complete `cache` or `fetched` chain scope and exact snapshot/row
+identities. When that proof is valid, rows inside the expanded fetch window
+remain usable even if none fall inside the base opening-strategy strike window.
+This means the opening strategy can have no contracts while position quotes and
+another option side remain available; it does not make the shared payload empty.
+
+Without complete scope proof, retain the existing inferred base-window coverage
+requirement. Missing snapshots, stale/incomplete chains, out-of-request rows and
+missing required exact position strikes still fail closed. Do not change strategy
+strike settings or turn a provider failure into a valid empty result to recover
+an expanded-window validation failure.
