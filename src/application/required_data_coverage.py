@@ -349,17 +349,11 @@ def _evaluate_required_data_rows(
                     maximum=request_scope_max,
                 ):
                     return "invalid_row_identity", False
-                if not _strikes_cover_bounds(
+                # Complete scope proof can establish an empty base strategy window.
+                if proven_codes is None and not _strikes_cover_bounds(
                     strikes=strikes,
                     base_min=effective_min,
                     base_max=effective_max,
-                ) and (
-                    proven_codes is None
-                    or not _strikes_overlap_bounds(
-                        strikes=strikes,
-                        base_min=effective_min,
-                        base_max=effective_max,
-                    )
                 ):
                     return "invalid_row_identity", False
                 if not _strikes_cover_exact_requirements(
@@ -1248,33 +1242,6 @@ def _strikes_cover_bounded_edges(*, unique_strikes: list[float], base_min: float
     nearest_lower_gap = min(abs(strike - base_min) for strike in unique_strikes)
     nearest_upper_gap = min(abs(strike - base_max) for strike in unique_strikes)
     return nearest_lower_gap <= tolerance and nearest_upper_gap <= tolerance
-
-
-def _strikes_overlap_bounds(
-    *,
-    strikes: pd.Series,
-    base_min: float | None,
-    base_max: float | None,
-) -> bool:
-    if strikes.empty:
-        return False
-    normalized_min = None
-    if base_min is not None:
-        normalized_min = _strict_finite_float(base_min)
-        if normalized_min is None or normalized_min <= 0:
-            return False
-    normalized_max = None
-    if base_max is not None:
-        normalized_max = _strict_finite_float(base_max)
-        if normalized_max is None or normalized_max <= 0:
-            return False
-    if not _valid_optional_range(normalized_min, normalized_max):
-        return False
-    return any(
-        (normalized_min is None or float(value) >= normalized_min)
-        and (normalized_max is None or float(value) <= normalized_max)
-        for value in strikes.tolist()
-    )
 
 
 def _strike_edge_tolerance(*, unique_strikes: list[float], base_min: float, base_max: float) -> float:
