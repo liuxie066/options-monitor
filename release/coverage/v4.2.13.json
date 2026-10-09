@@ -1,0 +1,119 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.13",
+  "base": {
+    "tag": "v4.2.12",
+    "commit": "1eb3636d3ed246e8c9d50abb8c5e57fa1e2c5ea5"
+  },
+  "reviewed_head": "baab5b413d9ea37f9772707b430c48c20138268c",
+  "commits": [
+    {
+      "sha": "99a79160ed0238df12b0526298f2a11db19c2282",
+      "subject": "fix(brief): preserve ledger corrections and closed-market valuation"
+    },
+    {
+      "sha": "16d9054f8f825bfe0a092c84300affe721e57043",
+      "subject": "test(wheel): assert corrected historical facts after later void"
+    },
+    {
+      "sha": "44efb1ef438e4c98acb2ff8493d2479f4bbca53b",
+      "subject": "Merge pull request #524 from liuxie066/codex/brief-ledger-sizing-fix"
+    },
+    {
+      "sha": "e1ae957c7f410791fedaeda741d73a43bd6c549b",
+      "subject": "fix(portfolio): remove manual Holdings broker approval gate"
+    },
+    {
+      "sha": "737f8f64eee34c0a60d6d812dba4efaadddb048a",
+      "subject": "Merge pull request #531 from liuxie066/codex/holdings-without-broker-approval"
+    },
+    {
+      "sha": "15546a918a292ddc6934a2cf438e327c58eb7ef1",
+      "subject": "fix(snapshot): isolate ready manifest field validation"
+    },
+    {
+      "sha": "baab5b413d9ea37f9772707b430c48c20138268c",
+      "subject": "Merge pull request #533 from liuxie066/codex/issue481-schema"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "归属历史回放保留指向范围内事实的后补 void 更正，避免重新计入已作废的到期事件而导致归属待办读取失败；更正继续由权威账本投影校验。",
+      "commits": [
+        "99a79160ed0238df12b0526298f2a11db19c2282",
+        "16d9054f8f825bfe0a092c84300affe721e57043",
+        "44efb1ef438e4c98acb2ff8493d2479f4bbca53b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Position Sizing 在市场休市时接受完整交易日历验证的最近交易日报价，并展示估值市场及最早报价时间；缺失或未通过日历校验的报价仍明确不可用，开平仓实时报价门禁不变。",
+      "commits": [
+        "99a79160ed0238df12b0526298f2a11db19c2282",
+        "44efb1ef438e4c98acb2ff8493d2479f4bbca53b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "启用 Holdings 后自动纳入本账户通过校验的 PM 非富途资产，不再要求手工确认券商名单；保留账户隔离、来源完整性、时效和可信度校验，非富途资产不增加富途可用于期权开仓的现金。",
+      "commits": [
+        "e1ae957c7f410791fedaeda741d73a43bd6c549b",
+        "737f8f64eee34c0a60d6d812dba4efaadddb048a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复同一快照混合正常空集与有合约结果时，ready 条目的可选字段污染后续条目校验的问题；保留严格字段、收据及数据完整性校验。",
+      "commits": [
+        "15546a918a292ddc6934a2cf438e327c58eb7ef1",
+        "baab5b413d9ea37f9772707b430c48c20138268c"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "99a79160ed0238df12b0526298f2a11db19c2282",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/524"
+      ]
+    },
+    {
+      "commit": "16d9054f8f825bfe0a092c84300affe721e57043",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/524"
+      ]
+    },
+    {
+      "commit": "44efb1ef438e4c98acb2ff8493d2479f4bbca53b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/524"
+      ]
+    },
+    {
+      "commit": "e1ae957c7f410791fedaeda741d73a43bd6c549b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/531"
+      ]
+    },
+    {
+      "commit": "737f8f64eee34c0a60d6d812dba4efaadddb048a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/531"
+      ]
+    },
+    {
+      "commit": "15546a918a292ddc6934a2cf438e327c58eb7ef1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/533"
+      ]
+    },
+    {
+      "commit": "baab5b413d9ea37f9772707b430c48c20138268c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/533"
+      ]
+    }
+  ]
+}
