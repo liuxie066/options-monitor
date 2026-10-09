@@ -436,6 +436,35 @@ not actual average capital used during elapsed reporting time, and can exceed th
 The return numerator is the native currency's `option_net_cashflow.total.amount`; it never substitutes
 the open/terminated split.
 
+### Actual Daily Occupied Principal
+
+The root-only `daily_occupied_capital` metric is displayed as **日均占用**:
+
+```text
+实际资本天数 = Σ(每份本金 × 统计期内实际未了结毫秒数 / 86,400,000)
+日均占用 = 实际资本天数 / 已经过的统计天数
+```
+
+Include option lots opened before the selected window, including shares closed during that window.
+Clip each disjoint closed share and residual to the reporting window: start at the later of opening
+and window start; end at the earlier of actual terminal and cutoff, or cutoff for residuals.
+Future closes remain unsettled at cutoff. Intraday durations retain fractions without a one-day
+floor; weekends and idle time remain in the elapsed denominator. A completed natural month uses
+its actual calendar days, rather than a fixed 30-day denominator.
+
+Use the same native-currency principal basis listed below. This measures option principal, not
+broker margin. It is independent of `option_return.average_occupied_capital` and is **not the
+return denominator**. Original cashflow, returns, quality, and opening-cohort rows/breakdowns
+retain their contracts.
+
+Each currency reports `amount, status, missing`. Unavailable/conflicting terminal or principal
+evidence and affected economic diagnostics produce `amount=null, status=partial`; never infer an
+expiry closure. Fee, cash FX, and strategy attribution gaps alone do not block principal. Its
+completeness is reported by its own status and missing reasons, independently of root quality.
+Known-currency zero occupancy is observed zero; an entirely empty scope has an empty currency map.
+Default/summary Tool Gateway and CLI reads preserve the metric; row/breakdown pages retain their
+existing cohort shape. Bot displays partial amounts as “-（证据不完整）”.
+
 Occupied-capital basis:
 
 - `sell_put`: strike × multiplier × remaining contracts;
@@ -713,6 +742,8 @@ buy_option_win_rate
   winning_contracts, eligible_contracts, rate, status, missing
 option_return
   by_currency -> capital_days, average_occupied_capital, rate, annualized_rate, status, missing
+daily_occupied_capital             # root only; actual overlapping holdings, not opening cohort
+  by_currency -> amount, status, missing
 breakdowns
   opening_years[], opening_months[], accounts[], currencies[], leg_types[],
   attribution_strategies[], parent_universes[], symbols[]

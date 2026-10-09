@@ -38,6 +38,7 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
             "status": "not_applicable", "missing": [],
         },
         "option_return": {"by_currency": {}},
+        "daily_occupied_capital": {"by_currency": {"USD": {"amount": 5000, "status": "observed", "missing": []}}},
         "breakdowns": {
             "opening_years": [], "opening_months": [], "accounts": [], "currencies": [],
             "leg_types": [], "attribution_strategies": [], "parent_universes": [], "symbols": [],
@@ -105,11 +106,12 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
         "as_of_date": "2026-09-02", "include_rows": True,
     })
 
+    assert data["daily_occupied_capital"] == _report()["daily_occupied_capital"]
     assert warnings == []
     assert set(data) == {
         "period", "scope", "coverage", "freshness", "option_net_cashflow",
         "sell_option_win_rate", "buy_option_win_rate", "option_return",
-        "breakdowns", "quality", "rows",
+        "daily_occupied_capital", "breakdowns", "quality", "rows",
     }
     assert calls["account"] == "lx"
     assert calls["broker"] == "富途"
@@ -233,6 +235,10 @@ def test_option_performance_output_contract_has_only_the_new_business_fields() -
     assert "sell_option_win_rate" in contract["fact_fields"]
     assert "buy_option_win_rate" in contract["fact_fields"]
     assert "option_return" in contract["fact_fields"]
+    assert "daily_occupied_capital" in contract["fact_fields"]
+    assert "daily_occupied_capital" in contract["model_value_fields"]
+    assert "daily_occupied_capital" in contract["model_preview_fields"]
+    assert "daily_occupied_capital.by_currency.*.missing" in contract["model_missing_data_fields"]
     assert "option_net_cashflow.cny_total.missing" in contract["missing_data_fields"]
     assert "option_net_cashflow.cny_total.missing" in contract["model_missing_data_fields"]
     serialized = str(contract)

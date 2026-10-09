@@ -273,6 +273,13 @@ def reduce_option_performance(
             "status": MetricStatus.PARTIAL,
             "missing": tuple(sorted({*bundle["missing"], *partial_breakdown_missing})),
         }
+    bundle = {
+        **bundle,
+        "daily_occupied_capital": _daily_occupied_capital(
+            projection, allocations_by_lot=allocations_by_lot, period=period,
+            accounts=account_scopes, broker=broker_scope,
+        ),
+    }
     return PerformanceReduction(
         period=period,
         facts=ordered_facts,
@@ -280,6 +287,87 @@ def reduce_option_performance(
         breakdowns=breakdowns,
         diagnostics=diagnostics,
     )
+
+
+def _daily_occupied_capital(
+    projection: ProjectionResult,
+    *,
+    allocations_by_lot: Mapping[str, Sequence[OptionEconomicAllocation]],
+    period: PeriodWindow,
+    accounts: set[str],
+    broker: str | None,
+) -> dict[str, Any]:
+    diagnostics = tuple(
+        item for item in projection.diagnostics
+        if _diagnostic_in_scope(item, accounts=accounts, broker=broker)
+    )
+    affected = _affected_lot_missing(diagnostics)
+    lot_ids = {lot.lot_id for lot in projection.lots}
+    global_missing: set[str] = set()
+    for item in diagnostics:
+        reason = _DIAGNOSTIC_REASONS.get(item.code)
+        if reason not in _ECONOMIC_FAILURES:
+            continue
+        targets = _affected_lot_missing((item,))
+        details = item.details if isinstance(item.details, dict) else {}
+        if not targets or set(targets) - lot_ids or details.get("cohort_time_unreliable"):
+            global_missing.add(reason)
+
+    capital_days: dict[str, Decimal] = defaultdict(Decimal)
+    missing: dict[str, set[str]] = defaultdict(set)
+    for lot in projection.lots:
+        if (lot.asset_type != "option" or lot.opened_at_ms >= period.effective_end_exclusive_at_ms
+                or (accounts and lot.contract_key.account not in accounts)
+                or (broker and lot.contract_key.broker != broker)):
+            continue
+        currency = lot.currency
+        capital_days[currency] += Decimal(0)
+        missing[currency].update(global_missing)
+        admitted = [
+            item for item in allocations_by_lot.get(lot.lot_id, ())
+            if item.closed_at_ms < period.effective_end_exclusive_at_ms
+        ]
+        remaining = lot.contracts_opened - sum(item.contracts for item in admitted)
+        if remaining < 0:
+            missing[currency].add("capital_identity_missing")
+            continue
+        segments = [
+            (item.contracts, item.closed_at_ms,
+             "terminal_evidence_conflict" if _terminal_kind(item) == "conflicting" else None)
+            for item in admitted
+        ]
+        if remaining:
+            unresolved = _expiration_end_ms(lot.contract_key.expiration_ymd) <= period.effective_end_exclusive_at_ms
+            segments.append((remaining, period.effective_end_exclusive_at_ms,
+                             "terminal_evidence_missing" if unresolved else None))
+        for contracts, ended_at_ms, terminal_missing in segments:
+            if ended_at_ms < lot.opened_at_ms:
+                missing[currency].add("capital_identity_missing")
+                continue
+            start = max(lot.opened_at_ms, period.effective_start_at_ms)
+            end = min(ended_at_ms, period.effective_end_exclusive_at_ms)
+            if end <= start:
+                continue
+            missing[currency].update(set(affected.get(lot.lot_id, ())) & _ECONOMIC_FAILURES)
+            if terminal_missing:
+                missing[currency].add(terminal_missing)
+            # Reuse the canonical principal; actual daily duration has no one-day floor.
+            occupied, _return_days, capital_missing = _capital(
+                lot, contracts=contracts, opened_at_ms=start, end_at_ms=end, unresolved_reason=None,
+            )
+            missing[currency].update(capital_missing)
+            if occupied is not None and not capital_missing:
+                capital_days[currency] += occupied * Decimal(end - start) / MILLISECONDS_PER_DAY
+    return {
+        "by_currency": {
+            currency: {
+                "amount": None if missing[currency] else quantize_money(days / period.statistic_days),
+                "status": MetricStatus.PARTIAL if missing[currency] else MetricStatus.OBSERVED,
+                "missing": tuple(sorted(missing[currency])),
+            }
+            for currency, days in sorted(capital_days.items())
+        },
+    }
 
 
 def _diagnostic_in_scope(
