@@ -495,7 +495,14 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     assert len(outbox_ids) == 1
     outbox_id = next(iter(outbox_ids))
     assert outbox_id
-    assert repo.get_trade_lifecycle_notification(outbox_id)["outbox_id"] == outbox_id
+    notification = repo.get_trade_lifecycle_notification(outbox_id)
+    assert notification["outbox_id"] == outbox_id
+    assert notification["payload"]["close_reason"] == "trade_close"
+    from src.application.trades.receipt import build_trade_lifecycle_notification_message
+
+    message = build_trade_lifecycle_notification_message(notification["payload"])
+    assert "原因｜主动交易平仓" in message
+    assert "待确认" not in message
     lots = repo.list_position_lots()
     assert all(item["fields"]["status"] == "close" for item in lots)
     assert all(item["fields"]["contracts_open"] == 0 for item in lots)
