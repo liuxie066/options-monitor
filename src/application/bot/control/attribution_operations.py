@@ -84,7 +84,7 @@ def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str,
         now_ms=int(time.time() * 1000), focus_open_event_id=open_event_id)
     mode = combo_reconciliation_mode_for_account(config, account=account)
     view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=int(time.time() * 1000),
-        combo_evidence=evidence, capacity_observation=observation, combo_mode=mode)
+        combo_evidence=evidence, capacity_observation=observation, combo_mode=mode, revalidate_expired=True)
     return {"config": config, "market": market, "combo_evidence": evidence, "capacity_observation": observation,
             "combo_mode": mode, "view": view}
 

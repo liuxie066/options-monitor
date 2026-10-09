@@ -27,6 +27,10 @@ def attribution_pending_text(row) -> str:
     reasons = set(row.get("reason_codes") or [])
     if row.get("status") == "conflict":
         return "归属冲突，需核对"
+    if "combo_proposal_expired" in reasons:
+        return "组合提案已过期，需重新核验确认"
+    if reasons == {"combo_confirmation_required"}:
+        return "归属待确认，OM Bot 查看"
     if reasons == {"awaiting_ledger_commit"}:
         if row.get("rules_enabled") and row.get("selected_candidate_id"):
             return "系统归属处理中"

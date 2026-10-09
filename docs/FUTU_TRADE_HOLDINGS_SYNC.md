@@ -1507,9 +1507,20 @@ Inbox 与 ledger 是两个数据库：`trade_payload_commit_scope` 只有 writer
 恢复接入现有 `_recover_local_intake_if_due` 的分钟周期，不增加服务或队列。
 候选来自当前适用启用范围内、已入账且缺结果或 input_hash 已变化的 open，以及此前 pending/conflict；
 periodic sweep 同时核对已 linked 行是否出现新的竞争证据，不能只看 Inbox pending。
-复用 listener status 的 cursor 模式，每账户每周期最多 100 个 execution、按稳定 ID keyset 推进并在一轮结束后从头核对；
+复用 listener status 的 cursor 模式，每账户每市场每周期最多 100 个 execution、按稳定 ID keyset 推进并在一轮结束后从头核对；
 cursor 仅优化，可丢失，重启重扫不改变结果。证据未变化时不刷写相同 pending，也不重复通知。
-每个物理账户每轮只共享一组完整容量观察，不为每条成交重新查询；每轮归属 provider I/O 总预算 10 秒，
+归属恢复按市场拆分：来源配置市场复用 caller 配置与调用方 mode；其他市场只来自 canonical open 事实的发现
+（`execution_key` 存在且 `contracts_open > 0`，且属受支持市场），按 `runtime_root/config.<market>.json` 装载
+既有生成配置（`load_runtime_config` 只校验身份），再单独调用 `ensure_runtime_config_freshness` 校验与
+config.yaml 源一致；随后必须与来源逐项相等：同一逻辑账户已配置、物理账户与 trd_env 完全相同、解析出的
+canonical ledger 与来源账本是同一文件。缺失、过期、市场不符或任一身份不符只记录该市场的错误，
+绝不回退到来源市场配置；目标市场配置拥有该市场的 Combo mode。
+cursor 键为 `"<account>:<market>"`，进程内保存、不迁移旧键；失败市场保留原 cursor，成功市场写回本轮
+`next_cursor`，取消在剩余市场开始前停止。`attribution_recovery[account][market]` 是本轮该市场的结果或
+`{"error": "<类型>: <信息>"}`；该账户的 canonical 事实整体不可读时记为 `attribution_recovery[account] = {"error": "..."}`。
+逐笔归属诊断同样绑定成交所属市场配置；非来源市场装载失败时保留既有 best-effort `attribution_error`，
+不产生用其他市场配置构建的预览。
+每个物理账户每市场每轮只共享一组完整容量观察，不为每条成交重新查询；每市场每轮归属 provider I/O 总预算 10 秒，
 一次失败不在同周期重试，响应在整体预算后到达则丢弃本轮写资格，下轮再取。连接调用必须支持超时/取消，
 无法中断的 provider 路径不得放进恢复循环。归属 I/O 位于 process_lock 外，按页检查 stop，不阻塞既有 receipt 恢复。
 终态成交不必重过经济 resolver；历史 JSONL 的 dry-run/不触外部/不发通知约束继续有效，

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1149 (`src`: 556, `domain`: 90, `scripts`: 14, `tests`: 489)
-- Internal import edges: 8843 total, 3691 production/script edges excluding tests
+- Python files scanned: 1150 (`src`: 556, `domain`: 90, `scripts`: 14, `tests`: 490)
+- Internal import edges: 8861 total, 3691 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,8 +46,8 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3900| application
-  tests -->|506| domain
+  tests -->|3915| application
+  tests -->|509| domain
   tests -->|2| domain_services
   tests -->|259| infrastructure
   tests -->|304| interfaces
@@ -79,8 +79,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3900 |
-| tests | domain | 506 |
+| tests | application | 3915 |
+| tests | domain | 509 |
 | tests | interfaces | 304 |
 | tests | infrastructure | 259 |
 | tests | storage | 39 |
@@ -199,7 +199,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
-| src.application.trades.auto_intake | 51 |
+| src.application.trades.auto_intake | 50 |
 | src.application.ledger.api | 47 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.interfaces.cli.main | 32 |
@@ -212,8 +212,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.multi_account_tick | 29 |
 | src.application.agent_tools.config | 26 |
 | src.application.ledger.writer_common | 26 |
+| src.application.trades.attribution | 26 |
 | src.application.wheel.workflows | 26 |
-| src.application.agent_tools.positions | 25 |
 
 ## Reading
 

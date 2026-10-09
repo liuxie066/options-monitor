@@ -150,6 +150,8 @@ def test_wheel_stock_quantity_allows_fractions_but_not_invalid_values(tmp_path, 
     ('pending', ['awaiting_ledger_commit'], False, None, '归属待确认，OM Bot 查看'),
     ('pending', ['multiple_strategy_candidates'], True, None, '归属待确认，OM Bot 查看'),
     ('pending', ['capacity_basis_unavailable'], True, None, '归属暂受阻，需核对'),
+    ('pending', ['combo_proposal_expired'], False, None, '组合提案已过期，需重新核验确认'),
+    ('pending', ['combo_confirmation_required'], False, None, '归属待确认，OM Bot 查看'),
     ('pending', ['attribution_evidence_incomplete'], False, None, '归属证据不足，需核对'),
     ('conflict', ['late_competing_evidence'], True, None, '归属冲突，需核对'),
     ('pending', [], False, None, '归属待核对'),
@@ -216,3 +218,170 @@ def test_competing_wheel_candidate_keeps_fx_in_confirmation_hash(tmp_path, monke
     assert {row['strategy'] for row in first['candidates']} == {'wheel', 'combo_yield'}
     observation['portfolio']['exchange_rates']['rates']['HKDCNY'] = 0.8541168432
     assert read_put()['input_hash'] != first['input_hash']
+
+
+def _expired_scope(tmp_path, monkeypatch):
+    repo, config, pair, observation, evidence, _ = _scope(tmp_path, monkeypatch)
+    old = _read()
+    now = pair['proposal_expires_at_ms'] + 1
+    monkeypatch.setattr(attribution.time, 'time', lambda: now / 1000)
+    observation['portfolio']['position_snapshot_input']['observed_at_utc'] = datetime.fromtimestamp(
+        now / 1000, timezone.utc).isoformat()
+    repo.expire_combo_pair_inferences(effective_now_ms=now, account='lx')
+    return repo, config, pair, observation, evidence, now, old
+
+
+def test_expired_combo_requires_fresh_manual_preview_and_is_atomic_idempotent(tmp_path, monkeypatch):
+    repo, config, pair, observation, evidence, now, old = _expired_scope(tmp_path, monkeypatch)
+    before_events = repo.list_trade_events()
+    before_pairs = repo.list_combo_pair_inferences(account='lx')
+    raw, _, _ = TRADE_ATTRIBUTION_READ_TOOL.call({'account': 'lx'})
+    assert all(row['selected_candidate_id'] is None for row in raw['rows'])
+    assert all('combo_proposal_expired' in row['reason_codes'] for row in raw['rows'])
+    assert all('combo_counterpart_missing_or_asymmetric' not in row['reason_codes'] for row in raw['rows'])
+    fresh = _read()
+    assert fresh['selected_candidate_id'] is None
+    assert fresh['candidates'][0]['inference']['revalidated_expired'] is True
+    assert fresh['reason_codes'] == ['combo_confirmation_required']
+    assert fresh['input_hash'] != old['input_hash']
+    assert repo.list_combo_pair_inferences(account='lx') == before_pairs
+    with pytest.raises(ValueError, match='evidence changed'):
+        attribution.apply_referenced_trade_attribution(repo, **_args(repo, config, pair, old), apply_changes=True)
+    args = _args(repo, config, pair, fresh)
+    assert attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=False)['status'] == 'dry_run'
+    assert repo.list_trade_events() == before_events
+    assert repo.list_combo_pair_inferences(account='lx') == before_pairs
+    assert attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=True)['status'] == 'adopted'
+    assert len(repo.list_trade_events()) == len(before_events) + 2
+    stored = repo.get_combo_pair_inference(pair['inference_id'])
+    assert stored['status'] == 'user_confirmed'
+    assert stored['proposal_expires_at_ms'] == pair['proposal_expires_at_ms']
+    assert attribution.apply_referenced_trade_attribution(repo, **args, apply_changes=True)['status'] == 'already_confirmed'
+    assert len(repo.list_trade_events()) == len(before_events) + 2
+
+
+@pytest.mark.parametrize('change', ['account', 'quantity', 'stale', 'partial', 'scope', 'ambiguous', 'missing_evidence'])
+def test_expired_manual_revalidation_preserves_current_guards(tmp_path, monkeypatch, change):
+    repo, config, pair, observation, evidence, _, _ = _expired_scope(tmp_path, monkeypatch)
+    fresh = _read()
+    snapshot = observation['portfolio']['position_snapshot_input']
+    if change == 'account':
+        observation['portfolio']['capacity_authority']['futu_account_id'] = 'other'
+    elif change == 'quantity':
+        snapshot['rows'][0]['quantity'] = '2'
+    elif change == 'stale':
+        snapshot['observed_at_utc'] = '2020-01-01T00:00:00+00:00'
+    elif change == 'partial':
+        snapshot['completeness'] = 'partial'
+    elif change == 'scope':
+        snapshot['scope']['markets'] = ['US']
+    elif change == 'ambiguous':
+        persist_trade_event_object(repo, _call_open('competing-call', 'competing-call-lot'))
+    else:
+        evidence.update(complete=False, exposures=[])
+    before = repo.list_trade_events()
+    with pytest.raises(ValueError):
+        attribution.apply_referenced_trade_attribution(repo, **_args(repo, config, pair, fresh), apply_changes=True)
+    assert repo.list_trade_events() == before
+    assert repo.get_combo_pair_inference(pair['inference_id'])['status'] == 'expired_unresolved'
+    current = _read()
+    with pytest.raises(ValueError):
+        attribution.apply_referenced_trade_attribution(repo, **_args(repo, config, pair, current), apply_changes=True)
+    assert repo.list_trade_events() == before
+
+
+def test_expired_combo_rolls_back_reactivation_when_final_capacity_fails(tmp_path, monkeypatch):
+    repo, config, pair, observation, evidence, now, _ = _expired_scope(tmp_path, monkeypatch)
+    fresh = _read()
+    before = repo.list_trade_events()
+    pairs = repo.list_combo_pair_inferences(account='lx')
+    def stale():
+        monkeypatch.setattr(attribution.time, 'time', lambda: (now + 61000) / 1000)
+    with pytest.raises(ValueError, match='capacity changed before commit'):
+        attribution.apply_trade_attribution(repo, account='lx', market='us', config=config,
+            execution_key=fresh['execution_key'], candidate_id=fresh['candidate_ids'][0],
+            expected_input_hash=fresh['input_hash'], request_id='expired-rollback', actor='fixture',
+            combo_evidence=evidence, capacity_observation=observation, combo_mode='confirm',
+            manual=True, before_commit=stale)
+    assert repo.list_trade_events() == before
+    assert repo.list_combo_pair_inferences(account='lx') == pairs
+
+
+@pytest.mark.parametrize('status', ['user_rejected', 'superseded'])
+def test_manual_preview_does_not_reactivate_other_terminal_proposals(tmp_path, monkeypatch, status):
+    repo, _, pair, _, _, _ = _scope(tmp_path, monkeypatch)
+    repo.transition_combo_pair_inference(inference_id=pair['inference_id'], expected_statuses=['proposal_ready'],
+        new_status=status, expected_input_hash=pair['input_snapshot_hash'], decision_fields={'decision_reason': status})
+    assert not any(candidate.get('inference', {}).get('revalidated_expired')
+                   for row in TRADE_ATTRIBUTION_READ_TOOL.call({'account': 'lx', 'prepare_confirmation': True})[0]['rows']
+                   for candidate in row['candidates'])
+
+
+def test_control_expired_pair_preview_confirm_and_retry_share_revalidation(tmp_path, monkeypatch):
+    from src.application.bot.control import attribution_operations as operations
+    from src.application.bot.control.contracts import BotInboundRequest, ControlCommand
+    from src.application.bot.control.operation_store import InboundOperationStore
+    from src.application.ledger.api import ledger_resource_identity
+    repo, config, pair, observation, evidence, _, _ = _expired_scope(tmp_path, monkeypatch)
+    for key, value in {'OM_INBOUND_OPERATIONS_ENABLED': '1', 'OM_INBOUND_TRADE_WRITE_ENABLED': '1',
+                       'OM_INBOUND_ADMIN_OPEN_IDS': 'wechat:user',
+                       'OM_INBOUND_OPERATION_HMAC_KEY': 'isolated-test-key'}.items():
+        monkeypatch.setenv(key, value)
+    authority = {'config_path': str(tmp_path / 'config.us.json'), 'runtime_root': str(tmp_path),
+                 'ledger': ledger_resource_identity(repo), 'account_mapping_hash': 'fixture'}
+    monkeypatch.setattr(operations, 'attribution_runtime', lambda **_: (repo, config, authority,
+        {'physical_account_ids': ['1001'], 'environment': 'REAL'}))
+    monkeypatch.setattr(operations, 'observe_trade_attribution_capacity', lambda **_: deepcopy(observation))
+    monkeypatch.setattr(operations, 'read_attribution_combo_evidence', lambda *a, **kw: evidence)
+    store = InboundOperationStore(tmp_path / 'audit.sqlite3')
+    request = BotInboundRequest(text='归属', sender_id='user', channel='wechat', conversation_id='room', config_key='us')
+    fresh = _read()
+    before = repo.list_trade_events()
+    preview = ControlCommand('attribution_preview', {'account': 'lx', 'execution_key': fresh['execution_key'],
+        'action': 'combo', 'target_id': pair['strategy_group_id']})
+    operations.handle_attribution_operation(preview, request, command_id='expired-control', store=store)
+    assert repo.list_trade_events() == before
+    assert repo.get_combo_pair_inference(pair['inference_id'])['status'] == 'expired_unresolved'
+    confirm = ControlCommand('attribution_confirm', {'operation_id': 'expired-control'})
+    operations.handle_attribution_operation(confirm, request, command_id='confirm', store=store)
+    assert store.get('expired-control')['status'] == 'applied'
+    assert len(repo.list_trade_events()) == len(before) + 2
+    operations.handle_attribution_operation(confirm, request, command_id='retry', store=store)
+    assert len(repo.list_trade_events()) == len(before) + 2
+
+
+def test_expired_pair_with_a_manually_claimed_leg_cannot_confirm(tmp_path, monkeypatch):
+    repo, config, pair, observation, evidence, _, _ = _expired_scope(tmp_path, monkeypatch)
+    rows = TRADE_ATTRIBUTION_READ_TOOL.call({'account': 'lx', 'prepare_confirmation': True})[0]['rows']
+    call = next(row for row in rows if row['contract_key']['option_type'] == 'call')
+    attribution.apply_trade_attribution(repo, account='lx', market='us', config=config,
+        execution_key=call['execution_key'], candidate_id='ordinary', expected_input_hash=call['input_hash'],
+        request_id='claim-call', actor='fixture', manual=True, combo_evidence=evidence,
+        capacity_observation=observation, combo_mode='confirm')
+    current = _read()
+    before = repo.list_trade_events()
+    pairs = repo.list_combo_pair_inferences(account='lx')
+    with pytest.raises(ValueError):
+        attribution.apply_referenced_trade_attribution(repo, **_args(repo, config, pair, current), apply_changes=True)
+    assert repo.list_trade_events() == before
+    assert repo.list_combo_pair_inferences(account='lx') == pairs
+
+
+def test_automatic_reconciliation_does_not_reactivate_expired_combo(tmp_path, monkeypatch):
+    repo, config, pair, _, evidence, now, _ = _expired_scope(tmp_path, monkeypatch)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute('INSERT INTO trade_attribution_policy_enablings '
+            '(broker, physical_account_id, environment, account, market, policy_version, effective_from_ms, '
+            'created_at_ms, actor, request_id, request_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ('futu', '1001', 'REAL', 'lx', 'us', 'trade_attribution.v2', BASE_TIME_MS - 1000,
+             BASE_TIME_MS - 1000, 'fixture', 'fixture', 'a' * 64))
+    before = repo.list_trade_events()
+    pairs = repo.list_combo_pair_inferences(account='lx')
+    reconcile_combo_pair_inferences(repo=repo, account='lx', runtime_environment=RUNTIME_ENVIRONMENT,
+        effective_now_ms=now, exposures=evidence['exposures'], persist=True)
+    monkeypatch.setattr('src.application.trades.inbox.cache_trade_attribution_result', lambda *a, **kw: 0)
+    result = attribution.reconcile_trade_attribution_account(repo, account='lx', market='us', config=config,
+        runtime_root=tmp_path, inbox_path=tmp_path / 'inbox.sqlite3', combo_mode='auto')
+    assert result['linked'] == 0 and result['errors'] == []
+    assert repo.list_trade_events() == before
+    assert repo.list_combo_pair_inferences(account='lx') == pairs
