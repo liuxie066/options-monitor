@@ -1164,6 +1164,7 @@ def _normal_close_notification_intent(
         "schema_version": "broker_close_notification.v1",
         "case_id": case_id,
         "transition_type": "resolution_confirmed",
+        "close_reason": "trade_close",
         "resolution_revision": 1,
         "broker_deal_key": broker_deal_key,
         "account": account,
