@@ -54,7 +54,7 @@ def test_holdings_failure_or_cancel_leaves_pm_source_and_connection_unchanged(tm
         assert config["portfolio_management"]["enabled"]
         if failure == "preflight":
             raise ValueError("fixture unavailable")
-        return {"status": "ready_empty", "approved_non_futu_brokers": {"lx": []}}
+        return {"status": "ready_empty"}
     monkeypatch.setattr(mod, "_probe_holdings", probe)
     if failure in {"preflight", "cancel"}:
         answers = iter(["true", "http://127.0.0.1:8765", "n"])
@@ -77,7 +77,7 @@ def test_holdings_publish_failure_rolls_back_both_flags(tmp_path, monkeypatch):
     path = source(tmp_path)
     before = path.read_bytes()
     monkeypatch.setattr(mod, "_probe_holdings", lambda *args, **kwargs: {
-        "status": "ready_empty", "approved_non_futu_brokers": {"lx": []}})
+        "status": "ready_empty"})
     namespace = args("holdings", path, "--enabled", "true", "--enable-pm")
     preview = run(namespace)["result"]
     atomic = transaction._atomic_write_bytes
@@ -134,7 +134,7 @@ def test_holdings_yaml_failure_reports_previously_confirmed_connection(tmp_path,
     path = source(tmp_path)
     before = path.read_bytes()
     monkeypatch.setattr(mod, "_probe_holdings", lambda *args, **kwargs: {
-        "status": "ready_empty", "approved_non_futu_brokers": {"lx": []}})
+        "status": "ready_empty"})
     namespace = args("holdings", path, "--enabled", "true", "--enable-pm", "--service-url", "http://127.0.0.1:8765")
     preview = run(namespace)
     namespace.apply = namespace.confirm = True

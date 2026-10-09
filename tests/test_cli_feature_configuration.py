@@ -262,7 +262,7 @@ def test_holdings_enables_pm_in_one_confirmed_generation(tmp_path, monkeypatch):
     def probe(config, **kwargs):
         observed.append(config["portfolio_management"]["enabled"])
         assert yaml.safe_load(path.read_text()).get("portfolio_management") is None
-        return {"status": "ready_empty", "approved_non_futu_brokers": {"lx": []}}
+        return {"status": "ready_empty"}
     monkeypatch.setattr(mod, "_probe_holdings", probe)
     namespace = args("holdings", path, "--enabled", "true", "--enable-pm")
     preview = run(namespace)

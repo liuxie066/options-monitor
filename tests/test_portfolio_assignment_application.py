@@ -90,7 +90,7 @@ def _patch_positions(monkeypatch, positions, *, holdings_enabled=False, approved
         lambda accounts: (
             positions,
             "config.us.json",
-            {**cash_config(), "portfolio_management": {"enabled": True}, "portfolio": {"holdings": {"enabled": holdings_enabled, **({"approved_non_futu_brokers": {"lx": approved if approved is not None else ["银行"]}} if holdings_enabled else {})}}},
+            {**cash_config(), "portfolio_management": {"enabled": True}, "portfolio": {"holdings": {"enabled": holdings_enabled, **({"approved_non_futu_brokers": {"lx": approved}} if approved is not None else {})}}},
         ),
     )
     monkeypatch.setattr(
@@ -503,21 +503,39 @@ def test_scoped_old_pm_input_error_is_source_failure() -> None:
         )
 
 
-def test_query_old_enabled_config_without_broker_approval_skips_pm(monkeypatch):
+def test_query_enabled_without_broker_approval_accepts_empty_pm_scope(monkeypatch):
     _patch_positions(monkeypatch, [], holdings_enabled=True)
-    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda _accounts: (
-        [], "config.us.json", {**cash_config(), "portfolio": {"holdings": {"enabled": True}}},
-    ))
-    monkeypatch.setattr(application, "read_portfolio_valuation_evidence",
-                        lambda **_kwargs: pytest.fail("PM must not be read before broker approval"))
+    evidence = _valuation_response()
+    evidence["scope"].update({"holdings_scope": "non_futu", "broker_inventory": {"lx": {"brokers": []}},
+                              "holding_counts": {"lx": {"source_rows": 0, "included": 0, "unsupported": 0}}})
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: evidence)
+    result = application.query_portfolio_assignment_scenario(["lx"])
+    assert result["status"] == "complete"
+    assert result["snapshot"]["pm_supplement"]["status"] == "complete"
+    assert result["snapshot"]["holdings_sources"] == ["futu", "pm_non_futu"]
+
+
+@pytest.mark.parametrize("status,freshness,trust", [
+    ("partial", "fresh", "partial"),
+    ("complete", "stale", "trusted"),
+    ("complete", "fresh", "untrusted"),
+])
+def test_query_without_broker_approval_still_marks_pm_quality_partial(monkeypatch, status, freshness, trust):
+    _patch_positions(monkeypatch, [], holdings_enabled=True)
+    evidence = _valuation_response()
+    evidence["status"] = status
+    evidence["freshness"].update({"status": freshness, "trust_status": trust})
+    evidence["scope"].update({"holdings_scope": "non_futu", "broker_inventory": {"lx": {"brokers": []}},
+                              "holding_counts": {"lx": {"source_rows": 0, "included": 0, "unsupported": 0}}})
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: evidence)
     result = application.query_portfolio_assignment_scenario(["lx"])
     assert result["status"] == "partial"
-    assert result["snapshot"]["pm_supplement"]["status"] == "missing"
-    assert any("re-preview" in warning for warning in result["warnings"])
+    assert "PM non-Futu valuation evidence is partial" in result["warnings"]
 
 
-def test_query_new_broker_pauses_entire_pm_supplement(monkeypatch):
-    _patch_positions(monkeypatch, [], holdings_enabled=True, approved=["银行"])
+@pytest.mark.parametrize("approved", [None, ["银行"]])
+def test_query_new_broker_is_included_without_approval(monkeypatch, approved):
+    _patch_positions(monkeypatch, [], holdings_enabled=True, approved=approved)
     evidence = _valuation_response()
     evidence["scope"].update({
         "holdings_scope": "non_futu",
@@ -535,10 +553,11 @@ def test_query_new_broker_pauses_entire_pm_supplement(monkeypatch):
     ]
     monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **_kwargs: evidence)
     result = application.query_portfolio_assignment_scenario(["lx"])
-    assert result["status"] == "partial"
-    assert result["snapshot"]["holdings_sources"] == ["futu"]
-    assert result["snapshot"]["pm_supplement"]["included_rows"] == 0
-    assert any("新券商" in warning and "re-preview" in warning for warning in result["warnings"])
+    assert result["status"] == "complete"
+    assert result["snapshot"]["holdings_sources"] == ["futu", "pm_non_futu"]
+    assert result["snapshot"]["pm_supplement"]["included_rows"] == 2
+    assert result["distribution"]["net_assets_cny"] == "200.00"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "0.00"
 
 
 @pytest.mark.parametrize(
