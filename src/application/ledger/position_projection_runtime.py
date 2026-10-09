@@ -247,9 +247,9 @@ def _run_position_projection_in_transaction_impl(
     created_flags = tuple(
         bool(candidate.upsert_trade_event(
             event, conn=conn,
-            replacing_pending_close_event_id=pending_close_replacements[event.event_id],
-        )) if pending_close_replacements and event.event_id in pending_close_replacements
-        else bool(candidate.upsert_trade_event(event, conn=conn))
+            **({"replacing_pending_close_event_id": pending_close_replacements[event.event_id]}
+               if pending_close_replacements and event.event_id in pending_close_replacements else {}),
+        ))
         for event in events
     )
     _fail(failure_hook, "after_event_write")
