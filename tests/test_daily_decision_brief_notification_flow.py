@@ -1552,3 +1552,40 @@ def test_history_save_error_is_not_a_successful_run(tmp_path, monkeypatch):
     with pytest.raises(DailyDecisionBriefStateError, match="disk_failed"):
         mod.run_tick_notification_flow(context.request)
     assert context.commits == []
+
+
+@pytest.mark.parametrize("failed_action", ["append_tick_metrics_history", "apply_notify_results_to_tick_metrics"])
+def test_confirmed_delivery_preserved_when_metrics_finalization_fails(
+    monkeypatch,
+    tmp_path: Path,
+    failed_action: str,
+) -> None:
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    monkeypatch.setattr(
+        mod.state_repo if failed_action == "append_tick_metrics_history" else mod,
+        failed_action,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("metrics unavailable")
+        ),
+    )
+    bundle = _request(tmp_path, run_id="history-degraded")
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert len(calls) == 1
+    degraded = [
+        event
+        for event in bundle.request.runlog.events
+        if event.get("step") == "finalize"
+        and event.get("status") == "degraded"
+    ]
+    assert degraded
+    expected_action = "append_tick_metrics_history" if failed_action == "append_tick_metrics_history" else "write_tick_metrics"
+    assert degraded[-1]["data"]["action"] == expected_action
+    assert degraded[-1]["data"]["notification_delivery_confirmed"] is True
+    assert any(
+        event.get("action") == expected_action
+        and event.get("status") == "error"
+        for event in bundle.request.audit_helper.events
+    )

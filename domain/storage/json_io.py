@@ -18,46 +18,53 @@ AUDIT_SEGMENT_BYTES = 64 * 1024 * 1024
 
 
 @contextmanager
-def rotating_private_jsonl_lock(path: str | Path, *, incoming_bytes: int):
-    """Serialize append and rename through a stable lock, never through the rotated inode."""
-    if incoming_bytes > AUDIT_SEGMENT_BYTES:
-        raise ValueError("audit record exceeds segment size limit")
+def private_json_file_lock(path: str | Path):
+    """Hold a stable sibling lock across read and atomic replacement."""
     target = Path(path)
     _ensure_private_directory(target.parent)
-    lock_path = Path(f"{target}.lock")
-    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(Path(f"{target}.lock"), flags, PRIVATE_FILE_MODE)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise OSError("audit lock is not a private regular file")
+            raise OSError("lock is not a private regular file")
         os.fchmod(fd, PRIVATE_FILE_MODE)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            if target.exists() or target.is_symlink():
-                current = target.lstat()
-                if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
-                    raise OSError("audit target is not a regular file")
-                today = datetime.now(timezone.utc).strftime("%Y%m%d")
-                file_day = datetime.fromtimestamp(current.st_mtime, timezone.utc).strftime("%Y%m%d")
-                readable = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-                try:
-                    complete_tail = not current.st_size or os.pread(readable, 1, current.st_size - 1) == b"\n"
-                finally:
-                    os.close(readable)
-                if current.st_size and complete_tail and (current.st_size + incoming_bytes > AUDIT_SEGMENT_BYTES or file_day != today):
-                    for number in range(1, 1000000):
-                        segment = target.with_name(f"{target.stem}.{file_day}.{number:06d}{target.suffix}")
-                        if not segment.exists() and not segment.is_symlink():
-                            target.rename(segment)
-                            break
-                    else:
-                        raise OSError("audit segment sequence exhausted")
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+@contextmanager
+def rotating_private_jsonl_lock(path: str | Path, *, incoming_bytes: int):
+    """Serialize append and rename through a stable lock, never through the rotated inode."""
+    if incoming_bytes > AUDIT_SEGMENT_BYTES:
+        raise ValueError("audit record exceeds segment size limit")
+    target = Path(path)
+    with private_json_file_lock(target):
+        if target.exists() or target.is_symlink():
+            current = target.lstat()
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                raise OSError("audit target is not a regular file")
+            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            file_day = datetime.fromtimestamp(current.st_mtime, timezone.utc).strftime("%Y%m%d")
+            readable = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                complete_tail = not current.st_size or os.pread(readable, 1, current.st_size - 1) == b"\n"
+            finally:
+                os.close(readable)
+            if current.st_size and complete_tail and (current.st_size + incoming_bytes > AUDIT_SEGMENT_BYTES or file_day != today):
+                for number in range(1, 1000000):
+                    segment = target.with_name(f"{target.stem}.{file_day}.{number:06d}{target.suffix}")
+                    if not segment.exists() and not segment.is_symlink():
+                        target.rename(segment)
+                        break
+                else:
+                    raise OSError("audit segment sequence exhausted")
+        yield
 
 
 def read_json(path: str | Path, default: Any = None, encoding: str = "utf-8") -> Any:

@@ -640,6 +640,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         ambiguous_send_count=ambiguous_send_count,
         duplicate_risk_count=duplicate_risk_count,
     )
+    metrics_action = "write_tick_metrics"
     try:
         apply_notify_results_to_tick_metrics(
             tick_metrics=request.tick_metrics,
@@ -649,7 +650,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             notify_summary=notify_summary,
         )
         state_repo.write_tick_metrics(request.base, request.run_id, request.tick_metrics)
+        metrics_action = "append_tick_metrics_history"
         state_repo.append_tick_metrics_history(request.base, request.run_id, request.tick_metrics)
+        metrics_action = "write_tick_metrics"
         request.audit_helper.audit(
             "write",
             "write_tick_metrics",
@@ -662,7 +665,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             run_id=request.run_id,
             safe_data_fn=_safe_runlog_data,
             audit_fn=request.audit_helper.audit,
-            action="write_tick_metrics",
+            action=metrics_action,
             exc=exc,
             extra={"notification_delivery_confirmed": bool(sent_accounts)},
         )

@@ -1285,3 +1285,53 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
         and event.get("error_code") == "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
         for event in events
     )
+
+
+@pytest.mark.parametrize("completed", [True, False])
+def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, completed):
+    from zoneinfo import ZoneInfo
+    from domain.domain.engine import SchedulerDecisionView
+    from src.application import multi_account_tick as mod
+    from src.application.tick_guard_flow import TickGuardOutcome
+    from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
+
+    config = tmp_path / "config.us.json"
+    _write_market_config(config, "us", [])
+    events = []
+    class Log:
+        def __init__(self, base):
+            self.run_id = "experience-history"
+        def safe_event(self, step, status, **kw):
+            events.append({"step": step, "status": status, **kw})
+    def guard(request):
+        return TickGuardOutcome(should_continue=True, return_code=0, base_cfg=request.base_cfg,
+                                accounts=request.accounts, default_account=request.default_account,
+                                bj_tz=ZoneInfo("Asia/Shanghai"))
+    _patch_runtime_bootstrap(monkeypatch, mod, tmp_path / "runtime", Log, guard)
+    monkeypatch.setattr(mod, "validate_experience_request", lambda **kw: None)
+    monkeypatch.setattr(mod, "build_trigger_context", lambda: {})
+    decision = {"schema_kind": "scheduler_decision", "schema_version": "1.0",
+                "should_run_scan": True, "is_notify_window_open": False, "reason": "experience"}
+    context = TickSchedulerContext(
+        markets_to_run=["US"], scheduler_markets=["US"], state_path=tmp_path / "scheduler.json",
+        scheduler_schedule_key="schedule", scheduler_ms=1, scheduler_decision=decision,
+        scheduler_view=SchedulerDecisionView.from_payload(decision), notify_decision_by_account={},
+        scan_decision_by_account={"lx": {"should_run": True}}, should_run_global=True,
+        reason_global="experience",
+    )
+    monkeypatch.setattr(mod, "build_tick_scheduler_context", lambda request: TickSchedulerOutcome(
+        should_continue=True, return_code=0, results=[], context=context))
+    monkeypatch.setattr(mod, "run_tick_account_execution", lambda request: SimpleNamespace(
+        account_metrics=[], prefetch_invocation_count=0, snapshot_status="ready",
+        snapshot_manifest_sha256=None, prepared_context_metrics=[], results=[],
+        ran_pipeline_accounts=["lx"] if completed else [],
+    ))
+    monkeypatch.setattr(mod, "run_tick_notification_flow", lambda request: pytest.fail("experience must not send"))
+    history = tmp_path / "runtime/output_shared/state/tick_metrics_history.json"
+    history.parent.mkdir(parents=True)
+    history.write_bytes(b"broken")
+    assert mod.main(["--config", str(config), "--accounts", "lx", "--experience", "--no-send"]) == (0 if completed else 2)
+    assert history.read_bytes() == b"broken"
+    assert any(e["step"] == "finalize" and e["status"] == "degraded"
+               and e["data"]["action"] == "append_tick_metrics_history" for e in events)
+    assert any(e["step"] == "run_end" and e["status"] == ("ok" if completed else "error") for e in events)
