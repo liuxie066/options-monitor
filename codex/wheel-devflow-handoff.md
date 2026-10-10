@@ -1,5 +1,7 @@
 # Wheel 需求 → devflow 交接
 
+> 已关闭任务的历史交接。以下基线、阶段状态和授权只描述当时任务；当前合同见 [Wheel PRD](../docs/WHEEL_STRATEGY_PRD.md)，不得按本文件启动新交付或生产操作。
+
 - 状态：Deepreview Gate 第 4 轮已通过；实现与验证完成，用户已确认完成，Devflow Closeout 已关闭。
 - 根任务：创建 prdflow skill。Wheel 为真实试跑案例，不把其实现误当成本轮 skill 任务。
 - prd_doc：[om-wheel-prd.md](om-wheel-prd.md)，批准原话集中在 §8。

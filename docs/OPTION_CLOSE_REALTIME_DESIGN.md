@@ -16,41 +16,29 @@ case（包括 2026-09-30 约 20:48 CST 只读观察到的 `lx/0700.HK/430P` 四�
 须另作只读盘点、预览和授权修复；
 不自动迁移，不写生产账本，不发通知或交易。
 
-## 现状代码依据
+## 当前责任归属
 
-- `src/application/trades/resolver.py::resolve_trade_deal` 是成交入口。普通开平仓
-  进入现有 `record_normalized_trade_event` 路径；零价期权平仓优先转到
-  `src/application/trades/lifecycle.py::_resolve_zero_price_option_close`。
-- `src/application/ledger/writer_lifecycle_evidence.py::accept_option_close_evidence_atomically`
-  已在一个 SQLite 事务中校验物理账户、broker source、价格、数量和 lot，冻结
-  `target_contracts_by_lot`。但目前只写 case/evidence/source claim，不写 close
-  event；`lifecycle.py` 返回 `reserve_option_close` 且 `projection_changed=False`。
-- `domain/domain/option_lifecycle.py` 将“预留但未分配”视为 `cause_pending`；
-  `src/application/positions/context_builder.py` 暂从 open 数量减预留量计算风险。
-  一旦 canonical lot 已平仓，此覆盖必须停止再次扣减，但待交收资金/股份提示仍按
-  证据保留。
-- `domain/domain/ledger/economics.py` 从 close event 生成数量、现金、费用和终结时间；
-  `domain/domain/performance/weighted_reducer.py` 将普通 `close` 当作买/卖平仓判胜，
-  到期仍 open 则以 `terminal_evidence_missing` 拒算资本天数。因此零价待定原因不能
-  仅写普通 `close`，也不能把未知费用填零。
-- `src/application/ledger/writer_lifecycle_allocation.py::apply_lifecycle_allocation_atomically`
-  已支持 correction void 和新终结事件在同一事务内预检、投影、持久化；
-  `domain/domain/ledger/projection.py` 对 void 进行全量重放。
-- 上述 evidence 与 allocation 两个 public writer 各自调用
-  `with_sqlite_repo_transaction`；顺序调用会产生两个提交，不能实现成交、claim 与
-  终结事件的原子性。新路径须由 ledger 内一个事务 owner 执行。
+| 责任 | owner |
+| --- | --- |
+| 零价 close 入口与预览 | `src/application/trades/lifecycle.py::_resolve_zero_price_option_close` |
+| 公开记账边界 | `src/application/ledger/api.py::record_zero_price_option_close` |
+| 单事务即时经济平仓 | `src/application/ledger/writer_lifecycle_evidence.py::record_zero_price_option_close_atomically` |
+| 待定原因与精确 replacement | `src/application/trades/lifecycle_reconciliation.py`、`src/application/ledger/writer_lifecycle_allocation.py` |
+| 经济事实、资本时间与原因待定收益 | `domain/domain/ledger/economics.py`、`domain/domain/performance/weighted_reducer.py` |
 
-## 拟议合同
+新成交入口原子写入已确认经济平仓；旧 reservation facade 仍有自身兼容职责，不能从它的结果推断新成交未写 close。风险与仓位消费者按同一有效代次读取数量和待交收约束。
+
+## 当前合同
 
 ### 1. 成交确认即记经济开平仓
 
 普通非零价开平仓保留现有路径。零价期权 close 只有在 canonical 物理账户、broker
 deal key、合约方向、数量、成交时刻和精确 lot 分配均通过现有校验时，由
-`ledger/api.py` 的一个新零价平仓入口调用 **ledger 内单一事务 owner**：在一条
+`ledger/api.py::record_zero_price_option_close`调用 **ledger 内单一事务 owner**：在一条
 `BEGIN IMMEDIATE` 写事务中依次完成 case/evidence/source claim 的既有校验与持久化、
 每个目标 lot 的 `close` event/allocation、forced-full 投影和同代决策快照发布；
-任一步失败则整笔回滚，成功后读回有效投影。实现时从现有两个 writer 提取仅在
-传入 `conn` 下运行的步骤，由该 owner 调用；不得在事务内调用会再次开启事务的
+任一步失败则整笔回滚，成功后读回有效投影。事务步骤仅在
+传入 `conn` 下运行，由该 owner 调用；不得在事务内调用会再次开启事务的
 两个 public writer，也不得先提交 claim 再写 event。direct reservation 旧路径的
 public facade 保留既有行为，仅新成交入口走完整原子流程。event 使用券商期权成交
 时间，不使用后到的股票交收时间；`price=0` 是券商成交价，
@@ -158,35 +146,12 @@ case、物理账户、币种/标的及交收时点匹配的可信结算证据解
 仅有完整券商持仓快照中某仓位消失、但没有精确平仓成交时，只能确认快照时点
 已不在持仓，不能推造平仓时间、分配和收益率；保留 review/partial。
 
-## 实现切片与验收
+## 验证入口
 
-| 切片 | owner 与行为 | 必须从真实入口验证的结果 |
-|---|---|---|
-| A：即时经济事实 | `trades/lifecycle.py` 经 `ledger/api.py` 到 ledger 单一事务 owner 原子接受零价 close；投影、生命周期直接读模型、可信决策快照、performance、Inbox 和风险消费者同步采用待定原因语义 | 隔离 SQLite 中，`lx/0700.HK/430P` 四张经一笔已确认零价 deal 立即从 open=4 到 0，成交时间为资本终点；原因 pending、胜率 partial；费用 actual 时 HKD 收益率可算，缺费用时仍 partial。claim 后、event 后、projection 前注入失败均无持久半成品；全平仓后资金/股份阻断仍在；相同 deal 重放 `skipped` 且无第二 receipt。普通开/平仓及部分成交不回归。 |
-| B：原因补齐 | `trades/lifecycle_reconciliation.py` 与 ledger allocation writer 复用单 evidence 的 correction void + replacement；最终原因、股票事件与费用证据各由原 owner 控制 | 完整匹配单 anchor 全部 lot 清单的指派/行权/到期证据只保留一次有效平仓数量；4→2 的部分结算保持原 4 张 pending close、进入 review，不能重开或把 4 张全标指派；晚到、重复、冲突、重启、事务故障后读回事件/allocations/lot/stock，数量与现金守恒；原期权成交时刻不变，完整更正后胜率更新。依赖 A。 |
+- `tests/test_trades_resolver_close.py`、`tests/test_trades_lifecycle_runtime.py`：真实 resolver/生命周期 facade 的即时数量变化、原因 pending、重复及失败回滚。
+- `tests/test_lifecycle_settlement_semantics.py`、`tests/test_trade_receipt_inbox_lifecycle.py`：结算、Inbox 与幂等恢复。
+- `tests/test_positions_context_builder_partial_close.py` 及绩效消费者测试：canonical 剩余量、待交收约束和原因/费用缺口分别保留。
 
-验证用现有 `resolve_trade_deal`、push/backfill Inbox 恢复入口、
-`option_performance_report` facade 和风险上下文读取；覆盖 `lx/sy`、US/HK、
-不同物理账户、同合约多 lot、部分/重复/乱序成交、相同 deal ID 不同 payload、
-实际零费与缺费用、actual 费用先于/后于原因、更正期间的费用同步、同合约再开平仓、
-两连接并发。零价普通买卖平仓若无独立原因证据，维持 pending/review，不从零价
-推断为到期或指派。A 的旧行为测试
-`tests/test_trades_resolver_close.py::test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_stock_settlement`
-须改为先失败再通过的核心断言，并加入性能/风险消费者测试；B 使用隔离 SQLite
-验证原子替换和失败回滚；另测 4→2 部分证据、单证据跨多个 anchor 均只记观察而
-不改经济事件。A/B 可分别开发和测试，但须一起交付：A 单独运行时
-旧结算路径会把已关闭数量当作无余量，无法安全补齐原因。测试不得接真实 OpenD、
-飞书或生产账本。
+隔离验证覆盖账户/市场/物理身份、部分成交、重复/乱序、实际零费与缺费、同合约再开平仓、完整单 anchor 更正和部分证据拒绝。历史已经接受但缺经济事件的半成品不能借重放补账；须重新盘点、预览并走授权修复。
 
-## 风险与待核事项
-
-- 现有 lifecycle allocation 校验要求 `terminal_type == event_type`，本方案用
-  `event_type=close`、`close_type=cause_pending` 避免新增事件类型；Impl 需核实所有
-  决策快照、通知与 Control 消费者是否正确区分“数量已关闭”和“原因待定”。
-- 原有已接受 evidence 仍可能保留预留而未写 event；部署后必须先只读盘点并给出
-  单独的预览/修复方案，不能让新 writer 把历史 broker source 当作新成交重放。
-- 券商 push 是成交被接收后的实时更新，不保证网络、OpenD 或进程故障期间零延迟；
-  backfill 恢复仍按原券商成交时间入账。
-
-设计稿经两轮 planreview 后获用户确认进入 Impl。Impl 仅改隔离工作树的源码与
-测试；历史账本修复、生产配置和运行服务仍须单独处理。
+券商 push 不保证网络或进程故障期间零延迟，backfill 仍使用原成交时间。源码及本地测试不证明历史账本修复、生产配置或运行服务状态。

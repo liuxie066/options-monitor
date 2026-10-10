@@ -1,8 +1,8 @@
 # OM 人工 CLI 产品方案与重构 PRD
 
-状态：2026-10-04 用户确认按本文的首次安装、日常管理与命令收敛目标实施；已进入 Gateflow。本文中的目标入口仍不能当作已发布版本的操作说明。
+状态：已确认的人工 CLI 产品契约。当前操作入口见 README / Getting Started；实现和目标环境验证分别提供证据。
 
-产品方案由 GPT-6 Astra 推导，主会话核查代码并补充后续决定。本文是 CLI 产品需求正文；本轮授权源码实现、验证、提交推送和 Draft PR，发布与部署另行授权。
+本文记录首次安装、日常管理和命令归属的产品要求；不承载某次任务的交付或生产授权。
 
 ## 1. 目标与设计方法
 
@@ -37,28 +37,7 @@
 | Exposure 口径 | 沿用所有未平仓卖出期权均被指派的情景；不改成 PM 的当前持仓分布 | 用户纠正后确认：“是，沿用指派后情景” |
 | Close Advice | 默认开启，日常可关闭并重新开启；关闭不应删除历史结果 | 功能配置会话中用户：“默认开启，然后可以在日常管理中关闭” |
 
-后续确认来自功能配置会话 `01a0ed67-eaec-7790-9787-9dad5892337e` 和实现会话 `01a0ed83-179b-7882-be6c-b9d58c9c0a3b`。后者当前还明确要求聚焦 Holdings 配置，具体实现范围仍由其收口。
-
-这些新决定替代旧稿“开启全局持仓风险”“Holdings 是风险功能启用前提”的要求。有效任务名称改为“纳入 Holdings 数据”；不新增 Portfolio Exposure 总开关。旧账户退役与存量迁移由会话 `01a0ed2b-1dc8-7c33-baed-63127ed62982` 负责。
-
-## 3. 设计时的实现基线与缺口
-
-核查基线：`codex/setup-symbol-selection`，HEAD `3085bca9dd5055061c7e62efc7df4bee0884ce04`，包含原有未提交的 CLI、配置、测试和文档改动。该检出与本地 main 已有差异，本轮未 fetch，不能称作远端最新代码；未检查部署状态。
-
-| 已核实的现状 | 本次目标与复用边界 |
-|---|---|
-| `om help all` 列出 34 个顶层命令；PRD 原收敛表未覆盖全部 | 第 6 节逐项给出处置，不再把部分任务表当最终命令全集 |
-| `setup init` 已有标的、策略、边界输入和配置发布，但仍询问目录、允许账户 ID 占位；生成默认启用的 Assistant/Bot 配置 | 复用发布与回读，补齐默认目录、明确账户环境和可选接入；未完成配置不得宣称可运行 |
-| 首页中 OpenD、通知、Bot 的若干选项仅打印说明；日常菜单只有状态、简报、诊断和查看标的 | 改为能完成任务的交互流程；外部安装和登录保留明确交接点 |
-| `accounts` 只有 add/edit/remove；真实/测试环境尚未在该 CLI 完整暴露 | 补 list、账户环境与路由核对，复用账户 authoring owner |
-| `symbols` 与 `config symbol set` 交叠；后者含 Combo 专用字段 | 推荐入口统一到 symbols；字段、安全及输出等价后才转发旧入口，不能直接删掉能力 |
-| `settings` 只有 inspect/doctor/explain；secrets 已有隐藏输入和存储操作 | settings 保持环境来源诊断；业务配置留在所属领域，向导复用 secrets |
-| `assistant`、`bot` 的模型、消息控制、只读问答、任务管理职责不同 | 按子命令合入 bot，保留只读与控制动作的权限差异 |
-| Feishu 传输在 inbound，微信传输在 channel | 建议同归 channel；先清点服务与网关调用，不改变传输行为 |
-| portfolio 已有 assignment-scenario | 沿用指派情景口径；Holdings 配置衔接独立方案，不新增另一种资产分布产品 |
-| OpenD 体验扫描要求 SIMULATE、手动执行及 no-send | 首次向导必须给测试账户独立分支，不能直接套真实账户定时运行步骤 |
-
-证据路径及本轮核查局限见第 10 节。上述是源码和帮助证据，不代表对应功能已在真实环境验证。
+这些决定替代旧稿“开启全局持仓风险”“Holdings 是风险功能启用前提”的要求。有效任务名称为“纳入 Holdings 数据”；不新增 Portfolio Exposure 总开关。账户退役及存量切换见 [退役设计](EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md)。
 
 ## 4. 从场景到任务
 
@@ -260,24 +239,22 @@ macOS 与 Linux 使用相同任务、术语和结果判定，底层分别复用�
 
 1. 用户已确认完整向导与恢复、日常管理任务、第 6 节命令归属，按可完成的用户任务验收。
 2. assistant/inbound 按子命令复用原 handler，保留兼容；人工推荐入口改为 bot 与 channel。内部配置键和网关契约保留。
-3. 2026-10-04 已核对主线：external_holdings 已退役；Holdings 使用现有 PM non_futu 包含开关及 broker 批准集合，保留 source/preview 双摘要和预检。Close Advice 使用现有 enabled 默认 true；Combo 保留既有标的参数，不发明新规则。
+3. 2026-10-04 已核对主线：external_holdings 已退役；Holdings 使用现有 PM non_futu 包含开关及来源清单核验，不保存券商批准集合；保留 source/preview 双摘要和预检。Close Advice 使用现有 enabled 默认 true；Combo 保留既有标的参数，不发明新规则。
 4. macOS/Linux 复用现有 renderer/profile，补齐基本安装、启停和状态回读；账户 facade 明确 REAL/SIMULATE。真实平台、OpenD、凭证和投递验收仍需对应环境授权，隔离测试不替代外部事实。
 
-当前实施由用户显式请求的 Gateflow 执行，计划与审查保存在仓库忽略的过程目录中；按该流程完成 Planreview、实现审查、整体 Deepreview 和 Draft PR 审查。
+## 10. 实现入口与验证边界
 
-## 10. 核查证据与限制
-
-本轮实际读取并沿链路核对：
+核对当前实现从以下 owner 及相关测试进入：
 
 - [CLI首页](../src/interfaces/cli/home.py)、[解析与路由](../src/interfaces/cli/main.py)、[首装入口](../src/interfaces/cli/setup_ops.py) → [配置生成与发布](../src/application/config_yaml_init.py) → source/runtime/root record 的写入、验证和失败清理 → 用户结果；对应 [首装测试](../tests/test_setup_init_cli.py)、[首页测试](../tests/test_cli_home.py)。
 - [账户入口](../src/interfaces/cli/account_ops.py)、[标的入口](../src/interfaces/cli/symbols.py)、[旧配置入口](../src/interfaces/cli/config_ops.py) → [标的修改与发布](../src/application/config_yaml_symbols.py)；验证策略必填字段、共享市场范围及已有发布调用。
 - [凭证入口](../src/interfaces/cli/secret_ops.py) → 系统存储 provisioner；确认隐藏输入、TTY要求和取消/删除边界。[settings](../src/interfaces/cli/settings_ops.py) 仅作环境来源诊断。
 - [Bot](../src/interfaces/cli/bot_ops.py)、[assistant](../src/interfaces/cli/bot_ops.py)、[inbound](../src/interfaces/cli/inbound_ops.py)、[channel](../src/interfaces/cli/channel_ops.py) 的解析和路由；确认读问答、控制和传输不可混为同一语义。
 - [portfolio](../src/interfaces/cli/portfolio_ops.py) 保留 assignment-scenario；[运行入口](../src/interfaces/cli/run_ops.py) → [体验模式门禁](../src/application/experience_mode.py)；核对 SIMULATE、手动与 no-send。
-- [操作入口](../src/interfaces/cli/operator_ops.py)、[服务入口](../src/interfaces/cli/service_ops.py) 及 Astra 读取的其他领域命令；[version](../src/application/version_check.py) 与 [upgrade check](../src/application/service_upgrade.py) 的版本来源和运行实例处理不同。
+- [操作入口](../src/interfaces/cli/operator_ops.py)、[服务入口](../src/interfaces/cli/service_ops.py) ；[version](../src/application/version_check.py) 与 [upgrade check](../src/application/service_upgrade.py) 的版本来源和运行实例处理不同。
 
-设计阶段仅运行帮助命令、静态阅读与文档检查；后续实施增加隔离配置、菜单、服务与回执回归测试。未运行真实扫描、通知、模型调用、账户读取或服务变更。34 项处置中的高级保留是兼容选择，不代表所有业务领域已完成全面审计。
+隔离配置、菜单、服务与回执测试用于核验源码行为。真实扫描、通知、模型调用、账户读取和服务状态须在对应环境分别验收；命令归属表中的高级保留是兼容选择，不证明所有业务领域均已验证。
 
 外部参考只支持交互机制，不决定 OM 的业务边界：[Command Line Interface Guidelines](https://clig.dev/#help) 支持帮助发现、明确反馈、TTY交互与可脚本化操作；[GitHub CLI 完整命令参考](https://cli.github.com/manual/gh_help_reference) 展示核心与附加命令分组。本文据此建议渐进展示，未把“少量推荐入口”等同于删除高级能力。
 
-源码证据的版本/字节核验使用 PRDflow code gate；它只核验记录完整性与版本，不能证明产品语义或真实环境效果。整体 ready 收口留待第 9 节中影响合同的事项明确后执行。
+当前 CLI 的行为证据归公开入口及其测试，生产效果归实际运行回读。产品目标与实现不一致时保留差异，不通过修改需求掩盖。

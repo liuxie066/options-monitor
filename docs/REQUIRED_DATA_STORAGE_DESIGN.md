@@ -1,119 +1,33 @@
 # Required Data Storage Design
 
-> Status: storage contract and the first shared projection-validation optimization
-> are implemented. The scheduled Tick latency design passed Planreview with
-> residual risks and is frozen for implementation. Commit, release, deployment,
-> and any production history cleanup remain separate operator actions.
+> Status: the storage contract, scheduled Tick warmup/batch/projection changes,
+> and run-scoped prefetch repair are implemented in source. Historical production
+> measurements below explain the design; they do not prove current latency or
+> deployment. Release, upgrade and production cleanup require their own evidence.
 
-## Day 7 required-data prefetch repair (2026-09-28)
+## Run-scoped prefetch and seal contract
 
-### Goal, scope, and success signals
+Owner: `src/application/multi_tick/required_data_prefetch.py`. The producer uses
+the current run's `required_data/{raw,parsed}` workspace; new-seal cleanup retires
+those files after canonical publication.
 
-Remove the run-scoped prefetch cache probe and its cached-result synthesis, and
-make four source-snapshot event append failures observable without changing
-fetch outcomes. This work changes only
-`src/application/multi_tick/required_data_prefetch.py`, its focused tests, and
-this design. The F7 seal read/hash in `tick_account_execution.py` is an
-authorized investigation: remove it only if the exact-byte contract is proved
-redundant. No production data, config, public schema, concurrency, execution
-mode, timeout, version, or delivery operation is in scope.
+- Every planned unique symbol in `fetch_syms` is dispatched once per invocation.
+  Reusing an isolated run root does not synthesize a cached result. Empty scope
+  returns the normal 34-key summary with `schema_version=1.0` and
+  `cached_unique_symbols=0`; no top-level `cached` field is introduced.
+- Four source-snapshot append sites preserve the fetch payload on append failure
+  and log `source_snapshot_event_append_failed` with symbol and exception type.
+  A failing logging handler also preserves the payload. Planning and provider
+  failures keep their existing fail-closed behavior.
+- `src/application/tick_account_execution.py` reads the newly sealed
+  manifest's exact bytes for `snapshot_manifest_sha256` and shadow retirement.
+  This read remains necessary: serializing the returned dictionary does not prove
+  byte identity, and cleanup uses those bytes for durability checks.
 
-Success signals:
-
-1. Every planned unique symbol is dispatched once per run, including a second
-   invocation against the same isolated run root. Zero symbols still return
-   the normal 34-key summary shape; `cached_unique_symbols` remains present
-   and zero, no top-level `cached` is added, and
-   `schema_version` remains `1.0` (`SCHEMA_VERSION_V1`).
-2. Each of the four specified append sites leaves a warning with symbol and
-   exception type when the append fails, while returning the same payload and
-   continuing fetch processing.
-3. The new-seal summary hashes the exact manifest file bytes and passes those
-   same bytes to shadow retirement; an optimization is applied only if that
-   property survives.
-
-### Current facts and ownership
-
-The producer files are under the current run's `required_data/{raw,parsed}`;
-new-seal cleanup retires them. `required_data_prefetch.py:_need_fetch` is called
-only while building `todo_cfgs`. Its cached branch then synthesizes quote
-receipts and a second early-return summary. The normal summary has the
-production-observed 34-key shape, including `cached_unique_symbols` but not
-top-level `cached`. Only the dead early return has `cached`. The planned fetch set already exists as
-`fetch_syms` and drives the global plan. The quote-candidate validator remains
-live in `required_data_snapshot.py` and `opend_symbol_outputs.py` and stays
-untouched.
-
-`required_data_snapshot.py:seal_required_data_snapshot` reads back and
-validates the manifest but returns only its parsed dictionary. Its
-`load_required_data_snapshot_manifest_snapshot` API can return exact bytes,
-but invoking it here would add another validation/read pass. In
-`tick_account_execution.py` the new-seal read supplies the exact file bytes
-for `snapshot_manifest_sha256` and the cleanup argument. Cleanup compares
-those bytes to the parsed manifest and uses them in durability checks. The
-read is therefore **not redundant**. F7 stays unchanged; no before/after
-speed claim is possible for this no-op decision. The historical runlog seal
-timings remain context, not evidence of an optimization.
-
-Reuse check: searched the prefetch owner, seal/cleanup owner, this document,
-and the focused tests for `_need_fetch`, `cached`, `append_source_snapshot_event`,
-`manifest_bytes`, and `sha256_bytes`. Reuse `fetch_syms` as the dispatch set;
-reuse the existing normal summary keys and `SCHEMA_VERSION_V1`; reuse
-`logging` from the standard library for warnings at the four append sites;
-reuse the existing manifest byte read and `sha256_bytes`. No new domain field,
-state, configuration key, module, or dependency is introduced. No matching
-preexisting warning helper was found in the prefetch owner. The absence claim
-is limited to these inspected owners.
-
-### Chosen changes and failure behavior
-
-- Delete `_need_fetch`, its cached result synthesis, and its early return.
-  Build the existing budget plan from all `fetch_syms`. Preserve the normal
-  return keys, with `cached_unique_symbols` fixed at zero. An empty `fetch_syms` list
-  goes through the normal coordinator merge and returns an empty but usable
-  summary. Keep planning and provider failures fail closed.
-- At the four exact append sites, retain the `try` boundary and log a warning
-  with stable event name, symbol (including an explicit empty string), and
-  exception type in the `except` branch. Guard the logging call itself: a
-  failing handler must not turn append failure into fetch failure. A broken
-  log sink cannot preserve the warning, but still must preserve the payload.
-  Do not raise, retry, change payload fields, or alter the other exception
-  handlers in the file. Append success produces no warning. Logging alone is
-  the chosen observable channel; no new counter or summary schema is needed.
-- Keep F7's read and hash. Deriving bytes by serializing the returned dict is
-  rejected because it need not reproduce the exact file bytes, especially on
-  an adopted existing manifest. Changing seal's return contract is rejected
-  because it broadens this narrow repair and does not eliminate seal's own
-  readback requirement.
-
-### Implementation slices and validation
-
-1. **F1, no dependency:** remove the probe and cached path. Covers signal 1.
-   Assert zero-symbol normal summary, exact normal key set and zero
-   `cached_unique_symbols`, fresh dispatch on a repeated invocation using the
-   same isolated run root and existing valid raw/CSV, and no `_need_fetch`
-   references.
-   Inventory every existing test that exercises the cached path and explain
-   every changed or removed assertion.
-2. **F3, depends on F1:** add the four warnings. Covers signal 2. Exercise
-   every append site with a failing repository append and assert unchanged
-   payload plus captured warning. Inject one failing log handler as well and
-   assert the payload still returns. Keep the other eight exception handlers
-   out of scope.
-
-Signal 3 is discharged by the F7 source proof above and one assertion in the
-existing seal barrier test that the persisted summary hash equals the SHA-256
-of the same manifest bytes supplied to cleanup. There is no source-code
-slice because the proposed deletion fails its prerequisite; before/after
-timing is not applicable to an unchanged seal path. After both code slices, run focused tests, the full
-suite, applicable lint and guardrails, and `git diff --check`.
-
-### Open questions and risks
-
-No product decision is open. Production timing and actual log collection are
-only verifiable after separately authorized deployment; this source change
-claims neither. The normal summary's `cached_unique_symbols` key remains for
-compatibility even though the run-scoped cache branch is gone.
+Regression owners include `tests/test_required_data_prefetch_inprocess.py` and
+`tests/test_required_data_observability.py`; seal barrier assertions remain in
+the account-execution tests. Source tests do not establish production latency
+or log collection.
 
 ## Goal
 
@@ -152,7 +66,7 @@ entries.
 - Do not couple this source contract to release, deployment, or production
   mutation.
 
-## Current facts and constraints
+## Storage contract and historical baseline
 
 The scheduled tick creates a run-scoped producer workspace at
 `output_runs/<run_id>/required_data/{raw,parsed}`. Prefetch, coverage,
@@ -558,47 +472,24 @@ that operational target in advance.
 - Do not modify runtime configuration, send a notification, commit, push, release,
   deploy, or run a production Tick without separate authorization.
 
-### Current facts and constraints
+### Historical latency evidence and current owners
 
-The 2026-09-04 production run `20260904T134008Z-6031b7` reached the wrapper's
-600-second deadline before its already-committed `lx` delivery attempt. Its
-required-data prefetch took about 414 seconds and recorded about 221 seconds of
-option-chain rate-gate wait across 69 OpenD option-chain calls. The opening
-warmup had stopped after the first symbol planning failure, so later symbols did
-not receive the intended chain-cache warming.
+The 2026-09-04 runs `20260904T134008Z-6031b7` and
+`20260904T140012Z-80d3e8` motivated warmup isolation, batched underlier
+observations and the multiplier-only projection shortcut. Their 600-second
+wrapper deadline and measured planning/seal/rate-gate costs are historical
+diagnostics, not current production performance.
 
-The warm-cache run `20260904T140012Z-80d3e8` made no option-chain OpenD calls but
-still took about 444 seconds. Required-data prefetch took about 205 seconds,
-including roughly 95 seconds of planning and 46 seconds around seal, publication,
-and validation. Account pipelines and downstream delivery work remain measurable
-but are not among the three selected required-data root causes.
+The current `required_data_prefetch.py` isolates per-symbol warmup planning,
+prefills the run-scoped spot cache through
+`opend_market_snapshot_fetching.py::get_underlier_observations_opend`, and
+keeps endpoint, binding and frozen-identity reconciliation fail closed.
+Expiration discovery remains a separate planning path.
 
-`_warm_required_data_chain_cache_inprocess()` currently builds every symbol plan
-inside one outer exception boundary. A projection failure or unresolved symbol
-identity returns a degraded summary immediately, even though later symbols are
-independent and the warmup is best-effort work before the formal run.
-
-`build_required_data_fetch_plan()` resolves one underlier observation per symbol.
-The current OpenD facade creates and closes a gateway for that symbol, calls
-`get_snapshot([code])`, then calls `get_market_state([code])`. The prefetch
-orchestrator already owns a run-scoped `spot_observation_cache`, but it is filled
-only as each symbol plan is built. Nine symbols therefore cause nine gateway
-lifecycles and eighteen serial provider calls before option-chain work begins.
-Expiration discovery separately opens one gateway and makes one provider call
-per symbol; those calls remain serial in this work unit. The selected batch
-change removes the underlier-observation calls, not all planning I/O.
-
-`_validate_consumer_csv_projection()` already keeps the exact `DataFrame.equals()`
-fast path and caches each mixed-dtype row before its canonical fallback. A current
-CPU smoke still attributes about 41% of cumulative time to this validator. The
-dominant normal mismatch is an attested `multiplier` enrichment; all other
-columns normally match exactly. An `itertuples()` replacement was rejected by an
-existing mixed-dtype boolean regression and is not semantically safe.
-
-Relevant source paths are unchanged between the deployed v3.4.7 behavior used
-for the timing evidence and current `origin/main` at design time. Provider wall
-time remains environment-dependent; deterministic tests can prove request count
-and behavior, not the production latency target.
+`opend_symbol_outputs.py::_validate_consumer_csv_projection` retains the exact
+`DataFrame.equals()` fast path, adds the attested multiplier-only branch, and
+preserves the mixed-dtype canonical fallback. Provider wall time and production
+delivery still need target-environment evidence.
 
 ### Chosen design
 
@@ -798,57 +689,19 @@ eligibility still depend on the existing validated terminal manifest.
 - Replacing the projection fallback with `itertuples()` is faster but changes
   supported mixed-dtype canonicalization.
 
-### Implementation slices
+### Verification owners
 
-1. **Warmup isolation:** change only the per-symbol planning boundary and add a
-   local task commit plus a planning deadline check. Regressions cover failure in
-   a symbol's second request after its first request was built, later-symbol
-   continuation, degraded final status, and unchanged shard-count invariants.
-2. **Batched underlier observations:** first add the batch facade and exact-code
-   reconciliation tests, then add frozen-identity/cache prefill and wire it into
-   warmup and formal prefetch. Tests cover per-symbol identity failure, one and
-   multiple bindings, mixed OpenD/non-OpenD sources, market partitions,
-   configured batch-size splitting, absolute warmup deadline enforcement,
-   independent endpoint failures, partial/duplicate/unexpected responses,
-   unavailable-cache hits, zero secondary spot calls, exact gateway call/code
-   counts, closure, and formal fail-closed behavior.
-3. **Projection shortcut:** add the multiplier-only branch before the existing
-   fallback. Tests cover valid enrichment, invalid/unattested enrichment,
-   `csv=Path` and `csv=None`, exact `chain_multiplier` and
-   `snapshot_multiplier`, non-multiplier drift, null/numeric equivalence, and the
-   existing mixed-dtype boolean case.
+Focused regressions live in `tests/test_required_data_prefetch_inprocess.py`,
+`tests/test_required_data_fetch_planning.py`,
+`tests/test_market_snapshot_fetching.py`,
+`tests/test_required_data_snapshot.py` and
+`tests/test_required_data_output_integrity.py`. They cover later-symbol
+continuation, absolute warmup deadlines, exact batch/code counts, unavailable
+cache hits, partial/duplicate/unexpected responses and projection drift.
 
-Each slice reuses current owners and adds no new module, dependency, schema,
-configuration, command, or service.
-
-### Validation plan
-
-- Run focused tests for warmup, planning, market-snapshot reconciliation, and
-  projection integrity:
-
-  ```bash
-  ./.venv/bin/python -m pytest \
-    tests/test_required_data_prefetch_inprocess.py \
-    tests/test_required_data_fetch_planning.py \
-    tests/test_market_snapshot_fetching.py \
-    tests/test_required_data_snapshot.py \
-    tests/test_required_data_output_integrity.py
-  ```
-
-- Run Ruff on every changed Python and test file. Regenerate and verify the
-  dependency graph only if imports change.
-- Repeat the paired host-local 254-row validator measurement against the current
-  row-cached baseline; require identical results and at least 60% lower median on
-  the multiplier-only common path.
-- Run the canonical required-data benchmark first as a reduced smoke for timing
-  diagnosis and then with its formal warmup/repetition counts for deterministic
-  fixture, retained-byte, allocation, cleanup, and blob-resolution acceptance.
-  Do not treat smoke timing as production acceptance.
-- Run the relevant Tick integration tests, repository wording/sensitive-artifact
-  guardrails, `git diff --check`, and the full pytest suite before implementation
-  is called complete.
-- Production timing and delivery confirmation require a later, separately
-  authorized release, upgrade, and natural scheduled run.
+The canonical scan-blob benchmark covers fixture identity, retained bytes,
+allocation, cleanup and blob-only resolution. Host-local timing and reduced
+smoke runs are diagnostic evidence; they do not establish production latency.
 
 ### Risks and open questions
 
@@ -983,27 +836,16 @@ those declaration points. The new return values stay private to this module.
    A stale observation prevents the receipt write; the already-published
    immutable payload can remain as an orphan, matching the existing retry model.
 
-### Slices and validation
+### Verification owners
 
-- T1, covering the metrics success signal: change only the metrics append and
-  add assertions for one atomic replacement, corrupt archive plus successful
-  append (empty, malformed and non-list content), preserved format, and
-  non-fatal read, serialization, archive-rename, and write failures. Check that
-  a colliding archive name is not overwritten in the single-writer case.
-- T2, covering the candidate and commit-check success signal, independent of T1:
-  return validated metadata through the existing private validators, remove the
-  call-local second read. Assert exactly one raw read for fresh and non-fresh
-  candidate calls, including `success_empty`; assert a fresh empty payload
-  passes and a stale one is rejected. Assert unreadable JSON keeps its message,
-  bad candidate metadata still yields `provider_incomplete`, and the separate
-  receipt-publication metadata error remains. Retain the existing test that
-  advances `now` during publication and confirms commit-time rejection; this
-  is a behavior assertion, not a raw-read count assertion.
+The OpenD symbol-output tests cover atomic metrics replacement, corrupt archive
+preservation and non-fatal metrics errors. Required-data snapshot and output
+integrity tests cover one call-local raw read, fresh empty payloads, malformed
+metadata and commit-time freshness rejection.
 
-Run the six focused test files, full pytest, staged guardrails, dependency graph
-check, and `git diff --check` from the task worktree with the main repository's
-virtualenv. The commit is local only. The two full finalizer validations and
-timestamp policy remain separate later work owned by required-data storage.
+The separate finalizer validations and timestamp policy remain owned by the
+required-data storage contract; removing a call-local duplicate read does not
+authorize removing either finalizer check.
 
 ### Risks and open questions
 

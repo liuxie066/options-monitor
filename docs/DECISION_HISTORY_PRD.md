@@ -1,12 +1,12 @@
 # 决策历史与交易关联查询 PRD
 
-Status: approved product contract; implementation in review. Owner: this document.
+Status: approved product contract. Implementation evidence belongs to source and tests; deployment evidence belongs to the target environment.
 
 操作入口、数据文件和迁移边界见 [决策历史操作说明](DECISION_HISTORY.md)。
 
-## Goal and authorization
+## Goal
 
-让账户管理者可靠查询当时的候选与动作建议、已有明确交易关联，以及关联交易当前状态/已实现结果。用户已逐项确认下列规则，并明确调用 Gateflow 实施，再确认隔离工作分支。实施、检查、提交、推送和 draft PR 已授权；不包含 merge、release、生产升级、真实历史导入、通知或交易。
+让账户管理者可靠查询当时的候选与动作建议、已有明确交易关联，以及关联交易当前状态/已实现结果。下列规则为已确认的产品契约。
 
 ## Approved contract
 
@@ -55,7 +55,7 @@ flowchart TD
 
 ## Acceptance contract
 
-All tests initially planned. Isolated runtime, synthetic source/ledger and real local SQLite; public facades and independent readback required. No real provider/production effects. Developers own automated verification; operator owns separately authorized production sample acceptance.
+Use an isolated runtime, synthetic source/ledger and real local SQLite; public facades and independent readback are required. No real provider/production effects. Developers own automated verification; operator owns separately authorized production sample acceptance.
 
 - A1: 从真实运行路径产生有建议/正常空/失败/部分结果，独立读回；保存失败可见，失败不伪造建议。
 - A2: 同次重试不增记录、新次留版本、改当前规则不改旧结论或关联目标。
@@ -66,8 +66,8 @@ All tests initially planned. Isolated runtime, synthetic source/ledger and real 
 - A7: 未结束、结束、费用/乘数缺口、多币种；账本纠正后结果更新、决策不变，无浮盈。
 - A8: 查询/翻页/取消/重复无业务写入或外部调用；前后数据及调用拦截证明。
 
-## Confirmation and baseline
+## Confirmation and evidence
 
 用户明确确认SQLite唯一权威，并依次选择A确认全运行结果、追加版本幂等、旧记录校验导入、仅明确关联、未结束不算最终结果、查询范围固定、通知仅定位版本。此前双入口/身份/部分结果决定持续有效。替代旧稿JSON直接承载历史与通知状态/匹配交易展示。
 
-Source baseline for implementation: origin/main 83135c0825ef796c40ef65e572e8d849362cb381, fetched and checked 2026-10-07. Prior analysis checkout 5ee2a559 is superseded for implementation. Source-only evidence; production version, retention and sample coverage unverified. Tables/file placement and supported facade details belong to implementation design, not extra product scope.
+当前 owner 为 `src/application/decision_history.py`、`src/application/decision_history_import.py`、`src/application/decision_history_results.py` 和 `src/infrastructure/decision_history_sqlite.py`。隔离验证见 `tests/test_decision_history_query.py`、`tests/test_decision_history_import.py`、`tests/test_decision_history_sqlite.py`、`tests/test_decision_history_results.py`。源码完成不证明生产版本、保留期限或历史样本覆盖；真实导入和运行环境变更仍分别授权。

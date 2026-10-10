@@ -145,25 +145,3 @@ oneshot refresh is successful only when its exit result is success and the
 published status artifact validates and can be read back; timer
 activity, or process presence alone is insufficient. Publishing and remote
 upgrade remain separate authorization gates. A schema extension is not part of this producer-side repair.
-
-## Hotfix scope and implementation slices
-
-目标是让带有内部 `snapshot_input` 的 OpenD 结果重新能够通过现有
-`investment.quality_status.v1` 校验并发布，同时保持质量判断和生产扫描行为不变。
-验收信号是：公共 source snapshot 的键集合严格等于上述八个字段；完整和不完整/错误
-结果都能完成服务级 schema 校验；quality-refresh oneshot 以成功结果退出并能读回
-有效 status artifact。
-
-实现只分两个行为切片：
-
-1. 在 `OpenDOptionSnapshot.public_source_snapshot()` 保留显式八字段 allowlist，
-   不修改或清空 `snapshot_input`，也不改变 `fetch`、position checks 或 artifact writer。
-2. 在 adapter 和 quality service 的公共边界补回归：用带内部哨兵字段的完整、
-   不完整/错误 snapshot 验证精确键集合和 schema 通过；保留旧的八字段 snapshot
-   仍可通过。测试必须走 `build_position_dataset`/service 真实发布路径，而不是只测
-   一个未被调用的 helper。
-
-以下不属于本 hotfix：修改本地 schema、增加 source-level `extensions` 或新版本、
-改变 OpenD 查询或消费者、重写跨文件事务、清洗历史 carry-forward artifact、修改
-发布工作流。发布前只读校验现有 status artifact；若发现历史 artifact 已含未声明字段，
-保留原始事实并另开数据修复工作，不在本 hotfix 中覆盖它。

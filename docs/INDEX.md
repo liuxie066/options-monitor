@@ -46,14 +46,16 @@
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 的开仓边界。
 - [Strategy Terminology](STRATEGY_TERMINOLOGY.md)：OM 内部策略命名与金融专业术语（Bullish Risk Reversal、Collar、Wheel 等）的对照。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
+- [CLI Product Contract](CLI_REFACTOR_PRD.md)：首次安装、日常管理和命令归属的已确认产品要求；操作说明以 README / Getting Started 为准。
 - [Futu Simulate Account Experience Scan PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)：
   面向富途模拟账户用户的 CSP、CC、Combo Yield 手动体验模式合同。
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：扫描质量与人工复盘判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
-- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：当前 Wheel 产品合同、批次级 CC 监控、共享覆盖和生命周期边界。
+- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：当前双向 Wheel 产品合同、Call / Put 分支、共享覆盖和生命周期边界。
 
 ## 技术架构与核心合同
 
+- [Shared API Index](API_INDEX.md)：按业务能力查共享数据、计算和工作流入口、事实归属、契约、测试及兼容/退役状态；Tool schema 使用 `./om-agent spec`。
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
 - [Compatibility Freeze](COMPATIBILITY_FREEZE.md)：只修不增的兼容入口、canonical owner 和退出证据。
 - [Required Data Storage Design](REQUIRED_DATA_STORAGE_DESIGN.md)：required-data 预热、规划、投影验证、canonical blob、封存边界和兼容读取合同。
@@ -67,11 +69,12 @@
 - [Option Close Realtime Design](OPTION_CLOSE_REALTIME_DESIGN.md)：零价期权即时平仓与原因迟到补齐的设计及实现边界；部署状态以运行环境为准。
 - [External Holdings Account Retirement Design](EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md)：账户退役、全局扫描风险分支退役与旧配置切换边界；前半部分保留历史设计依据。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
+- [Current Exchange Rate Contract](EXCHANGE_RATE_FACT_DESIGN.md)：当前汇率唯一 owner、运行快照、用途资格及历史现金边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
 - [Portfolio Assignment Scenario Design](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)：全部指派后分布来源、报价及资金覆盖的实现依据。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
-- [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的研发设计。
+- [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的当前合同。
 - [Runtime Failure Operations](RUNTIME_FAILURE_OPERATIONS.md)：Tick 故障取证、审计时间窗、drift 导出与只读回收预览。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
@@ -83,7 +86,7 @@
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
-- [Bot / Python runtime / Scene v6](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同。
+- [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同。
 - [Legacy Pi storage](PI_AGENT_CORE_INTEGRATION.md)：历史会话保留、离线转换与旧版本回滚边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。

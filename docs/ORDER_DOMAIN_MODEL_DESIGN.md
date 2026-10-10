@@ -1,19 +1,16 @@
 # 期权 / 股票订单统一领域模型设计
 
-> 状态：设计定稿（未实现）。目标：全库只有一个权威的订单/成交/持仓字段定义。
-> 已定决策：① Order 不作为持久化实体，仅作「成交的入口归组层」；② 权威命名以 `ExecutionInput`（`trade_execution.v1`）为基准；③ 实现采用**原地优化，不引入 v2 版本化**（直接改现有 `ContractKey`/`TradeEvent`/`PositionLot`，旧数据用兼容读缺省推导）；④ 三个原待确认口径已在 §9 落定。
-> 本文只定义「字段与语义」，不改代码；实现另开计划。
-> 修订记录（Improve Design 四路评审后合批写回）：补 `event_type` 账本事件轴、`position_side` 定为派生（不存储）、Order 归组四元主键、`fees`/`currency`/`multiplier` 归属与不变式、`PositionLot` 身份落点、策略元数据唯一 home、`premium_open` 每张口径、§10.3 落点计数更正、术语统一为 `ExecutionInput`。
+> 当前需求真源见 [订单领域模型 PRD](ORDER_DOMAIN_MODEL_PRD.md)。成交输入、合约身份、事件与 lot 的共同 owner 已在源码实现；本文保留字段目标及必要历史迁移依据，部署状态以运行证据为准。
+> §4–§7 是早期批准的字段与共用目标，不是全部已实现的声明。当前 `PositionLot` 仍内嵌 `contract_key`，与 §4.3 的扁平身份目标存在差异；当前序列化形状以 `domain/domain/ledger/lots.py` 为准。§9.4–§12 和 §13.6 为历史迁移记录，不能据此执行已退役写入口。
 
-## 1. 摘要
+## 1. 当前实现入口
 
-项目里订单/成交/持仓的「领域模型」分散在 **约 20+ 套**互不相同的表示中，字段命名与类型对不齐。根因不是「没有模型」，而是：
+- `domain/domain/trade_execution.py`：`trade_execution.v1` 输入归一化、精确金额及执行身份；订单保留为可空引用和入口归组。
+- `domain/domain/trade_contract_identity.py`、`domain/domain/ledger/identity.py`：资产/数量单位、方向和合约身份。
+- `domain/domain/ledger/events.py`、`domain/domain/ledger/lots.py`、`domain/domain/ledger/projection.py`：共同事件与确定性持仓投影。
+- `src/application/ledger/api.py`：非 ledger 模块使用的应用边界。新功能沿现有 owner 扩展，不重建平行模型。
 
-1. **事实层与投影层是「期权专属」的**：`ContractKey`/`TradeEvent`/`PositionLot` 只有 `option_type`/`strike`/`expiration_ymd`/`contracts`/`premium_open`，没有 `asset_type`。股票被硬塞进期权形状，股票持仓另起 `shares`/`cost_basis`/`stock_lot_id` 一套词汇。
-2. **「订单（Order）」没有正位**：权威账本从 `ExecutionInput` 起就是成交粒度，`external_order_id` 只是可空引用；真正以订单为主键的只有费用同步、订单回查、通知文本「建议挂单」三处，各写各的字段。
-3. **策略层各自重声明**：Combo 的 `_Lot`（`contracts_original`、`multiplier: str`）、Wheel 的候选（`net_premium`/`net_income`、`stock_lot_id`）在账本之上又各造一套字段。
-
-本设计：**以 `ExecutionInput` 为唯一权威事实结构，把事实层与投影层推广为 asset_type 判别，并把「订单」明确定为入口归组层**——所有模块共用这一套，不再各自搞。
+旧事件兼容读保留；R2 普通开库只接受最终 `lot_id` 结构。当前迁移诊断见 §8/§13，历史设计中的文件行号及计数只代表当时检出。
 
 ## 2. 设计原则
 
@@ -113,7 +110,7 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 
 ### 4.3 PositionLot（持仓手，asset_type 判别）
 
-> 对应现状：`domain/domain/ledger/lots.py`（期权）+ `assigned_stock_events`（股票）。本设计把股票 lot 提升为与期权 lot 同构的一等实体。
+> 早期设计基线：`domain/domain/ledger/lots.py`（期权）+ `assigned_stock_events`（股票）。当前 `PositionLot` 已区分资产类型；下段保留扁平身份目标，实际仍内嵌 `contract_key`。
 > **身份载体**：`PositionLot` 直接含 `asset_type`（判别器）与身份字段 `broker`/`account`/`symbol`/`market`/`currency`（复用 §4.1.2 `instrument_ref` 结构；option 额外 `option_type`/`strike`/`expiration_ymd`）。现状内嵌的期权专属 `contract_key` 改由该身份载体承接；股票 lot 身份 = `broker`/`account`/`symbol`/`market`/`currency`，不再依赖期权专属 `ContractKey`。
 
 #### 4.3.1 共用生命周期
@@ -188,77 +185,15 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 - `strategy`/`leg_role`/`strategy_group_id`/`source_stock_lot_id`/`source_wheel_branch_id`/`strategy_snapshot` **只挂在策略投影侧**（不进 `PositionLot` 权威结构），作为元数据。
 - Wheel 的 PnL 汇总字段（`remaining_stock_cost_basis`、`realized_*_net_pnl`、`shares_remaining`）明确为 wheel 投影专有，不进事实层。
 
-## 8. 迁移路径（分阶段，另开实现计划）
+## 8. 当前迁移与验证边界
 
-1. **定界**：冻结本文字段名，`ExecutionInput` 为唯一入账入口。
-2. **事实层 asset_type 判别**：`ContractKey` 加 `asset_type`，`TradeEvent` 加 `asset_type`/`quantity_unit`；`position_side` 移出身份。兼容读旧期权事件（缺省推导 `option`）。
-3. **股票 lot 一等化**：`assigned_stock_events` 的股票 lot 提升为 `PositionLot`（`asset_type=stock`）。
-4. **清退旧记录层**：`PositionLotFields`/`OpenPositionCommand`/`option_positions` read model 退役，`fields_json` 以 `PositionLot.to_dict()` 为准。
-5. **策略层归位**：Combo `_Lot`/Wheel 候选改读 `PositionLot`，删自造字段与遗留别名。
-6. **类型收紧**：金额/乘数/到期日按 §7 统一，逐套加校验，跑投影 verify 回归。
+代码语义收敛和列退役窗口已经完成。当前普通 repository 不双写旧表形状，也不在开库时执行破坏性重建。历史缺少 `asset_type` 的期权事件兼容读仍保留，不能与旧 SQLite 结构兼容混为一谈。
 
-### 8.1 实现范围模块清单（每块含成功标准）
+- `src/application/ledger/lot_identity_migration.py` 保留只读 `inventory`、`verify`；写入 apply 已退役。
+- `src/application/ledger/sqlite_row_codec.py` 定义最终列集合；`docs/retired_column_sql_registry.json` 与相应质量测试约束旧列 SQL。
+- 验证入口包括 `tests/test_trade_execution_input.py`、`tests/test_ledger_projection.py`、`tests/test_lot_identity_migration.py`、`tests/test_ledger_lot_identity_schema_guard.py`。
 
-> 与 §8 六步的关系：§8 是**按顺序**的迁移步骤，本节是**按架构层**的实现范围切分。每块的「成功标准」是可验证判据（绑定文件/测试），devflow 按块拆工作项。
-> 路径约定：裸 `ledger/` 在 ① ② ③ 指 `domain/domain/ledger/`，在 ④ ⑨ ⑩ 指 `src/application/ledger/`；其余按表内全名。⑦ 的 `wheel_trade_companions.py` 在 `src/application/ledger/`。
-
-#### ① 领域身份与事实层
-- 涉及：`ledger/identity.py`、`ledger/events.py`、`ledger/lots.py`
-- 改动：加 `asset_type`、`position_side` 移出身份、类型收紧
-- 成功标准：`ContractKey`/`TradeEvent`/`PositionLot` 均含 `asset_type`；`ContractKey` 不再含 `position_side`；`strike`/`price`/`premium_open` 为 Decimal、`multiplier` 为 int。→ 判据：`test_trade_contract_identity.py`、`test_ledger_projection.py` 通过；grep 无 `strike: float`/`price: float` 定义。
-
-#### ② 投影引擎
-- 涉及：`ledger/projection.py`、`ledger/projection_state.py`、`ledger/economics.py`、`ledger/invariants.py`
-- 改动：投影按 `asset_type` 判别；`position_key` 兼容读；`position_side` 读点迁移；含家族 A 数量换算收敛（§10.3）
-- 成功标准：同批旧期权事件（无 `asset_type`）新投影与迁移前等价；新股票事件产出 `asset_type=stock` lot。→ 判据：`test_ledger_projection.py`、`test_resumable_projection_state.py`、`test_position_projection_migration.py` 通过。
-
-#### ③ 旧记录层退役
-- 涉及：`ledger/position_fields.py` + 消费方 `ledger/{commands,manual_trades,preflight,publisher,results}.py`、`positions/workflows.py`
-- 改动：`PositionLotFields`/`OpenPositionCommand` 退役，读模型改 `PositionLot.to_dict()`；`PositionLotPatch` **保留**（是投影核心 `lots.py:apply_adjust` 的 adjust 载荷解码依赖），只迁入 `lots.py`/投影核心、不改语义，不退场
-- 成功标准：消费方不再 import/使用 `PositionLotFields`/`OpenPositionCommand`；读模型以 `PositionLot.to_dict()` 为准；`PositionLotPatch` 仍供投影核心使用。→ 判据：grep 无 `PositionLotFields`/`OpenPositionCommand` 消费引用；`test_ledger_module_facades.py`、`test_position_projection_facade_inventory.py` 通过。
-
-#### ④ 账本写入/序列化层
-- 涉及：`ledger/{event_codec,repository_schema,repository_trade_schema,repository,writer_common,writer_trade_events,writer_lifecycle_*,bootstrap,migration,lifecycle,maintenance,interventions,queries,api}.py`
-- 改动：构造点传 `asset_type`/`quantity_unit`；旧事件兼容读缺省 `option`；含家族 B stock_settlement 校验收敛（§10.3）
-- 成功标准：新写 `TradeEvent` 持久化含 `asset_type`/`quantity_unit`；旧无 `asset_type` 事件重投影不漂移。→ 判据：`test_ledger_migration.py`、`test_ledger_event_codec.py`、`test_trade_event_ledger_long_lifecycle.py` 通过。
-
-#### ⑤ 执行归一化层
-- 涉及：`trade_execution.py`、`domain/services/source_adapters.py`、`trades/{normalizer,intake}.py`
-- 改动：`ExecutionInput` 为基准，补 `asset_type` 语义 + 类型收紧；含家族 C/D 执行身份仲裁与双名回退收敛（§10.3）
-- 成功标准：`ExecutionInput` 的 `asset_type`/`quantity_unit` 与 §4 一致，金额/时间类型收紧。→ 判据：`test_trade_execution_input.py` 通过。
-
-#### ⑥ 股票层（assigned_stock 一等化）
-- 涉及：`assigned_stock.py`、`ledger/current_decision_assigned_stock.py`、`ledger/repository_assigned_stock.py`、`positions/assigned_stock_quotes.py`、`portfolio_context_builder.py`、`futu_portfolio_context.py`
-- 改动：股票 lot → `PositionLot(asset_type=stock)`，`avg_cost`(每股) → `cost_basis_total`(总额)；含家族 A/B 跨界换算与 stock_settlement 收敛（§10.3）
-- 成功标准：股票 lot 以 `asset_type=stock` 进入 `PositionLot`，用 `shares_opened/open/closed`+`cost_basis_total`，不再有 `stock_lot_id` 独立身份。→ 判据：`test_assigned_stock_projection.py`、`test_ledger_assigned_stock_queries.py` 通过。
-
-#### ⑦ 策略层（Combo/Wheel 收敛）
-- 涉及：`combo_reconciliation.py`（domain+src）、`combo_membership.py`、`combo_identity.py`、`combo_yield_lifecycle.py`、`wheel.py`、`strategy_membership.py`、`src/application/wheel/{read_model,scanning,candidate_snapshot,capacity,workflows}.py`、`wheel_trade_companions.py`
-- 改动：`_Lot` 字段改名、`net_premium`/`net_income` 去双名、别名 shim 清退、改读权威 `PositionLot`
-- 成功标准：`_Lot` 无 `contracts_original`/`multiplier:str`/`strike:str`；Wheel 候选无 `net_premium`/`net_income`；`batch_generation_hash`/`active_call_lot_ids` 别名清退。→ 判据：`test_combo_reconciliation_domain.py`、`test_wheel_strategy.py`、`test_wheel_scanning.py` 通过。
-
-#### ⑧ 方向语义层（position_side 读点迁移）
-- 涉及：`option_close_reason.py`、`option_lifecycle.py`、`performance/{models,weighted_reducer,attribution}.py`、`performance/adapters.py`
-- 改动：`contract_key.position_side` → lot/event side
-- 成功标准：全库无 `contract_key.position_side` 读点；`position_key` 聚合改来源、字符串不变。→ 判据：grep 无残留读点；`test_ledger_economics.py` 通过。
-
-#### ⑨ 交易/费用层（Order 归组 + deliverable）
-- 涉及：`trades/order_fee_sync.py`、`ledger/{order_fee_semantics,order_fee_migration}.py`、`trades/{resolver,file_intake,receipt}.py`
-- 改动：Order 归组确认（行为不变）；`deliverable` 保持可空；含家族 E 费用/币种仲裁收敛（§10.3）
-- 成功标准：订单级费用按 `order_id` 归组行为与迁移前一致；`deliverable` 可空且账本不消费。→ 判据：`test_order_fee_sync.py`、`test_order_fee_settlement.py`、`test_trades_resolver_*.py` 通过。
-
-#### ⑩ 读模型/CLI 边界
-- 涉及：`ledger/{read_model,publisher,views}.py`、`positions/inspection.py`、`agent_tools/positions.py`、`assistant/renderer.py`、`interfaces/cli/{option_positions,wheel}.py`
-- 改动：`position_id`/`record_id` → `lot_id`/`position_key`，展示字段改名
-- 成功标准：读模型与 CLI 以 `lot_id`/`position_key` 为准，无 `position_id`/`record_id` 残留。→ 判据：`test_position_projection_publication.py`、`test_ledger_publisher.py` 通过。
-
-#### ⑪ 外部基础设施（边界确认）
-- 涉及：`infrastructure/futu_gateway.py`、`futu_history_deals.py`、`external_services.py`
-- 改动：order/deal 数据面契约不变
-- 成功标准：`futu_gateway` 无行为改动。→ 判据：`test_trades_futu_detail_lookup.py` 通过。
-
-#### ⑫ 测试层（回归）
-- 成功标准：上述全部测试 + 完整 suite 回归通过，投影 fingerprint 一致。→ 判据：`om-pre-push-checks` 通过。
+恢复迁移前的备份须使用匹配的历史受控流程，历史 R1 配方见 §9.4–§12；当前版本不提供旧窗口的破坏性写功能。
 
 ## 9. 已定决策（原待确认项）
 
@@ -269,13 +204,9 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 - **依据**：外部 Futu 给的是每股 `avg_cost`，适配层已在 `portfolio_context_builder.py:266` / `futu_portfolio_context.py:712` 转为 `known_cost_total = avg_cost × shares`；费用总额是精确事实，存总额能无损承载费用，每股由总额/股数精确派生，避免「每股先舍入再反推总额」丢费用精度。
 - **边界**：每股 `avg_cost` 只出现在适配层入口，进账本即转总额。
 
-### 9.2 `position_side` 移出身份 → 三步迁移
+### 9.2 `position_side` 移出身份
 
-1. **先加（向前兼容）**：新增单一派生函数 `derive_position_side(position_effect, side)`（§4.1.3）；旧事件缺省从 `contract_key.position_side` 读。`position_side` **不新增存储字段**（派生投影值，`ContractKey.position_side` 暂时保留）。
-2. **再迁（读点迁移）**：全库 30+ 处 `contract_key.position_side` 改读派生 `position_side`（`lot` 侧派生值 / `event` 侧派生值）；`position_key` 聚合改用 lot 侧派生 side 拼接（字符串不变，仅来源变更）。
-3. **后删（移除）**：从 `ContractKey` 去掉 `position_side`，`position_key` 概念下沉到 lot 层（`contract_key` 回归纯合约身份 = broker/account/underlying/option_type/strike/expiration；lot 键 = 合约身份 + 派生 side）。
-
-> 方向已定（§5：`position_side` 移出身份）；上表只排顺序，每步独立可提交。「派生不存储」的理由：`side`+`position_effect` 对 open/close 可唯一推出 `position_side`，存一份会与 S4 单一定义点冲突；`void`/`adjust` 不改变目标 lot 方向。
+`ContractKey` 当前只承载合约身份，不含 `position_side`。方向由 `derive_position_side(position_effect, side)` 派生并由 event/lot 使用；旧事件兼容读集中在边界。`position_key` 是合约身份与方向的派生聚合键，既有持久化字符串及 hash 不因内部字段归位随意改变。
 
 ### 9.3 `deliverable` → 保持可空，账本不消费
 
@@ -335,7 +266,7 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 ### 9.5 存量迁移批次执行决策（§12.7 的裁定结果）
 
 > 来源：§12.7 的五个未决项，2026-09-18 裁定「按建议」。本节是**已定决策**；§12 保留机制事实、形态对照与重建配方，不再重复理由。
-> 本节的形态与顺序决策**尚未实施**，实施需另行授权（含生产迁移窗口与生产写入）。
+> 本节记录历史 R1 迁移窗口的形态与顺序决策；R2 已关闭写窗口，当前操作边界见 §8/§13。
 
 #### M1. D1–D4 一律走 B（操作者门控），不走 A
 
@@ -577,176 +508,35 @@ D1/D2 的重建应照搬 `wheel_events` v1→v2 的校验型顺序（`repository
 | 4 | `record_id` 与 `stock_lot_id` 是否同一身份（§12.5） | **是同一身份**（已查实） | §9.5 M4 |
 | 5 | 是否提供 preview/dry-run | **必须提供** `inventory`/`verify`/`apply` | §9.5 M5 |
 
-本案的落地顺序见 §9.5 M6，可执行切片与验证见 §13。**上述决策尚未实施**；实施（含生产迁移窗口与生产写入）需另行授权。
+本节保留历史落地依据，顺序见 §9.5 M6；当前只读诊断与旧备份边界见 §8/§13。历史配方不是当前操作授权。
 
-## 13. 本批次实现计划（切片、复用归属与验证）
+## 13. 当前只读诊断与历史边界
 
-> 本节经 devflow Improve Design 四路 Panel 独立评审后改写（2026-09-18）。原稿的三类缺陷已订正：
-> ① 切片 1 只加列、未要求同步登记列分类合同；② 切片 1 的「写侧继续写旧列 / 读侧优先取新列 / 回填在哪跑」
-> 三处互相矛盾；③ 切片 2 的「持久化边界集合」只有散文、无法据以验收。
-> 四路 reviewer 的原始结论不并入本文档，只并入**经主 agent 逐条回代码核验**的证据。
+已删除完成的三切片任务计划、临时工作树状态和重复测试执行说明。以下保留当前诊断语义及源码注释引用所需的迁移依据。
 
-### 13.1 目标 / 非目标 / 成功信号
+### 13.2 诊断 owner 与命令归属
 
-**目标**（§9.5 M6 的四个落点）：
+原复用清单第 8 项的约定继续有效：lot-identity 的 `inventory` / `verify` 与 projection-migration 的 checkpoint/tail 命令职责不同，不能因为名称相同混用。owner 为 `src/application/ledger/lot_identity_migration.py`，两者均不写入旧库。
 
-1. **D2 第一步**（不进窗口）：`position_lots` 增 `lot_id` 列 → 登记分类合同 → 建唯一索引 → 写侧双写 → 读侧可用。
-2. **身份名收敛（代码半边）**：把 lot 身份的**声明名**统一到 `lot_id`，含 `record_id` 与 `stock_lot_id` 两个旧名。
-3. **迁移子命令**：`inventory` / `verify` / `apply`，`verify` 是只读 dry-run，作为窗口 go/no-go 依据；必须能识别 D3 计划丢弃的 payload 键。
-4. **一个窗口**（未授权，不在本批次内执行）：D1 + D2 第二步 + D3/D4 + `wheel_events.stock_lot_id` 退役。
+### 13.3 验证语义
 
-**非目标**（精确化，避免与切片 1 冲突）：
+payload 丢键不自动等于丢事实。`verify` 将非空旧字段分类为已由目标形状承载、可从事件重建或实际丢失；只对丢失失败，事件可重建的判断须实际测量。只在 `note` 中存在的事实、无法映射的 KV 和自由文本不能被当作安全删除。
 
-- **不在开库路径做破坏性 / 改写型迁移**：`_init_db()` 不得承担删列、主键切换、payload 重写。
-  **显式豁免**：纯增量、幂等、不改写任何既有数据的 DDL（即 `_add_column_if_missing` 的既有用法）属本仓既定的加列惯例——
-  `repository_core.py` 的 `:529` / `:530` / `:531` 就是这样给 `position_lots` 补 `expiration` / `strike` / `multiplier` 的。
-  本批次**允许**该形态，但这是**声明的豁免**，不是默认；切片 1 必须写明它豁免于哪条非目标。
-- **不在开库路径回填**：全表 `UPDATE` 属改写型动作，落点在切片 3 的门控命令（既有先例见 §13.2 第 7 行）。
-- **不做开库自动重建**（§9.5 M1 裁定 B 形态）。
-- **不改 §13.6 边界集合里的任何持久化名**——那是代码层收敛的硬边界，不是遗漏。
-- **不碰生产**：不写生产库、不碰生产配置、不发布 / 升级 / 部署（§9.5 M6 第 3 步，需另行授权）。
-- **不引入 schema 版本号**（`PRAGMA user_version` 当前 0 命中），本批次靠内容比对。
+`verify` 使用新重放与逐行内容比对，不复用 checkpoint 的“自上次验证未变化”短路；后者不能证明一个原本错误的存储符合新投影。
 
-**成功信号**（每切片独立可验，且必须可回读）：
+### 13.4 隔离验证
 
-| 切片 | 成功信号 |
-|---|---|
-| 1 | 列已存在**且已登记列分类**；**列合同闭合**（`missing` 与 `unclassified` 皆空）、head 不落 `untrusted`；唯一索引在**非空**库上确实建成；二次开库幂等（不重复加列、不报错）；**写侧双写**使新写入行的 `lot_id` 非空；读路径对既有消费点输出等价 |
-| 2 | 声明名收敛为 `lot_id`；**持久化形状零变化**；剩余命中**等于** §13.6 边界集合（**不是 0**） |
-| 3 | `verify` 对 D3 计划丢弃的 payload 键给出**负例**（旧 payload 中非空即 fail）；`verify` **不得**走 checkpoint 复用短路；`apply` 在本地构造的旧形状 store 上**端到端跑通一次**（含失败回滚） |
+`tests/test_lot_identity_migration.py` 覆盖载体分布、非空丢键分类、真实丢失及只读大小不变。合成 fixture 只证明对应行为，不证明真实旧备份的所有载体。
 
-### 13.2 复用清单（owner 归属 + 检索证据）
+### 13.5 历史载体与恢复边界
 
-检索方式：`scripts/reuse_scan.py --root . --query lot_id --query record_id --query stock_lot_id --query position_lots --query projection-migration --no-text`，产物 `/tmp/reuse_scan_batch2.txt`（`schema: devflow.reuse_scan.v1`，`git_sha: 34ccf7fd…`，与本文档所在树同为 `0c97c5da…`；`python_seen/parsed = 1036/1036`，`structure_truncated: false`，`text_truncated: false`）。计数在 `src/` + `domain/` 上跑，**两种口径都给出**，因为二者都对、但含义不同：`grep -roE "\b<name>\b"` 计**出现次数**，`grep -rnwE "<name>"` 计**匹配行数**。切片 2 的验收用**行数**（对格式变化更稳）。
+原 R6 的载体问题由只读 inventory 报告结构化值、note KV、列独有值和缺失分布；恢复旧备份前应核对实际内容。历史 schema cookie 改变须通过完整重发布恢复可信投影，不能通过复用旧 checkpoint 掩盖。
 
-| # | 概念 / 名称 / 实现 | 归属 | 理由与证据 |
-|---|---|---|---|
-| 1 | `lot_id`（lot 身份名） | **复用** 既有领域名 | 领域记录早已叫 `lot_id`：`repository_common.py` 的 `:213` `record_id = record.lot_id`。出现 719 次 / 行 605 / 65 文件，无需新概念 |
-| 2 | `record_id` → lot 身份的旧名 | **复用** 既有 owner 定义 | 6 个 owner 已核验全是 lot 身份：`results.py` 的 `LedgerWriteResult` / `BrokerTradeOperation` / `ExpiredCloseDecision`、`lot_resolver.py` 的 `LotCloseCandidate` / `LotCloseMatch`、`positions/workflows.py` 的 `ManualCloseResolvedMatch`。本项是**改名**，不新增概念（出现 1140 / 行 853 / 77 文件） |
-| 3 | `stock_lot_id`（股票 lot 旧名） | **复用** 同一身份 | §9.5 M4 已查实与 `record_id` 同身份；最热为 `domain/domain/wheel/`（75 次）、`src/application/wheel/workflows.py`（68 次）（出现 560 / 行 426 / 30 文件） |
-| 4 | 加列惯用法 | **复用** `_add_column_if_missing` | `repository_common.py` 的 `:298`-`:301`；见 §13.1 的**显式豁免**——它是开库路径上的**增量**动作，与本批次禁止的破坏性迁移不同量级 |
-| 5 | 唯一索引建法 | **明确不复用** `_create_index_if_table_empty` | 该 helper 在表非空时**静默返回 False 且不建索引**（`repository_trade_schema.py` 的 `:936`-`:939`）。切片 1 必须用 `CREATE UNIQUE INDEX IF NOT EXISTS`，形态照 `repository_projection.py` 的 `:155`-`:172`（其 docstring 明写面向 already populated store） |
-| 6 | `strategy_group_identities` 等持久化名 | **不适用（排除）** | 见 §13.6 与 §13.5 R1。本批次不改 |
-| 7 | 门控回填形态 | **复用** `backfill_position_lot_contract_columns` | `repository_projection.py` 的 `:17`-`:25`，唯一生产调用点在 `position_projection_migration.py` 的 `:553`（**在门控 `apply` 事务内**）。这是「回填不进开库路径」的既有先例 |
-| 8 | 迁移子命令形态 | **复用** `om option-positions projection-migration` 的**约定**，**不复用子命令名** | 约定三条：只读 `inventory`、`--manifest` 必填、写操作走 `_add_local_write_flags(..., high_risk=True)`（`src/interfaces/cli/option_positions.py` 的 `:481`-`:524`）。但 `inventory` / `verify` / `apply` 三名字**已被投影迁移占用**且语义是 checkpoint/tail，`activate` / `deactivate` 还在生产用于开关 checkpoint 模式 → 本批次挂**新父组**（如 `lot-identity-migration`），不改现有语义 |
+### 13.6 历史持久化边界集合
 
-**空命中核对**（证明无需新概念名）：`lot_id_column_backfill` 0 命中、`position_lot_lot_id` 0 命中、`strategy_group_identities_lot_id` 0 命中。故 §13.3 不引入任何新名字。
+下表记录迁移前必须保护的名与 hash 载体，仅用于追溯当时改名为何需要窗口；退役后的当前列集合及 hash 规则以源码和登记表为准。它不是当前仍有旧列或待执行迁移的声明。
 
-### 13.3 实现切片（3 个，均为可独立验证的行为增量）
-
-**切片 1 — D2 第一步：加列 + 登记合同 + 建唯一索引 + 写侧双写**
-
-- 行为增量：库中多出一列可读的 lot 身份，**新写入的行也有值**，且列合同保持闭合。
-- **必须同批做**（缺一即失败）：
-  1. `ALTER TABLE position_lots ADD COLUMN lot_id TEXT`（复用 `_add_column_if_missing`，见 §13.1 豁免）。**实现期订正（落点）**：这条 DDL 与第 3 条的索引必须写在 `_ensure_position_projection_schema`（`repository_projection_schema.py` 的 `:302`）里，**不能**只写在 `_init_db` 的内联块。理由是两个调用点共享该函数：`_init_db`（`repository_core.py` 的 `:906`，仍在该次开库的同一事务内，commit 在 `:908`）与**门控迁移 `apply`**（`position_projection_migration.py` 的 `:549`，同样在事务内）。实测把 DDL 写在 `_init_db` 会让门控 `apply` 在冻结旧库上直接崩：`sqlite3.OperationalError: table position_lots has no column named lot_id`，触发者是 `tests/test_position_projection_migration.py` 的 `_legacy_store`——它用 `executescript` 手写旧形状 `position_lots`，**从不经过 `_init_db`**，`repository_projection_migration.py` 的 `:650` 另一处 `SELECT` 也走同一路径。订正前 13 个迁移用例红；
-  2. **把 `"lot_id"` 登记进 `POSITION_LOTS_COLUMN_CLASSIFICATION`**（`repository_common.py` 的 `:97`），分类取 `integrity/identity`（与 `record_id` 同类）。列合同是**精确集合相等**判定：`unclassified = actual - set(expected)`（`repository_projection_schema.py` 的 `:33`），**加列与删列是同一个失败模式** → 合同不闭合 → `column_contract_open`（`repository_projection_tail.py` 的 `:355`）→ head 写 `untrusted`（`:438`）→ tail 发布 `RuntimeError`（`position_projection_runtime.py` 的 `:872`）。同步更新硬编码该集合的测试（`tests/test_position_projection_publication.py` 的 `:143`）；
-  3. `CREATE UNIQUE INDEX IF NOT EXISTS idx_position_lots_lot_id ON position_lots(lot_id)`，**不得**用 `_create_index_if_table_empty`（§13.2 第 5 行）。**实现期订正（边界）**：该索引**不**加进 `position_projection_indexes_ready` 的 `required` 集合（`repository_projection_tail.py` 的 `:225`-`:230`），也**不**加进 `build_position_projection_indexes` 的 `definitions`（`repository_projection.py` 的 `:152`-`:172`）。前者是信任 / 状态门（被 `repository_projection_tail.py` 的 `:366` 与 `position_projection_runtime.py` 的 `:1052` 消费），加进去等于本切片新增一道 M6 窗口前不存在的门；后者返回的 `indexes_created` 会进迁移清单（`position_projection_migration.py` 的 `:556`），加进去会改动 `apply` 的上报值。两处都不是切片 1 的成功信号所必需——索引由 `_ensure_position_projection_schema` 在同一事务内以 `IF NOT EXISTS` 建成；
-  4. **写侧双写**：`_position_lot_storage_values`（`repository_common.py` 的 `:212`-`:240`）返回 `lot_id`，且 `repository_projection_tail.py` 的 `:126`-`:132` INSERT 与 `:163`-`:172` UPDATE 的列清单加上它。**不加这一步，每条新 lot 的 `lot_id` 恒为 NULL**，「逐行相等」只在回填那一瞬成立，且 SQLite 唯一索引把 NULL 视为互不相同，所以不报错、静默漂移；
-  5. **读路径不破坏既有消费点**：`position_lot_row_to_record`（`sqlite_row_codec.py` 的 `:12`-`:32`）目前只发 `"record_id"` 键，而 `queries.py` 的 `:993` / `:998` 以该键建索引（键消失即静默变空）。过渡期**两个键都发**，把 `read_model.py` 的 `:174`、`views.py` 的 `:33` / `:36`、`repository_projection_tail.py` 的 `:93` 列为必检。**实现期订正（调用面）**：该函数有 **7 个调用点**（`repository_projection_tail.py` 的 `:318` / `:756` / `:778` / `:789` / `:808`、`sqlite_row_codec.py` 的 `:63`、`position_projection_migration.py` 的 `:647`），任一喂给它的 `SELECT` 若不列 `lot_id`，`row["lot_id"]` 会 `IndexError`。故**代码**取双重保险：6 处 `SELECT` 全部补上 `lot_id`，**且**该函数用 `"lot_id" in row.keys()` 容错（`sqlite_row_codec.py` 的 `:27`-`:31`），两种合法回退——旧行的 `lot_id` 仍为 NULL、更窄的 `SELECT`——都退回 `record_id`。回退在本切片内不产生差异（两值同源相等），它保证的是「新增一列」不会把任何既有窄 `SELECT` 变成崩溃点。第一次实现时正是漏了 `position_projection_migration.py` 的 `:650`（当时用 `head` 截断了调用点检索），11 个迁移用例红。**同类的第二条读路径**：`read_only_evidence.py` 的 `_read_position_lots` 是**独立读取实现**（`mode=ro` + `query_only=ON`，不发 `fields_json` 之外的列回填），它**不能**自己加列，且必须能读**早于本批次**的库；`tests/test_trade_receipt_readback.py` 的 `:53` 断言它与 `repo.list_position_lots()` **逐字相等**，所以两条读路径必须同时双键、否则等价性当场破裂。订正方式照 §13.2 的既有惯用法（`position_projection_migration.py` 的 `:271`-`:273`）：探测列存在性，缺失时发 `NULL AS lot_id`（`read_only_evidence.py` 的 `:94`-`:99`），使**对外形状稳定**而存储差异被吸收；该契约的消费点 `auto_intake.py` 的 `:341` 只读 `row["fields"]`，故加键无副作用。同时更新 `tests/test_trade_receipt_readback.py` 的 `:56` 那条形状 pin 为三键；
-- **不做**：主键、守卫触发器（`repository_projection_schema.py` 的 `:683` / `:703` / `:725` 的 `AFTER UPDATE OF` 列表）在本切片内**不动**——它们仍挂在 `record_id` 上，动它就等于提前执行 D2 第二步（窗口项）。附带事实：回填不在 `AFTER UPDATE OF` 列表里、不 bump `lots_generation`。
-- **回填不进本切片**：存量行的回填落在切片 3 的门控 `apply`（先例见 §13.2 第 7 行）。
-
-**切片 2 — 身份名收敛（代码半边）**
-
-- 行为增量：领域 / 应用层对 lot 身份的**声明名**统一为 `lot_id`，旧名仅存活在 §13.6 的持久化边界上。
-- 关键约束：**持久化形状零变化**——§13.6 列出的每一处列名 / 索引名 / 触发器 / payload 键 / 内容哈希种子 / 事件身份种子，一律不得改动。
-- 规模与分批：`record_id` 在 src+domain 为 853 行 / 77 文件（出现 1140 次），tests 另 491 行 / 57 文件；`stock_lot_id` 为 426 行 / 30 文件、tests 238 行 / 26 文件。最热文件 `src/application/ledger/commands.py`（95）、`manual_trades.py`（54）、`preflight.py`（51）、`maintenance.py`（48）、`combo_membership.py`（46）。~~故本切片**按 owner 分批提交**，每批后独立验证。~~ **实现期订正（见下）**：owner 分批**不成立**，本切片**只能是单次原子改名**。
-- **成功信号必须精确**：~~剩余命中**等于** §13.6 边界集合~~，**不是 0**。把目标写成 0 会直接诱使实现者去改列名或 payload 键。**实现期订正（见下）**：§13.6 的枚举**不全**，「等于 §13.6 集合」**不可满足**；判据须改为**集合包含 + 逐桶枚举**。
-
-**切片 2 实现期订正（六条）**
-
-1. **「按 owner 分批提交」不可执行，本切片只能是单次原子改名。** 静态检测出 **60 对跨 owner 的 def ↔ 关键字调用**；一次对照改名的实测直接产出 `TypeError: build_wheel_event() got an unexpected keyword argument 'stock_lot_id'`。改名域是一个**连通分量**，任何一个 owner 的分片都至少一侧落在别的 owner 里。落地形态因此改为：**一次原子改名 + 一次提交**（提交仍待授权）。评审批次也须相应改为**按边界类分片**，而不是按文件或按 owner。
-2. **§13.6 枚举不全，「剩余命中 = §13.6 集合」不可满足。** 实测剩余命中 **64 处**，分属五个桶，**没有一处落在 §13.6 的字符串清单里**：
-   - `ARGPARSE_DEST` 20——`args.<dest>`；CLI flag 是已发布接口，argparse **由 flag 拼写推出属性名**（`--record-id` → `args.record_id`），改属性名等于改 flag；
-   - `CARRIER_KEY` 20——`dict(k=)` / `Namespace(k=)` / `.update(k=)` 把标识符**物化成字符串键**，以及被 `**` 展开的 dict 字面量的键；
-   - `EXCLUDED` 11——`source_record_identity` / `record_id_non_null`，**本就不是 lot 身份**，在被排除集内；
-   - `TEST_LABEL` 11——`test_*` 函数名，是散文；
-   - `BOUNDARY_COLUMN` 2——`scripts/benchmark_data_storage_projection.py` 的 `:1684`-`:1685`，直读 `position_lots.record_id` 列得到的局部变量。
-   故正确判据是 **剩余命中 ⊆（§13.6 ∪ 界面名 ∪ 载体键 ∪ 测试标签 ∪ 非 lot 名）**，且**每一桶逐条枚举、零条未归类**。§13.5 R2 的意图（目标**不是** 0）仍然成立，但它防的是「把剩余压成 0」，而不是「与 §13.6 相等」。
-3. **八个边界类，NAME 改名在其中六个上不是形状中性的。** ① `dict(k=v)` / `Namespace(k=v)` / `X.update(k=v)`——标识符**本身**就是字符串键；② `**kwargs` 转发进一个**签名**——键必须跟随被改名的形参，否则 TypeError；③ argparse `dest`（同第 2 条第 1 桶）；④ 源码文本反射锚（`inspect.getsource()` + 断言名字在源码里）；⑤ 对**持久化键元组**做 `getattr(self, key)`（`PositionLotPatch`）；⑥ **语义混同**：`record_id`（期权 / 持仓 lot）与 `stock_lot_id`（被指派股票 lot）是**两个不同的 lot**（4 个 scope）；⑦ `**kwargs` 收进 dict（`def f(**extra): return {**extra}`）；⑧ `getattr(obj, "name")` / `hasattr` / `setattr`——字符串里命中的是一个**声明**，改名后**静默返回默认值**而不是报错。子类还有：`@pytest.mark.parametrize` 的 argname **字符串**；`to_dict()` 里 `dataclasses.asdict(self)` 的字段名；以及一个**远距离的 ①**——dict 字面量先绑局部、之后再 `**` 展开（`agent_tools/positions.py` 的 `_wheel_common` 返回值），任何 AST 局部规则都看不见它。
-   - **类 ⑧ 是本次最大单一根因**（22 + 2 例失败）：`getattr(match, "record_id", "")` 在 `LotCloseMatch` 字段收敛后**返回空串**，表现为 `ValueError: position lot not found:`。它可被**定向证明**：AST 扫描确认 `src/` 与 `domain/` 中**不再有任何类声明 `record_id` 字段**，故对象分支上的旧拼写只能取到默认值。据此修 `commands.py`（4 处）、`position_fingerprint.py`、`writer_lifecycle_support.py`（2 处）；这些 `getattr` 的**对象分支**跟随声明改名，而**紧邻的 Mapping 分支**（`record.get("record_id")`）保持存储键——两类分支必须分别处置。
-   - **类 ⑥ 的代价须明说**：统一改名成 `lot_id` 后，`record_id` 与 `stock_lot_id` 的区分**只能靠上下文**。这是本切片语义上最需要 Review 独立复核的一点。
-4. **若干字符串编辑是被解释器**逼出来的**，故闸门契约只能是「经审核的允许清单」，不能是「零字符串改动」。** 例：`_wheel_common` 返回的 dict 被 `**` 打进九个 wheel 工作流，其键必须是**被调用方声明的形参名**（已是 `lot_id`），否则 `TypeError: create_wheel_call_intent() got an unexpected keyword argument 'stock_lot_id'`。同理 `manual_trade_operations._application_args()` 是一道**显式的桥**：工具 schema 的已发布键 `record_id`（`MANUAL_*_MODEL_FIELDS`）保留，进入应用层前重键为 `lot_id`。把契约写成「零字符串改动」会逼实现者去改这些**必须**改的键，反而制造真 bug。
-5. **改名强制刷新 projector fingerprint。** `domain/` 内任何编辑都会使 `src/application/ledger/projector_implementation.py` 的 `EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT` 失效：本切片 `0310d83e…` → `cdc0f1f648148bcd7dcadf168f83cc31bfe91325b288c5942a4bb6b9820278e8`（**重新生成**，非手改）。未刷新时表现为大量 `CurrentDecisionProjectionError: projector implementation is unavailable`，会把真实回归**掩盖成一片红**——这也是 §13.4 第 2 行必须先跑全量的理由。
-6. **一处新引入的拼写分裂（留待裁决）。** `src/application/agent_tools/positions.py` 的 `:705` 现在**发出** `call_lot_id`，而 `src/application/wheel/workflows.py` 的 `:1601` 对同一概念**发出** `call_record_id`。两者各自正确（前者是被 `**` 展开的载体键，必须跟随形参 `call_lot_id`；后者是 §13.6 保留的 payload 键，`repository_common.py` / `combo_reconciliation.py` / `wheel/workflows.py` 一致按 `call_record_id` 读），但这是本切片**唯一新增**的拼写分裂。另注：`domain/domain/wheel/intents.py` 的 `:839` 键 `call_lot_id` 与 `domain/domain/wheel/projection.py` 的 `:465` / `:475` 键 `call_record_id` 的并存是 **HEAD 既有**（HEAD 即 12 处 `call_lot_id` 对 5 处 `call_record_id`），非本切片引入，本切片的统一规则予以保留。
-
-**切片 2 实现期实测（全部本地，无生产读写）**
-
-- **闸门一（改名合法性）**：HEAD 与工作区**逐 token 位置比对**——改名从不增删改行，故 HEAD 的第 i 个 token 与工作区的第 i 个 token 是同一个 token，`(HEAD名 → 现名)` 映射因此是精确的。101 文件 / 337 个含改名域的 scope，断言该映射在改名域上**单射**（HEAD 的 `record_id` 与 HEAD 的 `stock_lot_id` 必须落到两个**不同**的名字）→ `INJECTIVITY OK`。字符串漂移 18 处**全部**在审核清单内（0 处未审核）；结构编辑文件（5 个：加了 `_application_args()` 桥、`to_dict()` 键重映射等）边界字面量 9 处**全部**在 vetted 清单内。
-- **闸门二（判据）**：剩余 64 处逐桶归类，**0 处未归类**（口径即上方订正 2 的五桶）。
-- **闸门三（类 ⑧）**：静态找出全部 `getattr/hasattr/setattr/delattr(obj, "<name>")`，仓内**仅 1 处**（`combo_membership.py` 的 `:524`，既存的**双读** `getattr(raw, "record_id", None) or getattr(raw, "lot_id", None)`，对两种形状都正确，已审核）→ `no renamed attribute reached through a string`。
-- **闸门四（类 ① 的远距离形态）**：942 个被 `**` 展开的 dict 字面量键，**0 个**不是被调用方形参。
-- **静态检查**：`ruff check src domain tests scripts` → `All checks passed!`。
-- **全量回归**：`3 failed, 7286 passed, 2 skipped`；三项失败与基线**逐名相同**（`test_inbound_control.py::test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd`、`test_service_credential_materializer.py::test_materializer_rejects_symlinked_encrypted_source`、同文件 `::test_materializer_cleanup_refuses_unexpected_entries`），`passed` 与基线同为 7286（**纯改名不新增用例**），**零新增失败**。
-- **切片 3 踩过的两个 tripwire 已复跑**：`tests/test_dependency_graph_generator.py` + `tests/test_position_projection_facade_inventory.py` → `5 passed`。本切片只改了一行 import（`from typing import Any, cast` → `Any, Mapping, cast`，stdlib），**未增删任何仓内 import 边**，故无需重生成 `docs/DEPENDENCY_GRAPH.md`——这与切片 3 的情形不同，不可照搬结论。
-
-**切片 3 — `inventory` / `verify` / `apply`（新父组）+ 测试**
-
-- 行为增量（**不是**复述现有能力）：三条成功信号必须落在**今天尚不存在**的行为上——
-  1. `inventory` 报告 D1/D2 待删列与 D3/D4 待清洗的**条数**，并输出 D1 三个合同标量（`expiration` / `strike` / `multiplier`）的**载体分布**（结构化字段 / `note` KV / 仅列），供 §13.5 R6 使用；
-  2. `verify` 具备**内容侧**判定：逐行比对旧 `fields_json` 全量键 → 新 `fields_json` 全量键的差集，凡 D3 计划丢弃的键在旧 payload 中非空即判 fail。**禁用** checkpoint 复用短路——`projection_verify.py` 的 `:213`-`:245` 在 `--mode auto` 下只要指纹命中就直接合成 `items=[{"status":"matched"}…]` 并返回 `ok: True`、`mode_used: "checkpoint_reuse"`，**完全不重放**；一个永远返回 ok 的 `verify` 也能通过形状式断言；
-  3. `apply` 承载 D1–D4 的重建配方与**存量回填**（复用 §13.2 第 7 行的门控回填形态，带 `WHERE lot_id IS NULL`）。
-- 约定复用（**不复用名字**）：只读 `inventory`、`--manifest` 必填、`high_risk` 写标志（§13.2 第 8 行）。
-- 挂新父组，不改现有 `projection-migration`（其 `apply` 语义是「落一个 disabled checkpoint」，非破坏性；两条 `apply` 同名同参但语义相反，是本批次唯一的操作者风险面）。
-- **实现期订正（第 2 条的判定式，四条；本条订正把「丢弃键非空即 fail」换成可用的三分类）**：
-  1. **原文的判定式不可用，它会在健康库上全红。** 已发布 payload 的面**远宽于** D3 的目标形状：`PositionLot.to_dict()`（`domain/domain/ledger/lots.py` 的 `:259`-`:284`）只有 17 个公共键 + 4 个仅股票的键，而库里存量 `fields_json` 还带 `broker` / `account` / `symbol` / `option_type` / `side` / `contracts` / `expiration` / `strike` / `premium` / `quantity_unit` / `position_id` / `cash_secured_amount` / `strategy_snapshot` 等一大批。实现在**未改动的健康 store** 上按原文跑，`lost` 桶非空（`close_price` / `close_reason` / `close_type` / `closed_at` / `last_close_event_id`），即原文会把一个**没有做错任何事**的库判 fail。故实现取三分类，且**只有 `lost` 桶非空才判 fail**：
-     - `carried`——目标形状在**别处**重新表达了同一事实，必须同时给出载体名（`CARRIED_DROPPED_KEYS`，逐条带载体：`broker`→`contract_key.broker`、`account`→`contract_key.account`、`symbol`→`contract_key.underlying_symbol`、`option_type`→`contract_key.option_type`、`side`→`position_side`、`contracts`→`contracts_opened` / `contracts_open` / `contracts_closed`、`opened_at`→`opened_at_ms`、`strike`→`contract_key.strike`、`expiration` / `expiration_ymd`→`contract_key.expiration_ymd`、`premium`→`premium_open`、`position_id`→`position_key`、`quantity_unit`→`asset_type + shares_*`、`last_close_event_id`→`close_event_ids / last_event_id`、`source_event_id`→`position_lots.source_event_id` 列）。载体名是**断言的一部分**：没有载体的 `carried` 与 `lost` 无区别，只是换个名字骗过判定；
-     - `reconstructible`——丢掉的那个键，其值可由**同一条数据路径**上的其它事实重算，必须同时给出推导出处（`RECONSTRUCTIBLE_DROPPED_KEYS`）。闭仓档位一族全部来自 `publisher._close_fields`（`publisher.py` 的 `:819`-`:862`），它把 `close_type` / `close_reason` / `close_price` / `last_close_event_id` / `last_action_at` / `closed_at` / `auto_close_exp_src` / `auto_close_grace_days` **逐个**直接写在**闭仓 trade event** 上（`event.event_id` / `event.price` / `event.event_time_ms` / `payload["close_type"]` / `payload["close_reason"]`），故是重算而**不是**丢失；`cash_secured_amount` / `underlying_share_locked` / `event_source_type` / `event_source_name` / `strategy_snapshot` 同理；
-     - `lost`——既无载体又不可重算。**这是唯一判 fail 的桶**，实测在真实 store 上为 `{}`；
-  2. **`note` KV 有两个互相不认识的写侧格式，且本仓自己的读侧看不见其中一个。** `publisher._base_fields_for_lot`（`publisher.py` 的 `:726`-`:731`）写**空格分隔**：`source={source_name} event_id={lot.open_event_id} order_id={order_id} multiplier_source={multiplier_source}`；`merge_note`（`src/infrastructure/feishu_bitable.py` 的 `:524`-`:533`）用 `;` 连接。而本仓的 `parse_note_kv`（`:511`-`:521`）**只按 `,` / `;` 切**，所以对一条 publisher 写出的 note，它只看得见**一对**：`("source", "test event_id=… order_id= multiplier_source=")`——其余键对它**不存在**。这不是本批次的改动，是既存事实，但它直接决定 `verify` 的 note 侧判定必须自己分词。实现用 `_segment_pairs` + `_NOTE_KV_KEY` 按**空白**做 KV 分词，且只在「整段全是 KV」时才当 KV 处理，否则整段归 prose（避免把自由文本里的 `a=b` 误判成事实载体）；
-  3. **note 侧判定收在 `NOTE_KV_DISPOSITIONS` 的双类上**：`structured`（`exp` / `strike` / `multiplier` / `option_type` / `side` / `status` / `premium_per_share`）要求同名结构化字段**非空**，否则报 `note_kv_only:<key>`；`external`（`source` / `event_id` / `order_id` / `multiplier_source` / `auto_close_at` / `auto_close_reason` / `close_reason` / `auto_close_grace_days` / `auto_close_exp_src`）是有出处的运行元数据，不判 fail。未登记的键一律报 `note_kv_unmapped:<key>`——**不静默放行**，这条对应 §13.5 R6 的「D3 必须先做 note→结构化回填」；
-  4. **原文对 checkpoint 复用短路的刻画是错的（高估了它）。** 原文说它「只要指纹命中就直接合成 matched」。实际前置条件在 `projection_verify.py` 的 `:205`-`:215`：需要一个 checkpoint **文件**（`<base>/current/projection_verify.checkpoint.json`，`_load_checkpoint` 的 `:79`-`:80`），且其 `projection_contract_version`、`event_fingerprint` **与** `position_lots_fingerprint` **三者全中**；而该文件只在一次 `ok` 的**全量重放之后**才写（`next_checkpoint = _build_checkpoint(...) if report["ok"] else None`，`:280`）。所以它证明的是「**自某个已验证点以来未变**」，**不是**「存储 payload 等于一次新鲜重放」——它的比较是**存储态对存储态**。这个区别对判定仍然致命（cookie 一变它就会把该红报成 ok，见 §13.5 R4 实测订正②），但原话「完全不重放」会被读成「无条件命中」，据此写的负例（例如在干净库上塞一个 checkpoint 就期待短路）**不会触发**，实测确认不触发。实现因此**不依赖**任何自报布尔：`verify` 从不调用复用入口（结构性禁用，测试用 monkeypatch 把 `verify_position_projection` / `verify_position_lot_projection` 替换成 `raise` 来证明它从未被走到），`mode_used` 恒为 `"full_replay"`；
-  5. **`projection_checkpoints` 这个表名有两义，勿混。** `position_projection_checkpoints`（SQLite 表）是 Phase 3A 由 `activate_position_projection_checkpoints`（`position_projection_migration.py` 的 `:951`）启用的**运行期 tail checkpoint**，它**不是**上面那个短路的前置条件，两者不可放在一起读。`_checkpoint_state` 只把它的行数当**可观测事实**上报（`runtime_tail_checkpoint_rows`），**不**据此推断短路可用性。
-- **实现期订正（第 3 条的执行范围，三条；原计划让 `apply` 一次做完 D1–D4）**：
-  1. **D1 / D2 重建不能由本批次执行**（原文把它排在 `apply` 内）。机制是 §13.5 R4 + R7：列合同是**精确集合相等**（`repository_projection_schema.py` 的 `:31`-`:34`，`missing` 与 `unclassified` 必须**同时**为空），**删列与加列是同一个失败模式**，一次落 D1 的重建会把窗口前**所有**旧形状库推成 `column_contract_open` → head `untrusted` → tail 发布 `RuntimeError`。承载 DDL 的那次发布属 §9.5 M6 第 3 步窗口（未授权）。故 `apply` 把 `switch_primary_key_to_lot_id_and_drop_record_id`（D2 第二步）与 `drop_expiration_column`（D1）写进步骤账本、`status: "deferred"`、`reason: "column_contract_precedes_rebuild"`——**登记而不执行**（先例是 §13.2 第 7 行那种「登记待窗口」形态）；
-  2. **D3 对存量行的重写不能由本批次执行**（原文把它排在 `apply` 内）。阻断条件是 §12.4 D3 **自己的前置**：读侧尚未收敛（R6 的扁平键 + `note` fallback），改存量 payload 会让所有读扁平 `expiration` / `strike` 的点当场断裂。故 `rewrite_fields_json_to_lot_shape` 同样 `status: "deferred"`、`reason: "read_side_compatibility_window_open"`；
-  3. 于是 `apply` **实际执行**的是两件、都是**非破坏、无窗口依赖**的（与切片 1 的加列同族）：D2 的**存量回填**（`UPDATE position_lots SET lot_id = record_id WHERE lot_id IS NULL`，即 §13.2 第 7 行的门控形态；`record_id` 是主键，故赋值不可能产生重复，`idx_position_lots_lot_id` 唯一索引也不会被触发）与 D4 的 `strip_position_id_from_fields_json`（把 `position_id` 从 `fields_json` 取走——注意它的**载体**已在 `CARRIED_DROPPED_KEYS` 里登记为 `position_key`，所以这不是丢事实）。守卫触发器不会因此 bump `lots_generation`：`AFTER UPDATE OF` 列表是 `record_id, account, fields_json, source_event_id, expiration, strike, multiplier`（`repository_projection_schema.py` 的 `:683` / `:703` / `:725`），D4 改 `fields_json` **在里面**、回填不在；实测 `projection_heads_advanced` 与 `required_follow_up` 都进了上报，故一次重发布是**必需**的后续动作。
-- **实现期实测（真实 store，端到端）**：本地用**真实写路径**建成含期权 + 股票 lot 的旧形状 store（两个 `persist_manual_open_event` → `run_position_projection_forced_full` → `record_manual_assignment`，再降级为 `lot_id=NULL` + `position_id=LEGACY-{record_id}`）。`inventory` 只读且报出待办条数；`apply` 前的 `verify` 报红且**恰好两条**预期理由；`apply` 执行上条的两件事、D1/D2 重建/D3 三条 deferred；`apply` 后的 `verify` 转绿且 **`lost: {}`**；注入失败后回滚，库**逐字节相同**。
-
-### 13.4 验证计划
-
-| # | 对象 | 验证方式 |
-|---|---|---|
-| 1 | 切片 1 | 在**非空**的旧形状 fixture 上：断言列存在、**列合同 `missing` / `unclassified` 皆空**、head 不落 `untrusted`、唯一索引确实建成；连续开库两次证明幂等；**写入一条新行后断言其 `lot_id` 非空**；读路径输出与改前等价。**已执行（22/22 通过）**：fixture 由**改造前代码**（pristine `34ccf7fd` worktree）用 `publish_full_position_projection` 建成 `heads=trusted` 的两账户库（`schema_version=171`），再用本批次代码打开。逐条实测：加列后旧 8 列顺序不变；合同两侧皆空；`idx_position_lots_lot_id` 存在且 `unique=1`，旧 `idx_position_lots_expiration` 存活；存量行 `lot_id` 保持 NULL（回填不入侵开库路径）；重开 `schema_version` 173→173 且 `sqlite_master` 全量比对无差异；新行写入即 `lot_id` 非空、被改行的载体被补上、未变行仍走 `unchanged` 短路（`added=0 changed=1 removed=0 unchanged=2`，证明 diff 语义未被这次加列改写）；`list_position_lots` / `get_position_lots_by_ids` / `list_active_position_lots` 三处读路径双键齐发且相等、`get_position_lot_fields` 的 `fields` 形状逐字不变；最后 `publish_full_position_projection` 重新盖章后 stored cookie == live cookie 且各 head 回到 `trusted`。复现脚本：`slice1_build_legacy.py`（pristine worktree 内运行）+ `slice1_verify.py`（本批次 worktree 内运行） |
-| 2 | 切片 2 | 断言**持久化形状未变**：§13.6 每条边界的列名 / payload 键名 / 种子键名逐字不变；combo 身份读回保持绿（`tests/test_trades_combo_reconciliation.py`）；decision 投影 schema 保持绿（`tests/test_ledger_current_decision_projection_schema.py`、`tests/test_ledger_current_decision_projection.py`）。~~逐批跑受影响文件~~ **实现期订正：无「逐批」——本切片是单次原子改名（§13.3 切片 2 订正 1），一次全量跑是唯一可行的验收**。**已执行**（101 文件 / 1740 个标识符 token）：① 结构闸门——HEAD↔工作区**逐 token 位置比对**，断言 `(HEAD名 → 现名)` 映射在改名域上**单射**，337 个 scope 全过；字符串漂移 18 处全在审核清单内（0 处未审核）；② 判据闸门——剩余 64 处逐桶归类，**0 处未归类**（五桶口径见 §13.6 订正）；③ 类 ⑧ 闸门——`getattr/hasattr/setattr/delattr(obj, "<name>")` 全仓仅 1 处（`combo_membership.py` 的 `:524`，既存双读，已审核）；④ 类 ① 远距离形态闸门——942 个被 `**` 展开的 dict 字面量键，0 个不是被调用方形参；⑤ `ruff check src domain tests scripts` → `All checks passed!`；⑥ 全量 `3 failed, 7286 passed, 2 skipped`，三项失败与基线**逐名相同**、`passed` 与基线持平（纯改名不新增用例），**零新增失败**；⑦ 两个仓库 tripwire（`tests/test_dependency_graph_generator.py`、`tests/test_position_projection_facade_inventory.py`）→ `5 passed`（本切片未增删仓内 import 边，故**无需**重生成 `docs/DEPENDENCY_GRAPH.md`——与切片 3 结论不同）。**未做**：commit / push / merge，发布、升级、部署，生产配置与生产写入 |
-| 3 | 切片 3 | 端到端：构造含期权 + 股票 lot 的旧形状 store → `inventory` → `verify` → `apply` → `PRAGMA integrity_check` → 重开库 → 再 `verify` 报一致；**负例**：构造一行「结构化字段为空、事实只在 `note` KV」，断言 `verify` 判 fail；**失败路径**：中途注入失败 → 整体回滚、旧表原样。测试形态复用 `tests/test_option_positions_cli.py` 与 `tests/test_position_projection_migration.py`。**实现期订正（fixture 条款，已实测）**：原文要求 fixture 含 `assigned-stock-*` 与 `assigned-stock-sale-*` 两族——**该要求不成立**，这两族**不是 `position_lots` 行**：`assigned-stock-{event_id}` 由 wheel 事件构造器在 `domain/domain/wheel/intents.py` 的 `:165` 产出，`assigned-stock-sale-{…}` 在 `src/application/positions/workflows.py` 的 `:130`-`:150` 产出，二者分别活在 `wheel_events` / `assigned_stock_events` 与 decision 读模型里；且 `"assigned_stock"` **不在** `SUPPORTED_EVENT_TYPES`（`domain/domain/ledger/events.py` 的 `:21`-`:26`：`OPEN_EVENT_TYPES = {"open"}`、`CLOSE_EVENT_TYPES = {"close","expire_close","assignment","exercise"}`、`TARGET_LOT_EVENT_TYPES = CLOSE_EVENT_TYPES \| {"adjust"}`、`TARGET_EVENT_TYPES = {"void","repair"}`、`READONLY_EVENT_TYPES = {"verification"}`），按字面构造会直接 `unsupported_event_type`。**股票 lot 的正确来源是股票 `open` 事件**：`publisher._stock_lot_fields` 的触发条件是 `lot_is_stock(lot)`（`domain/domain/ledger/lots.py` 的 `:291`-`:293`），事件用 `event_type="open"`、`contracts=shares`（**必须 > 0**，否则 `contracts_must_be_positive`）、`option_type=""`、`strike=0`、`expiration_ymd=""`、`asset_type="stock"`、`quantity_unit="share"`（先例：`tests/test_ledger_projection.py` 的 `:456`-`:507`）。**实测结果**：fixture 用真实写路径建成（两个 `persist_manual_open_event` → `run_position_projection_forced_full` → `record_manual_assignment` → `degrade_to_pre_migration_shape` 置 `lot_id=NULL` 并注入 `position_id=LEGACY-{record_id}`）；`apply` 前 `verify` 报 `{"field_mismatch": 4}`、`apply` 后 `{"matched": 4}`，全程 `lost: {}`；`PRAGMA integrity_check` = `ok`、lot 行数不变、零 NULL 载体；回滚路径实测库**逐字节相同**。新增 `tests/test_lot_identity_migration.py`（20 例，全绿），含 note KV **两种写侧格式**的参数化负例、monkeypatch 证明 `verify` 从不走复用入口、以及 `_position_lot_contract_scalars` 的一致性 pin |
-| 4 | 每切片共同 | 先捕获本修订的 FAILED 列表做基线，再比对**名字**而非计数（本机环境类失败是既存基线，见 `docs/GUARDRAILS.md`）；改动任何 `domain/` 语义文件后必须刷新 projector fingerprint，否则大面积报 `ProjectorImplementationUnavailable`。**切片 1 实测**：全量 `3 failed, 7256 passed, 2 skipped`，FAILED 三项与 pristine `34ccf7fd` 基线**逐名相同**（`test_inbound_control.py::test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd`、`test_service_credential_materializer.py::test_materializer_rejects_symlinked_encrypted_source`、同文件 `::test_materializer_cleanup_refuses_unexpected_entries`），即**零新增失败**；本切片不改 `domain/`，故不涉 projector fingerprint 刷新。**切片 3 实测**：全量 `3 failed, 7276 passed, 2 skipped`，FAILED **三项与前两切片基线逐名相同**（同上三名），`passed` 由 7256 → 7276 即本切片新增的 20 例，**零新增失败**；本切片同样不改 `domain/`。**注意切片 3 一度引入两处新红，均为仓库 tripwire 而非行为回归，已修**：① `tests/test_dependency_graph_generator.py`——新增模块改变了 import 边（`src.application.ledger → src.infrastructure` 10→11），须跑 `scripts/generate_dependency_graph.py` 重新生成 `docs/DEPENDENCY_GRAPH.md` 与 `docs/dependency_graph.mmd`（**生成，不得手改**）；② `tests/test_position_projection_facade_inventory.py::test_full_projection_calls_are_explicitly_classified`——新增的全量投影调用点必须显式登记为 `("src/application/ledger/lot_identity_migration.py", "verify_lot_identity_migration", "project_stored_trade_events_to_position_lots"): 1`，该测试对每个调用点做**精确 `Counter` 相等**判定，任何未登记的调用点都会红 |
-
-### 13.5 风险与未决问题
-
-**R1（硬边界，已裁定，机制已订正）— `strategy_group_identities` 的持久化名不可在本批次改名。**
-`funding_put_record_id` / `participation_call_record_id` 同时是 NOT NULL SQL 列（`repository_core.py` 的 `:808` / `:811`）与持久化 payload 键（`repository_strategy_groups.py` 的 `:54` / `:57`），名称真源在 `domain/domain/combo_identity.py`（`:58` 读、`:257` 构造）。
-**失败机制（本稿已订正一次）**：不是 `readback != identity` 那条比较——`raw_json` 由**同一个** `identity` dict 序列化（`repository_strategy_groups.py` 的 `:24` → `:26`），改名会**同时**改掉写出去与比回来的两边，因此该比较**不可能**捕捉改名（它是一条 JSON 自往返守卫，真正的比较在 `writer_trade_events.py` 的 `:295`-`:296`，不是 `:286`——`:286` 是 `_assert_combo_membership_exact` 的实参）。
-真正的断点在**既有行**上：`existing_identity` 从旧 `raw_json` 读出后被 `validate_combo_identity` 按**新键名**校验（`writer_trade_events.py` 的 `:262`-`:274`），取不到值即抛 `strategy group identity conflict`；读侧更早失败于 `current_decision_combo.py` 的 `:57`-`:62`（抛 `combo identity is invalid`）与 `wheel_assignment_recovery.py` 的 `:85` / `:92` / `:106`。
-故故障模式是「**旧 payload 读不出 → 该 group 的新写入失败**」，与结论（本批次不改）一致，但方向与初稿相反。这个订正有意义：R2 的「边界集合」正是要按**是否持久化**来判定，而不是按**是否有全等比较**来判定。
-
-**R2（成功信号陷阱）— 切片 2 没有「改完」的终态。** 窗口之前写侧仍须写 `record_id`（主键、唯一索引、守卫触发器都还挂在它上面）。验收必须写成「剩余命中 = §13.6 集合」，并要求每批提交说明照抄该清单。**该清单现已逐条列举于 §13.6**（初稿只有散文，无法据以验收）。
-
-**R3（规模）— 引用面大。** `record_id` src+domain 853 行 / 77 文件、tests 491 / 57；`stock_lot_id` 426 / 30 与 238 / 26（口径见 §13.2）。切片 2 必须按 owner 分批，否则回归面失控。
-
-**R4（无版本号 + verify 语义）— `verify` 只能靠内容比对。** 无迁移框架、无 schema 版本号（`PRAGMA user_version` 0 命中）。**两处必须写死的语义**：① `verify` 的判定是「逐行内容相等」而非版本标记；② **禁用 checkpoint 复用短路**（§13.3 切片 3 第 2 条）。另注：`verify` 把 `source_state_mismatch` 也算进 reason，而该判定含 `sqlite_schema_cookie`（`position_projection_migration.py` 的 `:830`-`:836`）——切片 1 的 `ALTER TABLE` 会 bump 它，故窗口前必须先确认各 head 已 trusted、无 `source_state_mismatch`，否则健康库也会翻红、go/no-go 门不可用。
-
-**R4 实测订正（切片 1 已量化，且比原文更尖锐）。** 在 pristine `34ccf7fd` 建成的 `heads=trusted`、`schema_version=171` 的库上打开本批次代码，实测结果是：`PRAGMA schema_version` 171 → **173**（加列 + 建唯一索引各 +1），**stored** `position_projection_source_state.sqlite_schema_cookie` 仍为 171，于是 `read_current_position_projection(account="lx")` 立刻返回 `status='data_unavailable'`、`reason='sqlite_schema_cookie_mismatch'`——**而 head 行本身没被动过**（表里仍是 `status='trusted'`）。消费该 cookie 的两处都会拒绝：`_unchanged_runtime_result_if_trusted`（`position_projection_runtime.py` 的 `:683`）不再短路，`_decode_trusted_checkpoint` 的 `position_projection_runtime.py` 的 `:1157`-`:1159` 直接抛 `source/checkpoint SQLite schema cookie mismatch`。**这是每库一次、可自愈的**：一次 `publish_full_position_projection` 之后 stored cookie == live cookie（实测 173 == 173）、各 head 重新可读 `trusted`（实测通过）。
-
-由此得出两条对 M6 的可执行结论，原文没有：① **第 1 步落地后必须让一次完整重发布先跑完**，第 3 步窗口的 go/no-go 只能读这次重发布**之后**的状态；否则一道纯粹因为「加了列」而翻红的门会把 go/no-go 判成 no-go；② 这条自愈路径**恰好**是切片 3 禁用 checkpoint 复用短路的实证依据——cookie 一变，复用分支就是错的，而一个复用短路过的 `verify` 会把它报成 ok。注意自愈只覆盖 cookie：存量行的 `lot_id` 仍为 NULL，直到切片 3 的门控 `apply` 回填。
-
-**R5（未授权边界）— 窗口执行仍未授权。** §9.5 M6 第 3 步需停全部账本写入方、SQLite `.backup` 落副本、`integrity_check`、`mv -n` 就位并保留源库（§12.6），属生产写入，**本批次不执行**。
-
-**R6（已核实，D3 的前置阻断条件）— D3 会同时拿掉扁平键与列回填，`note` 是活跃 fallback。**
-`PositionLot.to_dict()`（`domain/domain/ledger/lots.py` 的 `:259`-`:284`）的键集里**既没有 `note`，也没有扁平 `expiration` 与 `strike`**；而 `position_lot_row_to_record` 正是**用列回填这三个扁平键**（`sqlite_row_codec.py` 的 `:15`-`:22`），D1 又删列 → 回填来源一并消失。值仍在 `contract_key.expiration_ymd` / `contract_key.strike`，但**键形状**从扁平 ms 变成嵌套 ymd，所有读扁平键的点会断。
-且 `note` 不是装饰性备注：`effective_expiration` / `effective_strike` / `effective_multiplier`（`domain/domain/ledger/position_fields.py` 的 `:253`-`:281`）在结构化字段缺失时**回退到 `note` 的 KV**（返回 `source="note.exp"` 等）。
-故 §12.4 D1 表格「存量｜无」是**假设而非事实**，须由切片 3 的 `inventory` 载体分布回答；若存在仅由 `note` KV 承载的行，D3 必须**先**做 note→结构化回填、或保留这些 KV，**再**允许丢 `note`。另：`publisher._base_fields_for_lot` 从开仓事件的 `payload.fields` 快照播种，所以只改 `position_lots.fields_json` 而不处理播种，下一次重发布就会把被删字段**再种回来**——D3 必须写清播种的去留。
-
-**R7（结构，需并入 §9.5 M6，但不执行）— M6 缺「窗口后收紧发布」一步。**
-列合同是代码里硬编码的精确集合、又是发布路径的硬门。承载 D1–D4 的 DDL / 合同 / 守卫改动的那次发布一旦上生产：窗口前的旧形状库立刻 `column_contract_open` → `untrusted` → tail 发布 `RuntimeError`；窗口后若不发布收紧版，新形状库又永远回不到闭合。B 形态的立论是「代码已装」与「数据已改」可分离，但 M6 只有「普通发布(1,2) → 一个窗口(3) → status 复核(4)」，缺承载「两形状并存」的那次发布。**本项只主张把该步写进 M6 并写明窗口期服务运行在哪个形状上，不主张执行。**
-
-**R6 实测订正（切片 3 已交付回答能力，但仍未回答生产）**：`inventory` 现已在**只读**路径上给出载体分布（`carriers`：每个标量的 `structured` / `note_kv` / `column_only` / `absent` 计数，外加 `note_kv_keys` 与 `column_present_rows`），故 R6 的问句**已可回答**，机制不再是空的。**但本批次只在一个本地合成 fixture（4 行）上跑过**，实测 `expiration` / `strike` 为 `structured: 2 / note_kv: 0 / absent: 2`（`absent` 的 2 行即两个股票 lot，它们本就无到期日与行权价，非缺口）、`multiplier` 为 `structured: 4`；`verify` 的 `lost` 桶为 `{}`。这个结果**不能**外推到生产：它是 4 行合成库，而 R6 的风险面恰恰是「真实存量里有没有仅由 `note` KV 承载 `exp` / `strike` / `multiplier` 的行」。对生产库跑一次 `inventory` 是**只读**的、可行且未执行；在该读数拿到之前，D3 的 note 前置阻断条件**未解除**。**负例已锁死**：实现期构造「结构化字段为空、事实只在 `note` KV」的行，`verify` 判 fail（`note_kv_only:<key>`），且 note 侧还有两道更宽的兜底——整段非 KV 的自由文本报 `note_prose_only_in_note`、未登记的 KV 键报 `note_kv_unmapped:<key>`，两者都归 `lost`、都判 fail；`note` 键本身只有在**整条 note 全是已登记 KV 且每个 `structured` 类键的结构化对位非空**时才归 `carried`（理由 `note.kv`），即「丢掉它不丢任何事实」——这正是 R6 要求的门，而不是绕过它。
-
-**未决问题**：无。§12.7 的 5 项已由 §9.5 收口；R6 需窗口前由 `inventory` 回答，已登记为 D3 的前置阻断条件。
-
-### 13.6 持久化边界集合（切片 2 的禁改清单）
-
-切片 2 的目标语句是「旧名仅存活在持久化边界上」，而**边界**的判据是「**是否被持久化**」，不是「是否有全等比较」（R1 的订正正说明二者不等价）。下表是逐条清单；切片 2 每批提交说明须照抄，并声明本批未触碰。
+历史切片 2 的目标语句是「旧名仅存活在持久化边界上」，而**边界**的判据是「**是否被持久化**」，不是「是否有全等比较」（R1 的订正正说明二者不等价）。下表是逐条清单；切片 2 每批提交说明须照抄，并声明本批未触碰。
 
 | # | 边界（持久化名） | 位置与证据 |
 |---|---|---|

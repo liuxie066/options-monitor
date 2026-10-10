@@ -455,6 +455,7 @@ Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-
 - [配置指南](CONFIGURATION_GUIDE.md)：账户、市场、环境变量和验证方法。
 - [产品架构](docs/PRODUCT_ARCHITECTURE.md)：产品域与模块关系。
 - [系统架构](docs/ARCHITECTURE.md)：技术分层与真实调用链。
+- [共享 API 索引](docs/API_INDEX.md)：按业务能力查可复用入口、事实归属、契约和测试。
 - [策略架构](docs/STRATEGY_ARCHITECTURE.md)：CSP、CC、Combo Yield。
 - [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md)：交易与持仓事实边界。
 - [Tool Reference](docs/TOOL_REFERENCE.md)：当前 Tool Gateway 分类和 manifest 使用。

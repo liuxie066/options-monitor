@@ -8,6 +8,7 @@
 ## Repo-Specific Contract
 
 - Select evidence by question type using [Docs Index](docs/INDEX.md): implementation, effective runtime state, broker facts, and local ledger records have different owners. Preserve conflicts; memory and file names are only hints.
+- Before adding shared data or calculations, search [API Index](docs/API_INDEX.md) by business capability, reuse its owning entry and contract, and extend that owner before creating another implementation.
 - Prefer root-cause fixes at the owning boundary. If a tactical patch is unavoidable, state the tradeoff and follow-up.
 - Follow parsimony at repo boundaries: do not add entities, layers, states, tools, config keys, or workflows unless they are necessary.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.

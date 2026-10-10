@@ -264,7 +264,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace
 | External Adapters | OpenD/Futu、Feishu、exchange rate、subprocess | 运行与通知、数据采集、Inbound |
 | Domain Rules | 确定性策略、账本、通知、调度和 schema 决策 | Application use cases |
 
-## 当前实现与目标差距
+## 当前实现边界
 
 当前已对齐：
 
@@ -275,7 +275,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace
 - Close Advice 使用固定 `remaining_yield_capture.v3`，不读取 `short_vol` thesis、事件或集中度；Delta 只用于封存的临期持有例外。
 - Research 与生产执行保持分离。
 
-下一步目标：
+产品边界：
 
 ```text
 opening strategies
