@@ -274,6 +274,30 @@ def _service_slug(value: str) -> str:
     return slug or "account"
 
 
+def managed_systemd_unit_names(*, accounts: list[str]) -> set[str]:
+    """Reserved product names, including retired units; never a prefix wildcard."""
+    timers = set(_SHARED_TIMER_NAMES) | {
+        f"options-monitor-{task}-{market}.timer"
+        for task in ("tick", "auto-close", "quality-day-end")
+        for market in DEFAULT_MARKETS
+    } | {
+        "options-monitor-position-advice-promotion.timer",
+        "options-monitor-ai-evidence-collector.timer",
+    }
+    return timers | {name.removesuffix(".timer") + ".service" for name in timers} | {
+        "options-monitor-trade-intake.service",
+        "options-monitor-trade-intake-alert.service",
+        "options-monitor-feishu-ws.service",
+        "options-monitor-wechat-clawbot.service",
+        FEISHU_AGENT_CREDENTIAL_SERVICE,
+        "options-monitor-opend.service",
+        "options-monitor-quality-http.service",
+    } | {
+        f"options-monitor-opend-{_service_slug(account)}.service"
+        for account in accounts if isinstance(account, str) and account.strip()
+    }
+
+
 def _resolve_path(value: str | Path | None, *, base: Path, default: Path) -> Path:
     raw = str(value or "").strip()
     if not raw:

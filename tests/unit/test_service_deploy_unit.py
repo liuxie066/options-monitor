@@ -72,6 +72,49 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "UMask=0077" in tick
     assert "UMask=0077" in intake
 
+@pytest.mark.parametrize("include_legacy_credentials", [False, True])
+def test_managed_systemd_names_cover_renderer_and_preserve_unknown_names(
+    tmp_path: Path, include_legacy_credentials: bool,
+) -> None:
+    from src.application.service_deploy import managed_systemd_unit_names
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = _write_service_account_config(
+        repo / "config.us.json", _two_futu_service_accounts(tmp_path),
+    )
+    bundle = _render_bundle(
+        repo, tmp_path / "runtime", accounts=["lx", "sy"], markets=["us", "hk"],
+        config_paths={"us": config, "hk": config}, include_opend=True,
+        include_auto_upgrade=True, include_feishu_ws=True, include_wechat_clawbot=True,
+        feishu_ws_config_key="us", wechat_clawbot_config_key="us",
+        wechat_clawbot_allowed_senders="fixture-sender",
+        include_quality_monitoring=True,
+        include_feishu_agent_credential=include_legacy_credentials,
+    )
+    rendered = {
+        Path(item["install_path"]).name for item in bundle["files"]
+        if item["kind"] in {"systemd_service", "systemd_timer"}
+    }
+    managed = managed_systemd_unit_names(accounts=["lx", "sy"])
+    assert rendered <= managed
+    assert {"options-monitor-opend-lx.service", "options-monitor-opend-sy.service"} <= rendered
+    assert {
+        "options-monitor-position-advice-promotion.service",
+        "options-monitor-position-advice-promotion.timer",
+        "options-monitor-ai-evidence-collector.service",
+        "options-monitor-ai-evidence-collector.timer",
+        "options-monitor-quality-http.service",
+    } <= managed
+    assert not managed & {
+        "options-monitor-my-experiment.service", "options-monitor-my-experiment.timer",
+        "options-monitor-tick-us.service.bak", "options-monitor-tick-us.timer.disabled",
+        "options-monitor-feishu-ws.timer", "options-monitor-tick-cn.service",
+        "options-monitor-opend-other.service",
+    }
+    assert "options-monitor-opend-lx.service" not in managed_systemd_unit_names(accounts=[])
+
+
 def test_render_systemd_bundle_omits_retired_ai_evidence_collector(
     tmp_path: Path,
 ) -> None:

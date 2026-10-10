@@ -23,6 +23,7 @@ from src.application.service_deploy import (
     FEISHU_AGENT_CREDENTIAL_SERVICE,
     SECRET_CREDENTIAL_DROPIN,
     load_service_profile,
+    managed_systemd_unit_names,
     normalize_secret_credential_delivery,
     render_service_bundle,
 )
@@ -1566,7 +1567,18 @@ def _expected_bundle_from_profile(
         ),
         "include_content": True,
     }
-    return render_service_bundle(**render_kwargs)
+    bundle = render_service_bundle(**render_kwargs)
+    if provider == "systemd":
+        # Rendering defaults must not become persisted retirement ownership.
+        expected_profile = _bundle_profile(bundle)
+        if "accounts" in profile:
+            expected_profile["accounts"] = profile["accounts"]
+        else:
+            expected_profile.pop("accounts", None)
+        for item in bundle.get("files", []):
+            if item.get("kind") == "service_profile":
+                item["content"] = json.dumps(expected_profile, ensure_ascii=False, indent=2) + "\n"
+    return bundle
 
 
 def _profile_opend_render_values(opend: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1731,7 +1743,10 @@ def _profile_config_yaml(profile: dict[str, Any]) -> str | None:
 def _installed_units(*, provider: str, expected_files: dict[str, dict[str, Any]], ctx: dict[str, Any]) -> list[str]:
     if provider == "systemd":
         root = Path(ctx["systemd_unit_root"])
-        names = {path.name for path in root.glob("options-monitor*") if path.is_file()} if root.exists() else set()
+        names = {
+            path.name for path in root.glob("options-monitor*")
+            if path.suffix in {".service", ".timer"} and path.is_file()
+        } if root.exists() else set()
         for name, item in expected_files.items():
             if _install_path(item, provider=provider, ctx=ctx).exists():
                 names.add(name)
@@ -2119,7 +2134,7 @@ def _manual_actions(
             for name in activation_preservation_conflicts
         )
         actions.extend(f"manual_restart_failed_oneshot: sudo systemctl start {name}" for name in execution_drift_units)
-        actions.extend(f"manual_retire_unit: sudo systemctl disable --now {name}" for name in extra_installed_units)
+        actions.extend(f"manual_review_extra_unit: systemctl cat {name}" for name in extra_installed_units)
         actions.extend(
             f"manual_retire_managed_file: sudo rm -- {path}"
             for path in extra_managed_files
@@ -2344,7 +2359,11 @@ def _apply_service_drift(
         preserved_activation & mismatched & set(written_units)
     )
     retired_paths_changed = False
-    for name in sorted(extra_installed):
+    accounts = ctx["profile"].get("accounts")
+    managed_units = managed_systemd_unit_names(
+        accounts=accounts if isinstance(accounts, list) else [],
+    )
+    for name in sorted(extra_installed & managed_units):
         if live_systemctl:
             stop_result = _run_systemctl(ctx, ["disable", "--now", name], run_cmd=run_cmd)
             operations.append(stop_result)
