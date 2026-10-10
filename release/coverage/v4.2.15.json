@@ -1,0 +1,143 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.15",
+  "base": {
+    "tag": "v4.2.14",
+    "commit": "8a19bde98304062293e0e60c08828bfd1c4c4d55"
+  },
+  "reviewed_head": "c00d0f0ce86fab42f27a4b096c2d4dd5376117fc",
+  "commits": [
+    {
+      "sha": "4cd959d5ce09a362af852c608ddccd860d07425b",
+      "subject": "gateflow(performance): accept plan for daily-occupied-capital"
+    },
+    {
+      "sha": "2ccd7532a46047ce800b5693f4f7bfbe3fbb3bc6",
+      "subject": "chore(gateflow): accept plan for issue 482"
+    },
+    {
+      "sha": "59394c24202cb7a1acb244cabe29af3261a864ce",
+      "subject": "fix(snapshot): align sealed required-data replay contract"
+    },
+    {
+      "sha": "12b0b32bb138a35243a7e2cf96b9d9b5b002c737",
+      "subject": "chore(gateflow): accept deepreview for issue 482"
+    },
+    {
+      "sha": "21c8e2c76201cb9f04328d47cd9f8d4764e54b7c",
+      "subject": "feat(performance): gateflow accept daily-occupied-capital S1"
+    },
+    {
+      "sha": "f22996ab9dd54bf28930c5cdf840368c258a6afd",
+      "subject": "gateflow(performance): accept deepreview for daily-occupied-capital"
+    },
+    {
+      "sha": "c524e69518a11a42a3a1cdb4e329c9e40c84799d",
+      "subject": "Merge pull request #540 from liuxie066/codex/daily-occupied-capital"
+    },
+    {
+      "sha": "c545c9e7a8527c0b54f26d4c0e2c6a8ca6447038",
+      "subject": "chore(snapshot): merge main for issue 482 validation"
+    },
+    {
+      "sha": "c00d0f0ce86fab42f27a4b096c2d4dd5376117fc",
+      "subject": "Merge pull request #539 from liuxie066/codex/issue482-replay-contract"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "期权收益报告新增“日均占用”：按统计期内实际未了结本金及时间加权，包含跨期持仓，不计未来时间；原现金流、月收益率和年化计算保持不变。",
+      "commits": [
+        "21c8e2c76201cb9f04328d47cd9f8d4764e54b7c",
+        "c524e69518a11a42a3a1cdb4e329c9e40c84799d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复新封存行情快照在运行组合回放中被误拒绝的问题，共用 ready 条目字段与 blob 引用校验，保留路径、内容哈希、账户及运行身份校验和部分数据状态。",
+      "commits": [
+        "59394c24202cb7a1acb244cabe29af3261a864ce",
+        "c00d0f0ce86fab42f27a4b096c2d4dd5376117fc"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4cd959d5ce09a362af852c608ddccd860d07425b",
+      "reason": "空提交仅记录 Gateflow 计划或评审接受，不修改源码、配置或运行行为。"
+    },
+    {
+      "commit": "2ccd7532a46047ce800b5693f4f7bfbe3fbb3bc6",
+      "reason": "空提交仅记录 Gateflow 计划或评审接受，不修改源码、配置或运行行为。"
+    },
+    {
+      "commit": "12b0b32bb138a35243a7e2cf96b9d9b5b002c737",
+      "reason": "空提交仅记录 Gateflow 计划或评审接受，不修改源码、配置或运行行为。"
+    },
+    {
+      "commit": "f22996ab9dd54bf28930c5cdf840368c258a6afd",
+      "reason": "空提交仅记录 Gateflow 计划或评审接受，不修改源码、配置或运行行为。"
+    },
+    {
+      "commit": "c545c9e7a8527c0b54f26d4c0e2c6a8ca6447038",
+      "reason": "合并 main 以验证两个已映射修复的集成结果，没有独立用户或运营行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "4cd959d5ce09a362af852c608ddccd860d07425b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/540"
+      ]
+    },
+    {
+      "commit": "2ccd7532a46047ce800b5693f4f7bfbe3fbb3bc6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/539"
+      ]
+    },
+    {
+      "commit": "59394c24202cb7a1acb244cabe29af3261a864ce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/539"
+      ]
+    },
+    {
+      "commit": "12b0b32bb138a35243a7e2cf96b9d9b5b002c737",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/539"
+      ]
+    },
+    {
+      "commit": "21c8e2c76201cb9f04328d47cd9f8d4764e54b7c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/540"
+      ]
+    },
+    {
+      "commit": "f22996ab9dd54bf28930c5cdf840368c258a6afd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/540"
+      ]
+    },
+    {
+      "commit": "c524e69518a11a42a3a1cdb4e329c9e40c84799d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/540"
+      ]
+    },
+    {
+      "commit": "c545c9e7a8527c0b54f26d4c0e2c6a8ca6447038",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/539"
+      ]
+    },
+    {
+      "commit": "c00d0f0ce86fab42f27a4b096c2d4dd5376117fc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/539"
+      ]
+    }
+  ]
+}
