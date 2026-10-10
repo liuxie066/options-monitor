@@ -74,7 +74,7 @@
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
 - [Portfolio Assignment Scenario Design](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)：全部指派后分布来源、报价及资金覆盖的实现依据。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
-- [Runtime Status History Query PRD](RUNTIME_STATUS_HISTORY_QUERY_PRD.md)：历史查询请求内去重与按需装配的需求草案，待确认；不代表当前已实现。
+- [Runtime Status History Query PRD](RUNTIME_STATUS_HISTORY_QUERY_PRD.md)：历史查询请求内去重与按需装配的已确认需求和开发分支验证；不代表已经部署。
 - [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的当前合同。
 - [Runtime Failure Operations](RUNTIME_FAILURE_OPERATIONS.md)：Tick 故障取证、审计时间窗、drift 导出与只读回收预览。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。

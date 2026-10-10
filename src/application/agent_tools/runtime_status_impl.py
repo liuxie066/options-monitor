@@ -1809,15 +1809,35 @@ def _notification_delivery_health(
     }
 
 
+def _run_selection_payload(
+    run_dir: Path,
+    *,
+    accounts: list[str],
+    base: Path,
+    read_file_info: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "path": _relative_path(run_dir, base=base),
+        "state": {
+            "last_run": read_file_info(run_dir / "state" / "last_run.json"),
+            "tick_metrics": read_file_info(run_dir / "state" / "tick_metrics.json"),
+        },
+        "accounts": {
+            account: {"last_run": read_file_info(run_dir / "accounts" / account / "state" / "last_run.json")}
+            for account in accounts
+        },
+    }
+
+
 def _run_payload(
     run_dir: Path,
     *,
     accounts: list[str],
     base: Path,
-    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+    read_file_info: Callable[[Path], dict[str, Any]],
     max_notification_chars: int,
 ) -> dict[str, Any]:
-    run_accounts: dict[str, Any] = {}
+    out = _run_selection_payload(run_dir, accounts=accounts, base=base, read_file_info=read_file_info)
     for account in accounts:
         run_account_root = run_dir / "accounts" / account
         compatibility_notification = _compatibility_notification_info(
@@ -1825,43 +1845,19 @@ def _run_payload(
             base=base,
             max_chars=max_notification_chars,
         )
-        expired_position_maintenance = _json_file_info(
+        expired_position_maintenance = read_file_info(
             run_account_root / "state" / "expired_position_maintenance.json",
-            base=base,
-            read_json_object_or_empty=read_json_object_or_empty,
         )
-        run_accounts[account] = {
-            "last_run": _json_file_info(
-                run_account_root / "state" / "last_run.json",
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-            ),
+        out["accounts"][account].update({
             "expired_position_maintenance": expired_position_maintenance,
             "auto_close_receipt": _auto_close_receipt_summary(expired_position_maintenance.get("json")),
             "compatibility_notification": compatibility_notification,
             "notification": _deprecated_notification_alias(compatibility_notification),
-            "required_data_prefetch": _json_file_info(
+            "required_data_prefetch": read_file_info(
                 run_account_root / "state" / "required_data_prefetch_summary.json",
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
             ),
-        }
-    return {
-        "path": _relative_path(run_dir, base=base),
-        "state": {
-            "last_run": _json_file_info(
-                run_dir / "state" / "last_run.json",
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-            ),
-            "tick_metrics": _json_file_info(
-                run_dir / "state" / "tick_metrics.json",
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-            ),
-        },
-        "accounts": run_accounts,
-    }
+        })
+    return out
 
 
 def _requested_run_dir_from_payload(
@@ -1911,10 +1907,9 @@ def _latest_run_payload_for_market(
     *,
     base: Path,
     pointer_path: Path,
-    runs_root: Path,
-    accounts: list[str],
-    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
-    max_notification_chars: int,
+    run_dirs: Callable[[], list[Path]],
+    load_candidate: Callable[[Path], dict[str, Any]],
+    load_selected: Callable[[Path], dict[str, Any]],
     desired_market: str | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     skipped_market_mismatch_count = 0
@@ -1928,15 +1923,9 @@ def _latest_run_payload_for_market(
             pointed = (base / pointed).resolve()
         if pointed.exists() and pointed.is_dir():
             seen_dirs.add(pointed.resolve())
-            candidate = _run_payload(
-                pointed,
-                accounts=accounts,
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-                max_notification_chars=max_notification_chars,
-            )
+            candidate = load_candidate(pointed)
             if _run_payload_matches_market(candidate, desired_market):
-                return candidate, {
+                return load_selected(pointed), {
                     "requested": False,
                     "source": "last_run_dir_or_mtime",
                     "path": candidate.get("path"),
@@ -1947,21 +1936,15 @@ def _latest_run_payload_for_market(
                 }
             skipped_market_mismatch_count += 1
 
-    for run_dir in _run_dirs_newest_first(runs_root):
+    for run_dir in run_dirs():
         if run_dir.resolve() in seen_dirs:
             continue
         searched_count += 1
-        candidate = _run_payload(
-            run_dir,
-            accounts=accounts,
-            base=base,
-            read_json_object_or_empty=read_json_object_or_empty,
-            max_notification_chars=max_notification_chars,
-        )
+        candidate = load_candidate(run_dir)
         if not _run_payload_matches_market(candidate, desired_market):
             skipped_market_mismatch_count += 1
             continue
-        return candidate, {
+        return load_selected(run_dir), {
             "requested": False,
             "source": "last_run_dir_or_mtime",
             "path": candidate.get("path"),
@@ -2149,29 +2132,21 @@ def _run_dirs_newest_first(runs_root: Path) -> list[Path]:
 
 def _latest_scanned_run_payload(
     *,
-    runs_root: Path,
-    accounts: list[str],
-    base: Path,
-    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
-    max_notification_chars: int,
+    run_dirs: Callable[[], list[Path]],
+    load_candidate: Callable[[Path], dict[str, Any]],
+    load_selected: Callable[[Path], dict[str, Any]],
     desired_market: str | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     searched_count = 0
     skipped_market_mismatch_count = 0
-    for run_dir in _run_dirs_newest_first(runs_root):
+    for run_dir in run_dirs():
         searched_count += 1
-        candidate = _run_payload(
-            run_dir,
-            accounts=accounts,
-            base=base,
-            read_json_object_or_empty=read_json_object_or_empty,
-            max_notification_chars=max_notification_chars,
-        )
+        candidate = load_candidate(run_dir)
         if not _run_payload_matches_market(candidate, desired_market):
             skipped_market_mismatch_count += 1
             continue
         if _run_payload_has_scan(candidate):
-            return candidate, {
+            return load_selected(run_dir), {
                 "source": "runs_root_mtime",
                 "searched_count": searched_count,
                 "market_filter": desired_market,
@@ -2502,37 +2477,61 @@ def private_runtime_status_tool(
             "notification": _deprecated_notification_alias(account_compatibility_notification),
         }
 
+    history_files: dict[Path, dict[str, Any]] = {}
+    history_candidates: dict[Path, dict[str, Any]] = {}
+    history_selected: dict[Path, dict[str, Any]] = {}
+    history_dirs: list[Path] | None = None
+
+    def read_history_file(path: Path) -> dict[str, Any]:
+        key = path.resolve()
+        if key not in history_files:
+            history_files[key] = _json_file_info(path, base=base, read_json_object_or_empty=read_json_object_or_empty)
+        return history_files[key]
+
+    def history_run_dirs() -> list[Path]:
+        nonlocal history_dirs
+        if history_dirs is None:
+            history_dirs = _run_dirs_newest_first(runs_root)
+        return history_dirs
+
+    def load_history_candidate(run_dir: Path) -> dict[str, Any]:
+        key = run_dir.resolve()
+        if key not in history_candidates:
+            history_candidates[key] = _run_selection_payload(
+                run_dir, accounts=accounts, base=base, read_file_info=read_history_file,
+            )
+        return history_candidates[key]
+
+    def load_history_selected(run_dir: Path) -> dict[str, Any]:
+        key = run_dir.resolve()
+        if key not in history_selected:
+            history_selected[key] = _run_payload(
+                run_dir, accounts=accounts, base=base, read_file_info=read_history_file,
+                max_notification_chars=max_notification_chars,
+            )
+        return history_selected[key]
+
     pointer_path = shared_state_dir / "last_run_dir.txt"
     requested_run, latest_run_selection = _requested_run_dir_from_payload(payload, base=base, runs_root=runs_root)
     latest_run_payload: dict[str, Any] | None = None
     if latest_run_selection.get("requested"):
-        latest_run = requested_run
-        if latest_run is not None:
-            latest_run_payload = _run_payload(
-                latest_run,
-                accounts=accounts,
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-                max_notification_chars=max_notification_chars,
-            )
+        if requested_run is not None:
+            latest_run_payload = load_history_selected(requested_run)
     else:
         latest_run_payload, latest_run_selection = _latest_run_payload_for_market(
             base=base,
             pointer_path=pointer_path,
-            runs_root=runs_root,
-            accounts=accounts,
-            read_json_object_or_empty=read_json_object_or_empty,
-            max_notification_chars=max_notification_chars,
+            run_dirs=history_run_dirs,
+            load_candidate=load_history_candidate,
+            load_selected=load_history_selected,
             desired_market=desired_market,
         )
 
     prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
     latest_scanned_run_payload, latest_scanned_run_selection = _latest_scanned_run_payload(
-        runs_root=runs_root,
-        accounts=accounts,
-        base=base,
-        read_json_object_or_empty=read_json_object_or_empty,
-        max_notification_chars=max_notification_chars,
+        run_dirs=history_run_dirs,
+        load_candidate=load_history_candidate,
+        load_selected=load_history_selected,
         desired_market=desired_market,
     )
     latest_scanned_prefetch_summary = _latest_run_prefetch_summary(latest_scanned_run_payload)
