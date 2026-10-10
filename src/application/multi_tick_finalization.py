@@ -116,13 +116,16 @@ def finalize_no_account_notification(
                 account=account,
                 extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
             )
+    metrics_action = "write_tick_metrics"
     try:
         tick_metrics["sent"] = False
         tick_metrics["reason"] = reason
         if error_code:
             tick_metrics["error_code"] = str(error_code)
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
+        metrics_action = "append_tick_metrics_history"
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+        metrics_action = "write_tick_metrics"
         audit_fn("write", "write_tick_metrics", run_id=run_id, status=audit_status, message=reason)
     except Exception as exc:
         _record_finalize_degraded(
@@ -130,7 +133,7 @@ def finalize_no_account_notification(
             run_id=run_id,
             safe_data_fn=safe_data_fn,
             audit_fn=audit_fn,
-            action="write_tick_metrics",
+            action=metrics_action,
             exc=exc,
             extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
         )

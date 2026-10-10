@@ -782,8 +782,11 @@ def main(argv: list[str] | None = None) -> int:
             account_execution.ran_pipeline_accounts
         )
         try:
+            metrics_action = "write_tick_metrics"
             state_repo.write_tick_metrics(base, run_id, tick_metrics)
+            metrics_action = "append_tick_metrics_history"
             state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+            metrics_action = "write_tick_metrics"
             audit_helper.audit(
                 "write",
                 "write_tick_metrics",
@@ -795,8 +798,8 @@ def main(argv: list[str] | None = None) -> int:
             runlog.safe_event(
                 "finalize",
                 "degraded",
-                message="write_tick_metrics failed",
-                data=_safe_runlog_data({"error": str(exc)}),
+                message=f"{metrics_action} failed",
+                data=_safe_runlog_data({"action": metrics_action, "error": str(exc)}),
             )
         runlog.safe_event(
             "run_end",
