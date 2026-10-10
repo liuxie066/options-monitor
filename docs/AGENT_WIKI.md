@@ -474,6 +474,12 @@ files, `AccountResult`, ranking, notification, and delivery remain authoritative
 compact data is reported as account-scoped `data_unavailable` and never repaired or substituted into the legacy path;
 rollback is removal of the compact consumer/call, not a history rewrite or runtime-data deletion.
 
+Required-data replay uses the ready-entry field sets owned by `required_data_snapshot.py`, including optional
+`reason_code` and `scan_blob_ref`; unknown or missing fields still fail closed. The sealed manifest's
+`required_data_root_relpath` is relative to its run `state/` directory, so the canonical sibling root is
+`../required_data`. This metadata value is accepted only at that field; other replay references retain their
+normalized relative-path checks and parent-traversal rejection.
+
 Prepared portfolio payloads use content-addressed names and a write-once/adopt manifest. The parent retains the manifest
 SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
 anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks

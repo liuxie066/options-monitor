@@ -51,7 +51,13 @@ from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
 )
 from src.application.required_data_snapshot import (
+    REQUIRED_DATA_READY_ENTRY_FIELDS,
+    REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS,
     REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
+)
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    validate_required_data_scan_blob_ref,
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
@@ -1653,7 +1659,9 @@ def _validate_required_data_reference(
     status = _one_of(payload.get("status"), {"complete", "partial", "failed"}, "required-data status")
     _sha256(payload.get("plan_id"), "required-data plan_id")
     _utc_timestamp(payload.get("sealed_at_utc"), "required-data sealed_at_utc")
-    _relpath(payload.get("required_data_root_relpath"))
+    # The sealer records the sibling root relative to the run/state manifest.
+    if payload.get("required_data_root_relpath") != "../required_data":
+        _relpath(payload.get("required_data_root_relpath"))
     if close_pair <= set(payload):
         _relpath(payload.get("close_advice_required_data_plan_relpath"))
         _sha256(
@@ -1673,25 +1681,20 @@ def _validate_required_data_reference(
         item_status = _one_of(row.get("status"), {"ready", "failed"}, f"required-data {symbol} status")
         if item_status == "ready":
             ready_count += 1
-            ready_keys = {
-                "status",
-                "fetch_plan",
-                "expected_fetch_contract",
-                "expected_fetch_contract_sha256",
-                "fetch_policy_hash",
-                "receipt_relpath",
-                "receipt_hash",
-                "snapshot_id",
-                "payload_sha256",
-                "source_observed_at",
-                "expires_at",
-                "raw_json_relpath",
-                "required_data_csv_relpath",
-                "source_outcome",
-            }
-            if "reason_code" in row:
-                ready_keys.add("reason_code")
+            ready_keys = (
+                REQUIRED_DATA_READY_ENTRY_FIELDS
+                | REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS.intersection(row)
+            )
             _keys(row, ready_keys, f"required-data symbols.{symbol}")
+            if "scan_blob_ref" in row:
+                blob_ref = _mapping(row["scan_blob_ref"], f"required-data {symbol} scan_blob_ref")
+                try:
+                    validate_required_data_scan_blob_ref(blob_ref)
+                except RequiredDataBlobError as exc:
+                    raise RuntimePortfolioSnapshotError(
+                        "RUNTIME_PORTFOLIO_SNAPSHOT_REFERENCE_PAYLOAD_INVALID",
+                        f"required-data {symbol} scan_blob_ref is invalid",
+                    ) from exc
             for field in (
                 "expected_fetch_contract_sha256",
                 "fetch_policy_hash",
@@ -2376,7 +2379,7 @@ def _mapping(value: Any, path: str, keys: set[str] | None = None) -> dict[str, A
     return row
 
 
-def _keys(value: Mapping[str, Any], keys: set[str], path: str) -> None:
+def _keys(value: Mapping[str, Any], keys: set[str] | frozenset[str], path: str) -> None:
     if set(value) != keys:
         _fail("FIELD_INVALID", f"{path} fields do not match schema")
 

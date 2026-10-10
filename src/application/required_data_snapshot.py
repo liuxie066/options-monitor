@@ -49,6 +49,23 @@ _required_text = partial(required_text, error=lambda m: RequiredDataSnapshotErro
 
 
 REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA = "required_data_snapshot_manifest.v1"
+REQUIRED_DATA_READY_ENTRY_FIELDS = frozenset({
+    "status",
+    "fetch_plan",
+    "expected_fetch_contract",
+    "expected_fetch_contract_sha256",
+    "fetch_policy_hash",
+    "receipt_relpath",
+    "receipt_hash",
+    "snapshot_id",
+    "payload_sha256",
+    "source_observed_at",
+    "expires_at",
+    "raw_json_relpath",
+    "required_data_csv_relpath",
+    "source_outcome",
+})
+REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS = frozenset({"reason_code", "scan_blob_ref"})
 _TERMINAL_STATUSES = frozenset({"complete", "partial", "failed"})
 
 
@@ -790,22 +807,6 @@ def _validate_manifest_symbols(
         raise RequiredDataSnapshotError(
             "required-data snapshot symbols are invalid"
         )
-    ready_fields = {
-        "status",
-        "fetch_plan",
-        "expected_fetch_contract",
-        "expected_fetch_contract_sha256",
-        "fetch_policy_hash",
-        "receipt_relpath",
-        "receipt_hash",
-        "snapshot_id",
-        "payload_sha256",
-        "source_observed_at",
-        "expires_at",
-        "raw_json_relpath",
-        "required_data_csv_relpath",
-        "source_outcome",
-    }
     failed_fields = {"status", "reason", "error_type"}
     resolved_entries: dict[str, FrozenRequiredDataEntry] = {}
     ready_count = 0
@@ -818,11 +819,10 @@ def _validate_manifest_symbols(
         entry = dict(raw_entry)
         entry_status = str(entry.get("status") or "").strip().lower()
         if entry_status == "ready":
-            allowed_fields = ready_fields.copy()
-            if "reason_code" in entry:
-                allowed_fields |= {"reason_code"}
-            if "scan_blob_ref" in entry:
-                allowed_fields |= {"scan_blob_ref"}
+            allowed_fields = (
+                REQUIRED_DATA_READY_ENTRY_FIELDS
+                | REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS.intersection(entry)
+            )
             if set(entry) != allowed_fields:
                 raise RequiredDataSnapshotError(
                     f"{symbol} ready manifest entry fields do not match schema"
