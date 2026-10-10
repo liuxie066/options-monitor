@@ -199,11 +199,11 @@ Combo Yield 仅支持 `same_expiry_pair`。`min_expiry_gap_days` / `max_expiry_g
 
 `fetch.limit_expirations` 不再裁剪正式策略 universe；底层抓取仍可保留该参数供非策略 CLI 使用。到期日发现失败时，全局计划 fail closed，不能用部分数据声称得到了“全局最优”。DTE 窗口仍有业务意义，窗口数量上限没有。
 
-## 现有实现边界（待按候选策略合同收敛）
+## 当前实现与兼容边界
 
-本轮实现范围：
+当前开仓策略：
 
-- 新增 `insurance_underwriting` 开仓策略核心计算
+- `insurance_underwriting` 负责承保定价核心计算
 - CSP post-filter 从 short-vol 风险评估切到承保定价评估
 - CC post-filter 从 short-vol 风险评估切到承保定价评估
 - CSP / CC 开仓配置使用 `insurance_underwriting`，不再接受 `short_vol`

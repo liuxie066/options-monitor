@@ -17,7 +17,7 @@ def test_repo_path_check_accepts_current_paths_suffixes_and_nondeterministic_tok
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(guardrails_check, "ROOT", tmp_path)
-    _write(tmp_path / "src/current.py", "")
+    _write(tmp_path / "src/current.py", "def handler():\n    pass\n")
     _write(tmp_path / "src/package/member.py", "")
     document = _write(
         tmp_path / "docs/current.md",
@@ -37,6 +37,57 @@ def test_repo_path_check_accepts_current_paths_suffixes_and_nondeterministic_tok
     )
 
     assert guardrails_check.check_living_doc_repo_paths([document]) == []
+
+
+def test_repo_path_check_rejects_missing_symbols_links_and_unparseable_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(guardrails_check, "ROOT", tmp_path)
+    _write(tmp_path / "src/facade.py", "from .owner import handler\n__all__ = ['handler']\n")
+    _write(tmp_path / "src/owner.py", "def handler():\n    pass\ndef _internal():\n    pass\n__all__ = []\n")
+    _write(tmp_path / "src/broken.py", "def broken(\n")
+    _write(tmp_path / "docs/CONTRACT.md", "# Contract\n")
+    document = _write(
+        tmp_path / "docs/current.md",
+        "`src/facade.py::handler`\n"
+        "`src/owner.py::removed_handler`\n"
+        "`src/broken.py::broken`\n"
+        "[Contract](CONTRACT.md)\n"
+        "[Missing](MISSING.md)\n"
+        "`src/owner.py::_internal`\n",
+    )
+
+    issues = guardrails_check.check_living_doc_repo_paths([document])
+
+    assert sorted((issue.line_no, issue.reason) for issue in issues) == [
+        (2, "indexed living-doc Python symbol does not exist"),
+        (3, "indexed living-doc Python symbol cannot be verified"),
+        (5, "indexed living-doc target does not exist"),
+    ]
+
+
+def test_staged_symbol_check_uses_staged_source(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(guardrails_check, "ROOT", tmp_path)
+    document = _write(tmp_path / "docs/current.md", "`src/owner.py::handler`\n")
+    source = _write(tmp_path / "src/owner.py", "def handler():\n    pass\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    index_paths = {path.as_posix() for path in guardrails_check.git_index_paths()}
+    source.write_text("def replacement():\n    pass\n", encoding="utf-8")
+
+    def check_staged():
+        return guardrails_check.check_living_doc_repo_paths(
+            [document],
+            line_reader=guardrails_check.read_staged_lines,
+            path_exists=lambda path: guardrails_check.index_path_exists(path, index_paths),
+        )
+
+    assert check_staged() == []
+    subprocess.run(["git", "add", "src/owner.py"], cwd=tmp_path, check=True)
+    assert [(issue.line_no, issue.reason) for issue in check_staged()] == [
+        (1, "indexed living-doc Python symbol does not exist")
+    ]
 
 
 def test_repo_path_check_exempts_only_explicit_path_lifecycle_markers(

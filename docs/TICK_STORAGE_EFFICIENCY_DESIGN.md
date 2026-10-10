@@ -1,6 +1,6 @@
 # Tick 存储效率设计
 
-> 状态：Planreview re-review 为 `pass-with-risks`；两个 implementation slices 已实现，完整回归通过；Deepreview 未发现实质性问题。设计基线为 `a4488c00`。
+> 状态：当前源码已实现摘要投影与 opening snapshot 紧凑编码。历史性能数字保留为设计依据，生产容量与时延须按目标环境验证。
 > Commit、push、merge、release、deployment 和历史数据清理都是独立边界。
 
 ## 目标
@@ -89,7 +89,7 @@ rate-limit 会额外提升为外层 `error_code`。这些细分 provider 诊断�
 `canonical_sha256()` 计算 `content_sha256`。该 hash 使用排序、紧凑、数值规范化后的 canonical
 JSON，不依赖 snapshot 文件是否带缩进。
 
-当前 `_canonical_json_bytes()` 使用 `indent=2`。loader 先执行 `json.loads()`，再按语义字段和
+当前 `_canonical_json_bytes` 复用 `payload_helpers.canonical_json_bytes_lines` 的紧凑编码。loader 先执行 `json.loads()`，再按语义字段和
 `content_sha256` 校验，因此紧凑编码不会改变已解析 payload。candidate snapshot manifest 同时绑定
 同一 run 的文件字节 hash 与 `content_sha256`：新文件的字节 hash 会按新编码生成并在同一 run 内
 读回校验，语义 binding 不变。历史漂亮 JSON 不重写，现有 loader 继续接受。
@@ -181,80 +181,17 @@ assemble semantic payload
 | 同一 run 已存在不同字节 | 保留 write-once conflict；不得为了跨版本重写而放宽 immutable contract |
 | 文件包含 NaN 或非法语义 | 保留现有 fail-closed validator/encoder 行为 |
 
-## 实施切片
+## 验证入口
 
-### Slice 1：Prefetch 持久化投影
+- `tests/test_tick_account_execution_barrier.py`：完整内存对象用于 seal，投影不修改原对象，两账户精简摘要一致，外层诊断及 manifest binding 保留。
+- `tests/test_daily_decision_brief_service.py`：精简摘要仍保留正常消费的状态与 data gap。
+- `tests/test_opening_candidate_snapshot.py`、`tests/test_candidate_snapshot_manifest.py`：精确紧凑字节、语义 hash、write-once/readback、历史漂亮 JSON bundle 与下游 binding。
 
-- 在现有 publish owner 内加入最小投影；
-- 扩充 Tick barrier 回归，证明 seal 收到完整对象、原对象未变、两账户落盘一致且不含
-  `audit[].payload`；
-- 覆盖 success、外层 error status/message、duration、receipt、symbol 和 summary/manifest binding
-  保留；typed/partial provider fixture 明确证明嵌套诊断随 payload 删除且没有新增字段提升；
-- 使用 payload-dominant fixture，按当前 writer 的
-  `json.dumps(full_summary, ensure_ascii=False, indent=2) + "\n"` 计算完整 summary 基准字节，读取
-  实际精简文件并断言其长度小于基准的一半。该比例只保护 fixture 的显著缩减，不作为生产 run
-  阈值。
-
-完成 focused tests 后停止，等待下一 slice 的人工确认。
-
-### Slice 2：Opening snapshot 紧凑编码
-
-- 只修改现有 encoder；
-- 扩充 opening snapshot 回归，证明 exact compact bytes、load/validate、snapshot semantic hash、
-  write-once replay，以及 candidate manifest binding 自洽；最终完整回归再证明 Research
-  消费者可读取更新后的 bundle；
-- 添加历史 pretty snapshot + 匹配旧 raw hash manifest 的 fixture，证明
-  `load_candidate_snapshot_bundle()` 接受完整历史 bundle；
-- 用同一 fixture 同时计算旧漂亮编码长度，证明新落盘字节明显减少。
-
-完成 focused tests 和最终完整 validation 后停止，等待 Deepreview 授权。
-
-## 验证计划
-
-Implementation 开始时，controller 先把 `OM_PYTHON` 设置为已验证且包含仓库依赖的 Python 3.12
-可执行文件。以下 bootstrap 要求该值存在并显式 export，再通过 `scripts/python_runtime.sh` 解析和记录
-实际路径；隔离 worktree 不依赖自己的 `.venv` 或 PATH fallback，后续 focused tests 均复用
-`OM_REPO_PYTHON`：
-
-```bash
-: "${OM_PYTHON:?set OM_PYTHON to a compatible Python 3.12 executable}"
-export OM_PYTHON
-OM_REPO_PYTHON="$(bash -c 'source scripts/python_runtime.sh && om_select_repo_python "$PWD"')"
-"$OM_REPO_PYTHON" -c 'import sys; assert sys.version_info[:2] == (3, 12)'
-```
-
-Slice 1 最小证据：
-
-```bash
-"$OM_REPO_PYTHON" -m pytest \
-  tests/test_tick_account_execution_barrier.py \
-  tests/test_daily_decision_brief_service.py
-```
-
-Slice 2 最小证据：
-
-```bash
-"$OM_REPO_PYTHON" -m pytest \
-  tests/test_opening_candidate_snapshot.py \
-  tests/test_candidate_snapshot_manifest.py
-```
-
-Research 消费者覆盖留给最终完整 pytest，避免在 focused suite 重复运行同一证据。
-
-最终验证：
-
-- 运行 `OM_PYTHON="$OM_REPO_PYTHON" make lint`；
-- 运行 `OM_PYTHON="$OM_REPO_PYTHON" make test`；
-- 运行 `git diff --check`；
-- 运行文档 wording 与 sensitive-artifact guardrails；
-- imports 未变化时不重新生成 dependency graph；若实现引入 import 变化，则按仓库规则重新生成并验证。
-
-不运行真实 Tick、OpenD probe、通知发送或生产 cleanup 作为源码验收。
+确定性 fixture 保护摘要删减比例及紧凑编码，生产大小和时延通过目标环境自然 run 观察。历史文件不重写；imports 改变时才重生成依赖图。
 
 ## 拒绝和延期的方案
 
-- **候选 facts 规范化为只保存一次**：潜在收益更大，但会改变
-  `opening_candidate_snapshot.v1`、决策 hash 和多个正式消费者；另立合同后再做。
+- **候选 facts 只保存一次**：会改变 snapshot 语义、决策 hash 和多个消费者，须另立合同后处理。
 - **对 opening snapshot 使用 gzip**：节省更多磁盘，但会增加 Tick CPU、loader/manifest/archive
   协议和历史兼容复杂度；当前没有必要。
 - **run-level 共享 prefetch summary**：可消除两账户的剩余重复，但需要新路径、reader migration 和

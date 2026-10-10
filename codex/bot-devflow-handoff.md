@@ -1,5 +1,7 @@
 # Bot devflow 交接
 
+> 已完成任务的历史交接。以下基线、阶段状态和授权只描述当时任务；当前合同见 [Bot PRD](../docs/BOT_PRD.md) 与 [Bot Design](../docs/BOT_DESIGN.md)，不得按本文件启动新交付或生产操作。
+
 ## 输入与文档所有权
 
 产品合同：[Bot 第一版 PRD](../docs/BOT_PRD.md)，批准依据只引用其第 10 节，不另存批准副本。

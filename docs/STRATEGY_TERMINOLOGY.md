@@ -13,7 +13,7 @@ Wheel 以 [WHEEL_STRATEGY_PRD.md](WHEEL_STRATEGY_PRD.md) 为准。
 | `sell_call` | Covered Call (CC) | Covered Call | 备兑看涨 | 持有正股 + 卖一张看涨 |
 | `combo_yield`（variant `sp_lc`） | Combo Yield SP+LC | Bullish Risk Reversal（Cash-Secured） | 看涨风险反转（现金担保变体） | 卖现金担保认沽 + 买同到期看涨 |
 | `combo_yield`（variant `cc_lp`） | Combo Yield CC+LP | Collar（Credit Collar） | 领口策略（信用领口） | 持有正股 + 卖看涨 + 买同到期认沽 |
-| `wheel` | 轮转策略 | Wheel Strategy | 轮转策略 | CSP 指派后持有正股，按批次推荐 CC 卖出 |
+| `wheel` | 轮转策略 | Wheel Strategy | 轮转策略 | 按权威指派事实创建 Call / Put 分支，监控股票或现金容量 |
 
 ## CSP — Cash-Secured Put（现金担保认沽）
 
@@ -49,9 +49,9 @@ Wheel 以 [WHEEL_STRATEGY_PRD.md](WHEEL_STRATEGY_PRD.md) 为准。
 ## Wheel — Wheel Strategy（轮转策略）
 
 - OM 内部 key：`wheel`；中文名"轮转策略"。
-- 结构：CSP（含 Combo Funding Put）被权威指派后持有正股，Wheel 按 `stock_lot_id` 批次监控这批股票，推荐卖出 Covered Call，直到被 Call 行权卖出（`called_away`）或用户手动结束（`manual_ended`）。
-- 生命周期：单向；终止后不自动回到 CSP。
-- 术语说明：**Wheel Strategy（轮转策略）**业界泛指"卖 Put 接货 → 卖 Call 出货"的循环，许多公开版本会再次卖 Put 形成无限循环；本仓库明确为单向生命周期。
+- 结构：普通 CSP / CC 或身份与成员已验证的外部 Combo Yield 卖腿被权威指派后，按事件发生时的启用窗口创建对应方向分支；Call 分支引用真实 `stock_lot_id`，Put 分支使用稳定的 `wheel_branch_id`，不虚构股票批次。
+- 生命周期：当前实现支持双向分支。既有 Wheel 的真实指派按实际转换量创建 `pending_decision` 子分支，用户显式决定 `start` 或 `end`；不会自动无限轮转。新候选和 `start` 仍受当前监控启用门约束。
+- 兼容语义：旧单向 Call 生命周期及 `called_away` / `manual_ended` 终态仍按历史合同解释，不回建 Put 子分支。具体事件、容量、启用与回退边界见 [Wheel PRD §13](WHEEL_STRATEGY_PRD.md#13-双向-wheel-实现合同)。
 
 ## 关系与边界
 

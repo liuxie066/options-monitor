@@ -1,12 +1,12 @@
 # 运行失败证据与保留设计
 
-> Devflow 设计稿。2026-09-23 事故时间线是用户提供的历史输入；本稿的“当前实现”以本地 `origin/main` 源码为准。源码完成、提交、发布、远端升级和生产清理是不同边界。
+> 当前运行失败、取证与保留合同。2026-09-23 事故是历史设计输入；当前 owner 以源码为准，生产健康、磁盘占用和部署状态须从目标环境独立核验。
 
 ## 目标、范围与成功信号
 
 目标：计划 Tick 在 OpenD 登录失效、验证码、不可达或执行超时时快速失败，留下可从公开运行状态和 run 证据追溯的原因；取证文件持续可读，磁盘回收有可审核预览。
 
-本次范围是本地源码、测试、部署配置模板、文档和**只预览**的一次性回收工具。涉及 `tick-cron`、OpenD watchdog、runtime/quality status、通知审计读取、healthcheck、日志与清理入口。用户已选择 Devflow `full` 路径并授权本地设计、实现和审查；远端只读，绝不在本轮删除远端数据、改服务、发布或升级。
+合同覆盖 `tick-cron`、OpenD watchdog、runtime/quality status、通知审计读取、healthcheck、日志与清理入口。回收预览不授权删除，源码合同不授权发布、升级、服务变更或生产清理。
 
 非目标：重新登录富途账户；修改交易、账本或通知业务决策；发送测试告警到真实渠道；把事故时的磁盘大小或日志计数当成现值；自动删除备份、审计证据或历史 run；新建通用日志/存储框架。
 
@@ -18,23 +18,18 @@
 | S4 | 500 MB 审计文件仍可读取近期投递证据；指定历史时间窗可有界扫描并准确表明完整、部分、损坏或缺失，敏感字段与会话隔离维持原约束；service drift 明细可导出。 |
 | S5 | 已有 `output_runs` 清理预览/确认门保留；审计与 OpenD 日志保留策略可由部署侧管理；事故候选清单得到默认只预览的逐项引用/保护检查与预计释放量，不执行删除。 |
 
-## 当前事实和复用清单
+## 当前 owner
 
-检索范围：`tick_cron`、`multi_account_tick`、`multi_tick_watchdog`、`opend_watchdog`、`state_repo`、`runtime_status_impl`、`quality/runtime_checks`、`notification_perception_read`、`project_reader`、`healthcheck_impl`、`service_deploy`、`service_cleanup`、`runtime_logs_cli`，以及这些入口的直接测试；关键词为 `tick failure`、`audit_events`、`rotation`、`retention`、`opend_phone_verify_pending`、`service_drift`。未发现现成的跨所有外层 Tick 失败的终态 read model；不能由此推断仓外消费者不存在。
-
-| 概念或实现 | 归属决定 |
+| 责任 | owner 与边界 |
 | --- | --- |
-| OpenD 失败码 | 复用 `opend_watchdog.classify_watchdog_result` 和 `opend_retcodes`；图形验证码须从宽泛的“验证码”识别中细分，最终码在所有入口一致。 |
-| Tick run 身份与审计 | 复用 `run_log.create_run_id` 和 `state_repo.normalize_audit_event` 的 `error_code`、`extra` 契约；`state_repo.append_audit_event` 目前先写 shared 后写 run，latest 写失败会被吞掉，因此外层失败先用现有 `append_run_audit_jsonl` 写 run，再写 shared/latest，不将多次写入伪装成事务。外层 wrapper 只有失败时补自己的 run 级事件，不伪称它是内层扫描 run。 |
-| 最新失败/恢复状态 | 新增最小的**按市场** `output_shared/state/current/tick_cron_last_result.<market>.current.json` read model，理由是现有 `audit_event_latest.current.json` 会被任意事件覆盖，`opend_phone_verify_pending.json` 只表达一种故障且不分市场。仅同市场、完整计划 Tick 的可验证成功覆盖失败；诊断、指定账户、`--no-send`、guard/幂等跳过和锁冲突不覆盖。 |
-| OpenD 告警/暂停 | 复用 `multi_tick/opend_guard.py` 的 pending marker、限流和 `send_opend_alert`；不增加通知 provider。`no_send` 只抑制发送，不抑制失败记录与不健康状态。 |
-| 运行/质量状态 | 复用 `runtime_status_impl` 和 `quality/runtime_checks.py`，以 read model 加现有 pending/账户 last-run 为证据，不发起实时 OpenD 查询。 |
-| 审计写入和读取 | 复用 `state_repo` 的私有追加写入、`project_reader` 的 no-follow 边界及 `notification_perception_read` 的脱敏/会话过滤。当前公开读取器只读末尾 1 MiB 并标 `partial`，内部 `iter_notification_perception_events` 会整文件读入；历史时间窗扫描需新增有界流式读取，而不是另一套通知事件解释。 |
-| run 和服务清理 | 复用 `service_cleanup` 已有的运行目录保留与计划摘要确认门；`research storage-gc-preview` 和 `storage-cleanup-preview` 仍只读，不加隐式删除模式。 |
-| 日志 | systemd 服务已有 `StandardOutput/StandardError=journal`；`runtime_logs_cli` 当前仅列文件，因此 journal-only 需明确显示。OpenD 当前实际文件名含 `.ftlog` 和 `.logs`，不能用 `*.log` 策略假设覆盖。 |
-| service drift | 复用 `service_drift_status` 的明细对象；仅在显式 CLI `--output` 时原子写 JSON，不让只读 status 工具隐式落盘。 |
+| Tick 失败与恢复收据 | `src/application/tick_cron.py`、`src/application/multi_account_tick.py`；按市场保存终态，完整计划 Tick 收据才证明恢复 |
+| OpenD 原因码与人工动作 | `src/infrastructure/opend_watchdog.py`、`src/application/tick_guard_flow.py`；登录故障非零退出，探测确认恢复后清 pending marker |
+| 告警认领 | `src/application/multi_tick/opend_guard.py`；用现有限流状态和窄锁认领事故，不把发送尝试当送达 |
+| 只读状态 | `src/application/agent_tools/runtime_status_impl.py`、`src/application/quality/runtime_checks.py`；读取同一终态和 pending/账户证据，不实时查询 OpenD |
+| 通知取证 | `src/application/notification_perception_read.py`；近期尾部读取与显式历史窗口共享事件解释、脱敏和会话隔离 |
+| 日志与清理 | `src/application/runtime_logs_cli.py`、`src/application/service_cleanup.py`、`src/application/incident_cleanup_preview.py`；日志位置明确，清理按各自预览/确认边界执行 |
 
-## 选定设计与失败语义
+## 当前失败语义
 
 ### 1. Tick 终态
 
@@ -44,9 +39,9 @@
 
 只有同市场、全账户范围、非诊断且非 `--no-send` 的计划 Tick 完成实际扫描，才能覆盖按市场 latest 为 `ok`。wrapper 用内层相同的 `runtime_paths.resolve_runtime_root` 确定 runtime root，以 `OM_TICK_CRON_RUN_ID` 环境值传自己的 ID；内层在 `multi_account_tick` 唯一真实扫描完成出口、通知流程返回 `rc=0` 后，核对 `ran_pipeline_accounts` 与结果中 `ran_scan=True` 覆盖全部本轮计划账户，再向该 runtime root 下的 wrapper run 目录原子写 `state/child_tick_completion.json`，内容为 wrapper ID、inner run ID、市场、账户、`completed_at_utc`、`status=ok`。wrapper 只接受与本轮 ID/市场/完整账户集合匹配且子进程 `rc=0` 的收据；缺收据保持旧故障并显示 `completion_unknown`。`rc=0` 单独不足以证明恢复；no-account、delivery-only、项目 guard、幂等跳过以及未执行 Tick 均不写收据。read model 原子写入失败时报 ERROR；inner run 与 wrapper run 是两个身份，通过收据关联，不造同一个 ID。
 
-`OPEND_NEEDS_PHONE_VERIFY` 现有分支把 `run_end` 写成 `skip` 并返回 0，应改为终态错误（非零），写入账户 last-run 的原因码，保留 pending marker。`tick_guard_flow` 在 marker pending 时也返回非零、同一原因码，不能标 guard 成功；人工 `--opend-phone-verify-continue` 只放行一次 watchdog 探测，不在探测前清 marker。watchdog 验证所需登录能力确实恢复后清 marker，即使这次人工 Tick 因时窗没有扫描；市场级失败仍保持到下一次完整计划 Tick 收据。探测失败则保留 marker 并返回非零。`OPEND_LOGIN_INVALID` 沿现有 fail-fast 路径；“需要图形验证码”单独归一为 `OPEND_NEEDS_PIC_VERIFY`/人工动作，不再错误标成手机验证码。恢复不能靠时间过期伪装健康；账户旧错误与市场新收据按同一市场、账号、时间与 pending 状态仲裁，不能让旧记录永久遮蔽真恢复。
+`OPEND_NEEDS_PHONE_VERIFY` 分支以终态错误和非零返回结束，账户 last-run 保留原因码与 pending marker。`tick_guard_flow` 在 marker pending 时也返回非零、同一原因码，不能标 guard 成功；人工 `--opend-phone-verify-continue` 只放行一次 watchdog 探测，不在探测前清 marker。watchdog 验证所需登录能力确实恢复后清 marker，即使这次人工 Tick 因时窗没有扫描；市场级失败仍保持到下一次完整计划 Tick 收据。探测失败则保留 marker 并返回非零。`OPEND_LOGIN_INVALID` 沿现有 fail-fast 路径；“需要图形验证码”单独归一为 `OPEND_NEEDS_PIC_VERIFY`/人工动作，不再错误标成手机验证码。恢复不能靠时间过期伪装健康；账户旧错误与市场新收据按同一市场、账号、时间与 pending 状态仲裁，不能让旧记录永久遮蔽真恢复。
 
-告警复用现有独立于富途的通道；三种登录人工动作码归同一事故族。现有限流是先 check、发送后 record，HK/US 并发会重复提交；用现有限流状态加窄锁作原子认领，每次事故最多**一次发送尝试**，不把 provider 提交等同于投递确认。提交结果不明保持认领并给运维可读的 `delivery_unknown`，人工或恢复事件才解锁下一次事故；`no_send` 不认领也不发送。其他 OpenD 暂时故障仍遵守现有限流及重试策略。
+告警复用现有独立于富途的通道；三种登录人工动作码归同一事故族。限流状态在窄锁内作原子认领，每次事故最多**一次发送尝试**，不把 provider 提交等同于投递确认。提交结果不明保持认领并给运维可读的 `delivery_unknown`，人工或恢复事件才解锁下一次事故；`no_send` 不认领也不发送。其他 OpenD 暂时故障仍遵守现有限流及重试策略。
 
 运行状态以最新 read model 和 pending/账户错误证据判定；登录细码在其账号和时间覆盖范围内优先于外层通用码，缺文件或本轮写证据缺口是 `unknown/evidence_incomplete`，不是健康。`quality_status` 使用同一原因码生成运行检查，不因服务 unit `active` 就覆盖业务故障。状态读取不触发 OpenD、告警或写入。
 
@@ -54,7 +49,7 @@
 
 ### 2. 取证与健康检查
 
-保留近期默认末尾读取的速度和 `partial` 声明；增加显式 `start_utc/end_utc` 时间窗入口，逐行流式扫描当前及受管理的历史审计段，单行最大 1 MiB、单次扫描最多 64 MiB、最多 50 条公开结果，并沿用时间/取消预算。会话过滤先于公开计数，复用 `_matches_event/_public_event` 脱敏；预算耗尽、坏行、缺段或首段晚于查询起点时返回 `partial`、`stop_reason`、已扫描字节和已覆盖时间范围，不能返回完整零事件。历史页绑定首次查询的段身份与完整行结束偏移；活动文件后续追加不使已有页失效，原有字节变化、段消失或轮转使游标明确失效。旧单文件仍可流式读取；首轮不新增索引或数据库，若真实 500 MB 窗口扫描超出预算再另行设计索引。
+保留近期默认末尾读取的速度和 `partial` 声明；显式 `start_utc/end_utc` 时间窗入口，逐行流式扫描当前及受管理的历史审计段，单行最大 1 MiB、单次扫描最多 64 MiB、最多 50 条公开结果，并沿用时间/取消预算。会话过滤先于公开计数，复用 `_matches_event/_public_event` 脱敏；预算耗尽、坏行、缺段或首段晚于查询起点时返回 `partial`、`stop_reason`、已扫描字节和已覆盖时间范围，不能返回完整零事件。历史页绑定首次查询的段身份与完整行结束偏移；活动文件后续追加不使已有页失效，原有字节变化、段消失或轮转使游标明确失效。旧单文件仍可流式读取；首轮不新增索引或数据库，若真实 500 MB 窗口扫描超出预算再另行设计索引。
 
 `runtime_logs_cli` 对 `kind=service` 且文件为空的 systemd profile 返回 `journal_only` 和已知 unit/安全的只读查询提示，不把零文件解释成零日志。`service_drift` CLI 显式导出完整 JSON 明细；healthcheck 仅把缺凭证所影响的分项标为 `skipped/unknown`，其他账户/行情只读检查继续，汇总不得虚报 ready。
 
@@ -66,24 +61,22 @@
 
 `output_runs` 使用现有 `om service cleanup` 的 14 天或最近 200 个与计划摘要确认机制，不再建一套删除器。OpenD 自身已产生 `.ftlog`、`.logs` 分片；部署侧只按这些已知后缀和 7 天年龄生成预览/策略，保护现用进程打开的文件与最近文件，未知扩展名不处理。备份保留只生成 TTL 候选预览，不在本轮自动删除。
 
-一次性候选预览仅接受下列固定白名单，目标主机为 `liuxie-incus`，`output_shared` 路径相对 `/var/lib/options-monitor`；不使用通配发现未知候选：
+事故候选预览的历史白名单由 `src/application/incident_cleanup_preview.py` 维护；文档不复制可能被误当成当前文件状态的临时路径清单。该白名单来自 2026-09-23 事故输入，目标主机与路径必须按实际预览绑定，不使用通配发现未知候选。
 
-| 类型 | 精确候选 |
-| --- | --- |
-| 2026-09-14 快照（12） | `last-three-terminal-repair-20260914-v1`、`intake-evidence-repair-20260914-v2`、`identity-evidence-repair-20260914-v1`、`cnooc-repair-20260914-v2`、`last-stock-production-repair-20260914-v1`、`intake-evidence-repair-20260914-v1`、`cnooc-repair-20260914`、`last-stock-repair-20260914-v1`、`last-stock-repair-20260914-v2`、`wheel-fee-repair-20260914-v3`、`wheel-fee-repair-20260914-v2`、`sy-wheel-recovery-357-20260914`，均在 `output_shared/state/`。 |
-| `/tmp` 残留（8） | `/tmp/om-legacy-association-rehearsal`、`/tmp/om-hk-timing-proof`、`/tmp/om-hk-data-rehearsal`、`/tmp/om-v362-control.zocW8R`、`/tmp/om-pdd-order-repair`、`/tmp/om-v361-control.gTCvAT`、`/tmp/om-wheel-assignment-recovery-20260914`、`/tmp/om-readonly-20260919T065001.sqlite3`。 |
-| 其他 | `output_shared/state/backups/` 目录、用户给定的顶层 `option_positions.sqlite3.before-{cash-rekey,realized-pnl-repair}-*.bak` 与 `state/` 下旧 SQLite 备份（仅作为待精确枚举清单）；OpenD `~/.com.futunn.FutuOpenD/Log` 下 7 天前的 `.ftlog/.logs` 段。未给具体文件名的项只能在预览中列候选，不能被视为已批准删除。 |
 
 对每项输出 `path/realpath/type/logical_size/allocated_bytes/mtime/reference_checks/protected/reason`，缺失或身份变化也明确显示。检查当前 release 与前两个版本、现用账本、最近迁移备份、进程打开文件、软链、systemd unit、脚本和清单引用；目录嵌套去重，预计释放量只计非保护且可证明的常规文件。任何检查不可用或引用不明时 `protected=true`。工具没有删除开关；单独的生产 apply 需要另一个授权与独立执行方案。
 
-## 切片、验证和风险
+## 验证与风险
 
-| 切片 | 交付行为 | 覆盖 | 依赖/最小验证 |
-| --- | --- | --- | --- |
-| A | 计划 Tick 的失败事件、OpenD 终态、状态/质量映射、journal 级别及有限 unit 超时 | S1、S2、S3 | 无；入口、watchdog、status/quality、unit 渲染回归，失败/恢复/锁冲突路径。 |
-| B | 审计历史窗口流式读取、日志位置说明、drift 导出及 healthcheck 分项降级 | S4、S3 | A 的原因码；真实密集 JSONL 与 500 MB 文件的有界扫描、损坏/取消/游标变化/会话隔离和 facade 测试。 |
-| C | 协调写入的轮转、现有清理入口复用和固定清单的只读回收预览 | S5、S4 | B 的历史段读取；临时根目录中验证引用/保护/幂等及并发追加与轮转前后读取。 |
+入口与持久证据由 `tests/test_tick_cron.py`、
+`tests/test_tick_account_execution_barrier.py` 和 OpenD watchdog/guard 测试覆盖；
+历史读取、轮转、日志与回收预览分别见
+`tests/test_notification_perception_read_tool.py`、`tests/test_audit_rotation.py`、
+`tests/test_runtime_logs_journal.py`、`tests/test_service_drift_export.py` 和
+`tests/test_incident_cleanup_preview.py`。
 
-每片只修改必要 owner 并跑能暴露该行为回归的测试；最终执行项目要求的完整相关门禁。测试 fixture 不连接真实 OpenD、不发送通知、不写生产 runtime。未验证的外部日志命名、权限或保留合规要求必须保留为限制，不能把源码测试当远端部署成功。
+测试 fixture 不连接真实 OpenD、不发送通知、不写生产 runtime。强杀、断电、
+磁盘满或日志 sink 不可用仍可能留下证据缺口；状态读取必须报告 unknown。
+外部日志命名、权限、保留期和目标环境部署必须独立核验。
 
 拒绝的方案：另建通用日志框架、为审计查询新增数据库、把 `service_drift` 的只读状态查询变成隐藏写入、用目录通配直接删除备份或旧 run。这些都增加状态或副作用，而现有 owner 已提供更窄的入口。

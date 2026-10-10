@@ -402,15 +402,33 @@ def check_living_doc_repo_paths(
     path_exists: PathExists = working_tree_path_exists,
 ) -> list[Violation]:
     issues: list[Violation] = []
+    module_names: dict[Path, frozenset[str]] = {}
     for path in files:
-        for idx, line in enumerate(line_reader(path), start=1):
+        lines = line_reader(path)
+        _, link_issues = _local_markdown_targets(path, lines, path_exists=path_exists)
+        issues.extend(link_issues)
+        for idx, line in enumerate(lines, start=1):
             for match in _INLINE_CODE_RE.finditer(line):
-                relative = _normalized_repo_path(match.group(1))
+                token = match.group(1)
+                relative = _normalized_repo_path(token)
                 if relative is None:
                     continue
                 if _PATH_LIFECYCLE_PREFIX_RE.search(line[: match.start()]):
                     continue
                 if path_exists(relative):
+                    _, separator, symbol = token.partition("::")
+                    if separator and relative.suffix == ".py" and symbol.isidentifier():
+                        try:
+                            if relative not in module_names:
+                                module_names[relative] = _bound_names(
+                                    _parse_module("\n".join(line_reader(ROOT.resolve() / relative)))
+                                )
+                            if symbol in module_names[relative]:
+                                continue
+                            reason = "indexed living-doc Python symbol does not exist"
+                        except (OSError, UnicodeError, PublicSurfaceUnavailable):
+                            reason = "indexed living-doc Python symbol cannot be verified"
+                        issues.append(Violation(path.relative_to(ROOT.resolve()), idx, reason, line))
                     continue
                 issues.append(
                     Violation(

@@ -351,17 +351,9 @@ Wheel 继续使用默认值。
 不新增 `ExperienceContext` 类、domain entity、数据库 migration、配置 schema、provider adapter、扫描器、
 通知类型或体验专用输出目录。
 
-## 12. 实施顺序
+## 12. 验证边界
 
-1. 入口参数、全量预检、元数据显示名和外层副作用旁路。
-2. 将内部 flag 传过 `account_run`、`run_pipeline_script`、`pipeline_runtime`、`pipeline_watchlist` 和
-   `SymbolMonitoringInputs`。
-3. 在父、子两层 prefilter 保留体验 scope，并接入 SP/CC demo capacity、Combo 复用和 Wheel 排除。
-4. 发布版本化 owner snapshot、status index 和 terminal manifest。
-5. 更新只读展示面与正式 evidence / execution consumer 门禁。
-6. 运行公共入口、跨进程传播、零副作用、证据隔离和普通模式回归测试。
-
-每一步都应保持普通 REAL 与 SIMULATE 默认路径可运行；不先加入通用 bypass 开关再逐步补安全边界。
+普通 REAL 与 SIMULATE 默认路径、体验子进程传播、副作用旁路和正式证据隔离需共同验证；不使用通用 bypass 开关代替边界。以下验收映射保留 PRD 要求，实际通过证据以对应测试结果为准，真实 OpenD PoC 另行核验。
 
 ## 13. 验收映射
 
@@ -384,6 +376,3 @@ Wheel 继续使用默认值。
 - `tests/test_daily_decision_brief_service.py`；
 - `tests/test_account_run.py`、`tests/test_pipeline_runtime_paths.py`；
 - `tests/test_candidate_evidence_history.py`。
-
-文档完成不授权代码、配置、通知、交易、发布或远端升级。进入实施前应先确认本设计，再把第 12 节
-转换为可执行开发计划。
