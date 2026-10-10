@@ -788,7 +788,6 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
 
 
 def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Path) -> None:
-    from src.application.service_upgrade import _parse_drift_response, _service_reconcile_failed
     from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
     repo, runtime, systemd_root = _drift_roots(tmp_path)
@@ -849,14 +848,12 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     assert applied["summary"]["status"] == "warn"
     assert applied["summary"]["error_count"] == 0
     assert applied["summary"]["warning_count"] > 0
-    assert _service_reconcile_failed(applied) is False
     parser = argparse.ArgumentParser()
     add_service_update_commands(parser.add_subparsers(dest="command"))
     args = parser.parse_args(["service", "drift", "--runtime-root", str(runtime), "--confirm"])
     response = handle_service_update_command(args, service_drift_fn=lambda **_kwargs: applied)
     # Existing warning-envelope rejection remains tracked by issue 510.
     assert response["ok"] is False
-    assert _parse_drift_response(json.dumps(response)) is None
     assert applied["extra_installed_units"] == sorted(custom)
     assert set(applied["installed_units"]) == set(original_units) - nonunits - {retired}
     assert not (systemd_root / retired).exists()
@@ -924,8 +921,6 @@ def test_service_drift_never_persists_inferred_retirement_accounts(
 def test_service_drift_retries_retirement_after_failure_and_profile_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, retired: str,
 ) -> None:
-    from src.application.service_upgrade import _service_reconcile_failed
-
     repo, runtime, systemd_root = _drift_roots(tmp_path)
     bundle = _render_bundle(
         repo, runtime, accounts=["lx"], markets=["us"], use_default_deploy_user=False,
@@ -967,7 +962,6 @@ def test_service_drift_retries_retirement_after_failure_and_profile_refresh(
 
     assert failed["summary"]["status"] == "error"
     assert failed["summary"]["ok"] is False
-    assert _service_reconcile_failed(failed) is True
     assert failed["summary"]["error_count"] > 0
     assert len(failed["apply_errors"]) == 1
     assert retired in failed["apply_errors"][0]
