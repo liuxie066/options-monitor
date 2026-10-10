@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -787,7 +788,8 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
 
 
 def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Path) -> None:
-    from src.application.service_upgrade import _service_reconcile_failed
+    from src.application.service_upgrade import _parse_drift_response, _service_reconcile_failed
+    from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
     repo, runtime, systemd_root = _drift_roots(tmp_path)
     bundle = _render_bundle(
@@ -848,6 +850,13 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     assert applied["summary"]["error_count"] == 0
     assert applied["summary"]["warning_count"] > 0
     assert _service_reconcile_failed(applied) is False
+    parser = argparse.ArgumentParser()
+    add_service_update_commands(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["service", "drift", "--runtime-root", str(runtime), "--confirm"])
+    response = handle_service_update_command(args, service_drift_fn=lambda **_kwargs: applied)
+    # Existing warning-envelope rejection remains tracked by issue 510.
+    assert response["ok"] is False
+    assert _parse_drift_response(json.dumps(response)) is None
     assert applied["extra_installed_units"] == sorted(custom)
     assert set(applied["installed_units"]) == set(original_units) - nonunits - {retired}
     assert not (systemd_root / retired).exists()
@@ -866,6 +875,46 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     for name, content in protected.items():
         assert (systemd_root / name).read_bytes() == content
     assert (directory / "keep.txt").read_bytes() == b"preserve directory contents\n"
+
+
+@pytest.mark.parametrize("accounts", [None, [], "lx", [123, "lx"]])
+def test_service_drift_never_persists_inferred_retirement_accounts(
+    tmp_path: Path, accounts: object,
+) -> None:
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], use_default_deploy_user=False,
+    )
+    profile = json.loads(
+        next(item["content"] for item in bundle["files"] if item["relative_path"] == "service.profile.json")
+    )
+    if accounts is None:
+        profile.pop("accounts")
+    else:
+        profile["accounts"] = accounts
+    profile["services"].append({"name": "options-monitor-ai-evidence-collector.service"})
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    protected = "options-monitor-opend-123.service" if isinstance(accounts, list) and accounts else "options-monitor-opend-lx.service"
+    target = systemd_root / protected
+    target.write_bytes(b"operator-owned unit\n")
+    calls: list[list[str]] = []
+    runner = _fake_systemd_query_runner(record=lambda command, _kwargs: calls.append(command))
+    for attempt in range(3):
+        out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=runner)
+        assert out["apply_errors"] == []
+        assert out["applied"]["retired_units"] == []
+        assert out["summary"]["status"] == "warn"
+        assert out["extra_installed_units"] == [protected]
+        assert out["applied"]["profile_written"] is (attempt == 0)
+        refreshed = json.loads(profile_path.read_text(encoding="utf-8"))
+        if accounts is None:
+            assert "accounts" not in refreshed
+        else:
+            assert refreshed["accounts"] == accounts
+        assert target.read_bytes() == b"operator-owned unit\n"
+    assert not any("disable" in command and command[-1] == protected for command in calls)
 
 
 @pytest.mark.parametrize("failure", ["disable", "delete"])

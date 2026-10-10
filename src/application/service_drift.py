@@ -1567,7 +1567,18 @@ def _expected_bundle_from_profile(
         ),
         "include_content": True,
     }
-    return render_service_bundle(**render_kwargs)
+    bundle = render_service_bundle(**render_kwargs)
+    if provider == "systemd":
+        # Rendering defaults must not become persisted retirement ownership.
+        expected_profile = _bundle_profile(bundle)
+        if "accounts" in profile:
+            expected_profile["accounts"] = profile["accounts"]
+        else:
+            expected_profile.pop("accounts", None)
+        for item in bundle.get("files", []):
+            if item.get("kind") == "service_profile":
+                item["content"] = json.dumps(expected_profile, ensure_ascii=False, indent=2) + "\n"
+    return bundle
 
 
 def _profile_opend_render_values(opend: dict[str, Any]) -> tuple[str | None, str | None]:

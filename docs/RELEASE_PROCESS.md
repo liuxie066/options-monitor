@@ -369,9 +369,11 @@ git branch -d <exact-local-branch>
 
 service drift 仅将单元目录中的 `.service` / `.timer` 文件列入单元对账，
 `.bak`、`.disabled` 等备份文件不会被退役。`--confirm` 只自动退役部署器明确管理的
-产品单元，包括已停用的历史产品单元；账号专属 OpenD 名称按 profile 中显式记录的账号识别。
+产品单元，包括已停用的历史产品单元；账号专属 OpenD 名称按 profile 中显式记录的账号识别，
+profile 更新保留原账号声明，不把渲染默认值变成退役归属证据。
 未知自定义单元会保留在 `extra_installed_units` 和 warning 中，按 `manual_actions` 查看内容后人工判断。
 与产品保留名称相同的单元仍按产品单元管理；停用或删除失败会报告 error，并可重试。
+保留未知单元时，既有升级子进程会拒绝 CLI 的 warning 响应；该响应处理问题由 #510 跟踪。
 
 升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。profile 必须记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config。旧 profile 缺少 YAML authoring source 时会 fail closed；直接建立 `config.yaml`，再执行 `service render --config-yaml <path>`。切换 symlink 前缺失来源或 rebuild/validate 失败时会在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
 
