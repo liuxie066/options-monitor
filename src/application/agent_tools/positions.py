@@ -73,6 +73,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "sell_option_win_rate",
         "buy_option_win_rate",
         "option_return",
+        "daily_occupied_capital",
         "breakdowns.opening_years",
         "breakdowns.opening_months",
         "breakdowns.accounts",
@@ -90,6 +91,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "sell_option_win_rate.missing",
         "buy_option_win_rate.missing",
         "option_return.by_currency.*.missing",
+        "daily_occupied_capital.by_currency.*.missing",
     ],
     "freshness_fields": [
         "period.freshness_status",
@@ -103,6 +105,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "sell_option_win_rate",
         "buy_option_win_rate",
         "option_return",
+        "daily_occupied_capital",
         "quality",
     ],
     "model_value_fields": [
@@ -112,6 +115,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "sell_option_win_rate",
         "buy_option_win_rate",
         "option_return", "breakdowns", "quality", "rows", "view", "group_by", "pagination",
+        "daily_occupied_capital",
         "next_cursor", "continuation_status", "body_range", "body_complete", "text",
         "available_breakdowns", "detail_query",
     ],
@@ -119,6 +123,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.cny_total.missing",
+        "daily_occupied_capital.by_currency.*.missing",
     ],
 }
 
@@ -989,11 +994,12 @@ _PERFORMANCE_READ_INPUT = {
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取 MTD/YTD 或自然月/自然年期权四指标与明细分解。",
+    catalog_summary="读取 MTD/YTD 或自然月/自然年期权收益、实际日均占用与明细分解。",
     description=(
         "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
         "option net cash flow plus an audited CNY total when persisted event-time conversions are complete, "
-        "sell-option and buy-option win rates, and return on average occupied capital. Stock trades, "
+        "sell-option and buy-option win rates, hold-to-expiry returns, and independent actual daily unsettled "
+        "principal including carry-in positions. Daily principal is not the return denominator. Stock trades, "
         "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report."
     ),
     requires=("runtime_config", "sqlite_data_config"),

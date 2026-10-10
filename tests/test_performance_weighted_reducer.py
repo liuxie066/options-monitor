@@ -22,6 +22,153 @@ from domain.domain.performance.weighted_reducer import (
 )
 from src.application.cash_conversion import attach_trade_event_cash_conversions
 
+def _daily(reduction, currency="USD"):
+    return reduction.bundle["daily_occupied_capital"]["by_currency"][currency]
+
+
+def test_daily_capital_includes_carry_in_and_partial_closes_without_changing_returns():
+    fresh = _event("fresh", "open", "2026-09-03T00:00:00", lot_id="fresh-lot")
+    events = [
+        _event("carry", "open", "2026-08-20T00:00:00", lot_id="carry-lot", contracts=3),
+        _event("carry-close", "close", "2026-09-02T12:00:00", target_lot_id="carry-lot",
+               close_type="buy_to_close"),
+        fresh,
+    ]
+    period = _period(now="2026-09-05T23:59:59.999")
+    result = reduce_option_performance(project_trade_events(events), period=period)
+    baseline = reduce_option_performance(project_trade_events([fresh]), period=period)
+    # Carry: 1*1.5 + 2*5 contract-days; fresh: 1*3 days, over five calendar days.
+    assert _daily(result)["amount"] == Decimal("29000")
+    assert _daily(result)["status"] == MetricStatus.OBSERVED
+    assert {k: v for k, v in result.bundle.items() if k != "daily_occupied_capital"} == {
+        k: v for k, v in baseline.bundle.items() if k != "daily_occupied_capital"
+    }
+    assert result.facts == baseline.facts
+    assert result.breakdowns == baseline.breakdowns
+
+
+@pytest.mark.parametrize("side,option_type,expected", [
+    ("short", "put", "10000"), ("short", "call", "10000"),
+    ("long", "put", "200"), ("long", "call", "200"),
+])
+def test_daily_capital_intraday_principal_uses_no_floor(side, option_type, expected):
+    event = _event("open", "open", "2026-09-01T12:00:00", lot_id="lot",
+                   key=_key(side=side, option_type=option_type), contracts=2, price=2)
+    result = reduce_option_performance(project_trade_events([event]),
+                                      period=_period(now="2026-09-01T23:59:59.999"))
+    assert _daily(result)["amount"] == Decimal(expected)
+
+
+@pytest.mark.parametrize("close_at,expected", [
+    ("2026-09-01T12:00:00", "0"),
+    ("2026-09-01T13:00:00", "416.666667"),
+    ("2026-09-03T00:00:00", "5000"),
+])
+def test_daily_capital_zero_short_and_future_closes(close_at, expected):
+    events = [
+        _event("a-open", "open", "2026-09-01T12:00:00", lot_id="lot"),
+        _event("z-close", "close", close_at, target_lot_id="lot", close_type="buy_to_close"),
+    ]
+    result = reduce_option_performance(project_trade_events(events),
+                                      period=_period(now="2026-09-01T23:59:59.999"))
+    assert _daily(result)["amount"] == Decimal(expected)
+
+
+def test_daily_capital_weekends_and_closed_history_are_included():
+    events = [
+        _event("open", "open", "2026-09-04T20:00:00", lot_id="lot"),
+        _event("close", "close", "2026-09-07T08:00:00",
+               target_lot_id="lot", close_type="cause_pending"),
+    ]
+    result = reduce_option_performance(project_trade_events(events),
+                                      period=_period(now="2026-09-07T23:59:59.999"))
+    assert _daily(result)["amount"] == Decimal("3571.428571")
+    assert _daily(result)["missing"] == ()
+
+
+def test_daily_capital_isolates_scope_currency_and_fee_evidence():
+    events = [
+        _event("lx", "open", "2026-08-20T00:00:00", lot_id="lx", fee_basis=None),
+        _event("sy", "open", "2026-08-20T00:00:00", lot_id="sy",
+               key=_key(account="sy", symbol="0700.HK"), currency="HKD"),
+        _event("ib", "open", "2026-08-20T00:00:00", lot_id="ib",
+               key=_key(broker="ibkr")),
+    ]
+    projection = project_trade_events(events)
+    result = reduce_option_performance(projection, period=_period(),
+                                       accounts=("lx", "sy"), broker="富途")
+    assert set(result.bundle["daily_occupied_capital"]["by_currency"]) == {"USD", "HKD"}
+    assert _daily(result)["amount"] == _daily(result, "HKD")["amount"] == Decimal("10000")
+    scoped = reduce_option_performance(projection, period=_period(), account="sy", broker="富途")
+    assert scoped.bundle["daily_occupied_capital"]["by_currency"] == {
+        "HKD": {"amount": Decimal("10000"), "status": MetricStatus.OBSERVED, "missing": ()}
+    }
+
+
+def test_daily_capital_expired_carry_in_is_partial_without_degrading_old_cohort():
+    expired = _event("carry", "open", "2026-08-20T00:00:00", lot_id="carry",
+                     key=_key(expiration="2026-08-31"))
+    fresh = _event("fresh", "open", "2026-09-01T00:00:00", lot_id="fresh")
+    result = reduce_option_performance(project_trade_events([expired, fresh]), period=_period())
+    assert _daily(result)["amount"] is None
+    assert _daily(result)["missing"] == ("terminal_evidence_missing",)
+    assert result.bundle["status"] == MetricStatus.OBSERVED
+    assert result.bundle["option_return"]["by_currency"]["USD"]["status"] == MetricStatus.OBSERVED
+
+
+@pytest.mark.parametrize("details", [{"target_lot_id": "carry"}, {}, {"target_lot_id": "unknown"},
+                                    {"target_lot_id": "carry", "cohort_time_unreliable": True}])
+def test_daily_capital_carry_in_economic_diagnostics_fail_closed(details):
+    projection = project_trade_events([
+        _event("carry", "open", "2026-08-20T00:00:00", lot_id="carry"),
+        _event("fresh", "open", "2026-09-01T00:00:00", lot_id="fresh"),
+    ])
+    diagnostic = LedgerDiagnostic(event_id="bad", severity="warning", code="economic_adjust_invalid",
+                                  message="test", account="lx", broker="富途", details=details)
+    result = reduce_option_performance(replace(projection, diagnostics=[diagnostic]), period=_period())
+    assert _daily(result)["amount"] is None
+    assert "economic_adjust_invalid" in _daily(result)["missing"]
+
+
+def test_daily_capital_empty_and_closed_before_window_are_valid_zero():
+    assert reduce_option_performance(project_trade_events([]), period=_period()).bundle[
+        "daily_occupied_capital"] == {"by_currency": {}}
+    events = [
+        _event("open", "open", "2026-08-20T00:00:00", lot_id="lot"),
+        _event("close", "close", "2026-08-21T00:00:00", target_lot_id="lot",
+               close_type="buy_to_close"),
+    ]
+    result = reduce_option_performance(project_trade_events(events), period=_period())
+    assert _daily(result) == {"amount": Decimal(0), "status": MetricStatus.OBSERVED, "missing": ()}
+
+
+def test_daily_capital_excludes_stock_lots_and_does_not_require_cash_fx():
+    opened = _event("open", "open", "2026-08-20T00:00:00", lot_id="lot", price=2)
+    projection = project_trade_events([replace(opened, raw_payload={"side": "BUY"})])
+    long_lot = replace(projection.lots[0], position_side="long")
+    stock_lot = replace(long_lot, lot_id="stock", asset_type="stock", currency="HKD")
+    result = reduce_option_performance(
+        replace(projection, lots=[long_lot, stock_lot]), period=_period(),
+    )
+    assert result.bundle["daily_occupied_capital"]["by_currency"] == {
+        "USD": {"amount": Decimal(200), "status": MetricStatus.OBSERVED, "missing": ()},
+    }
+
+
+@pytest.mark.parametrize("period_request", [{"period": "month", "month": "2026-08"},
+                                    {"period": "ytd", "as_of_date": "2026-08-31"}])
+def test_daily_capital_historical_periods_clip_both_ends(period_request):
+    projection = project_trade_events([
+        _event("open", "open", "2026-07-01T00:00:00", lot_id="lot"),
+        _event("close", "close", "2026-08-16T00:00:00", target_lot_id="lot",
+               close_type="buy_to_close"),
+    ])
+    period = normalize_performance_period(PeriodRequest(**period_request), report_now_ms=_ms("2026-09-02T00:00:00"))
+    result = reduce_option_performance(projection, period=period)
+    held_days = Decimal(15 if period_request["period"] == "month" else 46)
+    assert _daily(result)["amount"] == (Decimal(10000)*held_days/period.statistic_days).quantize(Decimal("0.000001"))
+
+
 
 _TZ = ZoneInfo("Asia/Shanghai")
 
@@ -490,6 +637,10 @@ def test_unresolved_after_expiry_keeps_total_cash_but_nulls_split_and_return() -
         "terminal_evidence_conflict",
         "terminal_evidence_missing",
     }
+    assert _daily(reduction)["amount"] is None
+    assert set(_daily(reduction)["missing"]) == {
+        "terminal_evidence_conflict", "terminal_evidence_missing",
+    }
     cash = reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]
     assert cash["total"]["amount"] == Decimal("300.000000")
     assert cash["total"]["status"] == MetricStatus.OBSERVED
@@ -896,6 +1047,8 @@ def test_currency_conflict_fails_only_the_affected_scoped_allocation() -> None:
     assert [fact.account for fact in aggregate.facts] == ["lx", "sy"]
     assert aggregate.bundle["status"] == MetricStatus.PARTIAL
     assert aggregate.bundle["missing"] == ("currency_conflict",)
+    assert _daily(aggregate)["amount"] is None
+    assert _daily(aggregate)["missing"] == ("currency_conflict",)
     usd_cash = aggregate.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"]
     assert usd_cash["amount"] is None
     assert usd_cash["status"] == MetricStatus.PARTIAL
