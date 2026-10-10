@@ -384,12 +384,14 @@ def _render_option_performance(data: dict[str, Any]) -> str:
         f"- 卖方胜率：{_canonical_win_rate_text(data.get('sell_option_win_rate'))}",
         f"- 买方胜率：{_canonical_win_rate_text(data.get('buy_option_win_rate'))}",
         f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
+        f"- 日均占用：{_canonical_daily_capital_text(data.get('daily_occupied_capital'))}",
     ]
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
     lines.append("收益率计时：已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天；未平仓收益率按持有至到期估算。")
-    lines.append("口径：仅统计期权净现金流、卖方/买方胜率与按担保资本计算的期权收益率；不提供 option PnL。")
+    lines.append("日均占用：按统计期内实际未了结时间加权，含跨期持仓、不计未来时间；不是收益率分母。")
+    lines.append("口径：统计期权净现金流、卖方/买方胜率、按担保资本计算的期权收益率与实际日均未了结占用本金；不提供 option PnL。")
     return "\n".join(lines)
 
 
@@ -413,6 +415,20 @@ def _canonical_cashflow_text(value: Any) -> str:
             parts.append(f"折合 CNY 合计 ¥{amount:,.2f}")
         elif status == "partial":
             parts.append("折合 CNY 合计 -（折算证据不完整）")
+    return "；".join(parts) if parts else "-"
+
+
+def _canonical_daily_capital_text(value: Any) -> str:
+    by_currency = _dict(_dict(value).get("by_currency"))
+    parts: list[str] = []
+    for currency, raw in sorted(by_currency.items()):
+        metric = _dict(raw)
+        amount = _float_or_none(metric.get("amount"))
+        if metric.get("status") == "partial":
+            text = "-（证据不完整）"
+        else:
+            text = f"{amount:,.2f}" if amount is not None else "-"
+        parts.append(f"{str(currency).upper()} {text}")
     return "；".join(parts) if parts else "-"
 
 

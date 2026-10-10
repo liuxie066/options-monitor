@@ -178,6 +178,9 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
 
     report = _build_report(repo, configured_accounts=("lx", "sy"), include_rows=True)
 
+    assert report["daily_occupied_capital"]["by_currency"]["USD"] == {
+        "amount": 5000.0, "status": "observed", "missing": [],
+    }
     assert repo.read_count == 1
     assert set(report) == {
         "period",
@@ -188,6 +191,7 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
         "sell_option_win_rate",
         "buy_option_win_rate",
         "option_return",
+        "daily_occupied_capital",
         "breakdowns",
         "quality",
         "rows",
@@ -388,3 +392,20 @@ def test_report_uses_expiry_or_actual_close_for_each_account_without_mutating_le
     again = _build_report(repo, period=period, configured_accounts=("lx", "sy"), include_rows=True)
     assert again == report
     assert repo.rows == before
+
+
+def test_daily_capital_uses_effective_carry_in_void_and_no_cash_fx_evidence():
+    opened = _event("open", "open", "2026-08-20T00:00:00", fx_rate=None)
+    closed = _event("close", "close", "2026-09-01T12:00:00", target_lot_id="lot-1")
+    void = _event("void", "void", "2026-09-02T00:00:00", target_event_id="close")
+    repo = _Repo([opened.to_dict(), closed.to_dict()])
+    report = _build_report(repo)
+    assert report["daily_occupied_capital"]["by_currency"]["USD"]["amount"] == 2500
+    assert report["option_return"]["by_currency"] == {}
+    repo.rows.append(void.to_dict())
+    reopened = _build_report(repo)
+    assert reopened["daily_occupied_capital"]["by_currency"]["USD"] == {
+        "amount": 10000, "status": "observed", "missing": [],
+    }
+    repo.rows.append(_event("void-open", "void", "2026-09-02T01:00:00", target_event_id="open").to_dict())
+    assert _build_report(repo)["daily_occupied_capital"] == {"by_currency": {}}

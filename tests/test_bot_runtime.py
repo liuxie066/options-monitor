@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +154,7 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
                 "rate": None,
                 "status": "not_applicable",
             },
+            "daily_occupied_capital": {"by_currency": {"USD": {"amount": 12345.67, "status": "observed", "missing": []}}},
             "option_return": {
                 "by_currency": {
                     "USD": {
@@ -173,6 +176,9 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
     assert "卖方胜率：75.00%（3/4 张）" in text
     assert "买方胜率：-（0/0 张）（不适用）" in text
+    assert "日均占用：USD 12,345.67" in text
+    assert "不是收益率分母" in text
+    assert "与实际日均未了结占用本金" in text
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
     assert "terminal_evidence_missing" in text
     assert "不提供 option PnL" in text
@@ -232,3 +238,19 @@ def test_position_exit_renderer_uses_only_current_close_contract() -> None:
     assert "Put腿" not in text
     assert "IV/RV" not in text
     assert "delta" not in text
+
+
+@pytest.mark.parametrize("metric,expected", [
+    (None, "日均占用：-"),
+    ({"by_currency": {"USD": {"amount": None, "status": "partial", "missing": ["terminal_evidence_missing"]}}}, "日均占用：USD -（证据不完整）"),
+])
+def test_option_performance_daily_capital_never_falls_back_to_return_denominator(metric, expected):
+    text = render_canonical_tool_result(
+        renderer_key="option_performance", tool_result={"ok": True},
+        data={"daily_occupied_capital": metric, "option_return": {"by_currency": {
+            "USD": {"average_occupied_capital": 999999, "rate": 0.12, "annualized_rate": 0.24, "status": "observed"}
+        }}},
+    )
+    assert expected in text
+    assert "999999" not in text
+    assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text

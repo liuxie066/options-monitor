@@ -206,6 +206,7 @@ def _serialize_report(
         "sell_option_win_rate": _json_value(bundle["sell_option_win_rate"]),
         "buy_option_win_rate": _json_value(bundle["buy_option_win_rate"]),
         "option_return": _json_value(bundle["option_return"]),
+        "daily_occupied_capital": _json_value(bundle["daily_occupied_capital"]),
         "breakdowns": {
             name: _json_value(reduction.breakdowns.get(name, ()))
             for name in (
