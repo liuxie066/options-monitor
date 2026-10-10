@@ -1338,29 +1338,6 @@ class OMQualityService:
         return min(expirations, default=recent_floor)
 
     @staticmethod
-    def _unavailable_snapshot(
-        *,
-        account: str,
-        market: str,
-        observed_at: str,
-        reason: str,
-    ) -> OpenDOptionSnapshot:
-        return OpenDOptionSnapshot(
-            account=account,
-            market=market,
-            environment="UNKNOWN",
-            account_fingerprint="sha256:" + ("0" * 64),
-            observed_at_utc=observed_at,
-            snapshot_id=f"opend-unavailable-{account}",
-            complete=False,
-            refresh_cache=True,
-            rows=[],
-            trading_days=[],
-            error_code=reason,
-            error_message=reason,
-        )
-
-    @staticmethod
     def _unavailable_ledger_datasets(
         *,
         accounts: list[str],

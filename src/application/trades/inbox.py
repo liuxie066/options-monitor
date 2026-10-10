@@ -3293,8 +3293,6 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_inbox_evidence_id
         ON trade_inbox_evidence(evidence_id) WHERE evidence_id IS NOT NULL"""
     )
-    conn.execute("""CREATE TABLE IF NOT EXISTS trade_inbox_recovery (
-        inbox_id TEXT NOT NULL, operator TEXT NOT NULL, resumed_at_ms INTEGER NOT NULL)""")
     existing_attempt_columns = {
         str(row["name"])
         for row in conn.execute(

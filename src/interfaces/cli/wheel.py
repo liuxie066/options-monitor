@@ -256,17 +256,6 @@ def _write_requested(args: argparse.Namespace) -> bool:
     )
 
 
-def _batch(model: dict[str, Any], lot_id: str) -> dict[str, Any]:
-    matches = [
-        item
-        for item in model.get("batches") or []
-        if item.get("stock_lot_id") == lot_id
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"Wheel batch must resolve uniquely: {lot_id}")
-    return matches[0]
-
-
 def _branch(
     model: dict[str, Any],
     *,

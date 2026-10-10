@@ -1698,7 +1698,6 @@ def project_assigned_stock_lifecycle(
     )
 
     quote_rows = _normalize_quote_snapshots(quote_snapshots)
-    lifecycle_rows: list[dict[str, Any]] = []
     sale_rows: list[dict[str, Any]] = []
     lot_rows: list[dict[str, Any]] = []
     stock_position_lots: list[dict[str, Any]] = []
@@ -1896,7 +1895,6 @@ def project_assigned_stock_lifecycle(
             "lifecycle_quality": lifecycle_quality,
         }
         lot_rows.append(row)
-        lifecycle_rows.append(row)
         sale_rows.extend(lot.get("_sale_rows") or [])
         stock_position_lots.append(assigned_stock_lot_to_position_lot(lot).to_dict())
 
@@ -1908,7 +1906,7 @@ def project_assigned_stock_lifecycle(
     )
 
     filtered_lifecycle_rows = sorted(
-        [row for row in lifecycle_rows if _lifecycle_row_in_month(row, month)],
+        [row for row in lot_rows if _lifecycle_row_in_month(row, month)],
         key=_assigned_stock_row_sort_key,
     )
     return {
@@ -1920,10 +1918,7 @@ def project_assigned_stock_lifecycle(
                 str(row.get("lot_id") or ""),
             ),
         ),
-        "assigned_stock_lots": sorted(
-            [row for row in lot_rows if _lifecycle_row_in_month(row, month)],
-            key=_assigned_stock_row_sort_key,
-        ),
+        "assigned_stock_lots": list(filtered_lifecycle_rows),
         "assignment_lifecycle_rows": filtered_lifecycle_rows,
         "lifecycle_efficiency_rows": filtered_lifecycle_rows,
         "lifecycle_efficiency_summary": _lifecycle_efficiency_summary(filtered_lifecycle_rows),

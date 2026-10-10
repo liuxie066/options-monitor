@@ -24,6 +24,7 @@ from src.application.scan_sell_put import run_sell_put_scan
 from src.application.candidate_scanning import (
     evidence_summary_from_decisions,
     project_evidence_scan_status,
+    project_evidence_scan_status as _evidence_scan_status,
 )
 from src.application.sell_put_cash import (
     enrich_sell_put_candidates_with_cash,
@@ -147,26 +148,6 @@ def run_sell_put_scan_and_summarize(
     summary["_strategy_status"] = status
     summary["_strategy_reason"] = reason
     return [summary]
-
-
-def _evidence_scan_status(
-    *,
-    evidence: dict[str, Any],
-    candidate_count: int,
-) -> tuple[str, str | None]:
-    """Project per-scope evidence coverage into a scan status.
-
-    A zero-candidate scope is only a genuine ``no_candidate`` when every
-    evaluated contract was either accepted or rejected by policy/ineligibility
-    with complete evidence. Any contract that could not even be evaluated
-    downgrades the scope to a data-availability status instead of a silent
-    empty result.
-    """
-
-    return project_evidence_scan_status(
-        evidence=evidence,
-        candidate_count=candidate_count,
-    )
 
 
 def empty_sell_put_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

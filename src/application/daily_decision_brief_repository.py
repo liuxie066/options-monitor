@@ -2322,20 +2322,6 @@ def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
     return identities
 
 
-def _without_source_provenance(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _without_source_provenance(item)
-            for key, item in value.items()
-            if str(key) != "source"
-        }
-    if isinstance(value, list):
-        return [_without_source_provenance(item) for item in value]
-    if isinstance(value, tuple):
-        return [_without_source_provenance(item) for item in value]
-    return value
-
-
 def _read_json_strict(path: Path) -> Any:
     if not path.exists():
         return _MISSING

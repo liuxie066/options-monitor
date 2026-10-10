@@ -38,3 +38,47 @@ def test_public_legacy_runs_interface_remains_available(monkeypatch):
     data, warnings, _ = runtime.RUNTIME_RUNS_TOOL.call({'limit': 3})
     assert data['runs'] == [] and warnings == []
     assert calls[0]['limit'] == 3
+
+
+def test_bot_runs_cli_summarizes_durable_json_records(tmp_path):
+    import sqlite3
+    from argparse import ArgumentParser
+
+    from src.application.bot.host_store import BotHostStore
+    from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
+
+    db_path = tmp_path / "bot.sqlite3"
+    store = BotHostStore(db_path)
+    assert store.list_runs() == ()
+    responses = ['{"status": "answered"}', None, "", "{broken", "[]", '"answered"', "null"]
+    with sqlite3.connect(db_path) as conn:
+        for index, response in enumerate(responses):
+            conn.execute(
+                """INSERT INTO bot_runs (
+                    run_id, request_id, contract_id, session_key, status, events_json,
+                    started_at, finished_at, response_json, metrics_json, termination_reason
+                ) VALUES (?, 'req', 'contract', 'session', 'answered', '[]', ?, ?, ?, ?, 'complete')""",
+                (f"run_{index}", f"2026-10-10T00:00:0{index}Z", "2026-10-10T00:01:00Z",
+                 response, '{"tool_calls": 2}'),
+            )
+    before = store.list_runs()
+    parser = ArgumentParser()
+    add_bot_commands(parser.add_subparsers(dest="command"))
+    result = handle_bot_command(parser.parse_args(["bot", "runs", "--host-db", str(db_path)]))
+    assert result["ok"] is True
+    assert result["status"] == "answered"
+    assert [row["run_id"] for row in result["runs"]] == [row["run_id"] for row in before]
+    assert result["runs"] == [
+        {
+            "run_id": row["run_id"],
+            "session_key": "session",
+            "status": "answered",
+            "started_at": row["started_at"],
+            "finished_at": "2026-10-10T00:01:00Z",
+            "termination_reason": "complete",
+            "metrics": {"tool_calls": 2},
+            "response_status": "answered" if row["run_id"] == "run_0" else None,
+        }
+        for row in before
+    ]
+    assert store.list_runs() == before

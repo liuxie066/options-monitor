@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -9,6 +8,7 @@ from src.application.release_target import (
     BUMP_KINDS,
     VERSION_RE,
     bump_version as _bump_version,
+    checked_at as _checked_at,
     compare_versions,
     parse_release_tags,
 )
@@ -20,11 +20,6 @@ from src.application.release_version_recommendation import (
 
 def repo_base() -> Path:
     return Path(__file__).resolve().parents[2]
-
-
-def _checked_at(now_fn=None) -> str:
-    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
-    return now_fn().astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _read_current_version(base_dir: Path) -> str:

@@ -401,16 +401,6 @@ def _assert_exact_owner_files(
         raise CandidateSnapshotManifestError("artifact_version_mismatch")
 
 
-def _assert_status_version_files(account_dir: Path, *, manifest_v3: bool) -> None:
-    conflicting_pattern = (
-        "*_wheel_scan_status.json"
-        if manifest_v3
-        else "*_wheel_*_scan_status.v2.json"
-    )
-    if any(account_dir.glob(conflicting_pattern)):
-        raise CandidateSnapshotManifestError("artifact_version_mismatch")
-
-
 def publish_candidate_snapshot_manifest(
     *,
     base: Path,

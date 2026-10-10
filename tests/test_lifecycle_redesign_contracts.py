@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.ledger_sqlite_test_support import connect_ledger_fixture
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from src.application.ledger.repository import (
 from src.application.ledger.read_model import load_position_lot_records
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
+    canonical_source_payload_hash,
 )
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.auto_intake import (
@@ -433,6 +435,25 @@ def _migration_row(
         ),
         f"lifecycle:{case_id}",
     )
+
+
+@pytest.mark.parametrize("payload, serialized", [
+    (None, "{}"),
+    (False, "{}"),
+    ({}, "{}"),
+    ([("b", 2), ("a", 1)], '{"a":1,"b":2}'),
+    ({"z": [True, None], "a": "中文"}, '{"a":"中文","z":[true,null]}'),
+    ({"value": float("nan")}, '{"value":NaN}'),
+    ({"negative": float("-inf"), "positive": float("inf")}, '{"negative":-Infinity,"positive":Infinity}'),
+])
+def test_source_payload_hash_preserves_permissive_wire_bytes(payload, serialized) -> None:
+    assert canonical_source_payload_hash(payload) == hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("payload", [1, {"value": object()}, {"value": {1}}, {1: "a", "b": "b"}])
+def test_source_payload_hash_rejects_invalid_payloads(payload) -> None:
+    with pytest.raises(TypeError):
+        canonical_source_payload_hash(payload)
 
 
 def test_source_claim_hash_ignores_push_poll_transport() -> None:

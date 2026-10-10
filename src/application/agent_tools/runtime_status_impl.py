@@ -2164,16 +2164,6 @@ def _latest_scanned_run_payload(
     }
 
 
-def _accounts_from_runtime(
-    payload: dict[str, Any],
-    cfg: dict[str, Any],
-    *,
-    normalize_accounts: Callable[..., list[str]],
-    accounts_from_config: Callable[[dict[str, Any]], list[str]],
-) -> list[str]:
-    return normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
-
-
 def private_runtime_status_tool(
     payload: dict[str, Any],
     *,
@@ -2208,12 +2198,7 @@ def private_runtime_status_tool(
         runtime_root=ledger_runtime_root,
         existing_profile_meta=profile_meta,
     )
-    accounts = _accounts_from_runtime(
-        payload,
-        cfg,
-        normalize_accounts=normalize_accounts,
-        accounts_from_config=accounts_from_config,
-    )
+    accounts = normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
 
     desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
     wheel_activation_readiness = build_wheel_activation_readiness(

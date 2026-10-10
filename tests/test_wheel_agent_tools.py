@@ -106,6 +106,28 @@ def test_wheel_end_agent_tool_previews_through_application_workflow(
     assert calls[0][1]["apply_changes"] is False
 
 
+@pytest.mark.parametrize("confirm", [None, False])
+def test_wheel_end_agent_tool_requires_confirmation_before_workflow(monkeypatch, confirm) -> None:
+    def unexpected_workflow(*_args, **_kwargs):
+        pytest.fail("unconfirmed wheel end reached the application workflow")
+
+    monkeypatch.setattr(position_tools, "end_wheel_lifecycle", unexpected_workflow)
+    payload = {
+        "config_key": "us",
+        "account": "lx",
+        "stock_lot_id": "assigned-stock-1",
+        "expected_batch_generation_hash": "generation-1",
+        "request_id": "request-1",
+        "actor": "agent",
+        "apply": True,
+    }
+    if confirm is not None:
+        payload["confirm"] = confirm
+    with pytest.raises(AgentToolError) as exc:
+        position_tools.WHEEL_END_TOOL.call(payload)
+    assert exc.value.code == "CONFIRMATION_REQUIRED"
+
+
 def test_wheel_agent_writes_are_requested_only_by_apply() -> None:
     assert position_tools.WHEEL_END_TOOL.is_write_requested({"apply": False, "confirm": True}) is False
     assert position_tools.WHEEL_END_TOOL.is_write_requested({"apply": True, "confirm": True}) is True

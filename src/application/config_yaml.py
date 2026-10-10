@@ -1060,20 +1060,7 @@ def _bot_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     bot_config = cfg.get("bot")
     if isinstance(bot_config, dict):
         return deepcopy(bot_config)
-    return {
-        "enabled": False,
-        "context_window_messages": 8,
-        "llm": {
-            "provider": "",
-            "base_url": "",
-            "model": "",
-            "api_key_env": "OM_LLM_API_KEY",
-            "confidence_min": 0.75,
-            "timeout_seconds": 90,
-            "context_window_tokens": 24000,
-            "max_output_tokens": None,
-        },
-    }
+    return default_config()["defaults"]["bot"]
 
 
 def resolve_yaml_bot_config(

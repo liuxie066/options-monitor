@@ -211,16 +211,6 @@ def _notify_error_code(send_tool_dto: dict[str, Any]) -> str:
     return "SEND_UNCONFIRMED" if bool(send_tool_dto.get("command_ok")) else "SEND_FAILED"
 
 
-def _tail_text(value: Any, *, limit: int = 500) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="replace")
-    else:
-        text = str(value)
-    return text[-int(limit):]
-
-
 def _coerce_returncode(value: Any, *, default: int) -> int:
     try:
         return int(value)

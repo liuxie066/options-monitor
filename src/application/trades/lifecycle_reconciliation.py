@@ -23,7 +23,7 @@ from domain.domain.option_lifecycle import derive_lifecycle_read_model, pending_
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import derive_trade_side, stock_settlement_unit_issues, require_option_multiplier
 from src.application.ledger.api import (
-    discover_expired_lifecycle_cases,
+    discover_expired_lifecycle_cases as discover_lifecycle_cases,
     LifecycleAttemptAuditEnvelope,
     lifecycle_account_coherent_facts,
     lifecycle_case_coherent_facts,
@@ -81,21 +81,6 @@ class LifecycleReconciliationResult:
                 else None
             ),
         }
-
-
-def discover_lifecycle_cases(
-    repo: Any,
-    *,
-    account: str | None = None,
-    observed_at_ms: int | None = None,
-    apply_changes: bool = True,
-) -> dict[str, Any]:
-    return discover_expired_lifecycle_cases(
-        repo,
-        account=account,
-        observed_at_ms=observed_at_ms,
-        apply_changes=apply_changes,
-    )
 
 
 def lifecycle_case_read_model(

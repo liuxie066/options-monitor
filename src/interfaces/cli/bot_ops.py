@@ -287,12 +287,7 @@ def _run_local_request(
 
 
 def _run_summary(record: dict[str, Any]) -> dict[str, Any]:
-    response: dict[str, Any] = {}
-    try:
-        parsed = json.loads(str(record.get("response_json") or "{}"))
-        response = dict(parsed) if isinstance(parsed, dict) else {}
-    except Exception:
-        pass
+    response = _json_dict(record.get("response_json"))
     return {
         "run_id": record.get("run_id"),
         "session_key": record.get("session_key"),

@@ -30,7 +30,7 @@ from src.application.bot.control.operation_status_text import operation_candidat
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
 from src.application.payload_helpers import optional_text as _optional_text
-from src.application.payload_helpers import required_text
+from src.application.payload_helpers import nested, required_text
 from functools import partial
 
 
@@ -377,8 +377,8 @@ def _config_yaml_path_from_json(path: Path, *, repo_root: Path) -> Path | None:
     if not payload:
         return None
     for candidate in (
-        _nested_text(payload, RESOLVED_KEY, "config_yaml_path"),
-        _nested_text(payload, GENERATED_KEY, "config_yaml_path"),
+        _optional_text(nested(payload, RESOLVED_KEY, "config_yaml_path")),
+        _optional_text(nested(payload, GENERATED_KEY, "config_yaml_path")),
         _generated_source_path(payload),
     ):
         if candidate:
@@ -397,16 +397,6 @@ def _generated_source_path(payload: dict[str, Any]) -> str | None:
         if str(source.get("role") or "").strip() == "config_yaml":
             return str(source.get("path") or "").strip() or None
     return None
-
-
-def _nested_text(payload: dict[str, Any], *keys: str) -> str | None:
-    current: Any = payload
-    for key in keys:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    text = str(current or "").strip()
-    return text or None
 
 
 def _load_json_if_exists(path: Path) -> dict[str, Any]:

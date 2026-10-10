@@ -13,11 +13,6 @@ import yaml
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.ledger import ContractKey
-from domain.domain.ledger.position_fields import (
-    effective_expiration_ymd,
-    effective_strike,
-)
 from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.symbol_identity import symbol_market
@@ -34,54 +29,6 @@ from domain.domain.wheel import (
     project_wheel_intents,
     project_wheel_linkage_candidates,
 )
-def _lot_contract_key(fields: Mapping[str, Any], *, account: str) -> ContractKey:
-    """The lot's contract identity, read from the converged payload shape.
-
-    ``fields_json`` carries the option contract under ``contract_key`` now
-    (``write-side-definition.md`` §2); the retired flat siblings stay readable
-    for a row that predates the shape switch.
-    """
-    contract_key = fields.get("contract_key")
-    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
-
-    def value(nested_key: str, *flat_keys: str) -> Any:
-        nested = contract_key.get(nested_key)
-        if nested not in (None, ""):
-            return nested
-        for flat_key in flat_keys:
-            flat = fields.get(flat_key)
-            if flat not in (None, ""):
-                return flat
-        return None
-
-    strike, expiration_ymd = _lot_contract_scalars(fields)
-    return ContractKey.from_values(
-        broker=value("broker", "broker", "market"),
-        account=account or value("account", "account"),
-        underlying_symbol=value("underlying_symbol", "symbol"),
-        option_type=value("option_type", "option_type"),
-        strike=strike,
-        expiration_ymd=expiration_ymd,
-    )
-
-
-def _lot_contract_scalars(fields: Mapping[str, Any]) -> tuple[Any, Any]:
-    """The lot's ``(strike, expiration_ymd)`` under the converged shape."""
-    contract_key = fields.get("contract_key")
-    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
-    strike = contract_key.get("strike")
-    if strike in (None, ""):
-        strike = fields.get("strike")
-    if strike in (None, ""):
-        strike = effective_strike(fields)
-    expiration_ymd = contract_key.get("expiration_ymd")
-    if expiration_ymd in (None, ""):
-        expiration_ymd = fields.get("expiration_ymd")
-    if expiration_ymd in (None, ""):
-        expiration_ymd = effective_expiration_ymd(fields)
-    return strike, expiration_ymd
-
-
 from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_contract import sha256_text
@@ -1393,21 +1340,6 @@ def _linkage_candidate(
     ):
         raise ValueError("Wheel Call linkage candidate input changed")
     return candidate
-
-
-def _validate_linkage_coverage(
-    coverage_fact: Mapping[str, Any],
-    *,
-    account: str,
-    symbol: str,
-) -> None:
-    if (
-        str(coverage_fact.get("account") or "").strip().lower() != account
-        or str(coverage_fact.get("symbol") or "").strip().upper() != symbol
-        or not str(coverage_fact.get("capacity_identity_hash") or "").strip()
-    ):
-        raise ValueError("Wheel Call linkage coverage identity is unavailable")
-
 
 
 def reject_wheel_call_linkage(
