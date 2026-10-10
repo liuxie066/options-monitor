@@ -22,6 +22,7 @@ from src.application.bot.control.operation_policy import enforce_upgrade_write_a
 from src.application.bot.control.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.bot.control.operation_store import InboundOperationStore
 from src.application.bot.control.operation_status_text import cannot_repeat_message, operation_candidate_hint, user_facing_operation_status
+from src.application.service_upgrade import _load_service_profile as _read_upgrade_worker_service_profile
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
 from src.application.settings import build_effective_env
 from src.application.secret_resolver import resolve_feishu_bot_config
@@ -631,15 +632,6 @@ def _upgrade_worker_child_env(*, root: Path) -> dict[str, str]:
     current_pythonpath = str(values.get("PYTHONPATH") or "").strip()
     out["PYTHONPATH"] = f"{root}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(root)
     return out
-
-
-def _read_upgrade_worker_service_profile(runtime_root: Path) -> dict[str, Any]:
-    profile_path = runtime_root / "service.profile.json"
-    try:
-        profile = json.loads(profile_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return profile if isinstance(profile, dict) else {}
 
 
 def _systemd_setenv_args(env: dict[str, str]) -> list[str]:

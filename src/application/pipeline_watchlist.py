@@ -19,7 +19,7 @@ from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
 import signal
 from threading import Lock, current_thread, main_thread
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.config_profiles import ConfigProfileError, deep_merge
@@ -428,10 +428,6 @@ def _partition_combo_evidence(
     return out
 
 
-def _iter_watchlist(cfg: dict) -> Iterable[dict]:
-    return resolve_watchlist_config(cfg)
-
-
 def _resolve_profile_cfg(item: dict, profiles: dict) -> dict:
     use = item.get('use')
     if not use:
@@ -606,7 +602,7 @@ def run_watchlist_pipeline(
         opening_runtime_context_sink_fn(portfolio_ctx, option_ctx)
 
     watchlist_items = []
-    for item0 in _iter_watchlist(cfg):
+    for item0 in resolve_watchlist_config(cfg):
         if sym_whitelist is not None:
             s0 = normalize_symbol_read(item0.get('symbol'))
             if s0 and s0 not in sym_whitelist:

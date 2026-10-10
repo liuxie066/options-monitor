@@ -49,18 +49,6 @@ def _pick(src: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _normalize_side(value: Any) -> str | None:
-    return normalize_trade_side(value)
-
-
-def _normalize_position_effect(value: Any) -> str | None:
-    return normalize_position_effect(value)
-
-
-def _normalize_expiration(value: Any) -> str | None:
-    return normalize_contract_expiration(value)
-
-
 @dataclass(frozen=True)
 class NormalizedTradeDeal:
     broker: str
@@ -190,7 +178,7 @@ def normalize_trade_deal(
             except Exception:
                 currency = None
 
-    position_effect = _normalize_position_effect(
+    position_effect = normalize_position_effect(
         _pick(src, "position_effect", "position_side", "offset_type", "open_close", "trd_side", "trade_side", "side")
     )
     base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[3]
@@ -229,7 +217,7 @@ def normalize_trade_deal(
     strike = normalize_optional_float(_pick(src, "strike", "strike_price"))
     if strike is None and option_code_info.get("strike") is not None:
         strike = float(option_code_info["strike"])
-    expiration_ymd = _normalize_expiration(_pick(src, "expiration", "expiration_ymd", "expiry", "expiry_date"))
+    expiration_ymd = normalize_contract_expiration(_pick(src, "expiration", "expiration_ymd", "expiry", "expiry_date"))
     if expiration_ymd is None:
         expiration_ymd = str(option_code_info.get("expiration_ymd") or "").strip() or None
 
@@ -245,7 +233,7 @@ def normalize_trade_deal(
         order_id=normalize_optional_text(_pick(src, "order_id", "orderID")),
         symbol=symbol,
         option_type=option_type,
-        side=_normalize_side(_pick(src, "side", "trd_side", "trade_side")),
+        side=normalize_trade_side(_pick(src, "side", "trd_side", "trade_side")),
         position_effect=position_effect,
         contracts=normalize_optional_int(_pick(src, "contracts", "qty", "quantity")),
         price=normalize_optional_float(_pick(src, "price", "execution_price", "dealt_price")),

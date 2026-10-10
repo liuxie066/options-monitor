@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.payload_helpers import nested as _nested
 from src.application.runtime_cli_format import as_dict as _dict
 from src.application.runtime_cli_format import as_list as _list
 from src.application.runtime_cli_format import csv_value as _csv
@@ -309,12 +310,3 @@ def _reason(*, last_run: dict[str, Any], tick_metrics: dict[str, Any], scheduler
 
 def _mtime_utc(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
-
-
-def _nested(data: dict[str, Any], *keys: str) -> Any:
-    cur: Any = data
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur

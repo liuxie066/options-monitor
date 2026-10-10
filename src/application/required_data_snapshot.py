@@ -303,7 +303,7 @@ def seal_required_data_snapshot(
                 ),
             }
         )
-    _validate_manifest_close_advice_plan_for_seal(
+    _validate_manifest_close_advice_plan(
         manifest_path=target,
         payload=payload,
     )
@@ -766,17 +766,6 @@ def _validate_manifest_close_advice_plan(
         )
 
 
-def _validate_manifest_close_advice_plan_for_seal(
-    *,
-    manifest_path: Path,
-    payload: Mapping[str, Any],
-) -> None:
-    _validate_manifest_close_advice_plan(
-        manifest_path=manifest_path,
-        payload=payload,
-    )
-
-
 def _load_required_data_snapshot_manifest_for_seal(
     *,
     manifest_path: Path,
@@ -788,7 +777,7 @@ def _load_required_data_snapshot_manifest_for_seal(
         expected_run_id=expected_run_id,
         expected_required_data_root=expected_required_data_root,
     )
-    _validate_manifest_close_advice_plan_for_seal(
+    _validate_manifest_close_advice_plan(
         manifest_path=Path(manifest_path).resolve(),
         payload=payload,
     )

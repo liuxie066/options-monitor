@@ -26,10 +26,6 @@ def cash_secured_unavailable_for_cash_snapshot(
     return unavailable
 
 
-def _normalize_currency(value: Any) -> str:
-    return normalize_currency(value)
-
-
 def normalize_cash_secured_by_symbol_by_ccy(option_ctx: dict | None) -> dict[str, dict[str, float]]:
     norm: dict[str, dict[str, float]] = {}
     ctx = option_ctx if isinstance(option_ctx, dict) else {}
@@ -49,7 +45,7 @@ def normalize_cash_secured_by_symbol_by_ccy(option_ctx: dict | None) -> dict[str
                     continue
                 if not fv:
                     continue
-                ccy_u = _normalize_currency(ccy) or "USD"
+                ccy_u = normalize_currency(ccy) or "USD"
                 norm.setdefault(sym_u, {})
                 norm[sym_u][ccy_u] = norm[sym_u].get(ccy_u, 0.0) + fv
         return norm
@@ -87,7 +83,7 @@ def normalize_cash_secured_total_by_ccy(
                 continue
             if not fv:
                 continue
-            ccy_u = _normalize_currency(ccy)
+            ccy_u = normalize_currency(ccy)
             if not ccy_u:
                 continue
             norm[ccy_u] = fv
@@ -105,7 +101,7 @@ def normalize_cash_secured_total_by_ccy(
                 continue
             if not fv:
                 continue
-            ccy_u = _normalize_currency(ccy)
+            ccy_u = normalize_currency(ccy)
             if not ccy_u:
                 continue
             norm[ccy_u] = norm.get(ccy_u, 0.0) + fv
@@ -163,7 +159,7 @@ def cash_secured_symbol_cny(
             fv = float(amount)
         except Exception:
             continue
-        ccy_u = _normalize_currency(ccy)
+        ccy_u = normalize_currency(ccy)
         if ccy_u == "CNY":
             total += fv
             has_any = True

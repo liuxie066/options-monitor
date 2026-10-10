@@ -471,10 +471,31 @@ def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
 
 
 def test_event_write_projection_lives_under_ledger_writer() -> None:
+    from domain.domain.ledger.events import LedgerDiagnostic
+    from src.application.ledger import position_projection_runtime, writer
+
+    assert writer.projection_diagnostics_summary is position_projection_runtime.projection_diagnostics_summary
+    assert writer.projection_diagnostics_summary([]) == {
+        "projection_diagnostic_count": 0,
+        "unmatched_explicit_close_count": 0,
+        "unmatched_heuristic_close_count": 0,
+        "projection_diagnostics": [],
+    }
+    diagnostics = [
+        LedgerDiagnostic("explicit", "error", "target_lot_not_found", "missing lot"),
+        LedgerDiagnostic("heuristic", "warning", "close_unmatched_contracts", "unmatched close"),
+        LedgerDiagnostic("other", "error", "invalid_event", "invalid event"),
+    ]
+    assert writer.projection_diagnostics_summary(diagnostics) == {
+        "projection_diagnostic_count": 3,
+        "unmatched_explicit_close_count": 1,
+        "unmatched_heuristic_close_count": 1,
+        "projection_diagnostics": [item.to_dict() for item in diagnostics],
+    }
+
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
     writer_text = _ledger_text("writer_common.py", "writer_trade_events.py")
     moved_defs = (
-        "def projection_diagnostics_summary(",
         "def rebuild_position_lots_from_trade_events(",
         "def persist_trade_event_object(",
         "def persist_trade_event(",

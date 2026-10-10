@@ -904,10 +904,6 @@ def _enrich_combo_yield_open(deal: NormalizedTradeDeal) -> _PositionEffectInfere
     )
 
 
-def _combo_yield_structure_mode(deal: NormalizedTradeDeal) -> str:
-    return _combo_yield_payload_value(deal.raw_payload, "structure_mode").lower()
-
-
 def _combo_yield_pair_intent_id(deal: NormalizedTradeDeal) -> str:
     return _combo_yield_payload_value(deal.raw_payload, "pair_intent_id")
 

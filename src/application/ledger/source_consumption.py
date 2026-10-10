@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.payload_helpers import optional_text as _optional_text
+from .notification_outbox import canonical_payload_hash as canonical_source_payload_hash
 
 
 SOURCE_CONSUMPTION_SCHEMA = "trade_lifecycle_source_consumption.v1"
@@ -110,16 +109,6 @@ def canonical_source_economic_payload(
         ),
     }
     return canonical
-
-
-def canonical_source_payload_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(
-        dict(payload or {}),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_source_consumption_claim(

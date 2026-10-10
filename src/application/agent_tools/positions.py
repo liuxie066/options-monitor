@@ -1438,10 +1438,6 @@ def _require_wheel_fields(payload: Mapping[str, Any], *fields: str) -> None:
         )
 
 
-def _validate_wheel_end(payload: dict[str, Any]) -> None:
-    _require_wheel_fields(payload)
-
-
 def _validate_wheel_intent(payload: dict[str, Any]) -> None:
     if payload.get("action") == "create":
         _require_wheel_fields(
@@ -1558,7 +1554,7 @@ WHEEL_END_TOOL = build_agent_tool(
     requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for apply=true",),
     safe_default_input={"apply": False},
     write_request_predicate=_wheel_write_requested,
-    input_validator=_validate_wheel_end,
+    input_validator=_require_wheel_fields,
     output_contract={"schema_version": "wheel_end.output.v1", **_WHEEL_WRITE_OUTPUT},
     allow_additional_input=False,
 )

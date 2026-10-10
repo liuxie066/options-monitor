@@ -41,17 +41,10 @@ def _wheel_batches_from_rows(
     account: str,
     as_of_ms: int,
 ) -> list[dict[str, Any]]:
-    assigned_stock = project_assigned_stock_lifecycle_from_rows(
+    branches = _wheel_branches_from_rows(
         rows,
         account=account,
         as_of_ms=as_of_ms,
-    )
-    branches = project_wheel_branches(
-        rows.get("account_wheel_events") or [],
-        rows.get("trade_events") or [],
-        rows.get("account_position_lots") or [],
-        assigned_stock,
-        as_of_ms,
     )
     batches = []
     for branch in branches:

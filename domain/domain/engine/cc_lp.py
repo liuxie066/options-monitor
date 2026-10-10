@@ -5,7 +5,7 @@ from math import isfinite
 from typing import Any, Iterable
 
 from .combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA, ComboYieldLeg
-from domain.domain.engine.combo_yield import _safe_float
+from domain.domain.engine.combo_yield import _pct_distance, _safe_float
 
 
 CC_LP_DEFAULT_MIN_PUT_DELTA = COMBO_LONG_MIN_DELTA
@@ -176,9 +176,3 @@ def cc_lp_rank_key(
 
 def rank_cc_lp_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted((dict(row) for row in rows), key=cc_lp_rank_key)
-
-
-def _pct_distance(numerator: float, denominator: float) -> float:
-    if denominator <= 0:
-        return 0.0
-    return numerator / denominator
