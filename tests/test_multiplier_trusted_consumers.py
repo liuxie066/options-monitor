@@ -123,7 +123,7 @@ def test_cash_query_refuses_bad_history_with_fresh_broker_cash(tmp_path, monkeyp
 
     repo = _ledger(tmp_path)
     _break_history(repo, clear_lots=clear_lots)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda *_a, **_k: repo)
+    monkeypatch.setattr("src.application.ledger.api.resolve_position_ledger_sqlite_path", lambda **_k: repo.db_path)
     portfolio = cash_portfolio({
         "portfolio_source_name": "futu", "cash_by_currency": {"USD": 100000},
         "source_observed_at": datetime.now(timezone.utc).isoformat(),
@@ -136,7 +136,7 @@ def test_cash_query_refuses_bad_history_with_fresh_broker_cash(tmp_path, monkeyp
         no_exchange_rates=True, output_format="json", write_cache=False, runtime_config=cash_config(),
     )
     assert payload["cash_secured_usage_reliable"] is False
-    assert payload["cash_secured_unavailable_reason"] == "option_decision_snapshot_unavailable"
+    assert payload["cash_secured_unavailable_reason"] == "option_position_ledger_unavailable:ValueError"
     assert payload["cash_free_usd"] is None
     assert payload["cash_secured_used_usd"] is None
 

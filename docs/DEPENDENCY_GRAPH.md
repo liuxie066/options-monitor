@@ -12,11 +12,11 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1163 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 498)
-- Internal import edges: 9003 total, 3734 production/script edges excluding tests
+- Python files scanned: 1164 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 499)
+- Internal import edges: 9021 total, 3735 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
-- Production module cycles: 1
+- Production module cycles: 0
 - Production package cycles after compression: 2
 
 ## Layer Graph
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|3979| application
+  tests -->|3984| application
   tests -->|512| domain
   tests -->|2| domain_services
   tests -->|274| infrastructure
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3979 |
+| tests | application | 3984 |
 | tests | domain | 512 |
 | tests | interfaces | 316 |
 | tests | infrastructure | 274 |
@@ -164,7 +164,7 @@ This matches the current architecture rule that `domain/domain/` must not import
 
 ### Module-Level Cycles
 
-- 8 modules: `src.application.ledger.assigned_stock_projection`, `src.application.ledger.combo_membership`, `src.application.ledger.current_decision_migration`, `src.application.ledger.current_decision_oracle`, `src.application.ledger.current_decision_projection`, `src.application.ledger.decision_snapshot`, `src.application.ledger.queries`, `src.application.ledger.read_only_evidence`
+- No production module cycles detected.
 
 ### Package-Level Cycles
 
@@ -199,14 +199,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
+| src.application.ledger.api | 52 |
 | src.application.trades.auto_intake | 50 |
-| src.application.ledger.api | 47 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
-| src.application.ledger.queries | 31 |
 | src.application.pipeline_watchlist | 31 |
 | src.interfaces.cli.option_positions | 31 |
+| src.application.ledger.queries | 30 |
 | src.application.agent_tools.runtime_status_impl | 29 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.multi_account_tick | 29 |

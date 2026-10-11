@@ -67,21 +67,6 @@ def open_position_ledger_from_data_config(*, base: Path, data_config: str | Path
     return _impl(base=base, data_config=data_config)
 
 
-def read_position_query_ledger(
-    *, base: Path, accounts: list[str], cfg: dict[str, Any] | None = None,
-    data_config: str | Path | None = None, config_path: str | Path | None = None,
-    runtime_root: str | Path | None = None,
-) -> tuple[Any, dict[str, dict[str, Any]]]:
-    """Read canonical occupancy evidence; missing/untrusted is never an empty store."""
-    from src.application.ledger.read_only_evidence import read_position_query_snapshot
-
-    path = resolve_position_ledger_sqlite_path(
-        base=base, cfg=cfg, data_config=data_config,
-        config_path=config_path, runtime_root=runtime_root,
-    )
-    return read_position_query_snapshot(path, accounts=accounts)
-
-
 def open_performance_query_ledger_from_data_config(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
     from src.application.ledger.read_only_evidence import open_performance_query_repo
 

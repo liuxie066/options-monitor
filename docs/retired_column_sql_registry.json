@@ -182,7 +182,7 @@
   },
   "tests": {
     "by_kind": {
-      "ddl": 17,
+      "ddl": 18,
       "read": 8,
       "write": 13
     },
@@ -196,11 +196,12 @@
       "tests/test_performance_query_read_only.py": 1,
       "tests/test_position_lot_payload_shape.py": 1,
       "tests/test_position_projection_publication.py": 1,
+      "tests/test_position_query_read_only.py": 1,
       "tests/test_research_storage_baseline.py": 1,
       "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:5f79ad12d2f2ef21",
-    "statements": 35
+    "digest": "sha256:5acbcd4cc0d80f30",
+    "statements": 36
   }
 }

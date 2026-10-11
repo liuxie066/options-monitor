@@ -5,7 +5,7 @@ import pytest
 from cash_evidence_helpers import cash_config, cash_portfolio
 
 from src.application.ledger.api import read_position_query_ledger
-from src.application.ledger.read_only_evidence import read_position_query_snapshot
+from src.application.ledger.api import _read_position_query_snapshot as read_position_query_snapshot
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.manual_trades import persist_manual_open_event
 

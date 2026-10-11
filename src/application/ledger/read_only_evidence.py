@@ -568,54 +568,6 @@ def verify_trade_receipt_projection(evidence: dict[str, Any]) -> None:
         raise ValueError("recorded execution projection unavailable")
 
 
-def read_position_query_snapshot(
-    sqlite_path: str | Path, *, accounts: list[str],
-) -> tuple[Any, dict[str, dict[str, Any]]]:
-    """Freeze verified position and decision facts without a writer/bootstrap path."""
-    from datetime import datetime, timezone
-    from domain.domain.portfolio_scope import portfolio_scope_id
-    from src.application.ledger.decision_snapshot import (
-        _read_account_trade_source_constraints, decision_state_snapshot_from_rows,
-    )
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.ledger.repository_core import assert_final_lot_identity_shape
-
-    reader = open_trade_reconciliation_evidence_repo(sqlite_path)
-    with closing(reader._connect()) as conn:
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("BEGIN")
-        assert_final_lot_identity_shape(conn)
-        evidence = reader.read_trade_receipt_evidence(conn=conn)
-        repo = SQLiteOptionPositionsRepository(reader.db_path, initialize=False)
-        # Preserve the canonical row codec, derived columns and ordering after strict JSON validation.
-        evidence["position_lots"] = repo.list_position_lots(conn=conn)
-        verify_trade_receipt_projection(evidence)
-        account_values = sorted(set(accounts) if accounts else {
-            _lot_account(row.get("fields")) for row in evidence["position_lots"]
-        })
-        snapshots = {}
-        observed_at = datetime.now(timezone.utc).isoformat()
-        for account in account_values:
-            if not account:
-                continue
-            rows = repo._read_account_decision_state_rows(
-                account=account, conn=conn,
-                shared_trade_events=evidence["trade_events"],
-                shared_position_lots=evidence["position_lots"],
-            )
-            rows["_account_trade_source_constraints"] = _read_account_trade_source_constraints(
-                repo, account=account, rows=rows,
-            )
-            snapshot = decision_state_snapshot_from_rows(
-                rows, account=account, portfolio_scope_id=portfolio_scope_id(account),
-                source_observed_at=observed_at,
-            )
-            if snapshot.get("snapshot_status") != "trusted":
-                raise ValueError("position query decision evidence unavailable: " + ",".join(snapshot.get("reason_codes") or []))
-            snapshots[account] = snapshot
-    return _OptionExecutionPreviewRepository(reader.db_path, evidence), snapshots
-
-
 def open_performance_query_repo(sqlite_path: str | Path) -> Any:
     """Read strict performance source events without initializing or repairing a store."""
     return _ReadOnlyPerformanceQueryRepository(Path(sqlite_path))
