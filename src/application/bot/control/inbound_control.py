@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -252,6 +253,16 @@ def _tool_payload(
             payload["market_scope"] = "all"
         return payload
     if intent_name == "option_performance_report":
+        if request.config_path and os.environ.get("OM_PERFORMANCE_SERVICE_URL", "").strip():
+            from src.application.bot.config_scope import BotConfigScopeError, resolve_trusted_config_scope
+
+            try:
+                config_key, _path, _authority = resolve_trusted_config_scope(config_key=None, config_path=request.config_path)
+            except (BotConfigScopeError, OSError, RuntimeError) as exc:
+                raise AgentToolError("SCOPE_ERROR", "Performance query runtime scope is unavailable.") from exc
+            if request.config_key and request.config_key != config_key:
+                raise AgentToolError("SCOPE_ERROR", "Performance query runtime scope is inconsistent.")
+            base = {"config_key": config_key}
         payload = {**base, "period": str(arguments.get("period") or "mtd")}
         for key in ("account", "broker", "as_of_date", "month", "year"):
             if arguments.get(key) not in (None, ""):

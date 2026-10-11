@@ -67,6 +67,14 @@ def open_position_ledger_from_data_config(*, base: Path, data_config: str | Path
     return _impl(base=base, data_config=data_config)
 
 
+def open_performance_query_ledger_from_data_config(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
+    from src.application.ledger.read_only_evidence import open_performance_query_repo
+
+    resolved = resolve_position_data_config_path(base=base, data_config=data_config)
+    sqlite_path = resolve_position_ledger_sqlite_path(base=base, data_config=resolved)
+    return resolved, open_performance_query_repo(sqlite_path)
+
+
 def resolve_position_data_config_path(
     *,
     base: Path,
