@@ -299,6 +299,7 @@ def test_unavailable_service_never_falls_back(monkeypatch):
 def test_client_rejects_bad_envelopes_and_redirects(body, status):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Location", "http://example.com/")
