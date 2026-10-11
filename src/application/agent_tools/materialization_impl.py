@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -26,7 +27,7 @@ from src.application.performance.query import (
     _OPTION_PERFORMANCE_REPORT_NOW_MS as _OPTION_PERFORMANCE_REPORT_NOW_MS,
     normalize_option_performance_request as normalize_option_performance_request,
     option_performance_report_now_ms as option_performance_report_now_ms,
-    option_performance_report_tool as option_performance_report_tool,
+    option_performance_report_tool as query_local_option_performance,
 )
 
 
@@ -108,6 +109,32 @@ def query_cash_headroom_tool(
         write_cache=False,
     )
     return result, [], {"config_path": mask_path(config_path), "output_dir": mask_path(out_dir)}
+
+
+def option_performance_report_tool(
+    payload: dict[str, Any],
+    *,
+    load_runtime_config,
+    resolve_public_data_config_path,
+    normalize_broker,
+    resolve_option_positions_repo,
+    build_option_period_performance,
+    repo_base,
+    mask_path,
+    now_ms: int | None = None,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    url = os.environ.get("OM_PERFORMANCE_SERVICE_URL", "").strip()
+    if url:
+        from src.infrastructure.option_performance_client import query_option_performance
+
+        return query_option_performance(payload, url=url, token=os.environ.get("OM_PERFORMANCE_SERVICE_TOKEN", ""))
+    return query_local_option_performance(
+        payload, load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker, resolve_option_positions_repo=resolve_option_positions_repo,
+        build_option_period_performance=build_option_period_performance,
+        repo_base=repo_base, mask_path=mask_path, now_ms=now_ms,
+    )
 
 
 def capture_option_performance_evidence(

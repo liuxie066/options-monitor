@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,10 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
     report.add_argument("--month", default=None, help="Natural month YYYY-MM")
     report.add_argument("--year", default=None, help="Natural year YYYY")
     report.add_argument("--include-rows", action="store_true")
+
+    serve = sub.add_parser("serve", help="serve the canonical read-only query on authenticated loopback HTTP")
+    _add_config_args(serve)
+    serve.add_argument("--port", type=int, default=8766)
 
     evidence = sub.add_parser("evidence", help="validate, import, or capture performance evidence")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -309,6 +314,21 @@ def _correct_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.option_performance_command == "serve":
+        from src.application.performance.query_http import create_performance_query_server
+
+        server = create_performance_query_server(
+            config_key=args.config_key, config_path=args.config_path,
+            data_config=args.data_config, port=args.port,
+            token=os.environ.get("OM_PERFORMANCE_SERVICE_TOKEN", ""),
+        )
+        with server:
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+        return {"status": "stopped"}
+
     if args.option_performance_command == "report":
         data, _warnings, _meta = option_performance_report_tool(
             _report_payload(args),
