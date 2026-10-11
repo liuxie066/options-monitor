@@ -103,6 +103,22 @@ def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
     return True
 
 
+def _expected_capacity_authority(config: Mapping[str, Any], *, account: str | None) -> dict[str, Any]:
+    try:
+        ids = resolve_futu_account_ids(config, account=account)
+        settings = infer_futu_portfolio_settings(config, account=account)
+    except ValueError:
+        ids, settings = [], {}
+    portfolio_cfg = config.get("portfolio") or {}
+    base_currency = str(portfolio_cfg.get("base_currency") or "CNY")
+    return {
+        "logical_account": str(account or "").strip().lower(),
+        "futu_account_id": str(ids[0]) if len(ids) == 1 else None,
+        "trd_env": settings.get("trd_env"),
+        "market": _runtime_market(config, fallback=base_currency),
+    }
+
+
 def evaluate_account_cash_snapshot(
     context: Mapping[str, Any], *, config: Mapping[str, Any], account: str | None,
     evaluated_at: datetime,
@@ -112,19 +128,7 @@ def evaluate_account_cash_snapshot(
         ttl = cash_snapshot_ttl_sec(config)
     except ValueError:
         ttl = None
-    try:
-        ids = resolve_futu_account_ids(config, account=account)
-        settings = infer_futu_portfolio_settings(config, account=account)
-    except ValueError:
-        ids, settings = [], {}
-    portfolio_cfg = config.get("portfolio") or {}
-    base_currency = str(portfolio_cfg.get("base_currency") or "CNY")
-    expected = {
-        "logical_account": str(account or "").strip().lower(),
-        "futu_account_id": str(ids[0]) if len(ids) == 1 else None,
-        "trd_env": settings.get("trd_env"),
-        "market": _runtime_market(config, fallback=base_currency),
-    }
+    expected = _expected_capacity_authority(config, account=account)
 
     return evaluate_cash_snapshot(
         context, expected_authority=expected, evaluated_at=evaluated_at, max_age_sec=ttl,
@@ -143,6 +147,47 @@ def cash_snapshot_evidence(context: Mapping[str, Any]) -> dict[str, Any]:
     snapshot = context.get("cash_snapshot")
     return {**{key: deepcopy(context[key]) for key in keys if key in context},
             "max_age_sec": snapshot.get("max_age_sec") if isinstance(snapshot, Mapping) else None}
+
+
+def portfolio_position_snapshot_errors(
+    context: Mapping[str, Any], *, account: str | None = None,
+    asset_type: str = "stock", now_utc: datetime | None = None,
+    max_age_seconds: int = 300, market: str | None = None,
+) -> list[str]:
+    """Adapt current or frozen account evidence to the canonical holdings contract."""
+    authority = context.get("capacity_authority")
+    snapshot = context.get("position_snapshot_input")
+    if (context.get("portfolio_source_name") != "futu"
+            or not isinstance(authority, Mapping) or authority.get("status") != "available"
+            or not authority.get("futu_account_id") or not authority.get("trd_env")
+            or not isinstance(snapshot, Mapping)):
+        return ["position_snapshot_authority_unavailable"]
+    if context.get("position_refresh_error"):
+        return ["position_snapshot_refresh_unavailable"]
+    filters = context.get("filters")
+    filters = filters if isinstance(filters, Mapping) else {}
+    account_value = str(account or context.get("portfolio_source_account") or filters.get("account") or "").strip().lower()
+    if not account_value:
+        return ["position_snapshot_account_unavailable"]
+    if (context.get("portfolio_source_account") not in (None, "", account_value)
+            or str(authority.get("logical_account") or "").lower() != account_value
+            or portfolio_context_account_mismatch_reason(dict(context), requested_account=account_value)):
+        return ["position_snapshot_account_mismatch"]
+    try:
+        if now_utc is None:
+            evaluation = context.get("cash_snapshot")
+            evaluated_at = evaluation.get("evaluated_at") if isinstance(evaluation, Mapping) else None
+            now_utc = datetime.fromisoformat(str(evaluated_at).replace("Z", "+00:00")) if evaluated_at is not None else datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            return ["position_snapshot_evaluation_time_invalid"]
+        return position_snapshot_scope_errors(
+            snapshot, account_label=account_value,
+            external_account_id=authority["futu_account_id"], environment=str(authority["trd_env"]),
+            market=str(market or authority.get("market") or ""), asset_type=asset_type,
+            now_utc=now_utc, max_age_seconds=max_age_seconds,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return ["position_snapshot_invalid"]
 
 
 def load_account_portfolio_context(
@@ -171,6 +216,19 @@ def load_account_portfolio_context(
     except ValueError as exc:
         log(f"[CTX] cash config unavailable: {exc}")
 
+    assets = required_position_asset_types or (("stock", "option") if include_options else ())
+    position_max_age = 60 if include_options else 300
+    expected_authority = _expected_capacity_authority(config, account=account) if assets else {}
+
+    def position_errors(context: dict[str, Any]) -> list[str]:
+        authority = context.get("capacity_authority")
+        if assets and (not isinstance(authority, Mapping)
+                or any(not value or authority.get(key) != value for key, value in expected_authority.items())):
+            return ["position_snapshot_authority_mismatch"]
+        return sorted({error for asset in assets for error in portfolio_position_snapshot_errors(
+            context, account=account, asset_type=asset, max_age_seconds=position_max_age,
+        )})
+
     def evaluate(context: dict[str, Any], source: str) -> dict[str, Any]:
         result = deepcopy(context)
         result["context_source"] = source
@@ -185,6 +243,7 @@ def load_account_portfolio_context(
 
     if ttl is None:
         return evaluate({}, "unavailable")
+    trusted_cached_cash = None
     try:
         cached = load_json_fn(port_path)
     except (TimeoutError, CancelledError):
@@ -199,25 +258,13 @@ def load_account_portfolio_context(
                 normalize_persisted_position_snapshot_input(cached_snapshot)
             )
         result = evaluate(cached, "account_cache")
-        assets = required_position_asset_types or (("stock", "option") if include_options else ())
-        snapshot = result.get("position_snapshot_input")
-        snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-        authority = result.get("capacity_authority")
-        authority = authority if isinstance(authority, Mapping) else {}
-        position_errors = [
-            error for asset in assets if cash_snapshot_is_usable(result)
-            for error in position_snapshot_scope_errors(
-                snapshot, account_label=str(account or "").lower(),
-                external_account_id=authority.get("futu_account_id"), environment=str(authority.get("trd_env") or ""),
-                market=authority.get("market"), asset_type=asset,
-                now_utc=now_utc or datetime.now(timezone.utc),
-                max_age_seconds=60 if include_options else 300,
-            )
-        ]
+        errors = position_errors(result)
         account_valid = _validate_portfolio_context_account(result, requested_account=account, log=log, source="account_cache")
-        if cash_snapshot_is_usable(result) and not position_errors and account_valid:
+        if cash_snapshot_is_usable(result) and not errors and account_valid:
             log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
             return result
+        if cash_snapshot_is_usable(result) and account_valid and errors:
+            trusted_cached_cash = result
     kwargs: dict[str, Any] = {
         "cfg": config, "account": account, "market": str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
         "write_cache": write_cache,
@@ -235,10 +282,15 @@ def load_account_portfolio_context(
         raise
     except Exception as exc:
         log(f"[WARN] portfolio cash provider unavailable: {exc}")
+        if trusted_cached_cash is not None:
+            return {**trusted_cached_cash, "position_refresh_error": type(exc).__name__}
         return evaluate({"cash_provider_error": type(exc).__name__}, "unavailable")
     result = evaluate(context, "futu_direct")
     if not _validate_portfolio_context_account(result, requested_account=account, log=log, source="futu_direct"):
         raise ValueError("futu_direct account mismatch")
+    errors = position_errors(result)
+    if errors and isinstance(result.get("position_snapshot_input"), dict):
+        result["position_snapshot_input"]["errors"] = errors
     if write_cache:
         atomic_write_json(port_path, result)
     log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")

@@ -121,6 +121,7 @@ def load_portfolio_context(
             runtime_config=runtime_config,
             portfolio_source=portfolio_source,
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            required_position_asset_types=("stock",),
             exchange_rate_cache_path=(shared_state_dir / "rate_cache.json" if shared_state_dir else shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=base).runtime_root)),
             **({"exchange_rate_observation": exchange_rate_observation} if exchange_rate_observation is not _PORTFOLIO_FX_NOT_PROVIDED else {}),
             load_json_fn=load_cached_json,

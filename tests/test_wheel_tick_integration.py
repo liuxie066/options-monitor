@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -196,10 +198,10 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
                 prepared_batch.manifests["acct_a"]["manifest_path"]
             )
             return (
-                {
+                cash_portfolio({
                     "capacity_authority": {"status": "available", "market": "US"},
                     "stocks_by_symbol": {"NVDA": {"shares": 100, "can_sell_qty": 100}},
-                },
+                }, account="acct_a"),
                 {
                     **prepared_context,
                     "exchange_rates": {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},

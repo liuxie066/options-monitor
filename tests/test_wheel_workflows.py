@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from tests.cash_evidence_helpers import cash_portfolio
 from src.application.trades.attribution import confirm_wheel_call_linkage
 
 from cash_evidence_helpers import cash_portfolio, cash_config
@@ -572,6 +574,7 @@ def _create_call_intent(
         source_observed_at=observed_at, current_decision_now_ms=4_000,
     )
     coverage = {
+        "position_evidence": cash_portfolio({"source_observed_at": observed_at}),
         "account": "lx",
         "symbol": "NVDA",
         "source_observed_at": observed_at,
@@ -584,6 +587,7 @@ def _create_call_intent(
         "shares_reserved": 0,
         "shares_available_for_cover": contracts * 100,
     }
+    coverage["position_evidence"]["position_snapshot_input"]["observed_at_utc"] = observed_at
     created = create_wheel_call_intent(
         repo,
         candidate_snapshot=snapshot,
@@ -1012,6 +1016,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
             request_id="intent-stale-1",
             actor="tester",
             coverage_fact={
+                "position_evidence": cash_portfolio({}),
                 "account": "lx",
                 "symbol": "NVDA",
                 "capacity_identity_hash": "capacity-before-race",

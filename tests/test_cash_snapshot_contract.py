@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from tests.cash_evidence_helpers import cash_portfolio
 from domain.domain.risk_capacity import evaluate_cash_snapshot
 from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import build_futu_portfolio_context
@@ -28,6 +29,7 @@ def cash_context(observed=NOW, *, balance_rows=None, **changes):
         source_observed_at=NOW.isoformat(), cash_source_observed_at=observed.isoformat(),
         broker_account_identifiers={"123"}, futu_account_id="123", trd_env="REAL", capacity_market="us",
     )
+    result["position_snapshot_input"] = cash_portfolio({"source_observed_at": observed.isoformat()})["position_snapshot_input"]
     result.update(changes)
     return result
 
@@ -277,7 +279,7 @@ def test_option_terms_failure_keeps_cash_and_marks_positions_partial(monkeypatch
 
 
 def test_required_positions_refresh_once_without_invalidating_cash(tmp_path):
-    (tmp_path / "portfolio_context.json").write_text(json.dumps(cash_context()))
+    (tmp_path / "portfolio_context.json").write_text(json.dumps(cash_context(position_snapshot_input=None)))
     calls = []
     def fetch(**kwargs):
         calls.append(kwargs)
