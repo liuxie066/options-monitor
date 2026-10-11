@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
+from domain.domain.option_position_identity import normalize_currency
+
 
 def sum_by_currency_to_cny(
     by_currency: dict,
@@ -10,28 +14,25 @@ def sum_by_currency_to_cny(
     cny_per_hkd_exchange_rate: float | None,
 ) -> float | None:
     total = 0.0
-    ok = True
     for ccy, v in (by_currency or {}).items():
+        if isinstance(v, bool):
+            return None
         try:
             fv = float(v)
-        except Exception:
-            continue
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(fv):
+            return None
         if not fv:
             continue
-        c = str(ccy).strip().upper()
-        if c in ('CNY', 'RMB'):
-            total += fv
-        elif c == 'USD':
-            if not usdcny_exchange_rate:
-                ok = False
-                break
-            total += fv * float(usdcny_exchange_rate)
-        elif c == 'HKD':
-            if not cny_per_hkd_exchange_rate:
-                ok = False
-                break
-            total += fv * float(cny_per_hkd_exchange_rate)
-        else:
-            ok = False
-            break
-    return total if ok else None
+        rate = {"CNY": 1, "USD": usdcny_exchange_rate, "HKD": cny_per_hkd_exchange_rate}.get(normalize_currency(ccy))
+        if isinstance(rate, bool):
+            return None
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(rate) or rate <= 0:
+            return None
+        total += fv * rate
+    return total if math.isfinite(total) else None

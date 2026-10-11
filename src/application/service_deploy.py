@@ -2260,10 +2260,15 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
                 or Path(item.install_path).name == FEISHU_AGENT_CREDENTIAL_SERVICE
             )
         ]
+        installable_services = {
+            Path(item.install_path).name
+            for item in files
+            if item.kind == "systemd_service" and "[Install]" in item.content.splitlines()
+        }
         return {
             "prepare": mkdirs,
             "reload": ["systemctl daemon-reload"],
-            "enable": [*(f"systemctl enable --now {name}" for name in timer_names), *(f"systemctl enable --now {name}" for name in service_names)],
+            "enable": [*(f"systemctl enable --now {name}" for name in timer_names), *(f"systemctl enable --now {name}" for name in service_names if name in installable_services)],
             "status": [*(f"systemctl status {name}" for name in service_names), "systemctl list-timers 'options-monitor*'"],
         }
     labels = [

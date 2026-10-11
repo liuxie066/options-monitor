@@ -15,10 +15,8 @@ import pandas as pd
 from domain.domain.cash_secured_utils import (
     cash_secured_unavailable_for_cash_snapshot,
     cash_secured_symbol_by_ccy,
-    cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
-    read_cash_secured_total_cny,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import require_option_multiplier
@@ -28,6 +26,7 @@ from domain.domain.risk_capacity import (
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.portfolio_context_service import cash_snapshot_is_usable
+from src.application.cash_totals import sum_by_currency_to_cny
 
 log = logging.getLogger(__name__)
 
@@ -169,35 +168,6 @@ def sell_put_opening_capacity_inputs(
     }
 
 
-def _sum_cash_total_cny(
-    cash_by_ccy: dict[str, Any] | None,
-    *,
-    exchange_rate_converter: CurrencyConverter,
-) -> float | None:
-    if not isinstance(cash_by_ccy, dict):
-        return None
-
-    total = 0.0
-    ok = True
-    for ccy, value in cash_by_ccy.items():
-        try:
-            amount = float(value)
-        except Exception:
-            continue
-        if not amount:
-            continue
-        native_ccy = str(ccy or "").strip().upper()
-        if native_ccy in ("CNY", "RMB"):
-            total += amount
-            continue
-        converted = exchange_rate_converter.native_to_cny(amount, native_ccy=native_ccy)
-        if converted is None:
-            ok = False
-            break
-        total += float(converted)
-    return total if ok else None
-
-
 def enrich_sell_put_candidates_with_cash(
     *,
     df_labeled: pd.DataFrame,
@@ -263,6 +233,10 @@ def enrich_sell_put_candidates_with_cash(
         option_ctx, portfolio_ctx
     )
     total_by_ccy_norm: dict[str, float] = {}
+    cny_rates = {
+        "usdcny_exchange_rate": exchange_rate_converter.native_to_cny(1, native_ccy="USD"),
+        "cny_per_hkd_exchange_rate": exchange_rate_converter.native_to_cny(1, native_ccy="HKD"),
+    }
 
     if cash_secured_unavailable_reason:
         log.warning(
@@ -277,13 +251,8 @@ def enrich_sell_put_candidates_with_cash(
 
             used_symbol_usd = float((sym_used_by_ccy or {}).get('USD') or 0.0)
             used_total_usd = float(total_by_ccy_norm.get('USD') or 0.0)
-            used_total_cny = read_cash_secured_total_cny(option_ctx)
-            used_symbol_cny = cash_secured_symbol_cny(
-                option_ctx,
-                symbol,
-                by_symbol_by_ccy=norm_by_ccy,
-                native_to_cny=lambda amt, ccy: exchange_rate_converter.native_to_cny(amt, native_ccy=ccy),
-            )
+            used_total_cny = sum_by_currency_to_cny(total_by_ccy_norm, **cny_rates)
+            used_symbol_cny = sum_by_currency_to_cny(sym_used_by_ccy, **cny_rates)
         except Exception as e:
             log.warning("sell_put_cash: cash_secured calc failed for %s: %s", symbol, e)
             used_symbol_usd = 0.0
@@ -305,10 +274,7 @@ def enrich_sell_put_candidates_with_cash(
         cny = cash_by_ccy.get('CNY')
         cash_avail_cny = float(cny) if cny is not None else None
         if cash_usable:
-            cash_avail_total_cny = _sum_cash_total_cny(
-                cash_by_ccy,
-                exchange_rate_converter=exchange_rate_converter,
-            )
+            cash_avail_total_cny = sum_by_currency_to_cny(cash_by_ccy, **cny_rates)
 
         if cash_avail_cny is not None:
             cash_free_cny = (cash_avail_cny - used_total_cny) if used_total_cny is not None else None

@@ -187,8 +187,7 @@ def test_tool_cash_query_uses_runtime_shared_cache_with_custom_output(tmp_path, 
         captured.append(kwargs)
         return cash_portfolio({"cash_by_currency": {"HKD": 100}, "cash_balance_reliable": True})
     monkeypatch.setattr(query, "load_account_portfolio_context", portfolio)
-    monkeypatch.setattr(query, "_load_option_position_records", lambda _: (object(), []))
-    monkeypatch.setattr(query, "decision_state_snapshot", lambda *a, **kw: {})
+    monkeypatch.setattr(query, "_load_option_position_records", lambda *a, **kw: ([], None))
     monkeypatch.setattr(query, "build_option_positions_context", lambda *a, **kw: {"decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {}, "cash_secured_total_cny": 0})
     monkeypatch.setattr(query, "resolve_data_config_path", lambda **kw: tmp_path / "data.json")
     with runtime_root_scope(runtime):

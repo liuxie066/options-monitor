@@ -72,6 +72,39 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "UMask=0077" in tick
     assert "UMask=0077" in intake
 
+
+def test_systemd_enable_suggestions_require_install_section(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = _write_service_account_config(repo / "config.us.json", _two_futu_service_accounts(tmp_path))
+    bundle = _render_bundle(
+        repo, tmp_path / "runtime", accounts=["lx", "sy"], markets=["us", "hk"],
+        config_paths={"us": config, "hk": config}, include_opend=True,
+        include_auto_upgrade=True, include_quality_monitoring=True,
+        include_feishu_ws=True, feishu_ws_config_key="us",
+        include_wechat_clawbot=True, wechat_clawbot_config_key="us",
+        wechat_clawbot_allowed_senders="fixture-sender", include_feishu_agent_credential=True,
+    )
+    expected = {
+        "options-monitor-tick-us.timer", "options-monitor-tick-hk.timer",
+        "options-monitor-auto-close-us.timer", "options-monitor-auto-close-hk.timer",
+        "options-monitor-projection-verify.timer", "options-monitor-runtime-status.timer",
+        "options-monitor-trade-intake-heartbeat.timer", "options-monitor-upgrade.timer",
+        "options-monitor-quality-refresh.timer", "options-monitor-quality-recheck.timer",
+        "options-monitor-quality-day-end-us.timer", "options-monitor-quality-day-end-hk.timer",
+        "options-monitor-trade-intake.service", "options-monitor-opend-lx.service",
+        "options-monitor-opend-sy.service", "options-monitor-feishu-ws.service",
+        "options-monitor-wechat-clawbot.service", "options-monitor-feishu-agent-credential.service",
+    }
+    commands = bundle["commands"]["enable"]
+    assert len(commands) == len(expected)
+    assert set(commands) == {f"systemctl enable --now {name}" for name in expected}
+    files = {Path(item["install_path"]).name: item for item in bundle["files"]}
+    for name in expected:
+        assert "[Install]" in files[name]["content"].splitlines()
+    assert "Type=oneshot" in files["options-monitor-feishu-agent-credential.service"]["content"]
+    assert "systemctl status options-monitor-trade-intake-heartbeat.service" in bundle["commands"]["status"]
+
 @pytest.mark.parametrize("include_legacy_credentials", [False, True])
 def test_managed_systemd_names_cover_renderer_and_preserve_unknown_names(
     tmp_path: Path, include_legacy_credentials: bool,

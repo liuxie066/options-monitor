@@ -5,6 +5,7 @@ from cash_evidence_helpers import cash_portfolio
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import pytest
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -23,6 +24,46 @@ def _patched(module, **attributes):
     finally:
         for name, value in originals.items():
             setattr(module, name, value)
+
+
+@pytest.mark.parametrize("rate,expected", [(1, 500), (None, None)])
+def test_cash_query_and_candidate_share_collateral_conversion(tmp_path, rate, expected):
+    import pandas as pd
+    from src.application import cash_headroom_query as query
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    option = {
+        "decision_snapshot_status": "trusted",
+        "cash_secured_total_by_ccy": {"HKD": 500},
+        "cash_secured_total_cny": 460,
+        "cash_secured_by_symbol_cny": {"0700.HK": 460},
+        "cash_secured_by_symbol_by_ccy": {"0700.HK": {"HKD": 500}},
+    }
+    portfolio = cash_portfolio({"cash_by_currency": {"HKD": 1000}, "option_ctx": option})
+    with _patched(
+        query,
+        get_exchange_rates_or_fetch_latest=lambda **_: {"rates": {"HKDCNY": rate}},
+        load_account_portfolio_context=lambda **_: portfolio,
+        _load_option_position_records=lambda _, **_kw: ([], {"snapshot_status": "trusted"}),
+        build_option_positions_context=lambda *args, **_: option,
+    ):
+        result = query.query_sell_put_cash(
+            account="lx", output_format="json", base_dir=tmp_path,
+            runtime_config={}, out_dir=str(tmp_path), write_cache=False,
+        )
+    row = enrich_sell_put_candidates_with_cash(
+        df_labeled=pd.DataFrame([{"strike": 450, "multiplier": 100, "currency": "HKD"}]),
+        symbol="0700.HK", portfolio_ctx=portfolio,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=rate)),
+    ).iloc[0]
+    assert result["cash_secured_used_cny"] == expected
+    if expected is None:
+        assert pd.isna(row["cash_secured_used_cny_total"])
+        assert result["cash_free_total_cny"] is None
+    else:
+        assert result["cash_secured_used_cny"] == row["cash_secured_used_cny_total"]
+        assert result["cash_free_total_cny"] == row["cash_free_total_cny"] == 500
 
 
 def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_allows_it(tmp_path: Path) -> None:
@@ -47,9 +88,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     with _patched(
         m,
         fetch_futu_portfolio_context=fake_fetch_futu_portfolio_context,
-        open_position_ledger=lambda *_a, **_k: object(),
-        _load_option_position_records=lambda *_a, **_k: (object(), []),
-        decision_state_snapshot=lambda *_a, **_k: {},
+        _load_option_position_records=lambda *_a, **_k: ([], None),
         build_option_positions_context=lambda *_a, **_k: {
             "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 72000.0}},
@@ -122,9 +161,7 @@ def test_query_sell_put_cash_uses_futu_context_for_second_account(tmp_path: Path
     with _patched(
         m,
         load_account_portfolio_context=fake_load_account_portfolio_context,
-        open_position_ledger=lambda *_a, **_k: object(),
-        _load_option_position_records=lambda *_a, **_k: (object(), []),
-        decision_state_snapshot=lambda *_a, **_k: {},
+        _load_option_position_records=lambda *_a, **_k: ([], None),
         build_option_positions_context=lambda *_a, **_k: {
             "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
@@ -164,9 +201,7 @@ def test_query_sell_put_cash_uses_configured_futu_account(tmp_path: Path) -> Non
     with _patched(
         m,
         load_account_portfolio_context=fake_load_account_portfolio_context,
-        open_position_ledger=lambda *_a, **_k: object(),
-        _load_option_position_records=lambda *_a, **_k: (object(), []),
-        decision_state_snapshot=lambda *_a, **_k: {},
+        _load_option_position_records=lambda *_a, **_k: ([], None),
         build_option_positions_context=lambda *_a, **_k: {
             "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 8000.0}},
@@ -210,9 +245,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
     with _patched(
         m,
         load_account_portfolio_context=fake_load_account_portfolio_context,
-        open_position_ledger=lambda *_a, **_k: object(),
-        _load_option_position_records=lambda *_a, **_k: (object(), []),
-        decision_state_snapshot=lambda *_a, **_k: {},
+        _load_option_position_records=lambda *_a, **_k: ([], None),
         build_option_positions_context=lambda *_a, **_k: {
             "decision_snapshot_status": "trusted",
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
@@ -273,8 +306,7 @@ def test_query_sell_put_cash_keeps_closed_put_pending_after_newer_cash() -> None
             "context_source": "futu_direct",
             "source_observed_at": "2026-09-30T03:00:48+00:00",
         }),
-        _load_option_position_records=lambda *_a, **_k: (object(), []),
-        decision_state_snapshot=lambda *_a, **_k: snapshot,
+        _load_option_position_records=lambda *_a, **_k: ([], snapshot),
         build_option_positions_context=build_context,
     ):
         result = m.query_sell_put_cash(
@@ -296,8 +328,7 @@ def test_query_sell_put_cash_does_not_offer_stale_broker_cash_as_free_capacity()
             "portfolio_source_name": "futu", "context_source": "futu_direct",
             "source_observed_at": "2020-01-01T00:00:00+00:00", "cash_balance_reliable": True,
         }, evaluated_at=datetime.now(timezone.utc)),
-        _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
-        decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
+        _load_option_position_records=lambda *_args, **_kwargs: ([], None),
         build_option_positions_context=lambda *_args, **_kwargs: {
             "decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {"CNY": 12_000.0},
             "cash_secured_total_cny": 12_000.0, "cash_secured_unavailable_by_symbol": {},
@@ -321,8 +352,7 @@ def test_query_sell_put_cash_rejects_malformed_settlement_blockers() -> None:
             "cash_by_currency": {"CNY": 130_000.0}, "portfolio_source_name": "futu",
             "context_source": "futu_direct", "source_observed_at": datetime.now(timezone.utc).isoformat(),
         }),
-        _load_option_position_records=lambda *_args, **_kwargs: (object(), []),
-        decision_state_snapshot=lambda *_args, **_kwargs: {"snapshot_status": "trusted"},
+        _load_option_position_records=lambda *_args, **_kwargs: ([], None),
         build_option_positions_context=lambda *_args, **_kwargs: {
             "decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {},
             "cash_secured_total_cny": 0.0, "cash_secured_unavailable_by_symbol": ["invalid"],

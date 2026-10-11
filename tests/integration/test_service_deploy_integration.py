@@ -574,6 +574,30 @@ def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -
     ]
     assert out["missing_required_units"] == ["options-monitor-projection-verify.timer"]
 
+def test_service_drift_missing_heartbeat_does_not_suggest_enable(monkeypatch, tmp_path: Path) -> None:
+    import src.application.service_drift as service_drift_module
+
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
+    profile = next(item for item in bundle["files"] if item["relative_path"] == "service.profile.json")
+    (runtime / "service.profile.json").write_text(profile["content"], encoding="utf-8")
+    missing = {"options-monitor-trade-intake-heartbeat.service", "options-monitor-trade-intake.service"}
+    _write_systemd_units_from_bundle(bundle, systemd_root, skip=missing)
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("isolated drift must not query the host service manager")
+
+    monkeypatch.setattr(service_drift_module.subprocess, "run", unexpected_run)
+    out = _drift_at(repo, runtime, systemd_root)
+
+    assert out["missing_installed_units"] == sorted(missing)
+    enable_actions = [action for action in out["manual_actions"] if "systemctl enable --now" in action]
+    assert enable_actions == [
+        "manual_enable_long_running_service: sudo systemctl enable --now options-monitor-trade-intake.service"
+    ]
+    assert f"./om service drift --profile-path {runtime / 'service.profile.json'} --confirm" in out["manual_actions"]
+
+
 def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
