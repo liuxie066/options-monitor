@@ -293,6 +293,8 @@ def test_unavailable_service_never_falls_back(monkeypatch):
         (b"x" * (client.MAX_RESPONSE_BYTES + 1), 200),
         (b"{}", 302),
     ],
+    ids=["invalid-json", "missing-schema", "legacy-schema", "status-mismatch",
+         "error-status-mismatch", "oversized-response", "redirect"],
 )
 def test_client_rejects_bad_envelopes_and_redirects(body, status):
     class Handler(BaseHTTPRequestHandler):

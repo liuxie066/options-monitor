@@ -88,9 +88,22 @@ jobs:
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Full regression
+        id: regression
         if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}
+        timeout-minutes: 15
+        shell: bash
         run: |
-          ./.venv/bin/python -m pytest -n 2 --dist loadfile --max-worker-restart=0 --durations=25
+          ./.venv/bin/python -m pytest -vv -n 2 --dist loadfile --max-worker-restart=0 --durations=25 \
+            -o faulthandler_timeout=60 2>&1 | tee "$RUNNER_TEMP/full-regression.log"
+
+      - name: Preserve regression diagnostics
+        if: ${{ always() && steps.regression.outcome != 'skipped' && steps.regression.outcome != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/full-regression.log
+          if-no-files-found: warn
+          retention-days: 7
 
   release:
     needs: guardrails
