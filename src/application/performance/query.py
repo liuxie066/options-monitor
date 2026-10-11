@@ -352,5 +352,3 @@ def option_performance_report_tool(
             "freshness_status": data["period"]["freshness_status"],
         },
     )
-
-
