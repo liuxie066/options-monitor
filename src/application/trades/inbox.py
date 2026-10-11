@@ -187,6 +187,13 @@ def enqueue_trade_payload(
     source_text = str(source or "unknown").strip().lower() or "unknown"
     canonical_key = str(broker_deal_key or "").strip()
     content = _inbox_execution_content(canonical_key, payload) if canonical_key else {}
+    content_by_json = {payload_json: content}
+
+    def execution_content(raw_json: str) -> dict[str, Any]:
+        if raw_json not in content_by_json:
+            content_by_json[raw_json] = _inbox_execution_content(canonical_key, json.loads(raw_json))
+        return content_by_json[raw_json]
+
     economic_hash = _execution_content_hash(content) if canonical_key else None
     identity = canonical_key or f"identity-needs-review|{source_text}|{payload_hash}"
     inbox_id = hashlib.sha256(identity.encode()).hexdigest()
@@ -219,14 +226,15 @@ def enqueue_trade_payload(
         row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
         assert row is not None
         # Retain the pre-migration payload too; an old hash is not a new-contract fingerprint.
-        original = json.loads(row["payload_json"])
         original_json = str(row["payload_json"])
         prior_evidence = conn.execute(
             "SELECT payload_json FROM trade_inbox_evidence WHERE inbox_id = ?", (inbox_id,)
         ).fetchall()
-        known_before = _known_execution_associations(
-            canonical_key, [original, *(json.loads(item[0]) for item in prior_evidence)]
-        ) if canonical_key else {}
+        known_before = {
+            name: value for raw_json in (original_json, *(item[0] for item in prior_evidence))
+            for name, value in execution_content(raw_json).get("associations", {}).items()
+            if value is not None
+        } if canonical_key else {}
         new_evidence = False
         for raw_json, raw_source, raw_received_at_ms, raw_adapter_version in (
             (
@@ -248,14 +256,14 @@ def enqueue_trade_payload(
             ) or new_evidence
         if canonical_key:
             from domain.domain.trade_execution import conflicting_execution_associations
-            original_content = _inbox_execution_content(canonical_key, original)
+            original_content = execution_content(original_json)
             original_hash = _execution_content_hash(original_content)
             # Missing associations may be enriched, but every known value remains evidence.
             evidence = conn.execute(
                 "SELECT payload_json FROM trade_inbox_evidence WHERE inbox_id = ?", (inbox_id,)
             ).fetchall()
             evidence_content = [
-                _inbox_execution_content(canonical_key, json.loads(item[0])) for item in evidence
+                execution_content(item[0]) for item in evidence
             ]
             source_identity_conflict = _has_source_identity_conflict(evidence_content)
             source_status = execution_source_status(payload)

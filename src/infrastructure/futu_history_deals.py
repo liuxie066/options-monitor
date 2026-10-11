@@ -504,7 +504,9 @@ def _numeric_account_id(value: str) -> int:
 
 
 def _plain_records(value: Any) -> list[dict[str, Any]]:
-    rows = value.to_dict("records") if hasattr(value, "to_dict") else value
+    from src.infrastructure.futu_dataframe import futu_dataframe_records
+
+    rows = futu_dataframe_records(value) if hasattr(value, "to_dict") else value
     return [dict(row) for row in rows] if isinstance(rows, list) else []
 
 

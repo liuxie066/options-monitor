@@ -52,6 +52,33 @@ def _execution(*, physical: str = "123", deal_id: str = "fill-1", price: str = "
     }
 
 
+def test_replay_canonicalization_retains_distinct_source_versions(tmp_path, monkeypatch):
+    from src.application.trades import inbox as inbox_module
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "inbox.sqlite3")
+    payload = _execution()
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=key, repo=repo)
+    canonicalize = inbox_module._inbox_execution_content
+    seen = []
+
+    def tracked_content(identity, raw):
+        seen.append(raw["price"])
+        return canonicalize(identity, raw)
+
+    monkeypatch.setattr(inbox_module, "_inbox_execution_content", tracked_content)
+    enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=key, repo=repo)
+    assert seen == ["2.50"]
+    assert len(read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(inbox_id))) == 1
+    seen.clear()
+    enqueue_trade_payload(inbox, payload=_execution(price="9.00"), source="backfill", broker_deal_key=key, repo=repo)
+    assert seen == ["9.00", "2.50"]
+    evidence = read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(inbox_id))
+    assert {row["raw_payload"]["price"] for row in evidence} == {"2.50", "9.00"}
+    assert read_trade_payload(inbox, inbox_id=inbox_id)["result_reason"] == "broker_economic_payload_conflict"
+
+
 def _process(repo, root: Path, entry: str, payload: dict, **kwargs):
     return _process_payload(
         payload, repo=repo, state_path=root / entry / "state.json",
@@ -923,8 +950,8 @@ def test_inbox_candidates_bound_decoding_and_keep_durable_conflicts(tmp_path, mo
     targeted_name = "list_assigned_stock_events_for_execution" if stock else "list_trade_events_for_execution"
     read = getattr(repo, targeted_name)
 
-    def candidates(identity):
-        rows = read(identity)
+    def candidates(identity, *, conn=None):
+        rows = read(identity, conn=conn)
         seen.append(len(rows))
         return rows
 
