@@ -26,6 +26,48 @@ class _BrokerClient:
         return list(value)
 
 
+
+@pytest.mark.parametrize("keys,initial,expected_calls", [
+    ([b"a", b"a"], None, 2),
+    ([b"a", b"b", b"a"], None, 3),
+    ([b"a"], b"a", 1),
+])
+def test_history_query_rejects_repeated_cursor_without_partial_receipt(keys, initial, expected_calls):
+    from types import SimpleNamespace
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    calls = []
+
+    def query(**kwargs):
+        calls.append(kwargs)
+        return 0, [{"deal_id": str(len(calls))}], keys[len(calls) - 1]
+
+    client = _FutuAPIClient(SimpleNamespace(), is_option_chain_cache_enabled=False)
+    with pytest.raises(RuntimeError, match="repeated a page key"):
+        client._query_with_coverage(query, paginated=True, kwargs={"acc_id": "123", "page_req_key": initial})
+    assert len(calls) == expected_calls
+    assert all(call["acc_id"] == 123 for call in calls)
+
+
+@pytest.mark.parametrize("last_key", [None, "", b""])
+def test_history_query_preserves_complete_multi_page_receipt(last_key):
+    from types import SimpleNamespace
+    import pandas as pd
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    calls = []
+
+    def query(**kwargs):
+        calls.append(kwargs)
+        return 0, pd.DataFrame([{"deal_id": str(len(calls))}]), b"next" if len(calls) == 1 else last_key
+
+    client = _FutuAPIClient(SimpleNamespace(), is_option_chain_cache_enabled=False)
+    receipt = client._query_with_coverage(query, paginated=True, kwargs={"acc_id": "123", "page_req_key": b""})
+    assert receipt == {"retcode": 0, "rows": [{"deal_id": "1"}, {"deal_id": "2"}],
+                       "coverage_complete": True, "pagination_complete": True, "page_count": 2}
+    assert calls == [{"acc_id": 123}, {"acc_id": 123, "page_req_key": b"next"}]
+
+
 def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
 
     class FakeBackend:

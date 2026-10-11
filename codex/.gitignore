@@ -1,0 +1,9 @@
+# Generated research output; promote a reviewed summary instead of committing bulk results.
+**/results/
+**/cache/
+**/mpl/
+**/__pycache__/
+*.pyc
+*.pyo
+*.nbc
+*.nbi

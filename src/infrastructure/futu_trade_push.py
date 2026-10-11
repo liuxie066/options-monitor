@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import suppress
 import logging
 import queue
 import sys
@@ -11,6 +12,7 @@ from typing import Any, Callable
 from domain.domain.trade_account_identity import extract_visible_account_fields
 
 from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
 
 
@@ -70,7 +72,7 @@ class OpenDTradePushListener:
                 }
                 ret, data = super().on_recv_rsp(rsp_pb)
                 if ret == 0 and data is not None:
-                    rows = data.to_dict("records") if hasattr(data, "to_dict") else []
+                    rows = futu_dataframe_records(data) if hasattr(data, "to_dict") else []
                     if isinstance(rows, list):
                         raw_fill = getattr(getattr(rsp_pb, "s2c", None), "orderFill", None)
                         revision = (
@@ -116,7 +118,7 @@ class OpenDTradePushListener:
         try:
             ret, accounts = ctx.get_acc_list()
             if ret == 0 and hasattr(accounts, "to_dict"):
-                for account in accounts.to_dict("records"):
+                for account in futu_dataframe_records(accounts):
                     physical = str(account.get("acc_id") or "").strip()
                     environment = str(account.get("trd_env") or "").rsplit(".", 1)[-1].upper()
                     if physical and environment in {"REAL", "SIMULATE"}:
@@ -220,7 +222,7 @@ class OpenDTradePushListener:
                     market = futu_mod.TrdMarket.to_string2(header.trdMarket)
                     if environment != "REAL" or market in {"NONE", "N/A", ""}:
                         return ret, data
-                    rows = data.to_dict("records") if hasattr(data, "to_dict") else []
+                    rows = futu_dataframe_records(data) if hasattr(data, "to_dict") else []
                     for row in rows:
                         if not isinstance(row, dict):
                             continue
@@ -258,6 +260,8 @@ class OpenDTradePushListener:
         on_wait: Callable[[], None] | None = None,
     ) -> None:
         results: queue.Queue[tuple[str, Any, Any]] = queue.Queue(maxsize=1)
+        construction_lock = threading.Lock()
+        abandoned = threading.Event()
         auth_required = threading.Event()
         auth_evidence: dict[str, str] = {}
 
@@ -277,7 +281,12 @@ class OpenDTradePushListener:
             except Exception as exc:
                 results.put(("error", exc, None))
             else:
-                results.put(("ok", ctx, handler))
+                with construction_lock:
+                    if abandoned.is_set():
+                        with suppress(Exception):
+                            ctx.close()
+                    else:
+                        results.put(("ok", ctx, handler))
 
         sdk_logger = logging.getLogger("FTConsoleLog")
         log_handler = _TradeContextInitLogHandler()
@@ -314,8 +323,22 @@ class OpenDTradePushListener:
                         raise RuntimeError("trade order push handler registration failed")
                 self._ctx.start()
                 return
+        except BaseException:
+            with suppress(Exception):
+                self.close()
+            raise
         finally:
             sdk_logger.removeHandler(log_handler)
+            with construction_lock:
+                abandoned.set()
+                try:
+                    result, value, _handler = results.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    if result == "ok":
+                        with suppress(Exception):
+                            value.close()
 
     def check_health(self) -> None:
         if self._ctx is None:
@@ -327,8 +350,8 @@ class OpenDTradePushListener:
             error_code, message = classify_watchdog_result(None, detail)
         else:
             if ret == 0 and isinstance(data, dict):
-                ready = data.get("program_status_type") in (None, "", "READY")
-                trade_logined = bool(data.get("trd_logined", True))
+                ready = data.get("program_status_type") == "READY"
+                trade_logined = data.get("trd_logined") is True
                 if ready and trade_logined:
                     return
                 detail = f"OpenD trade context not ready: {data}"

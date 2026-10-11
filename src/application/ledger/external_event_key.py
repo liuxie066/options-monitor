@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Iterable, Mapping
 
 from domain.domain.trade_execution import (
@@ -18,16 +19,16 @@ def read_execution_event_candidates(repo: Any, execution_id: str) -> tuple[Any, 
 
     candidate = getattr(repo, "primary_repo", repo)
     results = []
-    for name in ("list_trade_events", "list_assigned_stock_events"):
-        targeted = (
-            getattr(candidate, f"{name}_for_execution", None)
-            if isinstance(candidate, RepositoryCoreMixin) else None
-        )
-        if callable(targeted):
-            results.append(targeted(execution_id))
-        else:
-            read = getattr(candidate, name, None)
-            results.append(read() if callable(read) else None)
+    sqlite_repo = isinstance(candidate, RepositoryCoreMixin)
+    connection = candidate._optional_conn(None) if sqlite_repo else nullcontext(None)
+    with connection as conn:
+        for name in ("list_trade_events", "list_assigned_stock_events"):
+            targeted = getattr(candidate, f"{name}_for_execution", None) if sqlite_repo else None
+            if callable(targeted):
+                results.append(targeted(execution_id, conn=conn))
+            else:
+                read = getattr(candidate, name, None)
+                results.append(read() if callable(read) else None)
     return results[0], results[1]
 
 

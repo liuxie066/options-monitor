@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 from src.infrastructure.net_port import port_open
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
 LOG = logging.getLogger(__name__)
@@ -382,7 +383,7 @@ class _FutuAPIClient:
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
             try:
-                rows = to_dict(orient="records")
+                rows = futu_dataframe_records(value)
             except TypeError:
                 rows = to_dict()
             if isinstance(rows, list):
@@ -431,9 +432,10 @@ class _FutuAPIClient:
         rows: list[dict[str, Any]] = []
         pages = 0
         page_req_key = query.pop("page_req_key", None)
+        seen_page_keys = [] if page_req_key in (None, "", b"") else [page_req_key]
         while True:
             call_kwargs = dict(query)
-            if page_req_key not in (None, ""):
+            if page_req_key not in (None, "", b""):
                 call_kwargs["page_req_key"] = page_req_key
             result = method(**call_kwargs)
             pages += 1
@@ -446,8 +448,11 @@ class _FutuAPIClient:
             else:
                 rows.extend(self._rows(result))
                 next_key = None
-            if not paginated or next_key in (None, ""):
+            if not paginated or next_key in (None, "", b""):
                 break
+            if next_key in seen_page_keys:
+                raise RuntimeError("Futu query pagination repeated a page key")
+            seen_page_keys.append(next_key)
             if pages >= 100:
                 raise RuntimeError(
                     "Futu query pagination exceeded 100 pages"

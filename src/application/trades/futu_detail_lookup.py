@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 from domain.domain.symbol_identity import resolve_symbol_identity
 from src.application.payload_helpers import text as _norm_str
@@ -12,7 +13,7 @@ from src.application.payload_helpers import text as _norm_str
 def _rows(data: Any) -> list[dict[str, Any]]:
     if hasattr(data, "to_dict"):
         try:
-            recs = data.to_dict("records")
+            recs = futu_dataframe_records(data)
             if isinstance(recs, list):
                 return [dict(r) for r in recs if isinstance(r, dict)]
         except Exception:

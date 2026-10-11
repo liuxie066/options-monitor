@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway, build_ready_futu_quote_gateway
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.futu_option_terms import _enrich_option_contract_terms
 from domain.domain.ledger.position_fields import normalize_account
@@ -278,7 +279,7 @@ def _dedup_balance_rows(
 def _rows(data: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     if hasattr(data, "to_dict"):
         try:
-            recs = data.to_dict("records")
+            recs = futu_dataframe_records(data)
             if isinstance(recs, list):
                 if strict and any(not isinstance(row, dict) for row in recs):
                     raise ValueError("provider response contains malformed rows")
