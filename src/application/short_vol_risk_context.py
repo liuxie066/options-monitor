@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot
+from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot, normalize_cash_secured_total_by_ccy
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets
@@ -12,6 +12,7 @@ from src.application.portfolio_context_service import cash_snapshot_is_usable
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
+from src.application.cash_totals import sum_by_currency_to_cny
 
 
 PortfolioRiskContext = ShortVolPortfolioContext
@@ -119,44 +120,36 @@ def _short_put_assignment_from_option_ctx(
 ) -> tuple[dict[str, float], float | None, list[str]]:
     unavailable: list[str] = []
     by_symbol: dict[str, float] = {}
+    cny_rates = {
+        "usdcny_exchange_rate": exchange_rate_converter.native_to_cny(1, native_ccy="USD"),
+        "cny_per_hkd_exchange_rate": exchange_rate_converter.native_to_cny(1, native_ccy="HKD"),
+    }
     raw_by_symbol = option_ctx.get("cash_secured_by_symbol_by_ccy") if isinstance(option_ctx, dict) else {}
     if isinstance(raw_by_symbol, dict):
         for raw_symbol, by_ccy in raw_by_symbol.items():
             symbol = canonical_symbol(raw_symbol)
             if not symbol or not isinstance(by_ccy, dict):
                 continue
-            total = 0.0
-            ok = True
-            for ccy, amount in by_ccy.items():
-                converted = amount_to_cny(amount, ccy, exchange_rate_converter=exchange_rate_converter)
-                if converted is None:
-                    unavailable.append(f"short_put_assignment_fx_missing:{symbol}:{normalize_currency(ccy) or ccy}")
-                    ok = False
-                    continue
-                total += float(converted)
-            if ok:
+            total = sum_by_currency_to_cny(by_ccy, **cny_rates)
+            if total is None:
+                unavailable.append(f"short_put_assignment_fx_missing:{symbol}")
+            else:
                 by_symbol[symbol] = by_symbol.get(symbol, 0.0) + total
 
-    total_cny = _float(option_ctx.get("cash_secured_total_cny")) if isinstance(option_ctx, dict) else None
+    total_cny = sum_by_currency_to_cny(normalize_cash_secured_total_by_ccy(option_ctx), **cny_rates)
     if total_cny is None:
-        total_by_ccy = option_ctx.get("cash_secured_total_by_ccy") if isinstance(option_ctx, dict) else {}
-        if isinstance(total_by_ccy, dict):
-            total_cny = 0.0
-            for ccy, amount in total_by_ccy.items():
-                converted = amount_to_cny(amount, ccy, exchange_rate_converter=exchange_rate_converter)
-                if converted is None:
-                    unavailable.append(f"short_put_total_fx_missing:{normalize_currency(ccy) or ccy}")
-                    total_cny = None
-                    break
-                total_cny += float(converted)
-    if total_cny is None and by_symbol:
-        total_cny = sum(by_symbol.values())
+        unavailable.append("short_put_total_fx_missing")
     unresolved = cash_secured_unavailable_for_cash_snapshot(option_ctx, portfolio_ctx)
     if isinstance(unresolved, dict):
         for raw_symbol, reason in unresolved.items():
-            unavailable.append(f"{canonical_symbol(raw_symbol) or raw_symbol}:{reason}")
+            symbol = canonical_symbol(raw_symbol) or raw_symbol
+            unavailable.append(f"{symbol}:{reason}")
+            by_symbol.pop(symbol, None)
     elif unresolved is not None:
         unavailable.append(str(unresolved))
+        by_symbol = {}
+    if unavailable:
+        total_cny = None
     return by_symbol, total_cny, unavailable
 
 

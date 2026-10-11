@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from contextlib import closing
-from pathlib import Path
-from typing import Any
-
 from domain.domain.ledger.events import lot_id_for_open_event
 from .option_allocation import allocate_broker_option_execution
 from .futu_time_repair import apply_futu_time_repair, prepare_futu_time_repair, open_futu_time_repair_store
@@ -242,6 +238,7 @@ from src.application.ledger.publisher import (
     project_stored_trade_events_to_position_lots as project_position_lots_from_trade_facts,
 )
 from src.application.ledger.decision_snapshot import (
+    read_position_query_ledger,
     CURRENT_DECISION_POSITION_FIELDS,
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
@@ -578,69 +575,3 @@ __all__ = [
     "settlement_evidence_id",
     "settlement_observation_semantic",
 ]
-
-
-def read_position_query_ledger(
-    *, base: Path, accounts: list[str], cfg: dict[str, Any] | None = None,
-    data_config: str | Path | None = None, config_path: str | Path | None = None,
-    runtime_root: str | Path | None = None,
-) -> tuple[Any, dict[str, dict[str, Any]]]:
-    """Read canonical occupancy evidence; missing/untrusted is never an empty store."""
-    path = resolve_position_ledger_sqlite_path(
-        base=base, cfg=cfg, data_config=data_config,
-        config_path=config_path, runtime_root=runtime_root,
-    )
-    return _read_position_query_snapshot(path, accounts=accounts)
-
-
-def _read_position_query_snapshot(
-    sqlite_path: str | Path, *, accounts: list[str],
-) -> tuple[Any, dict[str, dict[str, Any]]]:
-    """Freeze verified position and decision facts without a writer/bootstrap path."""
-    from datetime import datetime, timezone
-    from domain.domain.portfolio_scope import portfolio_scope_id
-    from src.application.ledger.decision_snapshot import (
-        _read_account_trade_source_constraints, decision_state_snapshot_from_rows,
-    )
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.ledger.repository_core import assert_final_lot_identity_shape
-
-    from src.application.ledger.read_only_evidence import (
-        open_trade_reconciliation_evidence_repo, verify_trade_receipt_projection,
-        _lot_account, _OptionExecutionPreviewRepository,
-    )
-
-    reader = open_trade_reconciliation_evidence_repo(sqlite_path)
-    with closing(reader._connect()) as conn:
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("BEGIN")
-        assert_final_lot_identity_shape(conn)
-        evidence = reader.read_trade_receipt_evidence(conn=conn)
-        repo = SQLiteOptionPositionsRepository(reader.db_path, initialize=False)
-        # Preserve the canonical row codec, derived columns and ordering after strict JSON validation.
-        evidence["position_lots"] = repo.list_position_lots(conn=conn)
-        verify_trade_receipt_projection(evidence)
-        account_values = sorted(set(accounts) if accounts else {
-            _lot_account(row.get("fields")) for row in evidence["position_lots"]
-        })
-        snapshots = {}
-        observed_at = datetime.now(timezone.utc).isoformat()
-        for account in account_values:
-            if not account:
-                continue
-            rows = repo._read_account_decision_state_rows(
-                account=account, conn=conn,
-                shared_trade_events=evidence["trade_events"],
-                shared_position_lots=evidence["position_lots"],
-            )
-            rows["_account_trade_source_constraints"] = _read_account_trade_source_constraints(
-                repo, account=account, rows=rows,
-            )
-            snapshot = decision_state_snapshot_from_rows(
-                rows, account=account, portfolio_scope_id=portfolio_scope_id(account),
-                source_observed_at=observed_at,
-            )
-            if snapshot.get("snapshot_status") != "trusted":
-                raise ValueError("position query decision evidence unavailable: " + ",".join(snapshot.get("reason_codes") or []))
-            snapshots[account] = snapshot
-    return _OptionExecutionPreviewRepository(reader.db_path, evidence), snapshots

@@ -123,7 +123,7 @@ def test_cash_query_refuses_bad_history_with_fresh_broker_cash(tmp_path, monkeyp
 
     repo = _ledger(tmp_path)
     _break_history(repo, clear_lots=clear_lots)
-    monkeypatch.setattr("src.application.ledger.api.resolve_position_ledger_sqlite_path", lambda **_k: repo.db_path)
+    monkeypatch.setattr("src.application.ledger.queries.resolve_position_ledger_sqlite_path", lambda **_k: repo.db_path)
     portfolio = cash_portfolio({
         "portfolio_source_name": "futu", "cash_by_currency": {"USD": 100000},
         "source_observed_at": datetime.now(timezone.utc).isoformat(),
