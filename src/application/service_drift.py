@@ -1568,9 +1568,26 @@ def _expected_bundle_from_profile(
         "include_content": True,
     }
     bundle = render_service_bundle(**render_kwargs)
+    expected_profile = _bundle_profile(bundle)
+    if include_opend:
+        previous_services_raw = opend.get("services")
+        previous_services = previous_services_raw if isinstance(previous_services_raw, list) else []
+        previous_accounts = {
+            str(item.get("account") or "").strip()
+            for item in previous_services if isinstance(item, dict)
+        }
+        rendered_accounts = {
+            str(item.get("account") or "").strip()
+            for item in (expected_profile.get("opend") or {}).get("services", [])
+        }
+        missing_accounts = (previous_accounts & set(accounts)) - rendered_accounts
+        if missing_accounts:
+            raise ValueError(
+                "OpenD root is missing for previously managed accounts: "
+                + ", ".join(sorted(missing_accounts))
+            )
     if provider == "systemd":
         # Rendering defaults must not become persisted retirement ownership.
-        expected_profile = _bundle_profile(bundle)
         if "accounts" in profile:
             expected_profile["accounts"] = profile["accounts"]
         else:

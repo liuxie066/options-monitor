@@ -404,7 +404,11 @@ launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:
 
 ## 5. OpenD / Futu 前置条件
 
-`options-monitor` 不托管 OpenD 本身。部署前必须确认：
+使用 `service render --include-opend` 且未显式指定 `--opend-root` 时，OpenD 计划读取全部选定市场的配置，并汇总各市场账户的 `futu.opend_root`。缺失、解析失败或同一账户的 root/host/port 跨市场冲突会直接报错，不会退回默认单实例。配置中没有本地 OpenD root 时，请明确指定 `--opend-root` 使用单实例；已记录 root 且未绑定账户的旧单实例 profile 保留该 root；绑定账户的单实例仍以配置为准。
+
+可以同时包含托管本地 OpenD 和连接远端 OpenD 的账户；未配置 root 的账户不生成本地 unit。对于仍在 profile 账户范围内、此前已托管的账户，root 丢失会阻止 `service drift --confirm`，并保留原有 unit 和 profile。先补全配置，再重新预览和确认修复。
+
+默认部署不托管 OpenD 进程；启用 `--include-opend` 可以生成托管服务定义。部署前必须确认：
 
 - Linux 机器能连接可用 OpenD host/port，或本机已运行 OpenD。
 - Mac 机器的 OpenD 登录状态稳定，launchd 服务能访问同一端口。
