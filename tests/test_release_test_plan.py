@@ -299,11 +299,12 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     requirements = (root / "requirements" / "dev.txt").read_text(encoding="utf-8").splitlines()
     constraints = (root / "constraints" / "dev.txt").read_text(encoding="utf-8").splitlines()
     full_command = (
-        "./.venv/bin/python -m pytest -n 2 --dist loadfile "
+        "./.venv/bin/python -m pytest -vv -n 2 --dist loadfile "
         "--max-worker-restart=0 --durations=25"
     )
     pytest_commands = [
-        line.strip() for line in text.splitlines() if "./.venv/bin/python -m pytest" in line
+        line.strip().removesuffix("\\").rstrip()
+        for line in text.splitlines() if "./.venv/bin/python -m pytest" in line
     ]
 
     assert not (root / ".github" / "workflows" / "agent-plugin.yml").exists()

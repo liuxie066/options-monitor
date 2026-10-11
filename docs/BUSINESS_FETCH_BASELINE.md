@@ -4,6 +4,8 @@
 
 ## 版本、复现与证据范围
 
+交付时整合并发 main 更新至 `e3756a5cc938e6a3caed76121325087cd8557092`，变动为 service deploy、CI 门禁和既有测试；本基线涉及的取数 owner、脚本、fixture 与依赖未变化。下述测量仍绑定原审计源码和脚本摘要；最终集成门禁单独针对更新后的 base 验证。
+
 审计基线：`1bd339cc96f77564d7879024a36f5d384da337fb`。测量 checkout 的 HEAD 是 accepted-plan checkpoint `0aa921b88d4a8988083938c48d0060973662727c`，当时脚本与测试待提交；脚本内容摘要见下方。最终 PR 中的脚本和测试是可复现来源，checkpoint 的 Git tree 本身不包含新脚本。
 
 ```sh

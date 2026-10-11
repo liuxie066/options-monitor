@@ -1368,6 +1368,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     profile_content_changed = _profile_content_changed(persisted_profile, bundle)
     manual_actions = _manual_actions(
         provider=provider,
+        expected_files=expected_files,
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
@@ -2100,6 +2101,7 @@ def _summary_with_apply_errors(summary: dict[str, Any], errors: list[str]) -> di
 def _manual_actions(
     *,
     provider: str,
+    expected_files: dict[str, dict[str, Any]],
     missing_installed_units: list[str],
     mismatched_units: list[str],
     activation_drift_units: list[str],
@@ -2132,6 +2134,7 @@ def _manual_actions(
             for name in missing_installed_units
             if name.endswith(".service")
             and ("trade-intake" in name or "feishu-ws" in name or "wechat-clawbot" in name)
+            and "[Install]" in expected_files[name]["content"].splitlines()
         ]
         actions.extend(f"manual_enable_long_running_service: sudo systemctl enable --now {name}" for name in long_running)
         actions.extend(f"manual_review_unit_content: sudo systemctl cat {name}" for name in mismatched_units)
