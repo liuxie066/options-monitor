@@ -866,3 +866,106 @@ def test_prepare_does_not_refresh_option_quotes(monkeypatch, tmp_path: Path) -> 
     assert PerformanceEvidenceSQLiteRepository(
         ledger_path
     ).read_all().valuation_marks == ()
+
+
+def test_prepare_timing_preserves_shared_reads_and_replay(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from src.application import prepared_option_positions_context as mod
+    from src.application.multi_tick_audit import prepared_context_timing_scope
+
+    run_id = "timed-options"
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, run_id)
+    observation = _fx_stub(timestamp=NOW.isoformat())()
+    observation["observed_at"] = observation["timestamp"]
+    observation["quote_timestamps"] = {pair: observation["timestamp"] for pair in observation["rates"]}
+    fx = Mock(return_value=observation)
+    read = Mock(wraps=mod.read_decision_state_rows_many)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", fx)
+    monkeypatch.setattr(mod, "read_decision_state_rows_many", read)
+    log = SimpleNamespace(safe_event=Mock())
+    kwargs = dict(run_id=run_id, config_path=config_path, configs=configs, authorities=authorities)
+    with prepared_context_timing_scope(runlog=log):
+        batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert batch.unavailable_by_account == {}
+    assert batch.ledger_read_count == read.call_count == 2
+    assert batch.fx_observation_count == fx.call_count == 1
+    assert batch.fx_evidence_status == "persisted"
+    terminals = [c for c in log.safe_event.call_args_list if c.args[1] != "start"]
+    for phase in ("ledger_read_a", "ledger_read_b", "fx_observation", "fx_evidence", "projection", "context_build"):
+        shared = [c for c in terminals if c.kwargs["data"]["phase"] == phase]
+        assert len(shared) == 1
+        assert "account" not in shared[0].kwargs["data"]
+    for phase in ("ledger_paths", "current_projection", "account_context", "wheel_projection", "ready_publication"):
+        assert {c.kwargs["data"]["account"] for c in terminals if c.kwargs["data"]["phase"] == phase} == {"lx", "sy"}
+    assert all(set(c.kwargs["data"]) <= {"phase", "account", "outcome", "error_type"} for c in log.safe_event.call_args_list)
+    log.safe_event.reset_mock()
+    with prepared_context_timing_scope(runlog=log):
+        repeated = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert repeated.manifests == batch.manifests
+    assert repeated.ledger_read_count == repeated.fx_observation_count == 0
+    assert read.call_count == 2 and fx.call_count == 1
+    assert {c.kwargs["data"]["phase"] for c in log.safe_event.call_args_list} == {"post_portfolio_prepare", "option_reuse"}
+
+
+@pytest.mark.parametrize("operation,phase", [
+    ("resolve_position_data_config_path", "ledger_paths"),
+    ("read_decision_state_rows_many", "ledger_read_a"),
+    ("get_exchange_rates_or_fetch_latest", "fx_observation"),
+    ("read_current_decision_projection", "current_projection"),
+    ("decision_state_snapshots_from_rows_many", "projection"),
+    ("build_wheel_read_model_from_rows", "wheel_projection"),
+    ("_publish_ready_context", "ready_publication"),
+    ("_publish_unavailable_manifest", "unavailable_publication"),
+])
+def test_prepare_timing_reports_caught_failure_without_changing_fallback(monkeypatch, tmp_path, operation, phase):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from src.application import prepared_option_positions_context as mod
+    from src.application.multi_tick_audit import prepared_context_timing_scope
+
+    run_id = "timed-failure"
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, run_id)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
+    if phase == "unavailable_publication":
+        monkeypatch.setattr(mod, "_publish_ready_context", Mock(side_effect=OSError("private value")))
+    monkeypatch.setattr(mod, operation, Mock(side_effect=OSError("private value")))
+    log = SimpleNamespace(safe_event=Mock())
+    with prepared_context_timing_scope(runlog=log):
+        batch = _prepare(tmp_path, run_id=run_id, config_path=config_path, configs=configs, authorities=authorities)
+    errors = [c for c in log.safe_event.call_args_list if c.args[1] == "error" and c.kwargs["data"]["phase"] == phase]
+    assert errors and all(c.kwargs["data"]["error_type"] == "OSError" for c in errors)
+    assert "private value" not in str(log.safe_event.call_args_list)
+    assert "fx_evidence" not in {c.kwargs["data"]["phase"] for c in log.safe_event.call_args_list}
+    if phase in {"fx_observation", "current_projection"}:
+        assert batch.unavailable_by_account == {}
+        assert set(batch.manifests) == {"lx", "sy"}
+    else:
+        assert set(batch.unavailable_by_account) == {"lx", "sy"}
+    if phase == "unavailable_publication":
+        assert batch.manifests == {}
+
+
+def test_prepare_timing_failed_second_fence_preserves_existing_fallback(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from src.application import prepared_option_positions_context as mod
+    from src.application.multi_tick_audit import prepared_context_timing_scope
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, "timed-fence-b")
+    original = mod.read_decision_state_rows_many
+    read = Mock()
+    def _read(*args, **kwargs):
+        if read.call_count == 2:
+            raise OSError("private B failure")
+        return original(*args, **kwargs)
+    read.side_effect = _read
+    monkeypatch.setattr(mod, "read_decision_state_rows_many", read)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
+    log = SimpleNamespace(safe_event=Mock())
+    with prepared_context_timing_scope(runlog=log):
+        batch = _prepare(tmp_path, run_id="timed-fence-b", config_path=config_path, configs=configs, authorities=authorities)
+    assert read.call_count == 2
+    assert batch.ledger_read_count == 1
+    assert set(batch.manifests) == {"lx", "sy"}
+    assert batch.unavailable_by_account == {}
+    assert any(c.args[1] == "error" and c.kwargs["data"]["phase"] == "ledger_read_b" for c in log.safe_event.call_args_list)
