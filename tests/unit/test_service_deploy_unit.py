@@ -2323,3 +2323,53 @@ def test_upgrade_reconcile_fails_closed_on_bad_child_result(
     )
     if returncode:
         assert any(f"returncode: {returncode}" in item for item in excinfo.value.remediation)
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [1, 600, 1800])
+def test_service_timeout_profile_roundtrip(tmp_path, target, timeout_seconds):
+    from src.application.service_drift import _expected_bundle_from_profile
+
+    repo, runtime = tmp_path / "repo", tmp_path / "runtime"
+    bundle = _render_bundle(repo, runtime, target=target, accounts=["lx"],
+                           markets=["us", "hk"], timeout_seconds=timeout_seconds,
+                           use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    assert profile["timeout_seconds"] == timeout_seconds
+    rebuilt = _expected_bundle_from_profile(profile, provider=target,
+                                            repo_root=repo, runtime_root=runtime)
+    assert {item["relative_path"]: item["content"] for item in rebuilt["files"]} == {
+        item["relative_path"]: item["content"] for item in bundle["files"]
+    }
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+def test_service_timeout_legacy_profile_uses_default(tmp_path, target):
+    from src.application.service_deploy import DEFAULT_TIMEOUT_SECONDS
+    from src.application.service_drift import _expected_bundle_from_profile
+
+    repo, runtime = tmp_path / "repo", tmp_path / "runtime"
+    bundle = _render_bundle(repo, runtime, target=target, accounts=["lx"],
+                           markets=["us", "hk"], use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile.pop("timeout_seconds", None)
+    rebuilt = _expected_bundle_from_profile(profile, provider=target,
+                                            repo_root=repo, runtime_root=runtime)
+    assert {item["relative_path"]: item["content"] for item in rebuilt["files"]
+            if item["kind"] != "service_profile"} == {
+        item["relative_path"]: item["content"] for item in bundle["files"]
+        if item["kind"] != "service_profile"
+    }
+    restored = json.loads(next(item["content"] for item in rebuilt["files"]
+                               if item["kind"] == "service_profile"))
+    assert restored["timeout_seconds"] == DEFAULT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [None, True, False, "1800", 1800.5, 0, -1, [], {}])
+def test_service_render_rejects_invalid_timeout(tmp_path, target, timeout_seconds):
+    with pytest.raises(ValueError, match="timeout_seconds must be a positive integer"):
+        _render_bundle(tmp_path / "repo", tmp_path / "runtime", target=target,
+                       accounts=["lx"], markets=["us"], timeout_seconds=timeout_seconds)
