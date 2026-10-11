@@ -4329,3 +4329,130 @@ def test_preserved_drift_returns_success_through_public_cli(monkeypatch, capsys,
     assert payload["data"]["activation_states"][target] == "disabled"
     assert not any(target in cmd and any(action in cmd for action in ("enable", "start", "restart", "unmask"))
                    for cmd in commands)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_service_drift_preserves_timeout_while_repairing_and_retrying(tmp_path, legacy):
+    repo, runtime, units = _drift_roots(tmp_path)
+    timeout = 600 if legacy else 1800
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us", "hk"],
+                           timeout_seconds=timeout, use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    if legacy:
+        profile.pop("timeout_seconds", None)
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    original = {name: (units / name).read_bytes() for name in
+                ("options-monitor-tick-us.service", "options-monitor-tick-hk.service")}
+    damaged = units / "options-monitor-projection-verify.timer"
+    expected = damaged.read_bytes()
+    damaged.write_text("[Timer]\nOnCalendar=daily\n")
+    runner = _fake_systemd_query_runner()
+    before = _drift_at(repo, runtime, units, run_cmd=runner)
+    assert before["mismatched_units"] == [damaged.name]
+    after = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert after["apply_errors"] == []
+    assert after["summary"]["ok"] is True
+    assert damaged.read_bytes() == expected
+    assert json.loads(profile_path.read_text())["timeout_seconds"] == timeout
+    for name, content in original.items():
+        assert (units / name).read_bytes() == content
+        assert f"--timeout {timeout}" in content.decode()
+        assert f"TimeoutStartSec={timeout + 300}" in content.decode()
+    repeat = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert repeat["summary"]["ok"] is True
+    assert repeat["changed"] is False
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("timeout_seconds", [None, True, False, "1800", 1800.5, 0, -1, [], {}])
+def test_service_drift_invalid_timeout_has_no_effects(tmp_path, confirm, timeout_seconds):
+    repo, runtime, units = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
+                           use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile["timeout_seconds"] = timeout_seconds
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    profile_before = profile_path.read_bytes()
+    units_before = {item.name: item.read_bytes() for item in units.iterdir()}
+    calls = []
+    runner = _fake_systemd_query_runner(record=lambda command, kwargs: calls.append(command))
+    with pytest.raises(ValueError, match="timeout_seconds must be a positive integer"):
+        _drift_at(repo, runtime, units, confirm=confirm, run_cmd=runner)
+    assert profile_path.read_bytes() == profile_before
+    assert {item.name: item.read_bytes() for item in units.iterdir()} == units_before
+    assert calls == []
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [1800, 0])
+def test_service_timeout_public_wrapper(tmp_path, target, timeout_seconds):
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    source = runtime / "config.yaml"
+    source.write_text("accounts: [lx]\n")
+    output = tmp_path / "rendered"
+    result = subprocess.run([
+        str(repo / "om"), "service", "render", "--target", target,
+        "--runtime-root", str(runtime), "--config-yaml", str(source),
+        "--accounts", "lx", "--markets", "us", "--timeout", str(timeout_seconds),
+        "--output-dir", str(output),
+    ], cwd=tmp_path, env={"PATH": os.environ["PATH"], "OM_PYTHON": sys.executable,
+                         "OM_RUNTIME_ROOT": str(runtime)},
+        capture_output=True, text=True, timeout=30)
+    payload = json.loads(result.stdout)
+    if timeout_seconds == 0:
+        assert result.returncode != 0
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "CONFIG_ERROR"
+        assert "timeout_seconds" in payload["error"]["message"]
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert payload["ok"] is True
+    profile = json.loads((output / "service.profile.json").read_text())
+    assert profile["timeout_seconds"] == timeout_seconds
+    if target == "systemd":
+        tick = (output / "systemd/options-monitor-tick-us.service").read_text()
+        assert "--timeout 1800" in tick
+        assert "TimeoutStartSec=2100" in tick
+    else:
+        import plistlib
+
+        args = plistlib.loads((output / "launchd/com.options-monitor.tick-us.plist").read_bytes())["ProgramArguments"]
+        assert args[args.index("--timeout") + 1] == "1800"
+    assert not (runtime / "service.profile.json").exists()
+
+
+def test_service_drift_timeout_override_persists_before_next_reconcile(tmp_path):
+    repo, runtime, units = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
+                           timeout_seconds=600, use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    desired = {**profile, "timeout_seconds": 1800}
+    runner = _fake_systemd_query_runner()
+    before = _drift_at(repo, runtime, units, profile=desired, run_cmd=runner)
+    assert before["profile_content_changed"] is True
+    after = _drift_at(repo, runtime, units, profile=desired, confirm=True, run_cmd=runner)
+    assert after["summary"]["ok"] is True
+    assert after["apply_errors"] == []
+    assert json.loads(profile_path.read_text())["timeout_seconds"] == 1800
+    tick = (units / "options-monitor-tick-us.service").read_text()
+    assert "--timeout 1800" in tick
+    assert "TimeoutStartSec=2100" in tick
+    retry = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert retry["summary"]["ok"] is True
+    assert retry["changed"] is False
+    assert (units / "options-monitor-tick-us.service").read_text() == tick
