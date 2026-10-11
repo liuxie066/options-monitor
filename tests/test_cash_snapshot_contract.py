@@ -485,8 +485,7 @@ def test_public_cash_entries_share_reader_policy(tmp_path, monkeypatch, entry, c
     monkeypatch.setattr(query, "fetch_futu_portfolio_context", fetch)
     monkeypatch.setattr(pipeline, "fetch_futu_portfolio_context", fetch)
     monkeypatch.setattr(pipeline, "_persist_source_snapshot", lambda *_: None)
-    monkeypatch.setattr(query, "_load_option_position_records", lambda *_: (object(), []))
-    monkeypatch.setattr(query, "decision_state_snapshot", lambda *a, **kw: {})
+    monkeypatch.setattr(query, "_load_option_position_records", lambda *a, **kw: ([], None))
     monkeypatch.setattr(query, "build_option_positions_context", lambda *a, **kw: {
         "decision_snapshot_status": "trusted", "cash_secured_total_by_ccy": {"CNY": 30}, "cash_secured_total_cny": 30,
         "cash_secured_by_symbol_by_ccy": {}, "cash_secured_unavailable_by_symbol": {}})

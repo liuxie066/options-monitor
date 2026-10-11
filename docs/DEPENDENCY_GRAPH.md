@@ -12,11 +12,11 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1162 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 497)
-- Internal import edges: 8984 total, 3730 production/script edges excluding tests
+- Python files scanned: 1163 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 498)
+- Internal import edges: 9003 total, 3734 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
-- Production module cycles: 0
+- Production module cycles: 1
 - Production package cycles after compression: 2
 
 ## Layer Graph
@@ -46,8 +46,8 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|3965| application
-  tests -->|511| domain
+  tests -->|3979| application
+  tests -->|512| domain
   tests -->|2| domain_services
   tests -->|274| infrastructure
   tests -->|316| interfaces
@@ -79,8 +79,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3965 |
-| tests | domain | 511 |
+| tests | application | 3979 |
+| tests | domain | 512 |
 | tests | interfaces | 316 |
 | tests | infrastructure | 274 |
 | tests | storage | 39 |
@@ -93,9 +93,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 259 |
+| src.application | domain.domain | 258 |
 | src.interfaces | src.application | 157 |
-| src.application.ledger | domain.domain | 137 |
+| src.application.ledger | domain.domain | 138 |
 | src.application | src.infrastructure | 132 |
 | src.application.ledger | domain.domain.ledger | 71 |
 | src.application.trades | domain.domain | 67 |
@@ -164,7 +164,7 @@ This matches the current architecture rule that `domain/domain/` must not import
 
 ### Module-Level Cycles
 
-- No production module cycles detected.
+- 8 modules: `src.application.ledger.assigned_stock_projection`, `src.application.ledger.combo_membership`, `src.application.ledger.current_decision_migration`, `src.application.ledger.current_decision_oracle`, `src.application.ledger.current_decision_projection`, `src.application.ledger.decision_snapshot`, `src.application.ledger.queries`, `src.application.ledger.read_only_evidence`
 
 ### Package-Level Cycles
 
@@ -204,9 +204,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
+| src.application.ledger.queries | 31 |
 | src.application.pipeline_watchlist | 31 |
 | src.interfaces.cli.option_positions | 31 |
-| src.application.ledger.queries | 30 |
 | src.application.agent_tools.runtime_status_impl | 29 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.multi_account_tick | 29 |

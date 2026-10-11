@@ -28,7 +28,7 @@ from src.application.portfolio_management import (
 )
 from src.application.ledger.api import (
     list_open_short_assignment_rows,
-    open_position_ledger_from_runtime_config,
+    read_position_query_ledger,
 )
 from src.infrastructure.portfolio_management_client import (
     SERVICE_URL_ENV,
@@ -149,10 +149,11 @@ def _load_runtime_and_positions(
     unknown = [account for account in accounts if account not in configured_accounts]
     if unknown:
         raise AssignmentScenarioInputError(f"unknown accounts: {', '.join(unknown)}")
-    _data_config, repo = open_position_ledger_from_runtime_config(
+    repo, _snapshots = read_position_query_ledger(
         base=repo_base(),
         cfg=cfg,
         config_path=config_path,
+        accounts=list(accounts),
     )
     return (
         list_open_short_assignment_rows(repo, accounts=list(accounts)),
