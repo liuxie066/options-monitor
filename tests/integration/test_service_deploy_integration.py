@@ -60,7 +60,7 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     repo.mkdir()
 
     bundle = _render_bundle(
-        repo, runtime, accounts=["lx"], markets=["us"], include_opend=True, include_feishu_agent_credential=True,
+        repo, runtime, accounts=["lx"], markets=["us"], include_opend=True, opend_root=tmp_path / "opend", include_feishu_agent_credential=True,
         feishu_agent_credential_helper_path=helper, feishu_agent_credential_store=agent_store,
         feishu_holdings_credential_store=holdings_store, feishu_agent_credential_env_file=runtime_env,
         deploy_user="liuxie",
