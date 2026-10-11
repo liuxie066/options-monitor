@@ -96,6 +96,7 @@ from src.interfaces.cli.service_ops import (
     service_cleanup,
     service_drift,
     service_preflight,
+    service_repo_base,
     service_rollback,
     service_status_from_profile,
     service_upgrade,
@@ -349,7 +350,7 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command in {"service", "update"}:
             return _print(handle_service_update_command(
                 args,
-                repo_base_fn=repo_base,
+                repo_base_fn=service_repo_base,
                 load_service_profile_fn=load_service_profile,
                 render_service_bundle_fn=render_service_bundle,
                 service_preflight_fn=service_preflight,

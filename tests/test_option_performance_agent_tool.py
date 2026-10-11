@@ -74,7 +74,7 @@ def _patch_dependencies(monkeypatch: pytest.MonkeyPatch, *, report: dict[str, An
     )
     monkeypatch.setattr(
         positions,
-        "resolve_option_positions_repo",
+        "open_performance_query_ledger_from_data_config",
         lambda **_kwargs: (Path("/tmp/portfolio.runtime.json"), object()),
     )
     monkeypatch.setattr(positions, "repo_base", lambda: Path("/tmp"))
@@ -203,7 +203,7 @@ def test_option_performance_report_translates_only_stable_read_reasons(
     [
         "load_runtime_config",
         "resolve_public_data_config_path",
-        "resolve_option_positions_repo",
+        "open_performance_query_ledger_from_data_config",
         "repo_base",
     ],
 )

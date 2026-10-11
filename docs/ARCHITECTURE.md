@@ -405,3 +405,12 @@ When adding code:
 - Put CLI, Tool Gateway, and Inbound Bot argument/response adaptation in `src/interfaces`.
 - Prefer a small facade-preserving move over changing public command behavior.
 - Add or update boundary tests when moving ownership between layers.
+
+## 可显式启用的期权绩效查询边界
+
+CLI / Tool Gateway / Bot 经 `agent_tools.materialization_impl.option_performance_report_tool`
+路由：未设置服务 URL 时使用 `performance.query`；显式服务模式经唯一 HTTP 客户端到 loopback
+`performance.query_http`，服务端仍调用 `performance.query`。查询只经 ledger API 的严格只读
+事件快照进入现有 projection / reducer，不触发 bootstrap 或修复。账户与配置由操作员在服务
+启动时绑定，故障无本地回退。[接口与限制](OPTION_PERFORMANCE_DESIGN.md#explicit-loopback-query-service)
+由绩效合同维护；此试点保持同仓库与同账本，没有部署或数据库拆分。

@@ -565,3 +565,20 @@ def verify_trade_receipt_projection(evidence: dict[str, Any]) -> None:
         current_lots=evidence["position_lots"], diagnostics=projected.diagnostics)
     if _blocking_count(comparison["summary"]):
         raise ValueError("recorded execution projection unavailable")
+
+
+def open_performance_query_repo(sqlite_path: str | Path) -> Any:
+    """Read strict performance source events without initializing or repairing a store."""
+    return _ReadOnlyPerformanceQueryRepository(Path(sqlite_path))
+
+
+class _ReadOnlyPerformanceQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepository):
+    def list_trade_events(self) -> list[dict[str, Any]]:
+        from src.application.ledger.repository_core import assert_final_lot_identity_shape
+
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if not self._tables_exist(conn, "trade_events", "position_lots"):
+                raise sqlite3.DatabaseError("performance query requires an existing ledger schema")
+            assert_final_lot_identity_shape(conn)
+            return self._read_trade_events(conn, strict=True)

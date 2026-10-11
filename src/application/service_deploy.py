@@ -327,28 +327,6 @@ def _read_json_config(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _first_existing_config(config_by_market: dict[str, Path], market_values: list[str]) -> dict[str, Any]:
-    for market in market_values:
-        path = config_by_market.get(market)
-        if path is not None and path.exists():
-            cfg = _read_json_config(path)
-            if cfg:
-                return cfg
-    return {}
-
-
-def _first_yaml_runtime_config(*, repo_root: Path, config_yaml_path: Path, market_values: list[str]) -> dict[str, Any]:
-    for market in market_values:
-        cfg, _meta = resolve_yaml_runtime_config(
-            repo_root=repo_root,
-            market=market,
-            config_path=config_yaml_path,
-        )
-        if cfg:
-            return cfg
-    return {}
-
-
 def _opend_service_plans_from_authoring_config(
     *,
     repo_root: Path,
@@ -358,13 +336,14 @@ def _opend_service_plans_from_authoring_config(
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
-    config = (
-        _first_yaml_runtime_config(repo_root=repo_root, config_yaml_path=config_yaml_path, market_values=market_values)
-        if config_yaml_path is not None
-        else _first_existing_config(config_by_market, market_values)
+    configs = _runtime_configs_by_market(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
     )
-    return _opend_service_plans_from_config(
-        config=config,
+    return _opend_service_plans_from_configs(
+        configs_by_market=configs,
         repo_root=repo_root,
         accounts=accounts,
         executable=executable,
@@ -376,25 +355,37 @@ def _opend_executable_path(root: Path, executable: str | Path) -> Path:
     return raw if raw.is_absolute() else root / raw
 
 
-def _opend_service_plans_from_config(
+def _opend_service_plans_from_configs(
     *,
-    config: dict[str, Any],
+    configs_by_market: dict[str, dict[str, Any]],
     repo_root: Path,
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
     candidates: list[tuple[str, Path, str | None, int | None]] = []
     for account in accounts:
-        runtime_plan = build_account_runtime_plan(config, account=account)
-        if runtime_plan.account_type != "futu":
+        runtime_plans = [
+            build_account_runtime_plan(config, account=account)
+            for config in configs_by_market.values()
+            if account in accounts_from_config(config, fallback=())
+        ]
+        if not runtime_plans:
+            raise ValueError(f"OpenD account config is missing for selected account: {account}")
+        facts = {
+            (plan.account_type,
+             _absolute_path_preserve_symlink(plan.futu_opend_root, base=repo_root) if plan.futu_opend_root else None,
+             plan.futu_host, plan.futu_port)
+            for plan in runtime_plans
+        }
+        if len(facts) != 1:
+            raise ValueError(f"conflicting OpenD settings across markets for account: {account}")
+        account_type, root, host, port = next(iter(facts))
+        if account_type != "futu" or root is None:
             continue
-        if not runtime_plan.futu_opend_root:
-            continue
-        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root),
-                           runtime_plan.futu_host, runtime_plan.futu_port))
+        candidates.append((account, root, host, port))
 
     if not candidates:
-        return []
+        raise ValueError("no configured OpenD roots for selected accounts; provide --opend-root for an explicit single instance")
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
@@ -1150,7 +1141,7 @@ def render_service_bundle(
             accounts=account_values,
             executable=opend_executable_value,
         )
-    if include_opend and not opend_service_plans:
+    if include_opend and explicit_opend_root:
         opend_root_path = _resolve_path(
             opend_root,
             base=repo,

@@ -332,6 +332,14 @@ om-agent run --tool option_performance_report \
 券商确认的零价期权平仓按成交时间更新未平仓数量；原因待证时胜率暂不可算，
 现金和费用证据完整时仍可计算收益率。历史未入账成交不会自动补账。
 
+绩效查询可显式启用本地 HTTP 服务：操作员先在服务端与消费者进程私下设置同一
+`OM_PERFORMANCE_SERVICE_TOKEN`，再运行
+`om option-performance serve --config-key us --config-path /runtime/config.us.json --port 8766`。
+消费者设置 `OM_PERFORMANCE_SERVICE_URL=http://127.0.0.1:8766` 后，CLI、Tool Gateway 和 Bot
+通过同一客户端查询；服务不可用时明确报错。未设置 URL 时仍使用同一查询 owner 的本地只读路径。
+服务模式不接受消费者的 `config_path`／`data_config` 覆盖。接口、账户绑定、分页凭据及限制见
+[绩效服务合同](docs/OPTION_PERFORMANCE_DESIGN.md#explicit-loopback-query-service)。
+
 ### Research
 
 只收集并输出到终端、不写 evidence bundle：

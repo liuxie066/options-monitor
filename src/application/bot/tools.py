@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -141,6 +142,11 @@ def build_tool_payload(
             if nested_account not in allowed or (needs_account_scope and nested_account != account):
                 return None, "query.account is outside or conflicts with the configured scope"
             payload["query"] = {**nested_query, "account": nested_account}
+    if tool_name == "option_performance_report" and os.environ.get("OM_PERFORMANCE_SERVICE_URL", "").strip():
+        # Host scope was checked locally; server paths are never request selectors.
+        for name in ("config_path", "data_config"):
+            if name in trusted_fixed and payload.get(name) == trusted_fixed[name]:
+                payload.pop(name, None)
     return payload, None
 
 

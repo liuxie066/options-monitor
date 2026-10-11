@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.service_cleanup import service_cleanup
 from src.application.runtime_paths import resolve_runtime_root
@@ -34,6 +33,11 @@ from src.application.service_upgrade import (
 from src.application.write_contract import attach_write_contract
 
 
+def service_repo_base() -> Path:
+    # Service definitions must follow the invoked current link across upgrades.
+    return Path(os.path.abspath(__file__)).parents[3]
+
+
 def add_service_update_commands(subparsers: Any) -> None:
     service = subparsers.add_parser("service", help="render and inspect platform service definitions")
     service_sub = service.add_subparsers(dest="service_command", required=True)
@@ -59,7 +63,7 @@ def add_service_update_commands(subparsers: Any) -> None:
             lifecycle.add_argument("--channel-market", choices=("us", "hk"), default=None)
     service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
     service_render.add_argument("--target", required=True, choices=("systemd", "launchd"))
-    service_render.add_argument("--repo-root", default=None)
+    service_render.add_argument("--repo-root", default=None, help="repository path; defaults to this CLI's path, preserving symlinks")
     service_render.add_argument("--runtime-root", default=None)
     service_render.add_argument("--accounts", nargs="+", default=None)
     service_render.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
@@ -319,7 +323,7 @@ def _config_paths_from_args(args: argparse.Namespace) -> dict[str, str]:
 def handle_service_update_command(
     args: argparse.Namespace,
     *,
-    repo_base_fn: Callable[[], Path] = repo_base,
+    repo_base_fn: Callable[[], Path] = service_repo_base,
     load_service_profile_fn: Callable[..., dict[str, Any]] = load_service_profile,
     render_service_bundle_fn: Callable[..., dict[str, Any]] = render_service_bundle,
     service_preflight_fn: Callable[..., dict[str, Any]] = service_preflight,
@@ -349,7 +353,7 @@ def handle_service_update_command(
     if args.command == "service" and args.service_command == "render":
         bundle = render_service_bundle_fn(
             target=args.target,
-            repo_root=args.repo_root,
+            repo_root=args.repo_root or repo_base_fn(),
             runtime_root=args.runtime_root,
             accounts=args.accounts,
             markets=args.markets,

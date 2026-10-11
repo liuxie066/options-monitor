@@ -219,7 +219,7 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
     repo.mkdir()
     store = tmp_path / "credstore.encrypted"
     bundle = _render_bundle(
-        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, include_feishu_ws=True,
+        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, opend_root=tmp_path / "opend", include_feishu_ws=True,
         include_quality_monitoring=True, include_secret_credentials=True, secret_credential_store_root=store,
         deploy_user="liuxie",
     )
@@ -278,7 +278,7 @@ def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: 
     repo.mkdir()
     store = tmp_path / "credstore.encrypted"
     bundle = _render_bundle(
-        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, include_feishu_ws=True,
+        repo, tmp_path / "runtime", accounts=["lx"], markets=["us"], include_opend=True, opend_root=tmp_path / "opend", include_feishu_ws=True,
         include_quality_monitoring=True, include_secret_credentials=True, secret_credential_delivery="runtime-files",
         secret_credential_store_root=store, deploy_user="liuxie",
     )
@@ -641,7 +641,7 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     default_files = {item["relative_path"]: item for item in default_bundle["files"]}
     assert "systemd/options-monitor-quality-http.service" not in default_files
 
-    bundle = _render_bundle(repo, runtime, markets=["us", "hk"], include_opend=True, include_quality_monitoring=True)
+    bundle = _render_bundle(repo, runtime, markets=["us", "hk"], include_opend=True, opend_root=tmp_path / "opend", include_quality_monitoring=True)
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     assert not any("quality-http" in name for name in files)
