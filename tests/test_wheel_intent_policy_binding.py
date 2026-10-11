@@ -133,6 +133,7 @@ def _environment(tmp_path, direction, monkeypatch):
     if direction == "put":
         capacity["cash_evidence"] = cash_snapshot_evidence(_cash())
     if direction == "call":
+        capacity["position_evidence"] = cash_portfolio({"source_observed_at": observed_at})
         decision = decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"),
             source_observed_at=observed_at, current_decision_now_ms=5_000)
         capacity["decision_state_fingerprint"] = decision["decision_state_fingerprint"]

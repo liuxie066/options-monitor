@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.cash_evidence_helpers import cash_portfolio
 
 from src.application.prefilters import apply_prefilters
 
@@ -42,7 +43,7 @@ def test_apply_prefilters_treats_shared_symbol_without_account_holding_as_benign
         cc={"enabled": True},
         want_put=False,
         want_call=True,
-        portfolio_ctx={
+        portfolio_ctx=cash_portfolio({
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "available"},
             "stocks_by_symbol": {
@@ -53,7 +54,7 @@ def test_apply_prefilters_treats_shared_symbol_without_account_holding_as_benign
                     "currency": "HKD",
                 }
             },
-        },
+        }),
     )
 
     assert pf.want_call is False
@@ -68,13 +69,13 @@ def test_apply_prefilters_keeps_sell_call_with_futu_portfolio_stock() -> None:
         cc={'enabled': True},
         want_put=False,
         want_call=True,
-        portfolio_ctx={
+        portfolio_ctx=cash_portfolio({
             'portfolio_source_name': 'futu',
             'capacity_authority': {'status': 'available'},
             'stocks_by_symbol': {
                 'NVDA': {'symbol': 'NVDA', 'shares': 200, 'avg_cost': 100.0, 'currency': 'USD'}
             },
-        },
+        }),
     )
     assert pf.want_call is True
     assert pf.stock is not None

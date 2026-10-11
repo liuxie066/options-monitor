@@ -238,6 +238,7 @@ from src.application.ledger.publisher import (
     project_stored_trade_events_to_position_lots as project_position_lots_from_trade_facts,
 )
 from src.application.ledger.decision_snapshot import (
+    read_position_query_ledger,
     CURRENT_DECISION_POSITION_FIELDS,
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
@@ -472,6 +473,7 @@ __all__ = [
     "open_position_ledger_from_data_config",
     "open_performance_query_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
+    "read_position_query_ledger",
     "open_trade_reconciliation_evidence_repo",
     "plan_expired_position_closes",
     "position_lot_context_view",

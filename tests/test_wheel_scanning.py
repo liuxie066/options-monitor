@@ -278,12 +278,12 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
     }
     facts = build_shared_coverage_facts(
         account="lx",
-        portfolio_context={
+        portfolio_context=cash_portfolio({
             "source_observed_at": "2026-04-01T00:00:00+00:00",
             "stocks_by_symbol": {
                 "NVDA": {"shares": 200, "can_sell_qty": 200}
             },
-        },
+        }),
         option_context={
             "decision_snapshot_status": "trusted",
             "locked_shares_status": "available",
@@ -910,7 +910,7 @@ def test_unknown_wheel_reservation_blocks_scan_and_transaction_coverage():
                  "active_intent_reserved_shares": reserved}
         fact = build_shared_coverage_facts(
             account="lx",
-            portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 200, "can_sell_qty": 200}}},
+            portfolio_context=cash_portfolio({"stocks_by_symbol": {"NVDA": {"shares": 200, "can_sell_qty": 200}}}),
             option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {}},
             wheel_read_model={"batches": [batch]},
         )[0]
@@ -972,7 +972,7 @@ def test_shared_wheel_capacity_blocks_pending_settlement_even_after_cash_or_stoc
 
     call_fact = build_shared_coverage_facts(
         account="lx",
-        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 500, "can_sell_qty": 500}}},
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"3690.HK": {"shares": 500, "can_sell_qty": 500}}}),
         option_context={
             "decision_snapshot_status": "trusted",
             "locked_shares_status": "available",
@@ -1018,7 +1018,7 @@ def test_wheel_put_preview_invalidates_when_source_evidence_changes_without_cash
 def test_wheel_call_blocks_unknown_overlap_between_broker_sellable_and_ledger_lock() -> None:
     fact = build_shared_coverage_facts(
         account="lx",
-        portfolio_context={"stocks_by_symbol": {"3690.HK": {"shares": 1000, "can_sell_qty": 500}}},
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"3690.HK": {"shares": 1000, "can_sell_qty": 500}}}),
         option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available", "locked_shares_by_symbol": {"3690.HK": 500}},
         wheel_read_model={"batches": []},
     )[0]
@@ -1058,7 +1058,7 @@ def test_wheel_capacity_facts_require_trusted_decision_snapshot() -> None:
     )
     call = build_shared_coverage_facts(
         account="lx",
-        portfolio_context={"stocks_by_symbol": {"NVDA": {"shares": 100, "can_sell_qty": 100}}},
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"NVDA": {"shares": 100, "can_sell_qty": 100}}}),
         option_context={"locked_shares_status": "available", "locked_shares_by_symbol": {}},
         wheel_read_model={"batches": []},
     )[0]

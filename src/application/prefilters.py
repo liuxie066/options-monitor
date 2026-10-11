@@ -8,6 +8,7 @@ Goal: keep process_symbol small. Prefilters must be best-effort and never raise.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from src.application.portfolio_context_service import portfolio_position_snapshot_errors
 
 
 @dataclass
@@ -47,14 +48,7 @@ def apply_prefilters(
                 authority_status = str(
                     authority.get("status") if isinstance(authority, dict) else ""
                 ).strip().lower()
-                snapshot_input = portfolio_ctx.get("position_snapshot_input")
-                stock_context_available = (
-                    "position_snapshot_input" not in portfolio_ctx
-                    or (
-                        isinstance(snapshot_input, dict)
-                        and snapshot_input.get("errors") == []
-                    )
-                )
+                stock_context_available = not portfolio_position_snapshot_errors(portfolio_ctx)
                 if (
                     portfolio_source != "futu"
                     or not isinstance(authority, dict)

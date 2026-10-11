@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from pathlib import Path
 from typing import Any
 
@@ -441,7 +443,7 @@ def _run_wheel_scan_failure_capture(
         path.write_text("{}\n", encoding="utf-8")
 
     symbols = sorted(reserved_by_symbol)
-    portfolio_context = {
+    portfolio_context = cash_portfolio({
         "capacity_authority": {
             "status": "available",
             "logical_account": "lx",
@@ -459,7 +461,7 @@ def _run_wheel_scan_failure_capture(
             for symbol in symbols
         },
         "exchange_rates": {},
-    }
+    }, account='lx', account_id='10001')
     option_context = {
         "decision_snapshot_status": "trusted",
         "locked_shares_status": "available",
@@ -800,7 +802,7 @@ def _run_full_symbol_capture(
         "opening_scans": [],
         "combo_scans": [],
     }
-    portfolio_ctx = {
+    portfolio_ctx = cash_portfolio({
         "portfolio_source_name": "futu",
         "capacity_authority": {
             "status": "available",
@@ -823,7 +825,7 @@ def _run_full_symbol_capture(
             else {}
         ),
         "exchange_rates": {},
-    }
+    }, account='lx', account_id='10001')
     option_ctx = {
         "context_status": "available",
         "locked_shares_status": "available",

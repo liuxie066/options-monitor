@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import CancelledError
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +21,7 @@ from domain.domain.risk_capacity import (
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.portfolio_context_service import (
+    portfolio_position_snapshot_errors,
     load_account_portfolio_context, evaluate_account_cash_snapshot, cash_snapshot_is_usable, cash_snapshot_evidence,
 )
 from src.application.ledger.api import decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock
@@ -244,17 +246,14 @@ def _normalized_fx_snapshot(fx_snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(fx_snapshot), "fx_rate_facts": facts}
 
 
-def broker_capacity_observation_is_fresh(observed_at: Any) -> bool:
-    """A preview broker resource is valid only within the configured default TTL."""
-    try:
-        observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
-        if observed.tzinfo is None:
-            return False
-        age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
-        ttl = int(DEFAULT_CONFIG["defaults"]["runtime"]["portfolio_context_ttl_sec"])
-        return 0 <= age <= ttl
-    except (TypeError, ValueError, OverflowError):
-        return False
+def broker_capacity_observation_is_fresh(
+    observed_at: Any, *, account: str | None = None, market: str | None = None,
+) -> bool:
+    """Requalify holdings evidence at the new decision time, independently of cash TTL."""
+    evidence = observed_at.get("position_evidence") if isinstance(observed_at, Mapping) else None
+    return isinstance(evidence, Mapping) and not portfolio_position_snapshot_errors(
+        evidence, account=account, market=market, now_utc=datetime.now(timezone.utc),
+    )
 
 
 def build_shared_cash_capacity_fact(
@@ -646,6 +645,10 @@ def build_shared_coverage_facts(
     option_context: Mapping[str, Any],
     wheel_read_model: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    position_errors = portfolio_position_snapshot_errors(portfolio_context, account=account)
+    position_evidence = deepcopy({key: portfolio_context.get(key) for key in (
+        "position_snapshot_input", "capacity_authority", "portfolio_source_name", "portfolio_source_account", "filters", "position_refresh_error",
+    )})
     stocks = portfolio_context.get("stocks_by_symbol")
     stocks = stocks if isinstance(stocks, Mapping) else {}
     locked_by_symbol = option_context.get("locked_shares_by_symbol")
@@ -673,6 +676,8 @@ def build_shared_coverage_facts(
         status = "available"
         reason = None
         try:
+            if position_errors:
+                raise ValueError("position_snapshot_unavailable:" + ",".join(position_errors))
             if not isinstance(stock, Mapping):
                 raise ValueError("holding_missing")
             if stock.get("capacity_authority_status") not in (None, "available"):
@@ -708,6 +713,7 @@ def build_shared_coverage_facts(
                 "shares_reserved": shares_reserved,
                 "status": status,
                 "reason": reason,
+                "position_evidence": position_evidence,
                 "decision_state_fingerprint": option_context.get("decision_state_fingerprint"),
                 "source_observed_at": portfolio_context.get("source_observed_at"),
                 "ledger_generation_sha256": (
@@ -734,6 +740,7 @@ def build_shared_coverage_facts(
                     0, eligible - shares_locked - shares_reserved
                 ),
                 "capacity_identity_hash": identity,
+                "position_evidence": position_evidence,
                 "source_observed_at": stock.get("source_observed_at") or portfolio_context.get("source_observed_at"),
                 "decision_state_fingerprint": option_context.get("decision_state_fingerprint"),
             }
