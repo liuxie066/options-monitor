@@ -272,6 +272,12 @@ sudo systemctl show --property=Result --value options-monitor-feishu-agent-crede
 sudo systemctl enable --now options-monitor-upgrade.timer
 ```
 
+`service` 和 `update` 命令未传 `--repo-root` 时，使用调用入口的仓库路径并保留符号链接。
+例如从其他目录执行 `/opt/options-monitor/current/om service drift`，单元和 profile 仍引用
+`/opt/options-monitor/current`。`service render` 的默认仓库路径也来自调用入口，不再使用当前工作目录。
+管理其他 checkout 或实例时，显式传入 `--repo-root` 和对应的 `--runtime-root`；实例归属检查保持严格。
+已被旧命令改成具体 release 路径的单元，仍需显式指定正确的链接路径，先预览，再按受控流程确认并读回。
+
 对于原先把 credential unit 放在 `/usr/lib/systemd/system/` 的存量主机，升级到首个包含此能力的 release 后需要做一次显式收编：
 
 ```bash
