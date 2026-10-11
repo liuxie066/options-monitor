@@ -12,10 +12,8 @@ from typing import Any, Mapping
 
 from domain.domain.cash_secured_utils import (
     cash_secured_unavailable_for_cash_snapshot,
-    cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
-    read_cash_secured_total_cny,
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
@@ -222,7 +220,6 @@ def query_sell_put_cash(
     total_by_ccy_norm = normalize_cash_secured_total_by_ccy(opt, by_symbol_by_ccy=norm_by_ccy)
     cash_secured_unavailable_by_symbol, cash_secured_unavailable_reason = _cash_secured_unavailable_reason(opt, portfolio)
     cash_secured_reliable = cash_secured_unavailable_reason is None
-    cash_secured_total_cny = read_cash_secured_total_cny(opt) if cash_secured_reliable else None
 
     cash_secured_total_usd = total_by_ccy_norm.get('USD') if cash_secured_reliable else None
     cash_free_usd = None
@@ -250,6 +247,13 @@ def query_sell_put_cash(
     except Exception:
         cash_avail_cny = None
 
+    cash_secured_total_cny = (
+        _sum_by_currency_to_cny(
+            total_by_ccy_norm,
+            usdcny_exchange_rate=usdcny_exchange_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
+        ) if cash_secured_reliable else None
+    )
     if cash_avail_cny is not None and cash_secured_total_cny is not None:
         cash_free_cny = cash_avail_cny - cash_secured_total_cny
 
@@ -382,23 +386,10 @@ def query_sell_put_cash(
 
         for sym, _, m in items[: max(top, 1)]:
             detail = ', '.join([f"{ccy} {money(v, ccy).replace('$', '').replace('¥', '')}" for ccy, v in sorted(m.items())])
-            cny_eq = cash_secured_symbol_cny(
-                opt,
-                sym,
-                by_symbol_by_ccy=norm_by_ccy,
-                native_to_cny=lambda amt, ccy: (
-                    float(amt)
-                    if ccy == 'CNY'
-                    else (
-                        float(amt) * float(usdcny_exchange_rate)
-                        if (ccy == 'USD' and usdcny_exchange_rate)
-                        else (
-                            float(amt) * float(cny_per_hkd_exchange_rate)
-                            if (ccy == 'HKD' and cny_per_hkd_exchange_rate)
-                            else None
-                        )
-                    )
-                ),
+            cny_eq = _sum_by_currency_to_cny(
+                m,
+                usdcny_exchange_rate=usdcny_exchange_rate,
+                cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
             )
             cny_part = f" | ≈ {money(cny_eq, 'CNY')}" if cny_eq is not None else ''
             lines.append(f'- {sym}: {detail}{cny_part}')
