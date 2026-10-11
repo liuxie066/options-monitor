@@ -891,6 +891,12 @@ def test_default_backend_quote_readiness_does_not_construct_trade_context(monkey
         def __init__(self, **_kwargs):
             calls["quote"] += 1
 
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 8.0
+
+        def get_sync_conn_id(self):
+            return 1
+
         def get_global_state(self):
             return 0, {"program_status_type": "READY", "qot_logined": True}
 

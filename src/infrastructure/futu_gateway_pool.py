@@ -4,6 +4,8 @@ from collections.abc import Mapping
 import threading
 from typing import Any
 
+from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
+
 
 _CONNECTION_ERROR_CODES = frozenset(
     {
@@ -84,6 +86,9 @@ def is_gateway_connection_error(
 ) -> bool:
     if isinstance(failure, Mapping):
         return _has_structured_provider_connection_error(failure)
+    code = classify_opend_error(failure)
+    if code is not OpenDRetCode.UNKNOWN:
+        return code is OpenDRetCode.TRANSIENT
     return _has_connection_text(failure, allow_generic_ret_error=True)
 
 

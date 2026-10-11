@@ -49,8 +49,16 @@ def _install_fake_futu(monkeypatch, context) -> None:
     )
 
 
+class _ConnectedContext:
+    def set_sync_query_connect_timeout(self, timeout):
+        assert timeout == 8
+
+    def get_sync_conn_id(self):
+        return 1
+
+
 def _recording_context(calls):
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **kwargs):
             calls.append({"init": kwargs})
 
@@ -192,7 +200,7 @@ def test_fetch_opend_history_deals_adds_account_fields_and_diagnostics(monkeypat
             assert orient == "records"
             return [{"deal_id": "deal-1", "code": "HK.TCH260605P440000"}]
 
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **kwargs):
             calls.append({"init": kwargs})
 
@@ -314,7 +322,7 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
     calls: list[dict] = []
     query_count = 0
 
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **kwargs):
             calls.append({"init": kwargs})
 
@@ -345,7 +353,7 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
 def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypatch) -> None:
     calls: list[dict] = []
 
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **kwargs):
             calls.append({"init": kwargs})
 
@@ -397,7 +405,7 @@ def test_exact_terminal_order_uses_current_query_then_narrow_history_fallback(
 ) -> None:
     calls: list[dict] = []
 
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **_kwargs):
             pass
 
@@ -493,7 +501,7 @@ def test_order_fee_query_rate_limit_is_shared_across_client_calls(monkeypatch) -
             assert orient == "records"
             return [{"order_id": "o1", "fee_amount": 1, "fee_details": {}}]
 
-    class _FakeContext:
+    class _FakeContext(_ConnectedContext):
         def __init__(self, **_kwargs):
             pass
 

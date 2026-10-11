@@ -11,9 +11,9 @@ import threading
 from typing import Any, Callable
 from domain.domain.trade_account_identity import extract_visible_account_fields
 
-from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
+from src.infrastructure.futu_gateway import FutuGatewayError, build_futu_trade_context
 from src.infrastructure.futu_dataframe import futu_dataframe_records
-from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
+from src.infrastructure.opend_watchdog import classify_watchdog_result
 
 
 class TradeIntakeStartCancelled(RuntimeError):
@@ -51,7 +51,6 @@ class OpenDTradePushListener:
             futu_mod = importlib.import_module("futu")
         except Exception as exc:
             raise RuntimeError("futu SDK not importable; install futu-api in runtime env") from exc
-        OpenSecTradeContext: Any = getattr(futu_mod, "OpenSecTradeContext")
         TradeDealHandlerBase: Any = getattr(futu_mod, "TradeDealHandlerBase")
         TradeOrderHandlerBase: Any = (
             getattr(futu_mod, "TradeOrderHandlerBase") if self.on_order_hint is not None else None
@@ -97,17 +96,15 @@ class OpenDTradePushListener:
 
         ctx = None
         last_error: Exception | None = None
-        if not port_open(self.host, self.port):
-            raise FutuGatewayUnreachableError(
-                f"OpenD unreachable: {self.host}:{self.port}; start FutuOpenD before enabling the trade push listener"
-            )
         for kwargs in (
             {"host": self.host, "port": self.port},
             {"host": self.host, "port": self.port, "is_encrypt": False},
         ):
             try:
-                ctx = OpenSecTradeContext(**kwargs)
+                ctx = build_futu_trade_context(**kwargs)
                 break
+            except FutuGatewayError:
+                raise
             except Exception as exc:
                 last_error = exc
         if ctx is None:
