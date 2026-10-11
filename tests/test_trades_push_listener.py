@@ -15,7 +15,7 @@ from src.infrastructure.futu_trade_push import OpenDTradePushListener
 def _open_port(monkeypatch):
     """Tests mock the futu SDK; keep the port pre-check passing."""
 
-    from src.infrastructure import futu_trade_push as mod
+    from src.infrastructure import futu_gateway as mod
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: True)
     yield
@@ -40,10 +40,13 @@ def _health_context(get_global_state):
         instances = 0
 
         def __init__(self, **_kwargs):
-            type(self).instances += 1
+            _Context.instances += 1
+
+        def get_sync_conn_id(self):
+            return 1
 
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, _handler):
@@ -77,6 +80,15 @@ def _blocking_context(release: threading.Event, *, log_phone_verification: bool 
                 )
             release.wait(5)
 
+        def set_sync_query_connect_timeout(self, _timeout):
+            pass
+
+        def get_sync_conn_id(self):
+            return 1
+
+        def close(self):
+            pass
+
     return _BlockingContext
 
 
@@ -94,8 +106,11 @@ def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:
         def __init__(self, **_kwargs):
             self.handler = None
 
+        def get_sync_conn_id(self):
+            return 1
+
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, handler):
@@ -302,7 +317,7 @@ def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> N
 
 
 def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
-    from src.infrastructure import futu_trade_push as mod
+    from src.infrastructure import futu_gateway as mod
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: False)
@@ -339,8 +354,11 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, han
             self.account_reads += 1
             return (0, Frame(accounts)) if accounts is not None else (-1, "unavailable")
 
+        def get_sync_conn_id(self):
+            return 1
+
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, handler):
@@ -688,6 +706,9 @@ def test_order_push_on_same_context_only_emits_bound_refresh_hint(monkeypatch) -
 
         def get_acc_list(self):
             return 0, Frame([{"acc_id": "123", "trd_env": "REAL"}])
+
+        def get_sync_conn_id(self):
+            return 1
 
         def set_sync_query_connect_timeout(self, _timeout):
             pass

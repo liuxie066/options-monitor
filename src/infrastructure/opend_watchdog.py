@@ -83,7 +83,7 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
             return ("OPEND_LOGIN_INVALID", "OpenD 登录已失效，需人工重新登录")
         if _looks_like_pic_verify(err):
             return ("OPEND_NEEDS_PIC_VERIFY", "OpenD 需要图形验证码登录")
-        if "port not open" in low or "cannot connect" in low or "connection refused" in low:
+        if any(hint in low for hint in ("port not open", "cannot connect", "connection refused", "opend unreachable")):
             return ("OPEND_PORT_CLOSED", "OpenD 端口不可达")
         if _looks_like_rate_limit(err):
             return ("OPEND_RATE_LIMIT", "OpenD 请求频率受限")
@@ -118,6 +118,7 @@ def _looks_like_disconnect_error(msg: str) -> bool:
     if _looks_like_phone_verify(s):
         return False
     keys = [
+        "opend unreachable",
         "econnrefused",
         "connection refused",
         "econnreset",
@@ -135,12 +136,12 @@ def _looks_like_disconnect_error(msg: str) -> bool:
 
 
 def get_global_state_once(host: str, port: int) -> dict:
-    from futu import OpenQuoteContext, RET_OK
+    from src.infrastructure.futu_gateway import build_futu_quote_context
 
-    ctx = OpenQuoteContext(host=host, port=int(port))
+    ctx = build_futu_quote_context(host=host, port=int(port))
     try:
         ret, data = ctx.get_global_state()
-        if ret != RET_OK:
+        if ret != 0:
             raise RuntimeError(f"get_global_state ret={ret} data={data}")
         if not isinstance(data, dict):
             raise RuntimeError(f"get_global_state invalid: {data}")

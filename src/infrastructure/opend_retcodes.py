@@ -38,7 +38,10 @@ _NEED_2FA_HINTS_LOW = ("2fa", "phone verification", "verify code")
 _NEED_2FA_HINTS_TEXT = ("手机验证码", "短信验证", "手机验证", "验证码")
 _NEED_PIC_HINTS_LOW = ("picture captcha", "image captcha", "graphic captcha", "pic verify")
 _NEED_PIC_HINTS_TEXT = ("图形验证码", "图片验证码")
-_TRANSIENT_HINTS_LOW = ("timeout", "disconnected", "connection reset", "broken pipe", "temporarily unavailable")
+_TRANSIENT_HINTS_LOW = (
+    "timeout", "timed out", "disconnect", "connection reset", "connection closed",
+    "connection refused", "broken pipe", "temporarily unavailable",
+)
 _EMPTY_CHAIN_HINTS_LOW = ("empty_chain", "empty")
 
 
@@ -91,6 +94,12 @@ def classify_opend_error(value: Any) -> OpenDRetCode:
     code_attr = _from_code(getattr(value, "code", None))
     if code_attr is not None:
         return code_attr
+
+    if isinstance(value, (TimeoutError, ConnectionError)):
+        return OpenDRetCode.TRANSIENT
+
+    if isinstance(value, (AttributeError, TypeError, ValueError)):
+        return OpenDRetCode.UNKNOWN
 
     if isinstance(value, dict):
         code = _from_code(value.get("error_code"))
