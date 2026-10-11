@@ -21,6 +21,7 @@ from src.infrastructure.exchange_rates import (
     project_exchange_rate_snapshot,
 )
 from src.application.current_fx_run import load_run_fx_snapshot
+from src.application.multi_tick_audit import prepared_context_phase
 from src.application.ledger.api import (
     CURRENT_DECISION_READ_SCHEMA,
     attach_event_strategy_metadata,
@@ -489,13 +490,14 @@ def prepare_option_positions_contexts(
         raise PreparedOptionPositionsContextError(
             "prepared option config/authority scopes do not match"
         )
-    reused = _reuse_prepared_option_positions_contexts(
-        base=base_path,
-        run_id=run_id_norm,
-        configs=configs,
-        authorities=authorities,
-        expected_fx_snapshot_sha256=fx_snapshot_sha256,
-    )
+    with prepared_context_phase("option_reuse"):
+        reused = _reuse_prepared_option_positions_contexts(
+            base=base_path,
+            run_id=run_id_norm,
+            configs=configs,
+            authorities=authorities,
+            expected_fx_snapshot_sha256=fx_snapshot_sha256,
+        )
     manifests = dict(reused["manifests"])
     records_by_account = dict(reused["records_by_account"])
     wheel_models_by_account = dict(reused["wheel_models_by_account"])
@@ -517,15 +519,16 @@ def prepare_option_positions_contexts(
     data_config_by_ledger_path: dict[Path, Path] = {}
     for account in sorted(configs):
         try:
-            data_path = resolve_position_data_config_path(
-                base=base_path,
-                cfg=configs[account],
-                config_path=Path(config_path),
-            ).resolve()
-            ledger_path = resolve_position_ledger_sqlite_path(
-                base=base_path,
-                data_config=data_path,
-            )
+            with prepared_context_phase("ledger_paths", account=account):
+                data_path = resolve_position_data_config_path(
+                    base=base_path,
+                    cfg=configs[account],
+                    config_path=Path(config_path),
+                ).resolve()
+                ledger_path = resolve_position_ledger_sqlite_path(
+                    base=base_path,
+                    data_config=data_path,
+                )
         except Exception as exc:
             unavailable[account] = (
                 f"position_ledger_path_unavailable:{type(exc).__name__}"
@@ -545,16 +548,17 @@ def prepare_option_positions_contexts(
         key=lambda item: str(item[0]),
     ):
         try:
-            _resolved_path, repo = open_position_ledger_from_data_config(
-                base=base_path,
-                data_config=data_config_by_ledger_path[ledger_path],
-            )
-            rows_a_by_ledger_path[ledger_path] = read_decision_state_rows_many(
-                repo,
-                accounts=tuple(sorted(accounts)),
-            )
-            repos_by_ledger_path[ledger_path] = repo
-            ledger_read_count += 1
+            with prepared_context_phase("ledger_read_a"):
+                _resolved_path, repo = open_position_ledger_from_data_config(
+                    base=base_path,
+                    data_config=data_config_by_ledger_path[ledger_path],
+                )
+                rows_a_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+                    repo,
+                    accounts=tuple(sorted(accounts)),
+                )
+                repos_by_ledger_path[ledger_path] = repo
+                ledger_read_count += 1
         except Exception as exc:
             reason = f"coherent_position_ledger_unavailable:{type(exc).__name__}"
             for account in accounts:
@@ -565,23 +569,24 @@ def prepare_option_positions_contexts(
     fx_status = "unavailable"
     fx_error_type: str | None = None
     try:
-        if fx_snapshot_sha256 is not None:
-            snapshot, sealed_hash = load_run_fx_snapshot(base=base_path, run_id=run_id_norm)
-            if sealed_hash != fx_snapshot_sha256:
-                raise PreparedOptionPositionsContextError("prepared option FX snapshot mismatch")
-            fx_observation = project_exchange_rate_snapshot(snapshot, purpose="capacity")
-        else:
-            candidate = get_exchange_rates_or_fetch_latest(
-                cache_path=base_path / "output_shared" / "state" / "rate_cache.json",
+        with prepared_context_phase("fx_observation"):
+            if fx_snapshot_sha256 is not None:
+                snapshot, sealed_hash = load_run_fx_snapshot(base=base_path, run_id=run_id_norm)
+                if sealed_hash != fx_snapshot_sha256:
+                    raise PreparedOptionPositionsContextError("prepared option FX snapshot mismatch")
+                fx_observation = project_exchange_rate_snapshot(snapshot, purpose="capacity")
+            else:
+                candidate = get_exchange_rates_or_fetch_latest(
+                    cache_path=base_path / "output_shared" / "state" / "rate_cache.json",
+                    max_age_hours=24,
+                    log=log,
+                )
+                fx_observation = dict(candidate) if isinstance(candidate, Mapping) else None
+            fx_status = exchange_rate_observation_status(
+                fx_observation,
                 max_age_hours=24,
-                log=log,
             )
-            fx_observation = dict(candidate) if isinstance(candidate, Mapping) else None
-        fx_status = exchange_rate_observation_status(
-            fx_observation,
-            max_age_hours=24,
-        )
-        rates = fx_observation
+            rates = fx_observation
     except Exception as exc:
         rates = None
         fx_status = "unavailable"
@@ -595,17 +600,17 @@ def prepare_option_positions_contexts(
             "error_type": fx_error_type,
         }
     )
-    fx_evidence = (
-        _persist_fx_evidence(
-            repos_by_ledger_path=repos_by_ledger_path,
-            observation=fx_observation,
-            observation_status=fx_status,
-            migrated_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
-            log=log,
-        )
-        if persist_fx_evidence
-        else {"status": "disabled"}
-    )
+    if persist_fx_evidence:
+        with prepared_context_phase("fx_evidence"):
+            fx_evidence = _persist_fx_evidence(
+                repos_by_ledger_path=repos_by_ledger_path,
+                observation=fx_observation,
+                observation_status=fx_status,
+                migrated_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+                log=log,
+            )
+    else:
+        fx_evidence = {"status": "disabled"}
     rows_b_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
     for ledger_path, accounts in sorted(
         accounts_by_ledger_path.items(),
@@ -615,11 +620,12 @@ def prepare_option_positions_contexts(
         if repo is None:
             continue
         try:
-            rows_b_by_ledger_path[ledger_path] = read_decision_state_rows_many(
-                repo,
-                accounts=tuple(sorted(accounts)),
-            )
-            ledger_read_count += 1
+            with prepared_context_phase("ledger_read_b"):
+                rows_b_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+                    repo,
+                    accounts=tuple(sorted(accounts)),
+                )
+                ledger_read_count += 1
         except Exception as exc:
             if log is not None:
                 log(
@@ -637,41 +643,43 @@ def prepare_option_positions_contexts(
         if not isinstance(rows_by_account, dict):
             continue
         try:
-            first_rows = rows_by_account[accounts[0]]
-            if not isinstance(rows_a_by_account, dict):
-                raise ValueError("position fence snapshot A is unavailable")
-            ledger_generation_sha256 = _ledger_generation_sha256(
-                rows_by_account,
-                accounts,
-            )
-            records = attach_event_strategy_metadata(
-                first_rows["stored_position_lots"],
-                first_rows.get("trade_events"),
-            )
-            current_projections = {}
-            for account in accounts:
-                try:
-                    current_projection = read_current_decision_projection(
-                        repos_by_ledger_path[ledger_path],
-                        account=account,
-                        now_ms=lifecycle_now_ms,
-                    )
-                except Exception as exc:
-                    current_projection = {
-                        "status": "data_unavailable",
-                        "reason": (
-                            "current_projection_read_failed:"
-                            f"{type(exc).__name__}"
-                        ),
-                    }
-                current_projections[account] = current_projection
-            snapshots = decision_state_snapshots_from_rows_many(
-                {account: rows_by_account[account] for account in accounts},
-                portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
-                source_observed_at=observed_at_utc,
-                current_projections=current_projections,
-                current_decision_now_ms=lifecycle_now_ms,
-            )
+            with prepared_context_phase("projection"):
+                first_rows = rows_by_account[accounts[0]]
+                if not isinstance(rows_a_by_account, dict):
+                    raise ValueError("position fence snapshot A is unavailable")
+                ledger_generation_sha256 = _ledger_generation_sha256(
+                    rows_by_account,
+                    accounts,
+                )
+                records = attach_event_strategy_metadata(
+                    first_rows["stored_position_lots"],
+                    first_rows.get("trade_events"),
+                )
+                current_projections = {}
+                for account in accounts:
+                    try:
+                        with prepared_context_phase("current_projection", account=account):
+                            current_projection = read_current_decision_projection(
+                                repos_by_ledger_path[ledger_path],
+                                account=account,
+                                now_ms=lifecycle_now_ms,
+                            )
+                    except Exception as exc:
+                        current_projection = {
+                            "status": "data_unavailable",
+                            "reason": (
+                                "current_projection_read_failed:"
+                                f"{type(exc).__name__}"
+                            ),
+                        }
+                    current_projections[account] = current_projection
+                snapshots = decision_state_snapshots_from_rows_many(
+                    {account: rows_by_account[account] for account in accounts},
+                    portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
+                    source_observed_at=observed_at_utc,
+                    current_projections=current_projections,
+                    current_decision_now_ms=lifecycle_now_ms,
+                )
         except Exception as exc:
             reason = f"coherent_position_projection_unavailable:{type(exc).__name__}"
             for account in accounts:
@@ -698,139 +706,144 @@ def prepare_option_positions_contexts(
             records_by_account[account] = records
 
         for broker, broker_accounts in sorted(accounts_by_broker.items()):
-            shared_context = build_shared_context(
-                records,
-                broker=broker,
-                rates=rates,
-                decision_snapshots_by_account=snapshots,
-                lifecycle_now_ms=lifecycle_now_ms,
-                accounts=broker_accounts,
-                observed_at=observed_at,
-            )
+            with prepared_context_phase("context_build"):
+                shared_context = build_shared_context(
+                    records,
+                    broker=broker,
+                    rates=rates,
+                    decision_snapshots_by_account=snapshots,
+                    lifecycle_now_ms=lifecycle_now_ms,
+                    accounts=broker_accounts,
+                    observed_at=observed_at,
+                )
             for account in sorted(broker_accounts):
-                context = slice_shared_context_for_account(
-                    shared_context,
-                    account,
-                )
-                if not isinstance(context, dict):
-                    unavailable[account] = "prepared_option_account_slice_missing"
-                    records_by_account.pop(account, None)
-                    continue
-                authority = authorities[account]
-                prepared_authority = {
-                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-                    "run_id": run_id_norm,
-                    "account": account,
-                    "account_config_sha256": authority.account_config_sha256,
-                    "ledger_generation_sha256": ledger_generation_sha256,
-                    "fx_observation_sha256": fx_observation_sha256,
-                    "run_fx_snapshot_sha256": fx_snapshot_sha256,
-                    "fx_status": fx_status,
-                    "source_observed_at": observed_at_utc,
-                }
-                if fx_error_type:
-                    prepared_authority["fx_error_type"] = fx_error_type
-                context = dict(context)
-                try:
-                    market = infer_runtime_config_market(
-                        config_path=config_path,
-                        config=configs[account],
+                with prepared_context_phase("account_context", account=account):
+                    context = slice_shared_context_for_account(
+                        shared_context,
+                        account,
                     )
-                    wheel_config = resolve_wheel_config(
-                        configs[account], account, market=market,
-                    )
-                    durable_window = repos_by_ledger_path[
-                        ledger_path
-                    ].get_current_wheel_activation_window(
-                        market=market,
-                        account=account,
-                    )
-                    monitoring_readiness = evaluate_wheel_activation_readiness(
-                        wheel_config["activation_descriptor"],
-                        durable_window,
-                        account_configured=wheel_config["account_configured"],
-                    )
-                    wheel_model = build_wheel_read_model_from_rows(
-                        rows_by_account[account],
-                        account=account,
-                        as_of_ms=lifecycle_now_ms,
-                        monitoring_readiness=monitoring_readiness,
-                        market=market,
-                    )
-                except Exception as exc:
-                    unavailable[account] = (
-                        f"wheel_projection_failed:{type(exc).__name__}"
-                    )
-                    records_by_account.pop(account, None)
-                    continue
-                context["wheel_read_model"] = wheel_model
-                decision_snapshot = snapshots[account]
-                context["current_decision_read"] = dict(
-                    decision_snapshot["current_decision_read"]
-                )
-                context["decision_snapshot_actionable"] = bool(
-                    decision_snapshot.get("actionable") is True
-                )
-                context["current_decision_shadow"] = dict(
-                    decision_snapshot["current_decision_shadow"]
-                )
-                context["context_source"] = "prepared"
-                context["prepared_authority"] = prepared_authority
-                try:
-                    _validate_option_context_account(
-                        context,
-                        expected_account=account,
-                        expected_broker=broker,
-                    )
-                    application_received_at_utc = datetime.now(timezone.utc).isoformat()
-                    prepared_authority["application_received_at_utc"] = (
-                        application_received_at_utc
-                    )
-                    manifest = _publish_ready_context(
-                        base=base_path,
-                        run_id=run_id_norm,
-                        account=account,
-                        account_config_sha256=authority.account_config_sha256,
-                        context=context,
-                        ledger_generation_sha256=ledger_generation_sha256,
-                        decision_state_fingerprint=str(
-                            snapshots[account].get(
-                                "decision_state_fingerprint"
+                    if not isinstance(context, dict):
+                        unavailable[account] = "prepared_option_account_slice_missing"
+                        records_by_account.pop(account, None)
+                        continue
+                    authority = authorities[account]
+                    prepared_authority = {
+                        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+                        "run_id": run_id_norm,
+                        "account": account,
+                        "account_config_sha256": authority.account_config_sha256,
+                        "ledger_generation_sha256": ledger_generation_sha256,
+                        "fx_observation_sha256": fx_observation_sha256,
+                        "run_fx_snapshot_sha256": fx_snapshot_sha256,
+                        "fx_status": fx_status,
+                        "source_observed_at": observed_at_utc,
+                    }
+                    if fx_error_type:
+                        prepared_authority["fx_error_type"] = fx_error_type
+                    context = dict(context)
+                    try:
+                        with prepared_context_phase("wheel_projection", account=account):
+                            market = infer_runtime_config_market(
+                                config_path=config_path,
+                                config=configs[account],
                             )
-                            or ""
-                        ),
-                        source_observed_at=observed_at_utc,
-                        application_received_at_utc=(application_received_at_utc),
-                        fx_status=fx_status,
-                        fx_observation_sha256=fx_observation_sha256,
-                        run_fx_snapshot_sha256=fx_snapshot_sha256,
-                        fx_error_type=fx_error_type,
+                            wheel_config = resolve_wheel_config(
+                                configs[account], account, market=market,
+                            )
+                            durable_window = repos_by_ledger_path[
+                                ledger_path
+                            ].get_current_wheel_activation_window(
+                                market=market,
+                                account=account,
+                            )
+                            monitoring_readiness = evaluate_wheel_activation_readiness(
+                                wheel_config["activation_descriptor"],
+                                durable_window,
+                                account_configured=wheel_config["account_configured"],
+                            )
+                            wheel_model = build_wheel_read_model_from_rows(
+                                rows_by_account[account],
+                                account=account,
+                                as_of_ms=lifecycle_now_ms,
+                                monitoring_readiness=monitoring_readiness,
+                                market=market,
+                            )
+                    except Exception as exc:
+                        unavailable[account] = (
+                            f"wheel_projection_failed:{type(exc).__name__}"
+                        )
+                        records_by_account.pop(account, None)
+                        continue
+                    context["wheel_read_model"] = wheel_model
+                    decision_snapshot = snapshots[account]
+                    context["current_decision_read"] = dict(
+                        decision_snapshot["current_decision_read"]
                     )
-                except Exception as exc:
-                    unavailable[account] = (
-                        f"prepared_option_publication_failed:{type(exc).__name__}"
+                    context["decision_snapshot_actionable"] = bool(
+                        decision_snapshot.get("actionable") is True
                     )
-                    records_by_account.pop(account, None)
-                    continue
-                manifests[account] = manifest
-                wheel_models_by_account[account] = wheel_model
+                    context["current_decision_shadow"] = dict(
+                        decision_snapshot["current_decision_shadow"]
+                    )
+                    context["context_source"] = "prepared"
+                    context["prepared_authority"] = prepared_authority
+                    try:
+                        with prepared_context_phase("ready_publication", account=account):
+                            _validate_option_context_account(
+                                context,
+                                expected_account=account,
+                                expected_broker=broker,
+                            )
+                            application_received_at_utc = datetime.now(timezone.utc).isoformat()
+                            prepared_authority["application_received_at_utc"] = (
+                                application_received_at_utc
+                            )
+                            manifest = _publish_ready_context(
+                                base=base_path,
+                                run_id=run_id_norm,
+                                account=account,
+                                account_config_sha256=authority.account_config_sha256,
+                                context=context,
+                                ledger_generation_sha256=ledger_generation_sha256,
+                                decision_state_fingerprint=str(
+                                    snapshots[account].get(
+                                        "decision_state_fingerprint"
+                                    )
+                                    or ""
+                                ),
+                                source_observed_at=observed_at_utc,
+                                application_received_at_utc=(application_received_at_utc),
+                                fx_status=fx_status,
+                                fx_observation_sha256=fx_observation_sha256,
+                                run_fx_snapshot_sha256=fx_snapshot_sha256,
+                                fx_error_type=fx_error_type,
+                            )
+                    except Exception as exc:
+                        unavailable[account] = (
+                            f"prepared_option_publication_failed:{type(exc).__name__}"
+                        )
+                        records_by_account.pop(account, None)
+                        continue
+                    manifests[account] = manifest
+                    wheel_models_by_account[account] = wheel_model
 
     for account, reason in sorted(unavailable.items()):
         if account in manifests:
             continue
         try:
-            manifests[account] = _publish_unavailable_manifest(
-                base=base_path,
-                run_id=run_id_norm,
-                account=account,
-                account_config_sha256=authorities[account].account_config_sha256,
-                reason=reason,
-                source_observed_at=observed_at_utc,
-                fx_status=fx_status,
-                fx_observation_sha256=fx_observation_sha256,
-                run_fx_snapshot_sha256=fx_snapshot_sha256,
-                fx_error_type=fx_error_type,
-            )
+            with prepared_context_phase("unavailable_publication", account=account):
+                manifests[account] = _publish_unavailable_manifest(
+                    base=base_path,
+                    run_id=run_id_norm,
+                    account=account,
+                    account_config_sha256=authorities[account].account_config_sha256,
+                    reason=reason,
+                    source_observed_at=observed_at_utc,
+                    fx_status=fx_status,
+                    fx_observation_sha256=fx_observation_sha256,
+                    run_fx_snapshot_sha256=fx_snapshot_sha256,
+                    fx_error_type=fx_error_type,
+                )
         except Exception:
             pass
 

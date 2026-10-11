@@ -25,7 +25,11 @@ from src.application.account_config import (
 )
 from src.application.config_sections import resolve_watchlist_config
 from src.application.multi_tick.misc import AccountResult
-from src.application.multi_tick_audit import record_tick_latency
+from src.application.multi_tick_audit import (
+    prepared_context_phase,
+    prepared_context_timing_scope,
+    record_tick_latency,
+)
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
 from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
@@ -588,224 +592,230 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 reason="portfolio_context_preparation_failed",
                 error_type=type(exc).__name__,
             )
-        invalid_prepared_accounts: set[str] = set()
-        for account, manifest in prepared.items():
-            prepared_context_metrics.append(
-                {
-                    key: manifest.get(key)
-                    for key in (
-                        "account",
-                        "status",
-                        "reason",
-                        "deadline_seconds",
-                        "preparation_started_at_utc",
-                        "deadline_at_utc",
-                        "child_finished_at_utc",
-                        "promoted_at_utc",
-                        "worker_returncode",
-                        "account_config_sha256",
-                        "error_code",
+        with prepared_context_timing_scope(runlog=None if request.experience else request.runlog):
+            invalid_prepared_accounts: set[str] = set()
+            for account, manifest in prepared.items():
+                with prepared_context_phase("portfolio_authority", account=account):
+                    prepared_context_metrics.append(
+                        {
+                            key: manifest.get(key)
+                            for key in (
+                                "account",
+                                "status",
+                                "reason",
+                                "deadline_seconds",
+                                "preparation_started_at_utc",
+                                "deadline_at_utc",
+                                "child_finished_at_utc",
+                                "promoted_at_utc",
+                                "worker_returncode",
+                                "account_config_sha256",
+                                "error_code",
+                            )
+                            if manifest.get(key) is not None
+                        }
                     )
-                    if manifest.get(key) is not None
-                }
-            )
-            manifest_path = Path(str(manifest["manifest_path"])).resolve()
-            try:
-                account_configs[account] = load_account_run_config(
-                    authority=scanning_config_authorities[account],
-                    base=request.base,
-                    run_id=request.run_id,
-                    account=account,
-                )
-                scanning_configs[account] = account_configs[account]
-            except AccountRunConfigError as exc:
-                account_config_errors[account] = exc
-                invalid_prepared_accounts.add(account)
-                continue
-            error_code = str(manifest.get("error_code") or "").strip().upper()
-            if error_code.startswith("ACCOUNT_CONFIG_"):
-                account_config_errors[account] = AccountRunConfigError(
-                    error_code,
-                    str(manifest.get("reason") or "prepared account config invalid"),
-                )
-                invalid_prepared_accounts.add(account)
-                continue
-            try:
-                prepared_context = load_prepared_portfolio_context(
-                    manifest_path=manifest_path,
-                    expected_base=request.base,
-                    expected_run_id=request.run_id,
-                    expected_account=account,
-                    expected_account_config_sha256=(
-                        scanning_config_authorities[
-                            account
-                        ].account_config_sha256
-                    ),
-                    expected_manifest_sha256=str(
+                    manifest_path = Path(str(manifest["manifest_path"])).resolve()
+                    try:
+                        with prepared_context_phase("portfolio_config", account=account):
+                            account_configs[account] = load_account_run_config(
+                                authority=scanning_config_authorities[account],
+                                base=request.base,
+                                run_id=request.run_id,
+                                account=account,
+                            )
+                            scanning_configs[account] = account_configs[account]
+                    except AccountRunConfigError as exc:
+                        account_config_errors[account] = exc
+                        invalid_prepared_accounts.add(account)
+                        continue
+                    error_code = str(manifest.get("error_code") or "").strip().upper()
+                    if error_code.startswith("ACCOUNT_CONFIG_"):
+                        account_config_errors[account] = AccountRunConfigError(
+                            error_code,
+                            str(manifest.get("reason") or "prepared account config invalid"),
+                        )
+                        invalid_prepared_accounts.add(account)
+                        continue
+                    try:
+                        with prepared_context_phase("portfolio_context", account=account):
+                            prepared_context = load_prepared_portfolio_context(
+                                manifest_path=manifest_path,
+                                expected_base=request.base,
+                                expected_run_id=request.run_id,
+                                expected_account=account,
+                                expected_account_config_sha256=(
+                                    scanning_config_authorities[
+                                        account
+                                    ].account_config_sha256
+                                ),
+                                expected_manifest_sha256=str(
+                                    manifest.get("manifest_sha256") or ""
+                                ),
+                                expected_runtime_config=scanning_configs[account],
+                            )
+                    except PreparedPortfolioContextError as exc:
+                        account_config_errors[account] = AccountRunConfigError(
+                            "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                            str(exc),
+                        )
+                        invalid_prepared_accounts.add(account)
+                        continue
+                    if not isinstance(prepared_context, dict):
+                        account_config_errors[account] = AccountRunConfigError(
+                            "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                            str(
+                                manifest.get("reason")
+                                or "prepared portfolio context is unavailable"
+                            ),
+                        )
+                        invalid_prepared_accounts.add(account)
+                        continue
+                    if fx_snapshot_sha256 is not None and prepared_context.get("fx_snapshot_sha256") != fx_snapshot_sha256:
+                        account_config_errors[account] = AccountRunConfigError(
+                            "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                            "prepared portfolio FX snapshot mismatch",
+                        )
+                        invalid_prepared_accounts.add(account)
+                        continue
+                    prepared_contexts[account] = prepared_context
+                    prepared_manifest_paths[account] = manifest_path
+                    prepared_manifest_sha256_by_account[account] = str(
                         manifest.get("manifest_sha256") or ""
-                    ),
-                    expected_runtime_config=scanning_configs[account],
-                )
-            except PreparedPortfolioContextError as exc:
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                    str(exc),
-                )
-                invalid_prepared_accounts.add(account)
-                continue
-            if not isinstance(prepared_context, dict):
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                    str(
-                        manifest.get("reason")
-                        or "prepared portfolio context is unavailable"
-                    ),
-                )
-                invalid_prepared_accounts.add(account)
-                continue
-            if fx_snapshot_sha256 is not None and prepared_context.get("fx_snapshot_sha256") != fx_snapshot_sha256:
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
-                    "prepared portfolio FX snapshot mismatch",
-                )
-                invalid_prepared_accounts.add(account)
-                continue
-            prepared_contexts[account] = prepared_context
-            prepared_manifest_paths[account] = manifest_path
-            prepared_manifest_sha256_by_account[account] = str(
-                manifest.get("manifest_sha256") or ""
-            )
+                    )
 
-        if invalid_prepared_accounts:
-            scanning_accounts = [
-                account
-                for account in scanning_accounts
-                if account not in invalid_prepared_accounts
-            ]
-            scanning_configs = {
-                account: config
-                for account, config in scanning_configs.items()
-                if account not in invalid_prepared_accounts
-            }
+            if invalid_prepared_accounts:
+                scanning_accounts = [
+                    account
+                    for account in scanning_accounts
+                    if account not in invalid_prepared_accounts
+                ]
+                scanning_configs = {
+                    account: config
+                    for account, config in scanning_configs.items()
+                    if account not in invalid_prepared_accounts
+                }
 
-        try:
-            prepared_options = (
-                PreparedOptionPositionsBatch(
+            try:
+                with prepared_context_phase("option_prepare"):
+                    prepared_options = (
+                        PreparedOptionPositionsBatch(
+                            manifests={},
+                            position_records_by_account={},
+                            unavailable_by_account={},
+                            observed_at_utc=datetime.now(timezone.utc).isoformat(),
+                            ledger_read_count=0,
+                            fx_observation_count=0,
+                            fx_evidence_status="disabled",
+                        )
+                        if request.experience
+                        else prepare_option_positions_contexts(
+                        base=request.base,
+                        run_id=request.run_id,
+                        config_path=request.cfg_path,
+                        account_configs=scanning_configs,
+                        account_config_authorities={
+                            account: scanning_config_authorities[account]
+                            for account in scanning_configs
+                        },
+                        run_state_dir=run_state_dir,
+                        log=lambda message: request.runlog.safe_event(
+                            "prepared_option_positions_context",
+                            "degraded" if str(message).startswith("[WARN]") else "info",
+                            message=str(message),
+                        ),
+                        persist_fx_evidence=not request.smoke,
+                        fx_snapshot_sha256=fx_snapshot_sha256,
+                        )
+                    )
+            except Exception as exc:
+                prepared_options = PreparedOptionPositionsBatch(
                     manifests={},
                     position_records_by_account={},
-                    unavailable_by_account={},
+                    unavailable_by_account={
+                        account: (
+                            "prepared_option_context_failed:"
+                            f"{type(exc).__name__}"
+                        )
+                        for account in scanning_configs
+                    },
                     observed_at_utc=datetime.now(timezone.utc).isoformat(),
                     ledger_read_count=0,
                     fx_observation_count=0,
-                    fx_evidence_status="disabled",
+                    fx_evidence_status="error",
+                    fx_evidence_error_count=1,
                 )
-                if request.experience
-                else prepare_option_positions_contexts(
-                base=request.base,
-                run_id=request.run_id,
-                config_path=request.cfg_path,
-                account_configs=scanning_configs,
-                account_config_authorities={
-                    account: scanning_config_authorities[account]
-                    for account in scanning_configs
-                },
-                run_state_dir=run_state_dir,
-                log=lambda message: request.runlog.safe_event(
-                    "prepared_option_positions_context",
-                    "degraded" if str(message).startswith("[WARN]") else "info",
-                    message=str(message),
-                ),
-                persist_fx_evidence=not request.smoke,
-                fx_snapshot_sha256=fx_snapshot_sha256,
-                )
+            prepared_option_records_by_account = dict(
+                prepared_options.position_records_by_account
             )
-        except Exception as exc:
-            prepared_options = PreparedOptionPositionsBatch(
-                manifests={},
-                position_records_by_account={},
-                unavailable_by_account={
-                    account: (
-                        "prepared_option_context_failed:"
-                        f"{type(exc).__name__}"
+            prepared_option_unavailable_by_account = dict(
+                prepared_options.unavailable_by_account
+            )
+            invalid_prepared_option_accounts: set[str] = set()
+            for account in sorted(scanning_configs):
+                if request.experience:
+                    continue
+                with prepared_context_phase("prepared_option_authority", account=account):
+                    manifest = prepared_options.manifests.get(account)
+                    if (
+                        not isinstance(manifest, Mapping)
+                        or str(manifest.get("status") or "").strip().lower()
+                        != "ready"
+                    ):
+                        reason = (
+                            str((manifest or {}).get("reason") or "").strip()
+                            if isinstance(manifest, Mapping)
+                            else ""
+                        )
+                        if not reason:
+                            reason = prepared_option_unavailable_by_account.get(
+                                account,
+                                "prepared option context unavailable",
+                            )
+                        account_config_errors[account] = AccountRunConfigError(
+                            "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                            reason,
+                        )
+                        invalid_prepared_option_accounts.add(account)
+                        continue
+                    manifest_path = Path(str(manifest.get("manifest_path") or ""))
+                    manifest_sha256 = str(
+                        manifest.get("manifest_sha256") or ""
+                    ).strip().lower()
+                    if (
+                        not manifest_path.is_file()
+                        or len(manifest_sha256) != 64
+                        or (fx_snapshot_sha256 is not None and manifest.get("run_fx_snapshot_sha256") != fx_snapshot_sha256)
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in manifest_sha256
+                        )
+                    ):
+                        account_config_errors[account] = AccountRunConfigError(
+                            "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                            "prepared option context authority is incomplete",
+                        )
+                        invalid_prepared_option_accounts.add(account)
+                        continue
+                    prepared_option_manifest_paths[account] = manifest_path.resolve()
+                    prepared_option_manifest_sha256_by_account[account] = (
+                        manifest_sha256
                     )
-                    for account in scanning_configs
-                },
-                observed_at_utc=datetime.now(timezone.utc).isoformat(),
-                ledger_read_count=0,
-                fx_observation_count=0,
-                fx_evidence_status="error",
-                fx_evidence_error_count=1,
-            )
-        prepared_option_records_by_account = dict(
-            prepared_options.position_records_by_account
-        )
-        prepared_option_unavailable_by_account = dict(
-            prepared_options.unavailable_by_account
-        )
-        invalid_prepared_option_accounts: set[str] = set()
-        for account in sorted(scanning_configs):
-            if request.experience:
-                continue
-            manifest = prepared_options.manifests.get(account)
-            if (
-                not isinstance(manifest, Mapping)
-                or str(manifest.get("status") or "").strip().lower()
-                != "ready"
-            ):
-                reason = (
-                    str((manifest or {}).get("reason") or "").strip()
-                    if isinstance(manifest, Mapping)
-                    else ""
-                )
-                if not reason:
-                    reason = prepared_option_unavailable_by_account.get(
-                        account,
-                        "prepared option context unavailable",
-                    )
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
-                    reason,
-                )
-                invalid_prepared_option_accounts.add(account)
-                continue
-            manifest_path = Path(str(manifest.get("manifest_path") or ""))
-            manifest_sha256 = str(
-                manifest.get("manifest_sha256") or ""
-            ).strip().lower()
-            if (
-                not manifest_path.is_file()
-                or len(manifest_sha256) != 64
-                or (fx_snapshot_sha256 is not None and manifest.get("run_fx_snapshot_sha256") != fx_snapshot_sha256)
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in manifest_sha256
-                )
-            ):
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
-                    "prepared option context authority is incomplete",
-                )
-                invalid_prepared_option_accounts.add(account)
-                continue
-            prepared_option_manifest_paths[account] = manifest_path.resolve()
-            prepared_option_manifest_sha256_by_account[account] = (
-                manifest_sha256
-            )
 
-        request.runlog.safe_event(
-            "prepared_option_positions_context",
-            (
-                "ok"
-                if not invalid_prepared_option_accounts
-                else "degraded"
-            ),
-            data={
-                "accounts": sorted(scanning_configs),
-                "ready_accounts": sorted(prepared_option_manifest_paths),
-                "ledger_read_count": prepared_options.ledger_read_count,
-                "fx_observation_count": prepared_options.fx_observation_count,
-            },
-        )
+            request.runlog.safe_event(
+                "prepared_option_positions_context",
+                (
+                    "ok"
+                    if not invalid_prepared_option_accounts
+                    else "degraded"
+                ),
+                data={
+                    "accounts": sorted(scanning_configs),
+                    "ready_accounts": sorted(prepared_option_manifest_paths),
+                    "ledger_read_count": prepared_options.ledger_read_count,
+                    "fx_observation_count": prepared_options.fx_observation_count,
+                },
+            )
         if prepared_options.fx_evidence_status not in {"not_attempted", "disabled"}:
             request.runlog.safe_event(
                 "option_performance_fx_evidence",

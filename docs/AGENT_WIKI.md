@@ -862,6 +862,33 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 4. Use `research` `candidate` or `full` scope for candidate/filter trace evidence.
 5. Separate expected account constraints from state contamination.
 
+### Prepared Context Timing Evidence
+
+Existing `audit/run_logs/` emits `prepared_context_phase` for real tick preparation.
+`post_portfolio_prepare` spans the return from portfolio preparation through option
+manifest checks and the existing `prepared_option_positions_context` completion
+summary; it ends before FX evidence summary logging and prefetch. This starts after
+the preparation call returns, so promotion-to-return overhead remains outside it.
+Each executed phase has `start` and `ok`/`error` events under the logger's `run_id`.
+Terminal `duration_ms` is monotonic and inclusive: do not sum parent and child times.
+An absent duration is unknown; start without terminal is incomplete. `ok`/`outcome`
+describes execution completion, not data readiness. Read `ready_accounts`, existing
+unavailable reasons and FX evidence status alongside the timings.
+
+The tick records `portfolio_authority` (with `portfolio_config`/`portfolio_context`)
+and `prepared_option_authority` per account, plus shared `option_prepare`. The
+option owner records reuse checks, path resolution, ledger fences A/B, current
+projections, FX observation/evidence, projection and shared context building, and
+account context/Wheel/ready or unavailable publication. Account boundaries include
+`account`; shared ledger/FX/broker work does not. Repeated shared phase names are
+actual operations on separate ledgers/brokers, not copies for each account, and
+are not SQL/network call counts. Replay only records work it executes; disabled FX
+persistence, experience and scheduler skips do not synthesize phase durations.
+Scopes reset on exit and cover synchronous work only. Timing/clock/log failures
+preserve business results and exceptions; new events include no payloads, paths,
+amounts or raw exception text. Historical logs without these events cannot be
+retroactively attributed; source delivery alone does not prove production latency.
+
 ### Ledger Or Trade Intake Looks Wrong
 
 1. Use `option_positions_read action=inspect` or `action=events`.
