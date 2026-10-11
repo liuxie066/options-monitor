@@ -5,6 +5,7 @@ from cash_evidence_helpers import cash_portfolio
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import pytest
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -23,6 +24,47 @@ def _patched(module, **attributes):
     finally:
         for name, value in originals.items():
             setattr(module, name, value)
+
+
+@pytest.mark.parametrize("rate,expected", [(1, 500), (None, None)])
+def test_cash_query_and_candidate_share_collateral_conversion(tmp_path, rate, expected):
+    import pandas as pd
+    from src.application import cash_headroom_query as query
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    option = {
+        "decision_snapshot_status": "trusted",
+        "cash_secured_total_by_ccy": {"HKD": 500},
+        "cash_secured_total_cny": 460,
+        "cash_secured_by_symbol_cny": {"0700.HK": 460},
+        "cash_secured_by_symbol_by_ccy": {"0700.HK": {"HKD": 500}},
+    }
+    portfolio = cash_portfolio({"cash_by_currency": {"HKD": 1000}, "option_ctx": option})
+    with _patched(
+        query,
+        get_exchange_rates_or_fetch_latest=lambda **_: {"rates": {"HKDCNY": rate}},
+        load_account_portfolio_context=lambda **_: portfolio,
+        _load_option_position_records=lambda _: (object(), []),
+        decision_state_snapshot=lambda *args, **_: {},
+        build_option_positions_context=lambda *args, **_: option,
+    ):
+        result = query.query_sell_put_cash(
+            account="lx", output_format="json", base_dir=tmp_path,
+            runtime_config={}, out_dir=str(tmp_path), write_cache=False,
+        )
+    row = enrich_sell_put_candidates_with_cash(
+        df_labeled=pd.DataFrame([{"strike": 450, "multiplier": 100, "currency": "HKD"}]),
+        symbol="0700.HK", portfolio_ctx=portfolio,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=rate)),
+    ).iloc[0]
+    assert result["cash_secured_used_cny"] == expected
+    if expected is None:
+        assert pd.isna(row["cash_secured_used_cny_total"])
+        assert result["cash_free_total_cny"] is None
+    else:
+        assert result["cash_secured_used_cny"] == row["cash_secured_used_cny_total"]
+        assert result["cash_free_total_cny"] == row["cash_free_total_cny"] == 500
 
 
 def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_allows_it(tmp_path: Path) -> None:

@@ -225,11 +225,11 @@ def test_source_funds_response_does_not_drop_malformed_rows(monkeypatch):
 
 def test_partial_positions_do_not_create_cash_only_nav():
     from src.application.short_vol_risk_context import build_portfolio_risk_context
-    from src.infrastructure.exchange_rates import CurrencyConverter
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
     ctx = cash_context(cash_by_currency={"CNY": 100}, position_snapshot_input={
         "completeness": "partial", "quality": {"status": "unavailable"}, "errors": ["position_query_failed"],
     })
-    out = build_portfolio_risk_context(portfolio_ctx=ctx, exchange_rate_converter=CurrencyConverter(rates={}))
+    out = build_portfolio_risk_context(portfolio_ctx=ctx, exchange_rate_converter=CurrencyConverter(ExchangeRates()))
     assert out.nav_cny is None
     assert "broker_positions_unavailable" in out.unavailable_reasons
 
