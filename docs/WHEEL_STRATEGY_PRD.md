@@ -1487,3 +1487,8 @@ recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 
 验收：真实计算触发净权利金非正时，Call/Put 均输出策略拒绝且无数据缺口；全部正常拒绝为 no_candidate；共用候选计算阶段中真实缺失单独为 data_unavailable，与正常拒绝混合为 partial_data；保留后续 Wheel 批次经济数据不足的既有优先级；有效候选与拒绝候选并存仍可推荐。Call/Put 均验证真实计算触发的合约不适用仍为 contract_ineligible，不制造数据缺口；连续净权利金拒绝、真实缺失、有效候选核对原始 rule/message/metric_value/threshold 不丢失、不串用。渲染 facade 覆盖 Call/Put 无候选、部分/全部数据不足、已有推荐及未知原因。运行 Wheel scanning、snapshot/tick integration、共用扫描证据与 Daily Brief renderer 的相关测试，检查文档格式和适用 guardrails。
 
 适用边界：修正状态不保证出现交易机会；收益/Delta/波动率门槛保持不变。生产历史消息不回写。
+
+
+### Call 覆盖证据的新鲜度
+
+Call 共享覆盖与确认使用 `portfolio_context_service.portfolio_position_snapshot_errors`，复用领域持仓资格：完整未过滤范围、账户/物理 ID/环境/市场、ready 质量及股票 300 秒源时间。确认在当前决策时刻重核 coverage fact 的 `position_evidence`，不能以现金缓存 TTL 或单个观察时间放行。封存报告保留当次评价；既有持久化请求仍按原幂等回执读回。缺该证据的旧候选需要重新预览，股票锁定、预留、账本指纹及事务重核规则保持原合同。

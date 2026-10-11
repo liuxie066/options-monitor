@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -129,16 +131,16 @@ def test_cross_account_prefetch_union_is_order_independent_and_covers_call_costs
         ]
     }
     contexts = {
-        "lx": {
+        "lx": cash_portfolio({
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "available"},
             "stocks_by_symbol": {"NVDA": {"avg_cost": 100}},
-        },
-        "sy": {
+        }, account='lx', account_id='123'),
+        "sy": cash_portfolio({
             "portfolio_source_name": "futu",
             "capacity_authority": {"status": "available"},
             "stocks_by_symbol": {"NVDA": {"avg_cost": 120}},
-        },
+        }, account='sy', account_id='123'),
     }
 
     forward = build_cross_account_prefetch_config(
@@ -219,11 +221,11 @@ def test_cross_account_prefetch_keeps_put_when_one_context_is_unavailable() -> N
         base_config=config,
         account_configs={"lx": config, "sy": config},
         prepared_portfolio_contexts={
-            "lx": {
+            "lx": cash_portfolio({
                 "portfolio_source_name": "futu",
                 "capacity_authority": {"status": "available"},
                 "stocks_by_symbol": {"NVDA": {"avg_cost": 100}},
-            },
+            }, account='lx', account_id='123'),
             "sy": None,
         },
     )

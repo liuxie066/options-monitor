@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from pathlib import Path
 
 import pytest
@@ -34,7 +36,7 @@ def test_process_symbol_passes_futu_portfolio_stock_to_sell_call_chain(monkeypat
             'sell_call': {'enabled': True, 'min_dte': 7, 'max_dte': 45, 'min_strike': 100},
         },
         top_n=3,
-        portfolio_ctx={
+        portfolio_ctx=cash_portfolio({
             'portfolio_source_name': 'futu',
             'capacity_authority': {'status': 'available'},
             'stocks_by_symbol': {
@@ -50,7 +52,7 @@ def test_process_symbol_passes_futu_portfolio_stock_to_sell_call_chain(monkeypat
                 'locked_shares_by_symbol': {'NVDA': 100},
                 'locked_shares_unavailable_by_symbol': {},
             },
-        },
+        }, account='lx', account_id='123'),
         usd_per_cny_exchange_rate=0.14,
         cny_per_hkd_exchange_rate=0.92,
         timeout_sec=10,
@@ -75,11 +77,11 @@ def test_process_symbol_passes_futu_portfolio_stock_to_sell_call_chain(monkeypat
     (
         (None, 'covered_call_portfolio_context_unavailable'),
         (
-            {
+            cash_portfolio({
                 'portfolio_source_name': 'futu',
                 'capacity_authority': {'status': 'available'},
                 'stocks_by_symbol': {},
-            },
+            }, account='lx', account_id='123'),
             'covered_call_underlying_not_held',
         ),
     ),

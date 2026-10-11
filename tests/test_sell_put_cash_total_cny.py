@@ -5,6 +5,7 @@ from cash_evidence_helpers import cash_portfolio
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
@@ -35,6 +36,49 @@ def _usd_cny_portfolio_ctx(**overrides) -> dict:
         },
         **overrides,
     })
+
+
+@pytest.mark.parametrize("cached_cny", [460.0, None])
+def test_cash_and_collateral_use_the_same_consumer_fx(cached_cny):
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=_hk_df(), symbol="0700.HK",
+        portfolio_ctx=cash_portfolio({
+            "cash_by_currency": {"CNY": 10000, "HKD": 1000},
+            "option_ctx": {
+                "decision_snapshot_status": "trusted",
+                "cash_secured_total_by_ccy": {"HKD": 500},
+                "cash_secured_total_cny": cached_cny,
+                "cash_secured_by_symbol_cny": {"0700.HK": 460},
+                "cash_secured_by_symbol_by_ccy": {"0700.HK": {"HKD": 500}},
+            },
+        }),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=1)),
+    )
+    row = result.iloc[0]
+    assert row["cash_secured_used_cny_total"] == 500
+    assert row["cash_secured_used_cny_symbol"] == 500
+    assert row["cash_free_total_cny"] == 10500
+    assert row["cash_free_effective_native"] == 10500
+
+
+def test_unavailable_consumer_fx_cannot_reuse_cached_cny_collateral():
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=_hk_df(), symbol="0700.HK",
+        portfolio_ctx=cash_portfolio({
+            "cash_by_currency": {"HKD": 1000},
+            "option_ctx": {
+                "decision_snapshot_status": "trusted",
+                "cash_secured_total_by_ccy": {"HKD": 500},
+                "cash_secured_total_cny": 460,
+                "cash_secured_by_symbol_by_ccy": {"0700.HK": {"HKD": 500}},
+            },
+        }),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+    )
+    row = result.iloc[0]
+    assert pd.isna(row["cash_secured_used_cny_total"])
+    assert pd.isna(row["cash_free_total_cny"])
+    assert row["cash_free_effective_native"] == 500
 
 
 def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> None:

@@ -447,7 +447,7 @@ def test_query_missing_futu_quote_is_partial_without_pm_fallback(monkeypatch):
             "position_snapshot_input": {
                 "rows": [
                     {
-                        "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                        "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
                         "position_side": "long",
                         "quantity": "1",
                     }
@@ -582,13 +582,13 @@ def test_query_uses_futu_baseline_and_only_optional_non_futu_pm_rows(
         "position_snapshot_input": {
             "rows": [
                 {
-                    "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                    "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
                     "position_side": "long",
                     "quantity": "10",
                     "source_row": {"stock_name": "Nvidia"},
                 },
                 {
-                    "instrument_ref": {"asset_type": "stock", "symbol": "TSLA", "currency": "USD"},
+                    "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "TSLA", "currency": "USD"},
                     "position_side": "short",
                     "quantity": "10",
                     "source_row": {"stock_name": "Tesla"},
@@ -743,7 +743,7 @@ def test_call_assignment_does_not_count_pm_futu_stock_copy(monkeypatch):
             "position_snapshot_input": {
                 "rows": [
                     {
-                        "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "currency": "USD"},
+                        "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
                         "position_side": "long",
                         "quantity": "100",
                     }

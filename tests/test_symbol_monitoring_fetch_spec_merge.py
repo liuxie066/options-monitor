@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 import json
 from pathlib import Path
 
@@ -1147,7 +1149,7 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
                 "sell_put": {"enabled": False},
                 "sell_call": {"enabled": True},
             },
-            portfolio_ctx={
+            portfolio_ctx=cash_portfolio({
                 "portfolio_source_name": "futu",
                 "capacity_authority": {"status": "available"},
                 "stocks_by_symbol": {
@@ -1158,7 +1160,7 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
                         "currency": "HKD",
                     }
                 },
-            },
+            }, account='lx', account_id='123'),
             candidate_capture_status_sink_fn=capture_statuses.append,
         ),
         deps=deps,

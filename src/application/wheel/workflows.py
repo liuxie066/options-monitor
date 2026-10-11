@@ -1097,7 +1097,7 @@ def create_wheel_call_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
-        if not broker_capacity_observation_is_fresh(coverage_fact.get("source_observed_at")):
+        if not broker_capacity_observation_is_fresh(coverage_fact, account=account_value, market=market_value):
             raise ValueError("Wheel Call broker capacity observation is stale or unavailable")
         decision_snapshot = decision_state_snapshot_from_locked_rows(
             sqlite_repo, rows,

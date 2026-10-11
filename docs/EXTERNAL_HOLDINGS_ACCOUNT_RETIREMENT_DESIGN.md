@@ -140,7 +140,7 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 
 ### 读取、缓存与封存
 
-共享读取顺序：有效配置和期望身份 → 读取指定目录现有 portfolio_context.json → 共享评价 → fresh 且包含本次所需数据则复用 → 否则最多一次 Futu 刷新 → 对刷新结果运行同一评价 → 返回完整 context 和现金结论。共享现金结论只接受归一化后的 CNY/HKD/USD 键；其他币种键返回 CASH_CURRENCY_UNSUPPORTED。含其他币种键的旧当前缓存（包括零余额）视为未命中，沿既有流程刷新一次，成功后使用 source owner 的三币种结果；不改写旧封存历史。缓存 JSON 损坏等视为未命中；刷新失败不退回过期余额，错误统一映射为不可用，保留原本的日志与故障通道。取消/超时不再补发请求。
+共享读取顺序：有效配置和期望身份 → 读取指定目录现有 portfolio_context.json → 共享评价 → fresh 且包含本次所需数据则复用 → 否则最多一次 Futu 刷新 → 对刷新结果运行同一评价 → 返回完整 context 和现金结论。共享现金结论只接受归一化后的 CNY/HKD/USD 键；其他币种键返回 CASH_CURRENCY_UNSUPPORTED。含其他币种键的旧当前缓存（包括零余额）视为未命中，沿既有流程刷新一次，成功后使用 source owner 的三币种结果；不改写旧封存历史。缓存 JSON 损坏等视为未命中；刷新失败不退回过期余额。若仅持仓不合格触发刷新，仍独立有效的缓存现金可保留，持仓标记刷新不可用；无可信现金时现金不可用，保留原本的日志与故障通道。取消/超时不再补发请求。
 
 state_dir、runtime root、run_id、account 继续由既有入口绑定；共享 loader 不搜索其他根目录或其他 run 的缓存。不同目录使用相同读取规则，本轮不建立全局现金缓存仓库，也不承诺不同观测时刻读取同一快照。只读入口继续 write_cache=False；prepared 继续通过现有封存写入路径产出，不修改已封存 payload。允许写缓存的入口使用既有 atomic_write_json，避免并发半文件；缓存读取失败可以刷新，但写入失败不得悄悄伪报已缓存。
 
@@ -186,3 +186,28 @@ Prepared manifest/payload hash、run FX hash、run config hash 继续覆盖同�
 当前验证入口：`tests/test_cash_snapshot_contract.py`、`tests/test_futu_portfolio_context.py`、`tests/test_prepared_portfolio_context.py`、`tests/test_query_sell_put_cash_futu.py`、`tests/test_runtime_portfolio_snapshot.py`、`tests/test_portfolio_assignment_application.py` 及 Wheel 确认测试。
 
 旧缓存缺独立现金时间须刷新；旧封存缺必要证据明确不可用。持仓完整性/60 秒门槛不因现金缓存复用而放宽，历史 schema 的 hash/source binding 不因新 cash 字段放宽。目标环境现金、配置及服务未由本契约核验。
+
+
+### 共享持仓资格与重复取数评估（2026-10-11）
+
+`portfolio_context_service.portfolio_position_snapshot_errors` 适配唯一领域检查
+`domain/domain/position_snapshot.py::position_snapshot_scope_errors`。loader 在缓存及新取回响应上校验有效配置的账户、物理 ID、环境和市场；持仓还必须有完整未过滤的范围、ready 质量、所需资产类型及合法源时间。股票沿用 300 秒，300 可用、301 不可用；成交归属含期权沿用 60 秒，不用现金 TTL 代替。现金和持仓按各自证据判定。
+
+直接扫描和 prepared worker 声明需要股票；CC/Combo/CC-LP 的共享预筛、Wheel 共享覆盖及 Call 确认复用该检查。封存运行沿用当次评价时刻；新 Call 确认使用当前时刻并绑定账户/市场，覆盖指纹包含持仓证据。已持久化请求的幂等回执仍先于新鲜度检查。旧预览缺资格证据时需重新预览，不能仅凭 source_observed_at 放行。
+
+离线测量入口：`tests/test_holdings_eligibility_contract.py`。下表每项连续加载两次，计数单位是注入的完整 portfolio fetch 调用，缓存位于隔离临时目录；不等同于 SDK RPC 数或生产延迟。
+
+| 场景 | 两次加载的 fetch 次数 | 解释 |
+| --- | ---: | --- |
+| 同账户同目录、冷缓存、只读 | 2 | 没有缓存写入，每个独立请求均需取数 |
+| 同账户同目录、冷缓存、允许写缓存 | 1 | 第一次取数后第二次复用 |
+| 同账户同目录、合格缓存 | 0 | 共享 owner 已能复用 |
+| 同账户不同目录、冷缓存 | 2 | 当前目录隔离合同，没有跨目录仓库 |
+| 不同账户、同目录、允许写缓存 | 2 | 不得跨账户复用 |
+| 持仓 301 秒、现金有效、允许写缓存 | 1 | 刷新后第二次复用，不放宽持仓门槛 |
+| 每次返回部分持仓、只读 | 2 | 保留不可用证据，不把前缀当完整持仓 |
+| 旧持仓刷新失败、现金有效 | 2 | 两次独立请求各尝试一次，现金保留、持仓不可用 |
+
+额外范围测试：仅含股票的缓存可供股票请求复用；随后股票+期权归属请求必须再取一次。独立 broker 对账保留自身事实取数，不能用本地账本证明 broker 持仓。
+
+当前结论：先保留模块化单体和唯一 owner，暂不拆服务。可复用的同范围缓存已有 0/1 次路径；剩余重复来自只读冷请求、目录隔离、不同账户及更严格证据要求，拆进程不会自动消除这些语义。若后续实测发现同账户、同范围、同观察窗口持续重复取数，且现有 prepared/cache 仍不能满足并发预算，才评估独立数据服务。需另外测量实际 SDK 请求、调用关联、并发与排队、延迟及 provider 故障恢复，不能据本表承诺性能提升。本轮没有生产取数或服务拆分。

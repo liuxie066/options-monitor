@@ -41,6 +41,7 @@
 
 - 简报先展示完整 CNY 现金和期权开仓展示值，再保留原币种现金及开仓明细，包括负余额与担保独有币种。CNY 经济汇总不证明跨账户、券商或币种资金可自由互抵。
 - 现金与担保按同一快照折算后相减；任何非零必要币种缺价，或现金/担保来源不可靠时，完整 CNY 值为不可用。不能把可折算部分冒充总额，不能将两个快照的小计相减。
+- 当前现金查询、CSP 候选资金展示和风险上下文复用 `src/application/cash_totals.py::sum_by_currency_to_cny`，按消费者的同一份有效汇率折算原币现金及担保。持仓上下文已有的 CNY 小计不能替代本次折算；未知金额、布尔值、非有限金额或无效的必要汇率均不产出完整总额。已验证的零余额不要求汇率，负余额仍保留。
 - 正常假期沿用不增加通知提示；结构化证据保留逐对来源、原报价时间、质量与 hash。不可折算时保留原币种金额及不可靠原因。产品文案见 [通知体验 PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)。
 - [资产指派情景](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)从同一快照生成估值和资金覆盖用途，已验证休市报价可供两者使用；PM 非富途估值仍由 PM 的报价/汇率证据负责。
 
@@ -58,5 +59,6 @@
 | 封存一次、重试复用、损坏与并发冲突 | `tests/test_current_fx_run.py` |
 | 当前/历史共同资格、证据一致、历史不回写、Wheel 延迟消费 | `tests/test_unified_fx_consumers.py` |
 | 情景共用报价、估值/覆盖用途及账户隔离 | `tests/test_portfolio_assignment_application.py` |
+| 资金聚合有效性、查询/候选同口径、风险小计不冒充总额 | `tests/test_cash_totals.py`、`tests/test_sell_put_cash_total_cny.py`、`tests/test_query_sell_put_cash_futu.py`、`tests/test_sell_put_strategy_risk.py` |
 
 这些源码与测试入口不证明生产缓存格式、服务版本或真实通知送达。生产写入、发布和升级按各自受控流程执行。

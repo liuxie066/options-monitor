@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -96,10 +96,11 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
             rows = self._read_position_lots(conn)
         return rows
 
-    def read_trade_receipt_evidence(self) -> dict[str, list[dict[str, Any]]]:
+    def read_trade_receipt_evidence(self, *, conn: sqlite3.Connection | None = None) -> dict[str, list[dict[str, Any]]]:
         """Read required execution and projection evidence from one read-only snapshot."""
-        with closing(self._connect()) as conn:
-            conn.execute("BEGIN")
+        with (nullcontext(conn) if conn is not None else closing(self._connect())) as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
             if not self._tables_exist(conn, "trade_events", "position_lots"):
                 raise sqlite3.DatabaseError("trade receipt evidence requires trade_events and position_lots tables")
             events = self._read_trade_events(conn, strict=True)
