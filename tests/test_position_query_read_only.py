@@ -73,6 +73,16 @@ def test_bad_schema_or_projection_is_unavailable_without_repair(tmp_path, monkey
         with pytest.raises((sqlite3.Error, ValueError, RuntimeError)):
             read_position_query_snapshot(path, accounts=["lx"])
         assert list(conn.iterdump()) == before
+        from src.application import cash_headroom_query as query
+        monkeypatch.setattr(query, "load_account_portfolio_context", lambda **kw: cash_portfolio({"cash_by_currency": {"CNY": 10000}}))
+        result = query.query_sell_put_cash(base_dir=tmp_path, account="lx", runtime_config={},
+            data_config=tmp_path / "data.json", no_exchange_rates=True, write_cache=False, output_format="json")
+        assert result["cash_available_cny"] == 10000
+        assert result["cash_secured_usage_reliable"] is False
+        assert result["cash_secured_used_cny"] is None
+        assert result["cash_free_cny"] is None
+        assert "ledger_unavailable" in result["cash_secured_unavailable_reason"]
+        assert list(conn.iterdump()) == before
 
 
 def test_cash_tool_preserves_cash_but_missing_occupancy_is_not_zero(tmp_path, monkeypatch):

@@ -187,7 +187,7 @@ def query_sell_put_cash(
     ledger_error = None
     try:
         option_records, decision_snapshot = _load_option_position_records(data_config_path, account=account)
-    except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+    except (OSError, ValueError, TypeError, RuntimeError, sqlite3.Error) as exc:
         option_records, decision_snapshot = [], {}
         ledger_error = f"option_position_ledger_unavailable:{type(exc).__name__}"
     opt = build_option_positions_context(
