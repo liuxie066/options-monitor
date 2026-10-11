@@ -22,6 +22,7 @@ from src.application.ledger.api import (
     correct_superseded_cash_conversions,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config,
+    open_performance_query_ledger_from_data_config,
 )
 from src.application.performance.service import build_option_period_performance
 from src.interfaces.cli.ledger_write_safety import (
@@ -314,7 +315,7 @@ def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any
             load_runtime_config=load_runtime_config,
             resolve_public_data_config_path=resolve_public_data_config_path,
             normalize_broker=normalize_broker,
-            resolve_option_positions_repo=open_position_ledger_from_data_config,
+            resolve_option_positions_repo=open_performance_query_ledger_from_data_config,
             build_option_period_performance=build_option_period_performance,
             repo_base=repo_base,
             mask_path=mask_path,
