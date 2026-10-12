@@ -92,13 +92,14 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 运行时要求 Python 3.12 或更高版本。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
-"$HOME/.local/bin/om" setup init
+om_installer="$(mktemp -t options-monitor-install.XXXXXX)" &&
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o "$om_installer" &&
+bash "$om_installer" --setup
 ```
 
-第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；具体参数以安装版的 `om setup init --help` 为准。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
+先下载脚本再执行，保留终端输入供首次配置使用。`--setup` 在安装成功后调用安装版的 `om setup init`，无需先修改 `PATH`；没有交互终端时仅打印后续命令。默认解析最新 GitHub Release，不跟随浮动 `main`；具体参数以安装版的 `om setup init --help` 为准。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
 
-安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper；不会创建生产配置、写入 secrets、安装服务或启动定时任务。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
+安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper。首次配置仍使用已有向导的预览和确认；省略 `--setup` 只安装代码与依赖。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
 
 在源码 checkout 中，以下示例里的 `om` / `om-agent` 可替换为 `./om` / `./om-agent`。
 

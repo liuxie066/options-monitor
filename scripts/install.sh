@@ -11,6 +11,7 @@ FORCE=0
 INSTALL_CLI=1
 BIN_DIR="${HOME}/.local/bin"
 FORCE_CLI_WRAPPER=0
+RUN_SETUP=0
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 
 usage() {
@@ -24,9 +25,10 @@ Installs the latest GitHub release, or one pinned options-monitor release, into:
 
 The installer requires Python 3.12. It downloads code, installs
 locked Python dependencies, verifies the Bot runtime, updates current, and
-by default creates user-level CLI wrappers. It does not write runtime config,
+by default creates user-level CLI wrappers. The installation phase does not write runtime config,
 write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
+With --setup, it then calls the existing first-run wizard with its own confirmations.
 
 Options:
   --version VERSION     Release tag to install, for example v1.2.118.
@@ -41,6 +43,8 @@ Options:
   --with-server        Also install requirements/server.txt.
   --with-dev           Also install requirements/dev.txt.
   --force              Recreate an inactive target release directory if it exists.
+  --setup              After installation, enter first-run setup when a terminal is available.
+                       Without a terminal, print the exact command to run later.
   -h, --help           Show this help.
 EOF
 }
@@ -114,7 +118,10 @@ run_bot_smoke() {
 }
 
 quote() {
-  printf '%q' "$1"
+  # Bash 3.2's %q can split UTF-8 bytes under the C locale on macOS.
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
 }
 
 normalize_dir_path() {
@@ -207,30 +214,6 @@ install_optional_requirements() {
   fi
 }
 
-write_cli_wrapper() {
-  name="$1"
-  target="$2"
-  wrapper_path="${BIN_DIR}/${name}"
-  tmp_wrapper="${wrapper_path}.tmp.$$"
-
-  if [ ! -x "$target" ]; then
-    die "cannot install CLI wrapper; target is not executable: $target"
-  fi
-
-  mkdir -p "$BIN_DIR"
-  check_cli_wrapper_path "$name"
-
-  cat > "$tmp_wrapper" <<EOF
-#!/usr/bin/env bash
-# options-monitor managed wrapper
-# target-prefix: $PREFIX
-exec "$target" "\$@"
-EOF
-  chmod +x "$tmp_wrapper"
-  mv "$tmp_wrapper" "$wrapper_path"
-  printf '[install] cli wrapper: %s -> %s\n' "$wrapper_path" "$target"
-}
-
 stage_cli_wrapper() {
   name="$1"
   target="$2"
@@ -244,7 +227,7 @@ stage_cli_wrapper() {
 #!/usr/bin/env bash
 # options-monitor managed wrapper
 # target-prefix: $PREFIX
-exec "$target" "\$@"
+exec $(quote "$target") "\$@"
 EOF
   chmod +x "$staged_path"
 }
@@ -257,25 +240,158 @@ backup_cli_wrapper() {
       || die "failed to back up CLI wrapper: $wrapper_path"
     return 0
   fi
-  return 1
-}
-
-restore_cli_wrapper() {
-  wrapper_path="$1"
-  backup_path="$2"
-  existed="$3"
-  if [ "$existed" -eq 1 ]; then
-    mv -f "$backup_path" "$wrapper_path"
-  else
-    rm -f "$wrapper_path"
-  fi
+  return 0
 }
 
 replace_current_link() {
-  staged_link="${CURRENT_LINK}.tmp.$$"
-  rm -f "$staged_link"
+  staged_link="${CURRENT_LINK}.tmp.${transaction_token}"
   ln -s "$TARGET_DIR" "$staged_link"
   "$PYTHON_BIN" -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$staged_link" "$CURRENT_LINK"
+}
+
+wrapper_matches() {
+  if [ -L "$1" ] || [ -L "$2" ]; then
+    [ -L "$1" ] && [ -L "$2" ] && [ "$(readlink "$1")" = "$(readlink "$2")" ]
+  else
+    [ -f "$1" ] && [ -f "$2" ] && cmp -s "$1" "$2"
+  fi
+}
+
+restore_cli_wrapper() {
+  name="$1"
+  wrapper_path="${BIN_DIR}/${name}"
+  backup_path="${transaction_dir}/${name}.old"
+  expected_path="${transaction_dir}/${name}.new"
+  if wrapper_matches "$wrapper_path" "$expected_path"; then
+    if [ -e "$backup_path" ] || [ -L "$backup_path" ]; then
+      restore_path="${BIN_DIR}/.${name}.restore.${transaction_token}"
+      cp -pP "$backup_path" "$restore_path" && mv -f "$restore_path" "$wrapper_path" || return 1
+    else
+      rm -f "$wrapper_path" || return 1
+    fi
+  elif [ -e "$backup_path" ] || [ -L "$backup_path" ]; then
+    wrapper_matches "$wrapper_path" "$backup_path" || return 1
+  else
+    [ ! -e "$wrapper_path" ] && [ ! -L "$wrapper_path" ] || return 1
+  fi
+}
+
+target_is_owned() {
+  [ -f "$TARGET_DIR/.om-install-owner" ] && [ "$(cat "$TARGET_DIR/.om-install-owner")" = "$transaction_dir" ]
+}
+
+snapshot_release() {
+  "$PYTHON_BIN" -c '
+# install_target_snapshot: do not follow links or open special files.
+import hashlib, json, os, stat, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+def walk_error(error):
+    raise error
+def snapshot():
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("release root is not a directory")
+    root_identity = [info.st_mode, info.st_dev, info.st_ino, info.st_uid, info.st_gid]
+    entries = []
+    for base, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in sorted(dirs + files):
+            path = Path(base) / name
+            info = path.lstat()
+            entry = [str(path.relative_to(root)), info.st_mode, info.st_dev, info.st_ino,
+                     info.st_uid, info.st_gid]
+            if stat.S_ISREG(info.st_mode):
+                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+                    entry += [hashlib.file_digest(stream, "sha256").hexdigest()]
+            elif stat.S_ISLNK(info.st_mode):
+                entry += [os.readlink(path)]
+            entries.append(entry)
+    return [root_identity, sorted(entries)]
+try:
+    observed = snapshot()
+    if sys.argv[2] == "record":
+        print(json.dumps(observed))
+    else:
+        with open(sys.argv[3]) as stored:
+            raise SystemExit(0 if observed == json.load(stored) else 1)
+except (OSError, ValueError):
+    raise SystemExit(1)
+' "$TARGET_DIR" "$1" "$transaction_dir/release.snapshot"
+}
+
+cleanup_install() {
+  # A successful atomic replace is the commit point, including the signal window before its caller returns.
+  trap '' INT TERM HUP
+  if [ "$ALREADY_INSTALLED" -eq 0 ] && [ "$(readlink "$CURRENT_LINK" 2>/dev/null || true)" = "$TARGET_DIR" ]; then
+    if [ "$committed" -ne 1 ]; then
+      printf 'install.sh: current already switched; preserving installed release: %s\n' "$TARGET_DIR" >&2
+    fi
+    committed=1
+  fi
+  recovery_ok=1
+  if [ "$committed" -ne 1 ]; then
+    if [ "$wrappers_publishing" -eq 1 ]; then
+      restore_cli_wrapper om || recovery_ok=0
+      restore_cli_wrapper om-agent || recovery_ok=0
+    fi
+    if [ "$target_owned" -eq 1 ] && { [ -e "$TARGET_DIR" ] || [ -L "$TARGET_DIR" ]; }; then
+      if [ "$recovery_ok" -eq 1 ] && target_is_owned; then
+        if [ -f "$transaction_dir/release.snapshot" ] && ! snapshot_release matches; then
+          printf 'install.sh: release content changed or could not be verified; preserving target: %s\n' "$TARGET_DIR" >&2
+          recovery_ok=0
+        else
+          # Keep every failed target: a snapshot cannot prove who wrote each file.
+          mv "$TARGET_DIR" "$transaction_dir/failed-release" || recovery_ok=0
+        fi
+      else
+        recovery_ok=0
+      fi
+    fi
+    if [ -e "$transaction_dir/previous-release" ] || [ -L "$transaction_dir/previous-release" ]; then
+      if [ ! -e "$TARGET_DIR" ] && [ ! -L "$TARGET_DIR" ]; then
+        mv "$transaction_dir/previous-release" "$TARGET_DIR" || recovery_ok=0
+      else
+        recovery_ok=0
+      fi
+    fi
+  elif target_is_owned; then
+    rm -f "$TARGET_DIR/.om-install-owner" || recovery_ok=0
+  fi
+  if [ "$recovery_ok" -ne 1 ]; then
+    printf 'install.sh: recovery incomplete; preserved target, backups and lock for inspection: %s\n' "$transaction_dir" >&2
+    return 1
+  fi
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    rm -f "$staged_om_wrapper" "$staged_agent_wrapper" \
+      "${BIN_DIR}/.om.restore.${transaction_token}" "${BIN_DIR}/.om-agent.restore.${transaction_token}" || return 1
+  fi
+  rm -f "${CURRENT_LINK}.tmp.${transaction_token}" || return 1
+  if [ -e "$transaction_dir/failed-release" ] || [ -L "$transaction_dir/failed-release" ]; then
+    printf 'install.sh: failed release retained for inspection: %s; installation can be retried\n' "$transaction_dir/failed-release" >&2
+  else
+    rm -rf "$transaction_dir" || return 1
+  fi
+  if [ "$lock_owned" -eq 1 ]; then
+    rm -f "$install_lock/owner" && rmdir "$install_lock" || return 1
+  fi
+}
+
+setup_command_path() {
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    printf '%s\n' "${BIN_DIR}/om"
+  else
+    printf '%s\n' "${CURRENT_LINK}/om"
+  fi
+}
+
+run_first_setup() {
+  [ "$RUN_SETUP" -eq 1 ] || return 0
+  setup_cli="$(setup_command_path)"
+  if [ -t 0 ] && [ -t 1 ]; then
+    "$setup_cli" setup init
+  else
+    printf '\n安装已完成；首次配置未执行（需要交互终端）。请在终端运行：\n  %s setup init\n' "$(quote "$setup_cli")"
+  fi
 }
 
 check_cli_wrapper_path() {
@@ -312,17 +428,7 @@ print_next_steps() {
     printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
   fi
   printf 'Next steps:\n'
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    if bin_dir_in_path; then
-      printf '  om setup check\n'
-    else
-      printf '  export PATH=%s:"$PATH"\n' "$(quote "$BIN_DIR")"
-      printf '  om setup check\n'
-    fi
-  else
-    printf '  cd %s\n' "$(quote "$CURRENT_LINK")"
-    printf '  ./om setup check\n'
-  fi
+  printf '  %s setup init\n' "$(quote "$(setup_command_path)")"
   case "$OS_NAME" in
     Darwin)
       printf '\nmacOS service env-file, if you later render launchd services:\n'
@@ -402,6 +508,10 @@ while [ "$#" -gt 0 ]; do
       FORCE=1
       shift
       ;;
+    --setup)
+      RUN_SETUP=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -447,9 +557,34 @@ mkdir -p "$RELEASES_DIR"
 if { [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; } && [ ! -L "$CURRENT_LINK" ]; then
   die "current path exists and is not a symlink: $CURRENT_LINK"
 fi
+if [ -L "$CURRENT_LINK" ] && [ ! -d "$CURRENT_LINK" ]; then
+  die "current symlink target is missing or unreadable: $CURRENT_LINK"
+fi
 
 ALREADY_INSTALLED=0
 REPLACE_INACTIVE_TARGET=0
+committed=0
+target_owned=0
+wrappers_publishing=0
+lock_owned=0
+transaction_dir="$(mktemp -d "${RELEASES_DIR}/.${TAG}.txn.XXXXXX")"
+transaction_token="$(basename "$transaction_dir")"
+staged_om_wrapper="${BIN_DIR}/.om.tmp.${transaction_token}"
+staged_agent_wrapper="${BIN_DIR}/.om-agent.tmp.${transaction_token}"
+install_lock="${PREFIX}/.install.lock"
+trap 'status=$?; trap - EXIT; cleanup_install || status=1; exit "$status"' EXIT
+# Defer cancellation while recording ownership of the newly created lock.
+cancel_status=0
+trap 'cancel_status=130' INT
+trap 'cancel_status=143' TERM
+trap 'cancel_status=129' HUP
+mkdir -m 700 "$install_lock" || die "another installation or an unverified lock exists: $install_lock"
+lock_owned=1
+printf '%s\n' "$transaction_dir" > "$install_lock/owner"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+[ "$cancel_status" -eq 0 ] || exit "$cancel_status"
 TARGET_EXISTS=0
 if [ -e "$TARGET_DIR" ] || [ -L "$TARGET_DIR" ]; then
   TARGET_EXISTS=1
@@ -490,73 +625,55 @@ if [ "$ALREADY_INSTALLED" -eq 1 ]; then
     || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
   run_bot_smoke "$TARGET_DIR"
 else
-  tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
-  staged_om_wrapper="${BIN_DIR}/.om.tmp.$$"
-  staged_agent_wrapper="${BIN_DIR}/.om-agent.tmp.$$"
-  backup_om_wrapper="${BIN_DIR}/.om.backup.$$"
-  backup_agent_wrapper="${BIN_DIR}/.om-agent.backup.$$"
-  rm -rf "$tmp_dir"
-  trap 'rm -rf "$tmp_dir"; if [ "$INSTALL_CLI" -eq 1 ]; then rm -f "$staged_om_wrapper" "$staged_agent_wrapper" "$backup_om_wrapper" "$backup_agent_wrapper"; fi; rm -f "${CURRENT_LINK}.tmp.$$"' EXIT
-
+  tmp_dir="${transaction_dir}/source"
   printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
   git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
 
-  printf '[install] creating virtualenv\n'
-  "$PYTHON_BIN" -m venv "$tmp_dir/.venv"
-  "$tmp_dir/.venv/bin/pip" install -U pip
-  "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements.txt" -c "$tmp_dir/constraints.txt"
-
-  install_optional_requirements "$tmp_dir"
-
-  run_bot_smoke "$tmp_dir"
-
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    stage_cli_wrapper "om" "${CURRENT_LINK}/om" "$tmp_dir/om" "$staged_om_wrapper"
-    stage_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent" "$tmp_dir/om-agent" "$staged_agent_wrapper"
-    om_wrapper_existed=0
-    agent_wrapper_existed=0
-    if backup_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper"; then
-      om_wrapper_existed=1
-    fi
-    if backup_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper"; then
-      agent_wrapper_existed=1
-    fi
-  fi
-
   if [ "$REPLACE_INACTIVE_TARGET" -eq 1 ]; then
-    rm -rf "$TARGET_DIR"
+    mv "$TARGET_DIR" "$transaction_dir/previous-release"
   fi
+  printf '%s\n' "$transaction_dir" > "$tmp_dir/.om-install-owner"
+  target_owned=1
   mv "$tmp_dir" "$TARGET_DIR"
+  printf '[install] creating virtualenv\n'
+  "$PYTHON_BIN" -m venv "$TARGET_DIR/.venv"
+  "$TARGET_DIR/.venv/bin/pip" install -U pip
+  "$TARGET_DIR/.venv/bin/pip" install -r "$TARGET_DIR/requirements.txt" -c "$TARGET_DIR/constraints.txt"
 
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    if ! mv -f "$staged_om_wrapper" "${BIN_DIR}/om"; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
-      die "failed to publish CLI wrapper: ${BIN_DIR}/om"
-    fi
-    if ! mv -f "$staged_agent_wrapper" "${BIN_DIR}/om-agent"; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
-      die "failed to publish CLI wrapper: ${BIN_DIR}/om-agent"
-    fi
-  fi
-
-  if ! replace_current_link; then
-    if [ "$INSTALL_CLI" -eq 1 ]; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
-    fi
-    die "failed to atomically switch current release: $CURRENT_LINK"
-  fi
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    rm -f "$backup_om_wrapper" "$backup_agent_wrapper"
-  fi
-  trap - EXIT
+  install_optional_requirements "$TARGET_DIR"
+  run_bot_smoke "$TARGET_DIR"
 fi
 
-if [ "$INSTALL_CLI" -eq 1 ] && [ "$ALREADY_INSTALLED" -eq 1 ]; then
-  write_cli_wrapper "om" "${CURRENT_LINK}/om"
-  write_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent"
+for launcher in om om-agent; do
+  [ -x "$TARGET_DIR/$launcher" ] || die "target is not executable: $TARGET_DIR/$launcher"
+done
+"$TARGET_DIR/om" --help >/dev/null
+"$TARGET_DIR/om-agent" spec >/dev/null
+
+if [ "$ALREADY_INSTALLED" -eq 0 ]; then
+  snapshot_release record > "$transaction_dir/release.snapshot.tmp" || die "failed to snapshot prepared release"
+  mv "$transaction_dir/release.snapshot.tmp" "$transaction_dir/release.snapshot"
 fi
+
+if [ "$INSTALL_CLI" -eq 1 ]; then
+  stage_cli_wrapper om "${CURRENT_LINK}/om" "$TARGET_DIR/om" "$staged_om_wrapper"
+  stage_cli_wrapper om-agent "${CURRENT_LINK}/om-agent" "$TARGET_DIR/om-agent" "$staged_agent_wrapper"
+  backup_cli_wrapper "${BIN_DIR}/om" "$transaction_dir/om.old"
+  backup_cli_wrapper "${BIN_DIR}/om-agent" "$transaction_dir/om-agent.old"
+  cp -p "$staged_om_wrapper" "$transaction_dir/om.new"
+  cp -p "$staged_agent_wrapper" "$transaction_dir/om-agent.new"
+  wrappers_publishing=1
+  mv -f "$staged_om_wrapper" "${BIN_DIR}/om" || die "failed to publish CLI wrapper: ${BIN_DIR}/om"
+  mv -f "$staged_agent_wrapper" "${BIN_DIR}/om-agent" || die "failed to publish CLI wrapper: ${BIN_DIR}/om-agent"
+fi
+
+if [ "$ALREADY_INSTALLED" -eq 0 ]; then
+  replace_current_link || die "failed to atomically switch current release: $CURRENT_LINK"
+  [ "$(readlink "$CURRENT_LINK")" = "$TARGET_DIR" ] || die "current release readback failed: $CURRENT_LINK"
+fi
+committed=1
+cleanup_install || die "installation cleanup failed; inspect $transaction_dir and $install_lock"
+trap - EXIT INT TERM HUP
 
 print_next_steps
+run_first_setup
