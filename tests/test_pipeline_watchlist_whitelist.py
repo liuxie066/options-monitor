@@ -203,7 +203,6 @@ def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
         symbols_arg='NVDA',
         process_symbol_fn=_process_symbol,
         source_producer_run_id='run-1',
-        candidate_capture_status_sink_fn=lambda *_args, **_kwargs: None,
         required_data_snapshot_manifest=tmp_path / 'required.json',
         account_config_sha256='a' * 64,
         combo_evidence_sink_fn=_combo_sink,
@@ -359,7 +358,6 @@ def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
         },
         process_symbol_fn=_process_symbol,
         source_producer_run_id="run-1",
-        candidate_capture_status_sink_fn=lambda _row: None,
         opening_candidate_decisions_sink_fn=(
             lambda _mode, rows: captured.extend(rows)
         ),

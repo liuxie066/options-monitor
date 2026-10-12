@@ -2748,6 +2748,14 @@ def test_sell_put_failure_preserves_covered_call_action_and_degrades_status(tmp_
     )
 
 
+def _failed_strategy_fixture(account_dir, *symbols):
+    from src.application.strategy_scan_status import publish_strategy_scan_status
+    for symbol in symbols:
+        (account_dir / f"{symbol.lower()}_sell_put_candidates_labeled.csv").write_text("\n")
+        publish_strategy_scan_status(report_dir=account_dir, run_id="run-1", account="lx",
+            market="US", symbol=symbol, strategy_family="sell_put", status="failed", reason="sell_put_scan_failed")
+
+
 def test_strategy_step_failure_trace_blocks_false_normal_empty_result(tmp_path: Path) -> None:
     from src.application.strategy_scan_failures import append_strategy_scan_failure
 
@@ -2760,6 +2768,7 @@ def test_strategy_step_failure_trace_blocks_false_normal_empty_result(tmp_path: 
         error=RuntimeError("scanner crashed"),
     )
 
+    _failed_strategy_fixture(account_dir, "NVDA")
     brief = _assemble(tmp_path)
 
     assert brief["actionability"] == "blocked"
@@ -2792,6 +2801,7 @@ def test_strategy_step_failure_preserves_other_candidates_and_warns_user(tmp_pat
         error=RuntimeError("scanner crashed"),
     )
 
+    _failed_strategy_fixture(account_dir, "NVDA")
     brief = _assemble(tmp_path)
     message = render_fixed_report(brief)
 
@@ -2835,6 +2845,7 @@ def test_strategy_step_failure_reminders_list_each_failed_symbol(tmp_path: Path)
         error=RuntimeError("rv missing again"),
     )
 
+    _failed_strategy_fixture(account_dir, "SPCX", "XYZ")
     brief = _assemble(tmp_path)
     message = render_fixed_report(brief)
 
@@ -2864,12 +2875,13 @@ def test_strategy_step_failure_empty_summary_points_to_reminders(tmp_path: Path)
         error=RuntimeError("scanner crashed"),
     )
 
+    _failed_strategy_fixture(account_dir, "SPCX", "XYZ")
     brief = _assemble(tmp_path)
     view = build_daily_brief_user_view(brief, delivery_kind="fixed_report")
 
     assert (
         view["candidate_empty_summary"]
-        == "本轮暂无符合条件的候选；SPCX、XYZ CSP 扫描失败。"
+        == "本轮部分数据不可用；SPCX、XYZ CSP 扫描失败。"
     )
     assert "SPCX CSP 扫描失败，本轮无结果" in view["reminders"]
     assert "XYZ CSP 扫描失败，本轮无结果" in view["reminders"]
@@ -2988,3 +3000,24 @@ def test_funds_reject_conflicting_run_fx_hashes(monkeypatch) -> None:
     assert funds["cash_total_cny"] is None
     assert funds["cash_total_cny_unavailable_reason"] == "批次汇率快照不一致"
     assert funds["fx_pairs"] == {}
+
+
+def test_diagnostic_failure_log_cannot_erase_healthy_sealed_results(tmp_path):
+    from src.application.strategy_scan_failures import append_strategy_scan_failure
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(contract="HEALTHY_PUT")]).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    _assemble(tmp_path)
+    append_strategy_scan_failure(report_dir=account_dir, symbol="NVDA", strategy_family="sell_put", error=RuntimeError("late diagnostic"))
+    brief = _assemble(tmp_path)
+    assert any(row.get("contract_symbol") == "HEALTHY_PUT" for row in brief["actions"])
+    assert not any(row.get("reason") == "strategy_step_failed" for row in brief["data_gaps"])
+
+
+def test_wheel_gap_deduplication_preserves_directions():
+    from src.application.daily_decision_brief_service import _append_strategy_status_gaps, _dedupe_gaps
+    gaps = []
+    _append_strategy_status_gaps({"run_id": "run-1", "account": "lx", "items": [
+        {"market": "US", "symbol": "NVDA", "strategy_family": "wheel", "candidate_owner": "wheel",
+         "direction": direction, "status": "failed", "reason": "wheel_scan_failed"} for direction in ("call", "put")]},
+        run_id="run-1", account="lx", market="US", data_gaps=gaps)
+    assert {gap["direction"] for gap in _dedupe_gaps(gaps)} == {"call", "put"}

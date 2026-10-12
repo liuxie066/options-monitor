@@ -6,6 +6,10 @@ from domain.domain import build_no_account_notification_payloads, build_shared_l
 from src.application.cron_runtime import build_run_end_payload, build_shared_last_run_meta
 
 
+def failed_scan_accounts(tick_metrics: dict[str, Any]) -> list[str]:
+    return sorted(account for account, reliable in (tick_metrics.get("scan_outcomes") or {}).items() if reliable is False)
+
+
 def _record_finalize_degraded(
     *,
     runlog,
@@ -64,6 +68,11 @@ def finalize_no_account_notification(
     error_code: str | None = None,
     return_code: int = 0,
 ) -> int:
+    failed_accounts = failed_scan_accounts(tick_metrics)
+    if failed_accounts:
+        run_end_outcome = "error"
+        error_code = error_code or "SCAN_FAILED"
+        return_code = return_code or 1
     outcome = str(run_end_outcome or "ok").strip().lower()
     audit_status = "error" if outcome == "error" else "skip"
     notify_message = "no account notification content" if reason == "no_account_notification" else reason
@@ -78,6 +87,7 @@ def finalize_no_account_notification(
         reason=reason,
         error_code=error_code,
     )
+    shared_payload["scan_outcomes"] = dict(tick_metrics.get("scan_outcomes") or {})
     try:
         state_repo.write_shared_last_run(base, shared_payload)
         audit_fn("write", "write_shared_last_run", run_id=run_id, status=audit_status, message=reason)
@@ -99,6 +109,10 @@ def finalize_no_account_notification(
     for result in results:
         account = str(result.account)
         payload = account_payloads.get(account, {})
+        if account in (tick_metrics.get("scan_outcomes") or {}):
+            payload["scan_ok"] = tick_metrics["scan_outcomes"][account]
+        if error_code == "SCAN_FAILED" and account not in failed_accounts:
+            payload.pop("error_code", None)
         if len(run_markets) == 1 and run_markets <= {"US", "HK"}:
             payload["market"] = next(iter(run_markets))
         try:
@@ -147,6 +161,7 @@ def finalize_no_account_notification(
     }
     if error_code:
         run_end_kwargs["error_code"] = error_code
+    run_end_kwargs["data"]["failed_scan_accounts"] = failed_accounts
     runlog.safe_event("run_end", outcome, **run_end_kwargs)
     if outcome != "error":
         on_success()
@@ -174,6 +189,7 @@ def finalize_multi_tick_run(
     safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
     on_success: Callable[[], Any],
 ) -> int:
+    failed_accounts = failed_scan_accounts(tick_metrics)
     try:
         last_run_path = (shared_state_dir_getter(base) / "last_run.json").resolve()
         prev = read_json_fn(last_run_path, {})
@@ -188,6 +204,7 @@ def finalize_multi_tick_run(
             notify_summary=notify_summary,
             no_send=no_send,
         )
+        run_meta["scan_outcomes"] = dict(tick_metrics.get("scan_outcomes") or {})
         state_repo.write_shared_last_run(
             base,
             build_shared_last_run_payload(prev_payload=prev, run_meta=run_meta, history_limit=20),
@@ -204,20 +221,21 @@ def finalize_multi_tick_run(
             extra={"sent_accounts": list(sent_accounts)},
         )
 
-    if notify_failures:
+    if notify_failures or failed_accounts:
         runlog.safe_event(
             "run_end",
             "error",
-            error_code=("NOTIFY_PARTIAL_FAILED" if sent_accounts else "NOTIFY_FAILED"),
-            data=safe_data_fn(
-                build_run_end_payload(
+            error_code=("SCAN_FAILED" if failed_accounts else "NOTIFY_PARTIAL_FAILED" if sent_accounts else "NOTIFY_FAILED"),
+            data=safe_data_fn({
+                "failed_scan_accounts": failed_accounts,
+                **build_run_end_payload(
                     no_send=no_send,
                     results=results,
                     sent_accounts=sent_accounts,
                     notify_failures=notify_failures,
                     notify_summary=notify_summary,
-                )
-            ),
+                ),
+            }),
         )
         return 1
 

@@ -22,7 +22,7 @@
 
 | 责任 | owner 与边界 |
 | --- | --- |
-| Tick 失败与恢复收据 | `src/application/tick_cron.py`、`src/application/multi_account_tick.py`；按市场保存终态，完整计划 Tick 收据才证明恢复 |
+| Tick 失败与恢复收据 | `src/application/tick_cron.py`、`src/application/multi_account_tick.py`、`src/application/tick_run_context.py`；按市场保存终态，完整计划 Tick 收据才证明恢复 |
 | OpenD 原因码与人工动作 | `src/infrastructure/opend_watchdog.py`、`src/application/tick_guard_flow.py`；登录故障非零退出，探测确认恢复后清 pending marker |
 | 告警认领 | `src/application/multi_tick/opend_guard.py`；用现有限流状态和窄锁认领事故，不把发送尝试当送达 |
 | 只读状态 | `src/application/agent_tools/runtime_status_impl.py`、`src/application/quality/runtime_checks.py`；读取同一终态和 pending/账户证据，不实时查询 OpenD |
@@ -37,7 +37,13 @@
 
 失败写入顺序为 run、shared、按市场 latest：run 写失败不再声称满足 S1；每一步失败都保持原业务非零退出，在 stderr 的 ERROR 行报告 `FAILURE_RECORD_WRITE_FAILED` 与未完成阶段。latest 只有 durable run 证据存在后更新；shared 失败但 latest 可写时，latest 记录 `evidence_incomplete`，而不是旧 `ok`。latest 自身失败时无法由该文件自证，读取侧须交叉检查对应 systemd tick unit 的最近 `Result/ExecMainStatus` 与事件时间；unit 不可查则返回 `unknown`（并列明 latest 可能陈旧），绝不将旧 `ok` 宣称为本轮成功。这不是跨文件事务，重复恢复执行只允许新增带唯一 run ID 的事件，不回写或覆盖旧记录。进程被 SIGKILL、主机掉电、磁盘满无法保证写事件；systemd 的终态和下一次状态核对是后备证据。
 
-只有同市场、全账户范围、非诊断且非 `--no-send` 的计划 Tick 完成实际扫描，才能覆盖按市场 latest 为 `ok`。wrapper 用内层相同的 `runtime_paths.resolve_runtime_root` 确定 runtime root，以 `OM_TICK_CRON_RUN_ID` 环境值传自己的 ID；内层在 `multi_account_tick` 唯一真实扫描完成出口、通知流程返回 `rc=0` 后，核对 `ran_pipeline_accounts` 与结果中 `ran_scan=True` 覆盖全部本轮计划账户，再向该 runtime root 下的 wrapper run 目录原子写 `state/child_tick_completion.json`，内容为 wrapper ID、inner run ID、市场、账户、`completed_at_utc`、`status=ok`。wrapper 只接受与本轮 ID/市场/完整账户集合匹配且子进程 `rc=0` 的收据；缺收据保持旧故障并显示 `completion_unknown`。`rc=0` 单独不足以证明恢复；no-account、delivery-only、项目 guard、幂等跳过以及未执行 Tick 均不写收据。read model 原子写入失败时报 ERROR；inner run 与 wrapper run 是两个身份，通过收据关联，不造同一个 ID。
+只有同市场、全账户范围、非诊断且非 `--no-send` 的计划 Tick 完成实际扫描，才能覆盖按市场 latest 为 `ok`。wrapper 与内层使用同一 runtime root，通过 `OM_TICK_CRON_RUN_ID` 绑定 wrapper ID；内层使用 Brief 准备阶段已判定的账户 `pipeline_reliable` 记录 `scan_outcomes`。局部可信的 degraded 与正常零候选均可成功；账户整体不可评估返回非零，失败通知送达不改变扫描结果。manual、no_send、关闭通知及静默早退保留相同扫描终态。
+
+内层完成幂等记录后，向 wrapper run 目录原子写现有 `state/child_tick_completion.json`，绑定 wrapper ID、inner run ID、市场、完整计划账户集合、`completed_at_utc`、`status` 和 `rc`。新增 `account_outcomes` 中每项保留 `account/scan_ok/notify_failed/failure_notification_confirmed`；最后一个字段仅表示本次 inner run 的失败简报已确认送达。扫描和投递均成功才是 `status=ok/rc=0`；已知业务失败也写 `status=failed` 收据。幂等或收据写入失败返回错误，不产生市场恢复证据。
+
+wrapper 严格核对本轮身份、账户集合、布尔字段及退出码一致性；合法失败收据只向失败账户归属告警，已确认收到本轮失败简报的账户不再收到同一次 wrapper 通用告警。缺失或损坏的失败收据仍按计划范围记录 wrapper 故障。`--no-send` 与标的诊断保留失败证据，但 wrapper 不发送外部故障告警。旧成功收据保持可读；仅同轮完整成功收据允许市场恢复，非零的部分成功从不表示整市场健康。
+
+`rc=0` 单独不足以证明恢复；no-account、delivery-only、项目 guard、成功幂等跳过及未扫描 Tick 均不写扫描收据。已终结失败的同 bucket 重入返回失败，不重扫或重发，并可将原账户结果与 inner run 绑定到新 wrapper；处理中重入也不产生恢复证据。缺成功收据保持旧故障并显示 `completion_unknown`。read model 原子写入失败时报 ERROR；inner run 与 wrapper run 通过收据关联，不共用一个 ID。
 
 `OPEND_NEEDS_PHONE_VERIFY` 分支以终态错误和非零返回结束，账户 last-run 保留原因码与 pending marker。`tick_guard_flow` 在 marker pending 时也返回非零、同一原因码，不能标 guard 成功；人工 `--opend-phone-verify-continue` 只放行一次 watchdog 探测，不在探测前清 marker。watchdog 验证所需登录能力确实恢复后清 marker，即使这次人工 Tick 因时窗没有扫描；市场级失败仍保持到下一次完整计划 Tick 收据。探测失败则保留 marker 并返回非零。`OPEND_LOGIN_INVALID` 沿现有 fail-fast 路径；“需要图形验证码”单独归一为 `OPEND_NEEDS_PIC_VERIFY`/人工动作，不再错误标成手机验证码。恢复不能靠时间过期伪装健康；账户旧错误与市场新收据按同一市场、账号、时间与 pending 状态仲裁，不能让旧记录永久遮蔽真恢复。
 

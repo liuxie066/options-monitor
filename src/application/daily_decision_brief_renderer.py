@@ -2020,7 +2020,7 @@ def _strategy_data_gap_reminders(
                 seen.add(identity)
             continue
         if (
-            _lower(item.get("scope")) != "strategy"
+            _lower(item.get("scope")) not in {"strategy", "contract"}
             or _lower(item.get("severity")) != "warning"
             or item.get("actionable") is not False
         ):

@@ -262,7 +262,6 @@ def _patch_sender(
             failure_stage="wechat_clawbot_message_send",
         ),
     )
-    monkeypatch.setattr(mod, "finalize_multi_tick_run", lambda **kwargs: 1 if kwargs.get("notify_failures") else 0)
 
 
 def test_scheduled_daily_brief_needs_no_renderer_enable_switch(monkeypatch, tmp_path: Path) -> None:
@@ -659,7 +658,9 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
         accounts=("lx", "sy"),
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert bundle.completions[-1]["status"] == "failed"
+    assert bundle.request.audit_helper.successes == 0
 
     lx_state = read_daily_decision_brief_delivery_state(
         base=tmp_path,
@@ -696,6 +697,9 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
     assert prepared["sy"]["pipeline_reliable"] is False
 
 
+    assert bundle.request.tick_metrics["scan_outcomes"] == {"lx": True, "sy": False}
+    assert bundle.request.tick_metrics["scan_failure_notified_accounts"] == ["sy"]
+
 def test_fixed_report_without_candidates_still_contains_positions_and_funds(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch, candidate=False)
     bundle = _request(tmp_path, run_id="fixed-empty")
@@ -713,7 +717,9 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
 def test_pipeline_failure_nonfixed_is_quiet_and_keeps_scan_retryable(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed-half", fixed=False, pipeline_ok=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert bundle.completions[-1]["status"] == "failed"
+    assert bundle.request.audit_helper.successes == 0
     assert bundle.commits == []
     assert not bundle.request.tick_metrics["daily_brief"]["prepared"][0]["delivery_key"]
 
@@ -1564,3 +1570,53 @@ def test_history_save_error_is_not_a_successful_run(tmp_path, monkeypatch):
     with pytest.raises(DailyDecisionBriefStateError, match="disk_failed"):
         mod.run_tick_notification_flow(context.request)
     assert context.commits == []
+
+
+@pytest.mark.parametrize("path", ["delivered", "no_send", "disabled", "manual", "quiet"])
+def test_failed_scan_remains_failed_across_all_notification_paths(monkeypatch, tmp_path, path):
+    _patch_assembler(monkeypatch, blocked=True)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    config = _config()
+    if path == "disabled":
+        config["notifications"]["enabled"] = False
+    if path == "quiet":
+        monkeypatch.setattr(mod, "evaluate_dnd_quiet_hours", lambda **kwargs: {"is_quiet": True, "quiet_window": "all", "parse_error": None})
+    bundle = _request(tmp_path, run_id="failure-run", pipeline_ok=False, config=config,
+                      no_send=path == "no_send", trigger_kind="manual" if path == "manual" else "scheduled")
+    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert bundle.completions[-1] == {"status": "failed", "message": "SCAN_FAILED", "ok": False, "error_code": "SCAN_FAILED"}
+    assert bundle.request.audit_helper.successes == 0
+    assert bundle.request.tick_metrics["scan_outcomes"] == {"lx": False}
+    assert any(row["step"] == "run_end" and row["status"] == "error" for row in bundle.request.runlog.events)
+    assert len(calls) == (1 if path == "delivered" else 0)
+    assert bundle.request.tick_metrics.get("scan_failure_notified_accounts", []) == (["lx"] if path == "delivered" else [])
+    assert not read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"]
+
+
+def test_retry_delivery_failure_records_terminal_idempotency_without_scan_outcome(monkeypatch, tmp_path):
+    _patch_assembler(monkeypatch)
+    first = _request(tmp_path, run_id="pending")
+    mod._prepare_daily_brief_notification(first.request)
+    _patch_sender(monkeypatch, result={"ok": False, "delivery_confirmed": False, "error_code": "test_send_failed"})
+    retry = _request(tmp_path, run_id="retry", delivery_only=True)
+    assert mod.run_tick_notification_flow(retry.request) == 1
+    assert retry.completions[-1]["status"] == "failed"
+    assert retry.completions[-1]["error_code"] == "NOTIFY_FAILED"
+    assert retry.request.tick_metrics["scan_outcomes"] == {}
+
+
+@pytest.mark.parametrize("no_send", [True, False])
+def test_terminal_write_failure_does_not_mark_scan_recovered(monkeypatch, tmp_path, no_send):
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="terminal-write-failed", no_send=no_send)
+    bundle.request = replace(
+        bundle.request,
+        complete_tick_idempotency_fn=lambda **_kwargs: (_ for _ in ()).throw(OSError("terminal disk full")),
+    )
+    with pytest.raises(OSError, match="terminal disk full"):
+        mod.run_tick_notification_flow(bundle.request)
+    assert bundle.request.audit_helper.successes == 0
+    assert len(calls) == (0 if no_send else 1)
