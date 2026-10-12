@@ -412,25 +412,36 @@ def _normalize_daily_decision_brief(
     return _json_safe(out)
 
 
+def _candidate_gap_matches(action: Mapping[str, Any], gap: Mapping[str, Any]) -> bool:
+    if _upper(gap.get("symbol")) != _upper(action.get("symbol")) or _lower(gap.get("strategy_family")) != _lower(action.get("strategy_family")):
+        return False
+    if gap.get("direction") and _lower(gap["direction"]) != _lower(action.get("option_type")):
+        return False
+    if action.get("strategy_family") == "combo_yield":
+        owner = gap.get("candidate_owner") or gap.get("variant")
+        # Historical daily-brief Combo opening actions are SP+LC only.
+        if owner and owner != (action.get("candidate_owner") or "sp_lc"):
+            return False
+    for field in ("wheel_branch_id", "contract_symbol", "expiration"):
+        expected = str(gap.get(field) or "").strip()
+        actual = action.get(field)
+        if field == "wheel_branch_id":
+            actual = actual or action.get("position_lot_id")
+        if expected and expected != str(actual or "").strip():
+            return False
+    return True
+
+
 def reconcile_daily_decision_brief_evidence(
     previous: Mapping[str, Any],
     current: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Carry candidate identity across a run with typed family-level data gaps."""
+    """Carry candidate identity only where the current evidence is unavailable."""
 
     prev = normalize_persisted_daily_decision_brief(previous)
     cur = normalize_daily_decision_brief(current)
     _ensure_same_brief_identity(prev, cur)
-    gaps = {
-        (
-            _upper(item.get("symbol")),
-            _lower(item.get("strategy_family")),
-        ): dict(item)
-        for item in cur.get("data_gaps") or []
-        if isinstance(item, Mapping)
-        and _upper(item.get("symbol"))
-        and _lower(item.get("strategy_family"))
-    }
+    gaps = [item for item in cur.get("data_gaps") or [] if isinstance(item, Mapping)]
     current_actions = {
         str(action.get("action_id") or ""): action
         for action in cur.get("actions") or []
@@ -464,7 +475,7 @@ def reconcile_daily_decision_brief_evidence(
             _upper(prior.get("symbol")),
             _lower(prior.get("strategy_family")),
         )
-        gap = gaps.get(key)
+        gap = next((item for item in gaps if _candidate_gap_matches(prior, item)), None)
         if gap is None:
             continue
         held = dict(prior)
@@ -475,6 +486,7 @@ def reconcile_daily_decision_brief_evidence(
                 "evidence_gap_key": (
                     f"{cur['market']}:{key[0]}:{key[1]}:"
                     f"{str(gap.get('reason') or 'source_unavailable').strip()}"
+                    + "".join(f":{gap[field]}" for field in ("candidate_owner", "variant", "direction", "wheel_branch_id", "contract_symbol", "expiration") if gap.get(field))
                 ),
                 "evidence_reason": str(
                     gap.get("reason") or "source_unavailable"

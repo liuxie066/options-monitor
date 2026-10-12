@@ -58,7 +58,7 @@ def _observation(repo, *, now_ms=NOW):
         "futu_account_id": "1001", "trd_env": "REAL", "market": "hk"}, "position_snapshot_input": snapshot}}
 
 
-def _occupied_scope(tmp_path, monkeypatch, *, covered=4):
+def _occupied_scope(tmp_path, monkeypatch, *, covered=4, policy_effective_from_ms=None):
     # Reuse real ingress, five Put assignments and the existing multi-allocation writer.
     monkeypatch.setattr(attribution.time, "time", lambda: _ms("2026-09-28T00:00:00Z") / 1000)
     repo, config, _ = _meituan_repo(tmp_path, call_contracts=3)
@@ -84,12 +84,12 @@ def _occupied_scope(tmp_path, monkeypatch, *, covered=4):
             request_id="fixture:single", actor="fixture:operator", combo_evidence=EVIDENCE,
             capacity_observation={}, combo_mode="confirm", manual=True)
     with repo._writer_connection(begin_immediate=True) as conn:
+        enabled_at = policy_effective_from_ms if policy_effective_from_ms is not None else _ms("2026-10-01T00:00:00Z")
         conn.execute("""INSERT INTO trade_attribution_policy_enablings
             (broker, physical_account_id, environment, account, market, policy_version,
              effective_from_ms, created_at_ms, actor, request_id, request_hash)
             VALUES ('futu', '1001', 'REAL', 'lx', 'hk', 'trade_attribution.v2', ?, ?,
-                    'fixture', 'fixture:cutover', ?)""", (_ms("2026-10-01T00:00:00Z"),
-                    _ms("2026-10-01T00:00:00Z"), "a" * 64))
+                    'fixture', 'fixture:cutover', ?)""", (enabled_at, enabled_at, "a" * 64))
     monkeypatch.setattr(attribution.time, "time", lambda: NOW / 1000)
     monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     execution, receipt = _ingest(repo, config, tmp_path, deal_id="new-call",

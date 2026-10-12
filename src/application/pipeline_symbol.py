@@ -56,9 +56,7 @@ def process_symbol(
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None,
-    candidate_capture_status_sink_fn: (
-        Callable[[dict[str, Any]], None] | None
-    ) = None,
+    deadline_monotonic: float | None = None,
     final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
@@ -96,9 +94,7 @@ def process_symbol(
             required_data_snapshot_manifest=required_data_snapshot_manifest,
             required_data_snapshot_run_id=required_data_snapshot_run_id,
             required_data_snapshot_batch=required_data_snapshot_batch,
-            candidate_capture_status_sink_fn=(
-                candidate_capture_status_sink_fn
-            ),
+            deadline_monotonic=deadline_monotonic,
             final_candidates_sink_fn=final_candidates_sink_fn,
             candidate_decisions_sink_fn=candidate_decisions_sink_fn,
             combo_evidence_sink_fn=combo_evidence_sink_fn,

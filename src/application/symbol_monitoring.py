@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import io
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -18,7 +19,10 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
 )
-from src.application.strategy_scan_status import publish_strategy_scan_status
+from src.application.strategy_scan_status import (
+    StrategyScanStatusError,
+    publish_strategy_scan_status,
+)
 from src.application.combo_yield_config import (
     COMBO_YIELD_CONFIG_KEY,
     derive_combo_yield_policy,
@@ -27,6 +31,10 @@ from src.application.combo_yield_config import (
 
 
 log = logging.getLogger(__name__)
+
+
+class SymbolProcessingTimeout(TimeoutError):
+    pass
 
 
 class _PrefilterResultLike(Protocol):
@@ -59,9 +67,7 @@ class SymbolMonitoringInputs:
     required_data_snapshot_manifest: Path | None = None
     required_data_snapshot_run_id: str | None = None
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
-    candidate_capture_status_sink_fn: (
-        Callable[[dict[str, Any]], None] | None
-    ) = None
+    deadline_monotonic: float | None = None
     final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
@@ -102,11 +108,15 @@ def _append_summary_result(summary_rows: list[dict[str, Any]], result: object) -
 
 def _summary_candidate_count(result: object) -> int:
     rows = result if isinstance(result, list) else [result]
-    return sum(
-        max(0, int(item.get("candidate_count") or 0))
-        for item in rows
-        if isinstance(item, dict)
-    )
+    if not rows or any(not isinstance(item, dict) for item in rows):
+        raise ValueError("strategy result is missing or invalid")
+    total = 0
+    for item in rows:
+        count = item.get("candidate_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("strategy candidate count is missing or invalid")
+        total += count
+    return total
 
 
 def run_symbol_monitoring(
@@ -117,6 +127,15 @@ def run_symbol_monitoring(
     symbol_cfg = dict(inputs.symbol_cfg or {})
     symbol = str(symbol_cfg["symbol"])
     symbol_lower = symbol.lower()
+    deadline = inputs.deadline_monotonic
+    if deadline is None and inputs.timeout_sec and inputs.timeout_sec > 0:
+        deadline = time.monotonic() + inputs.timeout_sec
+
+    def check_deadline() -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SymbolProcessingTimeout(f"{symbol} symbol processing exceeded deadline")
+
+    check_deadline()
     limit_expirations = symbol_cfg.get("fetch", {}).get("limit_expirations", 8)
 
     sp: dict[str, Any] = dict(symbol_cfg.get("sell_put", {}) or {})
@@ -212,6 +231,7 @@ def run_symbol_monitoring(
         source_outcome: str | None = None,
         reason_code: str | None = None,
     ) -> None:
+        check_deadline()
         if not frozen_status_enabled:
             return
         try:
@@ -230,12 +250,12 @@ def run_symbol_monitoring(
                 source_outcome=source_outcome,
                 reason_code=reason_code,
             )
-        except Exception:
-            log.exception(
-                "symbol_monitoring: strategy status publish failed for %s/%s",
-                symbol,
-                family,
-            )
+        except SymbolProcessingTimeout:
+            raise
+        except Exception as exc:
+            raise StrategyScanStatusError(
+                f"strategy status publication failed: {symbol}/{family}"
+            ) from exc
 
     call_prefiltered = bool(configured_call and call_skip_reason)
     if call_prefiltered and not inputs.fetch_only:
@@ -245,17 +265,6 @@ def run_symbol_monitoring(
             reason=call_skip_reason,
             candidate_count=0,
         )
-        if inputs.candidate_capture_status_sink_fn is not None:
-            inputs.candidate_capture_status_sink_fn(
-                {
-                    "symbol": symbol.upper(),
-                    "strategy_mode": "call",
-                    "status": "not_applicable",
-                    "reason": call_skip_reason,
-                    "quote_snapshot_id": None,
-                    "quote_receipt_relpath": None,
-                }
-            )
 
     if call_prefiltered and not fetch_want_put and not fetch_want_call:
         if inputs.fetch_only:
@@ -272,7 +281,10 @@ def run_symbol_monitoring(
 
     def _capture_required_data_csv_bytes(csv_bytes: bytes) -> None:
         nonlocal required_data_frame
-        required_data_frame = pd.read_csv(io.BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+        try:
+            required_data_frame = pd.read_csv(io.BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
+            raise FrozenRequiredDataUnavailable(symbol=symbol, reason="required_data_invalid") from exc
 
     if not frozen_required_data:
         try:
@@ -281,6 +293,8 @@ def run_symbol_monitoring(
                 required_data_dir=inputs.required_data_dir,
                 symbol=symbol,
             )
+        except SymbolProcessingTimeout:
+            raise
         except Exception:
             pass
 
@@ -317,6 +331,7 @@ def run_symbol_monitoring(
         else None
     )
 
+    check_deadline()
     try:
         required_data_kwargs: dict[str, Any] = {
             "py": inputs.py,
@@ -405,31 +420,6 @@ def run_symbol_monitoring(
             _unavailable_summary(
                 deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
-        if inputs.candidate_capture_status_sink_fn is not None:
-            for strategy_mode, enabled in (("put", want_put), ("call", want_call)):
-                if enabled:
-                    inputs.candidate_capture_status_sink_fn(
-                        {
-                            "symbol": symbol.upper(),
-                            "strategy_mode": strategy_mode,
-                            "status": "unavailable",
-                            "reason": "required_data_snapshot_unavailable",
-                            "quote_snapshot_id": exc.snapshot_id,
-                            "quote_receipt_relpath": exc.receipt_relpath,
-                        }
-                    )
-            if want_combo_yield:
-                inputs.candidate_capture_status_sink_fn(
-                    {
-                        "symbol": symbol.upper(),
-                        "strategy_mode": "combo_yield",
-                        "status": "unavailable",
-                        "reason": "required_data_snapshot_unavailable",
-                        "quote_snapshot_id": exc.snapshot_id,
-                        "quote_receipt_relpath": exc.receipt_relpath,
-                        "variant": combo_variant,
-                    }
-                )
         for family, enabled in (
             ("sell_put", want_put),
             ("combo_yield", want_combo_yield),
@@ -495,77 +485,78 @@ def run_symbol_monitoring(
             }
         return {"source_outcome": None, "reason_code": None}
 
-    def _completed_scan_status(
-        candidate_count: int,
-        strategy_result: object = None,
-    ) -> tuple[str, str | None]:
-        # Prefer the evidence-driven projection attached by the strategy step
-        # over the legacy count-only inference.
-        rows = (
-            strategy_result
-            if isinstance(strategy_result, list)
-            else [strategy_result]
-        )
-        for item in rows:
-            if not isinstance(item, dict):
-                continue
-            status = str(item.get("_strategy_status") or "").strip()
-            reason = item.get("_strategy_reason")
-            if status == "unavailable":
-                return "unavailable", (
-                    str(reason) if reason else "data_unavailable"
-                )
-            if status == "completed" and reason in {"partial_data", "no_candidate"}:
-                return "completed", str(reason)
-        if candidate_count == 0 and quote_reason_code == "market_closed":
-            return "unavailable", "market_closed"
-        return "completed", None
-
-    def _capture_reason(
-        candidate_count: int,
-        strategy_reason: str | None,
-    ) -> str | None:
-        if strategy_reason:
-            return strategy_reason
-        if (
-            candidate_count == 0
-            and quote_source_outcome == "success_empty"
-            and quote_reason_code in SUCCESS_EMPTY_REASON_CODES
-        ):
-            return quote_reason_code
-        return None
-
-    def _report_capture(
-        *,
-        strategy_mode: str,
-        status: str,
-        reason: str | None,
-        variant: str | None = None,
-    ) -> None:
-        if inputs.candidate_capture_status_sink_fn is None:
-            return
-        payload: dict[str, Any] = {
-            "symbol": symbol.upper(),
-            "strategy_mode": strategy_mode,
-            "status": status,
-            "reason": reason,
-            "quote_snapshot_id": resolved_quote_snapshot_id or None,
-            "quote_receipt_relpath": quote_receipt_relpath or None,
-        }
-        if variant:
-            payload["variant"] = variant
-        inputs.candidate_capture_status_sink_fn(payload)
-
     summary_rows: list[dict[str, Any]] = []
     frozen_frame_kwargs = (
         {"required_data_frame": required_data_frame}
-        if required_data_frame is not None
-        else {}
+        if required_data_frame is not None else {}
     )
 
-    if want_put:
+    def run_step(family: str, runner: Callable[..., object], empty: Callable[..., object], **kwargs: Any) -> None:
+        check_deadline()
+        finals: list[tuple[str, list[dict[str, Any]]]] = []
+        decisions: list[tuple[str, list[dict[str, Any]]]] = []
+        combos: list[dict[str, Any]] = []
+        if family == "combo_yield":
+            kwargs["combo_evidence_sink_fn"] = lambda row: combos.append(dict(row))
+        else:
+            kwargs["final_candidates_sink_fn"] = lambda mode, rows: finals.append((mode, list(rows)))
+            kwargs["candidate_decisions_sink_fn"] = lambda mode, rows: decisions.append((mode, list(rows)))
         try:
-            put_result = deps.run_sell_put_scan_fn(
+            result = runner(**kwargs)
+            check_deadline()
+            count = _summary_candidate_count(result)
+            rows = result if isinstance(result, list) else [result]
+            terminals = {(row.get("_strategy_status"), row.get("_strategy_reason")) for row in rows}
+            if family == "combo_yield" and combo_variant == "cc_lp":
+                state = result.get("status")
+                status = {"candidates_found": "completed", "no_candidate": "completed",
+                          "not_applicable": "not_applicable", "unavailable": "unavailable"}.get(state)
+                reason = result.get("reason") or ("no_candidate" if state == "no_candidate" else None)
+            elif len(terminals) == 1:
+                status, reason = next(iter(terminals))
+            else:
+                raise ValueError("strategy result has conflicting terminal evidence")
+            if status not in {"completed", "unavailable", "not_applicable"}:
+                raise ValueError("strategy result has no valid terminal evidence")
+            if status != "completed" and (not reason or count):
+                raise ValueError("unavailable strategy result has invalid evidence/count")
+            if family != "combo_yield":
+                mode = "put" if family == "sell_put" else "call"
+                if any(key != mode for key, _ in finals + decisions):
+                    raise ValueError("candidate sink escapes strategy scope")
+                if count != sum(len(items) for _, items in finals):
+                    raise ValueError("strategy candidate count does not match captured rows")
+            elif (status == "completed" and len(combos) != 1) or len(combos) > 1 or count != sum(len(item.get("ranked_pairs") or []) for item in combos):
+                raise ValueError("combo terminal evidence is missing or inconsistent")
+        except (SymbolProcessingTimeout, StrategyScanStatusError):
+            raise
+        except Exception as exc:
+            log.exception("symbol_monitoring: %s step failed for %s", family, symbol)
+            append_strategy_scan_failure(report_dir=inputs.report_dir, symbol=symbol, strategy_family=family, error=exc)
+            _publish_status(family=family, status="failed", reason=f"{family}_scan_failed",
+                            snapshot_id=resolved_quote_snapshot_id, receipt_relpath=quote_receipt_relpath)
+            _append_summary_result(summary_rows, empty(symbol, symbol_cfg=symbol_cfg))
+            return
+
+        # Publication/commit errors must escape; an immutable completed status cannot become failed.
+        _publish_status(family=family, status=status, reason=reason, candidate_count=count,
+                        snapshot_id=resolved_quote_snapshot_id, receipt_relpath=quote_receipt_relpath,
+                        **(_completed_empty_evidence(count) if status == "completed" else {}))
+        try:
+            for sink, buffered in ((inputs.final_candidates_sink_fn, finals),
+                                   (inputs.candidate_decisions_sink_fn, decisions)):
+                if sink is not None:
+                    for mode, items in buffered:
+                        sink(mode, items)
+            if inputs.combo_evidence_sink_fn is not None:
+                for evidence in combos:
+                    inputs.combo_evidence_sink_fn(evidence)
+        except Exception as exc:
+            raise StrategyScanStatusError(f"candidate commit failed: {symbol}/{family}") from exc
+        _append_summary_result(summary_rows, result)
+
+    if want_put:
+        run_step("sell_put", deps.run_sell_put_scan_fn, deps.empty_sell_put_summary_fn,
                 symbol=symbol,
                 symbol_cfg=symbol_cfg,
                 sp=sp,
@@ -577,61 +568,11 @@ def run_symbol_monitoring(
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
                 demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
-            )
-            _append_summary_result(
-                summary_rows,
-                put_result,
-            )
-            put_candidate_count = _summary_candidate_count(put_result)
-            put_status, put_reason = _completed_scan_status(
-                put_candidate_count,
-                strategy_result=put_result,
-            )
-            _publish_status(
-                family="sell_put",
-                status=put_status,
-                reason=put_reason,
-                candidate_count=put_candidate_count,
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-                **_completed_empty_evidence(put_candidate_count),
-            )
-            if configured_put:
-                _report_capture(
-                    strategy_mode="put",
-                    status=put_status,
-                    reason=_capture_reason(put_candidate_count, put_reason),
-                )
-        except Exception as exc:
-            log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
-            append_strategy_scan_failure(
-                report_dir=inputs.report_dir,
-                symbol=symbol,
-                strategy_family="sell_put",
-                error=exc,
-            )
-            _append_summary_result(
-                summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
-            )
-            _publish_status(
-                family="sell_put",
-                status="failed",
-                reason="sell_put_scan_failed",
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-            )
-            if configured_put:
-                _report_capture(
-                    strategy_mode="put",
-                    status="failed",
-                    reason="sell_put_scan_failed",
-                )
+        )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
-
     if want_combo_yield:
-        try:
-            combo_result = deps.run_combo_yield_scan_fn(
+        run_step("combo_yield", deps.run_combo_yield_scan_fn, deps.empty_combo_yield_summary_fn,
                 sym=symbol,
                 symbol=symbol,
                 symbol_lower=symbol_lower,
@@ -648,93 +589,10 @@ def run_symbol_monitoring(
                 combo_evidence_sink_fn=inputs.combo_evidence_sink_fn,
                 demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
-            )
-            _append_summary_result(
-                summary_rows,
-                combo_result,
-            )
-            combo_candidate_count = _summary_candidate_count(combo_result)
-            combo_capture_status, combo_capture_reason = _completed_scan_status(
-                combo_candidate_count,
-                strategy_result=combo_result,
-            )
-            if combo_variant == "cc_lp":
-                if not isinstance(combo_result, dict):
-                    raise ValueError("cc_lp summary result is unavailable")
-                cc_lp_status = str(
-                    combo_result.get("status") or ""
-                ).strip().lower()
-                if cc_lp_status in {"candidates_found", "no_candidate"}:
-                    combo_capture_status = "completed"
-                elif cc_lp_status == "not_applicable":
-                    combo_capture_status = "not_applicable"
-                    combo_capture_reason = str(
-                        combo_result.get("reason") or "cc_lp_not_applicable"
-                    ).strip()
-                elif cc_lp_status == "unavailable":
-                    combo_capture_status = "unavailable"
-                    combo_capture_reason = str(
-                        combo_result.get("reason") or "cc_lp_data_unavailable"
-                    ).strip()
-                else:
-                    raise ValueError(
-                        "unexpected cc_lp summary status: "
-                        f"{cc_lp_status or 'missing'}"
-                    )
-            _publish_status(
-                family="combo_yield",
-                status=combo_capture_status,
-                candidate_count=combo_candidate_count,
-                reason=combo_capture_reason,
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-                **(
-                    _completed_empty_evidence(combo_candidate_count)
-                    if combo_capture_status == "completed"
-                    else {"source_outcome": None, "reason_code": None}
-                ),
-            )
-            _report_capture(
-                strategy_mode="combo_yield",
-                status=combo_capture_status,
-                reason=(
-                    combo_capture_reason
-                    or _capture_reason(
-                        combo_candidate_count,
-                        None,
-                    )
-                ),
-                variant=combo_variant,
-            )
-        except Exception as exc:
-            log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
-            append_strategy_scan_failure(
-                report_dir=inputs.report_dir,
-                symbol=symbol,
-                strategy_family="combo_yield",
-                error=exc,
-            )
-            _append_summary_result(
-                summary_rows,
-                deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
-            )
-            _publish_status(
-                family="combo_yield",
-                status="failed",
-                reason="combo_yield_scan_failed",
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-            )
-            _report_capture(
-                strategy_mode="combo_yield",
-                status="failed",
-                reason="combo_yield_scan_failed",
-                variant=combo_variant,
-            )
+        )
     if want_call:
         option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}
-        try:
-            call_result = deps.run_sell_call_scan_fn(
+        run_step("covered_call", deps.run_sell_call_scan_fn, deps.empty_sell_call_summary_fn,
                 symbol=symbol,
                 symbol_cfg=symbol_cfg,
                 cc=cc,
@@ -751,72 +609,7 @@ def run_symbol_monitoring(
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
                 demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
-            )
-            call_status = "completed"
-            call_reason = None
-            if isinstance(call_result, dict):
-                call_result = dict(call_result)
-                call_status = str(call_result.pop("_strategy_status", "completed"))
-                call_reason = call_result.pop("_strategy_reason", None)
-            _append_summary_result(
-                summary_rows,
-                call_result,
-            )
-            call_candidate_count = _summary_candidate_count(call_result)
-            if call_status == "completed":
-                call_status, closed_reason = _completed_scan_status(
-                    call_candidate_count,
-                    strategy_result=call_result,
-                )
-                if closed_reason is not None:
-                    call_reason = closed_reason
-            _publish_status(
-                family="covered_call",
-                status=call_status,
-                reason=(str(call_reason) if call_reason else None),
-                candidate_count=call_candidate_count,
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-                **(
-                    _completed_empty_evidence(call_candidate_count)
-                    if call_status == "completed" or call_reason == "market_closed"
-                    else {}
-                ),
-            )
-            if configured_call:
-                _report_capture(
-                    strategy_mode="call",
-                    status=call_status,
-                    reason=_capture_reason(
-                        call_candidate_count,
-                        str(call_reason) if call_reason else None,
-                    ),
-                )
-        except Exception as exc:
-            log.exception("symbol_monitoring: sell_call step failed for %s", symbol)
-            append_strategy_scan_failure(
-                report_dir=inputs.report_dir,
-                symbol=symbol,
-                strategy_family="covered_call",
-                error=exc,
-            )
-            _append_summary_result(
-                summary_rows,
-                deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
-            )
-            _publish_status(
-                family="covered_call",
-                status="failed",
-                reason="covered_call_scan_failed",
-                snapshot_id=resolved_quote_snapshot_id,
-                receipt_relpath=quote_receipt_relpath,
-            )
-            if configured_call:
-                _report_capture(
-                    strategy_mode="call",
-                    status="failed",
-                    reason="covered_call_scan_failed",
-                )
+        )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
 

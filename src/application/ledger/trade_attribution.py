@@ -286,7 +286,7 @@ def read_trade_attribution_facts(repo: Any, *, account: str) -> list[dict[str, A
 
 def record_trade_attribution_conflict(repo: Any, *, account: str, execution_key: str,
     branch: Mapping[str, Any], candidate_ids: Sequence[str], input_hash: str, now_ms: int, conn: Any,
-    execution_keys: Sequence[str] = ()) -> str:
+    execution_keys: Sequence[str] = (), diagnostic: Mapping[str, Any] | None = None) -> str:
     from domain.domain.wheel import build_wheel_event
 
     if conn is None or not conn.in_transaction or not execution_key or not candidate_ids:
@@ -304,7 +304,7 @@ def record_trade_attribution_conflict(repo: Any, *, account: str, execution_key:
         payload={"actor": "trade_intake:attribution", "request_id": request_id, "execution_keys": keys,
                  "policy_version": ATTRIBUTION_POLICY_VERSION, "reason": "late_attribution_conflict",
                  "candidate_ids": sorted(set(candidate_ids)), "branch_generation_hash": branch["batch_generation_hash"],
-                 "input_hash": input_hash})
+                 "input_hash": input_hash, **({"diagnostic": dict(diagnostic)} if diagnostic is not None else {})})
     repo.append_wheel_event_once(event, conn=conn)
     return event_id
 
@@ -545,7 +545,6 @@ def build_trade_attribution_view(
     """Collect every competitor before selecting any execution; this function never writes."""
     # The Wheel package initializes its application workflows; load config after the ledger facade.
     from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
-
     if combo_mode not in {"off", "observe", "confirm", "auto"}:
         raise ValueError("invalid Combo attribution mode")
     account_facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
@@ -704,6 +703,7 @@ def build_trade_attribution_view(
                 "competition_available_shares": None if available is None else available - (fact["contracts_open"] * multiplier if fact["wheel_branch_id"] == branch_id else 0),
                 "intent_id": intent["intent_id"] if intent else None, "consumed_reservation": consumed_reservation,
                 "intent_remaining_contracts": intent["remaining_contracts"] if intent else None,
+                "capacity_evidence_complete": check.get("evidence_complete") is True,
                 "capacity_reason_codes": check["reason_codes"]})
     # Same-intent executions transfer reservation together in one ledger transaction.
     intent_groups: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
@@ -730,8 +730,10 @@ def build_trade_attribution_view(
                     reasons.add("wheel_branch_capacity_exceeded")
             candidate["consumed_reservation"]["contracts"] = credit
             candidate["member_lot_ids"] = member_ids
-            reasons.update(trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
-                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])["reason_codes"])
+            check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
+                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])
+            reasons.update(check["reason_codes"])
+            candidate["capacity_evidence_complete"] = check.get("evidence_complete") is True
             candidate["reason_codes"] = sorted(reasons)
             candidate["eligible"] = not reasons
     for proposals in candidates.values():
@@ -742,7 +744,7 @@ def build_trade_attribution_view(
         if fact["status"] != "pending":
             continue
         for candidate in candidates[fact["lot_id"]]:
-            if candidate["strategy"] == "wheel":
+            if candidate["strategy"] == "wheel" and candidate["capacity_evidence_complete"]:
                 key = candidate["candidate_id"]
                 demands[key] = demands.get(key, 0) + fact["contracts"] * int(fact["multiplier"])
     portfolio = (capacity_observation or {}).get("portfolio") or {}
@@ -762,7 +764,8 @@ def build_trade_attribution_view(
     for fact in facts:
         proposals = sorted(candidates[fact["lot_id"]], key=lambda row: row["candidate_id"])
         for proposal in proposals:
-            if (proposal["strategy"] == "wheel" and proposal["available_shares"] is not None
+            if (proposal["strategy"] == "wheel" and proposal["capacity_evidence_complete"]
+                    and proposal["available_shares"] is not None
                     and demands.get(proposal["candidate_id"], 0) > proposal["competition_available_shares"]):
                 proposal["reason_codes"] = sorted(set(proposal["reason_codes"]) | {"competing_fills_exceed_capacity"})
                 proposal["eligible"] = False
@@ -807,10 +810,17 @@ def build_trade_attribution_view(
             "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
             "selected_candidate_id": resolution.selected_candidate_id if enabled else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
+            "capacity_evidence": {
+                "semantic_sha256": canonical_sha256(capacity_evidence),
+                "authority": dict(portfolio.get("capacity_authority") or {}),
+                "snapshot": {key: snapshot.get(key) for key in
+                    ("snapshot_id", "source_id", "observed_at_utc", "completeness")},
+            },
             "coverage": next((branch.get("coverage") for branch in branches if branch["wheel_branch_id"] == fact["wheel_branch_id"]), None),
             "direction": fact["contract_key"]["option_type"]})
     return {"rows": results, "wheel_model": capacity_model, "combo_evidence": dict(combo_evidence),
             "conflict_statuses": conflict_statuses}
+
 
 
 
@@ -1100,12 +1110,15 @@ def trade_attribution_capacity_check(
                 environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
                 external_account_id=ref.get("external_account_id"),
                 now_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc), max_age_seconds=60))
+    if reasons:
+        return {"status": "unavailable", "reason_codes": sorted(reasons), "evidence_complete": False}
 
     def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
         return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
                 Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
                 Decimal(str(multiplier)), currency)
 
+    evidence_complete = False
     try:
         actual, recorded = defaultdict(int), defaultdict(int)
         shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
@@ -1142,9 +1155,10 @@ def trade_attribution_capacity_check(
                     put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
         if dict(actual) != dict(recorded):
             reasons.add("broker_ledger_positions_mismatch")
-        if not check_account_capacity:
+        if reasons or not check_account_capacity:
             # Combo membership records existing fills, not permission to open more risk.
-            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
+            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
+                    "evidence_complete": not reasons}
         for branch in wheel_read_model.get("wheel_branches") or []:
             if branch.get("lifecycle_status") != "active":
                 continue
@@ -1176,6 +1190,7 @@ def trade_attribution_capacity_check(
                     put_claims[reservation["currency"]] += amount
         if fact["contract_key"]["option_type"] == "call":
             symbol = fact["contract_key"]["underlying_symbol"]
+            evidence_complete = True
             if call_claims[symbol] > shares[symbol]:
                 reasons.add("account_stock_capacity_exceeded")
         else:
@@ -1184,7 +1199,8 @@ def trade_attribution_capacity_check(
                 evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
             )
             if not cash_snapshot_is_usable({"cash_snapshot": cash_snapshot}):
-                reasons.add("cash_capacity_unavailable")
+                return {"status": "unavailable", "reason_codes": ["cash_capacity_unavailable"],
+                        "evidence_complete": False}
             native = fact["currency"]
             required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
             secured = {currency: float(amount) for currency, amount in put_claims.items()}
@@ -1194,8 +1210,14 @@ def trade_attribution_capacity_check(
                 cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
                 convert_currency=capacity_currency_converter(fx_payload or {}),
                 fx_status=portfolio.get("exchange_rate_status"))
-            if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
+            if not available.available or available.cash_free is None:
+                reasons.add("cash_capacity_unavailable")
+            else:
+                evidence_complete = True
+            if evidence_complete and Decimal(str(available.cash_free)) < required:
                 reasons.add("account_cash_capacity_exceeded")
     except (KeyError, TypeError, ValueError, ArithmeticError):
         reasons.add("capacity_basis_unavailable")
-    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
+        evidence_complete = False
+    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
+            "evidence_complete": evidence_complete}

@@ -892,13 +892,17 @@ def test_prepare_timing_preserves_shared_reads_and_replay(monkeypatch, tmp_path)
     assert batch.fx_observation_count == fx.call_count == 1
     assert batch.fx_evidence_status == "persisted"
     terminals = [c for c in log.safe_event.call_args_list if c.args[1] != "start"]
-    for phase in ("ledger_read_a", "ledger_read_b", "fx_observation", "fx_evidence", "projection", "context_build"):
+    for phase in ("ledger_read_a", "ledger_read_b", "fx_observation", "fx_evidence", "projection", "snapshot_build", "context_build"):
         shared = [c for c in terminals if c.kwargs["data"]["phase"] == phase]
         assert len(shared) == 1
         assert "account" not in shared[0].kwargs["data"]
-    for phase in ("ledger_paths", "current_projection", "account_context", "wheel_projection", "ready_publication"):
+    for phase in ("ledger_paths", "current_projection", "snapshot_contract", "account_context", "wheel_projection", "ready_publication"):
         assert {c.kwargs["data"]["account"] for c in terminals if c.kwargs["data"]["phase"] == phase} == {"lx", "sy"}
     assert all(set(c.kwargs["data"]) <= {"phase", "account", "outcome", "error_type"} for c in log.safe_event.call_args_list)
+    for phase, account in (("snapshot_build", None), ("snapshot_contract", "lx"), ("snapshot_contract", "sy")):
+        events = [c for c in log.safe_event.call_args_list
+                  if c.kwargs["data"]["phase"] == phase and c.kwargs["data"].get("account") == account]
+        assert [c.args[1] for c in events] == ["start", "ok"]
     log.safe_event.reset_mock()
     with prepared_context_timing_scope(runlog=log):
         repeated = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
@@ -913,7 +917,7 @@ def test_prepare_timing_preserves_shared_reads_and_replay(monkeypatch, tmp_path)
     ("read_decision_state_rows_many", "ledger_read_a"),
     ("get_exchange_rates_or_fetch_latest", "fx_observation"),
     ("read_current_decision_projection", "current_projection"),
-    ("decision_state_snapshots_from_rows_many", "projection"),
+    ("decision_state_snapshots_from_rows_many", "snapshot_build"),
     ("build_wheel_read_model_from_rows", "wheel_projection"),
     ("_publish_ready_context", "ready_publication"),
     ("_publish_unavailable_manifest", "unavailable_publication"),
@@ -969,3 +973,34 @@ def test_prepare_timing_failed_second_fence_preserves_existing_fallback(monkeypa
     assert set(batch.manifests) == {"lx", "sy"}
     assert batch.unavailable_by_account == {}
     assert any(c.args[1] == "error" and c.kwargs["data"]["phase"] == "ledger_read_b" for c in log.safe_event.call_args_list)
+
+
+@pytest.mark.parametrize("operation,phase", [
+    ("decision_state_snapshots_from_rows_many", "snapshot_build"),
+    ("validate_position_fact_snapshot_contract", "snapshot_contract"),
+])
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_snapshot_timing_preserves_entry_exception_semantics(monkeypatch, tmp_path, operation, phase, error_type):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from src.application import prepared_option_positions_context as mod
+    from src.application.multi_tick_audit import prepared_context_timing_scope
+
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, "snapshot-timing-error")
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
+    error = error_type("private snapshot detail")
+    monkeypatch.setattr(mod, operation, Mock(side_effect=error))
+    log = SimpleNamespace(safe_event=Mock())
+    kwargs = dict(run_id="snapshot-timing-error", config_path=config_path, configs=configs, authorities=authorities)
+    with prepared_context_timing_scope(runlog=log):
+        if phase == "snapshot_build" and error_type is OSError:
+            assert set(_prepare(tmp_path, **kwargs).unavailable_by_account) == {"lx", "sy"}
+        else:
+            with pytest.raises(error_type) as caught:
+                _prepare(tmp_path, **kwargs)
+            assert caught.value is error
+    events = [c for c in log.safe_event.call_args_list if c.kwargs["data"]["phase"] == phase]
+    assert [c.args[1] for c in events] == ["start", "error"]
+    assert events[-1].kwargs["data"]["error_type"] == error_type.__name__
+    assert (events[-1].kwargs["data"].get("account") == "lx") == (phase == "snapshot_contract")
+    assert "private snapshot detail" not in str(log.safe_event.call_args_list)
