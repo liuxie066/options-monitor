@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, MutableMapping
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
 import json
 import time
@@ -327,6 +327,7 @@ def build_trade_attribution_view(
                 "competition_available_shares": None if available is None else available - (fact["contracts_open"] * multiplier if fact["wheel_branch_id"] == branch_id else 0),
                 "intent_id": intent["intent_id"] if intent else None, "consumed_reservation": consumed_reservation,
                 "intent_remaining_contracts": intent["remaining_contracts"] if intent else None,
+                "capacity_evidence_complete": check.get("evidence_complete") is True,
                 "capacity_reason_codes": check["reason_codes"]})
     # Same-intent executions transfer reservation together in one ledger transaction.
     intent_groups: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
@@ -353,8 +354,10 @@ def build_trade_attribution_view(
                     reasons.add("wheel_branch_capacity_exceeded")
             candidate["consumed_reservation"]["contracts"] = credit
             candidate["member_lot_ids"] = member_ids
-            reasons.update(trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
-                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])["reason_codes"])
+            check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
+                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])
+            reasons.update(check["reason_codes"])
+            candidate["capacity_evidence_complete"] = check.get("evidence_complete") is True
             candidate["reason_codes"] = sorted(reasons)
             candidate["eligible"] = not reasons
     for proposals in candidates.values():
@@ -365,7 +368,7 @@ def build_trade_attribution_view(
         if fact["status"] != "pending":
             continue
         for candidate in candidates[fact["lot_id"]]:
-            if candidate["strategy"] == "wheel":
+            if candidate["strategy"] == "wheel" and candidate["capacity_evidence_complete"]:
                 key = candidate["candidate_id"]
                 demands[key] = demands.get(key, 0) + fact["contracts"] * int(fact["multiplier"])
     portfolio = (capacity_observation or {}).get("portfolio") or {}
@@ -385,7 +388,8 @@ def build_trade_attribution_view(
     for fact in facts:
         proposals = sorted(candidates[fact["lot_id"]], key=lambda row: row["candidate_id"])
         for proposal in proposals:
-            if (proposal["strategy"] == "wheel" and proposal["available_shares"] is not None
+            if (proposal["strategy"] == "wheel" and proposal["capacity_evidence_complete"]
+                    and proposal["available_shares"] is not None
                     and demands.get(proposal["candidate_id"], 0) > proposal["competition_available_shares"]):
                 proposal["reason_codes"] = sorted(set(proposal["reason_codes"]) | {"competing_fills_exceed_capacity"})
                 proposal["eligible"] = False
@@ -430,6 +434,12 @@ def build_trade_attribution_view(
             "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
             "selected_candidate_id": resolution.selected_candidate_id if enabled else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
+            "capacity_evidence": {
+                "semantic_sha256": canonical_sha256(capacity_evidence),
+                "authority": dict(portfolio.get("capacity_authority") or {}),
+                "snapshot": {key: snapshot.get(key) for key in
+                    ("snapshot_id", "source_id", "observed_at_utc", "completeness")},
+            },
             "coverage": next((branch.get("coverage") for branch in branches if branch["wheel_branch_id"] == fact["wheel_branch_id"]), None),
             "direction": fact["contract_key"]["option_type"]})
     return {"rows": results, "wheel_model": capacity_model, "combo_evidence": dict(combo_evidence),
@@ -825,7 +835,8 @@ def _reconcile_trade_attribution_batch(
                     now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
                 current = next(row for row in after_view["rows"] if row["execution_key"] == current["execution_key"])
                 result["linked"] += int(applied["write_applied"])
-            elif current["status"] == "conflict" and current["rules_enabled"]:
+            elif (current["status"] == "conflict" and current["rules_enabled"]
+                    and "unresolved_attribution_conflict" not in current["reason_codes"]):
                 action_attempted = True
                 def record_conflicts(active: Any, conn: Any) -> list[str]:
                     fresh = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
@@ -839,11 +850,32 @@ def _reconcile_trade_attribution_batch(
                         ids.append("wheel:" + fact["wheel_branch_id"])
                     if fact["strategy_group_id"]:
                         ids.append("combo:" + fact["strategy_group_id"])
-                    return [record_trade_attribution_conflict(active, account=account, execution_key=fact["execution_key"],
+                    claimed_branches = {allocation["wheel_branch_id"] for allocation in fact.get("wheel_call_allocations") or []}
+                    if fact["wheel_branch_id"]:
+                        claimed_branches.add(fact["wheel_branch_id"])
+                    affected_branches = (claimed_branches if "late_capacity_conflict" in fact["reason_codes"] else
+                        {item["wheel_branch_id"] for item in fact["candidates"] if item["strategy"] == "wheel"} | claimed_branches)
+                    if stop_event is not None and stop_event.is_set():
+                        raise InterruptedError("attribution conflict recording cancelled")
+                    events = [record_trade_attribution_conflict(active, account=account, execution_key=fact["execution_key"],
                         branch=branch, candidate_ids=ids, input_hash=fact["input_hash"], now_ms=int(time.time() * 1000), conn=conn,
-                        execution_keys=[row["execution_key"] for row in check["rows"] if row["execution_key"]
-                            and (row["wheel_branch_id"] == branch["wheel_branch_id"] or "wheel:" + branch["wheel_branch_id"] in row["candidate_ids"])])
-                        for branch in check["wheel_model"]["wheel_branches"] if "wheel:" + branch["wheel_branch_id"] in ids]
+                        execution_keys=_conflict_execution_keys(check["rows"], branch["wheel_branch_id"], fact,
+                            account_facts=trade_attribution_facts_from_events(fresh["trade_events"], account=account)),
+                        diagnostic={"reason_codes": fact["reason_codes"], "evaluated_at_ms": fact["evaluated_at_ms"],
+                            "candidate_reason_codes": {item["candidate_id"]: item["reason_codes"]
+                                for item in fact["candidates"]}, "capacity_evidence": fact["capacity_evidence"]})
+                        for branch in check["wheel_model"]["wheel_branches"] if branch["wheel_branch_id"] in affected_branches]
+                    # Validate the source snapshot again, excluding our provisional
+                    # conflict events; cancellation/expiry rolls back the whole write.
+                    final_view = build_trade_attribution_view(fresh, config=config, account=account, market=market,
+                        now_ms=int(time.time() * 1000), combo_evidence=evidence,
+                        capacity_observation=observation, combo_mode=combo_mode)
+                    final_fact = next(row for row in final_view["rows"] if row["execution_key"] == fact["execution_key"])
+                    if final_fact["input_hash"] != fact["input_hash"] or final_fact["status"] != "conflict":
+                        raise ValueError("conflict evidence changed before commit")
+                    if stop_event is not None and stop_event.is_set():
+                        raise InterruptedError("attribution conflict recording cancelled")
+                    return events
                 events = with_sqlite_repo_transaction(repo, record_conflicts)
                 current["ledger_event_ids"] = sorted(set(current["ledger_event_ids"]) | set(events))
                 result["conflicts"] += 1
@@ -862,6 +894,49 @@ def _reconcile_trade_attribution_batch(
     if len(selected) < 100 and result["checked"] == len(selected):
         result["next_cursor"] = ""
     return result
+
+
+def _conflict_execution_keys(rows: Sequence[Mapping[str, Any]], branch_id: str,
+                             trigger: Mapping[str, Any], *,
+                             account_facts: Sequence[Mapping[str, Any]] = ()) -> list[str]:
+    """Include proven shared shortages, never merely possible unrelated owners."""
+    candidate_id = "wheel:" + branch_id
+    shared_shortages = {code for item in trigger["candidates"]
+        if item.get("capacity_evidence_complete") is True for code in item["reason_codes"]
+        if code in {"account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}}
+    keys = []
+    for row in rows:
+        if not row["execution_key"] or row["contracts_open"] <= 0:
+            continue
+        claimed = row["wheel_branch_id"] == branch_id or any(
+            allocation["wheel_branch_id"] == branch_id for allocation in row.get("wheel_call_allocations") or [])
+        competing = (row["status"] == "pending" and not row["wheel_branch_id"]
+            and not row.get("wheel_call_allocations") and not row["strategy_group_id"]
+            and any(item["candidate_id"] == candidate_id and (
+                "competing_fills_exceed_intent_remainder" in item["reason_codes"]
+                or item.get("capacity_evidence_complete") is True
+                and "competing_fills_exceed_capacity" in item["reason_codes"])
+                for item in row["candidates"]))
+        same_resource = (row["account"] == trigger["account"]
+            and row["broker_account_ref"] == trigger["broker_account_ref"]
+            and row["contract_key"]["option_type"] == trigger["contract_key"]["option_type"]
+            and ("account_cash_capacity_exceeded" in shared_shortages
+                or row["contract_key"]["underlying_symbol"] == trigger["contract_key"]["underlying_symbol"]))
+        shared = (same_resource and row["status"] != "ordinary" and any(
+            item.get("capacity_evidence_complete") is True and shared_shortages.intersection(item["reason_codes"])
+            for item in row["candidates"]))
+        if claimed or competing or shared:
+            keys.append(row["execution_key"])
+    if "account_cash_capacity_exceeded" in shared_shortages:
+        # The proven pool already includes both markets; preserve its actual
+        # Wheel Put claimants without reclassifying them through another config.
+        keys.extend(row["execution_key"] for row in account_facts
+            if row["execution_key"] and row["contracts_open"] > 0 and row["wheel_branch_id"]
+            and row["strategy"] == "wheel"
+            and row["position_side"] == "short" and row["contract_key"]["option_type"] == "put"
+            and row["account"] == trigger["account"]
+            and row["broker_account_ref"] == trigger["broker_account_ref"])
+    return sorted(set(keys))
 
 
 def bind_attribution_market_config(

@@ -1136,12 +1136,21 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         command = list(command)
         calls.append(command)
+        installed_path = Path(command[-1])
         if command[:4] == ["sudo", "-n", "install", "-d"]:
-            Path(command[-1]).mkdir(parents=True, exist_ok=True)
+            assert installed_path == target.parent
+            installed_path.mkdir(parents=True, exist_ok=True)
         elif command[:3] == ["sudo", "-n", "install"] and "/dev/stdin" in command:
-            target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
-            os.chown(target, int(command[command.index("-o") + 1]), int(command[command.index("-g") + 1]))
-            target.chmod(int(command[command.index("-m") + 1], 8))
+            assert installed_path == target
+            installed_path.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+        else:
+            raise AssertionError(f"unexpected install command: {command}")
+        os.chown(
+            installed_path,
+            int(command[command.index("-o") + 1]),
+            int(command[command.index("-g") + 1]),
+        )
+        installed_path.chmod(int(command[command.index("-m") + 1], 8))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _write_text_with_sudo_fallback(
@@ -1158,8 +1167,9 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
     assert out["sudo_fallback"] is True
     assert target.read_text(encoding="utf-8") == "#!/usr/bin/python3\n"
     assert target.stat().st_mode & 0o777 == 0o755
-    assert target.stat().st_uid == expected_uid
-    assert target.stat().st_gid == expected_gid
+    assert (target.stat().st_uid, target.stat().st_gid) == (expected_uid, expected_gid)
+    assert (target.parent.stat().st_uid, target.parent.stat().st_gid) == (expected_uid, expected_gid)
+    assert target.parent.stat().st_mode & 0o777 == 0o755
     assert [
         "sudo",
         "-n",
@@ -1173,6 +1183,53 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
         "/dev/stdin",
         str(target),
     ] in calls
+
+
+@pytest.mark.parametrize("wrong_owner", ["uid", "gid"])
+def test_service_drift_privileged_executable_rejects_wrong_ownership(
+    monkeypatch,
+    tmp_path: Path,
+    wrong_owner: str,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    target = tmp_path / "protected" / "credential-helper"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    initial_owner = target.stat()
+    expected_uid = initial_owner.st_uid + (1 if wrong_owner == "uid" else 0)
+    expected_gid = initial_owner.st_gid + (1 if wrong_owner == "gid" else 0)
+    monkeypatch.setattr(service_drift_module.os, "geteuid", lambda: expected_uid + 1)
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:4] == ["sudo", "-n", "install", "-d"]:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+            target.chmod(0o755)
+        # Simulate a successful command that did not apply its requested owner.
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/usr/bin/python3\n",
+        ctx={"provider": "systemd"},
+        run_cmd=_run_cmd,
+        mode=0o755,
+        owner_uid=expected_uid,
+        owner_gid=expected_gid,
+    )
+
+    assert target.is_file()
+    assert target.stat().st_mode & 0o777 == 0o755
+    observed = target.stat().st_uid if wrong_owner == "uid" else target.stat().st_gid
+    assert observed != (expected_uid if wrong_owner == "uid" else expected_gid)
+    assert out["ok"] is False
+    assert out["sudo_fallback"] is True
+    assert out["returncode"] == 1
+    assert "ownership verification failed" in out["error"]
+
 
 def test_service_drift_privileged_executable_rejects_symlink_target(
     tmp_path: Path,

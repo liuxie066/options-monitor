@@ -207,5 +207,8 @@ def test_manual_wheel_choice_ignores_alternatives_but_preserves_real_conflicts()
     for reason in ("multiple_or_invalid_wheel_intents", "wheel_intent_fill_mismatch_or_consumed"):
         assert resolve([target, {**other, "reason_codes": [reason]}]).status == "conflict"
     assert resolve([target, {"candidate_id": "combo:c", "strategy": "combo_yield"}]).status == "conflict"
-    assert resolve([{**target, "reason_codes": ["account_stock_capacity_exceeded"]}, other]).reason_codes == ("late_capacity_conflict",)
+    assert resolve([{**target, "reason_codes": ["account_stock_capacity_exceeded"],
+                     "capacity_evidence_complete": True}, other]).reason_codes == ("late_capacity_conflict",)
+    assert resolve([{**target, "reason_codes": ["account_stock_capacity_exceeded"],
+                     "capacity_evidence_complete": False}, other]).status == "linked"
     assert resolve([target, other], status="conflict").reason_codes == ("unresolved_attribution_conflict",)

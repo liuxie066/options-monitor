@@ -11,6 +11,7 @@ from domain.domain.multi_tick import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
     SUPPORTED_NOTIFICATION_PROVIDERS,
     normalize_notification_provider,
+    notification_route_identity_hash,
 )
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from src.application.channels.feishu import build_feishu_channel_adapter
@@ -108,6 +109,10 @@ def send_feishu_app_message(
     if receive_id_type != "open_id":
         raise ValueError(f"unsupported receive_id_type for phase1: {receive_id_type}")
 
+    attribution_route_key = notification_route_identity_hash(
+        provider=FEISHU_APP_NOTIFICATION_PROVIDER, channel=resolved_channel,
+        sender=bot_cfg.app_id, recipient=receive_id)
+
     request_path = f"/open-apis/im/v1/messages?receive_id_type={receive_id_type}"
     http_attempts: list[dict[str, Any]] = []
     envelope = (
@@ -170,6 +175,7 @@ def send_feishu_app_message(
             "http_attempts": _safe_http_attempts(http_attempts),
             "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
             "fallback_used": fallback_used,
+            "attribution_route_key": attribution_route_key,
         }
     except FeishuError as exc:
         response = exc.response if isinstance(exc.response, dict) else {}
@@ -202,6 +208,7 @@ def send_feishu_app_message(
             ),
             "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
             "fallback_used": fallback_used,
+            "attribution_route_key": attribution_route_key,
         }
 
 
@@ -346,6 +353,7 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "error_code": (None if ok else error_code),
             "render_mode": str(result.get("render_mode") or ""),
             "fallback_used": fallback_used,
+            "attribution_route_key": result.get("attribution_route_key"),
             **local_diagnostics,
         },
     )
