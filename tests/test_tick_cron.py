@@ -390,3 +390,57 @@ def test_tick_cron_real_preflight_after_yaml_edit(
         assert len(calls) == 1
         assert "--no-send" in calls[0][0]
         assert captured.err == ""
+
+
+@pytest.mark.parametrize("notified", [False, True])
+def test_wrapper_attributes_only_failed_account_and_dedupes_confirmed_failure(monkeypatch, tmp_path, notified):
+    from src.application import tick_cron as mod
+    from src.application.tick_run_context import write_child_tick_completion
+    config = _write_json(tmp_path / "config.us.json", {"accounts": ["lx", "sy"]})
+    calls = []
+    recoveries = []
+    monkeypatch.setattr(mod, "report_system_failure", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(mod, "report_system_recovery", lambda **kwargs: recoveries.append(kwargs))
+    def child(command, **kwargs):
+        write_child_tick_completion(base=tmp_path, wrapper_run_id=kwargs["env"]["OM_TICK_CRON_RUN_ID"], inner_run_id="child-1",
+            market="us", accounts=["lx", "sy"], rc=1, account_outcomes=[
+                {"account": "lx", "scan_ok": True, "notify_failed": False, "failure_notification_confirmed": False},
+                {"account": "sy", "scan_ok": False, "notify_failed": False, "failure_notification_confirmed": notified}])
+        return subprocess.CompletedProcess(command, 1)
+    assert _tick(tmp_path, child, market="us", accounts=["lx", "sy"], config_path=str(config), preflight_config_fn=None) == 1
+    assert [row["account"] for row in calls] == ([] if notified else ["sy"])
+    assert recoveries == []
+    latest = json.loads((tmp_path / "output_shared/state/current/tick_cron_last_result.us.current.json").read_text())
+    assert latest["status"] == "failed"
+    assert latest["accounts"] == ["sy"]
+
+
+@pytest.mark.parametrize("corruption", ["market", "wrapper", "account", "duplicate", "inner", "rc", "scan_type", "contradictory", "missing_outcomes"])
+def test_wrapper_rejects_corrupt_failed_receipt_without_false_recovery(monkeypatch, tmp_path, corruption):
+    from src.application import tick_cron as mod
+    config = _write_json(tmp_path / "config.us.json", {"accounts": ["lx", "sy"]})
+    calls = []
+    recoveries = []
+    monkeypatch.setattr(mod, "report_system_failure", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(mod, "report_system_recovery", lambda **kwargs: recoveries.append(kwargs))
+    def child(command, **kwargs):
+        wrapper = kwargs["env"]["OM_TICK_CRON_RUN_ID"]
+        payload = {"status": "failed", "wrapper_run_id": wrapper, "inner_run_id": "child-1", "market": "us", "accounts": ["lx", "sy"], "rc": 1,
+            "account_outcomes": [{"account": "lx", "scan_ok": True, "notify_failed": False, "failure_notification_confirmed": False},
+                                 {"account": "sy", "scan_ok": False, "notify_failed": False, "failure_notification_confirmed": True}]}
+        if corruption == "market": payload["market"] = "hk"
+        elif corruption == "wrapper": payload["wrapper_run_id"] = "other"
+        elif corruption == "account": payload["accounts"] = ["sy"]
+        elif corruption == "duplicate": payload["account_outcomes"][0]["account"] = "sy"
+        elif corruption == "inner": payload["inner_run_id"] = "../other"
+        elif corruption == "rc": payload["rc"] = 0
+        elif corruption == "scan_type": payload["account_outcomes"][0]["scan_ok"] = "true"
+        elif corruption == "contradictory": payload["account_outcomes"][1]["scan_ok"] = True
+        else: payload.pop("account_outcomes")
+        path = tmp_path / "output_runs" / wrapper / "state/child_tick_completion.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(payload))
+        return subprocess.CompletedProcess(command, 1)
+    assert _tick(tmp_path, child, market="us", accounts=["lx", "sy"], config_path=str(config), preflight_config_fn=None) == 1
+    assert {row["account"] for row in calls} == {"lx", "sy"}
+    assert recoveries == []

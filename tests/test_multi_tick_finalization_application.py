@@ -133,7 +133,7 @@ def test_finalize_multi_tick_run_success_calls_on_success(fake_runlog_factory, t
 
     assert rc == 0
     assert success["called"] == 1
-    assert shared_payloads == [{"prev": {"history": [1]}, "meta": {"sent_accounts": ["lx"]}}]
+    assert shared_payloads == [{"prev": {"history": [1]}, "meta": {"sent_accounts": ["lx"], "scan_outcomes": {}}}]
     assert any(e.get("step") == "run_end" and e.get("status") == "ok" for e in events)
 
 

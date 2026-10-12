@@ -62,6 +62,7 @@ from src.application.multi_tick_finalization import (
     _record_finalize_degraded,
     finalize_multi_tick_run,
     finalize_no_account_notification,
+    failed_scan_accounts,
 )
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
 from src.application.notification_delivery_adapter import (
@@ -116,13 +117,19 @@ class DailyBriefNotificationPreparation:
     transport_envelopes_by_account: dict[str, dict[str, Any]] = field(default_factory=dict)
     multi_market_delivery_unsupported: bool = False
     blocked_error_code: str | None = None
+    scan_outcomes_by_account: dict[str, bool] = field(default_factory=dict)
 
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     process_root = (request.repo_root or request.base).resolve()
     _validate_scheduled_scan_targets(request)
 
-    def finish_success(
+    def complete_tick(**kwargs) -> None:
+        request.complete_tick_idempotency_fn(**kwargs)
+        if kwargs.get("ok", True):
+            request.audit_helper.guard_mark_success()
+
+    def finish_tick(
         fn: Callable[[], int],
         *,
         status: str = "completed",
@@ -130,7 +137,10 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     ) -> int:
         rc = int(fn())
         if rc == 0:
-            request.complete_tick_idempotency_fn(status=status, message=message)
+            complete_tick(status=status, message=message)
+        else:
+            code = "SCAN_FAILED" if failed_scan_accounts(request.tick_metrics) else "NOTIFY_FAILED"
+            complete_tick(status="failed", message=code, ok=False, error_code=code)
         return rc
 
     def finish_retry_blocker(error_code: str) -> int:
@@ -149,13 +159,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             utc_now_fn=utc_now,
             audit_fn=request.audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            on_success=request.audit_helper.guard_mark_success,
+            on_success=lambda: None,
             reason=error_code,
             run_end_outcome="error",
             error_code=error_code,
             return_code=2,
         )
-        request.complete_tick_idempotency_fn(
+        complete_tick(
             status="unsupported_failed",
             message=error_code,
             ok=False,
@@ -181,6 +191,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             started=daily_brief_prepare_started,
             data={"outcome": prepare_outcome},
         )
+    request.tick_metrics["scan_outcomes"] = dict(daily_brief_prep.scan_outcomes_by_account)
+    if failed_scan_accounts(request.tick_metrics):
+        request.audit_helper.guard_mark_failure("SCAN_FAILED", "candidate_scan")
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
     results_count = len(request.results)
@@ -188,13 +201,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     if not notifications_enabled(request.base_cfg):
         request.runlog.safe_event("notify", "skip", message="notifications_disabled")
         _run_post_delivery_sidecars_best_effort(request)
-        return finish_success(
+        return finish_tick(
             lambda: finalize_no_account_notification(
                 base=request.base, run_id=request.run_id, runlog=request.runlog,
                 results=request.results, tick_metrics=request.tick_metrics,
                 no_send=True, state_repo=state_repo, utc_now_fn=utc_now,
                 audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
-                on_success=request.audit_helper.guard_mark_success, reason="notifications_disabled",
+                on_success=lambda: None, reason="notifications_disabled",
             ), status="completed", message="notifications_disabled",
         )
 
@@ -208,7 +221,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             extra={"trigger_kind": request.trigger_kind, "provider_attempted": False},
         )
         _run_post_delivery_sidecars_best_effort(request)
-        return finish_success(
+        return finish_tick(
             lambda: finalize_no_account_notification(
                 base=request.base,
                 run_id=request.run_id,
@@ -220,7 +233,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 utc_now_fn=utc_now,
                 audit_fn=request.audit_helper.audit,
                 safe_data_fn=_safe_runlog_data,
-                on_success=request.audit_helper.guard_mark_success,
+                on_success=lambda: None,
                 reason=reason,
             ),
             status="completed",
@@ -256,13 +269,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             utc_now_fn=utc_now,
             audit_fn=request.audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            on_success=request.audit_helper.guard_mark_success,
+            on_success=lambda: None,
             reason=error_code,
             run_end_outcome="error",
             error_code=error_code,
             return_code=2,
         )
-        request.complete_tick_idempotency_fn(
+        complete_tick(
             status="unsupported_failed",
             message=error_code,
             ok=False,
@@ -312,16 +325,15 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         _run_post_delivery_sidecars_best_effort(request)
         if request.delivery_only:
             request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
-            request.audit_helper.guard_mark_success()
-            request.complete_tick_idempotency_fn(status="skipped", message="no_retryable_delivery")
+            complete_tick(status="skipped", message="no_retryable_delivery")
             return 0
-        return finish_success(
+        return finish_tick(
             lambda: finalize_no_account_notification(
                 base=request.base, run_id=request.run_id, runlog=request.runlog,
                 results=request.results, tick_metrics=request.tick_metrics,
                 no_send=request.no_send, state_repo=state_repo, utc_now_fn=utc_now,
                 audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
-                on_success=request.audit_helper.guard_mark_success, reason="no_daily_brief_delivery",
+                on_success=lambda: None, reason="no_daily_brief_delivery",
             ), status="skipped", message="no_daily_brief_delivery",
         )
 
@@ -449,8 +461,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             ),
         )
         _run_post_delivery_sidecars_best_effort(request)
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(status="skipped", message="quiet_hours")
+        if failed_scan_accounts(request.tick_metrics):
+            return finish_tick(lambda: finalize_no_account_notification(
+                base=request.base, run_id=request.run_id, runlog=request.runlog,
+                results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
+                state_repo=state_repo, utc_now_fn=utc_now, audit_fn=request.audit_helper.audit,
+                safe_data_fn=_safe_runlog_data, on_success=lambda: None,
+                reason="quiet_hours"))
+        complete_tick(status="skipped", message="quiet_hours")
         return 0
 
     sent_accounts: list[str] = []
@@ -539,6 +557,15 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         sent_accounts = [] if request.delivery_only else list(would_send_accounts)
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
+    request.tick_metrics["scan_failure_notified_accounts"] = [
+        account for account in sent_accounts
+        if not request.no_send
+        and account in failed_scan_accounts(request.tick_metrics)
+        and (daily_brief_prep.lifecycles_by_account.get(account, {}).get("envelope") or {}).get("delivery_kind") == "fixed_failure"
+        and (daily_brief_prep.lifecycles_by_account[account]["envelope"]).get("source_reference")
+            == f"output_runs/{request.run_id}/accounts/{account}/state/daily_decision_brief_failure.{daily_brief_prep.lifecycles_by_account[account]['market']}.json"
+        and (daily_brief_prep.lifecycles_by_account[account]["envelope"]).get("source_kind") == "scan_failure"
+    ]
     if bool(notify_delivery.get("should_send")):
         reasons = {str(item.get("account") or ""): str(item.get("error_code") or "send_unconfirmed")
                    for item in notify_failures}
@@ -598,12 +625,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         if notify_failures:
             request.runlog.safe_event("run_end", "error", error_code="NOTIFY_FAILED")
             if daily_brief_prep.blocked_error_code:
-                request.complete_tick_idempotency_fn(
+                complete_tick(
                     status="unsupported_failed",
                     message=daily_brief_prep.blocked_error_code,
                     ok=False,
                     error_code=daily_brief_prep.blocked_error_code,
                 )
+            else:
+                complete_tick(status="failed", message="NOTIFY_FAILED", ok=False, error_code="NOTIFY_FAILED")
             return 1
         if request.no_send:
             request.runlog.safe_event(
@@ -611,8 +640,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 "skip",
                 data=_safe_runlog_data({"would_send_accounts": would_send_accounts, "delivery_only": True}),
             )
-            request.audit_helper.guard_mark_success()
-            request.complete_tick_idempotency_fn(
+            complete_tick(
                 status="skipped",
                 message="delivery_only_no_send",
             )
@@ -622,8 +650,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             "ok",
             data=_safe_runlog_data({"sent_accounts": sent_accounts, "delivery_only": True}),
         )
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(
+        complete_tick(
             status="completed" if sent_accounts else "skipped",
             message="delivery_only_sent" if sent_accounts else "delivery_only_no_send",
         )
@@ -688,18 +715,21 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             utc_now_fn=utc_now,
             audit_fn=request.audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            on_success=request.audit_helper.guard_mark_success,
+            on_success=lambda: None,
         )
     )
     if rc == 0:
-        request.complete_tick_idempotency_fn(status="completed", message=None)
+        complete_tick(status="completed", message=None)
     elif daily_brief_prep.blocked_error_code:
-        request.complete_tick_idempotency_fn(
+        complete_tick(
             status="unsupported_failed",
             message=daily_brief_prep.blocked_error_code,
             ok=False,
             error_code=daily_brief_prep.blocked_error_code,
         )
+    else:
+        code = "SCAN_FAILED" if failed_scan_accounts(request.tick_metrics) else "NOTIFY_FAILED"
+        complete_tick(status="failed", message=code, ok=False, error_code=code)
     return rc
 
 
@@ -874,6 +904,7 @@ def _prepare_daily_brief_notification(
     delivery_keys_by_account: dict[str, str] = {}
     transport_envelopes_by_account: dict[str, dict[str, Any]] = {}
     messages_by_account: dict[str, str] = {}
+    scan_outcomes_by_account: dict[str, bool] = {}
     lifecycle_audit: list[dict[str, Any]] = []
     blocked_error_code: str | None = None
     daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
@@ -1048,6 +1079,7 @@ def _prepare_daily_brief_notification(
                         and brief.get("status") in {"ready", "degraded"}
                         and brief.get("actionability") != "blocked"
                     )
+                    scan_outcomes_by_account[account] = scan_outcomes_by_account.get(account, True) and pipeline_reliable
                     pending: list[str] = []
                     persisted: dict[str, Any] | None = None
                     diff: dict[str, Any] = {}
@@ -1341,6 +1373,7 @@ def _prepare_daily_brief_notification(
         markets=markets,
         multi_market_delivery_unsupported=multi_market,
         blocked_error_code=blocked_error_code,
+        scan_outcomes_by_account=scan_outcomes_by_account,
     )
 
 
