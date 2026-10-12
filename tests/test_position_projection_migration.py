@@ -859,3 +859,151 @@ def test_read_only_size_guard_ignores_ephemeral_shm_resize_only() -> None:
             {"db_bytes": 10, "wal_bytes": 21, "shm_bytes": 32_768},
             operation="test",
         )
+
+
+def test_incremental_current_readiness_is_independent_of_historical_full_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from src.application.ledger.position_projection_runtime import run_position_projection_fast_if_safe
+    from src.application.research.historical_cleanup import _position_gate
+
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
+    _activate(path, acceptance=_acceptance(shadow), shadow=shadow)
+    repo = module._repository(path)
+    last_full = repo.read_position_projection_source_state()["last_full_verified_source_generation"]
+    event = _event("open-next", event_time_ms=2000)
+    event["lot_id"] = "lot-next"
+    runtime = run_position_projection_fast_if_safe(repo, [event])
+    assert runtime.mode_used == "fast_tail"
+    source = repo.read_position_projection_source_state()
+    assert source["last_full_verified_source_generation"] == last_full
+    assert source["source_generation"] > last_full
+    before = {suffix: Path(f"{path}{suffix}").read_bytes() if Path(f"{path}{suffix}").exists() else b""
+              for suffix in ("", "-wal")}
+    status = module.position_projection_migration_status(path)
+    verification = _shadow(path)
+    assert status["readiness"] == "ready", status["reasons"]
+    assert _position_gate(path)["status"] == "pass"
+    assert verification["status"] == "pass", verification["reasons"]
+    assert verification["full_oracle_parity"]["status"] == "pass"
+    assert verification["runtime_shadow"]["status"] == "pass"
+    assert repo.read_position_projection_source_state()["last_full_verified_source_generation"] == last_full
+    import src.interfaces.cli.option_positions as cli
+    from types import SimpleNamespace
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n")
+    monkeypatch.setattr(cli, "resolve_ledger_store", lambda *a, **kw: SimpleNamespace(sqlite_path=path))
+    for command, extra in (("status", []), ("verify", ["--shadow"])):
+        assert cli.main(["--data-config", str(data_config), "projection-migration", command, *extra]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["readiness"] == "ready"
+        assert payload["last_full_verified_source_generation"] == last_full
+    assert before == {suffix: Path(f"{path}{suffix}").read_bytes() if Path(f"{path}{suffix}").exists() else b""
+                      for suffix in ("", "-wal")}
+
+
+@pytest.mark.parametrize("drift", ["lot_count", "projection_fingerprint"])
+def test_status_and_cleanup_reject_bad_content_with_fresh_full_marker(tmp_path: Path, drift: str) -> None:
+    from src.application.research.historical_cleanup import _position_gate
+
+    path = _migrated(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"UPDATE position_projection_heads SET {drift}=? WHERE account='lx'",
+                     (999 if drift == "lot_count" else "0" * 64,))
+    status = module.position_projection_migration_status(path)
+    assert status["last_full_verified_source_generation"] == status["source_generation"]
+    assert status["readiness"] == "not_ready"
+    assert f"{drift}_mismatch:lx" in status["reasons"]
+    assert _position_gate(path)["status"] == "blocked"
+
+
+@pytest.mark.parametrize("mutation", [
+    "UPDATE position_projection_checkpoints SET accumulator_sha256='bad'",
+    "UPDATE position_projection_checkpoints SET prefix_chain_sha256='bad'",
+    "UPDATE position_projection_source_state SET source_generation=source_generation+1",
+    "UPDATE position_projection_source_state SET projector_implementation_fingerprint='bad'",
+    "UPDATE position_projection_heads SET built_lots_generation=built_lots_generation+1",
+    "UPDATE position_lots SET strike=999",
+    "DROP TRIGGER trg_trade_events_source_insert",
+    "ALTER TABLE position_lots ADD COLUMN unknown_semantic TEXT",
+])
+def test_current_readiness_keeps_corrupt_binding_blocked_readonly(tmp_path: Path, mutation: str) -> None:
+    from src.application.research.historical_cleanup import _position_gate
+
+    path = _migrated(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(mutation)
+    before = path.read_bytes()
+    assert module.position_projection_migration_status(path)["readiness"] == "not_ready"
+    assert _position_gate(path)["status"] == "blocked"
+    assert path.read_bytes() == before
+
+
+def test_status_accepts_canonical_empty_head_and_empty_store(tmp_path: Path) -> None:
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+    from src.application.research.historical_cleanup import _position_gate
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "empty.sqlite3")
+    run_position_projection_forced_full(repo, [], seed_checkpoint=True)
+    assert module.position_projection_migration_status(repo.db_path)["readiness"] == "ready"
+    event = _event("verify-empty")
+    event.update(event_type="verification", contracts=0, price=0)
+    run_position_projection_forced_full(repo, [event], seed_checkpoint=True)
+    status = module.position_projection_migration_status(repo.db_path)
+    assert status["head_count"] == 1
+    assert status["fingerprint_scope"]["rows"] == 0
+    assert status["readiness"] == "ready"
+    assert _position_gate(repo.db_path)["status"] == "pass"
+    assert _shadow(repo.db_path)["status"] == "pass"
+
+
+def test_actual_full_publication_advances_marker_and_invalidates_decision_inventory(tmp_path: Path) -> None:
+    from src.application.ledger.api import (
+        build_current_decision_projection_migration_inventory,
+        apply_current_decision_projection_migration,
+    )
+    from src.application.ledger.position_projection_runtime import (
+        run_position_projection_fast_if_safe, run_position_projection_forced_full,
+    )
+
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
+    _activate(path, acceptance=_acceptance(shadow), shadow=shadow)
+    repo = module._repository(path)
+    event = _event("append", event_time_ms=2000)
+    event["lot_id"] = "append-lot"
+    assert run_position_projection_fast_if_safe(repo, [event]).mode_used == "fast_tail"
+    old = build_current_decision_projection_migration_inventory(path, now_ms=1900000000000)
+    source_before = repo.read_position_projection_source_state()
+    with sqlite3.connect(path) as conn:
+        authority_before = tuple(conn.execute(
+            "SELECT singleton_id,source_generation,projector_schema,projector_implementation_fingerprint,"
+            "checkpoint_mode FROM position_projection_source_state").fetchone())
+    assert source_before["source_generation"] != source_before["last_full_verified_source_generation"]
+    run_position_projection_forced_full(repo, [])
+    source_after = repo.read_position_projection_source_state()
+    assert source_after["source_generation"] == source_after["last_full_verified_source_generation"]
+    with sqlite3.connect(path) as conn:
+        assert authority_before == tuple(conn.execute(
+            "SELECT singleton_id,source_generation,projector_schema,projector_implementation_fingerprint,"
+            "checkpoint_mode FROM position_projection_source_state").fetchone())
+    current = build_current_decision_projection_migration_inventory(path, now_ms=1900000000000)
+    assert current["authority_fingerprint"] != old["authority_fingerprint"]
+    with pytest.raises(ValueError, match="stale"):
+        apply_current_decision_projection_migration(path, old)
+
+
+def test_missing_empty_account_head_is_unavailable_not_valid_empty(tmp_path: Path) -> None:
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "empty-account.sqlite3")
+    event = _event("verify-empty")
+    event.update(event_type="verification", contracts=0, price=0)
+    run_position_projection_forced_full(repo, [event], seed_checkpoint=True)
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("DELETE FROM position_projection_heads WHERE account='lx'")
+    status = module.position_projection_migration_status(repo.db_path)
+    assert status["readiness"] == "not_ready"
+    assert "projection_head_account_set_mismatch" in status["reasons"]

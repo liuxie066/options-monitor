@@ -3199,3 +3199,37 @@ def test_finalizer_shared_history_preserves_account_time_and_prepublication_fail
         assert sum(" ".join(sql.upper().split()).startswith(
             "SELECT EVENT_JSON FROM TRADE_EVENTS ORDER BY") for sql in statements) == 1
         conn.rollback()
+
+
+@pytest.mark.parametrize("drift", ["lot_count", "projection_fingerprint"])
+def test_writer_repairs_unrelated_head_without_blessing_dirty_decision_authority(
+    tmp_path: Path, drift: str,
+) -> None:
+    from src.application.ledger.api import record_manual_position_open
+    from src.application.ledger.position_projection_publication import read_current_position_projection
+
+    repo = _repo(tmp_path, accounts=("lx", "sy"))
+    _bootstrap(repo, "lx")
+    _bootstrap(repo, "sy")
+    repo.set_position_projection_checkpoint_mode("enabled")
+    sy_before = read_current_decision_projection(repo, account="sy", now_ms=5000)
+    assert sy_before["status"] == "trusted"
+    with repo._connect() as conn:
+        conn.execute(f"UPDATE position_projection_heads SET {drift}=? WHERE account='sy'",
+                     (999 if drift == "lot_count" else "0" * 64,))
+        conn.commit()
+    record_manual_position_open(
+        repo, broker="futu", account="lx", symbol="NVDA", option_type="put", side="short",
+        contracts=1, currency="USD", strike=100, multiplier=100, expiration_ymd="2026-06-19",
+        premium_per_share=2, opened_at_ms=3000, request_id="next-lx",
+    )
+    assert len(repo.list_position_lots()) == 3
+    assert read_current_position_projection(repo, account="sy")["status"] == "trusted"
+    sy_after = read_current_decision_projection(repo, account="sy", now_ms=5000)
+    if drift == "projection_fingerprint":
+        assert sy_after["status"] == "data_unavailable"
+        assert sy_after["reason"] == "decision projection is dirty"
+    else:
+        assert sy_after["status"] == "trusted"
+        assert sy_after["payload"]["lifecycle"] == sy_before["payload"]["lifecycle"]
+    assert read_current_decision_projection(repo, account="lx", now_ms=5000)["status"] == "trusted"
