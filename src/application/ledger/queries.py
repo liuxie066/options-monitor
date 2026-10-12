@@ -67,6 +67,28 @@ def open_position_ledger_from_data_config(*, base: Path, data_config: str | Path
     return _impl(base=base, data_config=data_config)
 
 
+def open_position_query_ledger_from_data_config(
+    *,
+    base: Path,
+    data_config: str | Path | None,
+    cfg: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> tuple[Path, Any]:
+    """Open public position queries without bootstrap or projection recovery."""
+    from src.application.ledger.read_only_evidence import open_position_query_repo
+    from src.application.ledger.store_resolution import resolve_ledger_store
+
+    resolved = resolve_position_data_config_path(
+        base=base, cfg=cfg, data_config=data_config, config_path=config_path,
+    )
+    store = resolve_ledger_store(resolved, config_path=config_path, runtime_root=runtime_root)
+    reader = open_position_query_repo(store.sqlite_path)
+    reader.data_config_path = resolved
+    reader.ledger_store = store
+    return resolved, reader
+
+
 def open_performance_query_ledger_from_data_config(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
     from src.application.ledger.read_only_evidence import open_performance_query_repo
 
@@ -1220,6 +1242,7 @@ __all__ = [
     "normalize_position_lot_snapshot",
     "open_position_ledger",
     "open_position_ledger_from_data_config",
+    "open_position_query_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
     "position_lot_context_view",
     "position_lot_risk_view",
