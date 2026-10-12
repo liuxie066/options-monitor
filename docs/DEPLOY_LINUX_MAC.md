@@ -29,6 +29,13 @@
 
 不要再用 `option_positions.sqlite_path` 作为 active DB 配置。运行时忽略该旧字段；如发现旧库，只能先离线修复为 canonical `trade_events`，再写入 active DB。
 
+`om service install` 覆盖或移除已有服务定义前，将原文保存在服务目录的
+`.om-service-backups/` 子目录中，保留原相对路径并以内容哈希命名。Linux 的服务备份由 root
+管理，macOS 的 LaunchAgent 备份由当前用户管理；新备份目录权限为 0700，文件为 0600。
+预览的 `files[].backup_path` 与执行后的 `operations[].backup_path` 指向同一文件。
+运行时 profile 和普通 env 文件仍使用原来的同级备份位置。历史 `.om-backup-*` 文件保持原样，
+不会自动迁移或清理；drift 不将它们作为服务单元扫描或退役。
+
 ## 2. 安装依赖
 
 最小运行依赖：

@@ -77,6 +77,23 @@ def _file_fact(path: Path) -> dict[str, Any]:
         _permission_error(path, exc)
 
 
+def _backup_path(item: dict[str, Any], *, unit_root: Path, owner_uid: int) -> Path:
+    path = Path(item["path"])
+    if item["kind"] in {"systemd_service", "systemd_timer", "systemd_secret_dropin", "launchd_plist"}:
+        path = unit_root / ".om-service-backups" / path.relative_to(unit_root)
+        directory = path.parent
+        while directory != unit_root:
+            _no_links(directory)
+            if directory.exists():
+                info = directory.stat()
+                if not stat.S_ISDIR(info.st_mode):
+                    _error("SERVICE_PATH_UNSAFE", "service backup parent must be a directory", path=str(directory))
+                if info.st_uid != owner_uid or info.st_mode & 0o022:
+                    _error("SERVICE_IDENTITY_MISMATCH", "service backup directory must be controlled by its deployment owner", path=str(directory))
+            directory = directory.parent
+    return path.with_name(path.name + ".om-backup-" + item["before"]["sha256"][:16])
+
+
 def _identity(target: str, deploy_user: str | None, euid: int) -> Any:
     if target == "launchd":
         if euid == 0:
@@ -543,12 +560,20 @@ def service_lifecycle(
             _error("SERVICE_INSTANCE_UNVERIFIED", "cannot establish the loaded service's ownership", service=unit["name"])
     commands = _activation_commands(action, units, before, target=provider, uid=user.pw_uid) if action != "install" else []
     changed_files = [item for item in files if item["before"].get("sha256") != item["sha256"]]
+    if action == "install":
+        for item in changed_files:
+            if item["before"]["exists"]:
+                owner_uid = user.pw_uid if item["kind"] in {"service_profile", "service_env"} else expected_unit_uid
+                backup = _backup_path(item, unit_root=root, owner_uid=owner_uid)
+                fact = _file_fact(backup)
+                if fact["exists"] and (fact["uid"] != owner_uid or fact["mode"] & 0o077):
+                    _error("SERVICE_IDENTITY_MISMATCH", "service backup must be private and controlled by its deployment owner", path=str(backup))
+                item["backup_path"] = str(backup)
+                inputs.append(fact)
     public_files = []
     for item in files:
         public = {key: value for key, value in item.items() if key != "content"}
         if item in changed_files:
-            if item["before"]["exists"]:
-                public["backup_path"] = item["path"] + ".om-backup-" + item["before"]["sha256"][:16]
             # Unit definitions contain credential names/paths, never values.
             # Include the actual definition difference for informed confirmation.
             public["diff"] = "".join(difflib.unified_diff(
@@ -635,7 +660,8 @@ def service_lifecycle(
                 _mkdir(path.parent, uid=owner_uid, gid=owner_gid, mode=0o755 if public_systemd_path else 0o700)
                 backup = None
                 if item["before"]["exists"]:
-                    backup = path.with_name(path.name + ".om-backup-" + item["before"]["sha256"][:16])
+                    backup = _backup_path(item, unit_root=root, owner_uid=owner_uid)
+                    _mkdir(backup.parent, uid=owner_uid, gid=owner_gid)
                     _no_links(backup)
                     if backup.exists() and backup.read_bytes() != path.read_bytes():
                         raise OSError("existing service backup content does not match")
