@@ -13,7 +13,7 @@ import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml_init import init_yaml_config
-from src.application.service_lifecycle import service_lifecycle
+from src.application.service_lifecycle import _definition_preview, service_lifecycle
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -423,18 +423,88 @@ def test_loaded_runtime_scope_requires_untruncated_evidence(instance, tmp_path, 
             service_lifecycle('start', **{**ctx, 'run_cmd': probe})
 
 
-def test_preview_hides_existing_env_values_and_live_probe_environment(instance, tmp_path):
+_PREVIEW_ENV_LINES = [
+    'Environment="DEEPSEEK_API_KEY={secret}"',
+    '  Environment="API_KEY={secret}"',
+    '\tEnvironment \t= "API_KEY={secret}"',
+    'Environment="HOME=/fictional" \\\n  "API_KEY={secret}"',
+    'Environment="HOME=/fictional" \\\n # ignored \\\n ; ignored too\n "API_KEY={secret}"',
+    'Environment="API_KEY=first-{secret}" \\\n "OTHER_KEY=second-{secret}" \\\n "HOME=/fictional"',
+    'Environment="API_KEY=first-\\\n{secret}"',
+    'Environment="API_KEY={secret}',
+    'Environment={secret}',
+    'Environment="{secret}=value"',
+    'Environment="HOME=/fictional"API_KEY={secret}',
+    'Environment="API_KEY={secret}\\x21"',
+    'Environment="HOME=/fictional"\v"API_KEY={secret}"',
+    '\ufeffEnvironment="API_KEY={secret}"',
+    'Environment = "HOME=/fictional" \\\r\n\t"API_KEY={secret}"',
+    'ExecStartPost=/bin/true \\\n\u00a0# ordinary\nEnvironment=API_KEY={secret}',
+    'ExecStartPost=/bin/true \\\n\v# ordinary\nEnvironment=API_KEY={secret}',
+    'ExecStartPost=/bin/true \\\n\f# ordinary\nEnvironment=API_KEY={secret}',
+    'Description=ordinary\0Environment=API_KEY={secret}',
+    'Environment="HOME=/fictional" \\\n\r "API_KEY={secret}"',
+]
+
+
+def _preview_probe(ctx, manager, secret):
+    # A real show response contains parsed environment, not the unit's physical lines.
+    def probe(command, **kwargs):
+        result = manager(command, **kwargs)
+        environment = shlex.join(['OM_RUNTIME_ROOT=' + str(ctx['runtime_root']), 'API_KEY=' + secret])
+        stdout = '\n'.join('Environment=' + environment if line.startswith('Environment=') else line
+                           for line in result.stdout.splitlines())
+        return subprocess.CompletedProcess(command, result.returncode, stdout, result.stderr)
+    return probe
+
+
+@pytest.mark.parametrize('env_line', _PREVIEW_ENV_LINES)
+def test_preview_hides_existing_env_values_and_live_probe_environment(instance, tmp_path, env_line):
     ctx, manager = context(instance, tmp_path, 'systemd')
     sentinel = 'test-only-secret-must-not-be-printed'
     env = instance / 'options-monitor.env'
     env.write_text('DEEPSEEK_API_KEY=' + sentinel + '\n')
     apply('install', ctx)
     unit = ctx['unit_root'] / 'options-monitor-tick-us.service'
-    unit.write_text(unit.read_text().replace('[Service]', '[Service]\nEnvironment="DEEPSEEK_API_KEY=' + sentinel + '"'))
-    result = service_lifecycle('install', **ctx)
+    unit.write_text(unit.read_text().replace('[Service]', '[Service]\n' + env_line.format(secret=sentinel)))
+    before = {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    manager.calls.clear()
+    result = service_lifecycle('install', **{**ctx, 'run_cmd': _preview_probe(ctx, manager, sentinel)})
     assert sentinel not in json.dumps(result)
     assert '<redacted>' in str(result['files'])
+    assert result['ok'] and not result['confirmed'] and not result['files_changed']
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    assert manager.calls and all(call[1] == 'show' for call in manager.calls)
     assert env.read_text() == 'DEEPSEEK_API_KEY=' + sentinel + '\n'
+
+
+def test_systemd_definition_preview_preserves_safe_values_and_other_directives():
+    source = ('# comment with trailing slash \\\n'
+              'Environment=\n'
+              ' Environment = "HOME=/safe home" OM_RUNTIME_ROOT=/safe OM_ENV_FILE=/safe.env PYTHONUNBUFFERED=1\n'
+              'Environment=API_KEY=fake-secret\n'
+              'EnvironmentFile=/safe.env\n'
+              'ExecStart=/bin/echo \\\n  ordinary-argument\n')
+    preview = _definition_preview(source, 'systemd_service')
+    assert 'fake-secret' not in preview
+    assert 'API_KEY=<redacted>' in preview
+    for value in ('HOME=/safe home', 'OM_RUNTIME_ROOT=/safe', 'OM_ENV_FILE=/safe.env', 'PYTHONUNBUFFERED=1'):
+        assert value in preview
+    assert preview.startswith('# comment with trailing slash \\\nEnvironment=\n')
+    assert preview.endswith('EnvironmentFile=/safe.env\nExecStart=/bin/echo \\\n  ordinary-argument\n')
+
+
+def test_systemd_definition_preview_does_not_continue_even_backslashes():
+    preview = _definition_preview('Environment="API_KEY=fake-secret" \\\\\nDescription=still-visible\n', 'systemd_service')
+    assert 'fake-secret' not in preview
+    assert 'Description=still-visible\n' in preview
+
+
+def test_launchd_definition_preview_preserves_safe_environment():
+    payload = {'EnvironmentVariables': {'HOME': '/safe', 'API_KEY': 'fake-secret'}, 'Label': 'example'}
+    preview = _definition_preview(plistlib.dumps(payload).decode(), 'launchd_plist')
+    assert plistlib.loads(preview.encode()) == {
+        'EnvironmentVariables': {'HOME': '/safe', 'API_KEY': '<redacted>'}, 'Label': 'example'}
 
 
 def test_inbound_install_requires_current_selected_bot_snapshot(instance, tmp_path):
