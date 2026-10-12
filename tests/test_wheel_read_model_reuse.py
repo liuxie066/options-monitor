@@ -41,7 +41,7 @@ def test_pair_matches_separate_views_and_shares_base(monkeypatch, market, readin
     expected = (model.build_wheel_read_model_from_rows(rows, **kwargs, market=market,
                                                       monitoring_readiness=readiness),
                 model.build_wheel_read_model_from_rows(rows, **kwargs))
-    project, branches = assigned.project_trade_event_log, model.project_wheel_branches
+    project, branches = assigned.project_trade_event_log, assigned.project_wheel_branches
     calls = {'project': 0, 'branches': 0}
     def counted_project(events):
         calls['project'] += 1
@@ -50,7 +50,7 @@ def test_pair_matches_separate_views_and_shares_base(monkeypatch, market, readin
         calls['branches'] += 1
         return branches(*args)
     monkeypatch.setattr(assigned, 'project_trade_event_log', counted_project)
-    monkeypatch.setattr(model, 'project_wheel_branches', counted_branches)
+    monkeypatch.setattr(assigned, 'project_wheel_branches', counted_branches)
     actual = model.build_wheel_read_model_with_capacity_from_rows(
         rows, **kwargs, market=market, monitoring_readiness=readiness)
     assert actual == expected

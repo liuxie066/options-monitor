@@ -79,3 +79,7 @@ Run it locally:
 ```
 
 Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change regenerates the registry and reviews the diff. New non-exempt retired-column SQL and unreviewed dynamic SQL fail the quality gate. The R1 statement exceptions, window switch, dual-shape write path, and destructive lot-identity `apply` were retired in R2. Ordinary repository open requires the final shape; `inventory` and `verify` remain read-only diagnostics for older stores.
+
+### 成交归属原子命令边界
+
+成交归属 preview/apply 通过 `ledger.api.apply_trade_attribution` 进入账本 owner。应用负责授权和外部观察；命令在锁内重读、复验、写入、投影和读回，preview 回滚业务效果。`trades.attribution` 保留同一函数的旧入口。`tests/test_trade_attribution_ledger_command.py` 验证公共命令的预览、取消/失败回滚、幂等与真实入口冷导入；归属冲突、Combo/Wheel 和 Bot 操作保留各自集成回归。自动冲突记录及其它事务消费者不属于本切片。

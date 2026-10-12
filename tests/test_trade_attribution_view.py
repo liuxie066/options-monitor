@@ -1,3 +1,4 @@
+from src.application.ledger import trade_attribution as ledger_attribution
 from cash_evidence_helpers import cash_portfolio, cash_config
 import pytest
 from copy import deepcopy
@@ -29,7 +30,7 @@ def _call_scope(tmp_path, monkeypatch, contracts=1):
     rows["attribution_policy_enablings"] = [{"broker": "futu", "physical_account_id": "1001", "environment": "REAL",
         "account": "lx", "market": "us", "policy_version": "trade_attribution.v2", "effective_from_ms": 2500}]
     # Capacity owner has separate full snapshot checks below; this isolates global competition.
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check",
                         lambda **kwargs: {"status": "available", "reason_codes": []})
     return rows, cfg, branch_id
 
@@ -63,12 +64,12 @@ def test_unrelated_fills_skip_historical_wheel_projection(tmp_path, monkeypatch)
     import src.application.trades.attribution as attribution
 
     rows, config, _branch = _call_scope(tmp_path, monkeypatch)
-    original = attribution.build_wheel_read_model_from_rows
+    original = ledger_attribution.build_wheel_read_model_from_rows
     projected_at = []
     def tracked(*args, **kwargs):
         projected_at.append(kwargs["as_of_ms"])
         return original(*args, **kwargs)
-    monkeypatch.setattr(attribution, "build_wheel_read_model_from_rows", tracked)
+    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_from_rows", tracked)
     build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=4000,
                                  combo_evidence={"complete": True, "exposures": []})
     put_times = {event["event_time_ms"] for event in rows["trade_events"]
@@ -226,7 +227,7 @@ def test_public_confirmation_read_hash_confirms_and_default_read_stays_local(tmp
     from src.application.trades import attribution
     from src.application.agent_tools.positions import TRADE_ATTRIBUTION_READ_TOOL
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config,
         {"runtime_root": str(tmp_path), "config_path": str(tmp_path / "config.json")}, {}))
     evidence = {"complete": True, "exposures": []}
@@ -283,7 +284,7 @@ def test_public_call_confirmation_rejects_insufficient_broker_shares_without_wri
     from src.application.wheel.read_model import build_wheel_read_model_from_rows
 
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config,
         {"runtime_root": str(tmp_path), "config_path": str(tmp_path / "config.json")}, {}))
     monkeypatch.setattr(attribution, "read_attribution_combo_evidence",
@@ -329,7 +330,7 @@ def test_public_call_confirmation_rejects_insufficient_broker_shares_without_wri
 def test_confirmation_read_capacity_failure_stays_unavailable(tmp_path, monkeypatch):
     from src.application.trades import attribution
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     monkeypatch.setattr(attribution, "attribution_runtime", lambda **_: (repo, config, {"runtime_root": str(tmp_path)}, {}))
     monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **kw: {"complete": True, "exposures": []})
     monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity", lambda **_: {"error": "provider_timeout"})
@@ -344,19 +345,19 @@ def test_confirmation_read_capacity_failure_stays_unavailable(tmp_path, monkeypa
 def test_final_capacity_rejects_snapshot_that_expires_during_write(tmp_path, monkeypatch):
     from src.application.trades import attribution
     repo, config = _writable_call_scope(tmp_path, monkeypatch)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     observation = _call_capacity_observation()
     evidence = {"complete": True, "exposures": []}
     view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
         config=config, account="lx", market="us", now_ms=4000, combo_evidence=evidence,
         capacity_observation=observation)
     fact = next(row for row in view["rows"] if row["contract_key"]["option_type"] == "call")
-    original = attribution.write_trade_attribution_decision
+    original = ledger_attribution.write_trade_attribution_decision
     def expire(*args, **kwargs):
         result = original(*args, **kwargs)
         monkeypatch.setattr("time.time", lambda: 65)
         return result
-    monkeypatch.setattr(attribution, "write_trade_attribution_decision", expire)
+    monkeypatch.setattr(ledger_attribution, "write_trade_attribution_decision", expire)
     before = read_trade_attribution_snapshot(repo, account="lx", market="us")
     with pytest.raises(ValueError, match="capacity changed before commit"):
         attribution.apply_trade_attribution(repo, account="lx", market="us", config=config,
@@ -458,7 +459,7 @@ def test_view_and_writer_keep_other_market_capacity_obligations(tmp_path, monkey
         observed.append({fact["contract_key"]["underlying_symbol"] for fact in kwargs["facts"]})
         return {"status": "available", "reason_codes": []}
 
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check", capacity)
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check", capacity)
     evidence = {"complete": True, "exposures": []}
     view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
         config=config, account="lx", market="us", now_ms=4000, combo_evidence=evidence)
@@ -497,7 +498,7 @@ def test_two_booked_intent_fills_are_linked_and_consumed_atomically(tmp_path, mo
     second["raw_payload"]["execution_id"] = execution_identity_from_input(second["raw_payload"]["execution_input"])
     persist_trade_event_objects_atomically(repo, [TradeEvent.from_dict(second)])
     monkeypatch.setattr("time.time", lambda: now_ms / 1000)
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check", trade_attribution_capacity_check)
     observation = _call_capacity_observation(contracts=2, now_ms=now_ms)
     evidence = {"complete": True, "exposures": []}
     rows = read_trade_attribution_snapshot(repo, account="lx", market="us")
@@ -813,7 +814,7 @@ def test_rejected_combo_does_not_reappear_as_placeholder_but_new_pair_competes(t
     config = {"market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}
     kwargs = dict(config=config, account="lx", market="us", now_ms=BASE_TIME_MS + 3000,
         combo_evidence={"complete": True, "exposures": [_exposure()]})
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check", lambda **_: {"reason_codes": []})
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check", lambda **_: {"reason_codes": []})
     view = build_trade_attribution_view(rows, **kwargs)
     assert all(not fact["candidates"] for fact in view["rows"]), view
     call = _open_events()[0]
@@ -1016,19 +1017,19 @@ def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkey
 
 def test_attribution_pair_keeps_complete_view_and_historical_instants(tmp_path, monkeypatch):
     import src.application.trades.attribution as attribution
-    from src.application.wheel import read_model
+    from src.application.ledger import assigned_stock_projection as read_model
 
     rows, config, _branch = _call_scope(tmp_path, monkeypatch)
     args = dict(config=config, account='lx', market='us', now_ms=4000,
                 combo_evidence={'complete': True, 'exposures': []})
-    paired = attribution.build_wheel_read_model_with_capacity_from_rows
+    paired = ledger_attribution.build_wheel_read_model_with_capacity_from_rows
     def independent(rows, *, account, as_of_ms, market, monitoring_readiness=None):
         return (read_model.build_wheel_read_model_from_rows(
             rows, account=account, as_of_ms=as_of_ms, market=market, monitoring_readiness=monitoring_readiness),
             read_model.build_wheel_read_model_from_rows(rows, account=account, as_of_ms=as_of_ms))
-    monkeypatch.setattr(attribution, 'build_wheel_read_model_with_capacity_from_rows', independent)
+    monkeypatch.setattr(ledger_attribution, 'build_wheel_read_model_with_capacity_from_rows', independent)
     expected = attribution.build_trade_attribution_view(rows, **args)
-    monkeypatch.setattr(attribution, 'build_wheel_read_model_with_capacity_from_rows', paired)
+    monkeypatch.setattr(ledger_attribution, 'build_wheel_read_model_with_capacity_from_rows', paired)
     base = read_model._build_wheel_read_model_base
     instants = []
     def counted(*a, **kw):

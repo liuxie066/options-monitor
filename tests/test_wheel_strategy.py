@@ -430,7 +430,7 @@ def test_read_model_reprojects_position_lots_from_corrected_as_of_trade_subset(
         return []
 
     monkeypatch.setattr(
-        "src.application.wheel.read_model.project_wheel_branches",
+        "src.application.ledger.assigned_stock_projection.project_wheel_branches",
         _capture,
     )
     rows = {"trade_events": [event.to_dict() for event in events]}
