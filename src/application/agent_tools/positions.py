@@ -28,7 +28,7 @@ from domain.domain.option_position_identity import normalize_account
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
 from src.application.agent_tool_config import repo_base
-from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
+from src.application.ledger.api import open_position_query_ledger_from_data_config as resolve_option_positions_repo
 from src.application.ledger.api import open_performance_query_ledger_from_data_config
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
 from src.application.wheel.candidate_snapshot import current_wheel_candidate_policy_hash

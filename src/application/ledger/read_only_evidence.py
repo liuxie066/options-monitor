@@ -10,6 +10,11 @@ from src.application.ledger.event_codec import (
     stored_trade_event_to_ledger_event,
     trade_event_application_payload,
 )
+from src.application.ledger.repository_assigned_stock import AssignedStockRepositoryMixin
+from src.application.ledger.repository_decision_reads import DecisionReadRepositoryMixin
+from src.application.ledger.repository_strategy_groups import StrategyGroupRepositoryMixin
+from src.application.ledger.repository_projection_tail import PositionProjectionTailRepositoryMixin
+from src.application.ledger.repository_trade_events import TradeEventRepositoryMixin
 from src.application.ledger.sqlite_row_codec import (
     read_current_decision_projection_inputs_from_conn,
 )
@@ -566,6 +571,49 @@ def verify_trade_receipt_projection(evidence: dict[str, Any]) -> None:
         current_lots=evidence["position_lots"], diagnostics=projected.diagnostics)
     if _blocking_count(comparison["summary"]):
         raise ValueError("recorded execution projection unavailable")
+
+
+def open_position_query_repo(sqlite_path: str | Path) -> Any:
+    """Read stored positions and diagnostics without initializing or repairing SQLite."""
+    return _ReadOnlyPositionQueryRepository(Path(sqlite_path))
+
+
+class _ReadOnlyPositionQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepository):
+    bootstrap_status = "read_only"
+    bootstrap_message = "query does not initialize or recover the ledger"
+
+    # Reuse the store's read codecs and paging contract without its writer lifecycle.
+    list_position_lots = PositionProjectionTailRepositoryMixin.list_position_lots
+    list_trade_events = TradeEventRepositoryMixin.list_trade_events
+    list_trade_events_page = TradeEventRepositoryMixin.list_trade_events_page
+    list_wheel_events = AssignedStockRepositoryMixin.list_wheel_events
+    list_strategy_group_identities = StrategyGroupRepositoryMixin.list_strategy_group_identities
+    _read_account_decision_state_rows = DecisionReadRepositoryMixin._read_account_decision_state_rows
+    read_lifecycle_account_rows = DecisionReadRepositoryMixin.read_lifecycle_account_rows
+
+    def _connect(self) -> sqlite3.Connection:
+        from src.application.ledger.repository_core import assert_final_lot_identity_shape
+
+        conn = super()._connect()
+        try:
+            assert_final_lot_identity_shape(conn)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _optional_conn(self, conn: sqlite3.Connection | None):
+        return nullcontext(conn) if conn is not None else closing(self._connect())
+
+    def list_assigned_stock_events(self) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            return self._read_json_query_from_conn(
+                conn,
+                "SELECT event_json FROM assigned_stock_events ORDER BY trade_time_ms ASC, stock_event_id ASC",
+                (),
+                column="event_json",
+                strict=True,
+            )
 
 
 def open_performance_query_repo(sqlite_path: str | Path) -> Any:
