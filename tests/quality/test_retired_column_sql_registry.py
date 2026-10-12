@@ -21,14 +21,20 @@ from scripts.retired_column_scan import (
 )
 
 
-def test_the_committed_registry_matches_the_tree() -> None:
+@pytest.fixture(scope="module")
+def tree_scan():
+    # Only share the unchanged checked-in tree; planted inputs are scanned separately.
+    return scan()
+
+
+def test_the_committed_registry_matches_the_tree(tree_scan) -> None:
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    assert scan() == registry
+    assert tree_scan == registry
 
 
-def test_every_exempt_module_still_names_retired_columns() -> None:
+def test_every_exempt_module_still_names_retired_columns(tree_scan) -> None:
     """A renamed exempt module must fail here, not hollow out the exemption."""
-    src = scan()["src"]
+    src = tree_scan["src"]
     named = {h["module"] for h in src["exempt_hits"] + src["exempt_dynamic"]}
     assert set(EXEMPT_MODULES) <= named
     assert any(
@@ -74,11 +80,11 @@ def test_check_mode_round_trips() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> None:
+def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys, tree_scan) -> None:
     from copy import deepcopy
     from scripts import retired_column_scan as scanner
 
-    document = scan()
+    document = deepcopy(tree_scan)
     path = tmp_path / "registry.json"
     monkeypatch.setattr(scanner, "REGISTRY_PATH", path)
     monkeypatch.setattr(scanner, "scan", lambda: document)
@@ -93,8 +99,8 @@ def test_check_rejects_metadata_only_drift(tmp_path, monkeypatch, capsys) -> Non
     assert scanner.main(["--check"]) == 0
 
 
-def test_runtime_sql_no_longer_names_retired_columns() -> None:
-    registry = scan()["src"]
+def test_runtime_sql_no_longer_names_retired_columns(tree_scan) -> None:
+    registry = tree_scan["src"]
     assert registry["detail"] == []
     assert {(h["module"], h["digest"]) for h in registry["dynamic_sql"]} == {
         ("src/application/ledger/repository_projection_schema.py", "sha256:00304c6023cc01e1"),

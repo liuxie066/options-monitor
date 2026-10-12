@@ -1140,6 +1140,7 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
             Path(command[-1]).mkdir(parents=True, exist_ok=True)
         elif command[:3] == ["sudo", "-n", "install"] and "/dev/stdin" in command:
             target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+            os.chown(target, int(command[command.index("-o") + 1]), int(command[command.index("-g") + 1]))
             target.chmod(int(command[command.index("-m") + 1], 8))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -1157,6 +1158,8 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
     assert out["sudo_fallback"] is True
     assert target.read_text(encoding="utf-8") == "#!/usr/bin/python3\n"
     assert target.stat().st_mode & 0o777 == 0o755
+    assert target.stat().st_uid == expected_uid
+    assert target.stat().st_gid == expected_gid
     assert [
         "sudo",
         "-n",

@@ -299,7 +299,7 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     requirements = (root / "requirements" / "dev.txt").read_text(encoding="utf-8").splitlines()
     constraints = (root / "constraints" / "dev.txt").read_text(encoding="utf-8").splitlines()
     full_command = (
-        "./.venv/bin/python -m pytest -vv -n 2 --dist loadfile "
+        "./.venv/bin/python -m pytest -vv -n 4 --dist loadfile "
         "--max-worker-restart=0 --durations=25"
     )
     pytest_commands = [
@@ -328,6 +328,7 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     checkout_step = text.split("- name: Checkout", 1)[1].split("- name: Set up Python", 1)[0]
     assert "fetch-depth: 0" in checkout_step
     assert pytest_commands == [full_command]
+    assert "-o tmp_path_retention_policy=failed" in text
     assert not any(selector in full_command for selector in (" -k ", "--ignore", "--deselect", "tests/test_"))
     assert "tests/test_" not in text
     assert "pytest-xdist" in requirements
@@ -488,7 +489,9 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert "[PREFLIGHT_OK] loopback bind available (127.0.0.1)" in proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
-    assert pytest_commands == ["-m pytest -n 2 --dist loadfile --max-worker-restart=0"]
+    assert pytest_commands == [
+        "-m pytest -n 4 --dist loadfile --max-worker-restart=0 -o tmp_path_retention_policy=failed"
+    ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
 
 

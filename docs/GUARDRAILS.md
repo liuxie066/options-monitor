@@ -29,17 +29,19 @@ Workflow: `.github/workflows/guardrails.yml`
 - Lint: run `python -m ruff check .`
 - Standalone smoke: run `tests/run_smoke.py`
 - Launcher spec smoke: render `./om-agent spec` through the public wrapper
-- Full regression: run automatic pytest discovery for pull requests and VERSION-changing pushes; ordinary pushes to `main` reuse the required pull-request result. The same full collection runs on two local worker processes, grouped by test file, and a worker crash fails the gate instead of restarting tests silently.
+- Full regression: run automatic pytest discovery for pull requests and VERSION-changing pushes; ordinary pushes to `main` reuse the required pull-request result. The same full collection runs on four local worker processes, grouped by test file, and a worker crash fails the gate instead of restarting tests silently.
 
 Trigger: `push` and `pull_request` to `main`. The merge policy requires pull requests and a passing, up-to-date `guardrails` result; the effective GitHub ruleset must be checked when verifying remote protection.
 
 ### Full regression
 
-The workflow uses pinned `pytest-xdist` and `pytest -n 2 --dist loadfile --max-worker-restart=0 --durations=25`. Automatic collection covers the complete suite; do not add test selectors, deselections, or a serial carve-out to conceal shared-resource failures. Isolate conflicting resources with temporary paths, dynamic ports, worker-unique paths, or cross-process locks.
+The workflow uses pinned `pytest-xdist` and `pytest -n 4 --dist loadfile --max-worker-restart=0 --durations=25 -o tmp_path_retention_policy=failed`. Automatic collection covers the complete suite; do not add test selectors, deselections, or a serial carve-out to conceal shared-resource failures. Isolate conflicting resources with temporary paths, dynamic ports, worker-unique paths, or cross-process locks.
 
-Two workers keep resource use predictable, `loadfile` keeps each test module in one process, and zero worker restarts makes crashes visible. The serial command remains available for diagnosis. Collected counts and hosted-runner timings vary with the revision and environment; past optimization measurements are not fixed merge thresholds.
+Four workers overlap independent test files, `loadfile` keeps each test module in one process, and zero worker restarts makes crashes visible. Both CI and `scripts/release_preflight.sh --full` use pytest's built-in `tmp_path_retention_policy=failed` to remove passed tests' temporary directories as they finish, limiting disk use while retaining failed test-call directories and diagnostic logs. Scope OS-level mocks to the tested calls so fixture cleanup sees the real filesystem APIs. The serial command remains available for diagnosis. Collected counts and hosted-runner timings vary with the revision and environment; past optimization measurements are not fixed merge thresholds.
 
 The dependency declaration and exact version pin live in `requirements/dev.txt` and `constraints/dev.txt`; the workflow owns the required invocation.
+
+The retired-column registry tests share one module-scoped scan of the unchanged source tree; planted-input scans and the CLI check stay independent. Performance-query HTTP tests use a shorter server shutdown polling interval while preserving real requests, request timeouts, and thread cleanup assertions.
 
 ### Declared public surface
 
