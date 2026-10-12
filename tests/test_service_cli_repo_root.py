@@ -19,7 +19,7 @@ from tests.service_deploy_test_support import (
     _fake_systemd_query_runner,
     _write_systemd_units_from_bundle,
 )
-from tests.test_service_lifecycle import Manager
+from tests.test_service_lifecycle import Manager, _preview_probe, apply, context, instance
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -166,3 +166,37 @@ def test_default_cli_drift_and_stop_share_installed_link_scope(linked_entry, mon
     error = json.loads(capsys.readouterr().out)["error"]
     assert error["code"] == "SERVICE_INSTANCE_CONFLICT"
     assert error["details"]["field"] == "repo_root"
+
+
+@pytest.mark.parametrize('env_line', [
+    'Environment="HOME=/fictional" \\\n # ignored \\\n ; ignored too\n "API_KEY={secret}"', 'Environment="API_KEY={secret}',
+    'ExecStartPost=/bin/true \\\n\xa0# ordinary\nEnvironment=API_KEY={secret}', 'Description=ordinary\x00Environment=API_KEY={secret}',
+    'Environment="API_KEY={secret}" \\',
+    'Environment="HOME=/fictional" \\\n "API_KEY={secret}" \\',
+    'Environment="HOME=/fictional" \\\n\r "API_KEY={secret}"',
+])
+def test_cli_install_preview_redacts_installed_environment(instance, tmp_path, monkeypatch, capsys, env_line):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    apply('install', ctx)
+    unit = ctx['unit_root'] / 'options-monitor-tick-us.service'
+    sentinel = 'fake-cli-secret-526'
+    original = unit.read_text()
+    installed = (original.split('[Install]', 1)[0] + env_line.format(secret=sentinel)
+                 if env_line.endswith('\\') else original.replace('[Service]', '[Service]\n' + env_line.format(secret=sentinel)))
+    unit.write_text(installed)
+    before = {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    manager.calls.clear()
+    handler = cli.handle_service_update_command
+    monkeypatch.setattr(cli, 'handle_service_update_command', lambda args, **kwargs: handler(args,
+        service_lifecycle_fn=lambda action, **options: service_lifecycle(action, **options,
+            unit_root=ctx['unit_root'], system='Linux', run_cmd=_preview_probe(ctx, manager, sentinel),
+            credential_store_root=tmp_path / 'credentials'), **kwargs))
+    assert cli.main(['service', 'install', '--repo-root', str(REPO), '--runtime-root', str(instance),
+                     '--target', 'systemd']) == 0
+    captured = capsys.readouterr()
+    assert sentinel not in captured.out + captured.err
+    data = json.loads(captured.out)['data']
+    assert data['ok'] and not data['confirmed'] and not data['files_changed']
+    assert '<redacted>' in str(data['files'])
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    assert manager.calls and all(call[1] == 'show' for call in manager.calls)

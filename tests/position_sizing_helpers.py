@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import datetime
 from src.application.portfolio_assignment_scenario import _futu_context_error, _futu_evidence, _futu_holdings
 
 
@@ -20,12 +21,13 @@ def with_sizing_evidence(context, *, quotes=(), positions=()):
             observed_at_utc=snapshot["observed_at_utc"],
             completeness="complete",
         )
-    data = _futu_evidence(["lx"], {"lx": context})
-    error = _futu_context_error("lx", context)
+    evaluated_at = datetime.fromisoformat(context["cash_snapshot"]["evaluated_at"].replace("Z", "+00:00"))
+    data = _futu_evidence(["lx"], {"lx": context}, now_utc=evaluated_at)
+    error = _futu_context_error("lx", context, now_utc=evaluated_at)
     if error:
         data["status"] = "unavailable"
         data["warnings"] = [error]
-    rows, warnings = ([], []) if error else _futu_holdings("lx", context, {q["code"]: q for q in quotes})
+    rows, warnings = ([], []) if error else _futu_holdings("lx", context, {q["code"]: q for q in quotes}, now_utc=evaluated_at)
     data["holdings"] = rows
     data["quotes"] = list(quotes)
     data["warnings"] = list(data.get("warnings") or []) + warnings

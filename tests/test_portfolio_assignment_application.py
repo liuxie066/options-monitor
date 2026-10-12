@@ -696,6 +696,7 @@ def test_futu_cash_uses_observed_currency_rate():
     rows, warnings = application._futu_holdings(
         "lx",
         cash_portfolio({
+            "source_observed_at": application.datetime.now(timezone.utc).isoformat(),
             "cash_by_currency": {"HKD": 100},
             "cash_balance_reliable": True,
             "stocks_by_symbol": {},
@@ -885,3 +886,108 @@ def test_closed_market_recent_quote_does_not_need_calendar(monkeypatch):
     quotes, warnings = application._read_futu_quotes(
         ["TSLA"], runtime_config={}, contexts={"lx": {}}, fx_observation={"rates": {"USDCNY": 7.2}})
     assert not quotes[0]["is_stale"] and not warnings
+
+
+def _consumer_stock_evidence(monkeypatch, entry, context, *, quote_reader=None):
+    from copy import deepcopy
+    _patch_positions(monkeypatch, [], futu_context=context)
+    if quote_reader is not None:
+        monkeypatch.setattr(application, "_read_futu_quotes", quote_reader)
+    monkeypatch.setattr(application, "load_account_portfolio_context", lambda **kw: deepcopy(context))
+    if entry == "prepared":
+        return application.prepare_position_sizing_evidence(
+            context=context, runtime_config=cash_config(), account="lx", fx_observation=None,
+        )["position_sizing_evidence"]
+    observed = []
+    project = application.project_assignment_scenario
+    def capture(**kwargs):
+        observed.append(kwargs["portfolio_evidence"])
+        return project(**kwargs)
+    monkeypatch.setattr(application, "project_assignment_scenario", capture)
+    application.query_portfolio_assignment_scenario(["lx"])
+    return observed[0]
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+@pytest.mark.parametrize("change,reason", [
+    ("physical", "snapshot_physical_account_mismatch"),
+    ("logical", "snapshot_account_mismatch"),
+    ("environment", "snapshot_environment_mismatch"),
+    ("market", "snapshot_scope_mismatch"),
+    ("asset", "snapshot_scope_mismatch"),
+    ("source", "snapshot_source_as_of_utc_stale_or_future"),
+    ("refresh", "position_snapshot_refresh_unavailable"),
+    ("partial", "snapshot_scope_incomplete"),
+    ("future", "snapshot_observed_at_utc_stale_or_future"),
+])
+def test_assignment_consumers_reject_canonical_stock_scope(monkeypatch, entry, change, reason):
+    from datetime import timedelta
+    from src.application.portfolio_context_service import portfolio_position_snapshot_errors
+    now = application.datetime.now(timezone.utc)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    snapshot = context["position_snapshot_input"]
+    if change == "physical":
+        snapshot["broker_account_ref"]["external_account_id"] = "456"
+    elif change == "logical":
+        snapshot["broker_account_ref"]["account_label"] = "sy"
+    elif change == "environment":
+        snapshot["broker_account_ref"]["environment"] = "SIMULATE"
+    elif change == "market":
+        snapshot["scope"]["markets"] = ["HK"]
+    elif change == "asset":
+        snapshot["scope"]["asset_types"] = ["option"]
+    elif change == "source":
+        snapshot["source_as_of_utc"] = (now - timedelta(seconds=301)).isoformat()
+    elif change == "refresh":
+        context["position_refresh_error"] = "provider timeout"
+    elif change == "partial":
+        snapshot["completeness"] = "partial"
+    else:
+        snapshot["observed_at_utc"] = (now + timedelta(seconds=1)).isoformat()
+    assert reason in portfolio_position_snapshot_errors(context, account="lx", now_utc=now)
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context,
+        quote_reader=lambda *a, **kw: pytest.fail("invalid stock evidence reached valuation"))
+    assert evidence["status"] == "unavailable", evidence
+    assert evidence["holdings"] == []
+    assert any(reason in warning for warning in evidence["warnings"])
+    diagnostic = application._futu_evidence(["lx"], {"lx": context}, now_utc=now)
+    assert reason in diagnostic["freshness"]["reason_codes"]
+    assert diagnostic["freshness"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+@pytest.mark.parametrize("elapsed", [0, 300])
+def test_assignment_consumers_accept_verified_empty_stock_scope(monkeypatch, entry, elapsed):
+    from datetime import timedelta
+    now = application.datetime.now(timezone.utc)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    snapshot = context["position_snapshot_input"]
+    snapshot["observed_at_utc"] = snapshot["source_as_of_utc"] = (now - timedelta(seconds=elapsed)).isoformat()
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context)
+    assert evidence["status"] == "complete", evidence
+    assert evidence["freshness"]["status"] == "fresh"
+    assert evidence["holdings"] == [{"account": "lx", "broker": "富途", "code": "CNY-CASH", "asset_type": "cash",
+        "currency": "CNY", "quantity": "0", "market_value_cny": "0", "source": "futu_cash_including_mmf"}]
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+def test_assignment_consumers_revalidate_stocks_after_quote_io(monkeypatch, entry):
+    from datetime import timedelta
+    now = application.datetime.now(timezone.utc)
+    clock = [now]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr(application, "datetime", Clock)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    context["position_snapshot_input"]["observed_at_utc"] = context["position_snapshot_input"]["source_as_of_utc"] = (now - timedelta(seconds=300)).isoformat()
+    calls = []
+    def delayed(*a, **kw):
+        calls.append("quote")
+        clock[0] += timedelta(seconds=1)
+        return [], []
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context, quote_reader=delayed)
+    assert calls == ["quote"]
+    assert evidence["status"] == "unavailable", evidence
+    assert any("snapshot_source_as_of_utc_stale_or_future" in warning for warning in evidence["warnings"])

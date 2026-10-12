@@ -139,3 +139,7 @@ prepared portfolio context 在封存前一次收集报价、资产与来源证�
 
 候选字段 `position_sizing_basis=non_option_net_assets_before_assignment_fees.v2` 标明口径；
 当前、已有指派后、加候选后对应三个浓度与净资产字段。旧封存结果不修改、仅按历史口径展示。
+
+### 股票证据资格复用
+
+直接资产情景查询与 prepared 仓位证据组装均复用 `portfolio_context_service.portfolio_position_snapshot_errors`。股票资格同时核对逻辑/物理账户、环境、市场/资产范围、完整性、刷新错误和观测/来源时间；采用当前 UTC 评价时点及既有 300 秒政策，在报价读取返回后消费持仓前再次复验。来源时间过期不能因本次观测时间新鲜而接受，合法完整零持仓仍是有效结果。不可用原因沿用 owner 的 reason codes，经既有 evidence/warnings 输出；不把身份或范围失败统一标为时间过期。现金资格、FX 与休市报价携带规则各由原 owner 维护。

@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
+from .decision_state_fingerprint import canonical_sha256
 
 from .engine import (
     AccountSchedulerDecisionView,
@@ -38,6 +39,13 @@ REMOVED_OPENCLAW_NOTIFICATION_VALUES = (
     OPENCLAW_NOTIFICATION_PROVIDER,
     OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
 )
+
+
+def notification_route_identity_hash(*, provider: str, channel: str,
+                                     sender: Any, recipient: Any) -> str:
+    """Hash resolved non-secret route facts without collecting mutable state."""
+    return canonical_sha256({"provider": provider, "channel": channel,
+                             "sender": sender, "recipient": recipient})
 
 
 def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:

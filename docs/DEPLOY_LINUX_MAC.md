@@ -193,6 +193,8 @@ cd "$REPO"
 
 `--no-restart-services` 只控制长期 service restart。若升级前已为维护显式暂停 systemd timer，同时传 `--preserve-activation-state`；控制面会在 release 切换前记录既有 timer 状态，并让 inactive、disabled 或 masked timer 在升级、失败补偿和 rollback 中保持暂停。定义文件仍会更新和 `daemon-reload`，但保留的 timer 不会被 `enable --now` 或 `restart`，避免 Persistent timer 在升级过程中补跑。
 
+Drift 的 `status=warn` 可以与 `summary.ok=true` 同时成立：兼容提示和需人工审阅的自定义额外 unit 不阻断成功，自定义 unit 也不会被自动删除。真实漂移仍会失败，完整判据见 [Release Process](RELEASE_PROCESS.md)。
+
 ### 已退役 AI Advice 的生产清理
 
 当前 service bundle 不再渲染 AI 外部证据 Collector。升级前已经安装的 Collector

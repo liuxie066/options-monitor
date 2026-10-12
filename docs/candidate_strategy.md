@@ -374,6 +374,12 @@ RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史
 - expiry chain 或财报覆盖失败：阻断相关 expiry；
 - 单合约 snapshot、multiplier、tick 或报价失败：阻断该合约。
 
+执行终态由 `strategy_scan_status` 发布并进入绑定 run/account/config 的索引；快照与 Brief 不再维护另一套捕获终态。`completed` 且零候选必须有有效执行结果。`None`、缺少数量或无效终态属于执行失败，不能当成正常空结果。来源 `success_empty/no_expirations`、`success_empty/no_contract_rows` 与策略 `no_candidate` 分别保留，`candidate_scope_reason` 统一投影到当前快照。
+
+策略执行先缓冲候选与诊断，校验结果后再发布终态和提交证据；执行异常丢弃该步骤缓冲，其他步骤继续。终态发布、证据提交或账户级 hash/身份不一致时停止封存。标的超时只给尚未完成的步骤写失败，已完成步骤保持不变；工作线程在下一步与发布前检查同一绝对截止时间，不能强制中断正在运行的外部调用。冻结输入缺失不能回退读取可变 CSV。
+
+Wheel 在标的计算与分支评估边界隔离异常，资金和股票仍由账户共享分配。Brief 从已验证快照保留健康候选；历史候选仅在相同 symbol、策略、方向、Combo owner、Wheel 分支或合约的证据缺口下转为待核验。`candidate_universe_summary.affected_scopes` 在合约身份可用时携带 `scope=contract`、`contract_symbol`、`expiration`；没有细分证据时保留原策略范围。执行日志只补充匹配失败终态的诊断，不覆盖快照中的健康结果。
+
 OI、volume、delta 等可选字段缺失不产生 `partial_data`。
 
 每个账户/run 即使无候选也必须封存 snapshot，并包含 `scope_results`。snapshot 必须：
