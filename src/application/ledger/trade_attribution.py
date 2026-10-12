@@ -270,7 +270,7 @@ def read_trade_attribution_facts(repo: Any, *, account: str) -> list[dict[str, A
 
 def record_trade_attribution_conflict(repo: Any, *, account: str, execution_key: str,
     branch: Mapping[str, Any], candidate_ids: Sequence[str], input_hash: str, now_ms: int, conn: Any,
-    execution_keys: Sequence[str] = ()) -> str:
+    execution_keys: Sequence[str] = (), diagnostic: Mapping[str, Any] | None = None) -> str:
     from domain.domain.wheel import build_wheel_event
 
     if conn is None or not conn.in_transaction or not execution_key or not candidate_ids:
@@ -288,7 +288,7 @@ def record_trade_attribution_conflict(repo: Any, *, account: str, execution_key:
         payload={"actor": "trade_intake:attribution", "request_id": request_id, "execution_keys": keys,
                  "policy_version": ATTRIBUTION_POLICY_VERSION, "reason": "late_attribution_conflict",
                  "candidate_ids": sorted(set(candidate_ids)), "branch_generation_hash": branch["batch_generation_hash"],
-                 "input_hash": input_hash})
+                 "input_hash": input_hash, **({"diagnostic": dict(diagnostic)} if diagnostic is not None else {})})
     repo.append_wheel_event_once(event, conn=conn)
     return event_id
 

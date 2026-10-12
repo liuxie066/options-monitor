@@ -81,15 +81,17 @@ def load_wechat_clawbot_state(
     base: Path,
     label: str,
     notifications: dict[str, Any] | None = None,
+    store: WechatClawbotStateStore | None = None,
 ) -> WechatClawbotState:
-    state_dir = resolve_wechat_clawbot_state_dir(base=base, label=label, notifications=notifications)
-    payload = WechatClawbotStateStore(state_dir).load_state()
+    store = store or WechatClawbotStateStore(
+        resolve_wechat_clawbot_state_dir(base=base, label=label, notifications=notifications))
+    payload = store.load_state()
     bot_token = str(payload.get("bot_token") or "").strip()
     if not bot_token:
         raise ValueError("WeChat ClawBot bot_token is missing; run QR login binding first")
     return WechatClawbotState(
         label=str(label or DEFAULT_WECHAT_CLAWBOT_LABEL),
-        state_dir=state_dir,
+        state_dir=store.state_dir,
         base_url=str(payload.get("base_url") or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL,
         bot_token=bot_token,
         get_updates_buf=str(payload.get("get_updates_buf") or ""),
@@ -102,10 +104,12 @@ def load_wechat_clawbot_binding(
     base: Path,
     target: str,
     notifications: dict[str, Any] | None = None,
+    store: WechatClawbotStateStore | None = None,
 ) -> WechatClawbotBinding:
     resolved = resolve_wechat_clawbot_target(target, notifications=notifications)
-    state_dir = resolve_wechat_clawbot_state_dir(base=base, label=resolved.label, notifications=notifications)
-    payload = WechatClawbotStateStore(state_dir).load_bindings()
+    store = store or WechatClawbotStateStore(
+        resolve_wechat_clawbot_state_dir(base=base, label=resolved.label, notifications=notifications))
+    payload = store.load_bindings()
     bindings_raw = payload.get("bindings")
     bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
     binding_raw = bindings.get(resolved.binding_name)

@@ -30,7 +30,7 @@ def _call_scope(tmp_path, monkeypatch, contracts=1):
         "account": "lx", "market": "us", "policy_version": "trade_attribution.v2", "effective_from_ms": 2500}]
     # Capacity owner has separate full snapshot checks below; this isolates global competition.
     monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
-                        lambda **kwargs: {"status": "available", "reason_codes": []})
+                        lambda **kwargs: {"status": "available", "reason_codes": [], "evidence_complete": True})
     return rows, cfg, branch_id
 
 
@@ -140,7 +140,8 @@ def test_capacity_counts_booked_calls_once_and_refuses_mismatch_or_stale():
     assert "snapshot_observed_at_utc_stale_or_future" in stale["reason_codes"]
     mismatched = trade_attribution_capacity_check(**{**args, "facts": [fact, fact]}, now_ms=now)
     assert "broker_ledger_positions_mismatch" in mismatched["reason_codes"]
-    assert "account_stock_capacity_exceeded" in mismatched["reason_codes"]
+    assert mismatched["evidence_complete"] is False
+    assert "account_stock_capacity_exceeded" not in mismatched["reason_codes"]
     from test_wheel_strategy import _started_event, _assignment_trade, _assigned_stock
     from domain.domain.wheel import build_legacy_wheel_event, project_wheel_branches
     intent = build_legacy_wheel_event(event_id="invalid-units", account="lx", lot_id="assigned-stock-assign-put",
@@ -689,7 +690,7 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units(monkeypatc
     assert trade_attribution_capacity_check(**args)["status"] == "available"
     verified_fx = portfolio["exchange_rates"]
     portfolio["exchange_rates"] = {"rates": {"USDCNY": 7, "HKDCNY": 0.9}}
-    assert "account_cash_capacity_exceeded" in trade_attribution_capacity_check(**args)["reason_codes"]
+    assert trade_attribution_capacity_check(**args)["reason_codes"] == ["cash_capacity_unavailable"]
     portfolio["exchange_rates"] = verified_fx
     original = deepcopy(portfolio)
     short_policy = {**args["config"], "runtime": {"portfolio_context_ttl_sec": 1}}
@@ -728,7 +729,7 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units(monkeypatc
     assert trade_attribution_capacity_check(**args)["status"] == "available"
     for pair in portfolio["exchange_rates"]["pairs"].values():
         pair.update(quote_at_utc="2026-09-28T06:00:00+00:00", observed_at_utc="2026-09-28T06:00:00+00:00")
-    assert "account_cash_capacity_exceeded" in trade_attribution_capacity_check(**args)["reason_codes"]
+    assert trade_attribution_capacity_check(**args)["reason_codes"] == ["cash_capacity_unavailable"]
     portfolio["cash_by_currency"]["USD"] = 2500
     assert trade_attribution_capacity_check(**args)["status"] == "available"
     fact["multiplier"] = 50

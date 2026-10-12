@@ -130,12 +130,15 @@ def trade_attribution_capacity_check(
                 environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
                 external_account_id=ref.get("external_account_id"),
                 now_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc), max_age_seconds=60))
+    if reasons:
+        return {"status": "unavailable", "reason_codes": sorted(reasons), "evidence_complete": False}
 
     def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
         return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
                 Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
                 Decimal(str(multiplier)), currency)
 
+    evidence_complete = False
     try:
         actual, recorded = defaultdict(int), defaultdict(int)
         shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
@@ -172,9 +175,10 @@ def trade_attribution_capacity_check(
                     put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
         if dict(actual) != dict(recorded):
             reasons.add("broker_ledger_positions_mismatch")
-        if not check_account_capacity:
+        if reasons or not check_account_capacity:
             # Combo membership records existing fills, not permission to open more risk.
-            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
+            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
+                    "evidence_complete": not reasons}
         for branch in wheel_read_model.get("wheel_branches") or []:
             if branch.get("lifecycle_status") != "active":
                 continue
@@ -206,6 +210,7 @@ def trade_attribution_capacity_check(
                     put_claims[reservation["currency"]] += amount
         if fact["contract_key"]["option_type"] == "call":
             symbol = fact["contract_key"]["underlying_symbol"]
+            evidence_complete = True
             if call_claims[symbol] > shares[symbol]:
                 reasons.add("account_stock_capacity_exceeded")
         else:
@@ -214,7 +219,8 @@ def trade_attribution_capacity_check(
                 evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
             )
             if not cash_snapshot_is_usable({"cash_snapshot": cash_snapshot}):
-                reasons.add("cash_capacity_unavailable")
+                return {"status": "unavailable", "reason_codes": ["cash_capacity_unavailable"],
+                        "evidence_complete": False}
             native = fact["currency"]
             required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
             secured = {currency: float(amount) for currency, amount in put_claims.items()}
@@ -224,11 +230,17 @@ def trade_attribution_capacity_check(
                 cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
                 convert_currency=_frozen_fx_converter(fx_payload or {}),
                 fx_status=portfolio.get("exchange_rate_status"))
-            if not available.available or available.cash_free is None or Decimal(str(available.cash_free)) < required:
+            if not available.available or available.cash_free is None:
+                reasons.add("cash_capacity_unavailable")
+            else:
+                evidence_complete = True
+            if evidence_complete and Decimal(str(available.cash_free)) < required:
                 reasons.add("account_cash_capacity_exceeded")
     except (KeyError, TypeError, ValueError, ArithmeticError):
         reasons.add("capacity_basis_unavailable")
-    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons)}
+        evidence_complete = False
+    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
+            "evidence_complete": evidence_complete}
 
 
 def _normalized_fx_snapshot(fx_snapshot: Mapping[str, Any]) -> dict[str, Any]:
