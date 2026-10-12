@@ -186,6 +186,293 @@ def _write_scan_blob_manifest(path: Path, *refs: dict[str, Any]) -> None:
     path.write_text(json.dumps({"scan_blob_refs": list(refs)}), encoding="utf-8")
 
 
+@pytest.mark.parametrize("fault", ["present", "missing", "symlink"])
+def test_baseline_and_gc_agree_on_protected_scan_blob_presence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
+) -> None:
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    manifest = root / "output_runs/current/state/required_data_snapshot_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({
+        "schema_version": module.REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
+        "run_id": "current", "symbols": {"NVDA": {"status": "ready", "scan_blob_ref": ref}},
+    }))
+    blob = root / ref["blob_relpath"]
+    if fault != "present":
+        preserved = tmp_path / "preserved-blob.gz"
+        blob.rename(preserved)
+        if fault == "symlink":
+            blob.symlink_to(preserved)
+    before = _tree_identity(root)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    gc = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: NOW)
+    assert _tree_identity(root) == before
+    assert gc["deletion_allowed"] is (fault == "present")
+    research = baseline["research_storage"]
+    if fault == "present":
+        assert research["status"] == "complete"
+        assert research["protected_reference_failures"] == []
+        assert baseline["thresholds"]["critical_reasons"] == []
+        assert research["physical_bytes"] == blob.stat().st_size + manifest.stat().st_size
+        classes = {row["storage_class"]: row for row in baseline["runtime_storage"]["by_class"]}
+        assert classes["immutable_shared_partition"]["size_bytes"] == blob.stat().st_size
+        assert research["content_verification"] == "not_performed"
+    else:
+        assert research["status"] == "data_unavailable"
+        assert research["protected_reference_failures"]
+        assert baseline["thresholds"]["status"] == "critical"
+
+
+@pytest.mark.parametrize(("fault", "ancestor"), [
+    (fault, ancestor)
+    for fault in ("symlink", "dangling_symlink")
+    for ancestor in ("blob_file", "shard", "sha256", "blobs")
+] + [("not_directory", ancestor) for ancestor in ("shard", "sha256", "blobs")])
+def test_gc_absent_expired_ref_keeps_blob_ancestor_guards(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, ancestor: str, fault: str,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    _publish_scan_blob(root, "AMD")
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        if index == 0:
+            _write_scan_blob_manifest(run / "state/manifest.json", ref)
+        os.utime(run, (timestamp + index, timestamp + index))
+    blob = root / ref["blob_relpath"]
+    path = {
+        "blob_file": blob, "shard": blob.parent,
+        "sha256": root / "output_shared/blobs/sha256", "blobs": root / "output_shared/blobs",
+    }[ancestor]
+    original_bytes = blob.read_bytes()
+    preserved = tmp_path / "preserved-target"
+    path.rename(preserved)
+    if fault == "not_directory":
+        path.write_bytes(b"synthetic non-directory")
+    else:
+        path.symlink_to(preserved if fault == "symlink" else tmp_path / "absent-target")
+    monkeypatch.setattr(module, "_utc_now", lambda _fn: observed_at)
+    before = _tree_identity(root)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    preview = module.preview_scan_blob_gc(runtime_root=root)
+    assert main(["research", "storage-gc-preview", "--runtime-root", str(root)]) == 0
+    cli = json.loads(capsys.readouterr().out)["data"]
+    assert _tree_identity(root) == before
+    assert preview == cli
+    assert preview["status"] == "data_unavailable"
+    assert preview["deletion_allowed"] is False
+    assert preview["candidates"] == []
+    assert baseline["research_storage"]["protected_reference_failures"]
+    assert baseline["research_storage"]["unprotected_reference_failures"] == []
+    preserved_blob = preserved if ancestor == "blob_file" else preserved / blob.relative_to(path)
+    assert preserved_blob.read_bytes() == original_bytes
+
+
+def test_gc_inventory_read_failure_never_proves_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    ref = _publish_scan_blob(root, "NVDA")
+    scandir = os.scandir
+    parent = root / "output_shared/blobs/sha256"
+
+    def unreadable(path):
+        if Path(path) == parent:
+            raise PermissionError("synthetic scan access failure")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unreadable)
+    with pytest.raises(PermissionError, match="synthetic scan access failure"):
+        module.preview_scan_blob_gc(runtime_root=root)
+    assert (root / ref["blob_relpath"]).is_file()
+
+
+def test_expired_scan_blob_relocation_keeps_repeated_previews_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    orphan_ref = _publish_scan_blob(root, "AMD")
+    retained_ref = _publish_scan_blob(root, "AAPL")
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        if index == 0:
+            _write_scan_blob_manifest(run / "state/manifest.json", ref)
+        elif index == 1:
+            _write_scan_blob_manifest(run / "state/manifest.json", retained_ref)
+        os.utime(run, (timestamp + index, timestamp + index))
+    before = _tree_identity(root)
+    first = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    assert _tree_identity(root) == before
+    assert first["deletion_allowed"] is True
+    assert {row["blob_sha256"] for row in first["candidates"]} == {
+        ref["blob_sha256"], orphan_ref["blob_sha256"],
+    }
+    blob = root / ref["blob_relpath"]
+    data = blob.read_bytes()
+    preserved = tmp_path / "preserved-candidate.gz"
+    blob.rename(preserved)
+    after = _tree_identity(root)
+    second = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    third = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    monkeypatch.setattr(module, "_utc_now", lambda _fn: observed_at)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    assert _tree_identity(root) == after
+    assert preserved.read_bytes() == data
+    assert second == third
+    assert second["deletion_allowed"] is True
+    assert second["blockers"] == []
+    assert [row["blob_sha256"] for row in second["candidates"]] == [orphan_ref["blob_sha256"]]
+    assert retained_ref["blob_sha256"] in second["reachable_blob_sha256"]
+    assert first["plan_sha256"] != second["plan_sha256"]
+    research = baseline["research_storage"]
+    assert research["status"] == "complete"
+    assert research["protected_reference_failures"] == []
+    assert research["unprotected_reference_failures"] == [{
+        "manifest": "output_runs/run-000/state/manifest.json",
+        "reference": ref["blob_relpath"], "reason": "missing",
+    }]
+    assert baseline["thresholds"]["critical_reasons"] == []
+
+
+
+@pytest.mark.parametrize("protection", [
+    "expired", "count", "recent", "shared", "operational_state", "unsafe_runs", "unsafe_blob",
+])
+def test_missing_expired_scan_blob_exemption_requires_safe_unprotected_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, protection: str,
+) -> None:
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        if index == 0:
+            _write_scan_blob_manifest(run / "state/manifest.json", ref)
+        os.utime(run, (timestamp + index, timestamp + index))
+    if protection == "count":
+        os.utime(root / "output_runs/run-000", (timestamp + 500, timestamp + 500))
+    elif protection == "recent":
+        recent = observed_at.timestamp() - 13 * 86400
+        os.utime(root / "output_runs/run-000", (recent, recent))
+    elif protection == "shared":
+        _write_scan_blob_manifest(root / "output_accounts/lx/state/manifest.json", ref)
+    elif protection == "operational_state":
+        _write_scan_blob_manifest(root / "output_shared/state/manifest.json", ref)
+    elif protection == "unsafe_runs":
+        (root / "output_runs/unknown").symlink_to(tmp_path, target_is_directory=True)
+    blob = root / ref["blob_relpath"]
+    if protection == "unsafe_blob":
+        preserved = tmp_path / "preserved-shard"
+        blob.parent.rename(preserved)
+        blob.parent.symlink_to(preserved, target_is_directory=True)
+    else:
+        blob.rename(tmp_path / "preserved-blob.gz")
+    monkeypatch.setattr(module, "_utc_now", lambda _fn: observed_at)
+    before = _tree_identity(root)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    gc = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    assert _tree_identity(root) == before
+    assert gc["deletion_allowed"] is (protection == "expired")
+    failures = baseline["research_storage"]["protected_reference_failures"]
+    assert bool(failures) is (protection != "expired")
+    assert bool(baseline["research_storage"]["unprotected_reference_failures"]) is (protection == "expired")
+
+
+@pytest.mark.parametrize("fault", ["invalid_ref", "conflicting_ref", "generic_missing", "corrupt_blob"])
+def test_expired_manifest_exemption_preserves_reference_and_content_guards(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
+) -> None:
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        os.utime(run, (timestamp + index, timestamp + index))
+    manifest = root / "output_runs/run-000/state/manifest.json"
+    if fault == "invalid_ref":
+        _write_scan_blob_manifest(manifest, {**ref, "codec": "invalid"})
+    elif fault == "conflicting_ref":
+        _write_scan_blob_manifest(manifest, ref, {**ref, "compressed_size_bytes": ref["compressed_size_bytes"] + 1})
+    else:
+        _write_scan_blob_manifest(manifest, ref)
+        if fault == "generic_missing":
+            payload = json.loads(manifest.read_text())
+            payload["files"] = [{"relpath": "missing.csv", "size_bytes": 5, "sha256": "a" * 64}]
+            manifest.write_text(json.dumps(payload))
+        else:
+            (root / ref["blob_relpath"]).write_bytes(b"corrupt")
+    os.utime(root / "output_runs/run-000", (timestamp, timestamp))
+    monkeypatch.setattr(module, "_utc_now", lambda _fn: observed_at)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    gc = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    if fault in {"invalid_ref", "conflicting_ref"}:
+        assert baseline["research_storage"]["manifest_parse_failures"]
+        assert gc["deletion_allowed"] is False
+    elif fault == "generic_missing":
+        assert baseline["research_storage"]["protected_reference_failures"][0]["reason"] == "missing"
+    else:
+        assert gc["deletion_allowed"] is False
+        assert "referenced_blob_missing_or_corrupt" in {row["reason"] for row in gc["blockers"]}
+    assert baseline["research_storage"]["unprotected_reference_failures"] == []
+
+
+def test_baseline_account_manifest_uses_complete_inventory_without_counting_mutable_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path)
+    payload = root / "output_accounts/lx/state/synthetic.json"
+    payload.parent.mkdir(parents=True)
+    payload.write_text("{}")
+    manifest = payload.parent / "manifest.json"
+    manifest.write_text(json.dumps({"files": [{"relpath": "synthetic.json", "size_bytes": 2}]}))
+    before = _tree_identity(root)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    assert _tree_identity(root) == before
+    assert baseline["research_storage"]["protected_reference_failures"] == []
+    assert baseline["research_storage"]["physical_bytes"] == 0
+    assert baseline["research_storage"]["content_verification"] == "not_performed"
+
+
+def test_baseline_does_not_read_canonical_blob_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    _write_scan_blob_manifest(root / "output_runs/current/state/manifest.json", ref)
+    read_bytes = Path.read_bytes
+
+    def read_without_blob(path: Path) -> bytes:
+        assert not str(path).endswith(".json.gz"), "metadata baseline must not read blob payload"
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_without_blob)
+    baseline = _collect(monkeypatch, tmp_path, root=root)
+    assert baseline["research_storage"]["protected_reference_failures"] == []
+    assert baseline["safety"]["payload_content_reads"] == 0
+
+
+def test_gc_shared_digest_with_conflicting_ref_still_blocks(tmp_path: Path) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    ref = _publish_scan_blob(root, "NVDA")
+    _write_scan_blob_manifest(root / "output_runs/current/state/manifest.json", ref)
+    _write_scan_blob_manifest(root / "output_shared/research/manifest.json", {
+        **ref, "compressed_size_bytes": ref["compressed_size_bytes"] + 1,
+    })
+    preview = module.preview_scan_blob_gc(runtime_root=root)
+    assert preview["deletion_allowed"] is False
+    assert "blob_reference_conflict" in {row["reason"] for row in preview["blockers"]}
+
+
 def test_collect_returns_deterministic_schema_and_aggregate_sqlite_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1127,6 +1414,11 @@ def test_scan_blob_gc_preview_validates_expired_run_references(
         now_fn=lambda: observed_at,
     )
 
+    if fault == "blob_missing":
+        assert result["deletion_allowed"] is True
+        assert result["blockers"] == []
+        assert referenced_ref["blob_sha256"] not in {item["blob_sha256"] for item in result["candidates"]}
+        return
     assert result["deletion_allowed"] is False
     assert result["candidates"] == []
     assert {item["reason"] for item in result["blockers"]} & {
