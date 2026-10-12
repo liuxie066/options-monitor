@@ -760,7 +760,7 @@ def candidate_universe_summary(
         REJECT_INPUT_MISSING,
         REJECT_RISK_EARNINGS_UNAVAILABLE,
     }
-    contract_reasons_by_scope: dict[tuple[str, str], set[str]] = {}
+    contract_gaps: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for raw in scopes:
         if not isinstance(raw, Mapping) or raw.get("scope") != "contract":
             continue
@@ -781,26 +781,28 @@ def candidate_universe_summary(
         mode = _mode(raw.get("strategy_mode"))
         key = (symbol, mode)
         reason_code = _contract_scope_reason_code(raw) or sorted(unresolved_reasons)[0]
-        contract_reasons_by_scope.setdefault(key, set()).add(reason_code)
-    for key, reason_codes in contract_reasons_by_scope.items():
-        existing = affected_by_scope.get(key)
-        if (
-            existing is None
-            or str(existing.get("reason_code") or "")
-            in _GENERIC_STRATEGY_GAP_REASONS
-        ):
-            symbol, mode = key
-            affected_by_scope[key] = {
-                "symbol": symbol,
-                "strategy_mode": mode,
-                "reason_code": sorted(reason_codes)[0],
-            }
-    affected = list(affected_by_scope.values())
+        contract_gaps.setdefault(key, []).append({
+            "symbol": symbol, "strategy_mode": mode, "reason_code": reason_code,
+            **({"scope": "contract", "contract_symbol": raw["contract_symbol"],
+                "expiration": raw.get("expiration")} if raw.get("contract_symbol") else {}),
+        })
+    affected = []
+    for key in sorted(set(affected_by_scope) | set(contract_gaps)):
+        strategy_gap = affected_by_scope.get(key)
+        detailed_by_contract = {}
+        for gap in sorted(contract_gaps.get(key, []), key=lambda item: item["reason_code"]):
+            detailed_by_contract.setdefault((gap.get("contract_symbol"), gap.get("expiration")), gap)
+        detailed = list(detailed_by_contract.values())
+        if strategy_gap and (not detailed or strategy_gap["reason_code"] not in _GENERIC_STRATEGY_GAP_REASONS):
+            affected.append(strategy_gap)
+        else:
+            affected.extend(detailed)
     affected.sort(
         key=lambda row: (
             str(row["strategy_mode"]),
             str(row["symbol"]),
             str(row["reason_code"]),
+            str(row.get("contract_symbol") or ""),
         )
     )
     return {
