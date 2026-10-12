@@ -235,6 +235,8 @@ def _patch_sender(
     order: list[str] | None = None,
 ) -> None:
     def send(**kwargs):
+        from src.application.notification_delivery_route import notification_reminder_route_key
+
         if order is not None:
             order.append("provider")
         if calls is not None:
@@ -246,6 +248,9 @@ def _patch_sender(
             "returncode": 0,
             "message_id": "msg-1",
             "idempotency_key": kwargs["idempotency_key"],
+            # This fake sender explicitly reports its own synthetic used route.
+            "attribution_route_key": notification_reminder_route_key(
+                config={"notifications": kwargs.get("notifications") or {}}, base=kwargs["base"]),
         }
 
     monkeypatch.setattr(
@@ -1409,6 +1414,7 @@ def test_prepare_failure_records_start_error_and_reraises(monkeypatch, tmp_path,
 
 
 def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(monkeypatch, tmp_path):
+    from copy import deepcopy
     import src.application.daily_decision_brief_repository as repository
 
     _patch_assembler(monkeypatch)
@@ -1439,9 +1445,14 @@ def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(mo
 
     observe("read_retryable_daily_decision_brief_delivery")
     observe("read_daily_decision_brief_fixed_recovery")
+    observe("read_confirmed_attribution_render_context")
     monkeypatch.setattr(repository, "_normalize_delivery_state", normalized)
     monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
-    mod._prepare_daily_brief_notification(_request(tmp_path, run_id="scope-next").request)
+    next_request = _request(tmp_path, run_id="scope-next").request
+    scheduler = deepcopy(next_request.scheduler_decisions_by_account)
+    scheduler["lx"]["scheduled_target_market"] = "2026-07-21T11:00:00-04:00"
+    scheduler["lx"]["scheduled_scan_target_market"] = "2026-07-21T11:00:00-04:00"
+    mod._prepare_daily_brief_notification(replace(next_request, scheduler_decisions_by_account=scheduler))
     prewrite = [item for item in observations if not item[2]]
     assert [item[0] for item in prewrite] == [
         "read_retryable_daily_decision_brief_delivery", "read_daily_decision_brief_fixed_recovery",
@@ -1449,6 +1460,7 @@ def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(mo
     assert prewrite[0][1] is not None and prewrite[0][1] is prewrite[1][1]
     postwrite = [item for item in observations if item[2]]
     assert postwrite and all(scope is None for _, scope, _ in postwrite)
+    assert "read_confirmed_attribution_render_context" in [name for name, _, _ in postwrite]
     assert normalizations.count(False) == 1
     assert normalizations.count(True) >= 2
 

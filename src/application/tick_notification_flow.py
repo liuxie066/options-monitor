@@ -27,6 +27,7 @@ from domain.domain.engine import (
 from domain.storage.repositories import state_repo
 from src.application.cron_runtime import apply_notify_results_to_tick_metrics, build_notify_summary
 from src.application.daily_decision_brief_renderer import (
+    build_attribution_reminder_context,
     render_candidate_alert,
     render_candidate_alert_card_markdown,
     render_fixed_failure,
@@ -45,6 +46,7 @@ from src.application.daily_decision_brief_repository import (
     list_daily_decision_brief_revisions,
     read_daily_decision_brief,
     read_daily_decision_brief_delivery_state,
+    read_confirmed_attribution_render_context,
     read_daily_decision_brief_fixed_recovery,
     read_latest_daily_decision_brief,
     read_retryable_daily_decision_brief_delivery,
@@ -61,7 +63,7 @@ from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
     finalize_no_account_notification,
 )
-from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
 from src.application.notification_delivery_adapter import (
     notification_target_reference,
     select_notification_delivery_adapter,
@@ -1158,6 +1160,9 @@ def _prepare_daily_brief_notification(
                             )
                         else:
                             assert persisted is not None
+                            render_context.update(_daily_brief_attribution_context(
+                                request, persisted["brief"], account=account, market=market,
+                            ))
                             identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
                             rendered_combo_rows = select_rendered_combo_candidate_rows(
                                 persisted["brief"],
@@ -1417,6 +1422,9 @@ def _rebuild_daily_brief_delivery(
         return {"envelope": None, "reason": "no_delivery_due"}
     identities = list(latest.get("candidate_identities") or []) if action == "fixed_report" else pending
     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+    render_context.update(_daily_brief_attribution_context(
+        request, brief, account=account, market=market, read_scope=read_scope,
+    ))
     diff: dict[str, Any] = {}
     if action == "fixed_report":
         revision_result = list_daily_decision_brief_revisions(
@@ -1574,6 +1582,20 @@ def _daily_brief_retired_envelope_audit(
     }
 
 
+def _daily_brief_attribution_context(
+    request: TickNotificationRequest, brief: dict[str, Any], *, account: str, market: str,
+    read_scope: DailyBriefReadScope | None = None,
+) -> dict[str, Any]:
+    route_key = notification_reminder_route_key(
+        config=request.base_cfg, base=(request.repo_root or request.base).resolve())
+    previous = read_confirmed_attribution_render_context(
+        base=request.base, account=account, market=market, read_scope=read_scope)
+    if not route_key or previous.get("attribution_route_key") != route_key:
+        previous = {}
+    return {**build_attribution_reminder_context(brief, previous_context=previous),
+            "attribution_route_key": route_key}
+
+
 def _daily_brief_render_context(
     request: TickNotificationRequest,
     *,
@@ -1659,6 +1681,7 @@ def _confirm_daily_brief_execution(
                 confirmation = confirm_daily_decision_brief_delivery_v2(
                     **common,
                     confirmed_at_utc=utc_now(),
+                    attribution_route_key=send_result.get("attribution_route_key"),
                 )
                 confirmed_accounts.append(account)
                 request.audit_helper.audit(

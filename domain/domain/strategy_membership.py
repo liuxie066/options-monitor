@@ -218,6 +218,8 @@ def resolve_trade_attribution(
             return TradeAttributionResolution("ordinary", ids, reason_codes=("manual_ordinary_preserved",))
         if existing.get("status") == "linked":
             target = _text(existing.get("candidate_id"))
+            targets = {target} | {"wheel:" + item["wheel_branch_id"]
+                for item in existing.get("wheel_call_allocations") or []}
             # Missing evidence cannot disprove a durable relationship.
             acknowledged = set(existing.get("acknowledged_candidate_ids") or []) if existing.get("origin") == "manual" else set()
             # A manual Wheel assignment already chooses among stock branches.
@@ -232,7 +234,9 @@ def resolve_trade_attribution(
                 return TradeAttributionResolution("conflict", ids, reason_codes=("late_competing_evidence",))
             capacity_conflicts = {"competing_fills_exceed_capacity", "competing_fills_exceed_intent_remainder",
                                   "account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}
-            if target in by_id and capacity_conflicts.intersection(by_id[target].get("reason_codes") or []):
+            if any("competing_fills_exceed_intent_remainder" in (by_id.get(key, {}).get("reason_codes") or [])
+                    or by_id.get(key, {}).get("capacity_evidence_complete") is True
+                    and capacity_conflicts.intersection(by_id[key].get("reason_codes") or []) for key in targets):
                 return TradeAttributionResolution("conflict", ids, reason_codes=("late_capacity_conflict",))
             return TradeAttributionResolution("linked", ids, reason_codes=("existing_attribution_preserved",))
     if not applicable:
