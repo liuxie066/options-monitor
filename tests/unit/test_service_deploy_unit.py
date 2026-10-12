@@ -2259,7 +2259,7 @@ def test_upgrade_reconcile_delegates_to_the_new_release_cli(tmp_path: Path) -> N
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift",
             "ok": True,
-            "data": {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]},
+            "data": {"summary": {"status": "ok", "ok": True}, "written_units": ["options-monitor-tick-us.timer"]},
         }), stderr="")
 
     reconcile = _reconcile_services_from_current_release(
@@ -2277,7 +2277,7 @@ def test_upgrade_reconcile_delegates_to_the_new_release_cli(tmp_path: Path) -> N
         "--profile-path", str(runtime / "service.profile.json"),
         "--confirm", "--preserve-activation-state",
     ]]
-    assert reconcile == {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]}
+    assert reconcile == {"summary": {"status": "ok", "ok": True}, "written_units": ["options-monitor-tick-us.timer"]}
 
 
 def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path) -> None:
@@ -2289,7 +2289,7 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}},
+            "data": {"summary": {"status": "ok", "ok": True}},
         }), stderr="")
 
     _reconcile_services_from_current_release(
@@ -2316,11 +2316,11 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
             },
         }), "target release rejected --preserve-activation-state", "systemctl is-enabled"),
         (0, json.dumps({
-            "tool_name": "om", "ok": True, "data": {"summary": {"status": "ok"}},
+            "tool_name": "om", "ok": True, "data": {"summary": {"status": "ok", "ok": True}},
         }), "", "unreadable child response"),
         (2, json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}},
+            "data": {"summary": {"status": "ok", "ok": True}},
         }), "child exited with status 2", "child exited with status 2"),
     ],
 )
