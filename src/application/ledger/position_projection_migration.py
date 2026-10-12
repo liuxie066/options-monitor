@@ -146,13 +146,13 @@ def _store_identity(path: Path) -> dict[str, Any]:
 
 @contextmanager
 def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a query-only connection; callers own its transaction lifetime."""
     uri = f"{path.as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA query_only=ON")
     try:
-        conn.execute("BEGIN")
         yield conn
     finally:
         conn.close()
@@ -522,6 +522,7 @@ def build_position_projection_migration_inventory(
     implementation, timing = _loaded_implementation()
     before = _file_sizes(path)
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         inventory = _inventory_from_conn(
             path,
             conn,
@@ -979,6 +980,7 @@ def verify_position_projection_migration(
     wall_start = time.perf_counter_ns()
     cpu_start = time.process_time_ns()
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         result = _verify_from_conn(
             path,
             conn,
@@ -1155,6 +1157,7 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
     path = _store_path(sqlite_path)
     implementation, timing = _loaded_implementation()
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         source = _source_state(conn)
         execution_identity_index_gaps = []
         for table in EXECUTION_IDENTITY_INDEXES:

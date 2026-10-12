@@ -1007,3 +1007,36 @@ def test_missing_empty_account_head_is_unavailable_not_valid_empty(tmp_path: Pat
     status = module.position_projection_migration_status(repo.db_path)
     assert status["readiness"] == "not_ready"
     assert "projection_head_account_set_mismatch" in status["reasons"]
+
+
+def test_shared_readonly_connection_preserves_caller_owned_transaction(tmp_path: Path) -> None:
+    path = _migrated(tmp_path)
+    before = path.read_bytes()
+    with module._read_only_connection(path) as conn:
+        assert conn.in_transaction is False
+        conn.execute("BEGIN")
+        assert conn.execute("SELECT count(*) FROM position_lots").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("UPDATE position_projection_heads SET lot_count=999")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["inventory", "status", "verify"])
+def test_position_read_entrypoint_owns_its_snapshot(tmp_path: Path, monkeypatch, operation: str) -> None:
+    path = _migrated(tmp_path)
+    real_source_state = module._source_state
+    observations = []
+
+    def bound_source_state(conn):
+        observations.append(conn.in_transaction)
+        return real_source_state(conn)
+
+    monkeypatch.setattr(module, "_source_state", bound_source_state)
+    reader = {
+        "inventory": module.build_position_projection_migration_inventory,
+        "status": module.position_projection_migration_status,
+        "verify": lambda path: module.verify_position_projection_migration(path, shadow=True),
+    }[operation]
+    payload = reader(path)
+    assert payload["read_only"] is True
+    assert observations and all(observations)

@@ -1445,7 +1445,9 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 规范化账户/标量、checkpoint 的内容摘要与实际事件前缀绑定，以及每个 head 对当前
 `position_lots` 的 canonical fingerprint 和数量。现有 execution-identity index 的
 fallback/gap 契约继续独立。缺失 head、损坏内容或失效绑定均阻断 readiness 和历史清理
-position gate；有 head 的合法零持仓账户仍可就绪。status 不运行 full oracle，也不
+position gate；有 head 的合法零持仓账户仍可就绪。共享只读连接 helper 只管理连接生命周期；
+本模块 inventory/status/verify 在各自入口开启读取事务，其他消费者自行管理事务边界。
+status 不运行 full oracle，也不
 写库、修复或推进任何历史标记；这项内容证明需要读取持仓和事件前缀，不能视为常数成本。
 
 writer 的 duplicate/unchanged 与 checkpoint tail admission 使用同一仓储内容校验；
