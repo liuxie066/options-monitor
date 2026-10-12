@@ -38,6 +38,18 @@ class StrategyScanStatusError(RuntimeError):
     pass
 
 
+def candidate_scope_reason(item: Mapping[str, Any]) -> str | None:
+    """Project current terminal evidence without merging strategy and source facts."""
+    source = str(item.get("source_outcome") or "").strip()
+    code = str(item.get("reason_code") or "").strip()
+    if source or code:
+        if (item.get("status") != "completed" or item.get("candidate_count") != 0
+                or source != "success_empty" or code not in SUCCESS_EMPTY_REASON_CODES):
+            raise StrategyScanStatusError("invalid success-empty scope evidence")
+        return code
+    return str(item.get("reason") or "").strip() or None
+
+
 def strategy_status_path(
     *,
     report_dir: Path,

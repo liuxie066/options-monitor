@@ -48,6 +48,7 @@ from src.application.wheel.candidate_snapshot import (
 from src.application.source_receipts import sha256_bytes
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.strategy_scan_status import (
+    candidate_scope_reason,
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
     STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
     STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
@@ -282,9 +283,7 @@ def _snapshot_strategy_scopes(
             raise CandidateSnapshotManifestError(
                 f"candidate owner terminal status mismatch: {owner}"
             )
-        index_reason = str(
-            index_row.get("reason_code") or index_row.get("reason") or ""
-        ).strip()
+        index_reason = candidate_scope_reason(index_row) or ""
         snapshot_reason = str(snapshot_row.get("reason_code") or "").strip()
         if snapshot_reason != index_reason:
             raise CandidateSnapshotManifestError(
