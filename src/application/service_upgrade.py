@@ -1038,7 +1038,7 @@ def _service_reconcile_failed(service_reconcile: dict[str, Any]) -> bool:
         return True
     summary_raw = service_reconcile.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
-    return str(summary.get("status") or "").strip().lower() == "error"
+    return summary.get("ok") is not True
 
 
 def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[str]:
