@@ -18,42 +18,15 @@ from src.application.notification_shells import render_receipt
 from src.application.report_formatting import attribution_pending_text
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
-from src.application.ledger.api import canonical_payload_hash
+from src.application.ledger.api import (
+    BATCH_RENDERER_VERSION,
+    build_notification_batch_route,
+    canonical_payload_hash,
+)
 from src.application.system_alerts import report_system_meta_signal
 
 
-BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
 MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
-
-
-def build_notification_batch_route(
-    *,
-    provider: str,
-    channel: str,
-    target: str,
-) -> dict[str, str]:
-    provider_value = str(provider or "").strip().lower()
-    channel_value = str(channel or "").strip().lower()
-    target_value = str(target or "").strip()
-    if not provider_value or not channel_value or not target_value:
-        raise ValueError("notification batch route is incomplete")
-    target_fingerprint = canonical_payload_hash(
-        {"target": target_value}
-    )
-    route_fingerprint = canonical_payload_hash(
-        {
-            "provider": provider_value,
-            "channel": channel_value,
-            "target_fingerprint": target_fingerprint,
-        }
-    )
-    return {
-        "provider": provider_value,
-        "channel": channel_value,
-        "target": target_value,
-        "target_fingerprint": target_fingerprint,
-        "route_fingerprint": route_fingerprint,
-    }
 
 
 def send_trade_intake_receipt(

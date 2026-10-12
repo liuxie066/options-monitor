@@ -42,10 +42,13 @@ trade_events -> deterministic projection -> position_lots
 | 当前决策投影 | `src/application/ledger/current_decision_projection.py` 公共 facade；事实域、migration 与 runtime 分别由 `current_decision_*.py` 持有 |
 | lot 目标解析与 preflight | `src/application/ledger/lot_resolver.py`、`preflight.py` |
 | 人工持仓工作流 | `src/application/positions/` |
+| 生命周期通知状态操作 | `src/application/ledger/notification_outbox.py`；公共入口经 `ledger/api.py` 导出 |
 | broker trade intake | `src/application/trades/` |
 | 人工 CLI | `src/interfaces/cli/option_positions.py`、`trade_events.py` |
 
 `positions`、`trades`、Agent tools、CLI 和 pipeline 不应绕过 `ledger.api` 导入内部写入原语。领域层不得反向导入 `src/`。
+
+生命周期 outbox 的领取、过期恢复、CAS、结算和人工核对由现有 ledger owner 持有；批次与成员的更新保持原有事务边界。`trades/lifecycle_outbox.py` 保留兼容接口、消息 renderer 注入及发送编排，provider 发送在账本事务之外。发送开始前冻结正文并校验摘要，重试复用原正文；结果不明保持 `unknown`，仅经既有人工核对流程决定补发。renderer 只读取冻结 payload 并返回正文，不执行 I/O 或修改 payload。
 
 ## 多源输入与历史留存
 
