@@ -444,3 +444,26 @@ def test_wrapper_rejects_corrupt_failed_receipt_without_false_recovery(monkeypat
     assert _tick(tmp_path, child, market="us", accounts=["lx", "sy"], config_path=str(config), preflight_config_fn=None) == 1
     assert {row["account"] for row in calls} == {"lx", "sy"}
     assert recoveries == []
+
+@pytest.mark.parametrize("failure", ["child", "timeout", "preflight"])
+@pytest.mark.parametrize("diagnostic", [False, True])
+def test_wrapper_failure_honors_no_send_and_symbol_diagnostics(monkeypatch, tmp_path, failure, diagnostic):
+    from src.application import tick_cron as mod
+    config = _write_json(tmp_path / "config.us.json", {"accounts": ["lx"]})
+    calls = []
+    monkeypatch.setattr(mod, "report_system_failure", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(mod, "report_system_recovery", lambda **kwargs: calls.append(kwargs))
+    def child(command, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 1)
+        return subprocess.CompletedProcess(command, 1)
+    def preflight(**kwargs):
+        if failure == "preflight":
+            raise ValueError("bad config")
+    rc = _tick(tmp_path, child, market="us", accounts=["lx"], config_path=str(config),
+               no_send=not diagnostic, symbols=["TOST"] if diagnostic else None,
+               preflight_config_fn=preflight)
+    assert rc != 0
+    assert calls == []
+    latest = json.loads((tmp_path / "output_shared/state/current/tick_cron_last_result.us.current.json").read_text())
+    assert latest["status"] == "failed"

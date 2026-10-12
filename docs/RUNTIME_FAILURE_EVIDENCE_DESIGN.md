@@ -41,7 +41,7 @@
 
 内层完成幂等记录后，向 wrapper run 目录原子写现有 `state/child_tick_completion.json`，绑定 wrapper ID、inner run ID、市场、完整计划账户集合、`completed_at_utc`、`status` 和 `rc`。新增 `account_outcomes` 中每项保留 `account/scan_ok/notify_failed/failure_notification_confirmed`；最后一个字段仅表示本次 inner run 的失败简报已确认送达。扫描和投递均成功才是 `status=ok/rc=0`；已知业务失败也写 `status=failed` 收据。幂等或收据写入失败返回错误，不产生市场恢复证据。
 
-wrapper 严格核对本轮身份、账户集合、布尔字段及退出码一致性；合法失败收据只向失败账户归属告警，已确认收到本轮失败简报的账户不再收到同一次 wrapper 通用告警。缺失或损坏的失败收据仍按计划范围记录 wrapper 故障。旧成功收据保持可读；仅同轮完整成功收据允许市场恢复，非零的部分成功从不表示整市场健康。
+wrapper 严格核对本轮身份、账户集合、布尔字段及退出码一致性；合法失败收据只向失败账户归属告警，已确认收到本轮失败简报的账户不再收到同一次 wrapper 通用告警。缺失或损坏的失败收据仍按计划范围记录 wrapper 故障。`--no-send` 与标的诊断保留失败证据，但 wrapper 不发送外部故障告警。旧成功收据保持可读；仅同轮完整成功收据允许市场恢复，非零的部分成功从不表示整市场健康。
 
 `rc=0` 单独不足以证明恢复；no-account、delivery-only、项目 guard、成功幂等跳过及未扫描 Tick 均不写扫描收据。已终结失败的同 bucket 重入返回失败，不重扫或重发，并可将原账户结果与 inner run 绑定到新 wrapper；处理中重入也不产生恢复证据。缺成功收据保持旧故障并显示 `completion_unknown`。read model 原子写入失败时报 ERROR；inner run 与 wrapper run 通过收据关联，不共用一个 ID。
 

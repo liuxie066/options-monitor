@@ -898,6 +898,10 @@ def _run_full_symbol_capture(
             opening_calls = observed["opening_scans"]
             assert isinstance(opening_calls, list)
             opening_calls.append(mode)
+            if scenario == "success_empty" and mode == "put":
+                from src.application.sell_put_steps import run_sell_put_scan_and_summarize
+
+                return run_sell_put_scan_and_summarize(**kwargs)
             if scenario == "failure":
                 raise RuntimeError(f"{mode} scan failed for test")
             final_sink = kwargs.get("final_candidates_sink_fn")

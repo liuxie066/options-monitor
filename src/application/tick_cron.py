@@ -228,6 +228,8 @@ def _record_failure(
         incomplete.append("latest")
     if incomplete:
         _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=" + ",".join(incomplete))
+    if "--no-send" in plan.tick_argv:
+        return
     config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
     if isinstance(config, dict):
         for account in accounts or ["-"]:

@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1172 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 507)
-- Internal import edges: 9152 total, 3745 production/script edges excluding tests
+- Internal import edges: 9186 total, 3747 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|4086| application
+  tests -->|4117| application
   tests -->|519| domain
   tests -->|2| domain_services
   tests -->|281| infrastructure
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4086 |
+| tests | application | 4117 |
 | tests | domain | 519 |
 | tests | interfaces | 321 |
 | tests | infrastructure | 281 |
@@ -202,14 +202,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.trades.auto_intake | 50 |
 | src.application.ledger.api | 47 |
 | src.application.multi_tick.required_data_prefetch | 34 |
+| src.application.pipeline_watchlist | 32 |
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
-| src.application.pipeline_watchlist | 31 |
 | src.interfaces.cli.option_positions | 31 |
 | src.application.ledger.queries | 30 |
 | src.application.agent_tools.runtime_status_impl | 29 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
-| src.application.multi_account_tick | 29 |
+| src.application.multi_account_tick | 28 |
 | src.application.agent_tools.config | 26 |
 | src.application.agent_tools.positions | 26 |
 | src.application.ledger.writer_common | 26 |
