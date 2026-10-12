@@ -843,7 +843,7 @@ def _backup_service_profile(profile_path: Path) -> Path:
 def _service_drift_apply_failed(result: dict[str, Any]) -> bool:
     return bool(
         result.get("apply_errors")
-        or not result.get("summary", {}).get("ok", False)
+        or result.get("summary", {}).get("ok") is not True
     )
 
 
@@ -1306,6 +1306,13 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     extra_profile_units = sorted(set(profile_services) - set(expected_services))
     missing_installed_units = sorted(set(expected_files) - set(installed_units))
     extra_installed_units = sorted(set(installed_units) - set(expected_files))
+    accounts = profile.get("accounts")
+    extra_managed_units = (
+        sorted(set(extra_installed_units) & managed_systemd_unit_names(
+            accounts=accounts if isinstance(accounts, list) else [],
+        ))
+        if provider == "systemd" else extra_installed_units
+    )
     extra_managed_files = sorted(
         set(installed_managed_files) - set(expected_managed_files)
     )
@@ -1389,6 +1396,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         extra_profile_units=extra_profile_units,
         extra_installed_units=extra_installed_units,
+        extra_managed_units=extra_managed_units,
         extra_managed_files=extra_managed_files,
         mismatched_units=mismatched_units,
         missing_managed_files=missing_managed_files,
@@ -2018,6 +2026,7 @@ def _drift_summary(
     missing_installed_units: list[str],
     extra_profile_units: list[str],
     extra_installed_units: list[str],
+    extra_managed_units: list[str],
     extra_managed_files: list[str],
     mismatched_units: list[str],
     missing_managed_files: list[str],
@@ -2052,6 +2061,12 @@ def _drift_summary(
     warning_count += max(0, int(compatibility_warning_count))
     error_count = (
         int(bool(missing_required_units))
+        + int(bool(missing_profile_units))
+        + int(bool(missing_installed_units))
+        + int(bool(extra_profile_units))
+        + int(bool(extra_managed_units))
+        + int(bool(mismatched_units))
+        + int(bool(profile_content_changed))
         + int(bool(activation_drift_units))
         + int(bool(activation_preservation_conflicts))
         + int(bool(missing_managed_files))
@@ -2062,7 +2077,7 @@ def _drift_summary(
     )
     status = "error" if error_count else ("warn" if warning_count else "ok")
     return {
-        "ok": status == "ok",
+        "ok": error_count == 0,
         "status": status,
         "error_count": error_count,
         "warning_count": warning_count,

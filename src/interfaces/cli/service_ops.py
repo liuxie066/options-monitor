@@ -448,7 +448,7 @@ def handle_service_update_command(
         )
         if args.output:
             export_service_drift(args.output, data)
-        ok = bool(data.get("summary", {}).get("ok", True))
+        ok = data.get("summary", {}).get("ok") is True
         return build_response(tool_name="service.drift", ok=ok, data=data)
 
     if args.command == "service" and args.service_command == "credentials-migrate":

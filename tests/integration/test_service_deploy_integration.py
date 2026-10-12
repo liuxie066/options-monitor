@@ -622,7 +622,8 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
 
     out = _drift_at(repo, runtime, systemd_root)
 
-    assert out["summary"]["status"] == "warn"
+    assert out["summary"]["status"] == "error"
+    assert out["summary"]["ok"] is False
     assert out["summary"]["mismatched_count"] == 2
     assert out["mismatched_units"] == [
         "options-monitor-auto-close-us.timer",
@@ -811,7 +812,9 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
     assert ["systemctl", "disable", "--now", "options-monitor-feishu-ws.service"] in calls
 
 
-def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Path) -> None:
+def test_service_drift_preserves_backups_nonunits_and_custom_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
     repo, runtime, systemd_root = _drift_roots(tmp_path)
@@ -859,8 +862,9 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     assert before["operations"] == []
     assert before["extra_installed_units"] == sorted(custom | {retired})
     assert set(before["installed_units"]) == set(original_units) - nonunits
-    assert before["summary"]["status"] == "warn"
-    assert before["summary"]["error_count"] == 0
+    assert before["summary"]["status"] == "error"
+    assert before["summary"]["ok"] is False
+    assert before["summary"]["error_count"] > 0
     assert profile_path.read_bytes() == original_profile
     assert {path.name: path.read_bytes() for path in systemd_root.iterdir() if path.is_file()} == original_units
     assert not any("disable" in command for command in calls)
@@ -877,8 +881,16 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     add_service_update_commands(parser.add_subparsers(dest="command"))
     args = parser.parse_args(["service", "drift", "--runtime-root", str(runtime), "--confirm"])
     response = handle_service_update_command(args, service_drift_fn=lambda **_kwargs: applied)
-    # Existing warning-envelope rejection remains tracked by issue 510.
-    assert response["ok"] is False
+    assert response["ok"] is True
+    from src.interfaces.cli import main as cli
+
+    for result, expected_code in ((before, 2), (applied, 0)):
+        monkeypatch.setattr(cli, "service_drift", lambda **_kwargs: result)
+        assert cli.main(["service", "drift", "--runtime-root", str(runtime)]) == expected_code
+        stdout = capsys.readouterr().out
+        payload = json.loads(stdout)
+        assert payload["ok"] is (expected_code == 0)
+
     assert applied["extra_installed_units"] == sorted(custom)
     assert set(applied["installed_units"]) == set(original_units) - nonunits - {retired}
     assert not (systemd_root / retired).exists()
@@ -1519,7 +1531,8 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
 
     drifted = _drift_at(repo, runtime, systemd_root)
 
-    assert drifted["summary"]["status"] == "warn"
+    assert drifted["summary"]["status"] == "error"
+    assert drifted["summary"]["ok"] is False
     assert drifted["profile_content_changed"] is True
     assert drifted["mismatched_units"] == []
 
@@ -3371,7 +3384,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
                 "active_states": {target: "inactive"},
             }
         return {
-            "summary": {"status": "warn"},
+            "summary": {"status": "warn", "ok": True},
             "preserved_activation_units": [target],
         }
 
@@ -3411,7 +3424,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
             }), stderr="unknown option --preserve-activation-state")
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}, "preserved_activation_states": child_snapshot},
+            "data": {"summary": {"status": "ok", "ok": True}, "preserved_activation_states": child_snapshot},
         }), stderr="")
 
     if child_error:
@@ -3551,7 +3564,7 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
             drift_commands.append(list(command))
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
                 "tool_name": "service.drift", "ok": True,
-                "data": {"summary": {"status": "ok"}},
+                "data": {"summary": {"status": "ok", "ok": True}},
             }), stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
