@@ -1429,3 +1429,9 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 ### 资金与指派查询的只读边界
 
 资金余量与指派情景经 `src/application/ledger/api.py::read_position_query_ledger` 读取既有 SQLite。事件、持仓 lot 和账户生命周期事实在同一只读事务冻结，复用既有投影及决策核验；查询不初始化账本、不取得应用写锁、不恢复投影。缺库、缺 schema、坏事件或投影不一致明确返回不可用；只有已验证的空账本表示零占用。账户现金仍独立评价，账本不可用时不计算扣占用后的余量。SQLite 的 WAL/SHM 协调与业务写入不同；该读取不使用会忽略活动 WAL 的 immutable 模式。主动恢复与写入仍由原受控流程负责。
+
+### 公共持仓查询的只读边界
+
+`option_positions_read` 的 list、events、history、inspect、assigned-stock，以及 `om option-positions` 的 list、events、history、inspect，经 `ledger.api.open_position_query_ledger_from_data_config` 使用 SQLite `mode=ro` / `query_only`。它们保留既有筛选、账户授权和事件分页，不创建数据库、补 schema 或自动恢复 `position_lots`。缺库、旧/不完整 lot 身份 schema 或所需表不可读时明确失败；events/history/inspect 可观察尚未恢复的事件与投影差异。`bootstrap.status=read_only` 表示本次没有执行启动恢复。
+
+该入口读取已存事实；资金余量/指派情景仍使用要求可信投影的 `read_position_query_ledger`。已有受控写入/恢复继续使用原工作流。assigned-stock 的报价刷新选项保持原合同，不表示生产账本写入授权；SQLite 活跃 WAL/SHM 协调也不等于业务写入。

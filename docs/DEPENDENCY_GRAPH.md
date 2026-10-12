@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1166 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 501)
-- Internal import edges: 9062 total, 3739 production/script edges excluding tests
+- Python files scanned: 1167 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 502)
+- Internal import edges: 9083 total, 3747 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,11 +46,11 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|4015| application
-  tests -->|512| domain
+  tests -->|4023| application
+  tests -->|513| domain
   tests -->|2| domain_services
   tests -->|280| infrastructure
-  tests -->|316| interfaces
+  tests -->|318| interfaces
   tests -->|28| scripts
   tests -->|39| storage
 ```
@@ -79,9 +79,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4015 |
-| tests | domain | 512 |
-| tests | interfaces | 316 |
+| tests | application | 4023 |
+| tests | domain | 513 |
+| tests | interfaces | 318 |
 | tests | infrastructure | 280 |
 | tests | storage | 39 |
 | tests | scripts | 28 |
@@ -202,11 +202,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.trades.auto_intake | 50 |
 | src.application.ledger.api | 47 |
 | src.application.multi_tick.required_data_prefetch | 34 |
+| src.application.ledger.queries | 32 |
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
 | src.application.pipeline_watchlist | 31 |
 | src.interfaces.cli.option_positions | 31 |
-| src.application.ledger.queries | 30 |
 | src.application.agent_tools.runtime_status_impl | 29 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.multi_account_tick | 29 |
