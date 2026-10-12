@@ -281,11 +281,20 @@ def test_gc_inventory_read_failure_never_proves_missing(monkeypatch: pytest.Monk
     parent = root / "output_shared/blobs/sha256"
 
     def unreadable(path):
-        if Path(path) == parent:
+        if not isinstance(path, int) and Path(os.fsdecode(path)) == parent:
             raise PermissionError("synthetic scan access failure")
         return scandir(path)
 
     monkeypatch.setattr(os, "scandir", unreadable)
+    if scandir in os.supports_fd:
+        descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            with os.scandir(descriptor) as entries:
+                assert {entry.name for entry in entries} == {Path(ref["blob_relpath"]).parent.name}
+        finally:
+            os.close(descriptor)
+    with pytest.raises(PermissionError, match="synthetic scan access failure"):
+        os.scandir(os.fsencode(parent))
     with pytest.raises(PermissionError, match="synthetic scan access failure"):
         module.preview_scan_blob_gc(runtime_root=root)
     assert (root / ref["blob_relpath"]).is_file()
