@@ -409,6 +409,7 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
     )
 
     assert legacy_retry["ok"] is True
+    assert callable(legacy_calls[0].pop("before_send"))
     assert legacy_calls == [
         {
             "app_id": "app_1",
@@ -1471,6 +1472,7 @@ def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_pa
     monkeypatch.setattr('src.application.bot.control.inbound_service._run_bot', forbidden)
     replies = []
     def reply(**kwargs):
+        kwargs.pop('before_send', None)
         replies.append(kwargs)
         return {'code': 0, 'data': {'message_id': 'terminal-reply'}}
     settings = FeishuWsSettings(app_id='test', app_secret='test',

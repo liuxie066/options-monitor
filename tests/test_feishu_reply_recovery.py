@@ -51,6 +51,10 @@ def _set_due(store):
         conn.execute("UPDATE bot_reply_outbox SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
 
 
+def _request(kwargs):
+    return {key: value for key, value in kwargs.items() if key != "before_send"}
+
+
 @pytest.mark.parametrize("restart", [False, True])
 def test_worker_recovers_outage_without_inbound(recovery, restart):
     settings, store, envelope = recovery
@@ -90,7 +94,7 @@ def test_worker_recovers_outage_without_inbound(recovery, restart):
     assert delivered["attempt_count"] == 2
     assert delivered["payload_json"] == "{}"
     assert len(calls) == 2
-    assert calls[0] == calls[1]
+    assert _request(calls[0]) == _request(calls[1])
     assert effects == {"feishu:synthetic": envelope["transport"]["content"]}
 
 
@@ -115,7 +119,7 @@ def test_worker_replays_unknown_outcome_without_second_fake_effect(recovery, tmp
         _wait(lambda: store.list_replies()[0]["status"] == "delivered")
     finally:
         worker.stop()
-    assert len(calls) == 2 and calls[0] == calls[1]
+    assert len(calls) == 2 and _request(calls[0]) == _request(calls[1])
     with sqlite3.connect(provider_db) as conn:
         assert conn.execute("SELECT uuid, body FROM effects").fetchall() == [
             ("feishu:synthetic", json.dumps(envelope["transport"]["content"], sort_keys=True))]
@@ -152,11 +156,15 @@ def test_expired_capability_never_sends_even_after_lease_recovery(recovery, stat
     worker = _worker(settings, lambda **kw: calls.append(kw))
     worker.start()
     try:
-        _wait(lambda: store.list_replies()[0]["status"] == "expired")
+        expected = "delivery_unknown" if status == "delivering" else "expired"
+        _wait(lambda: store.list_replies()[0]["status"] == expected)
     finally:
         worker.stop()
     assert calls == []
-    assert store.list_replies()[0]["payload_json"] == "{}"
+    if status == "delivering":
+        assert store.list_replies()[0]["payload_json"] != "{}"
+    else:
+        assert store.list_replies()[0]["payload_json"] == "{}"
 
 
 @pytest.mark.parametrize("overrides,reason", [
@@ -210,7 +218,7 @@ def test_unconfirmed_response_retains_envelope_for_identical_replay(recovery, re
     assert json.loads(failed["payload_json"]) == envelope
     _set_due(store)
     assert feishu_ws._retry_pending_feishu_reply(settings=settings, reply_fn=reply)["ok"] is True
-    assert calls[0] == calls[1]
+    assert _request(calls[0]) == _request(calls[1])
     assert store.list_replies()[0]["payload_json"] == "{}"
 
 

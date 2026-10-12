@@ -39,6 +39,7 @@ def reply_message(
     *,
     app_id: str,
     app_secret: str,
+    before_send: Callable[[], None] | None = None,
     message_id: str,
     msg_type: str = "text",
     content: dict[str, Any] | None = None,
@@ -95,6 +96,8 @@ def reply_message(
         )
 
     def _send(tenant_token: str) -> dict[str, Any]:
+        if before_send is not None:
+            before_send()
         return http_json_fn(
             "POST",
             url,
@@ -103,6 +106,7 @@ def reply_message(
                 "Authorization": f"Bearer {tenant_token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
+            retry_max_attempts=1,
         )
 
     return with_tenant_token_retry(app_id, app_secret, _send)

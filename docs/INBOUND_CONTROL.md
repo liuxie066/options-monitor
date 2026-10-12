@@ -157,6 +157,21 @@ Feishu WebSocket worker 在启动及空闲期间恢复到期回复，自主恢�
 worker 停止后不再启动恢复或处理排队事件；已经进入处理/transport 的调用按现有结果结算，
 停止无法撤回已发请求。过期 lease 回收的回复也必须通过 capability TTL。
 
+Feishu 官方回复接口的 UUID 去重承诺为一小时，24 小时 capability TTL 不能代替该保证。
+Host 保存 `replay_until`：明确拒绝后的尝试可建立新窗口；网络/5xx/模糊回执、失效发送
+lease 表示可能已有外部效果，原窗口不得延长，后续明确拒绝也不能抹掉较早的未知事实。
+未知回复在窗口截止（含截止时刻）、缺失可证明窗口或 capability 到期后进入
+`delivery_unknown`，保留正文与 UUID，不自动领取、清空或盲重发。
+升级前已有尝试但没有窗口的记录同样保留为未知；首次尚未尝试的 pending 不受该迁移限制。
+用 `./om bot replies --host-db <audit-db>` 查看 `delivery_unknown` 与
+`last_error=delivery_outcome_unknown`，人工核对 provider 的实际消息后再决定后续操作；
+本次没有新增强制重发或人工结算命令。
+
+Feishu 结算必须匹配 claim 的 `attempt_count`；旧 sender 或缺失 attempt 的旧调用不能改变
+新领取的状态。回复 POST 每次只尝试一次，由 outbox 持久结算与调度负责重试；实际 POST 前
+（包括等待 token 后）再次检查冻结窗口。已选择的 text fallback 在发送前持久化，后续重试
+只使用原 fallback UUID/正文；较早 card 结果未知时不另建 fallback 发送身份。
+
 ## Non-Goals
 
 Do not add:
