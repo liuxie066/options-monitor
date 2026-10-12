@@ -26,7 +26,7 @@ QUERY = {"period": "month", "month": "2026-09", "config_key": "us"}
 
 @contextmanager
 def _running(server):
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"

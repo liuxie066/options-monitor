@@ -425,10 +425,11 @@ def test_sqlite_helpers_do_not_open_existing_artifacts(tmp_path: Path, monkeypat
     def unexpected_open(*args, **kwargs):
         raise AssertionError("permission maintenance must not open existing artifacts")
 
-    monkeypatch.setattr(private_storage.os, "open", unexpected_open)
-    with connect_private_sqlite(database) as connection:
-        secure_sqlite_artifacts(database)
-        assert connection.execute("SELECT 1").fetchone() == (1,)
+    with monkeypatch.context() as patch:
+        patch.setattr(private_storage.os, "open", unexpected_open)
+        with connect_private_sqlite(database) as connection:
+            secure_sqlite_artifacts(database)
+            assert connection.execute("SELECT 1").fetchone() == (1,)
     for suffix in ("", "-wal", "-shm", "-journal"):
         artifact = Path(f"{database}{suffix}")
         if artifact.exists():

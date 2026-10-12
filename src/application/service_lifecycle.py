@@ -179,15 +179,42 @@ def _definition_preview(content: str, kind: str) -> str:
                 env[key] = "<redacted>"
         return plistlib.dumps(payload, sort_keys=False).decode()
     lines = []
-    for line in content.splitlines(keepends=True):
-        if line.startswith("Environment="):
+    # Consume physical continuations before redacting; comments do not end them.
+    physical_lines = iter(re.findall(r"[^\r\n\0]*(?:\r\n|\n\r|\r|\n)\0?|[^\r\n\0]*\0|[^\r\n\0]+$", content))
+    for raw in physical_lines:
+        if raw.lstrip(" \t\r\n").startswith(("#", ";")):
+            lines.append(raw)
+            continue
+        logical = raw.rstrip("\r\n\0").removeprefix("\ufeff")
+        incomplete = False
+        while (len(logical) - len(logical.rstrip("\\"))) % 2:
+            logical = logical[:-1] + " "
+            for continuation in physical_lines:
+                raw += continuation
+                if not continuation.lstrip(" \t\r\n").startswith(("#", ";")):
+                    logical += continuation.rstrip("\r\n\0")
+                    break
+            else:
+                incomplete = True
+                break
+        key, separator, value = logical.partition("=")
+        if separator and key.strip() == "Environment":
             try:
-                assignments = shlex.split(line.split("=", 1)[1])
-                safe = [item if item.split("=", 1)[0] in safe_env else item.split("=", 1)[0] + "=<redacted>" for item in assignments]
-                line = "Environment=" + shlex.join(safe) + "\n"
+                # Only simple whole-item quoting is shared with shlex; C escapes fail closed.
+                if incomplete or "\\" in value or "\v" in value or "\f" in value or not re.fullmatch(
+                    r'''\s*(?:(?:"[^"\\]*"|'[^'\\]*'|[^\s"'\\]+)(?:\s+|$))*''', value,
+                ):
+                    raise ValueError("ambiguous environment syntax")
+                safe = []
+                for item in shlex.split(value):
+                    name, equals, _ = item.partition("=")
+                    if not equals or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+                        raise ValueError("invalid environment assignment")
+                    safe.append(item if name in safe_env else name + "=<redacted>")
+                raw = "Environment=" + shlex.join(safe) + "\n"
             except ValueError:
-                line = "Environment=<unparseable, redacted>\n"
-        lines.append(line)
+                raw = "Environment=<redacted>\n"
+        lines.append(raw)
     return "".join(lines)
 
 
@@ -574,10 +601,10 @@ def service_lifecycle(
     for item in files:
         public = {key: value for key, value in item.items() if key != "content"}
         if item in changed_files:
-            # Unit definitions contain credential names/paths, never values.
-            # Include the actual definition difference for informed confirmation.
+            # Installed definitions may contain operator-added credential values.
+            # Preserve systemd line delimiters and redact both sides before the diff.
             public["diff"] = "".join(difflib.unified_diff(
-                _definition_preview(Path(item["path"]).read_text(), item["kind"]).splitlines(keepends=True) if item["before"]["exists"] else [],
+                _definition_preview(Path(item["path"]).read_bytes().decode(), item["kind"]).splitlines(keepends=True) if item["before"]["exists"] else [],
                 _definition_preview(item["content"] or "", item["kind"]).splitlines(keepends=True), fromfile="installed", tofile="requested"))
         public_files.append(public)
     scope = {"provider": provider, "repo_root": str(repo), "runtime_root": str(runtime), "config_yaml": str(source),
