@@ -526,7 +526,7 @@ def _register_projection_parsers(sub: Any) -> None:
     )
     for command_name, help_text in (
         ('inventory', 'emit an exact read-only migration inventory'),
-        ('status', 'read bounded checkpoint/head readiness status'),
+        ('status', 'read current content/checkpoint readiness (read-only)'),
     ):
         command = projection_migration_sub.add_parser(command_name, help=help_text)
         _add_runtime_root_arg(command)
