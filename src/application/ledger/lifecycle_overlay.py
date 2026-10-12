@@ -164,8 +164,9 @@ def resolve_account_lifecycle_overlay(
     position_lots: Iterable[Mapping[str, Any]],
     trade_events: Iterable[Mapping[str, Any]] = (),
     effective_void_event_ids: Iterable[str] = (),
+    _include_generation_token_hashes: bool = True,
 ) -> dict[str, Any]:
-    """Resolve every active lifecycle case from one coherent account bundle."""
+    """Resolve cases; the internal fact-check path needs only token bindings."""
 
     account_value = str(account or "").strip().lower()
     if not account_value:
@@ -283,6 +284,7 @@ def resolve_account_lifecycle_overlay(
         lot_rows=lot_rows,
         event_rows=event_rows,
         effective_void_event_ids=voided,
+        include_hashes=_include_generation_token_hashes,
     )
     return {
         **arbitration_payload,
@@ -1111,6 +1113,7 @@ def _case_generation_tokens(
     lot_rows: Sequence[Mapping[str, Any]],
     event_rows: Sequence[Mapping[str, Any]],
     effective_void_event_ids: Sequence[str],
+    include_hashes: bool,
 ) -> list[dict[str, Any]]:
     active_cases_by_id = {
         str(item.get("case_id") or "").strip(): dict(item)
@@ -1135,6 +1138,16 @@ def _case_generation_tokens(
             for dependency_case_id in dependency_ids
             for lot_id in target_manifests.get(dependency_case_id, {})
         }
+        if not include_hashes:
+            out.append(
+                {
+                    "schema_version": LIFECYCLE_GENERATION_TOKEN_SCHEMA,
+                    "case_id": case_id,
+                    "dependency_case_ids": dependency_ids,
+                    "target_lot_ids": sorted(target_lots),
+                }
+            )
+            continue
         dependency_set = set(dependency_ids)
         referenced_legacy_case_ids = {
             str(item.get("referenced_legacy_case_id") or "").strip()

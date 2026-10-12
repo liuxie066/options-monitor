@@ -614,6 +614,7 @@ def validate_position_fact_snapshot_contract(
                 ],
                 position_lots=lifecycle_rows["account_position_lots"],
                 effective_void_event_ids=void_event_ids,
+                _include_generation_token_hashes=False,
             )
         except (TypeError, ValueError):
             reasons.add("position_fact_lifecycle_resolution_inputs_invalid")
