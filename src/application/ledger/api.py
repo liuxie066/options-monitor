@@ -65,6 +65,10 @@ from src.application.ledger.event_codec import (
     valid_void_target_event_id,
 )
 from src.application.ledger.assigned_stock_projection import (
+    WHEEL_READ_MODEL_SCHEMA,
+    build_assigned_stock_projection_from_rows,
+    build_wheel_read_model_from_rows,
+    build_wheel_read_model_with_capacity_from_rows,
     project_assigned_stock_lifecycle_from_rows,
     project_position_lots_and_assigned_stock_from_rows,
 )
@@ -337,6 +341,9 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 from .trade_attribution import (
+    trade_attribution_capacity_check,
+    apply_trade_attribution,
+    build_trade_attribution_view,
     write_trade_attribution_decision,
     read_trade_attribution_decision,
     read_trade_attribution_policy,
@@ -352,6 +359,13 @@ from .trade_attribution import (
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
 __all__ = [
+    "WHEEL_READ_MODEL_SCHEMA",
+    "build_assigned_stock_projection_from_rows",
+    "build_wheel_read_model_from_rows",
+    "build_wheel_read_model_with_capacity_from_rows",
+    "trade_attribution_capacity_check",
+    "apply_trade_attribution",
+    "build_trade_attribution_view",
     "allocate_broker_option_execution",
     "open_option_execution_preview_repo",
     "verify_trade_receipt_projection",
