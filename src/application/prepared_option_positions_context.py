@@ -673,13 +673,14 @@ def prepare_option_positions_contexts(
                             ),
                         }
                     current_projections[account] = current_projection
-                snapshots = decision_state_snapshots_from_rows_many(
-                    {account: rows_by_account[account] for account in accounts},
-                    portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
-                    source_observed_at=observed_at_utc,
-                    current_projections=current_projections,
-                    current_decision_now_ms=lifecycle_now_ms,
-                )
+                with prepared_context_phase("snapshot_build"):
+                    snapshots = decision_state_snapshots_from_rows_many(
+                        {account: rows_by_account[account] for account in accounts},
+                        portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
+                        source_observed_at=observed_at_utc,
+                        current_projections=current_projections,
+                        current_decision_now_ms=lifecycle_now_ms,
+                    )
         except Exception as exc:
             reason = f"coherent_position_projection_unavailable:{type(exc).__name__}"
             for account in accounts:
@@ -689,9 +690,10 @@ def prepare_option_positions_contexts(
         accounts_by_broker: dict[str, list[str]] = {}
         for account in accounts:
             snapshot = snapshots[account]
-            contract_reasons = validate_position_fact_snapshot_contract(
-                snapshot
-            )
+            with prepared_context_phase("snapshot_contract", account=account):
+                contract_reasons = validate_position_fact_snapshot_contract(
+                    snapshot
+                )
             if (
                 snapshot.get("snapshot_status") != "trusted"
                 or snapshot.get("actionable") is not True
