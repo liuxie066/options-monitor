@@ -704,6 +704,9 @@ def test_input_invalid_decision_cannot_seal_as_clean_no_candidate(
                 "symbol": "NVDA",
                 "strategy_mode": "put",
                 "reason_code": "term_matched_rv_unavailable",
+                "scope": "contract",
+                "contract_symbol": "NVDA260918P00090000",
+                "expiration": "2026-09-18",
             }
         ],
     }

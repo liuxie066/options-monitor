@@ -146,9 +146,11 @@ def _store_identity(path: Path) -> dict[str, Any]:
 
 @contextmanager
 def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a query-only connection; callers own its transaction lifetime."""
     uri = f"{path.as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA query_only=ON")
     try:
         yield conn
@@ -520,6 +522,7 @@ def build_position_projection_migration_inventory(
     implementation, timing = _loaded_implementation()
     before = _file_sizes(path)
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         inventory = _inventory_from_conn(
             path,
             conn,
@@ -694,6 +697,34 @@ def _source_commit(root: Path | None = None) -> str | None:
     return source_commit_sha(root, run_cmd=subprocess.run)
 
 
+def _decode_source_bound_checkpoint(
+    row: dict[str, Any],
+    *,
+    source: dict[str, Any],
+    conn: sqlite3.Connection,
+    implementation: str,
+    event_rows: list[dict[str, Any]],
+) -> Any:
+    candidate = _decode_checkpoint(
+        row, source=source, schema_cookie=_schema_cookie(conn), implementation=implementation,
+    )
+    prefix_count = int(row["prefix_event_count"])
+    if not 0 <= prefix_count <= len(event_rows):
+        raise ValueError("checkpoint prefix exceeds source event count")
+    if int(source["source_generation"]) != int(row["source_generation"]) + len(event_rows) - prefix_count:
+        raise ValueError("checkpoint source generation is not strict append")
+    prefix = event_rows[:prefix_count]
+    chain = initial_event_prefix_chain()
+    for item in prefix:
+        chain = extend_event_prefix_chain(chain, item["event_json"])
+    expected_end = (prefix[-1]["trade_time_ms"], prefix[-1]["event_id"]) if prefix else (0, "")
+    if chain != row["prefix_chain_sha256"] or expected_end != (
+        int(row["prefix_end_trade_time_ms"]), str(row["prefix_end_event_id"]),
+    ):
+        raise ValueError("checkpoint prefix binding mismatch")
+    return candidate
+
+
 def _verify_from_conn(
     path: Path,
     conn: sqlite3.Connection,
@@ -773,29 +804,9 @@ def _verify_from_conn(
         decoded = None
         for row in trusted:
             try:
-                candidate = _decode_checkpoint(
-                    row,
-                    source=source,
-                    schema_cookie=_schema_cookie(conn),
-                    implementation=implementation,
+                candidate = _decode_source_bound_checkpoint(
+                    row, source=source, conn=conn, implementation=implementation, event_rows=event_rows,
                 )
-                prefix_count = int(row["prefix_event_count"])
-                if prefix_count > len(event_rows):
-                    raise ValueError("checkpoint prefix exceeds source event count")
-                prefix = event_rows[:prefix_count]
-                chain = initial_event_prefix_chain()
-                for item in prefix:
-                    chain = extend_event_prefix_chain(chain, item["event_json"])
-                expected_end = (
-                    (prefix[-1]["trade_time_ms"], prefix[-1]["event_id"])
-                    if prefix
-                    else (0, "")
-                )
-                if chain != row["prefix_chain_sha256"] or expected_end != (
-                    int(row["prefix_end_trade_time_ms"]),
-                    str(row["prefix_end_event_id"]),
-                ):
-                    raise ValueError("checkpoint prefix binding mismatch")
                 if decoded is None:
                     decoded = candidate
             except (TypeError, ValueError) as exc:
@@ -849,10 +860,10 @@ def _verify_from_conn(
                     and _int_or_missing(head.get("built_lots_generation"))
                     == int(head.get("lots_generation") or 0)
                 ),
-                "fingerprint": bool(
-                    head and str(head.get("projection_fingerprint") or "") == snapshot.fingerprint
-                ),
-                "lot_count": bool(head and int(head.get("lot_count") or 0) == snapshot.lot_count),
+                "content": bool(head and repo.position_projection_head_content_problem(head, snapshot) is None),
+                "fingerprint": bool(head and head.get("projection_fingerprint") == snapshot.fingerprint),
+                "lot_count": bool(head and head.get("lot_count") == snapshot.lot_count),
+                "projector_schema": bool(head and head.get("projector_schema") == POSITION_PROJECTION_SCHEMA),
                 "implementation": bool(
                     head
                     and head.get("projector_implementation_fingerprint") == implementation
@@ -867,10 +878,6 @@ def _verify_from_conn(
             "implementation": source.get("projector_implementation_fingerprint") == implementation,
             "schema_cookie": _int_or_missing(source.get("sqlite_schema_cookie"))
             == _schema_cookie(conn),
-            "last_full_verified_generation": _int_or_missing(
-                source.get("last_full_verified_source_generation")
-            )
-            == int(source.get("source_generation") or 0),
         }
         if not all(source_checks.values()):
             reasons.append("source_state_mismatch")
@@ -944,6 +951,11 @@ def _verify_from_conn(
         "full_oracle_parity": parity,
         "runtime_shadow": shadow_result,
         "checkpoint": checkpoint_summary,
+        "last_full_verified_source_generation": source.get("last_full_verified_source_generation") if source else None,
+        "last_full_verification_current": bool(
+            source and _int_or_missing(source.get("last_full_verified_source_generation"))
+            == int(source.get("source_generation") or 0)
+        ),
         "heads": head_results,
         "resource_failures": [
             reason
@@ -968,6 +980,7 @@ def verify_position_projection_migration(
     wall_start = time.perf_counter_ns()
     cpu_start = time.process_time_ns()
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         result = _verify_from_conn(
             path,
             conn,
@@ -1144,6 +1157,7 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
     path = _store_path(sqlite_path)
     implementation, timing = _loaded_implementation()
     with _read_only_connection(path) as conn:
+        conn.execute("BEGIN")
         source = _source_state(conn)
         execution_identity_index_gaps = []
         for table in EXECUTION_IDENTITY_INDEXES:
@@ -1161,7 +1175,23 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
             if _table_exists(conn, "position_projection_heads")
             else []
         )
-        reasons: list[str] = []
+        columns_closed = not any(
+            details["missing"] or details["unclassified"] for details in _column_contract(conn).values()
+        )
+        inventory = (
+            _inventory_from_conn(path, conn, implementation=implementation, implementation_timing=timing)
+            if source is not None and columns_closed else None
+        )
+        reasons = list(inventory["readiness_reasons"]) if inventory else []
+        if source is not None and not columns_closed:
+            reasons.append("column_contract_open")
+        # Execution identity indexes have a separate fallback/gap contract.
+        reasons = [reason for reason in reasons if reason != "execution_identity_index_definition_mismatch"]
+        if inventory and not (
+            set(inventory["required_indexes"]["missing"])
+            - {entry[0] for entry in EXECUTION_IDENTITY_INDEXES.values()}
+        ):
+            reasons = [reason for reason in reasons if reason != "required_indexes_missing"]
         lot_columns = set(_column_names(conn, "position_lots"))
         if not lot_columns:
             reasons.append("position_lots_table_missing")
@@ -1176,10 +1206,6 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
                 reasons.append("projector_implementation_mismatch")
             if _int_or_missing(source.get("sqlite_schema_cookie")) != _schema_cookie(conn):
                 reasons.append("sqlite_schema_cookie_mismatch")
-            if _int_or_missing(source.get("last_full_verified_source_generation")) != int(
-                source.get("source_generation") or 0
-            ):
-                reasons.append("last_full_verification_stale")
         if len(checkpoints) > 3:
             reasons.append("checkpoint_k_exceeded")
         trusted_checkpoints = [
@@ -1202,20 +1228,26 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
             max_checkpoint_state_bytes * 3 * 1.1
         ):
             reasons.append("checkpoint_steady_state_space_exceeded")
-        projected_accounts = (
-            {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT DISTINCT account FROM position_lots "
-                    "WHERE account IS NOT NULL AND account<>''"
-                )
-            }
-            if "account" in lot_columns
-            else set()
-        )
-        head_accounts = {str(row.get("account") or "") for row in heads}
-        if projected_accounts != head_accounts:
+        repo = _repository(path)
+        if (
+            "account" in lot_columns and _table_exists(conn, "position_projection_heads")
+            and not repo.position_projection_heads_cover_lots(conn=conn)
+        ):
             reasons.append("projection_head_account_set_mismatch")
+        if inventory and not {
+            item["account"] for item in inventory["accounts"]["canonical_account_mappings"]
+        }.issubset({str(head.get("account") or "") for head in heads}):
+            reasons.append("projection_head_account_set_mismatch")
+        content_ready = inventory is not None and not reasons
+        if source is not None and content_ready:
+            event_rows = _load_event_rows(conn)
+            for checkpoint in trusted_checkpoints:
+                try:
+                    _decode_source_bound_checkpoint(
+                        checkpoint, source=source, conn=conn, implementation=implementation, event_rows=event_rows,
+                    )
+                except (TypeError, ValueError):
+                    reasons.append("checkpoint_integrity_failure")
         for head in heads:
             account = str(head.get("account") or "")
             if head.get("status") != "trusted":
@@ -1232,6 +1264,11 @@ def position_projection_migration_status(sqlite_path: str | Path) -> dict[str, A
                 reasons.append(f"head_projector_schema_mismatch:{account}")
             if head.get("projector_implementation_fingerprint") != implementation:
                 reasons.append(f"head_implementation_mismatch:{account}")
+            if content_ready:
+                snapshot = repo.position_projection_account_snapshot(account, conn=conn)
+                problem = repo.position_projection_head_content_problem(head, snapshot)
+                if problem is not None:
+                    reasons.append(f"{problem}:{account}")
         fingerprint_scope = (
             conn.execute(
                 "SELECT count(*),coalesce(sum(length(fields_json)),0) FROM position_lots"

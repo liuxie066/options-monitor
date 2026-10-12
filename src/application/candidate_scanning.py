@@ -77,6 +77,10 @@ def _load_required_data_rows(
     frames: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     supplied = frames.get(symbol) if frames is not None else None
+    if frames is not None and supplied is None:
+        from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
+
+        raise FrozenRequiredDataUnavailable(symbol=symbol, reason="symbol_entry_missing")
     if supplied is not None:
         df = supplied.copy()
     else:
