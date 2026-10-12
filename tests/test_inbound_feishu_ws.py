@@ -386,7 +386,7 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
             app_secret="secret_1",
             audit_db=audit_argument,
         ),
-        reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0},
+        reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0, "data": {"message_id": "card-receipt"}},
     )
 
     assert card_retry["ok"] is True
@@ -405,7 +405,7 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
             app_secret="secret_1",
             audit_db=audit_argument,
         ),
-        reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0},
+        reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0, "data": {"message_id": "text-receipt"}},
     )
 
     assert legacy_retry["ok"] is True
@@ -483,7 +483,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
             audit_db=str(tmp_path / "audit.sqlite3"),
             bot_enabled=True,
         ),
-        reply_fn=lambda **_kwargs: {"code": 0},
+        reply_fn=lambda **_kwargs: {"code": 0, "data": {"message_id": "reply-assistant"}},
         execute_tool_fn=_execute,
     )
 
@@ -673,7 +673,7 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
-        return {"code": 0}
+        return {"code": 0, "data": {"message_id": "write-gate-receipt"}}
 
     out = handle_feishu_ws_event(
         _message_payload(
@@ -877,13 +877,15 @@ def test_feishu_ws_check_requires_config_scope() -> None:
 def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     reactions: list[dict[str, Any]] = []
+    replied = threading.Event()
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     def _reply(**_kwargs: Any) -> dict[str, Any]:
-        return {"code": 0}
+        replied.set()
+        return {"code": 0, "data": {"message_id": "worker-receipt"}}
 
     def _reaction(**kwargs: Any) -> dict[str, Any]:
         reactions.append(dict(kwargs))
@@ -891,6 +893,7 @@ def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
 
     def _start_client(**kwargs: Any) -> None:
         kwargs["on_event"](_message_payload(text="/status"))
+        assert replied.wait(2)
 
     serve_feishu_ws(
         _settings(audit_db=str(tmp_path / "audit.sqlite3")),

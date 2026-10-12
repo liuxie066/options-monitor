@@ -543,14 +543,6 @@ class BotHostStore:
             capability_cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=REPLY_CAPABILITY_TTL_SECONDS)
             ).isoformat()
-            conn.execute(
-                """
-                UPDATE bot_reply_outbox
-                SET status = 'expired', payload_json = '{}', last_error = NULL, updated_at = ?
-                WHERE status IN ('pending', 'retryable_failed') AND created_at <= ?
-                """,
-                (utc_now_iso(), capability_cutoff),
-            )
             delivery_cutoff = (
                 datetime.fromisoformat(str(now).replace("Z", "+00:00"))
                 - timedelta(seconds=REPLY_DELIVERY_LEASE_SECONDS)
@@ -563,6 +555,15 @@ class BotHostStore:
                 WHERE status = 'delivering' AND updated_at <= ?
                 """,
                 (now, now, delivery_cutoff),
+            )
+            # Recovered leases must pass the same capability TTL as pending replies.
+            conn.execute(
+                """
+                UPDATE bot_reply_outbox
+                SET status = 'expired', payload_json = '{}', last_error = NULL, updated_at = ?
+                WHERE status IN ('pending', 'retryable_failed') AND created_at <= ?
+                """,
+                (utc_now_iso(), capability_cutoff),
             )
             if delivery_key:
                 row = conn.execute(

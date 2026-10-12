@@ -65,6 +65,7 @@ from src.application.file_locks import single_instance_lock
 
 DEFAULT_FEISHU_REPLY_MAX_CHARS = 3500
 DEFAULT_FEISHU_WS_QUEUE_SIZE = 100
+FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS = 1.0
 
 ReplyFn = Callable[..., dict[str, Any]]
 ReactionFn = Callable[..., dict[str, Any]]
@@ -522,14 +523,26 @@ class _FeishuWsWorker:
         return "accepted"
 
     def _run(self) -> None:
-        while True:
+        next_outbox_retry = 0.0
+        while not self._stop_requested.is_set():
+            if time.monotonic() >= next_outbox_retry:
+                try:
+                    _retry_pending_feishu_reply(
+                        settings=self._settings,
+                        reply_fn=self._reply_fn,
+                        stop_requested=self._stop_requested,
+                    )
+                except Exception as exc:
+                    LOG.warning("failed to recover Feishu reply error_type=%s", type(exc).__name__)
+                finally:
+                    next_outbox_retry = time.monotonic() + FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS
             try:
                 job = self._queue.get(timeout=0.1)
             except queue.Empty:
                 if self._stop_requested.is_set():
                     return
                 continue
-            if job is None:
+            if job is None or self._stop_requested.is_set():
                 return
             process_started = time.monotonic()
             status = "ok"
@@ -874,7 +887,15 @@ def _maybe_reply(
     }
 
 
-def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn) -> dict[str, Any]:
+def _retry_pending_feishu_reply(
+    *, settings: FeishuWsSettings, reply_fn: ReplyFn, stop_requested: threading.Event | None = None,
+) -> dict[str, Any]:
+    if not settings.reply_enabled:
+        return {"attempted": False, "reason": "reply_disabled"}
+    if not (settings.app_id and settings.app_secret):
+        return {"attempted": False, "reason": "missing_app_credentials"}
+    if stop_requested is not None and stop_requested.is_set():
+        return {"attempted": False, "reason": "stopped"}
     store = BotHostStore(InboundAuditStore(settings.audit_db).path)
     record = store.claim_reply(channel="feishu")
     if record is None:
@@ -882,6 +903,9 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
     delivery_key = str(record.get("delivery_key") or "")
     try:
         envelope = _reply_envelope_from_outbox_record(record)
+        if stop_requested is not None and stop_requested.is_set():
+            store.mark_reply_failed(delivery_key, error="worker stopped before send", retryable=True)
+            return {"attempted": False, "reason": "stopped", "delivery_key": delivery_key}
         delivery = _deliver_feishu_reply(
             settings=settings,
             reply_fn=reply_fn,
@@ -1120,29 +1144,14 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
 
 
 def _reply_api_message_id(api_response: Any) -> str | None:
-    response = _dict(api_response)
-    data = _dict(response.get("data"))
-    result = _dict(response.get("result"))
-    return _first_text(
-        response.get("message_id"),
-        response.get("messageId"),
-        response.get("id"),
-        response.get("client_msg_id"),
-        data.get("message_id"),
-        data.get("messageId"),
-        data.get("id"),
-        data.get("client_msg_id"),
-        result.get("message_id"),
-        result.get("messageId"),
-        result.get("id"),
-        result.get("client_msg_id"),
-    )
+    message_id = _dict(_dict(api_response).get("data")).get("message_id")
+    return message_id.strip() if isinstance(message_id, str) and message_id.strip() else None
 
 
 def _reply_api_success(api_response: Any) -> bool:
     response = _dict(api_response)
     code = response.get("code")
-    return not isinstance(code, int) or code == 0
+    return type(code) is int and code == 0 and _reply_api_message_id(response) is not None
 
 
 def _reply_api_code(api_response: Any) -> int | None:

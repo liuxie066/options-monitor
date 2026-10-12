@@ -149,6 +149,14 @@ pending deterministic Control operation. Channel replies use the Host outbox so
 temporary delivery failure is retryable and the same delivery key is not sent
 twice.
 
+Feishu WebSocket worker 在启动及空闲期间恢复到期回复，自主恢复每秒最多处理一条，
+沿用 Host outbox 的 backoff、delivery lease、24 小时 capability TTL 与冻结正文/UUID。
+`--no-reply` 和缺少 app 凭据均阻止旧回复领取；不需要新入站消息触发恢复。
+只有整数 `code=0` 且 `data.message_id` 为非空字符串才确认送达并清除 payload；
+缺失或模糊回执保留原回复与发送身份，不使用 client UUID 代替 provider 回执。
+worker 停止后不再启动恢复或处理排队事件；已经进入处理/transport 的调用按现有结果结算，
+停止无法撤回已发请求。过期 lease 回收的回复也必须通过 capability TTL。
+
 ## Non-Goals
 
 Do not add:
