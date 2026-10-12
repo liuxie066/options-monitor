@@ -1429,3 +1429,9 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 ### 资金与指派查询的只读边界
 
 资金余量与指派情景经 `src/application/ledger/api.py::read_position_query_ledger` 读取既有 SQLite。事件、持仓 lot 和账户生命周期事实在同一只读事务冻结，复用既有投影及决策核验；查询不初始化账本、不取得应用写锁、不恢复投影。缺库、缺 schema、坏事件或投影不一致明确返回不可用；只有已验证的空账本表示零占用。账户现金仍独立评价，账本不可用时不计算扣占用后的余量。SQLite 的 WAL/SHM 协调与业务写入不同；该读取不使用会忽略活动 WAL 的 immutable 模式。主动恢复与写入仍由原受控流程负责。
+
+### 持仓事实快照校验与耗时
+
+`decision_snapshot.py` 的持仓事实契约校验复用账本生命周期解析器，重算决策事实、仲裁和 token 的依赖案例及目标 lot 绑定；仅跳过比对时会丢弃的期望侧 generation-token 哈希。快照构建仍生成完整 token，校验仍检查提供的 resolution 自身哈希、token 格式和完整快照指纹；没有缩减原始证据或改变失败原因。
+
+真实持仓准备入口的 `prepared_context_phase` 增加共享的 `snapshot_build` 和逐账户的 `snapshot_contract`。前者位于 `projection` 内，后者覆盖校验调用；耗时是包含子阶段的墙钟时间，不可相加，也不代表数据可信。CPU 热点和优化收益应另做离线分析，再由正常运行样本验证生产收益。
