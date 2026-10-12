@@ -882,7 +882,6 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(
     response = handle_service_update_command(args, service_drift_fn=lambda **_kwargs: applied)
     assert response["ok"] is True
     from src.interfaces.cli import main as cli
-    from src.application import service_upgrade as upgrade
 
     for result, expected_code in ((before, 2), (applied, 0)):
         monkeypatch.setattr(cli, "service_drift", lambda **_kwargs: result)
@@ -891,18 +890,6 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(
         payload = json.loads(stdout)
         assert payload["ok"] is (expected_code == 0)
 
-        def child(command, **_kwargs):
-            return subprocess.CompletedProcess(command, expected_code, stdout=stdout, stderr="")
-
-        kwargs = dict(repo_link=repo, target_dir=repo, runtime=runtime,
-                      activation_policy="ensure-active", run_cmd=child)
-        if expected_code:
-            with pytest.raises(upgrade.ServiceTransitionError):
-                upgrade._reconcile_services_from_current_release(**kwargs)
-        else:
-            reconciled = upgrade._reconcile_services_from_current_release(**kwargs)
-            assert upgrade._service_reconcile_failed(reconciled) is False
-            assert reconciled["summary"]["status"] == "warn"
     assert applied["extra_installed_units"] == sorted(custom)
     assert set(applied["installed_units"]) == set(original_units) - nonunits - {retired}
     assert not (systemd_root / retired).exists()

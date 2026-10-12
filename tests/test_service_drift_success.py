@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 
 import pytest
 
 from src.application.service_drift import (
     _drift_summary, _service_drift_apply_failed, _summary_with_apply_errors,
 )
-from src.application.service_upgrade import _service_reconcile_failed
+from src.application.service_upgrade import (
+    ServiceTransitionError, _reconcile_services_from_current_release, _service_reconcile_failed,
+)
 from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
 
@@ -85,3 +89,17 @@ def test_consumers_use_owner_boolean_not_status(tmp_path, summary, expected_ok):
     args = parser.parse_args(["service", "drift", "--runtime-root", str(tmp_path)])
     response = handle_service_update_command(args, service_drift_fn=lambda **_: result)
     assert response["ok"] is expected_ok
+    exit_code = 0 if expected_ok else 2
+
+    def child(command, **_kwargs):
+        return subprocess.CompletedProcess(command, exit_code, stdout=json.dumps(response), stderr="")
+
+    kwargs = dict(repo_link=tmp_path, target_dir=tmp_path, runtime=tmp_path,
+                  activation_policy="ensure-active", run_cmd=child)
+    if expected_ok:
+        reconciled = _reconcile_services_from_current_release(**kwargs)
+        assert _service_reconcile_failed(reconciled) is False
+        assert reconciled["summary"]["status"] == "warn"
+    else:
+        with pytest.raises(ServiceTransitionError):
+            _reconcile_services_from_current_release(**kwargs)
