@@ -836,6 +836,7 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(
     }
     nonunits = {
         f"{retired}.bak",
+        "options-monitor-tick-us.service.om-backup-0123456789abcdef",
         "options-monitor-tick-us.service.disabled",
         "options-monitor-tick-us.timer~",
         "options-monitor-notes.txt",

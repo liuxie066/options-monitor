@@ -256,6 +256,7 @@ def test_feature_bindings_retire_disabled_dropins_with_backup(instance, tmp_path
     assert 'feishu.bot.app_secret' in install['required_credentials']
     dropin = ctx['unit_root'] / 'options-monitor-tick-us.service.d/zzzz-secret-credentials.conf'
     old_content = dropin.read_bytes()
+    original_dropins = {path: path.read_bytes() for path in ctx['unit_root'].glob('*.service.d/zzzz-secret-credentials.conf')}
     with pytest.raises(AgentToolError, match='SERVICE_CREDENTIALS_MISSING'):
         apply('start', ctx)
     rewrite_notifications(instance, False)
@@ -266,7 +267,13 @@ def test_feature_bindings_retire_disabled_dropins_with_backup(instance, tmp_path
     assert result['ok'] and not dropin.exists()
     operation = next(item for item in result['operations'] if item.get('path') == str(dropin))
     assert Path(operation['backup_path']).read_bytes() == old_content
+    assert Path(operation['backup_path']).parent == ctx['unit_root'] / '.om-service-backups' / dropin.parent.name
     assert operation['readback'] == 'matched'
+    backups = {Path(item['path']): Path(item['backup_path']) for item in result['operations'] if item.get('operation') == 'remove'}
+    assert len(original_dropins) > 1 and set(backups) == set(original_dropins)
+    assert len(set(backups.values())) == len(backups)
+    for path, content in original_dropins.items():
+        assert backups[path].read_bytes() == content
     assert apply('start', ctx)['ok']
 
 
@@ -593,3 +600,151 @@ def test_protected_service_directory_returns_actionable_error_before_any_change(
     assert '--deploy-user' in failure.value.message
     assert not manager.calls
     assert protected.read_bytes() == before
+
+
+def changed_definition(instance, tmp_path, target='systemd'):
+    ctx, manager = context(instance, tmp_path, target)
+    installed = apply('install', ctx)
+    item = next(item for item in installed['files'] if item['kind'] in {'systemd_service', 'launchd_plist'})
+    path = Path(item['path'])
+    if target == 'systemd':
+        path.write_bytes(path.read_bytes() + b'\n# previously installed definition\n')
+    else:
+        payload = plistlib.loads(path.read_bytes())
+        payload['LegacyNote'] = 'previously installed definition'
+        path.write_bytes(plistlib.dumps(payload))
+    return ctx, manager, path, path.read_bytes()
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_changed_unit_reinstall_uses_private_backup_and_same_preview_path(instance, tmp_path, target):
+    ctx, manager, path, original = changed_definition(instance, tmp_path, target)
+    preview = service_lifecycle('install', **ctx)
+    item = next(item for item in preview['files'] if item['path'] == str(path))
+    backup = Path(item['backup_path'])
+    assert backup.parent == ctx['unit_root'] / '.om-service-backups'
+    assert not backup.parent.exists()
+    assert path.read_bytes() == original
+    result = service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    operation = next(item for item in result['operations'] if item.get('path') == str(path))
+    assert result['ok'] and operation['readback'] == 'matched'
+    assert operation['backup_path'] == str(backup)
+    assert backup.read_bytes() == original
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert backup.parent.stat().st_mode & 0o777 == 0o700
+    assert backup.stat().st_uid == path.stat().st_uid
+    assert not list(ctx['unit_root'].glob('*.om-backup-*'))
+    before = {p: p.read_bytes() for p in backup.parent.rglob('*') if p.is_file()}
+    assert apply('install', ctx)['ok']
+    assert {p: p.read_bytes() for p in backup.parent.rglob('*') if p.is_file()} == before
+    assert not any(call[1] in {'enable', 'bootstrap', 'kickstart'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('hazard', ['symlink_parent', 'writable_parent', 'directory_leaf', 'public_leaf', 'symlink_leaf'])
+def test_unsafe_relocated_backup_is_rejected_without_definition_write(instance, tmp_path, hazard):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    if hazard == 'symlink_parent':
+        victim = tmp_path / 'victim'; victim.mkdir()
+        backup.parent.symlink_to(victim, target_is_directory=True)
+    else:
+        backup.parent.mkdir(mode=0o700)
+        if hazard == 'writable_parent':
+            backup.parent.chmod(0o777)
+        elif hazard == 'directory_leaf':
+            backup.mkdir()
+        elif hazard == 'symlink_leaf':
+            victim = tmp_path / 'victim'; victim.write_bytes(original)
+            backup.symlink_to(victim)
+        else:
+            backup.write_bytes(original); backup.chmod(0o644)
+    with pytest.raises(AgentToolError, match='SERVICE_PATH_UNSAFE|SERVICE_IDENTITY_MISMATCH'):
+        service_lifecycle('install', **ctx)
+    assert path.read_bytes() == original
+
+
+def test_backup_change_after_preview_invalidates_confirmation(instance, tmp_path):
+    ctx, manager, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    backup.parent.mkdir(mode=0o700); backup.write_bytes(original); backup.chmod(0o600)
+    with pytest.raises(AgentToolError, match='STALE_PREVIEW'):
+        service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert path.read_bytes() == original and backup.read_bytes() == original
+    manager.calls.clear()
+    result = apply('install', ctx)
+    assert result['ok'] and backup.read_bytes() == original
+
+
+def test_backup_survives_definition_write_failure_and_retry(instance, tmp_path, monkeypatch):
+    import src.application.service_lifecycle as module
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    writer = module._atomic_file
+    def fail_definition(destination, *args, **kwargs):
+        if destination == path:
+            raise OSError('injected definition write failure')
+        return writer(destination, *args, **kwargs)
+    monkeypatch.setattr(module, '_atomic_file', fail_definition)
+    result = apply('install', ctx)
+    assert not result['ok'] and result['status'] == 'failed'
+    assert backup.read_bytes() == original and path.read_bytes() == original
+    assert result['operations'][-1]['readback'] == 'unverified'
+    monkeypatch.setattr(module, '_atomic_file', writer)
+    assert apply('install', ctx)['ok']
+    assert backup.read_bytes() == original
+
+
+def test_conflicting_backup_is_not_overwritten(instance, tmp_path):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    backup.parent.mkdir(mode=0o700); backup.write_bytes(b'preserve conflicting backup'); backup.chmod(0o600)
+    result = apply('install', ctx)
+    assert not result['ok'] and result['status'] == 'failed'
+    assert backup.read_bytes() == b'preserve conflicting backup' and path.read_bytes() == original
+
+
+def test_cli_reinstall_exposes_relocated_backup_receipt(instance, tmp_path):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'], run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    command = ['service', 'install', '--runtime-root', str(instance), '--target', 'systemd']
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    data = preview['data']
+    backup = next(item['backup_path'] for item in data['files'] if item['path'] == str(path))
+    result = handle_service_update_command(parse_args(command + ['--confirm', '--expected-preview-sha256', data['preview_sha256']]), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    assert result['ok']
+    operation = next(item for item in result['data']['operations'] if item.get('path') == str(path))
+    assert operation['backup_path'] == backup and Path(backup).read_bytes() == original
+
+
+def test_reinstall_preserves_old_adjacent_backup_and_profile_location(instance, tmp_path):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    profile = instance / 'service.profile.json'
+    payload = json.loads(profile.read_text()); payload['old_note'] = 'retain original profile'
+    profile.write_text(json.dumps(payload))
+    original_profile = profile.read_bytes()
+    preview = service_lifecycle('install', **ctx)
+    new_backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    legacy = ctx['unit_root'] / new_backup.name
+    legacy.write_bytes(b'preserve historic recovery bytes')
+    result = apply('install', ctx)
+    assert result['ok'] and legacy.read_bytes() == b'preserve historic recovery bytes'
+    assert new_backup.read_bytes() == original
+    operation = next(item for item in result['operations'] if item.get('path') == str(profile))
+    assert Path(operation['backup_path']).parent == instance
+    assert Path(operation['backup_path']).read_bytes() == original_profile
+
+
+def test_cancelled_reinstall_leaves_definition_and_no_backup_directory(instance, tmp_path):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    result = service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'], cancelled=lambda: True)
+    assert result['status'] == 'cancelled' and not result['changed']
+    assert path.read_bytes() == original
+    assert not (ctx['unit_root'] / '.om-service-backups').exists()
