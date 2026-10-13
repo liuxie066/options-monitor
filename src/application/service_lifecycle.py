@@ -714,6 +714,16 @@ def service_lifecycle(
                     if not result["ok"]:
                         out.update(ok=False, status="unknown" if result.get("outcome") == "unknown" else "failed")
             out["after"] = {unit["name"]: _query(unit["name"], target=provider, uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd) for unit in units}
+            loaded_states = {"running", "loaded-idle", "loaded-not-running"} if provider == "launchd" else {"running", "loaded-idle", "activating", "failed", "deactivating"}
+            if out["ok"] and not all(
+                (provider == "launchd" and row["state"] == "absent") or (
+                    row["state"] in loaded_states and
+                    row["definition_path"] == unit["path"] and
+                    (unit["name"].endswith(".timer") or row["runtime_root"] == str(runtime))
+                )
+                for unit in units for row in (out["after"][unit["name"]],)
+            ):
+                out.update(ok=False, status="unverified")
         else:
             for command in commands:
                 if cancelled and cancelled():
