@@ -334,19 +334,23 @@ def test_required_pr_and_release_guardrail_verifies_complete_distributed_suite()
     assert "pytest-xdist" in requirements
     assert "pytest-xdist==3.8.0" in constraints
     assert text.index("tests/run_smoke.py") < text.index("./om-agent spec")
-    assert "shard: [0, 1, 2, 3, 4, 5]" in text
+    assert "shard: [0, 1, 2, 3, 4, 5, 6, 7]" in text
     assert "fail-fast: false" in text
-    assert '-p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 6' in text
+    assert '-p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 8' in text
     assert '--ci-revision "$GITHUB_SHA"' in text
     gate = text.split("\n  guardrails:", 1)[1].split("\n  release:", 1)[0]
     assert "needs: [plan, checks, regression]" in gate
     assert "if: ${{ always() }}" in gate
     assert 'test "$PLAN_RESULT" = success' in gate
+    assert 'test "$PLAN_RESULT" = skipped' in gate
+    assert 'if [ "$EVENT_NAME" = pull_request ]; then' in gate
+    plan_job = text.split("\n  plan:", 1)[1].split("\n  checks:", 1)[0]
+    assert "if: github.event_name == 'push'" in plan_job
     assert 'test "$CHECKS_RESULT" = success' in gate
     assert 'test "$REGRESSION_RESULT" = success' in gate
     assert 'test "$REGRESSION_RESULT" = skipped' in gate
     assert 'python .github/ci/regression_manifest.py' in gate
-    assert '--count 6 --revision "$GITHUB_SHA"' in gate
+    assert '--count 8 --revision "$GITHUB_SHA"' in gate
 
 
 def test_release_workflow_pins_and_gates_pi_runtime() -> None:

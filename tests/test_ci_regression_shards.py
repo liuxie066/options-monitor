@@ -116,3 +116,30 @@ def test_shard_refuses_filtered_discovery(tmp_path):
     assert result.returncode != 0
     assert "unfiltered automatic discovery" in result.stderr
     assert receipt is None
+
+
+@pytest.mark.parametrize("event,plan,checks,regression,required,success", [
+    ("pull_request", "skipped", "success", "success", "true", True),
+    ("pull_request", "skipped", "success", "failure", "true", False),
+    ("pull_request", "skipped", "success", "cancelled", "true", False),
+    ("pull_request", "skipped", "success", "skipped", "true", False),
+    ("pull_request", "skipped", "failure", "success", "true", False),
+    ("push", "success", "success", "skipped", "false", True),
+    ("push", "success", "success", "success", "true", True),
+    ("push", "failure", "success", "skipped", "false", False),
+    ("push", "skipped", "success", "skipped", "false", False),
+    ("push", "success", "success", "skipped", "true", False),
+])
+def test_actual_required_gate_shell_rejects_failed_or_cancelled_dependencies(
+    event, plan, checks, regression, required, success,
+):
+    import yaml
+
+    workflow = yaml.safe_load((CI.parent / "workflows" / "guardrails.yml").read_text())
+    command = workflow["jobs"]["guardrails"]["steps"][0]["run"]
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], env={
+        **os.environ, "EVENT_NAME": event, "PLAN_RESULT": plan,
+        "CHECKS_RESULT": checks, "REGRESSION_RESULT": regression,
+        "REGRESSION_REQUIRED": required,
+    }, capture_output=True, text=True, timeout=5)
+    assert (result.returncode == 0) is success

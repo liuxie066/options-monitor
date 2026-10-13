@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   plan:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.release.outputs.tag }}
@@ -105,7 +106,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -133,7 +134,7 @@ jobs:
           CI_SHARD: ${{ matrix.shard }}
         run: |
           ./.venv/bin/python -m pytest -vv -n 4 --dist loadfile --max-worker-restart=0 --durations=25 \
-            -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 6 \
+            -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 8 \
             --ci-manifest "$RUNNER_TEMP/regression/manifest.json" --ci-revision "$GITHUB_SHA" \
             -o tmp_path_retention_policy=failed \
             -o faulthandler_timeout=60 2>&1 | tee "$RUNNER_TEMP/full-regression.log"
@@ -159,12 +160,17 @@ jobs:
     steps:
       - name: Require successful checks and regression
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PLAN_RESULT: ${{ needs.plan.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           REGRESSION_RESULT: ${{ needs.regression.result }}
           REGRESSION_REQUIRED: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
         run: |
-          test "$PLAN_RESULT" = success
+          if [ "$EVENT_NAME" = pull_request ]; then
+            test "$PLAN_RESULT" = skipped
+          else
+            test "$PLAN_RESULT" = success
+          fi
           test "$CHECKS_RESULT" = success
           if [ "$REGRESSION_REQUIRED" = true ]; then
             test "$REGRESSION_RESULT" = success
@@ -184,7 +190,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
         run: |
           python .github/ci/regression_manifest.py "$RUNNER_TEMP/regression-receipts" \
-            --count 6 --revision "$GITHUB_SHA"
+            --count 8 --revision "$GITHUB_SHA"
 
   release:
     needs: guardrails
