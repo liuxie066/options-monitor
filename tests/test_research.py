@@ -260,7 +260,7 @@ def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Pat
             )
 
 
-def test_storage_cli_real_owners_after_expired_candidate_relocation(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_storage_cli_real_owners_after_expired_candidate_relocation(storage_disk_capacity, monkeypatch, tmp_path: Path, capsys) -> None:
     from src.application.research import storage_baseline
     from src.interfaces.cli.main import main
     from tests.test_research_storage_baseline import (

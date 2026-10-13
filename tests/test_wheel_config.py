@@ -244,3 +244,40 @@ def test_detect_wheel_policy_drift_ignores_unusable_inputs() -> None:
     assert detect_wheel_policy_drift(None, _v2_config(), market="us") is None
     assert detect_wheel_policy_drift(_v2_config(), None, market="us") is None
     assert detect_wheel_policy_drift(_v2_config(), _v2_config(), market="eu") is None
+
+
+def test_pure_wheel_configuration_has_one_domain_owner():
+    from domain.domain.wheel import config as owner
+    from src.application.wheel import config as facade
+    from src.application.ledger import wheel_commands
+
+    for name in owner.__all__:
+        assert getattr(facade, name) is getattr(owner, name), name
+    assert wheel_commands.require_wheel_activation is owner.require_wheel_activation
+
+
+@pytest.mark.parametrize("invalid", [None, "account", "symbol", "policy", "window", "descriptor"])
+def test_activation_requirement_uses_shared_readiness_without_mutating_inputs(invalid):
+    from copy import deepcopy
+    from domain.domain.wheel.config import require_wheel_activation
+
+    descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
+    arguments = dict(durable_window=deepcopy(descriptor), market="us", branch={"symbol": "NVDA"},
+        activation_descriptor=deepcopy(descriptor), account_configured=True, policy_sha256=descriptor["policy_hash"])
+    if invalid == "account":
+        arguments["account_configured"] = False
+    elif invalid == "symbol":
+        arguments["branch"] = {"symbol": "0700.HK"}
+    elif invalid == "policy":
+        arguments["policy_sha256"] = "f" * 64
+    elif invalid == "window":
+        arguments["durable_window"] = None
+    elif invalid == "descriptor":
+        arguments["activation_descriptor"] = None
+    before = deepcopy(arguments)
+    if invalid:
+        with pytest.raises(ValueError, match="wheel_disabled"):
+            require_wheel_activation(**arguments)
+    else:
+        assert require_wheel_activation(**arguments) is None
+    assert arguments == before
