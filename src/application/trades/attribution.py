@@ -91,6 +91,25 @@ def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], acco
         "capacity_observation": observation, "combo_mode": combo_reconciliation_mode_for_account(config, account=account)}
 
 
+def observe_combo_confirmation_receipt_route(
+    *, config: Mapping[str, Any], account: str, runtime_root: Path,
+) -> dict[str, Any]:
+    from src.application.trades.lifecycle_batch_dispatcher import resolve_lifecycle_receipt_dispatch_scope
+    from src.application.trades.receipt import resolve_trade_lifecycle_notification_batch_route
+
+    scope = resolve_lifecycle_receipt_dispatch_scope(dict(config.get("trade_intake") or {}))
+    if account not in scope["allowed_accounts"]:
+        return {"route_available": False, "reason": "account_receipt_disabled"}
+    try:
+        route = resolve_trade_lifecycle_notification_batch_route(config=dict(config), base=runtime_root)
+        return {key: route.get(key) for key in (
+            "route_available", "provider", "channel", "target_fingerprint",
+            "route_fingerprint", "attribution_route_key",
+        )}
+    except Exception as exc:
+        return {"route_available": False, "reason": "receipt_route_unavailable:" + type(exc).__name__}
+
+
 def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mapping[str, Any],
     runtime_root: Path, expected_input_hash: str, request_id: str, actor: str, apply_changes: bool,
     option_lot_id: str | None = None, wheel_branch_id: str | None = None, stock_lot_id: str | None = None,
@@ -133,7 +152,9 @@ def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mappi
         context = read_trade_attribution_context(repo, config=config, account=account, runtime_root=runtime_root)
     result = apply_trade_attribution(repo, account=account, execution_key=facts[0]["execution_key"],
         candidate_id=candidate_id, expected_input_hash=expected_input_hash, request_id=request_id,
-        actor=actor, apply_changes=apply_changes, manual=True, reference=reference, **context)
+        actor=actor, apply_changes=apply_changes, manual=True, reference=reference,
+        confirmation_receipt_route=(observe_combo_confirmation_receipt_route(
+            config=config, account=account, runtime_root=runtime_root) if inference_id else None), **context)
     return {**result, "attribution_status": result["status"], "dry_run": not apply_changes,
         "request_id": request_id, "option_record_id": option_lot_id,
         "event_id": result["proof_event_ids"][0],
@@ -209,7 +230,10 @@ def _reconcile_trade_attribution_batch(
                 applied = apply_trade_attribution(repo, account=account, market=market, config=config,
                     execution_key=current["execution_key"], candidate_id=current["selected_candidate_id"],
                     expected_input_hash=current["input_hash"], request_id=request_id, actor="trade_intake:attribution_rule",
-                    combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode, stop_event=stop_event)
+                    combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode, stop_event=stop_event,
+                    confirmation_receipt_route=(observe_combo_confirmation_receipt_route(
+                        config=config, account=account, runtime_root=runtime_root)
+                        if current["selected_candidate_id"].startswith("combo:") else None))
                 committed = read_trade_attribution_snapshot(repo, account=account, market=market)
                 after_view = build_trade_attribution_view(committed, config=config, account=account, market=market,
                     now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)

@@ -1801,6 +1801,7 @@ def _build_lifecycle_receipt_batch_dispatcher(
 
     route = resolve_trade_lifecycle_notification_batch_route(
         config=cfg,
+        base=base,
     )
     if not bool(route.get("route_available")):
         status = lifecycle_receipt_dispatcher_status(

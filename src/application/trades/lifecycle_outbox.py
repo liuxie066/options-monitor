@@ -22,12 +22,13 @@ from src.application.ledger.api import (
     enqueue_notification_intent,
     mark_notification_batch_send_started as _ledger_mark_notification_batch_send_started,
     mark_notification_send_started as _ledger_mark_notification_send_started,
-    plan_notification_batch,
+    plan_notification_batch as _ledger_plan_notification_batch,
     reconcile_notification_batch,
     reconcile_unknown_notification,
     recover_stale_notification_batches,
     recover_stale_notifications,
     validate_notification_batch_route,
+    validate_combo_pair_success,
 )
 
 
@@ -55,6 +56,7 @@ def mark_notification_batch_send_started(
     batch_id: str,
     claim_id: str,
     now_ms: int,
+    route: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from src.application.trades.receipt import build_trade_lifecycle_notification_batch_message
 
@@ -64,7 +66,18 @@ def mark_notification_batch_send_started(
         claim_id=claim_id,
         now_ms=now_ms,
         render_message=build_trade_lifecycle_notification_batch_message,
+        route=route,
+        validate_combo_pair=validate_combo_pair_success,
     )
+
+
+def plan_notification_batch(
+    repo: Any, *, route: dict[str, Any], now_ms: int,
+    allowed_accounts: Iterable[str] | None = None, apply_changes: bool = True,
+) -> dict[str, Any]:
+    return _ledger_plan_notification_batch(repo, route=route, now_ms=now_ms,
+        allowed_accounts=allowed_accounts, apply_changes=apply_changes,
+        validate_combo_pair=validate_combo_pair_success)
 
 
 def dispatch_notification_batch_once(
@@ -75,6 +88,7 @@ def dispatch_notification_batch_once(
     now_ms: int,
     allowed_accounts: Iterable[str] | None = None,
 ) -> dict[str, Any]:
+    allowed_accounts = tuple(allowed_accounts) if allowed_accounts is not None else None
     recovery = recover_stale_notification_batches(repo, now_ms=now_ms)
     planned = plan_notification_batch(
         repo,
@@ -88,6 +102,8 @@ def dispatch_notification_batch_once(
         repo,
         now_ms=now_ms,
         route_fingerprint=route_snapshot["route_fingerprint"],
+        allowed_accounts=allowed_accounts,
+        route=route_snapshot,
     )
     if claimed is None:
         return {
@@ -104,7 +120,10 @@ def dispatch_notification_batch_once(
         batch_id=batch_id,
         claim_id=claim_id,
         now_ms=now_ms,
+        route=route_snapshot,
     )
+    if started["status"] == "suppressed":
+        return {"status": "suppressed", "planning": planned, "recovery": recovery, "batch": started}
     try:
         receipt = send_fn(dict(started["payload"]))
     except Exception as exc:

@@ -155,6 +155,49 @@ def enqueue_notification_intent(
     return {"created": created, "outbox": row}
 
 
+def enqueue_combo_pair_success_in_transaction(
+    repo: Any, *, conn: Any, identity: dict[str, Any], inference_id: str,
+    confirmed_at_ms: int, route: dict[str, Any],
+    validate_pair: Callable[..., bool],
+) -> dict[str, Any]:
+    """Freeze a newly confirmed pair's intent in the confirming ledger transaction."""
+    if conn is None or not conn.in_transaction:
+        raise ValueError("Combo receipt requires confirmation transaction authority")
+    key = "combo-pair:" + canonical_payload_hash(
+        {"account": identity["account"], "group_id": identity["group_id"]}
+    )
+    binding = {field: route.get(field) for field in (
+        "provider", "channel", "target_fingerprint", "route_fingerprint", "attribution_route_key"
+    )}
+    available = route.get("route_available") is True and all(binding.values())
+    payload = {
+        "transition_type": "combo_pair_confirmed", "account": identity["account"],
+        "symbol": identity["symbol"], "identity": dict(identity),
+        "inference_id": inference_id, "confirmed_at_ms": int(confirmed_at_ms),
+        "receipt_route": binding,
+        "suppression_reason": None if available else route.get("reason") or "receipt_route_unavailable",
+    }
+    if not validate_pair(repo, payload, conn=conn):
+        raise ValueError("Combo receipt requires accepted current pair confirmation")
+    intent = build_notification_intent(
+        case_id=key, transition_type="combo_pair_confirmed", resolution_revision=1,
+        transition_key=key + ":confirmed", state_fingerprint=identity["identity_hash"],
+        payload=payload, status="pending" if available else "suppressed",
+    )
+    repo.insert_trade_lifecycle_notification_once(intent, conn=conn)
+    row = repo.get_trade_lifecycle_notification(intent["outbox_id"], conn=conn)
+    if row is None or row["payload_hash"] != intent["payload_hash"]:
+        raise RuntimeError("Combo receipt intent readback failed")
+    return row
+
+
+def _combo_receipt_route_matches(payload: dict[str, Any], route: dict[str, Any]) -> bool:
+    binding = payload.get("receipt_route") or {}
+    return all(binding.get(key) and binding[key] == route.get(key) for key in (
+        "provider", "channel", "target_fingerprint", "route_fingerprint", "attribution_route_key"
+    ))
+
+
 
 def recover_stale_notifications(
     repo: Any,
@@ -237,6 +280,7 @@ def claim_next_notification(
             row
             for row in sqlite_repo.list_trade_lifecycle_notifications(conn=conn)
             if str(row.get("status") or "") in {"pending", "explicit_failed"}
+            and row.get("transition_type") != "combo_pair_confirmed"
             and not str(row.get("delivery_batch_id") or "").strip()
             and (
                 not account_value
@@ -541,6 +585,8 @@ def validate_notification_batch_route(route: dict[str, Any]) -> dict[str, str]:
         supplied = str(route.get(key) or "").strip()
         if supplied and supplied != snapshot[key]:
             raise ValueError("notification batch route fingerprint mismatch")
+    if route.get("attribution_route_key"):
+        snapshot["attribution_route_key"] = str(route["attribution_route_key"])
     return snapshot
 
 
@@ -550,6 +596,17 @@ def _batch_is_active(batch: dict[str, Any]) -> bool:
     return status in {"pending", "claimed", "send_started"} or (
         status == "explicit_failed"
         and int(batch.get("attempt_count") or 0) < MAX_ATTEMPTS
+    )
+
+
+def _batch_combo_scope_matches(
+    batch: dict[str, Any], *, route: dict[str, Any], accounts: set[str] | None,
+) -> bool:
+    return all(
+        member["transition_type"] != "combo_pair_confirmed"
+        or ((accounts is None or member["payload"]["account"] in accounts)
+            and _combo_receipt_route_matches(member["payload"], route))
+        for member in batch["payload"]["members"]
     )
 
 
@@ -576,6 +633,9 @@ def _eligible_unbound_notifications(
     conn: Any,
     now_ms: int,
     allowed_accounts: set[str] | None,
+    route: dict[str, Any],
+    validate_combo_pair: Callable[..., bool] | None,
+    apply_changes: bool,
 ) -> list[dict[str, Any]]:
     current = int(now_ms)
     rows = []
@@ -598,6 +658,18 @@ def _eligible_unbound_notifications(
             )
         ):
             continue
+        if row["transition_type"] == "combo_pair_confirmed":
+            if validate_combo_pair is None:
+                continue
+            if not validate_combo_pair(sqlite_repo, row["payload"], conn=conn):
+                if apply_changes:
+                    sqlite_repo.compare_and_set_trade_lifecycle_notification(
+                        outbox_id=row["outbox_id"], expected_status=status, new_status="suppressed",
+                        fields={"last_error": "combo_confirmation_no_longer_current"}, conn=conn,
+                    )
+                continue
+            if not _combo_receipt_route_matches(row["payload"], route):
+                continue
         rows.append(dict(row))
     rows.sort(
         key=lambda item: (
@@ -616,6 +688,7 @@ def plan_notification_batch(
     now_ms: int,
     allowed_accounts: Iterable[str] | None = None,
     apply_changes: bool = True,
+    validate_combo_pair: Callable[..., bool] | None = None,
 ) -> dict[str, Any]:
     current = int(now_ms)
     route_snapshot = validate_notification_batch_route(route)
@@ -633,7 +706,8 @@ def plan_notification_batch(
             )
         )
         active = next(
-            (batch for batch in route_batches if _batch_is_active(batch)),
+            (batch for batch in route_batches if _batch_is_active(batch)
+             and _batch_combo_scope_matches(batch, route=route_snapshot, accounts=account_values)),
             None,
         )
         if active is not None:
@@ -647,6 +721,9 @@ def plan_notification_batch(
             conn=conn,
             now_ms=current,
             allowed_accounts=account_values,
+            route=route_snapshot,
+            validate_combo_pair=validate_combo_pair,
+            apply_changes=apply_changes,
         )
         if not rows:
             return {
@@ -655,6 +732,11 @@ def plan_notification_batch(
                 "batch": None,
                 "candidate_count": 0,
             }
+        # A successful pair gets its own receipt, outside close-result aggregation.
+        if rows[0]["transition_type"] == "combo_pair_confirmed":
+            rows = rows[:1]
+        else:
+            rows = [row for row in rows if row["transition_type"] != "combo_pair_confirmed"]
         latest_send_started = max(
             (
                 int(batch.get("send_started_at_ms") or 0)
@@ -697,6 +779,8 @@ def plan_notification_batch(
                 "route_fingerprint": route_snapshot[
                     "route_fingerprint"
                 ],
+                **({"attribution_route_key": route_snapshot["attribution_route_key"]}
+                   if route_snapshot.get("attribution_route_key") else {}),
                 "member_outbox_ids": sorted(member_ids),
             }
         )
@@ -713,6 +797,8 @@ def plan_notification_batch(
                 "route_fingerprint": route_snapshot[
                     "route_fingerprint"
                 ],
+                **({"attribution_route_key": route_snapshot["attribution_route_key"]}
+                   if route_snapshot.get("attribution_route_key") else {}),
             },
             "members": members,
         }
@@ -885,10 +971,13 @@ def claim_next_notification_batch(
     now_ms: int,
     claim_id: str | None = None,
     route_fingerprint: str | None = None,
+    allowed_accounts: Iterable[str] | None = None,
+    route: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     current = int(now_ms)
     claim_value = str(claim_id or uuid.uuid4().hex)
     route_value = str(route_fingerprint or "").strip()
+    account_values = _normalized_accounts(allowed_accounts)
 
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any] | None:
         if conn is None:
@@ -906,6 +995,11 @@ def claim_next_notification_batch(
             for batch in batches
             if str(batch.get("status") or "")
             in {"pending", "explicit_failed"}
+            and (account_values is None or all(
+                member["payload"].get("account") in account_values
+                for member in batch["payload"]["members"]
+            ))
+            and _batch_combo_scope_matches(batch, route=route or {}, accounts=account_values)
             and int(batch.get("attempt_count") or 0) < MAX_ATTEMPTS
             and (
                 batch.get("next_attempt_at_ms") is None
@@ -970,6 +1064,8 @@ def mark_notification_batch_send_started(
     claim_id: str,
     now_ms: int,
     render_message: Callable[[dict[str, Any]], str],
+    route: dict[str, Any] | None = None,
+    validate_combo_pair: Callable[..., bool] | None = None,
 ) -> dict[str, Any]:
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
@@ -982,6 +1078,23 @@ def mark_notification_batch_send_started(
         )
         if not isinstance(current, dict):
             raise ValueError("notification delivery batch not found")
+        if current["status"] != "claimed" or current["claim_id"] != claim_id:
+            raise ValueError("notification batch claim lost before send_started")
+        combo_members = [member for member in current["payload"]["members"]
+                         if member["transition_type"] == "combo_pair_confirmed"]
+        if any(validate_combo_pair is None or not validate_combo_pair(sqlite_repo, member["payload"], conn=conn)
+               or not _combo_receipt_route_matches(member["payload"], route or {})
+               for member in combo_members):
+            sqlite_repo.compare_and_set_trade_lifecycle_notification_batch(
+                batch_id=batch_id, expected_status="claimed", new_status="suppressed",
+                expected_claim_id=claim_id,
+                fields={"last_error": "combo_confirmation_or_route_changed"}, conn=conn,
+            )
+            sqlite_repo.update_trade_lifecycle_notification_batch_members(
+                batch_id=batch_id, expected_statuses=("batched",), new_status="suppressed",
+                fields={"last_error": "combo_confirmation_or_route_changed"}, conn=conn,
+            )
+            return sqlite_repo.get_trade_lifecycle_notification_batch(batch_id, conn=conn)
         frozen = _frozen_receipt(current, render_message=render_message)
         attempts = int(current.get("attempt_count") or 0) + 1
         if attempts > MAX_ATTEMPTS:
